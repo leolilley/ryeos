@@ -237,7 +237,6 @@ class ExecuteTool:
         if project_path:
             search_bases.append(get_project_type_path(Path(project_path), item_type))
         search_bases.append(get_user_type_path(item_type))
-
         search_bases.append(get_system_type_path(item_type))
 
         for base in search_bases:

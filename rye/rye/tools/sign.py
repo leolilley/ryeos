@@ -44,17 +44,17 @@ class SignTool:
         item_type: str = kwargs["item_type"]
         item_id: str = kwargs["item_id"]
         project_path = kwargs["project_path"]
-        location = kwargs.get("location", "project")
+        source = kwargs.get("source", "project")
 
-        logger.debug(f"Sign: item_type={item_type}, item_id={item_id}")
+        logger.debug(f"Sign: item_type={item_type}, item_id={item_id}, source={source}")
 
         try:
             if item_type == ItemType.DIRECTIVE:
-                return await self._sign_directive(item_id, project_path, location)
+                return await self._sign_directive(item_id, project_path, source)
             elif item_type == ItemType.TOOL:
-                return await self._sign_tool(item_id, project_path, location)
+                return await self._sign_tool(item_id, project_path, source)
             elif item_type == ItemType.KNOWLEDGE:
-                return await self._sign_knowledge(item_id, project_path, location)
+                return await self._sign_knowledge(item_id, project_path, source)
             else:
                 return {"status": "error", "error": f"Unknown item type: {item_type}"}
 
@@ -63,10 +63,10 @@ class SignTool:
             return {"status": "error", "error": str(e), "item_id": item_id}
 
     async def _sign_directive(
-        self, item_id: str, project_path: str, location: str
+        self, item_id: str, project_path: str, source: str
     ) -> Dict[str, Any]:
         """Validate and sign a directive."""
-        file_path = self._find_item(project_path, location, ItemType.DIRECTIVE, item_id)
+        file_path = self._find_item(project_path, source, ItemType.DIRECTIVE, item_id)
         if not file_path:
             return {
                 "status": "error",
@@ -91,7 +91,7 @@ class SignTool:
             item_type=ItemType.DIRECTIVE,
             parsed_data=parsed,
             file_path=file_path,
-            location=location,
+            location=source,
             project_path=Path(project_path) if project_path else None,
         )
 
@@ -120,17 +120,17 @@ class SignTool:
             "status": "signed",
             "item_id": item_id,
             "path": str(file_path),
-            "location": location,
+            "location": source,
             "signature": sig_info,
             "warnings": validation_result.get("warnings", []),
             "message": "Directive validated and signed.",
         }
 
     async def _sign_tool(
-        self, item_id: str, project_path: str, location: str
+        self, item_id: str, project_path: str, source: str
     ) -> Dict[str, Any]:
         """Validate and sign a tool."""
-        file_path = self._find_item(project_path, location, ItemType.TOOL, item_id)
+        file_path = self._find_item(project_path, source, ItemType.TOOL, item_id)
         if not file_path:
             return {
                 "status": "error",
@@ -157,7 +157,7 @@ class SignTool:
             item_type=ItemType.TOOL,
             parsed_data=parsed,
             file_path=file_path,
-            location=location,
+            location=source,
             project_path=Path(project_path) if project_path else None,
         )
 
@@ -186,17 +186,17 @@ class SignTool:
             "status": "signed",
             "item_id": item_id,
             "path": str(file_path),
-            "location": location,
+            "location": source,
             "signature": sig_info,
             "warnings": validation_result.get("warnings", []),
             "message": "Tool validated and signed.",
         }
 
     async def _sign_knowledge(
-        self, item_id: str, project_path: str, location: str
+        self, item_id: str, project_path: str, source: str
     ) -> Dict[str, Any]:
         """Validate and sign a knowledge entry."""
-        file_path = self._find_item(project_path, location, ItemType.KNOWLEDGE, item_id)
+        file_path = self._find_item(project_path, source, ItemType.KNOWLEDGE, item_id)
         if not file_path:
             return {
                 "status": "error",
@@ -221,7 +221,7 @@ class SignTool:
             item_type=ItemType.KNOWLEDGE,
             parsed_data=parsed,
             file_path=file_path,
-            location=location,
+            location=source,
             project_path=Path(project_path) if project_path else None,
         )
 
@@ -245,25 +245,25 @@ class SignTool:
             "status": "signed",
             "item_id": item_id,
             "path": str(file_path),
-            "location": location,
+            "location": source,
             "signature": sig_info,
             "warnings": validation_result.get("warnings", []),
             "message": "Knowledge entry validated and signed.",
         }
 
     def _find_item(
-        self, project_path: str, location: str, item_type: str, item_id: str
+        self, project_path: str, source: str, item_type: str, item_id: str
     ) -> Optional[Path]:
-        """Find item file in specified location."""
+        """Find item file in specified source location."""
         type_dir = ItemType.TYPE_DIRS.get(item_type)
         if not type_dir:
             return None
 
-        if location == "project":
+        if source == "project":
             base = get_project_type_path(Path(project_path), item_type)
-        elif location == "user":
+        elif source == "user":
             base = get_user_type_path(item_type)
-        elif location == "system":
+        elif source == "system":
             base = get_system_type_path(item_type)
         else:
             return None

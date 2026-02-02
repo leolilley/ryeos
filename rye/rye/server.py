@@ -68,7 +68,7 @@ class RYEServer:
                             "project_path": {"type": "string"},
                             "source": {
                                 "type": "string",
-                                "enum": ["project", "user", "all"],
+                                "enum": ["project", "user", "system", "all"],
                                 "default": "project",
                             },
                             "limit": {"type": "integer", "default": 10},
@@ -90,7 +90,7 @@ class RYEServer:
                             "project_path": {"type": "string"},
                             "source": {
                                 "type": "string",
-                                "enum": ["project", "user"],
+                                "enum": ["project", "user", "system"],
                                 "default": "project",
                             },
                             "destination": {
@@ -130,7 +130,7 @@ class RYEServer:
                             "project_path": {"type": "string"},
                             "source": {
                                 "type": "string",
-                                "enum": ["project", "user", "all"],
+                                "enum": ["project", "user", "system", "all"],
                                 "default": "project",
                             },
                             "limit": {"type": "integer", "default": 10},
@@ -149,7 +149,7 @@ class RYEServer:
                             "project_path": {"type": "string"},
                             "source": {
                                 "type": "string",
-                                "enum": ["project", "user"],
+                                "enum": ["project", "user", "system"],
                                 "default": "project",
                             },
                             "destination": {
@@ -184,6 +184,11 @@ class RYEServer:
                             "item_type": {"type": "string", "enum": ItemType.ALL},
                             "item_id": {"type": "string"},
                             "project_path": {"type": "string"},
+                            "source": {
+                                "type": "string",
+                                "enum": ["project", "user"],
+                                "default": "project",
+                            },
                             "parameters": {"type": "object"},
                         },
                         "required": ["item_type", "item_id", "project_path"],
