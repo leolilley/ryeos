@@ -1,0 +1,14 @@
+[build]
+# Build registry-api from project root to include rye/lilux packages
+dockerfilePath = "services/registry-api/Dockerfile"
+watchPatterns = [
+    "services/registry-api/**",
+    "rye/**",
+    "lilux/**"
+]
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

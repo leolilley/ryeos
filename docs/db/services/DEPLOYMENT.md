@@ -100,9 +100,14 @@ cp .env.example .env
 Edit `.env` with your Supabase credentials:
 
 ```env
-# Supabase
+# Supabase - Get from: Dashboard → Settings → API
 SUPABASE_URL=https://your-project-id.supabase.co
-SUPABASE_SERVICE_KEY=your-service-role-key
+
+# Secret key (Settings → API → Secret keys → New secret key)
+# Format: sb_secret_xxx - bypasses RLS for backend operations
+SUPABASE_SERVICE_KEY=sb_secret_xxx
+
+# JWT Secret (Settings → API → JWT Settings → JWT Secret)
 SUPABASE_JWT_SECRET=your-jwt-secret
 
 # Server
@@ -116,13 +121,14 @@ ALLOWED_ORIGINS=https://your-app.com,https://localhost:3000
 
 ### 2.2 Production Deployment (Docker)
 
-Build and deploy the container:
+Build from project root (required to include rye/lilux packages):
 
 ```bash
-cd services/registry-api
+# From project root (rye-os/)
+cd /path/to/rye-os
 
 # Build image
-docker build -t registry-api:latest .
+docker build -f services/registry-api/Dockerfile -t registry-api:latest .
 
 # Run container
 docker run -d \
@@ -140,18 +146,20 @@ docker run -d \
 
 **Railway:**
 
+The project includes a `railway.toml` that configures the build from project root.
+
 ```bash
 # Install Railway CLI
 npm install -g @railway/cli
 
-# Login and init
+# Login and link (from project root)
 railway login
-railway init
+railway link
 
 # Set environment variables
-railway variables set SUPABASE_URL=...
-railway variables set SUPABASE_SERVICE_KEY=...
-railway variables set SUPABASE_JWT_SECRET=...
+railway variables set SUPABASE_URL=https://xxx.supabase.co
+railway variables set SUPABASE_SERVICE_KEY=sb_secret_xxx
+railway variables set SUPABASE_JWT_SECRET=your-jwt-secret
 
 # Deploy
 railway up
@@ -163,13 +171,13 @@ railway up
 # Install flyctl
 curl -L https://fly.io/install.sh | sh
 
-# Launch app
-fly launch
+# Launch app (from project root)
+fly launch --dockerfile services/registry-api/Dockerfile
 
 # Set secrets
-fly secrets set SUPABASE_URL=...
-fly secrets set SUPABASE_SERVICE_KEY=...
-fly secrets set SUPABASE_JWT_SECRET=...
+fly secrets set SUPABASE_URL=https://xxx.supabase.co
+fly secrets set SUPABASE_SERVICE_KEY=sb_secret_xxx
+fly secrets set SUPABASE_JWT_SECRET=your-jwt-secret
 
 # Deploy
 fly deploy
@@ -300,6 +308,9 @@ cd rye-os
 python -m venv .venv
 source .venv/bin/activate  # Linux/macOS
 # or: .venv\Scripts\activate  # Windows
+
+# Install lilux first (rye dependency)
+pip install -e lilux/
 
 # Install rye package (for validators)
 pip install -e rye/

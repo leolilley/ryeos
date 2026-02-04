@@ -1,3 +1,4 @@
+# Build from project root: docker build -f services/registry-api/Dockerfile .
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -7,12 +8,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
-COPY pyproject.toml README.md ./
-COPY registry_api ./registry_api
+# Copy lilux package (rye dependency)
+COPY lilux /app/lilux
 
-# Install dependencies
-RUN pip install --no-cache-dir -e .
+# Copy rye package
+COPY rye /app/rye
+
+# Copy registry-api
+COPY services/registry-api/pyproject.toml services/registry-api/README.md /app/registry-api/
+COPY services/registry-api/registry_api /app/registry-api/registry_api
+
+# Install packages in order
+WORKDIR /app/registry-api
+RUN pip install --no-cache-dir /app/lilux/ /app/rye/ -e .
 
 # Expose port
 EXPOSE 8000
