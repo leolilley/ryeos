@@ -1,18 +1,12 @@
-# rye:validated:2026-02-04T04:37:25Z:d0191e7a046d494ab3a7ca79c32fd8ad1e419ac84e5b28a2cfc56f8f01305bec
 """
-Registry tool - auth, push/pull, publish, key management.
+Registry tool - auth and item management for Rye Registry.
 
-Provides operations for interacting with the Rye Registry (Supabase backend).
-Uses the http_client primitive for all network operations.
-Uses the auth runtime for secure token storage.
+Provides operations for interacting with the Rye Registry:
+- Auth via OAuth PKCE flow (GitHub, etc.)
+- Push/pull items to/from registry
+- Publish/unpublish to control visibility
 
-Device Auth Flow (like Supabase CLI):
-1. Generate session ID + ECDH keypair
-2. Open browser to registry auth page
-3. User authenticates via Supabase Auth
-4. Server encrypts access token with shared ECDH secret
-5. CLI polls for encrypted token, decrypts locally
-6. Stores token in keyring
+Uses Railway API for item operations, Supabase for auth.
 
 Actions:
   Auth:
@@ -24,22 +18,18 @@ Actions:
 
   Items:
     - search: Search for items in the registry
-    - pull: Download item from registry to local (with signature verification)
-    - push: Upload local item to registry (with server-side validation)
-    - set_visibility: Change item visibility (public/private/unlisted)
-
-  Keys:
-    - keys_generate: Generate new signing keypair
-    - keys_list: List signing keys
-    - keys_trust: Add public key to trusted list
-    - keys_revoke: Revoke a signing key
+    - pull: Download item from registry to local
+    - push: Upload local item to registry
+    - delete: Remove item from registry
+    - publish: Make item public (visibility='public')
+    - unpublish: Make item private (visibility='private')
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_tool_runtime"
 __category__ = "rye/core/registry"
-__tool_description__ = "Registry tool for auth, push/pull, publish, and key management"
+__tool_description__ = "Registry tool for auth and item management"
 
 import asyncio
 import base64
@@ -96,11 +86,6 @@ ACTIONS = [
     "delete",
     "publish",
     "unpublish",
-    # Keys
-    "keys_generate",
-    "keys_list",
-    "keys_trust",
-    "keys_revoke",
 ]
 
 # Registry configuration from environment
@@ -132,16 +117,6 @@ def _get_rye_state_dir() -> Path:
     from rye.utils.path_utils import get_user_space
 
     return get_user_space()
-
-
-def _get_keys_dir() -> Path:
-    """Get signing keys directory under RYE state."""
-    return _get_rye_state_dir() / "signing-keys"
-
-
-def _get_trusted_keys_dir() -> Path:
-    """Get trusted keys directory under signing keys."""
-    return _get_keys_dir() / "trusted"
 
 
 def _get_session_dir() -> Path:
@@ -485,24 +460,6 @@ async def execute(
                 item_id=params.get("item_id"),
             )
             http_calls = 1
-
-        # Key actions
-        elif action == "keys_generate":
-            result = await _keys_generate(
-                label=params.get("label"),
-                make_primary=params.get("make_primary", False),
-            )
-        elif action == "keys_list":
-            result = await _keys_list()
-        elif action == "keys_trust":
-            result = await _keys_trust(
-                key_id=params.get("key_id"),
-                public_key=params.get("public_key"),
-            )
-        elif action == "keys_revoke":
-            result = await _keys_revoke(
-                key_id=params.get("key_id"),
-            )
         else:
             result = {"error": f"Action '{action}' not implemented"}
 
@@ -1664,180 +1621,3 @@ async def _unpublish(
     except Exception as e:
         await http.close()
         return {"error": f"Unpublish failed: {e}"}
-
-
-# =============================================================================
-# KEY ACTIONS
-# =============================================================================
-
-
-async def _keys_generate(
-    label: Optional[str],
-    make_primary: bool = False,
-) -> Dict[str, Any]:
-    """
-    Generate new Ed25519 signing keypair.
-
-    Private key stored locally in $USER_SPACE/registry/keys/ (default ~/.ai/registry/keys/)
-    Public key uploaded to registry (requires auth)
-    """
-    try:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    except ImportError:
-        return {
-            "error": "cryptography library required for key generation. Run: pip install cryptography"
-        }
-
-    # Generate keypair
-    private_key = Ed25519PrivateKey.generate()
-    public_key = private_key.public_key()
-
-    # Serialize keys
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-
-    # Generate key ID from public key hash
-    key_id = hashlib.sha256(public_pem).hexdigest()[:16]
-
-    # Ensure keys directory exists with proper permissions
-    keys_dir = _get_keys_dir()
-    keys_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(keys_dir, 0o700)
-
-    # Save private key
-    private_path = keys_dir / f"{key_id}.private.pem"
-    private_path.write_bytes(private_pem)
-    os.chmod(private_path, 0o600)
-
-    # Save public key
-    public_path = keys_dir / f"{key_id}.public.pem"
-    public_path.write_bytes(public_pem)
-    os.chmod(public_path, 0o644)
-
-    # If make_primary, update symlink
-    if make_primary:
-        primary_link = keys_dir / "primary.pem"
-        if primary_link.exists() or primary_link.is_symlink():
-            primary_link.unlink()
-        primary_link.symlink_to(f"{key_id}.private.pem")
-
-    return {
-        "status": "generated",
-        "key_id": key_id,
-        "label": label,
-        "is_primary": make_primary,
-        "private_key_path": str(private_path),
-        "public_key_path": str(public_path),
-        "public_key_pem": public_pem.decode(),
-        "message": f"Generated keypair '{key_id}'. Upload public key to registry with: registry push_key",
-        "next_step": "Run 'registry login' then 'registry push_key' to register with registry",
-    }
-
-
-async def _keys_list() -> Dict[str, Any]:
-    """List local signing keys."""
-    local_keys = []
-    keys_dir = _get_keys_dir()
-
-    if keys_dir.exists():
-        # Find all private keys
-        for key_file in keys_dir.glob("*.private.pem"):
-            key_id = key_file.stem.replace(".private", "")
-            public_exists = (keys_dir / f"{key_id}.public.pem").exists()
-
-            # Check if primary
-            primary_link = keys_dir / "primary.pem"
-            is_primary = (
-                primary_link.exists()
-                and primary_link.is_symlink()
-                and primary_link.resolve() == key_file
-            )
-
-            local_keys.append(
-                {
-                    "key_id": key_id,
-                    "is_primary": is_primary,
-                    "has_public": public_exists,
-                    "path": str(key_file),
-                }
-            )
-
-    # List trusted keys
-    trusted_keys = []
-    trusted_keys_dir = _get_trusted_keys_dir()
-    if trusted_keys_dir.exists():
-        for key_file in trusted_keys_dir.glob("*.pub"):
-            key_id = key_file.stem
-            trusted_keys.append(
-                {
-                    "key_id": key_id,
-                    "path": str(key_file),
-                }
-            )
-
-    return {
-        "local_keys": local_keys,
-        "trusted_keys": trusted_keys,
-        "keys_dir": str(keys_dir),
-        "trusted_dir": str(trusted_keys_dir),
-    }
-
-
-async def _keys_trust(
-    key_id: Optional[str],
-    public_key: Optional[str],
-) -> Dict[str, Any]:
-    """Add a public key to trusted list."""
-    if not key_id:
-        return {"error": "Required: key_id"}
-
-    # Ensure trusted keys directory exists
-    trusted_keys_dir = _get_trusted_keys_dir()
-    trusted_keys_dir.mkdir(parents=True, exist_ok=True)
-
-    # If public_key provided, save it
-    if public_key:
-        key_path = trusted_keys_dir / f"{key_id}.pub"
-        key_path.write_text(public_key)
-
-        return {
-            "status": "trusted",
-            "key_id": key_id,
-            "path": str(key_path),
-            "message": f"Added key '{key_id}' to trusted keys",
-        }
-
-    # Otherwise, fetch from registry
-    return {
-        "status": "pending",
-        "key_id": key_id,
-        "message": f"Would fetch public key '{key_id}' from registry and add to trusted",
-        "note": "Full implementation requires http_client primitive integration",
-    }
-
-
-async def _keys_revoke(key_id: Optional[str]) -> Dict[str, Any]:
-    """Revoke a signing key."""
-    if not key_id:
-        return {"error": "Required: key_id"}
-
-    # Remove from local trusted keys if present
-    trusted_path = _get_trusted_keys_dir() / f"{key_id}.pub"
-    if trusted_path.exists():
-        trusted_path.unlink()
-
-    return {
-        "status": "revoke_pending",
-        "key_id": key_id,
-        "removed_from_trusted": trusted_path.exists(),
-        "message": f"Would revoke key '{key_id}' in registry",
-        "note": "Full implementation requires auth + http_client primitive integration",
-    }
