@@ -291,7 +291,7 @@ async def _ensure_user(user_id: str, username: str):
 # =============================================================================
 
 
-@app.get("/v1/pull/{item_type}/{item_id}", response_model=PullResponse)
+@app.get("/v1/pull/{item_type}/{item_id:path}", response_model=PullResponse)
 async def pull_item(
     item_type: str,
     item_id: str,
@@ -385,7 +385,7 @@ async def pull_item(
 # =============================================================================
 
 
-@app.delete("/v1/delete/{item_type}/{item_id}")
+@app.delete("/v1/delete/{item_type}/{item_id:path}")
 async def delete_item(
     item_type: str,
     item_id: str,
@@ -478,7 +478,7 @@ async def delete_item(
 # =============================================================================
 
 
-@app.post("/v1/visibility/{item_type}/{item_id}")
+@app.post("/v1/visibility/{item_type}/{item_id:path}")
 async def set_visibility(
     item_type: str,
     item_id: str,
