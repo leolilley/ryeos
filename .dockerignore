@@ -1,0 +1,41 @@
+# Virtual environments
+.venv/
+venv/
+*.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Ruff/linting
+.ruff_cache/
+
+# Local development
+*.env
+!.env.example
