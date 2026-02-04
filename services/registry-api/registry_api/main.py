@@ -1,12 +1,15 @@
 """RYE Registry API - Server-side validation and signing.
 
+Identity model:
+- item_id = "{namespace}/{category}/{name}" (canonical)
+- namespace: owner (no slashes)
+- category: folder path (may contain slashes)
+- name: basename (no slashes)
+
 This FastAPI service handles registry push/pull operations with:
 - Server-side validation using the rye package's validators
 - Registry signing (adds |registry@username suffix)
 - Supabase database integration
-
-The service imports and reuses the rye package's data-driven validation,
-ensuring consistent rules between client and server.
 """
 
 import logging
@@ -21,22 +24,23 @@ from registry_api import __version__
 from registry_api.auth import User, get_current_user
 from registry_api.config import Settings, get_settings
 from registry_api.models import (
+    build_item_id,
+    parse_item_id,
+    DeleteResponse,
     HealthResponse,
     PullResponse,
     PushErrorResponse,
     PushRequest,
     PushResponse,
-    SearchRequest,
     SearchResponse,
     SearchResultItem,
     SignatureInfo,
-    UnpublishResponse,
+    VisibilityResponse,
 )
 from registry_api.validation import (
     sign_with_registry,
     strip_signature,
     validate_content,
-    verify_registry_signature,
 )
 
 # Configure logging
@@ -62,17 +66,11 @@ def get_supabase() -> Client:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - initialize on startup, cleanup on shutdown."""
-    # Startup
     settings = get_settings()
     logger.info(f"Starting Registry API v{__version__}")
     logger.info(f"Supabase URL: {settings.supabase_url}")
-    
-    # Initialize Supabase client
     get_supabase()
-    
     yield
-    
-    # Shutdown
     logger.info("Shutting down Registry API")
 
 
@@ -87,11 +85,46 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure via settings in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+
+def get_table_name(item_type: str) -> str:
+    """Get table name for item type."""
+    return "knowledge" if item_type == "knowledge" else f"{item_type}s"
+
+
+def get_version_table_name(item_type: str) -> str:
+    """Get version table name for item type."""
+    return f"{item_type}_versions"
+
+
+async def _ensure_user(user_id: str, username: str):
+    """Ensure user exists in users table."""
+    supabase = get_supabase()
+    result = supabase.table("users").select("id").eq("id", user_id).execute()
+    if not result.data:
+        supabase.table("users").insert({
+            "id": user_id,
+            "username": username,
+        }).execute()
+
+
+async def _get_author_username(author_id: str) -> str:
+    """Get username for author_id."""
+    if not author_id:
+        return "unknown"
+    supabase = get_supabase()
+    result = supabase.table("users").select("username").eq("id", author_id).execute()
+    return result.data[0].get("username", "unknown") if result.data else "unknown"
 
 
 # =============================================================================
@@ -104,7 +137,6 @@ async def health_check():
     """Health check endpoint."""
     try:
         supabase = get_supabase()
-        # Quick DB check
         supabase.table("users").select("id").limit(1).execute()
         db_status = "connected"
     except Exception as e:
@@ -130,29 +162,32 @@ async def push_item(
 ):
     """Validate and publish an item to the registry.
     
-    Flow:
-    1. Strip any existing signature from content
-    2. Validate content using rye validators (same as client-side sign tool)
-    3. If validation fails, return error with issues
-    4. If validation passes, sign with registry provenance (|registry@username)
-    5. Insert/update in database
-    6. Return signed content to client
+    item_id format: namespace/category/name
+    Example: leolilley/core/bootstrap
     """
     item_type = request.item_type
     item_id = request.item_id
+    namespace = request.namespace
+    category = request.category
+    name = request.name
     content = request.content
     version = request.version
     
-    logger.info(f"Push request: {item_type}/{item_id} v{version} from @{user.username}")
+    logger.info(f"Push: {item_type} {item_id} v{version} by @{user.username}")
     
-    # 1. Strip existing signature
+    # Verify namespace matches authenticated user
+    if namespace != user.username:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": f"Cannot push to namespace '{namespace}'. You can only push to your own namespace '{user.username}'."},
+        )
+    
+    # Strip existing signature and validate
     content_clean = strip_signature(content, item_type)
-    
-    # 2. Validate using rye validators
-    is_valid, validation_result = validate_content(content_clean, item_type, item_id)
+    is_valid, validation_result = validate_content(content_clean, item_type, name)
     
     if not is_valid:
-        logger.warning(f"Validation failed for {item_type}/{item_id}: {validation_result['issues']}")
+        logger.warning(f"Validation failed: {validation_result['issues']}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -162,14 +197,16 @@ async def push_item(
             },
         )
     
-    # 3. Sign with registry provenance
+    # Sign with registry provenance
     signed_content, signature_info = sign_with_registry(content_clean, item_type, user.username)
     
-    # 4. Insert/update in database
+    # Upsert to database
     try:
         await _upsert_item(
             item_type=item_type,
-            item_id=item_id,
+            namespace=namespace,
+            category=category,
+            name=name,
             version=version,
             content=signed_content,
             content_hash=signature_info["hash"],
@@ -179,18 +216,21 @@ async def push_item(
             metadata=request.metadata,
         )
     except Exception as e:
-        logger.error(f"Database error for {item_type}/{item_id}: {e}")
+        logger.error(f"Database error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"status": "error", "error": f"Database error: {str(e)}"},
         )
     
-    logger.info(f"Published {item_type}/{item_id} v{version} by @{user.username}")
+    logger.info(f"Published: {item_type} {item_id} v{version}")
     
     return PushResponse(
         status="published",
         item_type=item_type,
         item_id=item_id,
+        namespace=namespace,
+        category=category,
+        name=name,
         version=version,
         signature=SignatureInfo(**signature_info),
         signed_content=signed_content,
@@ -199,7 +239,9 @@ async def push_item(
 
 async def _upsert_item(
     item_type: str,
-    item_id: str,
+    namespace: str,
+    category: str,
+    name: str,
     version: str,
     content: str,
     content_hash: str,
@@ -208,49 +250,39 @@ async def _upsert_item(
     changelog: str = None,
     metadata: dict = None,
 ):
-    """Insert or update item and version in database.
-    
-    Uses the same table naming convention as the registry tool:
-    - Items: {item_type}s (e.g., directives, tools, knowledge)
-    - Versions: {item_type}_versions (e.g., directive_versions)
-    """
+    """Insert or update item and version in database."""
     supabase = get_supabase()
     metadata = metadata or {}
     
-    # Table names follow rye convention (knowledge is singular)
-    table = "knowledge" if item_type == "knowledge" else f"{item_type}s"
-    version_table = f"{item_type}_versions"
+    table = get_table_name(item_type)
+    version_table = get_version_table_name(item_type)
     
-    # Ensure user exists
     await _ensure_user(user_id, username)
     
-    # Check if item exists
-    result = supabase.table(table).select("id").eq("name", item_id).execute()
+    # Check if item exists (unique on namespace, category, name)
+    result = supabase.table(table).select("id").eq(
+        "namespace", namespace
+    ).eq("category", category).eq("name", name).execute()
     
     if result.data:
-        # Item exists - add new version
         item_uuid = result.data[0]["id"]
     else:
         # Create new item
         item_data = {
-            "name": item_id,
+            "namespace": namespace,
+            "category": category,
+            "name": name,
             "author_id": user_id,
-            "category": metadata.get("category", ""),
             "description": metadata.get("description", ""),
+            "visibility": metadata.get("visibility", "private"),
         }
         
-        # Add type-specific fields
+        # Type-specific fields
         if item_type == "tool":
-            item_data["tool_id"] = item_id
             item_data["tool_type"] = metadata.get("tool_type", "python")
-            item_data["visibility"] = metadata.get("visibility", "public")
         elif item_type == "knowledge":
-            item_data["title"] = metadata.get("title", item_id)
+            item_data["title"] = metadata.get("title", name)
             item_data["entry_type"] = metadata.get("entry_type", "reference")
-            item_data["visibility"] = metadata.get("visibility", "public")
-        else:
-            # directive
-            item_data["visibility"] = metadata.get("visibility", "public")
         
         create_result = supabase.table(table).insert(item_data).execute()
         item_uuid = create_result.data[0]["id"]
@@ -272,22 +304,13 @@ async def _upsert_item(
         version_data["changelog"] = changelog
     
     supabase.table(version_table).insert(version_data).execute()
-
-
-async def _ensure_user(user_id: str, username: str):
-    """Ensure user exists in users table."""
-    supabase = get_supabase()
     
-    result = supabase.table("users").select("id").eq("id", user_id).execute()
-    if not result.data:
-        supabase.table("users").insert({
-            "id": user_id,
-            "username": username,
-        }).execute()
+    # Update latest_version on item
+    supabase.table(table).update({"latest_version": version}).eq("id", item_uuid).execute()
 
 
 # =============================================================================
-# PULL - Download an item with signature verification
+# PULL - Download an item
 # =============================================================================
 
 
@@ -299,8 +322,7 @@ async def pull_item(
 ):
     """Pull an item from the registry.
     
-    Returns the item content with registry signature, allowing clients
-    to verify integrity and provenance.
+    item_id format: namespace/category/name
     """
     if item_type not in ["directive", "tool", "knowledge"]:
         raise HTTPException(
@@ -308,14 +330,23 @@ async def pull_item(
             detail={"error": f"Invalid item_type: {item_type}"},
         )
     
+    # Parse item_id
+    try:
+        namespace, category, name = parse_item_id(item_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
+    
     supabase = get_supabase()
+    table = get_table_name(item_type)
+    version_table = get_version_table_name(item_type)
     
-    # Table names follow rye convention (knowledge is singular)
-    table = "knowledge" if item_type == "knowledge" else f"{item_type}s"
-    version_table = f"{item_type}_versions"
-    
-    # Query item first
-    item_result = supabase.table(table).select("*").eq("name", item_id).execute()
+    # Query item
+    item_result = supabase.table(table).select("*").eq(
+        "namespace", namespace
+    ).eq("category", category).eq("name", name).execute()
     
     if not item_result.data:
         raise HTTPException(
@@ -326,17 +357,16 @@ async def pull_item(
     item = item_result.data[0]
     item_uuid = item["id"]
     
-    # Query versions separately
+    # Query versions
     versions_result = supabase.table(version_table).select("*").eq(
         f"{item_type}_id", item_uuid
     ).order("created_at", desc=True).execute()
     
     versions = versions_result.data or []
-    
     if not versions:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": f"No versions found for {item_type}: {item_id}"},
+            detail={"error": f"No versions found for {item_id}"},
         )
     
     # Get requested version or latest
@@ -345,29 +375,25 @@ async def pull_item(
         if not target_version:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": f"Version {version} not found for {item_id}"},
+                detail={"error": f"Version {version} not found"},
             )
     else:
-        # Get latest (is_latest=true or most recent)
         target_version = next((v for v in versions if v.get("is_latest")), versions[0])
     
-    # Get author username via separate query
-    author_username = "unknown"
-    if item.get("author_id"):
-        user_result = supabase.table("users").select("username").eq("id", item["author_id"]).execute()
-        if user_result.data:
-            author_username = user_result.data[0].get("username", "unknown")
-    
+    author_username = await _get_author_username(item.get("author_id"))
     content = target_version["content"]
     
-    # Extract signature info for response
+    # Extract signature info
     from rye.utils.metadata_manager import MetadataManager
     strategy = MetadataManager.get_strategy(item_type)
-    sig_info = strategy.extract_signature(content)
+    sig_info = strategy.extract_signature(content) or {}
     
     return PullResponse(
         item_type=item_type,
         item_id=item_id,
+        namespace=namespace,
+        category=category,
+        name=name,
         version=target_version["version"],
         content=content,
         author=author_username,
@@ -375,43 +401,46 @@ async def pull_item(
             timestamp=sig_info.get("timestamp", ""),
             hash=sig_info.get("hash", ""),
             registry_username=sig_info.get("registry_username"),
-        ) if sig_info else SignatureInfo(timestamp="", hash=""),
+        ),
         created_at=target_version["created_at"],
     )
 
 
 # =============================================================================
-# DELETE - Remove an item from the registry
+# DELETE - Remove an item
 # =============================================================================
 
 
-@app.delete("/v1/delete/{item_type}/{item_id:path}")
+@app.delete("/v1/delete/{item_type}/{item_id:path}", response_model=DeleteResponse)
 async def delete_item(
     item_type: str,
     item_id: str,
     version: str = None,
     user: User = Depends(get_current_user),
 ):
-    """Remove an item from the registry.
-    
-    Only the author can unpublish their items.
-    If version is specified, only that version is deleted.
-    Otherwise, all versions and the item itself are deleted.
-    """
+    """Delete an item from the registry."""
     if item_type not in ["directive", "tool", "knowledge"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": f"Invalid item_type: {item_type}"},
         )
     
+    try:
+        namespace, category, name = parse_item_id(item_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
+    
     supabase = get_supabase()
+    table = get_table_name(item_type)
+    version_table = get_version_table_name(item_type)
     
-    # Table names follow rye convention (knowledge is singular)
-    table = "knowledge" if item_type == "knowledge" else f"{item_type}s"
-    version_table = f"{item_type}_versions"
-    
-    # Find the item
-    result = supabase.table(table).select("id, author_id").eq("name", item_id).execute()
+    # Find item
+    result = supabase.table(table).select("id, author_id").eq(
+        "namespace", namespace
+    ).eq("category", category).eq("name", name).execute()
     
     if not result.data:
         raise HTTPException(
@@ -425,7 +454,7 @@ async def delete_item(
     if item["author_id"] != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "You can only unpublish your own items"},
+            detail={"error": "You can only delete your own items"},
         )
     
     item_uuid = item["id"]
@@ -441,59 +470,52 @@ async def delete_item(
         if deleted_versions == 0:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": f"Version {version} not found for {item_id}"},
+                detail={"error": f"Version {version} not found"},
             )
         
-        # Check if any versions remain
+        # Delete item if no versions remain
         remaining = supabase.table(version_table).select("id").eq(
             f"{item_type}_id", item_uuid
         ).execute()
-        
         if not remaining.data:
-            # No versions left, delete the item
             supabase.table(table).delete().eq("id", item_uuid).execute()
     else:
-        # Delete all versions
+        # Delete all versions and item
         del_result = supabase.table(version_table).delete().eq(
             f"{item_type}_id", item_uuid
         ).execute()
         deleted_versions = len(del_result.data) if del_result.data else 0
-        
-        # Delete the item
         supabase.table(table).delete().eq("id", item_uuid).execute()
     
-    logger.info(f"Deleted {item_type}/{item_id} (v={version or 'all'}) by @{user.username}")
+    logger.info(f"Deleted: {item_type} {item_id} by @{user.username}")
     
-    return {
-        "status": "deleted",
-        "item_type": item_type,
-        "item_id": item_id,
-        "version": version,
-        "deleted_versions": deleted_versions,
-    }
+    return DeleteResponse(
+        status="deleted",
+        item_type=item_type,
+        item_id=item_id,
+        version=version,
+        deleted_versions=deleted_versions,
+    )
 
 
 # =============================================================================
-# VISIBILITY - Set item visibility (publish/unpublish)
+# VISIBILITY - Set item visibility
 # =============================================================================
 
 
-@app.post("/v1/visibility/{item_type}/{item_id:path}")
+@app.post("/v1/visibility/{item_type}/{item_id:path}", response_model=VisibilityResponse)
 async def set_visibility(
     item_type: str,
     item_id: str,
     body: dict,
     user: User = Depends(get_current_user),
 ):
-    """Set item visibility (public/private/unlisted).
-    
-    Used by publish (visibility='public') and unpublish (visibility='private').
-    """
+    """Set item visibility (public/private/unlisted)."""
     visibility = body.get("visibility")
     if visibility not in ["public", "private", "unlisted"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": f"Invalid visibility: {visibility}. Must be public, private, or unlisted."},
+            detail={"error": f"Invalid visibility: {visibility}"},
         )
     
     if item_type not in ["directive", "tool", "knowledge"]:
@@ -502,13 +524,21 @@ async def set_visibility(
             detail={"error": f"Invalid item_type: {item_type}"},
         )
     
+    try:
+        namespace, category, name = parse_item_id(item_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
+    
     supabase = get_supabase()
+    table = get_table_name(item_type)
     
-    # Table names follow rye convention (knowledge is singular)
-    table = "knowledge" if item_type == "knowledge" else f"{item_type}s"
-    
-    # Find the item
-    result = supabase.table(table).select("id, author_id, visibility").eq("name", item_id).execute()
+    # Find item
+    result = supabase.table(table).select("id, author_id, visibility").eq(
+        "namespace", namespace
+    ).eq("category", category).eq("name", name).execute()
     
     if not result.data:
         raise HTTPException(
@@ -526,19 +556,17 @@ async def set_visibility(
         )
     
     old_visibility = item.get("visibility", "private")
-    
-    # Update visibility
     supabase.table(table).update({"visibility": visibility}).eq("id", item["id"]).execute()
     
-    logger.info(f"Changed visibility {item_type}/{item_id}: {old_visibility} -> {visibility} by @{user.username}")
+    logger.info(f"Visibility: {item_type} {item_id} {old_visibility} -> {visibility}")
     
-    return {
-        "status": "updated",
-        "item_type": item_type,
-        "item_id": item_id,
-        "visibility": visibility,
-        "previous_visibility": old_visibility,
-    }
+    return VisibilityResponse(
+        status="updated",
+        item_type=item_type,
+        item_id=item_id,
+        visibility=visibility,
+        previous_visibility=old_visibility,
+    )
 
 
 # =============================================================================
@@ -550,8 +578,8 @@ async def set_visibility(
 async def search_items(
     query: str,
     item_type: str = None,
+    namespace: str = None,
     category: str = None,
-    author: str = None,
     limit: int = 20,
     offset: int = 0,
 ):
@@ -560,34 +588,42 @@ async def search_items(
     results = []
     total = 0
     
-    # Search each item type (or specific type if provided)
     types_to_search = [item_type] if item_type else ["directive", "tool", "knowledge"]
     
     for itype in types_to_search:
         try:
-            # knowledge table is singular, others are plural
-            table = "knowledge" if itype == "knowledge" else f"{itype}s"
+            table = get_table_name(itype)
             
-            # Build query - simple select without join for reliability
             q = supabase.table(table).select("*", count="exact")
             
-            # Text search on name and description (consistent across all types now)
+            # Text search on name and description
             q = q.or_(f"name.ilike.%{query}%,description.ilike.%{query}%")
             
+            if namespace:
+                q = q.eq("namespace", namespace)
             if category:
-                q = q.eq("category", category)
+                q = q.ilike("category", f"{category}%")  # Prefix match for nested
+            
+            # Only show public items in search
+            q = q.eq("visibility", "public")
             
             result = q.range(offset, offset + limit - 1).execute()
             
             for item in result.data:
+                item_id = build_item_id(
+                    item["namespace"],
+                    item["category"],
+                    item["name"],
+                )
                 results.append(SearchResultItem(
                     item_type=itype,
-                    item_id=item.get("name") or item.get("tool_id") or item.get("zettel_id"),
-                    name=item.get("name", ""),
+                    item_id=item_id,
+                    namespace=item["namespace"],
+                    category=item["category"],
+                    name=item["name"],
                     description=item.get("description"),
                     version=item.get("latest_version") or "0.0.0",
-                    author=None,  # Skip author lookup for now
-                    category=item.get("category"),
+                    author=item["namespace"],  # namespace is the author
                     download_count=item.get("download_count") or 0,
                     created_at=item.get("created_at"),
                 ))

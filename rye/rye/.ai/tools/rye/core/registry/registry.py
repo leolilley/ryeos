@@ -1,6 +1,16 @@
 """
 Registry tool - auth and item management for Rye Registry.
 
+Identity model:
+  item_id = "{namespace}/{category}/{name}" (canonical)
+  - namespace: owner (no slashes), e.g., "leolilley"
+  - category: folder path (may contain slashes), e.g., "core" or "rye/core/registry"
+  - name: basename (no slashes), e.g., "bootstrap"
+  
+  Parsing: first segment = namespace, last segment = name, middle = category
+  Example: "leolilley/rye/core/registry/registry" 
+           -> namespace="leolilley", category="rye/core/registry", name="registry"
+
 Provides operations for interacting with the Rye Registry:
 - Auth via OAuth PKCE flow (GitHub, etc.)
 - Push/pull items to/from registry
@@ -18,8 +28,8 @@ Actions:
 
   Items:
     - search: Search for items in the registry
-    - pull: Download item from registry to local
-    - push: Upload local item to registry
+    - pull: Download item from registry to local (item_id=namespace/category/name)
+    - push: Upload local item to registry (item_id=namespace/category/name)
     - delete: Remove item from registry
     - publish: Make item public (visibility='public')
     - unpublish: Make item private (visibility='private')
@@ -107,6 +117,72 @@ REGISTRY_ANON_KEY = os.environ.get(
 REGISTRY_SERVICE = "rye_registry"
 # Env var override for CI/headless - checked before keyring
 REGISTRY_TOKEN_ENV = "RYE_REGISTRY_TOKEN"
+
+
+# =============================================================================
+# ITEM ID HELPERS
+# =============================================================================
+
+
+def parse_item_id(item_id: str) -> Tuple[str, str, str]:
+    """Parse item_id into (namespace, category, name).
+    
+    Format: namespace/category/name where category may contain slashes.
+    Minimum 3 segments required.
+    
+    Returns:
+        Tuple of (namespace, category, name)
+    
+    Raises:
+        ValueError if item_id has fewer than 3 segments
+    """
+    segments = item_id.split("/")
+    if len(segments) < 3:
+        raise ValueError(
+            f"item_id must have at least 3 segments (namespace/category/name), got: {item_id}"
+        )
+    namespace = segments[0]
+    name = segments[-1]
+    category = "/".join(segments[1:-1])
+    return namespace, category, name
+
+
+def build_item_id(namespace: str, category: str, name: str) -> str:
+    """Build item_id from components."""
+    return f"{namespace}/{category}/{name}"
+
+
+def build_item_id_from_path(
+    file_path: Path,
+    namespace: str,
+    item_type: str,
+    project_path: Optional[Path] = None,
+) -> str:
+    """Build item_id from a local file path.
+    
+    Extracts category from path and combines with namespace and filename.
+    
+    Args:
+        file_path: Path to the item file
+        namespace: Owner namespace (usually authenticated username)
+        item_type: "directive", "tool", or "knowledge"
+        project_path: Optional project root for relative path calculation
+    
+    Returns:
+        item_id in format namespace/category/name
+    """
+    from rye.utils.path_utils import extract_category_path
+    
+    name = file_path.stem
+    category = extract_category_path(
+        file_path, item_type, location="project", project_path=project_path
+    )
+    
+    # Ensure category is not empty
+    if not category:
+        category = "uncategorized"
+    
+    return build_item_id(namespace, category, name)
 
 
 def _get_rye_state_dir() -> Path:
@@ -436,7 +512,7 @@ async def execute(
             result = await _push(
                 item_type=params.get("item_type"),
                 item_path=params.get("item_path"),
-                name=params.get("name"),
+                item_id=params.get("item_id"),
                 version=params.get("version"),
                 visibility=params.get("visibility", "private"),
                 project_path=project_path,
@@ -1093,7 +1169,8 @@ async def _pull(
 
     Args:
         item_type: "directive", "tool", or "knowledge"
-        item_id: Item identifier (namespace/name format)
+        item_id: Item identifier (namespace/category/name format)
+                 Example: "leolilley/core/bootstrap"
         version: Specific version (or "latest")
         dest_path: Destination directory
         verify: Verify registry signature (default True)
@@ -1101,7 +1178,17 @@ async def _pull(
     if not item_type or not item_id:
         return {
             "error": "Required: item_type and item_id",
-            "usage": "pull(item_type='directive', item_id='core/bootstrap')",
+            "usage": "pull(item_type='directive', item_id='leolilley/core/bootstrap')",
+        }
+    
+    # Validate item_id format
+    try:
+        namespace, category, name = parse_item_id(item_id)
+    except ValueError as e:
+        return {
+            "error": str(e),
+            "hint": "item_id must be namespace/category/name format",
+            "example": "leolilley/core/bootstrap",
         }
 
     if item_type not in ["directive", "tool", "knowledge"]:
@@ -1195,14 +1282,12 @@ async def _pull(
                     "reason": "MetadataManager not available",
                 }
 
-        # Determine destination path
+        # Determine destination path using category from item_id
         dest = Path(dest_path)
         if dest.is_dir():
-            # Build path like .ai/directives/category/name.md
-            # Use item_id last segment as filename
-            filename = item_id.split("/")[-1]
+            # Build path like .ai/{item_type}s/{category}/{name}.ext
             ext = ".md" if item_type in ["directive", "knowledge"] else ".py"
-            dest = dest / ".ai" / f"{item_type}s" / f"{filename}{ext}"
+            dest = dest / ".ai" / f"{item_type}s" / category / f"{name}{ext}"
 
         # Create directory and write content
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1212,6 +1297,9 @@ async def _pull(
             "status": "pulled",
             "item_type": item_type,
             "item_id": item_id,
+            "namespace": namespace,
+            "category": category,
+            "name": name,
             "version": item_version,
             "path": str(dest),
             "content_hash": signature_data.get("hash", ""),
@@ -1227,7 +1315,7 @@ async def _pull(
 async def _push(
     item_type: Optional[str],
     item_path: Optional[str],
-    name: Optional[str],
+    item_id: Optional[str],
     version: Optional[str],
     visibility: str = "private",
     project_path: Optional[str] = None,
@@ -1244,14 +1332,25 @@ async def _push(
     Args:
         item_type: "directive", "tool", or "knowledge"
         item_path: Path to local item file
-        name: Registry name (namespace/name format)
+        item_id: Registry identifier (namespace/category/name format)
+                 Example: "leolilley/core/bootstrap"
         version: Version string (semver)
         visibility: "public", "private", or "unlisted"
     """
-    if not item_type or not item_path or not name or not version:
+    if not item_type or not item_path or not item_id or not version:
         return {
-            "error": "Required: item_type, item_path, name, version",
-            "usage": "push(item_type='directive', item_path='.ai/directives/my.md', name='me/my', version='1.0.0')",
+            "error": "Required: item_type, item_path, item_id, version",
+            "usage": "push(item_type='tool', item_path='.ai/tools/test/my_tool.py', item_id='leolilley/test/my_tool', version='1.0.0')",
+        }
+    
+    # Validate item_id format
+    try:
+        namespace, category, name = parse_item_id(item_id)
+    except ValueError as e:
+        return {
+            "error": str(e),
+            "hint": "item_id must be namespace/category/name format",
+            "example": "leolilley/core/bootstrap",
         }
 
     if item_type not in ["directive", "tool", "knowledge"]:
@@ -1355,7 +1454,7 @@ async def _push(
             "/v1/push",
             body={
                 "item_type": item_type,
-                "item_id": name,
+                "item_id": item_id,
                 "content": signed_content,
                 "version": version,
                 "metadata": {
@@ -1392,7 +1491,7 @@ async def _push(
         return {
             "status": "pushed",
             "item_type": item_type,
-            "name": name,
+            "item_id": item_id,
             "version": version,
             "visibility": visibility,
             "content_hash": response_body.get("signature", {}).get("hash", ""),
@@ -1418,14 +1517,20 @@ async def _delete(
 
     Args:
         item_type: "directive", "tool", or "knowledge"
-        item_id: Item identifier (namespace/name format)
+        item_id: Item identifier (namespace/category/name format)
         version: Specific version to delete (or None for all versions)
     """
     if not item_type or not item_id:
         return {
             "error": "Required: item_type, item_id",
-            "usage": "delete(item_type='directive', item_id='me/my')",
+            "usage": "delete(item_type='directive', item_id='leolilley/core/bootstrap')",
         }
+    
+    # Validate item_id format
+    try:
+        parse_item_id(item_id)
+    except ValueError as e:
+        return {"error": str(e)}
 
     if item_type not in ["directive", "tool", "knowledge"]:
         return {
@@ -1495,13 +1600,19 @@ async def _publish(
 
     Args:
         item_type: "directive", "tool", or "knowledge"
-        item_id: Item identifier (namespace/name format)
+        item_id: Item identifier (namespace/category/name format)
     """
     if not item_type or not item_id:
         return {
             "error": "Required: item_type, item_id",
-            "usage": "publish(item_type='directive', item_id='me/my')",
+            "usage": "publish(item_type='directive', item_id='leolilley/core/bootstrap')",
         }
+    
+    # Validate item_id format
+    try:
+        parse_item_id(item_id)
+    except ValueError as e:
+        return {"error": str(e)}
 
     if item_type not in ["directive", "tool", "knowledge"]:
         return {
@@ -1565,13 +1676,19 @@ async def _unpublish(
 
     Args:
         item_type: "directive", "tool", or "knowledge"
-        item_id: Item identifier (namespace/name format)
+        item_id: Item identifier (namespace/category/name format)
     """
     if not item_type or not item_id:
         return {
             "error": "Required: item_type, item_id",
-            "usage": "unpublish(item_type='directive', item_id='me/my')",
+            "usage": "unpublish(item_type='directive', item_id='leolilley/core/bootstrap')",
         }
+    
+    # Validate item_id format
+    try:
+        parse_item_id(item_id)
+    except ValueError as e:
+        return {"error": str(e)}
 
     if item_type not in ["directive", "tool", "knowledge"]:
         return {
