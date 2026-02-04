@@ -28,8 +28,8 @@ All registry operations (search, pull, push) go through the Registry API. Direct
 
 ## Services
 
-| Service | Purpose | Documentation |
-|---------|---------|---------------|
+| Service          | Purpose                             | Documentation                        |
+| ---------------- | ----------------------------------- | ------------------------------------ |
 | **registry-api** | Handles push/pull/search operations | [registry-api.md](./registry-api.md) |
 
 ## Why Server-Side Validation?
@@ -44,6 +44,7 @@ The client-side `sign` tool validates and signs content locally. However, for re
 ## Database Security
 
 RLS (Row Level Security) is enabled on all tables:
+
 - **Public read**: Anyone can read published items
 - **Write via API only**: Direct inserts/updates blocked; must go through Registry API
 - **Service role bypass**: API uses service role key to write
@@ -53,6 +54,7 @@ See [../schema/003_rls_api_only.sql](../schema/003_rls_api_only.sql) for RLS pol
 ## Getting Started
 
 See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for:
+
 - Supabase setup
 - Registry API deployment
 - Local development

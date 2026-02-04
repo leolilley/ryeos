@@ -148,16 +148,16 @@ def sign_with_registry(
     base_signature = strategy.format_signature(timestamp, content_hash)
 
     # Inject registry suffix into the signature
-    # For HTML comments: "<!-- rye:validated:T:H -->" -> "<!-- rye:validated:T:H|registry@user -->"
-    # For line comments: "# rye:validated:T:H\n" -> "# rye:validated:T:H|registry@user\n"
+    # For HTML comments: "<!-- rye:validated:T:H -->" -> "<!-- rye:validated:T:H|rye-registry@user -->"
+    # For line comments: "# rye:validated:T:H\n" -> "# rye:validated:T:H|rye-registry@user\n"
     if base_signature.endswith(" -->\n"):
         registry_signature = base_signature.replace(
-            " -->", f"|registry@{username} -->"
+            " -->", f"|rye-registry@{username} -->"
         )
     elif base_signature.endswith("\n"):
-        registry_signature = base_signature.rstrip("\n") + f"|registry@{username}\n"
+        registry_signature = base_signature.rstrip("\n") + f"|rye-registry@{username}\n"
     else:
-        registry_signature = base_signature + f"|registry@{username}"
+        registry_signature = base_signature + f"|rye-registry@{username}"
 
     # Insert signature into content
     signed_content = strategy.insert_signature(content, registry_signature)
