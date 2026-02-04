@@ -6,6 +6,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy lilux package (rye dependency)
@@ -25,9 +26,10 @@ RUN pip install --no-cache-dir /app/lilux/ /app/rye/ -e .
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"
+# Health check - Railway handles this via healthcheckPath in railway.toml
+# For local Docker, use PORT env var
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
-# Run server
-CMD ["uvicorn", "registry_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run server - Railway injects PORT env var
+CMD uvicorn registry_api.main:app --host 0.0.0.0 --port ${PORT:-8000}
