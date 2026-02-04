@@ -142,76 +142,85 @@ def my_function():
 - `ToolMetadataStrategy` - Language-specific comment format (Python: `# rye:validated:...`)
 - `KnowledgeMetadataStrategy` - HTML comment format (`<!-- rye:validated:... -->`)
 
-**Minor MetadataManager update needed:** Extend regex to parse optional `|registry@username` suffix. Registry code handles signing with the extended format.
+**Minor MetadataManager update needed:** Extend regex to parse optional `|registry@username` suffix.
 
-**Changes needed in `registry.py`:**
+**Design principle:** Server-side signing. The `|registry@username` suffix is **only added by the Registry API server** after validating content and authenticating the user. This prevents forged provenance claims.
 
-**Design principle:** Registry handles registry signing. MetadataManager just needs to parse the extended format.
+See [/docs/db/services/registry-api.md](../../../db/services/registry-api.md) for full server-side validation documentation.
 
-1. **Sign with registry format on push** - Add to `_push()`:
+**Changes needed in `registry.py` (`_push()`):**
 
-   ```python
-   from rye.utils.metadata_manager import MetadataManager
+The client push function should:
+1. Validate and sign locally (same as `sign` tool) - adds `rye:validated:timestamp:hash`
+2. Push to Registry API server
+3. Server re-validates using same `rye` validators, adds `|registry@username`
+4. Update local file with registry-signed content
 
-   content = path.read_text()
-   manager = MetadataManager.for_item_type(item_type)
+```python
+async def _push(item_type: str, item_id: str, ...):
+    # 1. Load content
+    content = path.read_text()
+    
+    # 2. Validate locally (same as sign tool)
+    parsed = parser_router.parse(parser_type, content)
+    validation = validate_parsed_data(item_type, parsed, file_path, ...)
+    if not validation["valid"]:
+        return {"status": "error", "issues": validation["issues"]}
+    
+    # 3. Sign locally (standard signature, NO registry suffix)
+    signed_content = MetadataManager.sign_content(item_type, content, ...)
+    
+    # 4. Push to Registry API (server will re-validate and add |registry@username)
+    response = await http.post(
+        f"{registry_url}/v1/push",
+        json={
+            "item_type": item_type,
+            "item_id": item_id,
+            "content": signed_content,
+            "version": version,
+        },
+        auth_token=token,
+    )
+    
+    if response.get("status") == "error":
+        return response  # Server-side validation failed
+    
+    # 5. Update local file with registry-signed version
+    if response.get("signed_content"):
+        path.write_text(response["signed_content"])
+    
+    return response
+```
 
-   # Get username from API
-   username = await _get_registry_username(token)
+**Changes needed in `registry.py` (`_pull()`):**
 
-   # Remove any existing signature, compute hash, create registry signature
-   content_without_sig = manager.remove_signature(content)
-   content_hash = hashlib.sha256(content_without_sig.encode()).hexdigest()
-   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+Verify the registry signature on pull:
 
-   # Registry signature format: timestamp:hash|registry@username
-   signature = f"{timestamp}:{content_hash}|registry@{username}"
-   signed_content = manager.insert_signature(content_without_sig, signature)
-
-   path.write_text(signed_content)  # Update local file with registry signature
-
-   # Upload content (signature is inline)
-   ```
-
-2. **Verify signature + username on pull** - Add to `_pull()`:
-
-   ```python
-   from rye.utils.metadata_manager import MetadataManager
-
-   content = latest_version.get("content", "")
-   manager = MetadataManager.for_item_type(item_type)
-
-   # Extract and verify signature
-   sig_info = manager.extract_signature(content)
-   if not sig_info:
-       return {"status": "error", "message": "No signature found"}
-
-   # Verify hash
-   content_without_sig = manager.remove_signature(content)
-   computed_hash = hashlib.sha256(content_without_sig.encode()).hexdigest()
-   if computed_hash != sig_info["hash"]:
-       return {"status": "error", "message": "Content integrity check failed"}
-
-   # Verify username matches author from registry
-   registry_author = item.get("author_username")  # From DB
-   if sig_info.get("username") and sig_info["username"] != registry_author:
-       return {"status": "error", "message": f"Username mismatch: signature says {sig_info['username']}, registry says {registry_author}"}
-
-   dest.write_text(content)
-   ```
-
-3. **Update `whoami`** - Fetch account from API:
-   ```python
-   result = await http.get("/auth/v1/user", auth_token=token)
-   if result["success"] and result["body"]:
-       user = result["body"]
-       return {
-           "authenticated": True,
-           "account": user.get("email"),
-           "username": user.get("user_metadata", {}).get("preferred_username"),
-           "source": "keyring" if not env_token else "env",
-       }
-   ```
+```python
+async def _pull(item_type: str, item_id: str, ...):
+    response = await http.get(f"{registry_url}/v1/pull/{item_type}/{item_id}")
+    
+    content = response["content"]
+    author = response["author"]
+    
+    # Extract and verify signature
+    sig_info = MetadataManager.extract_signature(item_type, content)
+    if not sig_info:
+        return {"status": "error", "message": "No signature found"}
+    
+    # Verify hash
+    content_without_sig = MetadataManager.remove_signature(item_type, content)
+    computed_hash = hashlib.sha256(content_without_sig.encode()).hexdigest()
+    if computed_hash != sig_info["hash"]:
+        return {"status": "error", "message": "Content integrity check failed"}
+    
+    # Verify username matches author from registry
+    if sig_info.get("registry_username") and sig_info["registry_username"] != author:
+        return {"status": "error", "message": f"Username mismatch: signature says {sig_info['registry_username']}, registry says {author}"}
+    
+    dest.write_text(content)
+    return {"status": "pulled", ...}
+```
 
 **Changes needed in `metadata_manager.py`:**
 
@@ -221,7 +230,7 @@ Extend `extract_signature()` regex to parse optional `|registry@username` suffix
 # Current: r"validated:(.*?):([a-f0-9]{64})"
 # New:     r"validated:(.*?):([a-f0-9]{64})(?:\|registry@(\w+))?"
 
-# Returns: {"timestamp": ..., "hash": ..., "username": ... or None}
+# Returns: {"timestamp": ..., "hash": ..., "registry_username": ... or None}
 ```
 
 **What stays the same:**
@@ -229,6 +238,7 @@ Extend `extract_signature()` regex to parse optional `|registry@username` suffix
 - Local `sign` tool uses simple format (`timestamp:hash`)
 - Local sign overwrites registry signature (user modified file = their signature now)
 - Both formats are valid, MetadataManager parses either
+- Client never adds `|registry@username` - only the server does this
 
 ### 3.3. Schema Changes
 

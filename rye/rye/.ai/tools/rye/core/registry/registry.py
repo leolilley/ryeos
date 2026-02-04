@@ -1,4 +1,3 @@
-# rye:validated:2026-02-03T07:36:42Z:faeb88416ae3d091766ca6afd61b41cbfa3b1a588f60766ed16b073912654122
 """
 Registry tool - auth, push/pull, publish, key management.
 
@@ -23,8 +22,9 @@ Actions:
     - whoami: Show current authenticated user
 
   Items:
-    - pull: Download item from registry to local
-    - push: Upload local item to registry
+    - search: Search for items in the registry
+    - pull: Download item from registry to local (with signature verification)
+    - push: Upload local item to registry (with server-side validation)
     - set_visibility: Change item visibility (public/private/unlisted)
 
   Keys:
@@ -88,6 +88,7 @@ ACTIONS = [
     "logout",
     "whoami",
     # Items
+    "search",
     "pull",
     "push",
     "set_visibility",
@@ -379,12 +380,22 @@ async def execute(
             result = await _whoami()
 
         # Item actions
+        elif action == "search":
+            result = await _search(
+                query=params.get("query"),
+                item_type=params.get("item_type"),
+                category=params.get("category"),
+                author=params.get("author"),
+                limit=params.get("limit", 20),
+            )
+            http_calls = 1
         elif action == "pull":
             result = await _pull(
                 item_type=params.get("item_type"),
                 item_id=params.get("item_id"),
                 version=params.get("version"),
                 dest_path=params.get("dest_path") or project_path,
+                verify=params.get("verify", True),
             )
             http_calls = 1  # pull makes HTTP requests
         elif action == "push":
@@ -892,20 +903,85 @@ async def _whoami() -> Dict[str, Any]:
 # =============================================================================
 
 
+async def _search(
+    query: Optional[str],
+    item_type: Optional[str] = None,
+    category: Optional[str] = None,
+    author: Optional[str] = None,
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """
+    Search for items in the registry via Registry API.
+
+    Args:
+        query: Search query (searches name and description)
+        item_type: Filter by type ("directive", "tool", or "knowledge")
+        category: Filter by category
+        author: Filter by author username
+        limit: Maximum results to return (default 20)
+    """
+    if not query:
+        return {
+            "error": "Required: query",
+            "usage": "search(query='bootstrap', item_type='directive')",
+        }
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        # Build query params for Registry API
+        url = f"/v1/search?query={query}&limit={limit}"
+        if item_type:
+            url += f"&item_type={item_type}"
+        if category:
+            url += f"&category={category}"
+        if author:
+            url += f"&author={author}"
+
+        result = await http.get(url)
+        await http.close()
+
+        if not result["success"]:
+            return {
+                "error": f"Search failed: {result.get('error', 'Unknown error')}",
+                "status_code": result.get("status_code"),
+            }
+
+        body = result.get("body", {})
+        return {
+            "status": "success",
+            "query": query,
+            "results": body.get("results", []),
+            "total": body.get("total", 0),
+            "filters": {
+                "item_type": item_type,
+                "category": category,
+                "author": author,
+            },
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Search failed: {e}"}
+
+
 async def _pull(
     item_type: Optional[str],
     item_id: Optional[str],
     version: Optional[str],
     dest_path: str,
+    verify: bool = True,
 ) -> Dict[str, Any]:
     """
-    Download item from registry to local.
+    Download item from registry via Registry API with signature verification.
 
     Args:
         item_type: "directive", "tool", or "knowledge"
         item_id: Item identifier (namespace/name format)
         version: Specific version (or "latest")
         dest_path: Destination directory
+        verify: Verify registry signature (default True)
     """
     if not item_type or not item_id:
         return {
@@ -923,76 +999,104 @@ async def _pull(
     http = RegistryHttpClient(config)
 
     try:
-        # Query for item with latest version
-        table = f"{item_type}s"
-        version_table = f"{item_type}_versions"
-
-        # Build query - get item with its versions
-        query = f"/rest/v1/{table}?name=eq.{item_id}&select=*,{version_table}(*)&{version_table}.order=created_at.desc&{version_table}.limit=1"
-
+        # Call Registry API pull endpoint
+        url = f"/v1/pull/{item_type}/{item_id}"
         if version:
-            query = f"/rest/v1/{table}?name=eq.{item_id}&select=*,{version_table}(*)&{version_table}.version=eq.{version}"
+            url += f"?version={version}"
 
-        result = await http.get(query)
+        result = await http.get(url)
+        await http.close()
 
         if not result["success"]:
-            await http.close()
+            error_body = result.get("body", {})
+            if isinstance(error_body, dict) and "error" in error_body:
+                return {
+                    "error": error_body["error"],
+                    "suggestion": f"Search for available items with: search(query='{item_id}')",
+                }
             return {
-                "error": f"Failed to fetch {item_type}: {result['error']}",
-                "status_code": result["status_code"],
+                "error": f"Failed to fetch {item_type}: {result.get('error', 'Unknown')}",
+                "status_code": result.get("status_code"),
             }
 
-        items = result["body"]
-        if not items or len(items) == 0:
-            await http.close()
-            return {
-                "error": f"{item_type.title()} not found: {item_id}",
-                "suggestion": f"Search for available {item_type}s with: search({item_type})",
-            }
+        body = result.get("body", {})
+        content = body.get("content", "")
+        author_username = body.get("author", "")
+        item_version = body.get("version", "")
+        signature_data = body.get("signature", {})
 
-        item = items[0]
-        versions = item.get(version_table, [])
+        # Verify registry signature locally if enabled
+        signature_info = None
+        if verify and content:
+            try:
+                from rye.utils.metadata_manager import MetadataManager
 
-        if not versions:
-            await http.close()
-            return {
-                "error": f"No versions found for {item_type}: {item_id}",
-            }
+                strategy = MetadataManager.get_strategy(item_type)
+                sig_info = strategy.extract_signature(content)
 
-        latest_version = versions[0]
-        content = latest_version.get("content", "")
+                if not sig_info:
+                    return {
+                        "error": "No signature found on registry content",
+                        "hint": "Content may be corrupted or from an older registry version",
+                    }
+
+                # Verify it's a registry signature
+                registry_username = sig_info.get("registry_username")
+                if registry_username:
+                    # Verify username matches author from API
+                    if author_username and registry_username != author_username:
+                        return {
+                            "error": "Signature username mismatch",
+                            "signature_says": registry_username,
+                            "registry_says": author_username,
+                            "hint": "Content may have been tampered with",
+                        }
+
+                    # Verify content hash
+                    content_without_sig = strategy.remove_signature(content)
+                    computed_hash = hashlib.sha256(content_without_sig.encode()).hexdigest()
+
+                    if computed_hash != sig_info["hash"]:
+                        return {
+                            "error": "Content integrity check failed",
+                            "expected_hash": sig_info["hash"],
+                            "computed_hash": computed_hash,
+                            "hint": "Content was modified after signing",
+                        }
+
+                signature_info = {
+                    "verified": True,
+                    "registry_username": registry_username,
+                    "timestamp": sig_info.get("timestamp"),
+                    "hash": sig_info.get("hash"),
+                }
+
+            except ImportError:
+                # MetadataManager not available, skip verification
+                signature_info = {"verified": False, "reason": "MetadataManager not available"}
 
         # Determine destination path
         dest = Path(dest_path)
         if dest.is_dir():
             # Build path like .ai/directives/category/name.md
-            category = item.get("category", "")
-            if category:
-                dest = (
-                    dest
-                    / ".ai"
-                    / f"{item_type}s"
-                    / category
-                    / f"{item_id.split('/')[-1]}.md"
-                )
-            else:
-                dest = dest / ".ai" / f"{item_type}s" / f"{item_id.split('/')[-1]}.md"
+            # Use item_id last segment as filename
+            filename = item_id.split("/")[-1]
+            ext = ".md" if item_type in ["directive", "knowledge"] else ".py"
+            dest = dest / ".ai" / f"{item_type}s" / f"{filename}{ext}"
 
         # Create directory and write content
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content)
 
-        await http.close()
-
         return {
             "status": "pulled",
             "item_type": item_type,
             "item_id": item_id,
-            "version": latest_version.get("version"),
+            "version": item_version,
             "path": str(dest),
-            "content_hash": latest_version.get("content_hash"),
-            "author": item.get("author_id"),
-            "is_official": item.get("is_official", False),
+            "content_hash": signature_data.get("hash", ""),
+            "author": author_username,
+            "signature": signature_info,
         }
 
     except Exception as e:
@@ -1008,7 +1112,13 @@ async def _push(
     visibility: str = "private",
 ) -> Dict[str, Any]:
     """
-    Upload local item to registry.
+    Upload local item to registry with server-side validation.
+
+    Flow:
+    1. Validate content locally using rye validators
+    2. Sign content locally (standard signature)
+    3. Push to Registry API (server re-validates and adds |registry@username)
+    4. Update local file with registry-signed content
 
     Args:
         item_type: "directive", "tool", or "knowledge"
@@ -1051,90 +1161,111 @@ async def _push(
         except ImportError:
             return {"error": "AuthStore not available"}
 
-    # Read content and compute hash
+    # Read content
     content = path.read_text()
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
 
+    # Step 1: Validate locally using rye validators (same as sign tool)
+    try:
+        from rye.utils.parser_router import ParserRouter
+        from rye.utils.validators import apply_field_mapping, validate_parsed_data
+        from rye.utils.metadata_manager import MetadataManager
+
+        parser_router = ParserRouter()
+        parser_types = {
+            "directive": "markdown_xml",
+            "tool": "python_ast",
+            "knowledge": "markdown_yaml",
+        }
+        parser_type = parser_types.get(item_type)
+
+        # Strip existing signature for validation
+        strategy = MetadataManager.get_strategy(item_type)
+        content_clean = strategy.remove_signature(content)
+
+        # Parse content
+        parsed = parser_router.parse(parser_type, content_clean)
+        if "error" in parsed:
+            return {
+                "error": "Failed to parse content",
+                "details": parsed.get("error"),
+                "path": str(path),
+            }
+
+        # Add name for tools (matches client sign tool behavior)
+        if item_type == "tool":
+            parsed["name"] = path.stem
+
+        # Apply field mapping
+        parsed = apply_field_mapping(item_type, parsed)
+
+        # Validate
+        validation = validate_parsed_data(
+            item_type=item_type,
+            parsed_data=parsed,
+            file_path=path,
+            location="project",
+        )
+
+        if not validation["valid"]:
+            return {
+                "error": "Validation failed",
+                "issues": validation["issues"],
+                "path": str(path),
+                "hint": "Fix validation issues before pushing",
+            }
+
+        # Step 2: Sign locally (standard signature, no registry suffix)
+        signed_content = MetadataManager.sign_content(
+            item_type, content_clean, file_path=path
+        )
+
+    except ImportError as e:
+        return {"error": f"Missing rye validation modules: {e}"}
+
+    # Step 3: Push to Registry API (server re-validates and adds |registry@username)
     config = RegistryConfig.from_env()
     http = RegistryHttpClient(config)
 
     try:
-        # First, check if item exists
-        table = f"{item_type}s"
-        result = await http.get(f"/rest/v1/{table}?name=eq.{name}", auth_token=token)
-
-        if result["success"] and result["body"] and len(result["body"]) > 0:
-            # Item exists - create new version
-            item = result["body"][0]
-            item_id = item["id"]
-
-            version_table = f"{item_type}_versions"
-            version_result = await http.post(
-                f"/rest/v1/{version_table}",
-                body={
-                    f"{item_type}_id": item_id,
-                    "version": version,
-                    "content": content,
-                    "content_hash": content_hash,
-                    "is_latest": True,
-                },
-                auth_token=token,
-            )
-
-            if not version_result["success"]:
-                await http.close()
-                return {
-                    "error": f"Failed to create version: {version_result['error']}",
-                    "status_code": version_result["status_code"],
-                }
-
-        else:
-            # Create new item + version
-            create_result = await http.post(
-                f"/rest/v1/{table}",
-                body={
-                    "name": name,
+        # Push to Registry API endpoint
+        # The API validates, signs with registry provenance, and stores
+        result = await http.post(
+            "/v1/push",
+            body={
+                "item_type": item_type,
+                "item_id": name,
+                "content": signed_content,
+                "version": version,
+                "metadata": {
                     "visibility": visibility,
+                    "category": parsed.get("category", ""),
+                    "description": parsed.get("description", ""),
                 },
-                auth_token=token,
-                headers={"Prefer": "return=representation"},
-            )
-
-            if not create_result["success"]:
-                await http.close()
-                return {
-                    "error": f"Failed to create {item_type}: {create_result['error']}",
-                    "status_code": create_result["status_code"],
-                }
-
-            item = create_result["body"][0] if create_result["body"] else None
-            if not item:
-                await http.close()
-                return {"error": "Failed to get created item ID"}
-
-            item_id = item["id"]
-
-            # Create version
-            version_table = f"{item_type}_versions"
-            version_result = await http.post(
-                f"/rest/v1/{version_table}",
-                body={
-                    f"{item_type}_id": item_id,
-                    "version": version,
-                    "content": content,
-                    "content_hash": content_hash,
-                    "is_latest": True,
-                },
-                auth_token=token,
-            )
-
-            if not version_result["success"]:
-                await http.close()
-                return {
-                    "error": f"Failed to create version: {version_result['error']}",
-                }
+            },
+            auth_token=token,
+        )
 
         await http.close()
+
+        if not result["success"]:
+            # Check if this is a validation error from the server
+            error_body = result.get("body", {})
+            if isinstance(error_body, dict) and "issues" in error_body:
+                return {
+                    "error": "Server-side validation failed",
+                    "issues": error_body["issues"],
+                    "hint": "Server rejected content - check validation rules",
+                }
+            return {
+                "error": f"Push failed: {result.get('error', 'Unknown error')}",
+                "status_code": result.get("status_code"),
+            }
+
+        # Step 4: Update local file with registry-signed content
+        response_body = result.get("body", {})
+        if isinstance(response_body, dict) and "signed_content" in response_body:
+            registry_signed = response_body["signed_content"]
+            path.write_text(registry_signed)
 
         return {
             "status": "pushed",
@@ -1142,8 +1273,10 @@ async def _push(
             "name": name,
             "version": version,
             "visibility": visibility,
-            "content_hash": content_hash,
-            "size_bytes": len(content.encode()),
+            "content_hash": response_body.get("signature", {}).get("hash", ""),
+            "registry_username": response_body.get("signature", {}).get("registry_username"),
+            "size_bytes": len(signed_content.encode()),
+            "local_updated": "signed_content" in response_body,
         }
 
     except Exception as e:
