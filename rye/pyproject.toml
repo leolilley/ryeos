@@ -25,5 +25,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["rye"]
 
+[tool.hatch.build]
+exclude = [
+    ".venv",
+    "__pycache__",
+    "*.pyc",
+]
+
 [tool.hatch.build.targets.wheel.force-include]
 "rye/.ai" = "rye/.ai"
