@@ -439,6 +439,7 @@ async def execute(
                 name=params.get("name"),
                 version=params.get("version"),
                 visibility=params.get("visibility", "private"),
+                project_path=project_path,
             )
             http_calls = 2  # push typically makes 2 HTTP requests (check + create)
         elif action == "delete":
@@ -1229,6 +1230,7 @@ async def _push(
     name: Optional[str],
     version: Optional[str],
     visibility: str = "private",
+    project_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Upload local item to registry with server-side validation.
@@ -1323,6 +1325,7 @@ async def _push(
             parsed_data=parsed,
             file_path=path,
             location="project",
+            project_path=Path(project_path) if project_path else None,
         )
 
         if not validation["valid"]:
