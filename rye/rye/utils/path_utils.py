@@ -4,6 +4,7 @@ Provides functions to:
 - Extract category path from file location (relative to .ai/{type}/)
 - Validate filename matches metadata name/id
 - Validate path structure
+- Ensure directories exist (filesystem helpers)
 """
 
 import os
@@ -11,6 +12,35 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rye.constants import ItemType
+
+
+def ensure_directory(path: Path) -> Path:
+    """Ensure directory exists, creating it and all parents if necessary.
+
+    Args:
+        path: Directory path to ensure exists
+
+    Returns:
+        The path (for chaining)
+
+    Raises:
+        OSError: If directory cannot be created
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def ensure_parent_directory(file_path: Path) -> Path:
+    """Ensure parent directory of file path exists.
+
+    Args:
+        file_path: File path whose parent should exist
+
+    Returns:
+        The file path (for chaining)
+    """
+    return ensure_directory(file_path.parent)
 
 
 def get_user_space() -> Path:

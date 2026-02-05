@@ -55,6 +55,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlencode
 
+# Import filesystem helpers
+try:
+    from rye.utils.path_utils import ensure_directory
+except ImportError:
+    # Fallback for when in .ai/tools context
+    def ensure_directory(path: Path) -> Path:
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
 # Telemetry integration
 try:
     from .telemetry.lib import TelemetryStore
@@ -583,7 +593,7 @@ def _save_session(
 ) -> Path:
     """Save session data for later polling."""
     session_dir = _get_session_dir()
-    session_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory(session_dir)
     session_path = session_dir / f"{session_id}.json"
 
     session_data = {
@@ -1329,7 +1339,7 @@ async def _pull(
             dest = base_dir / f"{item_type}s" / category / f"{name}{ext}"
 
         # Create directory and write content
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        ensure_directory(dest.parent)
         dest.write_text(content)
 
         return {

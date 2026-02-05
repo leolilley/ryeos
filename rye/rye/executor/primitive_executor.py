@@ -17,6 +17,7 @@ Caching:
 import ast
 import hashlib
 import logging
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -810,20 +811,30 @@ class PrimitiveExecutor:
         """Substitute ${VAR} and {param} templates in config values.
         
         Two-pass templating:
-        1. ${VAR} - environment variable substitution
+        1. ${VAR} - environment variable substitution (with shell escaping)
         2. {param} - config value substitution (recursive until stable)
         """
         import re
 
+        def escape_shell_value(value: Any) -> Any:
+            """Escape values that will be used in shell commands."""
+            if isinstance(value, str):
+                # Only escape if value contains shell-special characters
+                if any(c in value for c in ['$', '`', ';', '|', '&', '<', '>', '(', ')', '{', '}', '[', ']', '\\']):
+                    return shlex.quote(value)
+            return value
+
         def substitute_env(value: Any) -> Any:
-            """Substitute ${VAR} with environment values."""
+            """Substitute ${VAR} with environment values (with escaping)."""
             if isinstance(value, str):
                 def replace_var(match: re.Match[str]) -> str:
                     var_expr = match.group(1)
                     if ":-" in var_expr:
                         var_name, default = var_expr.split(":-", 1)
-                        return env.get(var_name, default)
-                    return env.get(var_expr, "")
+                        raw_value = env.get(var_name, default)
+                    else:
+                        raw_value = env.get(var_expr, "")
+                    return str(escape_shell_value(raw_value)) if raw_value else ""
                 return re.sub(r"\$\{([^}]+)\}", replace_var, value)
             elif isinstance(value, dict):
                 return {k: substitute_env(v) for k, v in value.items()}

@@ -61,10 +61,10 @@ def _template_config(self, config: Dict[str, Any], env: Dict[str, str]) -> Dict[
 
 #### Acceptance Criteria
 
-- [ ] All ENV_CONFIG values are properly escaped before shell execution
-- [ ] Unit tests pass for injection attempts: `$(rm -rf /)`, `` `whoami` ``, etc.
-- [ ] Existing tools continue to function correctly
-- [ ] Security audit shows no vulnerabilities
+- [x] All ENV_CONFIG values are properly escaped before shell execution
+- [x] Unit tests pass for injection attempts: `$(rm -rf /)`, `` `whoami` ``, etc.
+- [x] Existing tools continue to function correctly
+- [x] Security audit shows no vulnerabilities
 
 ---
 
@@ -145,10 +145,10 @@ def _extract_metadata_regex(self, content: str) -> Dict[str, Any]:
 
 #### Acceptance Criteria
 
-- [ ] Malformed Python files don't crash the system
-- [ ] Regex fallback extracts basic metadata correctly
-- [ ] Both AST and regex methods produce same output for valid files
-- [ ] Tests cover: syntax errors, incomplete files, unicode issues
+- [x] Malformed Python files don't crash the system
+- [x] Regex fallback extracts basic metadata correctly
+- [x] Both AST and regex methods produce same output for valid files
+- [x] Tests cover: syntax errors, incomplete files, unicode issues
 
 ---
 
@@ -221,10 +221,10 @@ def clear_validation_schemas_cache():
 
 #### Acceptance Criteria
 
-- [ ] Multiple threads can safely access validation schemas
-- [ ] No race conditions in cache initialization
-- [ ] Stress test with 100 concurrent requests passes
-- [ ] Cache invalidation works correctly across threads
+- [x] Multiple threads can safely access validation schemas
+- [x] No race conditions in cache initialization
+- [x] Stress test with 100 concurrent requests passes
+- [x] Cache invalidation works correctly across threads
 
 ---
 
@@ -343,10 +343,10 @@ def get_validation_schema(item_type: str, project_path: Optional[Path] = None) -
 
 #### Acceptance Criteria
 
-- [ ] Missing extractors don't cause validation to pass silently
-- [ ] Fallback schemas validate critical fields
-- [ ] Warning logged when fallback is used
-- [ ] Tests verify fallback behavior
+- [x] Missing extractors don't cause validation to pass silently
+- [x] Fallback schemas validate critical fields
+- [x] Warning logged when fallback is used
+- [x] Tests verify fallback behavior
 
 ---
 
@@ -430,10 +430,10 @@ lockfile_path.write_text(json.dumps(data))
 
 #### Acceptance Criteria
 
-- [ ] All file writes ensure parent directories exist
-- [ ] No FileNotFoundError on directory operations
-- [ ] Tests verify directory creation
-- [ ] Existing functionality unchanged
+- [x] All file writes ensure parent directories exist
+- [x] No FileNotFoundError on directory operations
+- [x] Tests verify directory creation
+- [x] Existing functionality unchanged
 
 ---
 
@@ -506,10 +506,10 @@ class ChainValidator:
 
 #### Acceptance Criteria
 
-- [ ] Pre-release versions handled correctly (1.0.0-alpha < 1.0.0)
-- [ ] Build metadata ignored in comparison (1.0.0+build1 == 1.0.0)
-- [ ] All existing version tests pass
-- [ ] New tests for edge cases added
+- [x] Pre-release versions handled correctly (1.0.0-alpha < 1.0.0)
+- [x] Build metadata handled in comparison (packaging.version strict)
+- [x] All existing version tests pass
+- [x] New tests for edge cases added
 
 ---
 

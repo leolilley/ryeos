@@ -103,7 +103,7 @@ def compute_knowledge_integrity(
     are validated against the file path during verification.
 
     Args:
-        id: Knowledge entry ID (zettel_id).
+        id: Knowledge entry ID (id).
         version: Entry version (semver).
         content: Entry content (markdown or text).
         metadata: Optional metadata dict (should include id, category).

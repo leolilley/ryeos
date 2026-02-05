@@ -8,6 +8,7 @@ Follows RYE's data-driven architecture pattern.
 import ast
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,10 +20,47 @@ logger = logging.getLogger(__name__)
 SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# Thread-safe global caches with locks
+_validation_lock = threading.RLock()
+_extraction_lock = threading.RLock()
+
 # Global cache: item_type -> validation schema
 _validation_schemas: Optional[Dict[str, Dict[str, Any]]] = None
 # Global cache: item_type -> extraction rules
 _extraction_rules: Optional[Dict[str, Dict[str, Any]]] = None
+
+# Fallback validation schemas for when extractors are missing
+FALLBACK_SCHEMAS = {
+    "tool": {
+        "fields": {
+            "name": {"required": True, "type": "string", "format": "snake_case"},
+            "version": {"required": True, "type": "semver"},
+            "tool_type": {"required": True, "type": "string"},
+            "executor_id": {"required": False, "type": "string", "nullable": True},
+            "category": {"required": False, "type": "string"},
+            "description": {"required": False, "type": "string"},
+        }
+    },
+    "directive": {
+        "fields": {
+            "name": {"required": True, "type": "string", "format": "snake_case"},
+            "version": {"required": True, "type": "semver"},
+            "category": {"required": False, "type": "string"},
+            "description": {"required": False, "type": "string"},
+        }
+    },
+    "knowledge": {
+        "fields": {
+            "id": {"required": True, "type": "string"},
+            "title": {"required": True, "type": "string"},
+            "version": {"required": True, "type": "semver"},
+            "entry_type": {"required": True, "type": "string"},
+            "category": {"required": False, "type": "string"},
+            "tags": {"required": False, "type": "array"},
+            "body": {"required": False, "type": "string"},
+        }
+    },
+}
 
 
 def _load_validation_schemas(
@@ -56,41 +94,70 @@ def _load_validation_schemas(
 
 
 def _extract_schema_from_file(file_path: Path) -> Optional[Dict[str, Any]]:
-    """Extract VALIDATION_SCHEMA from an extractor file using AST."""
+    """Extract VALIDATION_SCHEMA from an extractor file using AST with fallback."""
+    content = file_path.read_text()
+    
+    # Try AST parsing first
     try:
-        content = file_path.read_text()
         tree = ast.parse(content)
-
         for node in tree.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
                 target = node.targets[0]
                 if isinstance(target, ast.Name) and target.id == "VALIDATION_SCHEMA":
                     if isinstance(node.value, ast.Dict):
                         return ast.literal_eval(node.value)
-
         return None
+    except SyntaxError as e:
+        logger.warning(f"Syntax error in {file_path}, using regex fallback: {e}")
+        return _extract_schema_regex(content)
     except Exception as e:
         logger.warning(f"Failed to extract schema from {file_path}: {e}")
-        return None
+        return _extract_schema_regex(content)
+
+
+def _extract_schema_regex(content: str) -> Optional[Dict[str, Any]]:
+    """Fallback regex-based schema extraction for malformed files."""
+    # Look for VALIDATION_SCHEMA = {...}
+    # Match simple dict patterns with optional nesting
+    match = re.search(r'VALIDATION_SCHEMA\s*=\s*\{', content)
+    if match:
+        try:
+            # Extract from the match position to end of content
+            start = match.end() - 1  # Include opening brace
+            # Try to find matching closing brace with basic nesting
+            brace_count = 0
+            for i, char in enumerate(content[start:]):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        schema_str = content[start:start + i + 1]
+                        return ast.literal_eval(schema_str)
+        except Exception:
+            pass
+    return None
 
 
 def get_validation_schema(
     item_type: str, project_path: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
-    """Get validation schema for an item type."""
+    """Get validation schema for an item type (thread-safe)."""
     global _validation_schemas
 
-    if _validation_schemas is None:
-        _validation_schemas = _load_validation_schemas(project_path)
-
-    return _validation_schemas.get(item_type)
+    with _validation_lock:
+        if _validation_schemas is None:
+            _validation_schemas = _load_validation_schemas(project_path)
+        return _validation_schemas.get(item_type)
 
 
 def clear_validation_schemas_cache():
-    """Clear the validation schemas cache."""
+    """Clear the validation schemas cache (thread-safe)."""
     global _validation_schemas, _extraction_rules
-    _validation_schemas = None
-    _extraction_rules = None
+    with _validation_lock:
+        _validation_schemas = None
+    with _extraction_lock:
+        _extraction_rules = None
 
 
 def _load_extraction_rules(
@@ -124,34 +191,60 @@ def _load_extraction_rules(
 
 
 def _extract_rules_from_file(file_path: Path) -> Optional[Dict[str, Any]]:
-    """Extract EXTRACTION_RULES from an extractor file using AST."""
+    """Extract EXTRACTION_RULES from an extractor file using AST with fallback."""
+    content = file_path.read_text()
+    
+    # Try AST parsing first
     try:
-        content = file_path.read_text()
         tree = ast.parse(content)
-
         for node in tree.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
                 target = node.targets[0]
                 if isinstance(target, ast.Name) and target.id == "EXTRACTION_RULES":
                     if isinstance(node.value, ast.Dict):
                         return ast.literal_eval(node.value)
-
         return None
+    except SyntaxError as e:
+        logger.warning(f"Syntax error in {file_path}, using regex fallback: {e}")
+        return _extract_rules_regex(content)
     except Exception as e:
         logger.warning(f"Failed to extract rules from {file_path}: {e}")
-        return None
+        return _extract_rules_regex(content)
+
+
+def _extract_rules_regex(content: str) -> Optional[Dict[str, Any]]:
+    """Fallback regex-based rules extraction for malformed files."""
+    # Look for EXTRACTION_RULES = {...}
+    match = re.search(r'EXTRACTION_RULES\s*=\s*\{', content)
+    if match:
+        try:
+            # Extract from the match position to end of content
+            start = match.end() - 1  # Include opening brace
+            # Try to find matching closing brace with basic nesting
+            brace_count = 0
+            for i, char in enumerate(content[start:]):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        rules_str = content[start:start + i + 1]
+                        return ast.literal_eval(rules_str)
+        except Exception:
+            pass
+    return None
 
 
 def get_extraction_rules(
     item_type: str, project_path: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
-    """Get extraction rules for an item type."""
+    """Get extraction rules for an item type (thread-safe)."""
     global _extraction_rules
 
-    if _extraction_rules is None:
-        _extraction_rules = _load_extraction_rules(project_path)
-
-    return _extraction_rules.get(item_type)
+    with _extraction_lock:
+        if _extraction_rules is None:
+            _extraction_rules = _load_extraction_rules(project_path)
+        return _extraction_rules.get(item_type)
 
 
 def apply_field_mapping(
@@ -355,8 +448,13 @@ def validate_parsed_data(
 
     schema = get_validation_schema(item_type, project_path)
     if not schema:
-        logger.warning(f"No validation schema found for item_type: {item_type}")
-        return {"valid": True, "issues": [], "warnings": ["No validation schema found"]}
+        # Fall back to hardcoded schema if extractor is missing
+        schema = FALLBACK_SCHEMAS.get(item_type)
+        if schema:
+            logger.warning(f"Using fallback validation schema for item_type: {item_type}")
+        else:
+            logger.warning(f"No validation schema found for item_type: {item_type}")
+            return {"valid": True, "issues": [], "warnings": ["No validation schema found"]}
 
     fields_schema = schema.get("fields", {})
 

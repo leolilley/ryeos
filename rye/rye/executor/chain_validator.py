@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from packaging import version
+
 logger = logging.getLogger(__name__)
 
 
@@ -209,28 +211,36 @@ class ChainValidator:
             )
             result.valid = False
     
-    def _version_satisfies(self, version: str, op: str, constraint: str) -> bool:
-        """Check if version satisfies constraint.
-        
-        Simple semver comparison (major.minor.patch).
-        """
-        try:
-            def parse_version(v: str) -> tuple:
-                parts = v.split(".")
-                return tuple(int(p) for p in parts[:3])
-            
-            v = parse_version(version)
-            c = parse_version(constraint)
-            
-            if op == ">=":
-                return v >= c
-            elif op == "<=":
-                return v <= c
-            elif op == "==":
-                return v == c
-            return True
-        except (ValueError, TypeError):
-            return True  # Invalid versions pass (warning elsewhere)
+    def _version_satisfies(self, version_str: str, op: str, constraint: str) -> bool:
+         """Check if version satisfies constraint using proper semver.
+         
+         Supports:
+         - Standard semver: 1.0.0, 2.1.3
+         - Pre-releases: 1.0.0-alpha, 1.0.0-beta.2
+         - Build metadata: 1.0.0+build.123
+         """
+         try:
+             v = version.parse(version_str)
+             c = version.parse(constraint)
+             
+             if op == ">=":
+                 return v >= c
+             elif op == "<=":
+                 return v <= c
+             elif op == "==":
+                 return v == c
+             elif op == ">":
+                 return v > c
+             elif op == "<":
+                 return v < c
+             elif op == "!=":
+                 return v != c
+             else:
+                 logger.warning(f"Unknown version operator: {op}")
+                 return True
+         except version.InvalidVersion:
+             logger.warning(f"Invalid version format: {version_str} or {constraint}")
+             return True  # Invalid versions pass (warning logged)
     
     def _validate_space_consistency(
         self,

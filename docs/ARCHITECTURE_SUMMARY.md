@@ -8,10 +8,10 @@ This document provides a crystal-clear summary of the architecture for implement
 
 ## The Two Layers
 
-| Layer | Package | Role | Intelligence |
-|-------|---------|------|--------------|
-| **Lilux** | `lilux` | Microkernel - dumb execution | None - just executes |
-| **RYE** | `rye-lilux` | OS Layer - intelligent orchestration | Content understanding, caching, routing |
+| Layer     | Package     | Role                                 | Intelligence                            |
+| --------- | ----------- | ------------------------------------ | --------------------------------------- |
+| **Lilux** | `lilux`     | Microkernel - dumb execution         | None - just executes                    |
+| **RYE**   | `rye-lilux` | OS Layer - intelligent orchestration | Content understanding, caching, routing |
 
 ---
 
@@ -90,20 +90,20 @@ rye/
 
 LLM sees exactly 4 tools:
 
-| Tool | Purpose |
-|------|---------|
-| `mcp__rye__search` | Find items by query |
-| `mcp__rye__load` | Load item content |
-| `mcp__rye__execute` | Execute an item |
-| `mcp__rye__sign` | Validate and sign |
+| Tool      | Purpose             |
+| --------- | ------------------- |
+| `search`  | Find items by query |
+| `load`    | Load item content   |
+| `execute` | Execute an item     |
+| `sign`    | Validate and sign   |
 
 ### The 3 Item Types
 
-| Type | Location | Format |
-|------|----------|--------|
-| `directive` | `.ai/directives/` | XML in Markdown |
-| `tool` | `.ai/tools/` | Python, YAML, etc. |
-| `knowledge` | `.ai/knowledge/` | Markdown + frontmatter |
+| Type        | Location          | Format                 |
+| ----------- | ----------------- | ---------------------- |
+| `directive` | `.ai/directives/` | XML in Markdown        |
+| `tool`      | `.ai/tools/`      | Python, YAML, etc.     |
+| `knowledge` | `.ai/knowledge/`  | Markdown + frontmatter |
 
 ### On-Demand Loading
 
@@ -146,12 +146,14 @@ LLM
 ### 1. Lilux is Dumb
 
 Lilux never:
+
 - Parses tool IDs to find schemas
 - Builds registries at startup
 - Caches with complex invalidation
 - Validates chains
 
 Lilux always:
+
 - Executes what the orchestrator tells it
 - Returns result objects (success/failure)
 - Provides pure functions
@@ -159,6 +161,7 @@ Lilux always:
 ### 2. RYE is Smart
 
 RYE handles:
+
 - Chain resolution
 - Schema extraction
 - Caching with hash-based invalidation
@@ -209,29 +212,29 @@ RYE handles:
 
 ### Lilux Docs (`docs/lilux/`)
 
-| File | Purpose |
-|------|---------|
-| `principles.md` | What Lilux is and isn't |
-| `package/structure.md` | Directory organization |
-| `primitives/overview.md` | All primitives |
-| `primitives/subprocess.md` | SubprocessPrimitive |
-| `primitives/http-client.md` | HttpClientPrimitive |
-| `primitives/integrity.md` | Pure hash functions |
-| `primitives/lockfile.md` | LockfileManager |
-| `runtime-services/overview.md` | AuthStore, EnvResolver |
-| `schemas/overview.md` | JSON Schema validation |
+| File                           | Purpose                 |
+| ------------------------------ | ----------------------- |
+| `principles.md`                | What Lilux is and isn't |
+| `package/structure.md`         | Directory organization  |
+| `primitives/overview.md`       | All primitives          |
+| `primitives/subprocess.md`     | SubprocessPrimitive     |
+| `primitives/http-client.md`    | HttpClientPrimitive     |
+| `primitives/integrity.md`      | Pure hash functions     |
+| `primitives/lockfile.md`       | LockfileManager         |
+| `runtime-services/overview.md` | AuthStore, EnvResolver  |
+| `schemas/overview.md`          | JSON Schema validation  |
 
 ### RYE Docs (`docs/rye/`)
 
-| File | Purpose |
-|------|---------|
-| `principles.md` | What RYE is |
-| `mcp-server.md` | MCP server configuration |
-| `mcp-tools/overview.md` | The 5 MCP tools |
-| `loading/overview.md` | On-demand loading |
-| `executor/overview.md` | Chain resolution |
-| `executor/components.md` | PrimitiveExecutor, ChainValidator, IntegrityVerifier |
-| `executor/chain-validator.md` | Chain validation |
-| `cache/overview.md` | Caching system |
-| `package/structure.md` | Directory organization |
-| `bundle/structure.md` | .ai/ content organization |
+| File                          | Purpose                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `principles.md`               | What RYE is                                          |
+| `mcp-server.md`               | MCP server configuration                             |
+| `mcp-tools/overview.md`       | The 5 MCP tools                                      |
+| `loading/overview.md`         | On-demand loading                                    |
+| `executor/overview.md`        | Chain resolution                                     |
+| `executor/components.md`      | PrimitiveExecutor, ChainValidator, IntegrityVerifier |
+| `executor/chain-validator.md` | Chain validation                                     |
+| `cache/overview.md`           | Caching system                                       |
+| `package/structure.md`        | Directory organization                               |
+| `bundle/structure.md`         | .ai/ content organization                            |

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from lilux.primitives.lockfile import Lockfile, LockfileRoot, LockfileManager
 from lilux.primitives.integrity import compute_tool_integrity
 
-from rye.utils.path_utils import get_user_space, get_system_space
+from rye.utils.path_utils import get_user_space, get_system_space, ensure_parent_directory
 
 
 class LockfileResolver:
@@ -112,8 +112,8 @@ class LockfileResolver:
             lockfile.root.version,
         )
 
-        # Ensure directory exists
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure parent directory exists
+        ensure_parent_directory(path)
 
         return self.manager.save(lockfile, path)
 
