@@ -37,7 +37,7 @@ Actions:
 
 __version__ = "1.1.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_tool_runtime"
+__executor_id__ = "rye/core/runtimes/python_runtime"
 __category__ = "rye/core/registry"
 __tool_description__ = "Registry tool for auth and item management"
 
@@ -691,7 +691,7 @@ async def _signup(params: Dict[str, Any]) -> Dict[str, Any]:
         # If no confirmation required, we have a session
         if body.get("access_token"):
             try:
-                from ..runtimes.auth import AuthStore
+                from lilux.runtime.auth import AuthStore
 
                 auth_store = AuthStore()  # Uses kernel default service_name="lilux"
                 auth_store.set_token(
@@ -742,7 +742,7 @@ async def _login_email(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from ..runtimes.auth import AuthStore
+        from lilux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -821,7 +821,7 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from ..runtimes.auth import AuthStore
+        from lilux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available - auth runtime not installed"}
 
@@ -941,7 +941,7 @@ async def _login_poll(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from ..runtimes.auth import AuthStore
+        from lilux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -1040,7 +1040,7 @@ async def _logout() -> Dict[str, Any]:
         }
 
     try:
-        from ..runtimes.auth import AuthStore
+        from lilux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -1066,7 +1066,7 @@ async def _whoami() -> Dict[str, Any]:
         }
 
     try:
-        from ..runtimes.auth import AuthenticationRequired, AuthStore
+        from lilux.runtime.auth import AuthenticationRequired, AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -1133,7 +1133,7 @@ async def _search(
             token = env_token
         else:
             try:
-                from ..runtimes.auth import AuthStore
+                from lilux.runtime.auth import AuthStore
                 auth_store = AuthStore()
                 if auth_store.is_authenticated(REGISTRY_SERVICE):
                     token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:read")
@@ -1409,7 +1409,7 @@ async def _push(
         token = env_token
     else:
         try:
-            from ..runtimes.auth import AuthenticationRequired, AuthStore
+            from lilux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()  # Uses kernel default service_name="lilux"
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1584,7 +1584,7 @@ async def _delete(
         token = env_token
     else:
         try:
-            from ..runtimes.auth import AuthenticationRequired, AuthStore
+            from lilux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1666,7 +1666,7 @@ async def _publish(
         token = env_token
     else:
         try:
-            from ..runtimes.auth import AuthenticationRequired, AuthStore
+            from lilux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1742,7 +1742,7 @@ async def _unpublish(
         token = env_token
     else:
         try:
-            from ..runtimes.auth import AuthenticationRequired, AuthStore
+            from lilux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1781,3 +1781,38 @@ async def _unpublish(
     except Exception as e:
         await http.close()
         return {"error": f"Unpublish failed: {e}"}
+
+
+# CLI entry point for subprocess execution
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Registry Tool")
+    parser.add_argument("--params", required=True, help="Parameters as JSON")
+    parser.add_argument("--project-path", required=True, help="Project path")
+
+    args = parser.parse_args()
+
+    try:
+        params = json.loads(args.params)
+        action = params.pop("action", None)
+        if not action:
+            print(json.dumps({"success": False, "error": "action required in params"}))
+            sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"success": False, "error": f"Invalid params JSON: {e}"}))
+        sys.exit(1)
+
+    try:
+        result = asyncio.run(execute(action, args.project_path, params))
+        # Normalize result format
+        if "error" in result:
+            result["success"] = False
+        elif "success" not in result:
+            result["success"] = True
+        print(json.dumps(result, indent=2), flush=True)
+        sys.exit(0 if result.get("success") else 1)
+    except Exception as e:
+        print(json.dumps({"success": False, "error": str(e)}), flush=True)
+        sys.exit(1)

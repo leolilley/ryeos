@@ -6,6 +6,7 @@ description = "RYE - AI operating system running on Lilux microkernel"
 dependencies = [
     "mcp",
     "lilux",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

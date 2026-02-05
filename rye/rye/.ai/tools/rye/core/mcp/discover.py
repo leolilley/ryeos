@@ -1,6 +1,6 @@
-# rye:validated:2026-02-03T07:29:34Z:2c38de1bc91a96492720d27678993364dcf733e90001cdecd32e4935a3e45c76
+# rye:validated:2026-02-05T00:00:00Z:placeholder
 __tool_type__ = "python"
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __executor_id__ = "rye/core/runtimes/python_runtime"
 __category__ = "rye/core/mcp"
 __tool_description__ = "MCP discover tool - discover tools from MCP servers via stdio, HTTP, or SSE transport"
@@ -260,9 +260,14 @@ if __name__ == "__main__":
     import sys
 
     parser = argparse.ArgumentParser(description="MCP Discover Tool")
+    
+    # New unified params mode (used by rye executor)
+    parser.add_argument("--params", help="All parameters as JSON")
+    parser.add_argument("--project-path", dest="project_path", help="Project path")
+    
+    # Legacy individual args mode (for direct CLI use)
     parser.add_argument(
         "--transport",
-        required=True,
         choices=["stdio", "http", "sse"],
         help="Transport type (http recommended for remote)",
     )
@@ -276,12 +281,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--auth", help="Authentication config (JSON, legacy - use --headers instead)"
     )
-    parser.add_argument(
-        "--project-path",
-        "--project_path",
-        dest="project_path",
-        help="Project path (ignored)",
-    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
@@ -292,26 +291,43 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(level=logging.INFO)
 
-    params = {}
-    if args.command:
-        params["command"] = args.command
-    if args.args:
-        params["args"] = args.args
-    if args.env:
-        params["env"] = json.loads(args.env)
-    if args.url:
-        params["url"] = args.url
-    if args.headers:
-        params["headers"] = json.loads(args.headers)
-    if args.auth:
-        params["auth"] = json.loads(args.auth)
+    # Parse params - either from --params JSON or individual args
+    if args.params:
+        try:
+            params = json.loads(args.params)
+            transport = params.pop("transport", None)
+            if not transport:
+                print(json.dumps({"success": False, "error": "transport required in params"}))
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(json.dumps({"success": False, "error": f"Invalid params JSON: {e}"}))
+            sys.exit(1)
+    else:
+        # Legacy mode - build params from individual args
+        if not args.transport:
+            print(json.dumps({"success": False, "error": "--transport or --params required"}))
+            sys.exit(1)
+        transport = args.transport
+        params = {}
+        if args.command:
+            params["command"] = args.command
+        if args.args:
+            params["args"] = args.args
+        if args.env:
+            params["env"] = json.loads(args.env)
+        if args.url:
+            params["url"] = args.url
+        if args.headers:
+            params["headers"] = json.loads(args.headers)
+        if args.auth:
+            params["auth"] = json.loads(args.auth)
 
     try:
-        result = asyncio.run(execute(args.transport, **params))
+        result = asyncio.run(execute(transport, **params))
         print(json.dumps(result, indent=2), flush=True)
-        sys.stdout.flush()  # Ensure output is written before exit
+        sys.stdout.flush()
         sys.exit(0 if result.get("success") else 1)
     except Exception as e:
         print(json.dumps({"success": False, "error": str(e)}, indent=2), flush=True)
-        sys.stdout.flush()  # Ensure output is written before exit
+        sys.stdout.flush()
         sys.exit(1)

@@ -50,7 +50,7 @@ def get_tool_extensions(
         if not extractors_dir.exists():
             continue
 
-        for file_path in extractors_dir.glob("*_extractor.py"):
+        for file_path in extractors_dir.glob("**/*_extractor.py"):
             if file_path.name.startswith("_"):
                 continue
 

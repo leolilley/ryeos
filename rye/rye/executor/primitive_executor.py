@@ -623,11 +623,10 @@ class PrimitiveExecutor:
             }
 
         # Execute primitive
-        # Merge tool execution context into parameters for {param} templating
-        enriched_params = {**parameters}
-        for key in ("tool_path", "project_path", "params_json", "action"):
-            if key in config:
-                enriched_params[key] = config[key]
+        # All config values are available for {param} templating in args
+        # This includes: tool_path, project_path, params_json, system_space, 
+        # user_space, and any tool config values (server_config_path, tool_name, etc.)
+        enriched_params = {**config, **parameters}
 
         try:
             result = await primitive.execute(config, enriched_params)
@@ -782,12 +781,16 @@ class PrimitiveExecutor:
         # Apply environment
         config["env"] = resolved_env
 
+        # Inject execution context (generic, available for {param} templating)
+        config["project_path"] = str(self.project_path)
+        config["user_space"] = str(self.user_space)
+        config["system_space"] = str(self.system_space)
+
         # Inject tool execution context for python_runtime
         # chain[0] is the tool being executed
         if chain:
             tool_element = chain[0]
             config["tool_path"] = str(tool_element.path)
-            config["project_path"] = str(self.project_path)
 
             # Build params_json from parameters (excluding config keys)
             tool_params = {
@@ -804,27 +807,56 @@ class PrimitiveExecutor:
     def _template_config(
         self, config: Dict[str, Any], env: Dict[str, str]
     ) -> Dict[str, Any]:
-        """Substitute ${VAR} templates in config values."""
+        """Substitute ${VAR} and {param} templates in config values.
+        
+        Two-pass templating:
+        1. ${VAR} - environment variable substitution
+        2. {param} - config value substitution (recursive until stable)
+        """
         import re
 
-        def substitute(value: Any) -> Any:
+        def substitute_env(value: Any) -> Any:
+            """Substitute ${VAR} with environment values."""
             if isinstance(value, str):
-
                 def replace_var(match: re.Match[str]) -> str:
                     var_expr = match.group(1)
                     if ":-" in var_expr:
                         var_name, default = var_expr.split(":-", 1)
                         return env.get(var_name, default)
                     return env.get(var_expr, "")
-
                 return re.sub(r"\$\{([^}]+)\}", replace_var, value)
             elif isinstance(value, dict):
-                return {k: substitute(v) for k, v in value.items()}
+                return {k: substitute_env(v) for k, v in value.items()}
             elif isinstance(value, list):
-                return [substitute(item) for item in value]
+                return [substitute_env(item) for item in value]
             return value
 
-        return substitute(config)
+        def substitute_params(value: Any, params: Dict[str, Any]) -> Any:
+            """Substitute {param} with config values."""
+            if isinstance(value, str):
+                def replace_param(match: re.Match[str]) -> str:
+                    param_name = match.group(1)
+                    if param_name in params:
+                        return str(params[param_name])
+                    return match.group(0)  # Leave unchanged
+                return re.sub(r"\{([^}]+)\}", replace_param, value)
+            elif isinstance(value, dict):
+                return {k: substitute_params(v, params) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [substitute_params(item, params) for item in value]
+            return value
+
+        # Pass 1: env var substitution
+        result = substitute_env(config)
+        
+        # Pass 2: param substitution (iterate until stable, max 3 passes)
+        for _ in range(3):
+            new_result = substitute_params(result, result)
+            if new_result == result:
+                break
+            result = new_result
+
+        return result
 
     def _get_user_space(self) -> Path:
         """Get user space path."""

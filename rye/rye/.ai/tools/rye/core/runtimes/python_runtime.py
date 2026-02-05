@@ -1,4 +1,4 @@
-# rye:validated:2026-02-04T04:59:28Z:8a346aca072319716e7fdd4b9d86ef8d5e8aaa7bbaeeb3850dda1a68221c7b8b
+# rye:validated:2026-02-04T23:42:35Z:b8f7d8861d1a56394a863e2eb07de7aafc266e93f4bdf6d98d6c4e3266541b14
 """Python Runtime - Execute Python scripts.
 
 Layer 2 runtime with __executor_id__ = "rye/core/primitives/subprocess".
@@ -28,7 +28,11 @@ ENV_CONFIG = {
 
 CONFIG = {
     "command": "${RYE_PYTHON}",
-    "args": [],
+    "args": [
+        "{tool_path}",
+        "--params", "{params_json}",
+        "--project-path", "{project_path}",
+    ],
     "timeout": 300,
 }
 

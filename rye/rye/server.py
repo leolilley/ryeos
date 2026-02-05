@@ -49,10 +49,10 @@ class RYEServer:
 
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
-            """Return 5 MCP tools."""
+            """Return 4 MCP tools."""
             return [
                 Tool(
-                    name="mcp__rye__search",
+                    name="search",
                     description="Search for directives, tools, or knowledge by query",
                     inputSchema={
                         "type": "object",
@@ -74,7 +74,7 @@ class RYEServer:
                     },
                 ),
                 Tool(
-                    name="mcp__rye__load",
+                    name="load",
                     description="Load item content for inspection or copy between locations",
                     inputSchema={
                         "type": "object",
@@ -99,7 +99,7 @@ class RYEServer:
                     },
                 ),
                 Tool(
-                    name="mcp__rye__execute",
+                    name="execute",
                     description="Execute a directive, tool, or knowledge item",
                     inputSchema={
                         "type": "object",
@@ -117,63 +117,7 @@ class RYEServer:
                     },
                 ),
                 Tool(
-                    name="mcp__rye__search",
-                    description="Search for directives, tools, or knowledge by query",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_type": {"type": "string", "enum": ItemType.ALL},
-                            "query": {"type": "string"},
-                            "project_path": {"type": "string"},
-                            "source": {
-                                "type": "string",
-                                "enum": ["project", "user", "system", "all"],
-                                "default": "project",
-                            },
-                            "limit": {"type": "integer", "default": 10},
-                        },
-                        "required": ["item_type", "query", "project_path"],
-                    },
-                ),
-                Tool(
-                    name="mcp__rye__load",
-                    description="Load item content for inspection or copy between locations",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_type": {"type": "string", "enum": ItemType.ALL},
-                            "item_id": {"type": "string"},
-                            "project_path": {"type": "string"},
-                            "source": {
-                                "type": "string",
-                                "enum": ["project", "user", "system"],
-                                "default": "project",
-                            },
-                            "destination": {
-                                "type": "string",
-                                "enum": ["project", "user"],
-                            },
-                        },
-                        "required": ["item_type", "item_id", "project_path"],
-                    },
-                ),
-                Tool(
-                    name="mcp__rye__execute",
-                    description="Execute a directive, tool, or knowledge item",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_type": {"type": "string", "enum": ItemType.ALL},
-                            "item_id": {"type": "string"},
-                            "project_path": {"type": "string"},
-                            "parameters": {"type": "object"},
-                            "dry_run": {"type": "boolean", "default": False},
-                        },
-                        "required": ["item_type", "item_id", "project_path"],
-                    },
-                ),
-                Tool(
-                    name="mcp__rye__sign",
+                    name="sign",
                     description="Validate and sign an item file",
                     inputSchema={
                         "type": "object",
@@ -197,13 +141,13 @@ class RYEServer:
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             """Dispatch to appropriate tool."""
             try:
-                if name == "mcp__rye__search":
+                if name == "search":
                     result = await self.search.handle(**arguments)
-                elif name == "mcp__rye__load":
+                elif name == "load":
                     result = await self.load.handle(**arguments)
-                elif name == "mcp__rye__execute":
+                elif name == "execute":
                     result = await self.execute.handle(**arguments)
-                elif name == "mcp__rye__sign":
+                elif name == "sign":
                     result = await self.sign.handle(**arguments)
                 else:
                     result = {"error": f"Unknown tool: {name}"}
