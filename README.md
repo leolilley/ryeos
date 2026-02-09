@@ -97,6 +97,57 @@ Your agent will:
 
 The directive is now in your project (`.ai/directives/`) and can be reused without searching again.
 
+### Threaded Example with Actual Tool Calls
+
+To spawn a thread for security analysis, the agent would execute:
+
+```json
+{
+  "item_type": "tool",
+  "item_id": "rye.agent.threads.spawn_thread",
+  "parameters": {
+    "thread_id": "security-analysis",
+    "directive_name": "security-vulnerability-scanner",
+    "project_path": "/path/to/project"
+  }
+}
+```
+
+Then execute the directive with safety harness:
+
+```json
+{
+  "item_type": "tool",
+  "item_id": "rye.agent.threads.thread_directive",
+  "parameters": {
+    "directive_name": "security-vulnerability-scanner",
+    "inputs": {
+      "target_path": "/path/to/src",
+      "scan_depth": "deep"
+    },
+    "dry_run": false
+  }
+}
+```
+
+The SafetyHarness automatically enforces:
+- Cost tracking (tokens, turns, duration)
+- Permission validation via CapabilityToken
+- Hook execution for error handling
+- Checkpoint-based control flow
+
+Monitor thread status with:
+```json
+{
+  "item_type": "tool", 
+  "item_id": "rye.agent.threads.thread_registry",
+  "parameters": {
+    "action": "query",
+    "thread_id": "security-analysis"
+  }
+}
+```
+
 ### Creating Directives
 
 Directives are **XML-formatted** markdown files. Here's a minimal example:
@@ -460,7 +511,35 @@ Sequential spawning of specialized agent threads:
 - Edit agents with limited scope
 - Approval agents with elevated permissions
 
-## Agent Thread Examples
+## Thread Tool Reference
+
+### Core Thread Tools
+
+| Tool | Purpose | Parameters |
+|------|---------|------------|
+| `rye.agent.threads.spawn_thread` | Spawn OS-level thread with validation | `thread_id`, `directive_name`, `project_path`, `register_in_registry` |
+| `rye.agent.threads.thread_directive` | Execute directive with SafetyHarness | `directive_name`, `inputs`, `dry_run`, `_token` |
+| `rye.agent.threads.thread_registry` | Manage thread state and events | `action`, `thread_id`, `event_types`, `status` |
+| `rye.agent.threads.read_transcript` | Read thread execution transcripts | `thread_id`, `event_type`, `limit` |
+
+### Tool Execution Format
+
+All thread tools use the same MCP execute format:
+
+```json
+{
+  "item_type": "tool",
+  "item_id": "tool_id",
+  "parameters": {
+    "parameter_name": "value",
+    "nested": {
+      "parameter": "value"
+    }
+  }
+}
+```
+
+### Agent Thread Examples
 
 ### Parallel Code Analysis with Scoped Permissions
 
@@ -491,35 +570,83 @@ Sequential spawning of specialized agent threads:
   </metadata>
 
   <process>
-    <step name="spawn-security-analysis">
-      <description>Spawn security-focused thread with scoped permissions</description>
-      <action><![CDATA[
-        Spawn agent thread with:
-        - Thread ID: security-analysis
-        - Directive: security-vulnerability-scanner
-        - Limited permissions to source code only
-        - Cost tracking within budget
-      ]]></action>
+<step name="spawn-security-analysis">
+        <description>Spawn security-focused thread with scoped permissions</description>
+        <action><![CDATA[
+          Call execute tool with parameters:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.spawn_thread"
+          - parameters:
+              thread_id: "security-analysis"
+              directive_name: "security-vulnerability-scanner"
+              project_path: "/path/to/project"
+          Then thread_directive to execute the security directive with cost tracking:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.thread_directive"
+          - parameters:
+              directive_name: "security-vulnerability-scanner"
+              inputs:
+                target_path: "/path/to/src"
+                scan_depth: "deep"
+              _token: {capability_token_from_spawn}
+        ]]></action>
     </step>
 
-    <step name="spawn-performance-analysis">
-      <description>Spawn performance-focused thread</description>
-      <action><![CDATA[
-        Spawn agent thread with:
-        - Thread ID: performance-analysis
-        - Directive: code-performance-optimizer
-        - Read access to tests and benchmarks
-        - Different model tier for performance reasoning
-      ]]></action>
+<step name="spawn-performance-analysis">
+        <description>Spawn performance-focused thread</description>
+        <action><![CDATA[
+          Call execute tool with parameters:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.spawn_thread"
+          - parameters:
+              thread_id: "performance-analysis"
+              directive_name: "code-performance-optimizer"
+              project_path: "/path/to/project"
+          Then thread_directive with specific model and permissions:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.thread_directive"
+          - parameters:
+              directive_name: "code-performance-optimizer"
+              inputs:
+                benchmark_path: "/path/to/benchmarks"
+                analysis_type: "comprehensive"
+              model:
+                tier: "sonnet"
+                provider: "anthropic"
+              permissions:
+                - cap: "rye.execute.tool.rye.file-system.fs_read"
+                - cap: "rye.execute.tool.rye.file-system.fs_write"
+        ]]></action>
     </step>
 
-    <step name="coordinate-results">
-      <description>Wait for all threads and synthesize results</description>
-      <action><![CDATA[
-        Load transcript from all spawned threads
-        Cross-reference findings between threads
-        Generate unified analysis report
-      ]]></action>
+<step name="coordinate-results">
+        <description>Wait for all threads and synthesize results</description>
+        <action><![CDATA[
+          Use thread_registry to get thread status and transcripts:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.thread_registry"
+          - parameters:
+              action: "query"
+              thread_ids: ["security-analysis", "performance-analysis"]
+              event_types: ["thread_complete", "thread_error"]
+          
+          Load and synthesize results from transcripts:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.read_transcript"
+          - parameters:
+              thread_id: "security-analysis"
+              event_type: "thread_complete"
+          
+          Generate unified analysis using cross-referenced data:
+          - item_type: "tool"
+          - item_id: "rye.agent.threads.thread_directive"
+          - parameters:
+              directive_name: "synthesize-analysis-report"
+              inputs:
+                security_findings: {from security thread}
+                performance_findings: {from performance thread}
+                recommendations: []
+        ]]></action>
     </step>
   </process>
 </directive>
