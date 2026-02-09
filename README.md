@@ -1,353 +1,315 @@
-# RYE OS
+# Rye OS
 
-**The operating system for artificial intelligence.**
+Rye OS is an MCP (Model Context Protocol) server that enables interoperability across different AI agents and their associated workflows, tools, and knowledge.
 
----
+## Problem
 
-Everyone's building agent frameworks. We built an operating system.
+Different AI agents (Claude Desktop, Cursor, Windsurf, etc.) each operate in isolation. Workflows, tools, and knowledge created in one agent cannot be easily reused or shared with another. This leads to:
 
-The problem with every AI SDK is the same: they treat code and prompts as separate worlds. Code does the work. Prompts tell it what to do. Two paradigms that never actually meet.
+- **Reinventing the wheel**: Every agent environment re-solves the same problems independently
+- **No portability**: You can't take your setup from one agent to another
+- **Fragmented tooling**: Tools developed for one agent can't be used by others
+- **Lost knowledge**: Learnings and patterns aren't captured in a reusable way
 
-**Rye unifies them.**
+## Solution
 
-Everything in Rye is data. Directives are data that define workflows. Tools are data that execute. Knowledge is data that informs. Even the extractors and parsers that process this data—they're data too.
+Rye OS provides a unified data model and runtime for agent workflows, tools, and knowledge. It treats all of these as structured data that can be:
 
-This is a **homoiconic system**. Data that operates on data. Which means the system can inspect itself, modify itself, and improve itself. Not through hardcoded logic, but through the same data structures it already understands.
+- **Shared** across different agent environments
+- **Versioned** like any other code
+- **Discovered** through a searchable registry
+- **Composed** together into complex workflows
 
-And here's the breakthrough: **once prompts become data, they become shareable, versionable, and testable.** The Registry makes prompt engineering a solved, global problem. You don't spend 3 hours perfecting a PDF extraction prompt. You pull the best one from the Registry, cryptographically signed and battle-tested by thousands of users.
+## Architecture
 
-**This is not a framework. This is the substrate.**
+Rye OS exposes **4 MCP tools** that operate on **3 types of data**:
 
----
+### The 4 MCP Tools
 
-## The Architecture
-
-Rye exposes **4 MCP tools** that operate on **3 types of data**:
-
-### The 4 Syscalls
-
-```
-search    →  Find what you need
-load      →  Pull it into scope
-execute   →  Run it
-sign      →  Validate it
-```
-
-That's it. Four operations. From these primitives, you can build anything.
-
-No `create_agent()`, no `add_tool()`, no `set_memory()`, no chain builders, no callback hell. Just four syscalls that work on data.
+| Tool      | Purpose                                         |
+| --------- | ----------------------------------------------- |
+| `search`  | Find directives, tools, or knowledge by query   |
+| `load`    | Load an item into your local project            |
+| `execute` | Run a directive or tool                         |
+| `sign`    | Cryptographically sign an item for distribution |
 
 ### The 3 Data Types
 
-- **Directives** — Workflow definitions (the HOW)
-- **Tools** — Executable code (the WHAT)
-- **Knowledge** — Structured information (the CONTEXT)
+- **Directives** — XML-based workflow definitions that specify HOW to accomplish a task
+- **Tools** — Executable code that performs specific actions (Python, JavaScript, YAML, Bash, etc.)
+- **Knowledge** — Structured information, patterns, and learnings (markdown with YAML frontmatter)
 
-Your agent doesn't call methods. It searches for the directive it needs, loads it, and executes it. The directive is just data—a markdown file with metadata.
+All three types are stored as data files in your project (`.ai/` directory) and can be shared via a registry.
 
-### How Data Operates on Data
+### How It Works
 
-Here's where it clicks.
+When an agent wants to accomplish a task:
 
-**Runtimes** are just data that delegate to kernel primitives:
+1. **Search**: Find relevant directives, tools, or knowledge
+2. **Load**: Bring them into the local project space
+3. **Execute**: Run directives which orchestrate tools and knowledge
 
-```python
-# .ai/tools/runtimes/python.py
+Because everything is data, you can:
 
-__tool_type__ = "runtime"
-EXTENSIONS = [".py"]
+- Store workflows in your project repository
+- Share them with a team
+- Version them alongside your code
+- Pull new versions from the registry
 
-def execute(code: str, permissions: dict) -> Result:
-    """Execute Python by calling subprocess primitive."""
-    return kernel.subprocess(
-        command=["python", "-c", code],
-        permissions=permissions
-    )
-```
-
-This runtime is **data** that says: "To run Python, call the subprocess primitive."
-
-**Tools** are data that specify their runtime and permissions:
-
-```yaml
-# .ai/tools/web_scraper.yaml
-
-name: web_scraper
-runtime: python
-version: 1.2.0
-signature: a3f2b9... # Cryptographic signature
-permissions:
-  - http_client # Needs network access
-  - filesystem.read # Needs to cache results
-```
-
-**Lockfiles** are data that chain verified tools together:
-
-```yaml
-# .ai/directives/research_pipeline.lock
-
-directive: research_pipeline
-dependencies:
-  - tool: web_scraper
-    version: 1.2.0
-    signature: a3f2b9... # Verified
-  - tool: summarizer
-    version: 2.0.1
-    signature: c7d4e1... # Verified
-```
-
-When you execute `research_pipeline`, Rye:
-
-1. Reads the lockfile (data)
-2. Verifies each tool's signature (data validating data)
-3. Loads the appropriate runtime (data)
-4. Calls kernel primitives with scoped permissions (data defining constraints)
-
-**Data loading data to validate data to execute data.**
-
-Every layer is inspectable, versionable, and swappable. Change the Python runtime? Drop a new one in your project directory. The system adapts. No code changes. No rebuilds. Just data.
-
----
-
-## Why This Is Different
-
-| Traditional OS     | Rye OS             |
-| ------------------ | ------------------ |
-| Kernel             | Lilux library      |
-| Programs           | Directives         |
-| System calls       | 4 MCP tools        |
-| Binary executables | Tools (any format) |
-| Package manager    | Registry           |
-
-Everyone else is building **agent frameworks**. LangChain chains components together. CrewAI coordinates role-specific agents. AutoGPT decomposes tasks into loops.
-
-We built an **operating system for data**.
-
-Like Unix abstracted "everything is a file," Rye abstracts **"everything is data."**
-
-And just like Unix, the power isn't in what the OS does—it's in what you can build on top of it.
-
----
-
-## The Registry: Prompt Engineering, Solved
-
-Here's the thing about prompts: everyone's solving the same problems independently.
-
-You spend 3 hours perfecting a prompt for code review. I spend 3 hours on the same thing. Neither of us knows whose is actually better. We both reinvent the wheel.
-
-**The Registry fixes this.**
-
-**Discovery (one time):**
-
-```
-You: "Find me a good code review directive from the registry"
-
-Your agent:
-→ search(directive, "code review", source=registry)
-→ Returns: code_review_v2 (★4.8, 2.3k uses, signed by @senior-dev)
-
-You: "Pull that into my project"
-
-Your agent:
-→ load(directive, "code_review_v2", source=registry, dest=project)
-→ Installed to .ai/directives/workflows/code_review_v2.md
-```
-
-**Execution (every time after):**
-
-```
-You: "Review this pull request"
-
-Your agent:
-→ execute(directive, "code_review_v2", {"pr_url": "..."})
-→ Done
-```
-
-The directive is now **in your project**. You don't search for it again. You don't think about it. You just say "review this PR" and your agent knows what to run.
-
-**This turns prompt engineering from an art into a solved distribution problem.**
-
-The best code review directive—battle-tested by thousands of users, cryptographically signed, continuously improved—lives in the Registry. You pull it once. It works forever.
-
-And when a better version ships? You get notified. Update with one command. The entire community benefits from every improvement.
-
----
-
-## Multi-Model Orchestration
-
-AGI isn't a model problem. It's a **coordination problem**.
-
-The model wars (Claude vs GPT vs Gemini) are like arguing whether lungs or a heart is more important. You need both. You need the whole system.
-
-Rye lets you use the right model for each task:
-
-```yaml
-directive: analyze_research_paper
-steps:
-  - task: extract_text
-    model: gpt-4o-mini # Fast, cheap
-  - task: deep_reasoning
-    model: o1-preview # High reasoning
-  - task: generate_summary
-    model: claude-sonnet # Balanced output
-```
-
-Don't burn $100 reasoning tokens on "write this to a file." Use fast models for routine work. Use slow models for hard problems.
-
-**Specialization beats generalization.**
-
-And because everything is data, you can version, test, and validate these multi-model workflows just like any other code.
-
----
-
-## Security: The Recursive Harness
-
-Here's the breakthrough that solves agent security.
-
-Rye is an **MCP server**. Your agent (Claude Desktop, Cursor, etc.) connects to it. The MCP protocol enforces what the agent can access externally—filesystem, network, environment variables.
-
-But here's the trick: **the subprocess primitive lets us spawn new agent threads INSIDE the MCP.**
-
-When you execute a directive, Rye:
-
-1. Creates a **safety harness** with limits and permissions
-2. Spawns an LLM thread via subprocess (inside the MCP boundary)
-3. Gives that thread access to **Rye itself** as an MCP tool
-4. The harness intercepts every MCP call and enforces the directive's declared permissions
-
-**The agent thread runs inside a jail that has the keys to Rye—but the jail decides which keys work.**
-
-Example: A directive declares it needs `fs.read` and `db.query`:
-
-```python
-# The harness computes required capabilities from directive permissions
-permissions = [
-    {"tag": "read", "resource": "filesystem"},
-    {"tag": "execute", "resource": "database", "action": "query"}
-]
-
-# Converted to capabilities: ["fs.read", "db.query"]
-```
-
-When the agent calls `rye.execute("sql_query_tool")`, the harness checks:
-
-- Does the parent token grant `db.query`? ✓
-- Does the tool request `db.write`? ✗ Permission denied.
-
-**Every MCP call is permission-checked against the capability token.**
-
-The kernel exposes 2 primitives:
-
-1. **Subprocess** — Spawn agent threads with harnesses
-2. **HTTP Client** — Make external requests (if permitted)
-
-Everything else is data. Python runtime? Calls subprocess. Database connector? Calls HTTP client. Even the MCP server itself is just data that delegates to primitives.
-
-This solves the permission escalation problem thats killing agentic apps. You don't trust the model to behave. You enforce permissions at runtime, cryptographically, with capability tokens that flow through the execution tree.
-
-**The model can't escape the jail because the jail is the runtime.**
-
----
-
-## Install
-
-**One line:**
+## Installation
 
 ```bash
 pip install rye-os
 ```
 
-**Point your agent to Rye:**
+### Connect to Your Agent
 
-For Claude Desktop, edit `claude_desktop_config.json`:
+For Claude Desktop, add to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "rye": {
-      "command": "rye-os",
+      "command": "rye",
       "args": ["serve"]
     }
   }
 }
 ```
 
-That's it. Now just prompt.
+For other MCP-compatible agents (Cursor, Windsurf, Gemini), see their documentation for MCP server configuration.
+
+## Usage
+
+### Basic Example
+
+Prompt your agent:
 
 ```
-You: "rye search the registry for a blog post generator and use it"
-
-Your agent:
-→ Calls search, load, execute
-→ Done
+"Search for a code review directive and use it to review this PR"
 ```
 
-No CLI commands. No config files. No manual workflow setup.
+Your agent will:
 
-**Your agent talks to Rye. Rye does the work.**
+1. Call `mcp__rye__search` with your query
+2. Receive matching results from the registry
+3. Call `mcp__rye__load` to pull the directive into your project
+4. Call `mcp__rye__execute` with the PR details
 
-For Cursor, Windsurf, Gemini, or any other MCP client: [See the docs →](https://docs.example.com)
+The directive is now in your project (`.ai/directives/`) and can be reused without searching again.
 
+### Creating Directives
+
+Directives are **XML-formatted** markdown files. Here's a minimal example:
+
+```xml
+<directive name="deploy_app" version="1.0.0">
+  <metadata>
+    <description>Deploy application to production environment.</description>
+    <category>workflows</category>
+    <author>devops-team</author>
+  </metadata>
+
+  <process>
+    <step name="build">
+      <description>Build the application</description>
+      <action><![CDATA[
+npm run build
+      ]]></action>
+    </step>
+
+    <step name="deploy">
+      <description>Deploy to production</description>
+      <action><![CDATA[
+npm run deploy:production
+      ]]></action>
+    </step>
+
+    <step name="verify">
+      <description>Check deployment health</description>
+      <action><![CDATA[
+Verify application is responding at https://app.example.com
+      ]]></action>
+    </step>
+  </process>
+
+  <success_criteria>
+    <criterion>Build completes successfully</criterion>
+    <criterion>Application is accessible and responding</criterion>
+  </success_criteria>
+
+   <outputs>
+     <output name="deployment_url">Final URL of deployed application</output>
+     <output name="status">Deployment status (success/failed)</output>
+     <output name="logs">Build and deployment log file path</output>
+   </outputs>
+</directive>
+```
+
+**Mandatory fields:**
+
+- `name` and `version` (root attributes)
+- `description`, `category`, `author` (in `<metadata>`)
+- `<process>` with one or more `<step>` elements
+- `<success_criteria>` with one or more `<criterion>` elements
+- `<outputs>` with one or more `<output>` elements
+
+For advanced features (model tiers, permissions, cost tracking), see `create_advanced_directive`.
+
+### Creating Tools
+
+Tools are executable scripts in any language. Here's a simple Python tool example:
+
+```python
+# .ai/tools/utilities/deploy-service.py
+"""
+Tool: deploy-service
+Version: 1.0.0
+Tool Type: python
+Executor: python_runtime
+Category: utilities
+Description: Deploy service to Kubernetes cluster
+"""
+
+def main(**kwargs):
+    """Execute deployment with provided parameters"""
+    service_name = kwargs.get('service_name')
+    replicas = kwargs.get('replicas', 3)
+
+    # Deployment logic here
+    print(f"Deploying {service_name} with {replicas} replicas")
+    return {"status": "success", "service": service_name}
+```
+
+Use the MCP execute tool to register tools:
+
+```
+Call mcp__rye__execute with:
+- item_type: "tool"
+- action: "create"
+- item_id: "deploy-service"
+- parameters: {...}
+```
+
+### Managing Knowledge
+
+Knowledge entries capture patterns, learnings, or domain information using YAML frontmatter:
+
+```markdown
+---
+id: python-async-patterns
+title: Python Async Best Practices
+category: patterns/async
+version: "1.0.0"
+author: user
+created_at: 2026-02-05T00:00:00Z
+tags:
+  - python
+  - async
+  - best-practices
+extends:
+  - python-basics
+references:
+  - https://docs.python.org/3/library/asyncio.html
 ---
 
-## What You Can Build
+# Python Async Best Practices
 
-- Research pipelines that spawn 20 parallel agents to analyze sources
-- Code review systems checking security, performance, and style simultaneously
-- Sales automation personalizing outreach based on live prospect data
-- Content factories that research, outline, draft, edit, and publish autonomously
-- Data pipelines that extract, transform, validate, and load without intervention
+## When to Use Async
 
-The limit isn't just the model. The limit is your data library.
+- I/O-bound operations
+- Network requests
+- File operations
 
----
+## Common Pitfalls
 
-## The Big Picture
-
-Think about the evolution of programming:
-
-```
-Machine code → Assembly → C → Python → ... → ???
+- Don't use async for CPU-bound work
+- Always gather coroutines, don't await sequentially
 ```
 
-Each level gets further from "how the machine works" and closer to "what we want to happen."
+## Registry
 
-**Rye is the next abstraction layer.**
+The registry is a centralized store of shared directives, tools, and knowledge. It enables:
 
-Instead of:
+- **Discovery**: Find solutions others have already created
+- **Validation**: Items are cryptographically signed
+- **Versioning**: Track changes and updates
+- **Community**: Share improvements back
+
+When you search from your agent, results from the registry appear alongside your local items.
+
+### Publishing to the Registry
+
+Use the MCP execute tool to publish items:
 
 ```
-Prompt → Generated code → Execution
+Call mcp__rye__execute with:
+- item_type: "directive"
+- action: "publish"
+- item_id: "code_review"
+- parameters: {"version": "1.0.0"}
 ```
 
-We have:
+## Permissions and Security
+
+Rye enforces permissions at multiple levels:
+
+1. **MCP Protocol**: Controls what the external agent can access
+2. **Directive Permissions**: Declared in the directive's `<permissions>` section
+3. **Runtime Scoping**: Each tool runs with only the permissions it needs
+
+Permission declarations use XML elements:
+
+```xml
+<permissions>
+  <read resource="filesystem" path="**/*" />
+  <write resource="filesystem" path="tests/**" />
+  <execute resource="shell" action="pytest" />
+  <execute resource="rye" action="search" />
+</permissions>
+```
+
+This layered approach ensures that even if a directive from the registry is malicious, it can only access resources its permissions allow.
+
+## Project Structure
+
+When you use Rye in a project, it creates a `.ai/` directory:
 
 ```
-Prompt → Data → Execution
+your-project/
+├── .ai/
+│   ├── directives/      # XML workflow definitions
+│   ├── tools/           # Tool configurations and scripts
+│   └── knowledge/       # Domain information and patterns
+├── src/
+└── README.md
 ```
 
-Data is shareable. Versioned. Testable. Signed.
+This structure is committed to your repository, making your AI workflows part of your codebase.
 
-**The model gets to improve itself** because everything it operates on is data it can understand, modify, and execute.
+## Why This Matters
 
-Once you understand the game, you can play the physics.
+Traditional agent environments treat prompts, tools, and knowledge as transient. Rye makes them:
 
-Once you understand the physics, you can play the game.
+- **Persistent**: Stored alongside your code
+- **Portable**: Works across different agent clients
+- **Collaborative**: Teams can share and improve workflows
+- **Composable**: Combine multiple directives into complex pipelines
+- **Inspectable**: You can read and modify everything
 
-This project aims to be the maintainer of those physics.
+Instead of starting from scratch in each agent environment, you build up a library of reusable components that improve over time.
 
----
+## Examples
+
+- **Research Pipeline**: A directive that spawns parallel agents to analyze multiple sources, extracts key findings, and synthesizes a report
+- **Code Review System**: Automated PR review checking security, performance, and style
+- **Data Processing Pipeline**: Extract, transform, validate, and load data with provenance tracking
+- **Content Factory**: Research, outline, draft, edit, and publish with multi-stage approval
 
 ## License
 
 MIT
 
----
+## Contributing
 
-_"Give me a lever long enough and a fulcrum upon which to place it, and I will move the earth."_
-
-**If AI is the lever, this is the fulcrum.**
-
----
-
-**And once you see it, you can't unsee it.**
+Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

@@ -20,7 +20,7 @@ Directives are XML-formatted workflow definitions with a required `<metadata>` s
 
 **Attributes:**
 
-- `name` (required): Kebab-case identifier (e.g., `create-project`, `deploy-staging`). Must match file name.
+- `name` (required): snake-case identifier (e.g., `create_project`, `deploy_staging`). Must match file name.
 - `version` (required): Semantic versioning format `X.Y.Z`
 
 ### `<description>`
@@ -402,8 +402,9 @@ npm run deploy:staging
   </success_criteria>
 
   <outputs>
-    <success>Deployed to staging successfully</success>
-    <failure>Deployment failed - check build logs</failure>
+    <output name="deployment_url">Final URL of deployed application</output>
+    <output name="status">Deployment status (success/failed)</output>
+    <output name="logs">Build and deployment log file path</output>
   </outputs>
 </directive>
 ```
@@ -497,9 +498,10 @@ npm run deploy:staging
 6. **`category`** is free-form string (must align with directory structure)
 7. **`permissions`** must have at least one permission element (if specified)
 8. **`cost`** must have at least a `<context>` sub-element with `estimated_usage` and `turns` attributes (if specified)
-9. **Permission paths** support glob patterns (e.g., `**/*.py`)
-10. **Relationship elements** must be direct children of `<context>`
-11. **Hook `<when>` expressions** evaluated against context variables
+9. **`outputs`** (if present) must contain one or more `<output name="...">` elements, where `name` is the output identifier and element text is the description
+10. **Permission paths** support glob patterns (e.g., `**/*.py`)
+11. **Relationship elements** must be direct children of `<context>`
+12. **Hook `<when>` expressions** evaluated against context variables
 
 ---
 

@@ -15,13 +15,13 @@ from typing import Any, Dict, Optional
 
 from rye.constants import ItemType
 from rye.executor import ExecutionResult, PrimitiveExecutor
+from rye.utils.extensions import get_tool_extensions
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     get_project_type_path,
     get_system_type_path,
     get_user_type_path,
 )
-from rye.utils.extensions import get_tool_extensions
 from rye.utils.resolvers import get_system_space, get_user_space
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ class ExecuteTool:
             "type": ItemType.DIRECTIVE,
             "item_id": item_id,
             "data": parsed,
-            "instructions": "Follow the directive steps as specified.",
+            "instructions": "Execute the directive as specified now.",
         }
 
         if dry_run:
@@ -229,7 +229,7 @@ class ExecuteTool:
         self, project_path: str, item_type: str, item_id: str
     ) -> Optional[Path]:
         """Find item file by relative path ID searching project > user > system.
-        
+
         Args:
             item_id: Relative path from .ai/<type>/ without extension.
                     e.g., "rye/core/registry/registry" -> .ai/tools/rye/core/registry/registry.py
@@ -247,7 +247,9 @@ class ExecuteTool:
 
         # Get extensions data-driven from extractors
         if item_type == ItemType.TOOL:
-            extensions = get_tool_extensions(Path(project_path) if project_path else None)
+            extensions = get_tool_extensions(
+                Path(project_path) if project_path else None
+            )
         else:
             extensions = [".md"]
 
