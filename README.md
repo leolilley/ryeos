@@ -409,27 +409,27 @@ When you use Rye in a project, it creates a `.ai/` directory:
 
 ```
 your-project/
-├── .ai/
-│   ├── directives/      # XML workflow definitions
-│   ├── tools/           # Tool configurations and scripts
-│   └── knowledge/       # Domain information and patterns
+├── .ai/                # Directory should be git ignored
+│   ├── directives/      # XML workflow definitions (local workspace)
+│   ├── tools/           # Tool configurations and scripts (local workspace)
+│   └── knowledge/       # Domain information and patterns (local workspace)
 ├── src/
 └── README.md
 ```
 
-This structure is committed to your repository, making your AI workflows part of your codebase.
+The `.ai/` directory should be **git ignored** to keep your workflows private and separate from your codebase. This is by design - versioning and sharing happens through the registry, not git.
 
 ## Why This Matters
 
 Traditional agent environments treat prompts, tools, and knowledge as transient. Rye makes them:
 
-- **Persistent**: Stored alongside your code
-- **Portable**: Works across different agent clients
-- **Collaborative**: Teams can share and improve workflows
+- **Persistent**: Stored in your local workspace alongside your code
+- **Portable**: Works across different agent clients through the registry
+- **Collaborative**: Teams share and improve workflows via the registry
 - **Composable**: Combine multiple directives into complex pipelines
-- **Inspectable**: You can read and modify everything
+- **Inspectable**: You can read and modify everything locally
 
-Instead of starting from scratch in each agent environment, you build up a library of reusable components that improve over time.
+Instead of committing AI workflows to your git history, you build up a library of reusable components that improve over time and are shared through the registry. This keeps your codebase clean while enabling powerful AI workflows.
 
 ## Examples
 
