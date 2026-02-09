@@ -29,38 +29,7 @@ _validation_schemas: Optional[Dict[str, Dict[str, Any]]] = None
 # Global cache: item_type -> extraction rules
 _extraction_rules: Optional[Dict[str, Dict[str, Any]]] = None
 
-# Fallback validation schemas for when extractors are missing
-FALLBACK_SCHEMAS = {
-    "tool": {
-        "fields": {
-            "name": {"required": True, "type": "string", "format": "snake_case"},
-            "version": {"required": True, "type": "semver"},
-            "tool_type": {"required": True, "type": "string"},
-            "executor_id": {"required": False, "type": "string", "nullable": True},
-            "category": {"required": False, "type": "string"},
-            "description": {"required": False, "type": "string"},
-        }
-    },
-    "directive": {
-        "fields": {
-            "name": {"required": True, "type": "string", "format": "snake_case"},
-            "version": {"required": True, "type": "semver"},
-            "category": {"required": False, "type": "string"},
-            "description": {"required": False, "type": "string"},
-        }
-    },
-    "knowledge": {
-        "fields": {
-            "id": {"required": True, "type": "string"},
-            "title": {"required": True, "type": "string"},
-            "version": {"required": True, "type": "semver"},
-            "entry_type": {"required": True, "type": "string"},
-            "category": {"required": False, "type": "string"},
-            "tags": {"required": False, "type": "array"},
-            "body": {"required": False, "type": "string"},
-        }
-    },
-}
+
 
 
 def _load_validation_schemas(
@@ -448,13 +417,7 @@ def validate_parsed_data(
 
     schema = get_validation_schema(item_type, project_path)
     if not schema:
-        # Fall back to hardcoded schema if extractor is missing
-        schema = FALLBACK_SCHEMAS.get(item_type)
-        if schema:
-            logger.warning(f"Using fallback validation schema for item_type: {item_type}")
-        else:
-            logger.warning(f"No validation schema found for item_type: {item_type}")
-            return {"valid": True, "issues": [], "warnings": ["No validation schema found"]}
+        raise ValueError(f"Extractor not found for tool type: {item_type}. Extractors should be packaged with their tools.")
 
     fields_schema = schema.get("fields", {})
 
