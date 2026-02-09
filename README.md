@@ -131,15 +131,17 @@ Then execute the directive with safety harness:
 ```
 
 The SafetyHarness automatically enforces:
+
 - Cost tracking (tokens, turns, duration)
 - Permission validation via CapabilityToken
 - Hook execution for error handling
 - Checkpoint-based control flow
 
 Monitor thread status with:
+
 ```json
 {
-  "item_type": "tool", 
+  "item_type": "tool",
   "item_id": "rye.agent.threads.thread_registry",
   "parameters": {
     "action": "query",
@@ -515,12 +517,12 @@ Sequential spawning of specialized agent threads:
 
 ### Core Thread Tools
 
-| Tool | Purpose | Parameters |
-|------|---------|------------|
-| `rye.agent.threads.spawn_thread` | Spawn OS-level thread with validation | `thread_id`, `directive_name`, `project_path`, `register_in_registry` |
-| `rye.agent.threads.thread_directive` | Execute directive with SafetyHarness | `directive_name`, `inputs`, `dry_run`, `_token` |
-| `rye.agent.threads.thread_registry` | Manage thread state and events | `action`, `thread_id`, `event_types`, `status` |
-| `rye.agent.threads.read_transcript` | Read thread execution transcripts | `thread_id`, `event_type`, `limit` |
+| Tool                                 | Purpose                               | Parameters                                                            |
+| ------------------------------------ | ------------------------------------- | --------------------------------------------------------------------- |
+| `rye.agent.threads.spawn_thread`     | Spawn OS-level thread with validation | `thread_id`, `directive_name`, `project_path`, `register_in_registry` |
+| `rye.agent.threads.thread_directive` | Execute directive with SafetyHarness  | `directive_name`, `inputs`, `dry_run`, `_token`                       |
+| `rye.agent.threads.thread_registry`  | Manage thread state and events        | `action`, `thread_id`, `event_types`, `status`                        |
+| `rye.agent.threads.read_transcript`  | Read thread execution transcripts     | `thread_id`, `event_type`, `limit`                                    |
 
 ### Tool Execution Format
 
@@ -570,7 +572,7 @@ All thread tools use the same MCP execute format:
   </metadata>
 
   <process>
-<step name="spawn-security-analysis">
+    <step name="spawn-security-analysis">
         <description>Spawn security-focused thread with scoped permissions</description>
         <action><![CDATA[
           Call execute tool with parameters:
@@ -592,7 +594,7 @@ All thread tools use the same MCP execute format:
         ]]></action>
     </step>
 
-<step name="spawn-performance-analysis">
+    <step name="spawn-performance-analysis">
         <description>Spawn performance-focused thread</description>
         <action><![CDATA[
           Call execute tool with parameters:
@@ -619,7 +621,7 @@ All thread tools use the same MCP execute format:
         ]]></action>
     </step>
 
-<step name="coordinate-results">
+    <step name="coordinate-results">
         <description>Wait for all threads and synthesize results</description>
         <action><![CDATA[
           Use thread_registry to get thread status and transcripts:
@@ -629,14 +631,14 @@ All thread tools use the same MCP execute format:
               action: "query"
               thread_ids: ["security-analysis", "performance-analysis"]
               event_types: ["thread_complete", "thread_error"]
-          
+
           Load and synthesize results from transcripts:
           - item_type: "tool"
           - item_id: "rye.agent.threads.read_transcript"
           - parameters:
               thread_id: "security-analysis"
               event_type: "thread_complete"
-          
+
           Generate unified analysis using cross-referenced data:
           - item_type: "tool"
           - item_id: "rye.agent.threads.thread_directive"
