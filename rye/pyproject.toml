@@ -7,6 +7,7 @@ dependencies = [
     "mcp",
     "lilux",
     "pyyaml",
+    "cryptography",
     "packaging>=21.0",
 ]
 
