@@ -17,9 +17,18 @@ Create new tools in Python, JavaScript, YAML, or other formats, validate, and si
       <spawn_threshold>50%</spawn_threshold>
     </context_budget>
     <permissions>
-      <read resource="filesystem" path=".ai/tools/**/*"/>
-      <write resource="filesystem" path=".ai/tools/**/*"/>
-      <execute resource="mcp_rye" action="execute"/>
+      <execute>
+        <tool>rye.file-system.*</tool>
+      </execute>
+      <search>
+        <tool>*</tool>
+      </search>
+      <load>
+        <tool>*</tool>
+      </load>
+      <sign>
+        <tool>*</tool>
+      </sign>
     </permissions>
     <relationships>
       <suggests>edit_tool</suggests>

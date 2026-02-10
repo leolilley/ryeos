@@ -18,9 +18,18 @@ Create new directives with proper XML structure, validate, and sign.
       <spawn_threshold>50%</spawn_threshold>
     </context_budget>
     <permissions>
-      <read resource="filesystem" path=".ai/directives/**/*"/>
-      <write resource="filesystem" path=".ai/directives/**/*.md"/>
-      <execute resource="mcp_rye" action="execute"/>
+      <execute>
+        <tool>rye.file-system.*</tool>
+      </execute>
+      <search>
+        <directive>*</directive>
+      </search>
+      <load>
+        <directive>*</directive>
+      </load>
+      <sign>
+        <directive>*</directive>
+      </sign>
     </permissions>
     <relationships>
       <suggests>edit_directive</suggests>
@@ -129,9 +138,12 @@ Create .md file with structure:
       <spawn_threshold>50%</spawn_threshold>
     </context_budget>
     <permissions>
-      <read resource="filesystem" path="**/*"/>
-      <write resource="filesystem" path="**/*"/>
-      <execute resource="mcp_rye" action="*"/>
+      <execute>
+        <tool>*</tool>
+      </execute>
+      <search>*</search>
+      <load>*</load>
+      <sign>*</sign>
     </permissions>
     <relationships>
       <!-- <requires>other_directive</requires> -->

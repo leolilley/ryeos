@@ -36,7 +36,7 @@ try:
     import importlib.util
     from pathlib import Path
     
-    _tokens_path = Path(__file__).parent.parent / "capabilities" / "tokens" / "capability_tokens.py"
+    _tokens_path = Path(__file__).parent.parent / "permissions" / "capability_tokens" / "capability_tokens.py"
     _spec = importlib.util.spec_from_file_location("capability_tokens", _tokens_path)
     _tokens_module = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_tokens_module)
@@ -161,7 +161,8 @@ class SafetyHarness:
     def _compute_required_caps(self) -> List[str]:
         """Extract required capabilities from permission declarations.
         
-        Permissions use <cap> tags: <cap>rye.execute.tool.*</cap>
+        Handles both legacy <cap> tags and new hierarchical format
+        (normalized to cap entries by the parser).
         """
         if not CAPABILITY_SYSTEM_AVAILABLE:
             return []

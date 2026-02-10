@@ -99,50 +99,110 @@ Specifies LLM model complexity tier for execution with fallback options.
 
 ### `<permissions>`
 
-**Type:** element with permission rules  
+**Type:** element with hierarchical permission rules  
 **Purpose:** Declares capabilities this directive requires  
 **Required:** Yes
 
 ```xml
 <permissions>
-  <read resource="filesystem" path="**/*" />
-  <write resource="filesystem" path="tests/**" />
-  <execute resource="shell" action="pytest" />
-  <execute resource="kiwi-mcp" action="execute" />
+  <execute>
+    <tool>rye.file-system.*</tool>
+    <tool>rye.agent.capabilities.primitives.git</tool>
+  </execute>
+  <search>
+    <directive>workflow/*</directive>
+    <tool>rye.registry.*</tool>
+  </search>
+  <load>
+    <tool>rye.shell.*</tool>
+  </load>
+  <sign>
+    <tool>rye.execute.*</tool>
+  </sign>
 </permissions>
 ```
 
-**Permission elements:**
+**Primary elements:**
 
-- `<read resource="..." path="..."/>` - Read access with optional path patterns
-- `<write resource="..." path="..."/>` - Write access with optional path patterns
-- `<execute resource="..." action="..."/>` - Execute permissions with optional action specification
+- `<execute>` - Permission to run/execute items
+- `<search>` - Permission to search for items
+- `<load>` - Permission to load/read item content
+- `<sign>` - Permission to sign/validate items
 
-**Resource types:**
+**Item type children:**
 
-- `filesystem` - File system with path patterns (glob syntax supported)
-- `shell` - Shell command execution (action: command name or `*` for all)
-- `tool` - Specific tool invocation by ID
-- `kiwi-mcp` - Kiwi MCP system operations (action: `search`, `load`, `execute`, `publish`, `update`, `delete`, or `*`)
+- `<tool>` - Tool capability path
+- `<directive>` - Directive capability path
+- `<knowledge>` - Knowledge entry capability path
+
+**Capability string format:** `rye.{primary}.{item_type}.{specifics}`
+
+Each item type element contains a capability path that identifies the specific resource. Wildcard `*` suffix matches all items under a path.
+
+**Wildcard patterns:**
+
+```xml
+<permissions>*</permissions>
+
+<permissions>
+  <execute>*</execute>
+</permissions>
+
+<permissions>
+  <execute>
+    <tool>rye.agent.*</tool>
+  </execute>
+  <search>*</search>
+  <load>*</load>
+</permissions>
+```
+
+- `<permissions>*</permissions>` - Full access (god mode)
+- `<execute>*</execute>` - Execute all item types
+- `<search>*</search>` - Search all item types
+- `<load>*</load>` - Load all item types
+- `<sign>*</sign>` - Sign all item types
+- `<tool>rye.agent.*</tool>` - All tools under `rye.agent`
 
 **Examples:**
 
 ```xml
-<!-- File system access -->
-<read resource="filesystem" path=".ai/directives/**/*.md" />
-<write resource="filesystem" path="build/**" />
+<permissions>
+  <execute>
+    <tool>rye.file-system.fs_write</tool>
+  </execute>
+</permissions>
 
-<!-- Shell commands -->
-<execute resource="shell" action="pytest" />
-<execute resource="shell" action="*" />  <!-- All shell commands -->
-
-<!-- Kiwi MCP operations -->
-<execute resource="kiwi-mcp" action="search" />
-<execute resource="kiwi-mcp" action="*" />  <!-- All MCP operations -->
-
-<!-- Specific tool -->
-<execute resource="tool" id="deploy-kubernetes" />
+<permissions>
+  <execute>
+    <tool>rye.file-system.*</tool>
+    <tool>rye.agent.threads.spawn_thread</tool>
+  </execute>
+  <search>
+    <directive>analysis/*</directive>
+    <tool>rye.registry.*</tool>
+  </search>
+  <load>
+    <tool>rye.shell.*</tool>
+  </load>
+  <sign>
+    <tool>rye.execute.*</tool>
+  </sign>
+</permissions>
 ```
+
+**Backward compatibility:**
+
+The legacy `<cap>` format is still supported during the transition period:
+
+```xml
+<permissions>
+  <cap>rye.execute.tool.rye.file-system.*</cap>
+  <cap>rye.execute.tool.rye.agent.capabilities.primitives.git</cap>
+</permissions>
+```
+
+The system accepts both formats but the hierarchical format is preferred. The `<cap>` format will emit deprecation warnings.
 
 ### `<cost>`
 
@@ -196,57 +256,6 @@ Specifies LLM model complexity tier for execution with fallback options.
     8000
   </context>
 </cost>
-```
-
----
-
-## Optional Fields
-
-### `<context>`
-
-**Type:** element with permission rules  
-**Purpose:** Declares capabilities this directive requires  
-**Required:** Yes
-
-```xml
-<permissions>
-  <read resource="filesystem" path="**/*" />
-  <write resource="filesystem" path="tests/**" />
-  <execute resource="shell" action="pytest" />
-  <execute resource="kiwi-mcp" action="execute" />
-</permissions>
-```
-
-**Permission elements:**
-
-- `<read resource="..." path="..."/>` - Read access with optional path patterns
-- `<write resource="..." path="..."/>` - Write access with optional path patterns
-- `<execute resource="..." action="..."/>` - Execute permissions with optional action specification
-
-**Resource types:**
-
-- `filesystem` - File system with path patterns (glob syntax supported)
-- `shell` - Shell command execution (action: command name or `*` for all)
-- `tool` - Specific tool invocation by ID
-- `kiwi-mcp` - Kiwi MCP system operations (action: `search`, `load`, `execute`, `publish`, `update`, `delete`, or `*`)
-
-**Examples:**
-
-```xml
-<!-- File system access -->
-<read resource="filesystem" path=".ai/directives/**/*.md" />
-<write resource="filesystem" path="build/**" />
-
-<!-- Shell commands -->
-<execute resource="shell" action="pytest" />
-<execute resource="shell" action="*" />  <!-- All shell commands -->
-
-<!-- Kiwi MCP operations -->
-<execute resource="kiwi-mcp" action="search" />
-<execute resource="kiwi-mcp" action="*" />  <!-- All MCP operations -->
-
-<!-- Specific tool -->
-<execute resource="tool" id="deploy-kubernetes" />
 ```
 
 ---
@@ -408,12 +417,18 @@ Specifies LLM model complexity tier for execution with fallback options.
     </context>
 
     <permissions>
-      <read resource="filesystem" path="k8s/**,scripts/**" />
-      <write resource="filesystem" path="build/**,logs/**" />
-      <execute resource="shell" action="docker" />
-      <execute resource="shell" action="kubectl" />
-      <execute resource="kiwi-mcp" action="execute" />
-      <execute resource="kiwi-mcp" action="search" />
+      <execute>
+        <tool>rye.shell.docker</tool>
+        <tool>rye.shell.kubectl</tool>
+        <tool>rye.file-system.*</tool>
+      </execute>
+      <search>
+        <directive>*</directive>
+        <tool>*</tool>
+      </search>
+      <load>
+        <tool>*</tool>
+      </load>
     </permissions>
 
     <cost>
@@ -467,9 +482,9 @@ Specifies LLM model complexity tier for execution with fallback options.
 3. **`version`** must be valid semantic version (X.Y.Z)
 4. **`model tier`** is user-defined string
 5. **`category`** is free-form string (must align with directory structure)
-6. **`permissions`** must have at least one permission element
+6. **`permissions`** must have at least one primary element (`<execute>`, `<search>`, `<load>`, `<sign>`) or `*` for god mode
 7. **`cost`** must have at least a `<context>` sub-element with `estimated_usage` and `turns` attributes
-8. **Permission paths** support glob patterns (e.g., `**/*.py`)
+8. **Capability paths** support wildcard `*` suffix (e.g., `rye.agent.*`)
 9. **Relationship elements** must be direct children of `<context>`
 10. **Hook `<when>` expressions** evaluated against context variables
 
@@ -497,9 +512,9 @@ Specifies LLM model complexity tier for execution with fallback options.
 ### Permissions
 
 - Declare minimal required permissions (principle of least privilege)
-- Use glob patterns for flexible paths (e.g., `.ai/directives/**/*.md`)
-- Group related resources together
-- Document why each permission is needed
+- Use wildcard `*` suffix for flexible capability paths (e.g., `rye.agent.*`)
+- Group capabilities by primary element (`<execute>`, `<search>`, `<load>`, `<sign>`)
+- Use item type children (`<tool>`, `<directive>`, `<knowledge>`) for specificity
 
 ### Context
 

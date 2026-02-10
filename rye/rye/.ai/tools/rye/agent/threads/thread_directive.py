@@ -15,7 +15,7 @@ This is the primary entry point for running directives with:
 
 import json
 import logging
-import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -79,7 +79,7 @@ PROVIDER_MAP = {
 
 SYSTEM_PROVIDER_FALLBACK = "rye/agent/providers/anthropic_messages"
 
-_cap_tokens_path = PathLib(__file__).parent.parent / "capabilities" / "tokens" / "capability_tokens.py"
+_cap_tokens_path = PathLib(__file__).parent.parent / "permissions" / "capability_tokens" / "capability_tokens.py"
 _cap_spec = importlib.util.spec_from_file_location("capability_tokens", _cap_tokens_path)
 _cap_module = importlib.util.module_from_spec(_cap_spec)
 _cap_spec.loader.exec_module(_cap_module)
@@ -91,7 +91,8 @@ expand_capabilities = _cap_module.expand_capabilities
 def _extract_caps_from_permissions(permissions: List) -> List[str]:
     """Extract capability strings from parsed directive permissions.
 
-    Handles <cap> tags: <cap>rye.execute.tool.*</cap>
+    Handles both legacy <cap> tags and new hierarchical format
+    (normalized to cap entries by the parser).
     """
     caps = []
     for perm in permissions:
@@ -124,7 +125,43 @@ MAX_TOOL_ROUNDTRIPS = 10
 
 
 def _generate_thread_id(directive_name: str) -> str:
-    return f"{directive_name}-{uuid.uuid4().hex[:4]}"
+    """Generate thread ID using Unix timestamp (UTC).
+    
+    Format: {directive_name}-{epoch_seconds}
+    where epoch_seconds is seconds since 1970-01-01 UTC
+    
+    Raises ValueError if thread ID already exists in registry.
+    """
+    # Get UTC timestamp (seconds since 1970-01-01)
+    now = datetime.now(timezone.utc)
+    epoch_seconds = int(now.timestamp())
+    
+    thread_id = f"{directive_name}-{epoch_seconds}"
+    
+    # Check if thread_id already exists
+    try:
+        project_path = Path.cwd()
+        db_path = project_path / ".ai" / "threads" / "registry.db"
+        
+        # If DB exists, check for clash
+        if db_path.exists():
+            registry = ThreadRegistry(db_path)
+            existing = registry.get_status(thread_id)
+            
+            if existing:
+                raise ValueError(
+                    f"Thread ID clash: '{thread_id}' already exists in registry. "
+                    f"Cannot spawn thread with same epoch day for same directive. "
+                    f"Existing thread created at: {existing.get('created_at')}"
+                )
+    except ValueError:
+        # Re-raise ValueError (clash detected)
+        raise
+    except Exception as e:
+        # Log other errors as warnings but continue (best-effort clash detection)
+        logger.warning(f"Error checking thread ID clash: {e}")
+    
+    return thread_id
 
 
 def _get_registry(project_path: Path) -> ThreadRegistry:
@@ -224,7 +261,7 @@ def _load_provider_config(provider_id: str, project_path: Path) -> Dict:
 
 def _load_primary_tool_paths() -> Dict[str, str]:
     """Load primary tool paths from primary.yaml (data-driven)."""
-    primary_yaml = PathLib(__file__).parent.parent / "capabilities" / "primitives" / "primary.yaml"
+    primary_yaml = PathLib(__file__).parent.parent / "permissions" / "capabilities" / "primary.yaml"
     try:
         data = yaml.safe_load(primary_yaml.read_text())
         return data.get("primary_tools", {})

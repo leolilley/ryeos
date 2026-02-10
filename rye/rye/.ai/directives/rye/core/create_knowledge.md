@@ -17,9 +17,18 @@ Create new knowledge entries with proper metadata, validate, and sign.
       <spawn_threshold>50%</spawn_threshold>
     </context_budget>
     <permissions>
-      <read resource="filesystem" path=".ai/knowledge/**/*"/>
-      <write resource="filesystem" path=".ai/knowledge/**/*.md"/>
-      <execute resource="mcp_rye" action="execute"/>
+      <execute>
+        <tool>rye.file-system.*</tool>
+      </execute>
+      <search>
+        <knowledge>*</knowledge>
+      </search>
+      <load>
+        <knowledge>*</knowledge>
+      </load>
+      <sign>
+        <knowledge>*</knowledge>
+      </sign>
     </permissions>
     <relationships>
       <suggests>edit_knowledge</suggests>

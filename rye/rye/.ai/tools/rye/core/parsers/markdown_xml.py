@@ -150,15 +150,25 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
 
             # Handle permissions - parse nested permission elements
             elif tag == "permissions":
+                PRIMARY_NAMES = {"execute", "search", "load", "sign"}
                 permissions = []
-                for perm in child:
-                    perm_data = {
-                        "tag": perm.tag,
-                        "attrs": dict(perm.attrib),
-                    }
-                    if perm.text:
-                        perm_data["content"] = perm.text.strip()
-                    permissions.append(perm_data)
+                perm_text = (child.text or "").strip()
+                if perm_text == "*" and len(child) == 0:
+                    permissions.append({"tag": "cap", "content": "rye.*"})
+                else:
+                    for perm in child:
+                        if perm.tag not in PRIMARY_NAMES:
+                            continue
+                        inner_text = (perm.text or "").strip()
+                        if inner_text == "*" and len(perm) == 0:
+                            permissions.append({"tag": "cap", "content": f"rye.{perm.tag}.*"})
+                        elif len(perm) > 0:
+                            for item in perm:
+                                item_text = (item.text or "").strip()
+                                if item_text:
+                                    permissions.append({"tag": "cap", "content": f"rye.{perm.tag}.{item.tag}.{item_text}"})
+                        elif inner_text:
+                            permissions.append({"tag": "cap", "content": f"rye.{perm.tag}.{inner_text}"})
                 result["permissions"] = permissions
 
             elif tag == "limits":

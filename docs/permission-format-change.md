@@ -3,6 +3,7 @@
 ## Current State
 
 ### XML Format (directives)
+
 ```xml
 <permissions>
   <cap>rye.execute.tool.rye.agent.capabilities.primitives.git</cap>
@@ -11,6 +12,7 @@
 ```
 
 ### YAML Format (capability definitions)
+
 ```yaml
 capabilities:
   - "rye.execute.tool.rye.agent.capabilities.primitives.git"
@@ -18,14 +20,24 @@ capabilities:
 ```
 
 **Issues with current format:**
+
 1. Verbose - Repeats full hierarchy
 2. Flat structure - Doesn't leverage XML child element capabilities
 3. No clear grouping of permission types
 4. Not semantic - All caps look the same regardless of type
 
+this can also change
+
+/home/leo/projects/rye-os/rye/rye/.ai/tools/rye/agent/capabilities/primitives
+
+folder structure should also better reflect our new format and the structure of tools/directives/knowledge
+
+something like capabilties/tools/ capabilties/directives capabilties/knowledge/
+
 ## Proposed Format
 
 ### XML Format (directives)
+
 ```xml
 <permissions>
   <execute>
@@ -41,6 +53,7 @@ capabilities:
 ```
 
 ### YAML Format (capability definitions)
+
 ```yaml
 capabilities:
   - primary: execute
@@ -68,6 +81,7 @@ capabilities:
 ## Examples
 
 ### Single Capability
+
 ```xml
 <permissions>
   <execute>
@@ -77,6 +91,7 @@ capabilities:
 ```
 
 ### Wildcard Permissions
+
 ```xml
 <permissions>
   <execute>
@@ -89,11 +104,13 @@ capabilities:
 ```
 
 ### Full Access (God Mode)
+
 ```xml
 <permissions>*</permissions>
 ```
 
 ### Execute Only
+
 ```xml
 <permissions>
   <execute>*</execute>
@@ -101,6 +118,7 @@ capabilities:
 ```
 
 ### Search Only
+
 ```xml
 <permissions>
   <search>*</search>
@@ -108,6 +126,7 @@ capabilities:
 ```
 
 ### Combined Access
+
 ```xml
 <permissions>
   <execute>
@@ -128,6 +147,7 @@ capabilities:
 ```
 
 ### Specific Item Types
+
 ```xml
 <permissions>
   <execute>
@@ -150,23 +170,28 @@ Each permission type can independently specify which item types it can access.
 ## Implementation Requirements
 
 ### 1. Directive Extractor Update (`rye/core/extractors/directive/directive_extractor.py`)
+
 - Update `EXTRACTION_RULES` to handle new XML structure
 - Support nested XML elements with flattened values
 
 ### 2. Thread Directive Update (`rye/agent/threads/thread_directive.py`)
+
 - Update `_extract_caps_from_permissions()` to parse new format
 - Extract capabilities from `<execute>`, `<search>`, `<load>`, `<sign>` children
 
 ### 3. Validator Update
+
 - Update schema validation to recognize new permission structure
 - Ensure backward compatibility during transition
 
 ### 4. Migration Strategy
+
 - Support both old and new formats during transition period
 - Provide migration tooling for converting existing directives
 - Document deprecation timeline
 
 ### 5. Examples Update
+
 - Update all directive examples in README and knowledge files
 - Update create_directive and create_advanced_directive directives
 - Add migration guide
@@ -174,6 +199,7 @@ Each permission type can independently specify which item types it can access.
 ## Backward Compatibility
 
 During transition, the system should:
+
 1. Accept both old (`<cap>rye.execute.tool.*</cap>`) and new (`<execute><tool>*</tool></execute>`) formats
 2. Warn about deprecated format usage
 3. Auto-migrate to new format when possible

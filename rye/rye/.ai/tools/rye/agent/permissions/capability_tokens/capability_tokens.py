@@ -597,14 +597,14 @@ def load_capabilities(project_path: Path) -> Tuple[Dict[Tuple, str], Dict[str, L
     hierarchy = {}    # {parent: [children]}
     
     # Determine search paths
-    # From: rye/.ai/tools/rye/agent/capabilities/tokens/capability_tokens.py
+    # From: rye/.ai/tools/rye/agent/permissions/capability_tokens/capability_tokens.py
     # To: rye/.ai/tools/rye/agent/
-    tokens_dir = Path(__file__).parent  # tokens/
-    caps_dir = tokens_dir.parent  # capabilities/
-    agent_dir = caps_dir.parent  # agent/
-    system_caps_dir = agent_dir / "capabilities" / "primitives"
+    tokens_dir = Path(__file__).parent  # capability_tokens/
+    permissions_dir = tokens_dir.parent  # permissions/
+    agent_dir = permissions_dir.parent  # agent/
+    system_caps_dir = agent_dir / "permissions" / "capabilities" / "tools"
     
-    project_caps_dir = project_path / ".ai" / "tools" / "agent" / "capabilities"
+    project_caps_dir = project_path / ".ai" / "tools" / "agent" / "permissions" / "capabilities" / "tools"
     
     search_order = [
         (system_caps_dir, True),      # System space (can define system capabilities)
@@ -615,7 +615,7 @@ def load_capabilities(project_path: Path) -> Tuple[Dict[Tuple, str], Dict[str, L
         if not caps_dir.exists():
             continue
             
-        for yaml_file in sorted(caps_dir.glob("*.yaml")):
+        for yaml_file in sorted(caps_dir.glob("**/*.yaml")):
             try:
                 data = yaml.safe_load(yaml_file.read_text())
                 if not data:
