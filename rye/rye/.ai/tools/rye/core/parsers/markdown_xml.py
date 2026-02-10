@@ -173,16 +173,14 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
 
             elif tag == "limits":
                 limits = {}
-                for limit_child in child:
-                    if limit_child.text:
-                        val = limit_child.text.strip()
-                        try:
-                            if '.' in val:
-                                limits[limit_child.tag] = float(val)
-                            else:
-                                limits[limit_child.tag] = int(val)
-                        except ValueError:
-                            limits[limit_child.tag] = val
+                for k, v in child.attrib.items():
+                    try:
+                        if '.' in v:
+                            limits[k] = float(v)
+                        else:
+                            limits[k] = int(v)
+                    except ValueError:
+                        limits[k] = v
                 result["limits"] = limits
 
             elif tag == "hooks":
@@ -230,7 +228,7 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
         if inputs:
             result["inputs"] = inputs
 
-    # Extract process steps
+    # Extract process steps (with optional <execute>/<spawn> actions)
     process_elem = root.find("process")
     if process_elem is not None:
         steps = []
@@ -238,8 +236,42 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
             step_data = {
                 "name": step.get("name", ""),
             }
-            if step.text:
+            desc_el = step.find("description")
+            if desc_el is not None and desc_el.text:
+                step_data["description"] = desc_el.text.strip()
+            elif step.text and step.text.strip():
                 step_data["description"] = step.text.strip()
+
+            action_tags = {"execute", "search", "load", "sign"}
+            actions = []
+            for child in step:
+                if child.tag not in action_tags:
+                    continue
+                if child.tag == "execute":
+                    action = {
+                        "primary": "execute",
+                        "item_type": child.get("item_type", "tool"),
+                        "item_id": child.get("item_id", ""),
+                    }
+                    if child.get("id"):
+                        action["id"] = child.get("id")
+                else:
+                    action = {"primary": child.tag}
+                    action.update(child.attrib)
+                params = {}
+                for param in child.findall("param"):
+                    pname = param.get("name", "")
+                    pval = param.get("value", "")
+                    if not pval and param.text:
+                        pval = param.text.strip()
+                    if pname:
+                        params[pname] = pval
+                if params:
+                    action["params"] = params
+                actions.append(action)
+
+            if actions:
+                step_data["actions"] = actions
             steps.append(step_data)
         if steps:
             result["steps"] = steps

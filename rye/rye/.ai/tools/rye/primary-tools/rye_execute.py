@@ -43,12 +43,19 @@ def execute(params: dict, project_path: str) -> dict:
     try:
         from rye.tools.execute import ExecuteTool
 
+        raw_params = params.get("parameters", {})
+        if isinstance(raw_params, str):
+            try:
+                raw_params = json.loads(raw_params)
+            except (json.JSONDecodeError, TypeError):
+                raw_params = {"raw_input": raw_params}
+
         tool = ExecuteTool(project_path=project_path)
         result = asyncio.run(tool.handle(
             item_type=params["item_type"],
             item_id=params["item_id"],
             project_path=project_path,
-            parameters=params.get("parameters", {}),
+            parameters=raw_params,
             dry_run=params.get("dry_run", False),
         ))
         return result

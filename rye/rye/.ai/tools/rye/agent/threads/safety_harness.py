@@ -161,8 +161,8 @@ class SafetyHarness:
     def _compute_required_caps(self) -> List[str]:
         """Extract required capabilities from permission declarations.
         
-        Handles both legacy <cap> tags and new hierarchical format
-        (normalized to cap entries by the parser).
+        Permissions are parsed from hierarchical XML format
+        and normalized to {"tag": "cap", "content": "rye.X"} by the parser.
         """
         if not CAPABILITY_SYSTEM_AVAILABLE:
             return []

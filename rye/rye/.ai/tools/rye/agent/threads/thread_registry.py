@@ -1,4 +1,4 @@
-# rye:validated:2026-02-09T02:02:59Z:32f951145b6386aa3a282ec05692621f6e4b83ed9d94f9f84363a3b37456a478
+# rye:validated:2026-02-10T00:42:36Z:5cc8741fde67c583f18947f860d48992b4a924a0a937b34f74588a9cd80031e8
 """
 Thread Registry: SQLite-based persistence for thread state and events.
 
@@ -400,20 +400,36 @@ class ThreadRegistry:
 
 class TranscriptWriter:
     """
-    JSONL transcript writer for human-readable thread logs.
+    JSONL transcript writer for human-readable thread logs with optional auto-markdown.
     
     Append-only file per thread: .ai/threads/{thread_id}/transcript.jsonl
+    If auto_markdown enabled: also writes .ai/threads/{thread_id}/transcript.md
+    
+    Event envelope contract:
+    - `ts`: ISO 8601 timestamp (UTC), auto-set by TranscriptWriter
+    - `type`: event type string
+    - `thread_id`: thread identifier, auto-set by TranscriptWriter
+    - `directive`: directive name, MUST be provided via data or default_directive
     """
     
-    def __init__(self, transcript_dir: Path):
+    def __init__(
+        self,
+        transcript_dir: Path,
+        auto_markdown: bool = True,
+        default_directive: Optional[str] = None,
+    ):
         """
         Initialize transcript writer.
         
         Args:
             transcript_dir: Base directory for transcripts
+            auto_markdown: If True, auto-generate transcript.md alongside transcript.jsonl
+            default_directive: Default directive name if not in event data
         """
         self.transcript_dir = Path(transcript_dir)
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
+        self.auto_markdown = auto_markdown
+        self.default_directive = default_directive
     
     def write_event(
         self,
@@ -424,22 +440,133 @@ class TranscriptWriter:
         """
         Write an event to the transcript file.
         
+        Event envelope contract: All events include ts, type, thread_id, directive.
+        
         Args:
             thread_id: Thread identifier
-            event_type: Event type (turn_start, user_message, tool_call, etc.)
-            data: Event data
+            event_type: Event type (thread_start, user_message, tool_call, etc.)
+            data: Event data. Must contain 'directive' or TranscriptWriter must have default_directive.
+            
+        Raises:
+            ValueError: If 'directive' is missing from data and no default_directive set
         """
         transcript_path = self.transcript_dir / thread_id / "transcript.jsonl"
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         
+        # Extract or use default directive
+        directive = data.get("directive") or self.default_directive
+        if not directive:
+            raise ValueError(
+                f"Event '{event_type}' missing 'directive'. "
+                f"Provide it in data or set default_directive on TranscriptWriter."
+            )
+        
+        # Build event envelope: ts, type, thread_id, directive are guaranteed
         event = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "type": event_type,
-            **data,
+            "thread_id": thread_id,
+            "directive": directive,
+            # Merge payload, filtering out envelope fields if they exist
+            **{k: v for k, v in data.items() if k not in ("ts", "type", "thread_id", "directive")},
         }
         
+        # Write to JSONL
         with open(transcript_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event) + "\n")
+        
+        # Auto-generate markdown if enabled
+        if self.auto_markdown:
+            md_path = self.transcript_dir / thread_id / "transcript.md"
+            md_chunk = self._render_event_to_markdown(event)
+            if md_chunk:
+                with open(md_path, "a", encoding="utf-8") as f:
+                    f.write(md_chunk)
+    
+    def _render_event_to_markdown(self, event: Dict[str, Any]) -> str:
+        """
+        Render a single event to a markdown fragment for transcript.md.
+        
+        Args:
+            event: Event dict with at least 'type' field
+            
+        Returns:
+            Markdown string fragment (may be empty for some event types)
+        """
+        event_type = event.get("type", "")
+        
+        if event_type == "thread_start":
+            return (
+                f"# {event.get('directive', 'Thread')}\n\n"
+                f"**Thread ID:** `{event.get('thread_id', '')}`\n"
+                f"**Model:** {event.get('model', 'unknown')}\n"
+                f"**Provider:** {event.get('provider', 'unknown')}\n"
+                f"**Mode:** {event.get('thread_mode', 'single')}\n"
+                f"**Started:** {event.get('ts', '')}\n\n---\n\n"
+            )
+        
+        elif event_type == "user_message":
+            role = event.get("role", "user").title()
+            text = event.get("text", "")
+            return f"## {role}\n\n{text}\n\n---\n\n"
+        
+        elif event_type == "step_start":
+            turn = event.get("turn_number", "?")
+            return f"### Turn {turn}\n\n"
+        
+        elif event_type == "assistant_text":
+            text = event.get("text", "")
+            return f"**Assistant:**\n\n{text}\n\n"
+        
+        elif event_type == "assistant_reasoning":
+            text = event.get("text", "")
+            return f"_Thinking:_\n\n```\n{text}\n```\n\n"
+        
+        elif event_type == "tool_call_start":
+            tool = event.get("tool", "unknown")
+            call_id = event.get("call_id", "?")
+            input_data = event.get("input", {})
+            return (
+                f"**Tool Call:** `{tool}` (ID: `{call_id}`)\n\n"
+                f"```json\n{json.dumps(input_data, indent=2)}\n```\n\n"
+            )
+        
+        elif event_type == "tool_call_result":
+            call_id = event.get("call_id", "?")
+            output = event.get("output", "")
+            error = event.get("error")
+            duration = event.get("duration_ms", 0)
+            
+            result_str = f"**Tool Result** (ID: `{call_id}`, {duration}ms)\n\n"
+            if error:
+                result_str += f"**Error:** {error}\n\n"
+            else:
+                result_str += f"```\n{output}\n```\n\n"
+            return result_str
+        
+        elif event_type == "step_finish":
+            tokens = event.get("tokens", 0)
+            cost = event.get("cost", 0)
+            finish_reason = event.get("finish_reason", "unknown")
+            return f"_Step finished: {tokens} tokens, ${cost:.6f}, reason: {finish_reason}_\n\n---\n\n"
+        
+        elif event_type == "thread_complete":
+            cost_dict = event.get("cost", {})
+            tokens = cost_dict.get("tokens", 0)
+            spend = cost_dict.get("spend", 0)
+            return (
+                f"## Completed\n\n"
+                f"**Total Tokens:** {tokens}\n"
+                f"**Total Cost:** ${spend:.6f}\n\n"
+            )
+        
+        elif event_type == "thread_error":
+            error_code = event.get("error_code", "unknown")
+            detail = event.get("detail", "")
+            return f"## Error: {error_code}\n\n{detail}\n\n"
+        
+        # Default: no markdown for unknown event types
+        return ""
 
 
 # Tool entry point function

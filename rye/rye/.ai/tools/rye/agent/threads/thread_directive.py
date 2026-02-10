@@ -1,4 +1,4 @@
-# rye:validated:2026-02-09T02:05:23Z:291c457b482c7305b8ff27a28192fd61d0fedd4134b9b72c5fa63e0227ef9fca
+# rye:validated:2026-02-10T00:53:52Z:35bb62a1d528901465e5f1d56b75843ad7a3691c0eab2d641eb26514f4a25692
 """
 Thread Directive Tool.
 
@@ -91,8 +91,9 @@ expand_capabilities = _cap_module.expand_capabilities
 def _extract_caps_from_permissions(permissions: List) -> List[str]:
     """Extract capability strings from parsed directive permissions.
 
-    Handles both legacy <cap> tags and new hierarchical format
-    (normalized to cap entries by the parser).
+    Permissions are parsed from hierarchical XML format
+    (<execute><tool>...</tool></execute>) and normalized to
+    {"tag": "cap", "content": "rye.execute.tool.X"} by the parser.
     """
     caps = []
     for perm in permissions:
@@ -172,6 +173,62 @@ def _get_registry(project_path: Path) -> ThreadRegistry:
 def _get_transcript_writer(project_path: Path) -> TranscriptWriter:
     transcript_dir = project_path / ".ai" / "threads"
     return TranscriptWriter(transcript_dir)
+
+
+def _write_thread_meta_atomic(
+    thread_dir: Path,
+    thread_id: str,
+    directive_name: str,
+    status: str,
+    created_at: str,
+    updated_at: str,
+    model: Optional[str] = None,
+    cost: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Write thread.json metadata atomically using tmp -> rename pattern.
+    
+    Args:
+        thread_dir: .ai/threads directory
+        thread_id: Thread identifier
+        directive_name: Name of directive that spawned the thread
+        status: Thread status (running, completed, error)
+        created_at: ISO 8601 timestamp of thread creation
+        updated_at: ISO 8601 timestamp of last update
+        model: Model ID used for this thread
+        cost: Cost dict with keys: tokens, spend, turns, duration_seconds
+    """
+    thread_path = thread_dir / thread_id
+    thread_path.mkdir(parents=True, exist_ok=True)
+    
+    meta = {
+        "thread_id": thread_id,
+        "directive": directive_name,
+        "status": status,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+    
+    if model:
+        meta["model"] = model
+    if cost:
+        meta["cost"] = cost
+    
+    # Atomic write: tmp -> final rename
+    meta_path = thread_path / "thread.json"
+    tmp_path = meta_path.with_suffix(".json.tmp")
+    
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        tmp_path.rename(meta_path)
+        logger.debug(f"Wrote thread metadata to {meta_path}")
+    except Exception as e:
+        # Clean up temp file if rename failed
+        if tmp_path.exists():
+            tmp_path.unlink()
+        logger.error(f"Failed to write thread metadata: {e}")
+        raise
 
 
 def _validate_directive_metadata(directive: Dict, directive_name: str) -> Optional[Dict]:
@@ -413,25 +470,147 @@ def _build_tool_result_message(tool_results: List[Dict], provider_config: Dict) 
     return {"role": role, "content": blocks}
 
 
-def _build_system_prompt(directive: Dict, inputs: Optional[Dict]) -> str:
-    parts = [directive.get("description", "")]
+def _strip_rye_signature(text: str) -> str:
+    """Strip rye:validated signature comments from directive body."""
+    import re
+    return re.sub(r'<!--\s*rye:validated:[^>]*-->\s*', '', text).strip()
+
+
+def _resolve_input_refs(value: str, inputs: Optional[Dict]) -> str:
+    """Resolve {input:name} placeholders with actual input values."""
+    if not inputs or "{input:" not in value:
+        return value
+    import re
+    def replacer(m):
+        key = m.group(1)
+        if key in inputs:
+            return str(inputs[key])
+        return m.group(0)
+    return re.sub(r"\{input:(\w+)\}", replacer, value)
+
+
+def _render_action(action: Dict, inputs: Optional[Dict]) -> str:
+    """Render a parsed action as a canonical primary-tool call block.
+
+    Maps the 4 action tags to their primary tools:
+    - <execute> → rye_execute (item_type + item_id + parameters)
+    - <search>  → rye_search  (query + item_type + ...)
+    - <load>    → rye_load    (item_type + item_id + ...)
+    - <sign>    → rye_sign    (item_type + item_id + ...)
+    """
+    primary = action.get("primary", "execute")
+    params = {}
+    for k, v in (action.get("params") or {}).items():
+        params[k] = _resolve_input_refs(v, inputs)
+
+    if primary == "execute":
+        item_type = action.get("item_type", "tool")
+        item_id = _resolve_input_refs(action.get("item_id", ""), inputs)
+        call = {"item_type": item_type, "item_id": item_id}
+        if params:
+            if item_type == "directive":
+                call["parameters"] = {"directive_name": item_id, "inputs": params}
+            else:
+                call["parameters"] = params
+        return f"  Call tool: rye_execute\n  {json.dumps(call)}"
+
+    tool_name = f"rye_{primary}"
+    call = {}
+    for attr in ("item_type", "item_id", "query", "source", "limit"):
+        if attr in action:
+            call[attr] = _resolve_input_refs(action[attr], inputs)
+    call.update(params)
+    return f"  Call tool: {tool_name}\n  {json.dumps(call)}"
+
+
+def _format_steps_block(directive: Dict, inputs: Optional[Dict] = None) -> str:
+    """Format directive steps as a labeled block for the system prompt.
+
+    If steps contain <execute> actions, renders canonical tool-call
+    JSON blocks targeting the appropriate primary tool.
+    """
     steps = directive.get("steps", [])
-    if steps:
-        parts.append("\nSteps:")
-        for step in steps:
-            name = step.get("name", "")
-            desc = step.get("description", "")
-            parts.append(f"- {name}: {desc}")
-    if inputs:
-        parts.append(f"\nInputs: {json.dumps(inputs)}")
-    return "\n".join(parts)
+    if not steps:
+        return ""
+    lines = ["Steps:"]
+    for i, step in enumerate(steps, 1):
+        name = step.get("name", "")
+        desc = step.get("description", "")
+        actions = step.get("actions", [])
+
+        if actions:
+            lines.append(f"{i}) {name} — {desc}" if desc else f"{i}) {name}")
+            for action in actions:
+                lines.append(_render_action(action, inputs))
+        else:
+            lines.append(f"- {name}: {desc}")
+    return "\n".join(lines)
+
+
+def _format_inputs_block(inputs: Optional[Dict]) -> str:
+    """Format directive inputs as a labeled block for the system prompt."""
+    if not inputs:
+        return ""
+    return f"Inputs: {json.dumps(inputs)}"
+
+
+def _build_system_prompt(
+    directive: Dict,
+    inputs: Optional[Dict],
+    tool_defs: Optional[List[Dict]] = None,
+    provider_config: Optional[Dict] = None,
+    directive_name: str = "",
+) -> str:
+    """Build the system prompt from the provider's template.
+
+    The provider YAML owns the system_template (data-driven).
+    This function renders placeholders with directive metadata and tool names.
+    Raises ValueError if no template is configured — providers MUST define one.
+    """
+    if provider_config is None:
+        raise ValueError(
+            f"Cannot build system prompt for directive '{directive_name}': "
+            f"no provider config loaded. Provider YAML must be resolved before building prompts."
+        )
+
+    prompts = provider_config.get("prompts") or {}
+    template = prompts.get("system_template")
+    if not template:
+        raise ValueError(
+            f"Cannot build system prompt for directive '{directive_name}': "
+            f"provider config missing 'prompts.system_template'. "
+            f"The provider YAML must define a system_template under the prompts key."
+        )
+
+    tool_names = ", ".join(t["name"] for t in tool_defs) if tool_defs else "(none)"
+    description = directive.get("description", "")
+    steps_block = _format_steps_block(directive, inputs)
+    inputs_block = _format_inputs_block(inputs)
+
+    return template.format(
+        tool_names=tool_names,
+        directive_name=directive_name,
+        directive_description=description,
+        directive_steps=steps_block,
+        directive_inputs=inputs_block,
+    ).strip()
 
 
 def _build_user_prompt(directive: Dict, inputs: Optional[Dict]) -> str:
+    """Build the user message from the directive body.
+
+    The user prompt contains the full directive body (the task to execute).
+    The system prompt already has the agent framing and tool instructions.
+    """
     body = directive.get("body", "")
     if body:
-        return body
-    return directive.get("description", "Execute this directive.")
+        cleaned = _strip_rye_signature(body)
+        if cleaned:
+            return cleaned
+    description = directive.get("description", "")
+    if description:
+        return f"Execute this directive: {description}"
+    return "Execute the directive."
 
 
 async def _call_llm(
@@ -490,10 +669,21 @@ async def _execute_tool_call(
             "is_error": True,
         }
 
+    tool_input = tool_call["input"]
+    if isinstance(tool_input, dict):
+        params = tool_input
+    elif isinstance(tool_input, str):
+        try:
+            params = json.loads(tool_input)
+        except (json.JSONDecodeError, TypeError):
+            params = {"raw_input": tool_input}
+    else:
+        params = {}
+
     executor = PrimitiveExecutor(project_path=project_path)
     result = await executor.execute(
         item_id=item_id,
-        parameters=tool_call["input"],
+        parameters=params,
         use_lockfile=True,
     )
 
@@ -515,14 +705,39 @@ async def _run_tool_use_loop(
     tool_defs: List[Dict],
     tool_map: Dict[str, str],
     harness: SafetyHarness,
+    directive_name: str = "",
+    thread_id: str = "",
+    transcript: Optional[Any] = None,
 ) -> Dict[str, Any]:
+    """Run the LLM tool-use loop with rich transcript events."""
     formatted_tools = _format_tool_defs(tool_defs, provider_config) if tool_defs else []
 
     messages = [{"role": "user", "content": user_prompt}]
     all_tool_results = []
     final_text = ""
+    
+    # Emit user message event
+    if transcript and thread_id:
+        try:
+            transcript.write_event(thread_id, "user_message", {
+                "directive": directive_name,
+                "text": user_prompt,
+                "role": "user",
+            })
+        except Exception as e:
+            logger.warning(f"Failed to write user_message event: {e}")
 
     for turn in range(MAX_TOOL_ROUNDTRIPS):
+        # Emit step_start event
+        if transcript and thread_id:
+            try:
+                transcript.write_event(thread_id, "step_start", {
+                    "directive": directive_name,
+                    "turn_number": turn + 1,
+                })
+            except Exception as e:
+                logger.warning(f"Failed to write step_start event: {e}")
+        
         llm_result = await _call_llm(
             project_path=project_path,
             model=model_id,
@@ -541,6 +756,26 @@ async def _run_tool_use_loop(
 
         harness.update_cost_after_turn({"usage": parsed["usage"]}, parsed["model"] or model_id)
 
+        # Emit assistant_text event
+        if transcript and thread_id and parsed.get("text"):
+            try:
+                transcript.write_event(thread_id, "assistant_text", {
+                    "directive": directive_name,
+                    "text": parsed["text"],
+                })
+            except Exception as e:
+                logger.warning(f"Failed to write assistant_text event: {e}")
+        
+        # Emit assistant_reasoning if available
+        if transcript and thread_id and parsed.get("reasoning"):
+            try:
+                transcript.write_event(thread_id, "assistant_reasoning", {
+                    "directive": directive_name,
+                    "text": parsed["reasoning"],
+                })
+            except Exception as e:
+                logger.warning(f"Failed to write assistant_reasoning event: {e}")
+
         limit_event = harness.check_limits()
         if limit_event:
             harness.evaluate_hooks(limit_event)
@@ -549,11 +784,59 @@ async def _run_tool_use_loop(
 
         if not parsed["has_tool_use"] or not parsed["tool_calls"]:
             final_text = parsed["text"]
+            
+            # Emit step_finish event
+            if transcript and thread_id:
+                try:
+                    step_cost = harness.cost.per_turn[-1]["spend"] if harness.cost.per_turn else 0
+                    step_tokens = (harness.cost.per_turn[-1].get("prompt_tokens", 0) + 
+                                 harness.cost.per_turn[-1].get("completion_tokens", 0)) if harness.cost.per_turn else 0
+                    transcript.write_event(thread_id, "step_finish", {
+                        "directive": directive_name,
+                        "cost": step_cost,
+                        "tokens": step_tokens,
+                        "finish_reason": "end_turn",
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to write step_finish event: {e}")
             break
 
+        # Emit tool_call events and execute
         tool_results = []
         for tc in parsed["tool_calls"]:
+            call_id = tc.get("id", "")
+            
+            # Emit tool_call_start
+            if transcript and thread_id:
+                try:
+                    transcript.write_event(thread_id, "tool_call_start", {
+                        "directive": directive_name,
+                        "tool": tc["name"],
+                        "call_id": call_id,
+                        "input": tc["input"],
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to write tool_call_start event: {e}")
+            
+            import time
+            start_time = time.time()
             tr = await _execute_tool_call(tc, tool_map, project_path)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            # Emit tool_call_result
+            if transcript and thread_id:
+                try:
+                    error_str = tr.get("error") if tr.get("is_error") else None
+                    transcript.write_event(thread_id, "tool_call_result", {
+                        "directive": directive_name,
+                        "call_id": call_id,
+                        "output": str(tr.get("result", ""))[:1000],  # Truncate long outputs
+                        "error": error_str,
+                        "duration_ms": duration_ms,
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to write tool_call_result event: {e}")
+            
             tool_results.append(tr)
             all_tool_results.append({
                 "tool": tc["name"],
@@ -562,6 +845,21 @@ async def _run_tool_use_loop(
                 "is_error": tr.get("is_error", False),
             })
 
+        # Emit step_finish event
+        if transcript and thread_id:
+            try:
+                step_cost = harness.cost.per_turn[-1]["spend"] if harness.cost.per_turn else 0
+                step_tokens = (harness.cost.per_turn[-1].get("prompt_tokens", 0) + 
+                             harness.cost.per_turn[-1].get("completion_tokens", 0)) if harness.cost.per_turn else 0
+                transcript.write_event(thread_id, "step_finish", {
+                    "directive": directive_name,
+                    "cost": step_cost,
+                    "tokens": step_tokens,
+                    "finish_reason": "tool_use",
+                })
+            except Exception as e:
+                logger.warning(f"Failed to write step_finish event: {e}")
+        
         result_msg = _build_tool_result_message(tool_results, provider_config)
         messages.append(result_msg)
     else:
@@ -714,6 +1012,9 @@ async def execute(
 
     registry = _get_registry(project_path)
     transcript = _get_transcript_writer(project_path)
+    
+    # Thread creation timestamp (ISO 8601)
+    thread_created_at = datetime.now(timezone.utc).isoformat()
 
     parent_thread_id = params.get("_parent_thread_id")
     try:
@@ -732,7 +1033,23 @@ async def execute(
         "inputs": inputs or {},
         "model": model_id,
         "provider": provider_id,
+        "thread_mode": "single",
     })
+    
+    # Write thread.json with initial metadata (status: running)
+    try:
+        thread_dir = project_path / ".ai" / "threads"
+        _write_thread_meta_atomic(
+            thread_dir=thread_dir,
+            thread_id=thread_id,
+            directive_name=directive_name,
+            status="running",
+            created_at=thread_created_at,
+            updated_at=thread_created_at,
+            model=model_id,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to write thread.json: {e}")
 
     if dry_run:
         return {
@@ -750,7 +1067,9 @@ async def execute(
             "tools": [t["name"] for t in tool_defs],
         }
 
-    system_prompt = _build_system_prompt(directive, inputs)
+    system_prompt = _build_system_prompt(
+        directive, inputs, tool_defs, provider_config, directive_name
+    )
     user_prompt = _build_user_prompt(directive, inputs)
     max_tokens = limits.get("max_tokens", 1024)
 
@@ -765,6 +1084,9 @@ async def execute(
         tool_defs=tool_defs,
         tool_map=tool_map,
         harness=harness,
+        directive_name=directive_name,
+        thread_id=thread_id,
+        transcript=transcript,
     )
 
     if not llm_result["success"]:
@@ -773,7 +1095,23 @@ async def execute(
         hook_result = harness.evaluate_hooks(error_event)
         try:
             registry.update_status(thread_id, "error", {"usage": harness.cost.to_dict()})
-            transcript.write_event(thread_id, "thread_error", {"error": llm_result.get("error", "")})
+            transcript.write_event(thread_id, "thread_error", {
+                "directive": directive_name,
+                "error_code": "llm_call_failed",
+                "detail": llm_result.get("error", ""),
+            })
+            # Update thread.json with error status
+            thread_dir = project_path / ".ai" / "threads"
+            _write_thread_meta_atomic(
+                thread_dir=thread_dir,
+                thread_id=thread_id,
+                directive_name=directive_name,
+                status="error",
+                created_at=thread_created_at,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                model=model_id,
+                cost=harness.cost.to_dict(),
+            )
         except Exception as e:
             logger.warning(f"Failed to update registry on error: {e}")
         if hook_result.context and "hook_directive" in hook_result.context:
@@ -839,10 +1177,23 @@ async def execute(
     try:
         registry.update_status(thread_id, "completed", {"usage": harness.cost.to_dict()})
         transcript.write_event(thread_id, "thread_complete", {
+            "directive": directive_name,
             "usage": llm_result["usage"],
             "cost": harness.cost.to_dict(),
             "tool_results_count": len(llm_result.get("tool_results", [])),
         })
+        # Update thread.json with completed status
+        thread_dir = project_path / ".ai" / "threads"
+        _write_thread_meta_atomic(
+            thread_dir=thread_dir,
+            thread_id=thread_id,
+            directive_name=directive_name,
+            status="completed",
+            created_at=thread_created_at,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            model=model_id,
+            cost=harness.cost.to_dict(),
+        )
     except Exception as e:
         logger.warning(f"Failed to update registry on completion: {e}")
 

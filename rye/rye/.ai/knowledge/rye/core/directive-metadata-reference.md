@@ -191,18 +191,7 @@ Each item type element contains a capability path that identifies the specific r
 </permissions>
 ```
 
-**Backward compatibility:**
-
-The legacy `<cap>` format is still supported during the transition period:
-
-```xml
-<permissions>
-  <cap>rye.execute.tool.rye.file-system.*</cap>
-  <cap>rye.execute.tool.rye.agent.capabilities.primitives.git</cap>
-</permissions>
-```
-
-The system accepts both formats but the hierarchical format is preferred. The `<cap>` format will emit deprecation warnings.
+**Note:** The legacy `<cap>` format has been removed. Use the hierarchical format shown above.
 
 ### `<cost>`
 

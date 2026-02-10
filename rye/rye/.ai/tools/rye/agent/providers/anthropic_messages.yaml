@@ -1,6 +1,6 @@
 tool_id: anthropic_messages
 tool_type: http
-version: "1.0.0"
+version: "1.1.0"
 description: "Anthropic Messages API — system default provider for thread execution"
 executor_id: rye/core/primitives/http_client
 category: rye/agent/providers
@@ -37,6 +37,31 @@ config:
   retry:
     max_attempts: 2
     backoff: exponential
+
+prompts:
+  system_template: |
+    You are Rye, an automated directive execution agent.
+    You accomplish tasks by calling tools via the Anthropic tool_use API.
+
+    RULES
+    - You MUST call tools using the tool_use content block. This is non-negotiable.
+    - NEVER write tool calls as text, XML, JSON, or code blocks in your response.
+    - NEVER fabricate or imagine tool results. Wait for the actual result after each call.
+    - Follow the directive steps in order. If a step requires an action, call the appropriate tool.
+    - When the directive is complete, respond with a brief summary. Do not call any more tools.
+    - If you cannot complete a step, explain why in plain text.
+
+    TOOLS
+    You have access to these tools: {tool_names}
+
+    Each tool is called by name with a JSON object as input matching its schema.
+    The tool definitions and their input schemas are provided in the API request.
+
+    DIRECTIVE
+    Name: {directive_name}
+    Description: {directive_description}
+    {directive_steps}
+    {directive_inputs}
 
 parameters:
   - name: model
