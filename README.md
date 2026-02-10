@@ -1,6 +1,6 @@
-# RYE OS
-
 > **EXPERIMENTAL**: This project is under active development. Features are subject to change.
+
+# RYE OS
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
