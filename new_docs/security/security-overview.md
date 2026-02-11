@@ -28,6 +28,7 @@ RYE recognizes three trust levels:
 | Threat                        | Mitigation                                                                                             |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Content tampering             | SHA256 content hash embedded in signature; recomputed and compared on every verification               |
+| Chain element drift           | Per-element integrity hashes in lockfiles detect changes to any tool in the resolution chain           |
 | Provenance forgery            | Ed25519 signatures bind content to a specific keypair; key must be in trust store                      |
 | Capability escalation         | Capability tokens scoped to directive-declared permissions; child threads can only narrow, never widen |
 | Prompt/shell injection        | Two-pass template substitution with `shlex.quote()` escaping for all shell-unsafe values               |
@@ -36,9 +37,10 @@ RYE recognizes three trust levels:
 
 ## Related Documents
 
-- [Content Signing](content-signing.md) — signature format, verification flow, enforcement points
+- [Content Signing](content-signing.md) — signature format, verification flow, enforcement points, lockfile chain integrity
 - [Keys and Trust](keys-and-trust.md) — keypair management, trust store API, cryptographic primitives
 - [TOFU Registry Pinning](tofu-registry-pinning.md) — registry key pinning and provenance verification
 - [Capability Tokens](capability-tokens.md) — permission declarations, token minting, attenuation
 - [Agent Thread Safety](agent-thread-safety.md) — safety harness, limit enforcement, runtime guards
 - [Injection Hardening](injection-hardening.md) — template substitution, shell escaping, input sanitization
+- [Lockfile Format](../reference/file-formats/lockfile-format.md) — lockfile structure, per-element integrity, portability

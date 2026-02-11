@@ -183,6 +183,38 @@ class PrimitiveExecutor:
                                 duration_ms=(time.time() - start_time) * 1000,
                             )
 
+                        for entry in lockfile.resolved_chain:
+                            entry_id = entry.get("item_id")
+                            entry_space = entry.get("space", "project")
+                            entry_integrity = entry.get("integrity")
+                            if not entry_id or not entry_integrity:
+                                continue
+                            resolved = self._resolve_tool_path(entry_id, entry_space)
+                            if not resolved:
+                                return ExecutionResult(
+                                    success=False,
+                                    error=(
+                                        f"Lockfile chain element not found: {entry_id} "
+                                        f"(space: {entry_space}). Delete stale lockfile."
+                                    ),
+                                    duration_ms=(time.time() - start_time) * 1000,
+                                )
+                            entry_content = resolved[0].read_text(encoding="utf-8")
+                            entry_hash = MetadataManager.compute_hash(
+                                ItemType.TOOL, entry_content,
+                                file_path=resolved[0],
+                                project_path=self.project_path,
+                            )
+                            if entry_hash != entry_integrity:
+                                return ExecutionResult(
+                                    success=False,
+                                    error=(
+                                        f"Lockfile integrity mismatch for chain element "
+                                        f"{entry_id}. Re-sign and delete stale lockfile."
+                                    ),
+                                    duration_ms=(time.time() - start_time) * 1000,
+                                )
+
             # 2. Build the executor chain
             chain = await self._build_chain(item_id)
 
@@ -547,13 +579,28 @@ class PrimitiveExecutor:
         return self.chain_validator.validate_chain(chain_dicts)
 
     def _chain_element_to_dict(self, element: ChainElement) -> Dict[str, Any]:
-        """Convert ChainElement to dict for validation/serialization."""
+        """Convert ChainElement to dict for validation/serialization.
+
+        Stores item_id + space (portable) instead of absolute path.
+        Includes integrity hash for each element.
+        """
+        integrity = None
+        try:
+            content = element.path.read_text(encoding="utf-8")
+            integrity = MetadataManager.compute_hash(
+                ItemType.TOOL, content,
+                file_path=element.path,
+                project_path=self.project_path,
+            )
+        except Exception:
+            pass
+
         return {
             "item_id": element.item_id,
-            "path": str(element.path),
             "space": element.space,
             "tool_type": element.tool_type,
             "executor_id": element.executor_id,
+            "integrity": integrity,
         }
 
     def _resolve_chain_env(self, chain: List[ChainElement]) -> Dict[str, str]:

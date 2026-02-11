@@ -106,6 +106,29 @@ On success, `verify_item()` returns the verified content hash.
 | [`rye/rye/tools/search.py`](rye/rye/tools/search.py)                                                                 | During metadata extraction for results    | Non-blocking — sets `signed: false` on failure, does not prevent listing |
 | [`rye/rye/.ai/tools/rye/agent/threads/thread_directive.py`](rye/rye/.ai/tools/rye/agent/threads/thread_directive.py) | Before parsing directive for agent thread | Blocking — returns `None` on failure, thread cannot start                |
 
+## Lockfile Chain Integrity
+
+In addition to `verify_item()` (which checks Ed25519 signatures at execution time), lockfiles store a per-element integrity hash for change detection between lockfile creation and subsequent use.
+
+When a lockfile is created after successful execution, `MetadataManager.compute_hash()` is called for every chain element, and the resulting SHA256 hashes are stored in each `resolved_chain` entry's `integrity` field.
+
+On lockfile load, the executor re-resolves each chain element by `item_id` + `space` and recomputes the hash. If any element's hash differs from the stored value, execution is blocked:
+
+```
+Lockfile integrity mismatch for chain element {item_id}. Re-sign and delete stale lockfile.
+```
+
+This is a **separate check** from Ed25519 signature verification:
+
+| Check              | When                        | What It Detects                                   | Module           |
+| ------------------ | --------------------------- | ------------------------------------------------- | ---------------- |
+| Ed25519 signature  | Every execution             | Tampering, unsigned content, untrusted keys       | `verify_item()`  |
+| Lockfile integrity | When lockfile exists        | Any content change since lockfile was generated    | `execute()`      |
+
+Both checks must pass. The lockfile check runs first (before chain building), and Ed25519 verification runs after chain building for every element.
+
+See [Lockfile Format](../reference/file-formats/lockfile-format.md) for the full format specification.
+
 ## Legacy Format Rejection
 
 The old `rye:validated:` and `kiwi-mcp:validated:` signature formats are rejected entirely. When `verify_item()` finds a signature without the `ed25519_sig` field, it raises:
