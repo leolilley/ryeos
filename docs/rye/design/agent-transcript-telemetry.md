@@ -120,10 +120,10 @@ takes precedence over `default_directive`.
 | Event Type            | When                           | Payload                                                   |
 | --------------------- | ------------------------------ | --------------------------------------------------------- |
 | `thread_start`        | Thread begins                  | `inputs`, `model`, `provider`, `thread_mode`              |
-| `user_message`        | System/user prompt sent to LLM | `text`, `role`                                            |
+| `cognition_in`        | Context/prompt sent to LLM     | `text`, `role`                                            |
 | `step_start`          | LLM roundtrip begins           | `turn_number`                                             |
-| `assistant_text`      | Assistant text response        | `text`                                                    |
-| `assistant_reasoning` | Thinking/CoT (if available)    | `text`                                                    |
+| `cognition_out`       | LLM-generated text response    | `text`                                                    |
+| `cognition_reasoning` | Thinking/CoT (if available)    | `text`                                                    |
 | `tool_call_start`     | Tool invocation begins         | `tool`, `call_id`, `input`                                |
 | `tool_call_result`    | Tool invocation completes      | `call_id`, `output`, `error?`, `duration_ms`              |
 | `step_finish`         | LLM roundtrip done             | `cost`, `tokens`, `finish_reason`                         |
@@ -143,7 +143,7 @@ transcript.write_event(thread_id, "thread_start", {
 })
 
 # 2. System prompt sent
-transcript.write_event(thread_id, "user_message", {
+transcript.write_event(thread_id, "cognition_in", {
     "text": system_prompt, "role": "system",
 })
 
@@ -153,7 +153,7 @@ transcript.write_event(thread_id, "step_start", {
 })
 
 # 4. After LLM response text
-transcript.write_event(thread_id, "assistant_text", {
+transcript.write_event(thread_id, "cognition_out", {
     "text": llm_result["text"],
 })
 
@@ -239,11 +239,11 @@ class TranscriptWriter:
                     f"**Model:** {event.get('model', '')}\n"
                     f"**Started:** {event.get('ts', '')}\n\n---\n\n"
                 )
-            case "user_message":
-                role = event.get("role", "user").title()
+            case "cognition_in":
+                role = event.get("role", "system").title()
                 return f"## {role}\n\n{event.get('text', '')}\n\n---\n\n"
-            case "assistant_text":
-                return f"## Assistant\n\n{event.get('text', '')}\n\n"
+            case "cognition_out":
+                return f"## Cognition\n\n{event.get('text', '')}\n\n"
             case "assistant_reasoning":
                 return f"_Thinking:_\n\n{event.get('text', '')}\n\n"
             case "tool_call_start":
@@ -354,7 +354,7 @@ Reads an existing `transcript.jsonl` and produces markdown. Useful for:
 class TranscriptOptions:
     thinking: bool = False
     tool_details: bool = True
-    assistant_metadata: bool = True
+    show_cognition_headers: bool = True
 
 class TranscriptRenderer:
     def __init__(self, options: TranscriptOptions = None):
@@ -391,13 +391,13 @@ class TranscriptRenderer:
                     f"**Model:** {event.get('model', '')}\n"
                     f"**Started:** {event.get('ts', '')}\n\n---\n\n"
                 )
-            case "user_message":
-                role = event.get("role", "user").title()
+            case "cognition_in":
+                role = event.get("role", "system").title()
                 return f"## {role}\n\n{event.get('text', '')}\n\n---\n\n"
-            case "assistant_text":
+            case "cognition_out":
                 text = event.get('text', '')
-                if self.options.assistant_metadata:
-                    return f"## Assistant\n\n{text}\n\n"
+                if self.options.show_cognition_headers:
+                    return f"## Cognition\n\n{text}\n\n"
                 return f"{text}\n\n"
             case "tool_call_start":
                 if not self.options.tool_details:
@@ -725,17 +725,17 @@ class TestTranscriptWriterJSONL:
 
     def test_event_envelope_has_required_fields(self, writer, thread_dir):
         """Every event has ts, type, thread_id, directive."""
-        writer.write_event(THREAD_ID, "assistant_text", {"text": "Hello"})
+        writer.write_event(THREAD_ID, "cognition_out", {"text": "Hello"})
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         event = json.loads(jsonl_path.read_text().strip())
         assert "ts" in event
-        assert event["type"] == "assistant_text"
+        assert event["type"] == "cognition_out"
         assert event["thread_id"] == THREAD_ID
         assert event["directive"] == "test_agent"
 
     def test_directive_from_data_overrides_default(self, writer, thread_dir):
         """directive in data takes precedence over default_directive."""
-        writer.write_event(THREAD_ID, "assistant_text", {
+        writer.write_event(THREAD_ID, "cognition_out", {
             "text": "Hi", "directive": "custom_directive",
         })
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
@@ -746,19 +746,19 @@ class TestTranscriptWriterJSONL:
         """ValueError raised when no directive provided."""
         writer = TranscriptWriter(thread_dir, auto_markdown=False)  # no default_directive
         with pytest.raises(ValueError, match="missing 'directive'"):
-            writer.write_event(THREAD_ID, "assistant_text", {"text": "Hi"})
+            writer.write_event(THREAD_ID, "cognition_out", {"text": "Hi"})
 
     def test_multiple_events_append(self, writer, thread_dir):
         """Multiple write_event calls append to same file."""
         writer.write_event(THREAD_ID, "thread_start", {"directive": "test"})
-        writer.write_event(THREAD_ID, "user_message", {"text": "hi", "role": "user"})
-        writer.write_event(THREAD_ID, "assistant_text", {"text": "hello"})
+        writer.write_event(THREAD_ID, "cognition_in", {"text": "Process this", "role": "system"})
+        writer.write_event(THREAD_ID, "cognition_out", {"text": "Processing complete"})
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         lines = [l for l in jsonl_path.read_text().strip().split("\n") if l]
         assert len(lines) == 3
         assert json.loads(lines[0])["type"] == "thread_start"
-        assert json.loads(lines[1])["type"] == "user_message"
-        assert json.loads(lines[2])["type"] == "assistant_text"
+        assert json.loads(lines[1])["type"] == "cognition_in"
+        assert json.loads(lines[2])["type"] == "cognition_out"
 
     def test_creates_directory_if_missing(self, writer, thread_dir):
         """Thread subdirectory is created automatically."""
@@ -790,9 +790,9 @@ class TestTranscriptWriterMarkdown:
         md_path = thread_dir / THREAD_ID / "transcript.md"
         assert not md_path.exists()
 
-    def test_markdown_user_message(self, writer, thread_dir):
-        """user_message renders as ## System/User heading."""
-        writer.write_event(THREAD_ID, "user_message", {
+    def test_markdown_cognition_in(self, writer, thread_dir):
+        """cognition_in renders as ## System heading."""
+        writer.write_event(THREAD_ID, "cognition_in", {
             "text": "Do something", "role": "system",
         })
         md_path = thread_dir / THREAD_ID / "transcript.md"
@@ -800,12 +800,12 @@ class TestTranscriptWriterMarkdown:
         assert "## System" in content
         assert "Do something" in content
 
-    def test_markdown_assistant_text(self, writer, thread_dir):
-        """assistant_text renders as ## Assistant heading."""
-        writer.write_event(THREAD_ID, "assistant_text", {"text": "I'll help"})
+    def test_markdown_cognition_out(self, writer, thread_dir):
+        """cognition_out renders as ## Cognition heading."""
+        writer.write_event(THREAD_ID, "cognition_out", {"text": "I'll help"})
         md_path = thread_dir / THREAD_ID / "transcript.md"
         content = md_path.read_text()
-        assert "## Assistant" in content
+        assert "## Cognition" in content
         assert "I'll help" in content
 
     def test_markdown_tool_call(self, writer, thread_dir):
@@ -875,7 +875,7 @@ class TestTranscriptWriterMarkdown:
     def test_markdown_appends_incrementally(self, writer, thread_dir):
         """Each event appends to existing .md file."""
         writer.write_event(THREAD_ID, "thread_start", {"directive": "test"})
-        writer.write_event(THREAD_ID, "assistant_text", {"text": "Hello"})
+        writer.write_event(THREAD_ID, "cognition_out", {"text": "Hello"})
         writer.write_event(THREAD_ID, "thread_complete", {
             "cost": {"turns": 1, "tokens": 100, "spend": 0.001, "duration_seconds": 1.5},
         })
@@ -899,7 +899,7 @@ class TestJSONLIntegrity:
         jsonl_path.write_text(
             '{"ts":"2026-01-01T00:00:00","type":"thread_start","directive":"test"}\n'
             'THIS IS NOT JSON\n'
-            '{"ts":"2026-01-01T00:00:01","type":"assistant_text","text":"hello"}\n'
+            '{"ts":"2026-01-01T00:00:01","type":"cognition_out","text":"hello"}\n'
             '\n'
             '{"broken json\n'
         )
@@ -918,7 +918,7 @@ class TestJSONLIntegrity:
                     continue
         assert len(events) == 2
         assert events[0]["type"] == "thread_start"
-        assert events[1]["type"] == "assistant_text"
+        assert events[1]["type"] == "cognition_out"
 
     def test_read_events_skips_missing_envelope_fields(self, thread_dir):
         """Lines missing required ts/type fields are skipped."""
@@ -1046,8 +1046,8 @@ class TestTranscriptRenderer:
         jsonl_path.write_text(
             '{"ts":"2026-02-09T04:03:50Z","type":"thread_start",'
             '"thread_id":"hello_world-1739012630","directive":"hello_world","model":"haiku"}\n'
-            '{"ts":"2026-02-09T04:03:51Z","type":"user_message","text":"Hi","role":"user"}\n'
-            '{"ts":"2026-02-09T04:03:52Z","type":"assistant_text","text":"Hello!"}\n'
+            '{"ts":"2026-02-09T04:03:51Z","type":"cognition_in","text":"Hi","role":"system"}\n'
+            '{"ts":"2026-02-09T04:03:52Z","type":"cognition_out","text":"Hello!"}\n'
             '{"ts":"2026-02-09T04:03:53Z","type":"thread_complete",'
             '"cost":{"turns":1,"tokens":100,"spend":0.001,"duration_seconds":3.0}}\n'
         )
@@ -1063,8 +1063,8 @@ class TestTranscriptRenderer:
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         jsonl_path.parent.mkdir(parents=True)
         jsonl_path.write_text(
-            '{"ts":"T","type":"assistant_reasoning","text":"Let me think..."}\n'
-            '{"ts":"T","type":"assistant_text","text":"Answer is 42"}\n'
+            '{"ts":"T","type":"cognition_reasoning","text":"Let me think..."}\n'
+            '{"ts":"T","type":"cognition_out","text":"Answer is 42"}\n'
         )
         events = [json.loads(l) for l in jsonl_path.read_text().strip().split("\n")]
         # With thinking=False, filter out assistant_reasoning

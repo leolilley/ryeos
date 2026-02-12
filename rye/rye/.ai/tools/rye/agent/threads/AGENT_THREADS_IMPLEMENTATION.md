@@ -10,14 +10,14 @@ Complete implementation of multi-turn conversation, multi-agent coordination, an
 
 This implementation follows the design from `docs/rye/design/agent-threads-future.md` with 6 phases:
 
-| Phase | Component | Status | Tests |
-|-------|-----------|--------|-------|
-| **1** | Core helpers | ✅ Done | 11 |
-| **2** | Conversation mode | ✅ Done | 6 |
-| **3** | Human approval flow | ✅ Done | 17 |
-| **4** | Thread channels | ✅ Done | 20 |
-| **5** | TranscriptWatcher | ✅ Done | 17 |
-| **6** | Integration tests | ✅ Done | 8 |
+| Phase | Component           | Status  | Tests |
+| ----- | ------------------- | ------- | ----- |
+| **1** | Core helpers        | ✅ Done | 11    |
+| **2** | Conversation mode   | ✅ Done | 6     |
+| **3** | Human approval flow | ✅ Done | 17    |
+| **4** | Thread channels     | ✅ Done | 20    |
+| **5** | TranscriptWatcher   | ✅ Done | 17    |
+| **6** | Integration tests   | ✅ Done | 8     |
 
 ---
 
@@ -41,6 +41,7 @@ save_state(thread_id, harness, project_path)
 Reconstructs LLM message history from `transcript.jsonl` using provider-specific configuration.
 
 **Key feature:** Data-driven reconstruction (no Anthropic hardcoding)
+
 - Provider YAML defines message field mappings
 - Function reads `provider_config['message_reconstruction']` section
 - Supports any provider (Anthropic, OpenAI, etc.)
@@ -58,6 +59,7 @@ messages = rebuild_conversation_from_transcript(
 Executes LLM with tool-use loop, accepting pre-built messages (enabling conversation continuation).
 
 Refactored from `thread_directive._run_tool_use_loop` with:
+
 - Pre-built messages input (instead of system/user prompts)
 - Cost tracking via harness
 - Transcript event emission
@@ -149,6 +151,7 @@ File-based approval request/response pattern for deployment gates.
 ### Classes
 
 **`ApprovalRequest`**
+
 ```python
 req = ApprovalRequest(
     request_id="approval-1739012650",
@@ -160,6 +163,7 @@ req.to_dict()  # Serialize to JSON
 ```
 
 **`ApprovalResponse`**
+
 ```python
 resp = ApprovalResponse(
     approved=True,
@@ -171,22 +175,27 @@ resp = ApprovalResponse(
 ### Functions
 
 **`request_approval(thread_id, prompt, project_path, timeout_seconds=300)`**
+
 - Creates `.request.json` file
 - Returns request_id for polling
 
 **`wait_for_approval(request_id, thread_id, project_path, timeout_seconds=None)`**
+
 - Blocking poll for response
 - Raises TimeoutError if timeout exceeded
 - Returns response dict when available
 
 **`poll_approval(request_id, thread_id, project_path)`**
+
 - Non-blocking check for response
 - Returns None if not yet answered
 
 **`write_approval_response(request_id, thread_id, approved, message, project_path)`**
+
 - Approvers/testers write response files
 
 **`list_pending_approvals(thread_id, project_path)`**
+
 - List all unanswered requests for a thread
 
 **Tests:** `test_approval_flow.py` (17 tests)
@@ -208,6 +217,7 @@ Multi-agent coordination with turn-based protocols.
 ### Classes
 
 **`ThreadChannelState`**
+
 ```python
 state = ThreadChannelState(
     channel_id="workflow-123",
@@ -226,26 +236,32 @@ state = ThreadChannelState(
 ### Functions
 
 **`create_channel(channel_id, members, project_path, turn_protocol="round_robin")`**
+
 - Initialize channel with members
 - Support round_robin and on_demand protocols
 
 **`get_channel_state(channel_id, project_path)` / `save_channel_state(state, project_path)`**
+
 - Load/persist channel state
 
 **`advance_turn_round_robin(channel_state)`**
+
 - Move to next member in round-robin
 - Increment turn_count
 
 **`can_write_to_channel(origin_thread_id, channel_state)`**
+
 - Check if thread has permission to write
 - round_robin: only current_turn holder
 - on_demand: any member
 
 **`write_to_channel(channel_id, origin_thread_id, message, project_path, auto_advance=True)`**
+
 - Write message to channel transcript
 - Auto-advance turn for round_robin
 
 **`read_channel_transcript(channel_id, project_path, limit=None)`**
+
 - Read messages from channel transcript
 
 ### Channel State Structure
@@ -255,8 +271,8 @@ state = ThreadChannelState(
   "channel_id": "workflow-123",
   "thread_mode": "channel",
   "members": [
-    {"thread_id": "planner-1", "directive": "plan"},
-    {"thread_id": "coder-1", "directive": "code"}
+    { "thread_id": "planner-1", "directive": "plan" },
+    { "thread_id": "coder-1", "directive": "code" }
   ],
   "turn_protocol": "round_robin",
   "turn_order": ["planner-1", "coder-1"],
@@ -280,6 +296,7 @@ File-based incremental polling of transcript.jsonl entries.
 ### Classes
 
 **`TranscriptWatcher`**
+
 - Watches a single thread's transcript
 - Tracks file position for incremental reads
 - No re-reading of entire file on each poll
@@ -298,6 +315,7 @@ new_events = watcher.poll()  # 3 events (only new)
 ```
 
 **`MultiThreadWatcher`**
+
 - Watch multiple threads simultaneously
 - Poll all threads at once
 
@@ -319,12 +337,14 @@ results = multi.poll_all()
 ### Methods
 
 **`TranscriptWatcher`**
+
 - `poll()` — Get new events since last position
 - `reset_position()` — Seek to beginning
 - `seek_to_end()` — Skip all existing events (follow mode)
 - `get_position()` — Current file position
 
 **`MultiThreadWatcher`**
+
 - `watch(thread_id)` — Register thread for monitoring
 - `unwatch(thread_id)` — Stop monitoring
 - `poll_all()` — Poll all watched threads

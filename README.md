@@ -320,6 +320,7 @@ The LLM translates this to:
 When you execute `mcp/context7/search`, the chain resolves based on transport:
 
 **HTTP Transport:**
+
 ```
 mcp/context7/search (MCP tool YAML config)
     ↓ __executor_id__ = "rye/core/runtimes/mcp_http_runtime"
@@ -331,6 +332,7 @@ Execute via Lilux
 ```
 
 **stdio Transport:**
+
 ```
 mcp/local-script/analyze (MCP tool YAML config)
     ↓ __executor_id__ = "rye/core/runtimes/mcp_stdio_runtime"

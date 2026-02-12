@@ -43,6 +43,15 @@ EXTRACTION_RULES = {
     "content": {"type": "path", "key": "content"},
 }
 
+# Search field weights for scoring (loaded by SearchTool via AST)
+SEARCH_FIELDS = {
+    "title": 3.0,
+    "name": 3.0,
+    "description": 2.0,
+    "category": 1.5,
+    "content": 1.0,
+}
+
 # Validation schema - defines required fields and their types
 VALIDATION_SCHEMA = {
     "fields": {

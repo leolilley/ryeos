@@ -16,7 +16,6 @@ def temp_project():
         project_root = Path(tmpdir)
         ai_dir = project_root / ".ai"
 
-        # Create directives
         directives_dir = ai_dir / "directives"
         directives_dir.mkdir(parents=True)
         (directives_dir / "create_tool.md").write_text(
@@ -30,12 +29,10 @@ def temp_project():
             '</directive>'
         )
 
-        # Create tools
         tools_dir = ai_dir / "tools"
         tools_dir.mkdir(parents=True)
         (tools_dir / "scraper.py").write_text('# Tool scraper\n' "# version=1.0.0")
 
-        # Create knowledge
         knowledge_dir = ai_dir / "knowledge"
         knowledge_dir.mkdir(parents=True)
         (knowledge_dir / "api_patterns.md").write_text(
@@ -50,7 +47,6 @@ class TestSearchTool:
     """Test search tool."""
 
     async def test_search_directives(self, temp_project):
-        """Search for directives."""
         tool = SearchTool("")
         result = await tool.handle(
             item_type="directive",
@@ -59,12 +55,11 @@ class TestSearchTool:
             source="project",
         )
 
-        assert result["status"] == "success"
+        assert "error" not in result
         assert result["total"] >= 1
         assert any(r["name"] == "create_tool" for r in result["results"])
 
     async def test_search_tools(self, temp_project):
-        """Search for tools."""
         tool = SearchTool("")
         result = await tool.handle(
             item_type="tool",
@@ -73,11 +68,10 @@ class TestSearchTool:
             source="project",
         )
 
-        assert result["status"] == "success"
+        assert "error" not in result
         assert result["total"] >= 1
 
     async def test_search_knowledge(self, temp_project):
-        """Search for knowledge entries."""
         tool = SearchTool("")
         result = await tool.handle(
             item_type="knowledge",
@@ -86,11 +80,10 @@ class TestSearchTool:
             source="project",
         )
 
-        assert result["status"] == "success"
+        assert "error" not in result
         assert result["total"] >= 1
 
     async def test_search_empty_query(self, temp_project):
-        """Search with empty query returns all."""
         tool = SearchTool("")
         result = await tool.handle(
             item_type="directive",
@@ -99,11 +92,10 @@ class TestSearchTool:
             source="project",
         )
 
-        assert result["status"] == "success"
+        assert "error" not in result
         assert result["total"] >= 2
 
     async def test_search_with_limit(self, temp_project):
-        """Respect limit parameter."""
         tool = SearchTool("")
         result = await tool.handle(
             item_type="directive",
@@ -113,11 +105,10 @@ class TestSearchTool:
             limit=1,
         )
 
-        assert result["status"] == "success"
+        assert "error" not in result
         assert len(result["results"]) <= 1
 
     async def test_search_nonexistent_project(self):
-        """Handle nonexistent project path."""
         tool = SearchTool("")
         result = await tool.handle(
             item_type="directive",
@@ -126,5 +117,118 @@ class TestSearchTool:
             source="project",
         )
 
-        assert result["status"] == "success"
+        assert "error" not in result
         assert result["total"] == 0
+
+    async def test_boolean_or(self, temp_project):
+        tool = SearchTool("")
+        result = await tool.handle(
+            item_type="directive",
+            query="create OR bootstrap",
+            project_path=str(temp_project),
+            source="project",
+        )
+
+        assert "error" not in result
+        assert result["total"] >= 2
+
+    async def test_boolean_not(self, temp_project):
+        tool = SearchTool("")
+        result = await tool.handle(
+            item_type="directive",
+            query="NOT bootstrap",
+            project_path=str(temp_project),
+            source="project",
+        )
+
+        assert "error" not in result
+        assert all(
+            "bootstrap" not in r.get("name", "") for r in result["results"]
+        )
+
+    async def test_phrase_search(self, temp_project):
+        tool = SearchTool("")
+        result = await tool.handle(
+            item_type="directive",
+            query='"Create a new tool"',
+            project_path=str(temp_project),
+            source="project",
+        )
+
+        assert "error" not in result
+        assert result["total"] >= 1
+
+    async def test_wildcard_search(self, temp_project):
+        tool = SearchTool("")
+        result = await tool.handle(
+            item_type="directive",
+            query="boot*",
+            project_path=str(temp_project),
+            source="project",
+        )
+
+        assert "error" not in result
+        assert result["total"] >= 1
+
+    async def test_field_specific_search(self, temp_project):
+        tool = SearchTool("")
+        result = await tool.handle(
+            item_type="directive",
+            query="",
+            fields={"name": "bootstrap"},
+            project_path=str(temp_project),
+            source="project",
+        )
+
+        assert "error" not in result
+        assert result["total"] >= 1
+        assert result["results"][0]["name"] == "bootstrap"
+
+    async def test_pagination_offset(self, temp_project):
+        tool = SearchTool("")
+        all_results = await tool.handle(
+            item_type="directive",
+            query="",
+            project_path=str(temp_project),
+            source="project",
+            limit=100,
+        )
+        page2 = await tool.handle(
+            item_type="directive",
+            query="",
+            project_path=str(temp_project),
+            source="project",
+            limit=1,
+            offset=1,
+        )
+
+        assert page2["total"] == all_results["total"]
+        assert len(page2["results"]) <= 1
+
+    async def test_response_schema(self, temp_project):
+        tool = SearchTool("")
+        result = await tool.handle(
+            item_type="directive",
+            query="create",
+            project_path=str(temp_project),
+            source="project",
+        )
+
+        assert "results" in result
+        assert "total" in result
+        assert "query" in result
+        assert "item_type" in result
+        assert "source" in result
+        assert "limit" in result
+        assert "offset" in result
+        assert "search_type" in result
+        assert result["search_type"] == "keyword"
+
+        if result["results"]:
+            item = result["results"][0]
+            assert "id" in item
+            assert "type" in item
+            assert "score" in item
+            assert "preview" in item
+            assert "source" in item
+            assert "path" in item

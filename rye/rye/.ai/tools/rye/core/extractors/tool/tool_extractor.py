@@ -36,6 +36,15 @@ EXTRACTION_RULES = {
     "executor_id": {"type": "path", "key": "__executor_id__"},
 }
 
+# Search field weights for scoring (loaded by SearchTool via AST)
+SEARCH_FIELDS = {
+    "title": 3.0,
+    "name": 3.0,
+    "description": 2.0,
+    "category": 1.5,
+    "content": 1.0,
+}
+
 # Validation schema - enforces required fields per tool-metadata.md spec
 VALIDATION_SCHEMA = {
     "fields": {

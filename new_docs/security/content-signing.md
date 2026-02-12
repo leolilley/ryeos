@@ -129,6 +129,27 @@ Both checks must pass. The lockfile check runs first (before chain building), an
 
 See [Lockfile Format](../reference/file-formats/lockfile-format.md) for the full format specification.
 
+## Dynamic Dependency Verification
+
+`verify_item()` covers chain elements resolved via `__executor_id__`. However, signed tools often load dependencies dynamically — Python modules via `importlib`, JS files via `node_runtime`, YAML configs via `safe_load()`. These loads bypass the chain and are **not** verified by `PrimitiveExecutor`.
+
+The `verify_dependency()` function closes this gap. It is language-agnostic — it calls `verify_item()` before any load or execution of files under `.ai/tools/`, using `get_signature_format()` to resolve the correct comment prefix per file extension (data-driven from the tool extractor's `SIGNATURE_FORMAT` dict). See [App Bundling and Orchestration — Verified Loader](../concepts/app-bundling-and-orchestration.md#layer-1-verified-loader-for-dynamic-dependencies) for the implementation.
+
+| Verification Point | Module | What's Verified |
+|-------------------|--------|-----------------|
+| Chain resolution | `PrimitiveExecutor._build_chain()` | Files with `__executor_id__` |
+| Dynamic dependency | `verify_dependency()` | Any file under `.ai/tools/` loaded at runtime (`.py`, `.js`, `.sh`, `.yaml`, etc.) |
+| Directive load | `thread_directive._load_directive()` | Directive files |
+| Bundle asset load | `verify_bundle_manifest()` | App source, assets, config (any file type including non-code) |
+
+## Bundle Manifests
+
+For app bundles that include files where inline signatures are not possible (JSX, CSS, images, minified JS, binaries), a **signed bundle manifest** provides integrity coverage. The manifest lists `{relative_path: sha256}` for every file in the bundle and is itself signed with Ed25519.
+
+At load time, files are verified against either their inline signature or their manifest hash entry. Files covered by neither are rejected.
+
+See [App Bundling and Orchestration — Bundle Manifest](../concepts/app-bundling-and-orchestration.md#layer-2-bundle-manifest-for-app-assets) for the full specification.
+
 ## Legacy Format Rejection
 
 The old `rye:validated:` and `kiwi-mcp:validated:` signature formats are rejected entirely. When `verify_item()` finds a signature without the `ed25519_sig` field, it raises:

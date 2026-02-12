@@ -10,7 +10,7 @@
 2. **JSONL is the source of truth.** The transcript is the conversation state.
    Any process can reconstruct a thread by reading its files.
 3. **Project-local by default.** Thread data lives in `.ai/threads/`. User-space
-   threads (`~/.ai/threads/`) only when user-space directives need cross-project
+   threads (`{USER_SPACE}/.ai/threads/`) only when user-space directives need cross-project
    orchestration.
 4. **Data-driven control flow.** Thread coordination uses declarative state files,
    not imperative orchestration.
@@ -55,7 +55,7 @@ When a conversation thread completes a turn, it goes to `paused` instead of
   "thread_id": "planner-1739012630",
   "thread_mode": "conversation",
   "status": "paused",
-  "awaiting": "user",
+  "awaiting": "input",
   "turn_count": 3,
   "cost": { "...cumulative across all turns..." }
 }
@@ -87,9 +87,9 @@ async def continue_thread(
     meta["awaiting"] = None
     meta_path.write_text(json.dumps(meta, indent=2))
 
-    # Append new user message to transcript
+    # Append new cognition_in event to transcript
     transcript = TranscriptWriter(threads_dir, default_directive=meta.get("directive"))
-    transcript.write_event(thread_id, "user_message", {
+    transcript.write_event(thread_id, "cognition_in", {
         "text": message, "role": role,
     })
 
@@ -241,7 +241,7 @@ def rebuild_conversation_from_transcript(
         thread_id: Thread to reconstruct
         project_path: Project root
         provider_config: Loaded provider YAML (from _load_provider_config)
-    
+
     Raises:
         ValueError: If provider_config is missing 'message_reconstruction'
     """
@@ -267,12 +267,12 @@ def rebuild_conversation_from_transcript(
                 continue
 
             match event.get("type"):
-                case "user_message":
+                case "cognition_in":
                     messages.append({
-                        "role": event.get("role", "user"),
+                        "role": event.get("role", "system"),
                         "content": event["text"],
                     })
-                case "assistant_text":
+                case "cognition_out":
                     messages.append({
                         "role": "assistant",
                         "content": event["text"],
@@ -595,7 +595,11 @@ and write to. Coordination is managed by a `state.json` turn protocol.
     { "thread_id": "reviewer-1739012802", "directive": "review_code" }
   ],
   "turn_protocol": "round_robin",
-  "turn_order": ["planner-1739012630", "coder-1739012701", "reviewer-1739012802"],
+  "turn_order": [
+    "planner-1739012630",
+    "coder-1739012701",
+    "reviewer-1739012802"
+  ],
   "current_turn": "coder-1739012701",
   "turn_count": 5,
   "max_turns": 20
@@ -604,11 +608,11 @@ and write to. Coordination is managed by a `state.json` turn protocol.
 
 #### Turn Protocols
 
-| Protocol       | Behavior                                                                       |
-| -------------- | ------------------------------------------------------------------------------ |
-| `round_robin`  | Executions take turns in order, cycling through `turn_order`                   |
-| `on_demand`    | Any member execution can write at any time. No coordination.                   |
-| `reactive`     | Execution writes only when addressed by directive name in previous message.    |
+| Protocol       | Behavior                                                                           |
+| -------------- | ---------------------------------------------------------------------------------- |
+| `round_robin`  | Executions take turns in order, cycling through `turn_order`                       |
+| `on_demand`    | Any member execution can write at any time. No coordination.                       |
+| `reactive`     | Execution writes only when addressed by directive name in previous message.        |
 | `orchestrated` | A coordinating execution explicitly delegates to others via `@directive` mentions. |
 
 #### Channel Write
@@ -927,15 +931,15 @@ This mirrors how directives and tools already resolve: project → user → syst
 
 These build on each other. Each phase is independently useful.
 
-| Phase | Capability                                    | Depends On                      |
-| ----- | --------------------------------------------- | ------------------------------- |
-| **A** | Multi-turn conversations (`continue_thread`)  | `state.json`, rich transcripts  |
-| **B** | Async/await thread execution (`ThreadHandle`) | `thread.json` status updates    |
+| Phase | Capability                                           | Depends On                       |
+| ----- | ---------------------------------------------------- | -------------------------------- |
+| **A** | Multi-turn conversations (`continue_thread`)         | `state.json`, rich transcripts   |
+| **B** | Async/await thread execution (`ThreadHandle`)        | `thread.json` status updates     |
 | **C** | Shared transcript reading (cross-thread observation) | `directive` + `origin` on events |
-| **D** | Human-in-the-loop (approval gates via hooks)  | Hook system, file-based signals   |
-| **E** | Thread channels (multi-thread coordination)   | `state.json` turn protocol        |
-| **F** | Reactive executions (file polling)             | Channels                          |
-| **G** | User-space threads                            | Resolution order refactor       |
+| **D** | Human-in-the-loop (approval gates via hooks)         | Hook system, file-based signals  |
+| **E** | Thread channels (multi-thread coordination)          | `state.json` turn protocol       |
+| **F** | Reactive executions (file polling)                   | Channels                         |
+| **G** | User-space threads                                   | Resolution order refactor        |
 
 ## Test Specifications
 
@@ -1052,15 +1056,15 @@ class TestContinueThread:
 class TestConversationReconstruction:
     """Tests for rebuilding LLM conversation from transcript events."""
 
-    def test_reconstruct_user_and_assistant(self, thread_dir):
-        """Reconstructs user_message and assistant_text."""
+    def test_reconstruct_cognition_in_and_out(self, thread_dir):
+        """Reconstructs cognition_in and cognition_out."""
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         jsonl_path.parent.mkdir(parents=True)
         jsonl_path.write_text(
-            '{"ts":"T","type":"user_message","role":"user","text":"Hello"}\n'
-            '{"ts":"T","type":"assistant_text","text":"Hi there"}\n'
-            '{"ts":"T","type":"user_message","role":"user","text":"Help me"}\n'
-            '{"ts":"T","type":"assistant_text","text":"Sure"}\n'
+            '{"ts":"T","type":"cognition_in","role":"system","text":"Hello"}\n'
+            '{"ts":"T","type":"cognition_out","text":"Hi there"}\n'
+            '{"ts":"T","type":"cognition_in","role":"system","text":"Help me"}\n'
+            '{"ts":"T","type":"cognition_out","text":"Sure"}\n'
         )
         events = []
         messages = []
@@ -1070,12 +1074,12 @@ class TestConversationReconstruction:
                 if not line:
                     continue
                 event = json.loads(line)
-                if event["type"] == "user_message":
+                if event["type"] == "cognition_in":
                     messages.append({"role": event["role"], "content": event["text"]})
-                elif event["type"] == "assistant_text":
+                elif event["type"] == "cognition_out":
                     messages.append({"role": "assistant", "content": event["text"]})
         assert len(messages) == 4
-        assert messages[0] == {"role": "user", "content": "Hello"}
+        assert messages[0] == {"role": "system", "content": "Hello"}
         assert messages[1] == {"role": "assistant", "content": "Hi there"}
 
     def test_reconstruct_with_tool_calls_provider_driven(self, thread_dir):
@@ -1083,7 +1087,7 @@ class TestConversationReconstruction:
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         jsonl_path.parent.mkdir(parents=True)
         jsonl_path.write_text(
-            '{"ts":"T","type":"assistant_text","text":"I will read the file"}\n'
+            '{"ts":"T","type":"cognition_out","text":"I will read the file"}\n'
             '{"ts":"T","type":"tool_call_start","tool":"fs_read","call_id":"tc_1","input":{"path":"/x"}}\n'
             '{"ts":"T","type":"tool_call_result","call_id":"tc_1","output":"file contents"}\n'
         )
@@ -1115,7 +1119,7 @@ class TestConversationReconstruction:
             for line in f:
                 event = json.loads(line.strip())
                 match event.get("type"):
-                    case "assistant_text":
+                    case "cognition_out":
                         messages.append({"role": "assistant", "content": event["text"]})
                     case "tool_call_start":
                         tc = recon_config["tool_call"]
@@ -1173,11 +1177,11 @@ class TestConversationReconstruction:
         jsonl_path.write_text(
             '{"ts":"T","type":"thread_start","directive":"test"}\n'
             '{"ts":"T","type":"step_start","turn_number":1}\n'
-            '{"ts":"T","type":"user_message","role":"user","text":"Hi"}\n'
-            '{"ts":"T","type":"assistant_text","text":"Hello"}\n'
+            '{"ts":"T","type":"cognition_in","role":"system","text":"Hi"}\n'
+            '{"ts":"T","type":"cognition_out","text":"Hello"}\n'
             '{"ts":"T","type":"step_finish","cost":{},"tokens":{}}\n'
         )
-        message_types = {"user_message", "assistant_text", "tool_call_start", "tool_call_result"}
+        message_types = {"cognition_in", "cognition_out", "tool_call_start", "tool_call_result"}
         messages = []
         with open(jsonl_path) as f:
             for line in f:
@@ -1191,9 +1195,9 @@ class TestConversationReconstruction:
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         jsonl_path.parent.mkdir(parents=True)
         jsonl_path.write_text(
-            '{"ts":"T","type":"user_message","role":"user","text":"Hi"}\n'
+            '{"ts":"T","type":"cognition_in","role":"system","text":"Hi"}\n'
             'CORRUPT LINE\n'
-            '{"ts":"T","type":"assistant_text","text":"Hello"}\n'
+            '{"ts":"T","type":"cognition_out","text":"Hello"}\n'
         )
         messages = []
         with open(jsonl_path) as f:
@@ -1203,7 +1207,7 @@ class TestConversationReconstruction:
                     continue
                 try:
                     event = json.loads(line)
-                    if event.get("type") in ("user_message", "assistant_text"):
+                    if event.get("type") in ("cognition_in", "cognition_out"):
                         messages.append(event)
                 except json.JSONDecodeError:
                     continue
@@ -1302,7 +1306,7 @@ class TestThreadHandle:
         jsonl_path = thread_dir / THREAD_ID / "transcript.jsonl"
         jsonl_path.parent.mkdir(parents=True)
         events = [
-            {"ts": f"T{i}", "type": "assistant_text", "text": f"msg {i}"}
+            {"ts": f"T{i}", "type": "cognition_out", "text": f"msg {i}"}
             for i in range(10)
         ]
         jsonl_path.write_text(
@@ -1481,7 +1485,7 @@ class TestTranscriptWatcher:
         jsonl_path.parent.mkdir(parents=True)
         jsonl_path.write_text(
             '{"ts":"T1","type":"thread_start"}\n'
-            '{"ts":"T2","type":"assistant_text","text":"Hi"}\n'
+            '{"ts":"T2","type":"cognition_out","text":"Hi"}\n'
         )
         last_pos = 0
         with open(jsonl_path) as f:
@@ -1507,7 +1511,7 @@ class TestTranscriptWatcher:
 
         # Append more
         with open(jsonl_path, "a") as f:
-            f.write('{"ts":"T2","type":"assistant_text","text":"New"}\n')
+            f.write('{"ts":"T2","type":"cognition_out","text":"New"}\n')
 
         # Second poll
         with open(jsonl_path) as f:
@@ -1516,7 +1520,7 @@ class TestTranscriptWatcher:
             last_pos = f.tell()
         events = [json.loads(l.strip()) for l in new_lines if l.strip()]
         assert len(events) == 1
-        assert events[0]["type"] == "assistant_text"
+        assert events[0]["type"] == "cognition_out"
 
     def test_poll_empty_when_no_changes(self, thread_dir):
         """Poll returns empty list when no new events."""
