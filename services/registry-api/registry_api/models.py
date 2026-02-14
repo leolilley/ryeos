@@ -188,3 +188,35 @@ class VisibilityResponse(BaseModel):
     item_id: str
     visibility: str
     previous_visibility: str
+
+
+# Bundle Models
+
+
+class BundlePushRequest(BaseModel):
+    """Request body for pushing a bundle to the registry."""
+
+    bundle_id: str = Field(..., min_length=1, max_length=256)
+    version: Optional[str] = None
+    manifest: str = Field(..., min_length=1)
+    files: Dict[str, Any] = Field(..., description="Map of rel_path -> {content, sha256, inline_signed}")
+
+
+class BundlePushResponse(BaseModel):
+    """Response for successful bundle push."""
+
+    status: Literal["pushed"]
+    bundle_id: str
+    version: str
+    file_count: int
+
+
+class BundlePullResponse(BaseModel):
+    """Response for bundle pull."""
+
+    bundle_id: str
+    version: str
+    manifest: str
+    files: Dict[str, Any]
+    author: str
+    created_at: datetime

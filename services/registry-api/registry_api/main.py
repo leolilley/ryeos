@@ -26,6 +26,9 @@ from registry_api.config import Settings, get_settings
 from registry_api.models import (
     build_item_id,
     parse_item_id,
+    BundlePullResponse,
+    BundlePushRequest,
+    BundlePushResponse,
     DeleteResponse,
     HealthResponse,
     PullResponse,
@@ -669,6 +672,169 @@ async def search_items(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+# =============================================================================
+# BUNDLE PUSH - Upload a bundle (manifest + files)
+# =============================================================================
+
+
+@app.post("/v1/bundle/push", response_model=BundlePushResponse)
+async def push_bundle(
+    request: BundlePushRequest,
+    user: User = Depends(get_current_user),
+):
+    """Push a bundle to the registry.
+
+    Stores the signed manifest and all bundle files as a versioned unit.
+    The bundle_id is scoped to the authenticated user's namespace.
+    """
+    bundle_id = request.bundle_id
+    manifest = request.manifest
+    files = request.files
+
+    # Parse version from manifest if not provided
+    version = request.version
+    if not version:
+        try:
+            import yaml
+            manifest_data = yaml.safe_load(manifest)
+            version = manifest_data.get("bundle", {}).get("version", "0.1.0")
+        except Exception:
+            version = "0.1.0"
+
+    logger.info(f"Bundle push: {bundle_id} v{version} by @{user.username} ({len(files)} files)")
+
+    supabase = get_supabase()
+    namespace = user.username
+
+    await _ensure_user(user.id, user.username)
+
+    # Upsert bundle record
+    result = supabase.table("bundles").select("id").eq(
+        "namespace", namespace
+    ).eq("bundle_id", bundle_id).execute()
+
+    if result.data:
+        bundle_uuid = result.data[0]["id"]
+    else:
+        create_result = supabase.table("bundles").insert({
+            "bundle_id": bundle_id,
+            "namespace": namespace,
+            "name": bundle_id.split("/")[-1] if "/" in bundle_id else bundle_id,
+            "description": "",
+            "author_id": user.id,
+            "visibility": "private",
+        }).execute()
+        bundle_uuid = create_result.data[0]["id"]
+
+    # Mark existing versions as not latest
+    supabase.table("bundle_versions").update({"is_latest": False}).eq(
+        "bundle_id", bundle_uuid
+    ).execute()
+
+    # Compute content hash from manifest
+    import hashlib
+    content_hash = hashlib.sha256(manifest.encode()).hexdigest()
+
+    # Store files as JSONB (content + sha256 per path)
+    supabase.table("bundle_versions").insert({
+        "bundle_id": bundle_uuid,
+        "version": version,
+        "manifest": manifest,
+        "files": files,
+        "content_hash": content_hash,
+        "is_latest": True,
+    }).execute()
+
+    # Update latest_version
+    supabase.table("bundles").update({"latest_version": version}).eq(
+        "id", bundle_uuid
+    ).execute()
+
+    logger.info(f"Bundle published: {bundle_id} v{version}")
+
+    return BundlePushResponse(
+        status="pushed",
+        bundle_id=bundle_id,
+        version=version,
+        file_count=len(files),
+    )
+
+
+# =============================================================================
+# BUNDLE PULL - Download a bundle (manifest + files)
+# =============================================================================
+
+
+@app.get("/v1/bundle/pull/{bundle_id:path}", response_model=BundlePullResponse)
+async def pull_bundle(
+    bundle_id: str,
+    version: str = None,
+    namespace: str = None,
+    user: User = Depends(get_current_user),
+):
+    """Pull a bundle from the registry.
+
+    Returns the signed manifest and all bundle files.
+    If namespace is not specified, defaults to the authenticated user's namespace.
+    """
+    if not namespace:
+        namespace = user.username
+
+    supabase = get_supabase()
+
+    # Find bundle
+    result = supabase.table("bundles").select("*").eq(
+        "namespace", namespace
+    ).eq("bundle_id", bundle_id).execute()
+
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Bundle not found: {namespace}/{bundle_id}"},
+        )
+
+    bundle = result.data[0]
+    bundle_uuid = bundle["id"]
+
+    # Get versions
+    versions_result = supabase.table("bundle_versions").select("*").eq(
+        "bundle_id", bundle_uuid
+    ).order("created_at", desc=True).execute()
+
+    versions = versions_result.data or []
+    if not versions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"No versions found for bundle {bundle_id}"},
+        )
+
+    if version:
+        target = next((v for v in versions if v["version"] == version), None)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": f"Version {version} not found"},
+            )
+    else:
+        target = next((v for v in versions if v.get("is_latest")), versions[0])
+
+    # Increment download count
+    supabase.table("bundles").update({
+        "download_count": (bundle.get("download_count") or 0) + 1,
+    }).eq("id", bundle_uuid).execute()
+
+    author_username = await _get_author_username(bundle.get("author_id"))
+
+    return BundlePullResponse(
+        bundle_id=bundle_id,
+        version=target["version"],
+        manifest=target["manifest"],
+        files=target["files"],
+        author=author_username,
+        created_at=target["created_at"],
     )
 
 
