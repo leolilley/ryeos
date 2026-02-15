@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rye.constants import ItemType, AI_DIR
-from rye.utils.path_utils import get_project_type_path, get_system_type_path, get_user_space
+from rye.utils.path_utils import get_project_type_path, get_system_type_paths, get_user_space
 from rye.utils.extensions import get_tool_extensions
 from rye.utils.integrity import verify_item
 
@@ -91,7 +91,20 @@ class LoadTool:
         elif source == "user":
             base = Path(self.user_space) / AI_DIR / type_dir
         elif source == "system":
-            base = get_system_type_path(item_type)
+            # Get extensions data-driven from extractors
+            if item_type == ItemType.TOOL:
+                extensions = get_tool_extensions(Path(project_path) if project_path else None)
+            else:
+                extensions = [".md"]
+
+            for _root_id, base in get_system_type_paths(item_type):
+                if not base.exists():
+                    continue
+                for ext in extensions:
+                    file_path = base / f"{item_id}{ext}"
+                    if file_path.is_file():
+                        return file_path
+            return None
         else:
             return None
 

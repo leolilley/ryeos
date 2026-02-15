@@ -21,7 +21,7 @@ from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     extract_filename,
     get_project_type_path,
-    get_system_type_path,
+    get_system_type_paths,
     get_user_type_path,
 )
 from rye.utils.extensions import get_tool_extensions
@@ -55,7 +55,10 @@ class SignTool:
         elif source == "user":
             return get_user_type_path(item_type)
         elif source == "system":
-            return get_system_type_path(item_type)
+            for _root_id, p in get_system_type_paths(item_type):
+                if p.exists():
+                    return p
+            return None
         return None
 
     def _resolve_glob_items(
@@ -71,13 +74,24 @@ class SignTool:
         elif source == "user":
             base_dir = get_user_type_path(item_type)
         elif source == "system":
-            base_dir = get_system_type_path(item_type)
+            all_items = []
+            for _root_id, sys_dir in get_system_type_paths(item_type):
+                if not sys_dir.exists():
+                    continue
+                all_items.extend(self._glob_in_dir(sys_dir, item_type, pattern, project_path))
+            return all_items
         else:
             return []
 
         if not base_dir.exists():
             return []
 
+        return self._glob_in_dir(base_dir, item_type, pattern, project_path)
+
+    def _glob_in_dir(
+        self, base_dir: Path, item_type: str, pattern: str, project_path: str
+    ) -> List[Path]:
+        """Glob for items inside a single base directory."""
         if item_type == ItemType.TOOL:
             tool_extensions = get_tool_extensions(
                 Path(project_path) if project_path else None
@@ -418,7 +432,20 @@ class SignTool:
         elif source == "user":
             base = get_user_type_path(item_type)
         elif source == "system":
-            base = get_system_type_path(item_type)
+            # Get extensions data-driven from extractors
+            if item_type == ItemType.TOOL:
+                extensions = get_tool_extensions(Path(project_path) if project_path else None)
+            else:
+                extensions = [".md"]
+
+            for _root_id, base in get_system_type_paths(item_type):
+                if not base.exists():
+                    continue
+                for ext in extensions:
+                    file_path = base / f"{item_id}{ext}"
+                    if file_path.is_file():
+                        return file_path
+            return None
         else:
             return None
 

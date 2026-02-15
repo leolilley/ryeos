@@ -2,20 +2,16 @@
 
 Loads extensions from data-driven extractor tools across 3-tier space:
   1. Project: {project}/.ai/tools/rye/core/extractors/
-  2. User: ~/.ai/tools/rye/core/extractors/
+  2. User: {USER_SPACE}/.ai/tools/rye/core/extractors/
   3. System: site-packages/rye/.ai/tools/rye/core/extractors/
 """
 
+import ast
+import logging
 from pathlib import Path
 from typing import List, Optional
-import logging
-import ast
 
-from rye.utils.path_utils import (
-    get_user_space,
-    get_system_space,
-    get_extractor_search_paths,
-)
+from rye.utils.path_utils import get_extractor_search_paths
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +46,9 @@ def get_tool_extensions(
         if not extractors_dir.exists():
             continue
 
-        for file_path in list(extractors_dir.glob("**/*_extractor.yaml")) + list(extractors_dir.glob("**/*_extractor.py")):
+        for file_path in list(extractors_dir.glob("**/*_extractor.yaml")) + list(
+            extractors_dir.glob("**/*_extractor.py")
+        ):
             if file_path.name.startswith("_"):
                 continue
 
@@ -66,6 +64,7 @@ def _extract_extensions_from_file(file_path: Path) -> List[str]:
     """Extract EXTENSIONS list from an extractor file."""
     if file_path.suffix in (".yaml", ".yml"):
         import yaml
+
         try:
             data = yaml.safe_load(file_path.read_text())
             return data.get("extensions", []) if data else []

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rye.constants import AI_DIR
-from rye.utils.path_utils import get_user_space, get_system_space
+from rye.utils.path_utils import get_user_space, get_system_spaces
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +41,13 @@ class ParserRouter:
         if user_parsers.exists():
             paths.append(user_parsers)
 
-        # System parsers (bundled with rye in .ai/tools/rye/core/parsers/)
-        system_parsers = get_system_space() / AI_DIR / "tools" / "rye" / "core" / "parsers"
-        if system_parsers.exists():
-            paths.append(system_parsers)
+        # System parsers from all roots (lowest priority)
+        for bundle in get_system_spaces():
+            system_parsers = (
+                bundle.root_path / AI_DIR / "tools" / "rye" / "core" / "parsers"
+            )
+            if system_parsers.exists():
+                paths.append(system_parsers)
 
         return paths
 

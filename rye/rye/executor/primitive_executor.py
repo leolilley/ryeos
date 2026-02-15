@@ -31,6 +31,7 @@ from rye.executor.lockfile_resolver import LockfileResolver
 from rye.utils.extensions import get_tool_extensions
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.metadata_manager import MetadataManager
+from rye.utils.path_utils import BundleInfo
 from rye.constants import AI_DIR, ItemType
 
 logger = logging.getLogger(__name__)
@@ -107,9 +108,22 @@ class PrimitiveExecutor:
         """
         self.project_path = Path(project_path) if project_path else Path.cwd()
         self.user_space = Path(user_space) if user_space else self._get_user_space()
-        self.system_space = (
-            Path(system_space) if system_space else self._get_system_space()
-        )
+        if system_space:
+            from rye.utils.path_utils import BundleInfo
+
+            self.system_spaces: List[BundleInfo] = [
+                BundleInfo(
+                    bundle_id="rye-os",
+                    version="0.0.0",
+                    root_path=Path(system_space),
+                    manifest_path=None,
+                    source="legacy",
+                )
+            ]
+        else:
+            self.system_spaces = self._get_system_spaces()
+        # Use first bundle's root_path as the legacy system_space
+        self.system_space = self.system_spaces[0].root_path
 
         self.env_resolver = EnvResolver(project_path=self.project_path)
         self.chain_validator = ChainValidator()
@@ -171,7 +185,8 @@ class PrimitiveExecutor:
                         lockfile_used = True
                         content = tool_path[0].read_text(encoding="utf-8")
                         current_integrity = MetadataManager.compute_hash(
-                            ItemType.TOOL, content,
+                            ItemType.TOOL,
+                            content,
                             file_path=tool_path[0],
                             project_path=self.project_path,
                         )
@@ -203,7 +218,8 @@ class PrimitiveExecutor:
                                 )
                             entry_content = resolved[0].read_text(encoding="utf-8")
                             entry_hash = MetadataManager.compute_hash(
-                                ItemType.TOOL, entry_content,
+                                ItemType.TOOL,
+                                entry_content,
                                 file_path=resolved[0],
                                 project_path=self.project_path,
                             )
@@ -230,7 +246,8 @@ class PrimitiveExecutor:
             # 3. Verify integrity of every chain element
             for element in chain:
                 verify_item(
-                    element.path, ItemType.TOOL,
+                    element.path,
+                    ItemType.TOOL,
                     project_path=self.project_path,
                 )
 
@@ -284,7 +301,8 @@ class PrimitiveExecutor:
                     root_element = chain[0]
                     root_content = root_element.path.read_text(encoding="utf-8")
                     integrity = MetadataManager.compute_hash(
-                        ItemType.TOOL, root_content,
+                        ItemType.TOOL,
+                        root_content,
                         file_path=root_element.path,
                         project_path=self.project_path,
                     )
@@ -296,7 +314,9 @@ class PrimitiveExecutor:
                         integrity=integrity,
                         resolved_chain=resolved_chain,
                     )
-                    self.lockfile_resolver.save_lockfile(new_lockfile, space=chain[0].space)
+                    self.lockfile_resolver.save_lockfile(
+                        new_lockfile, space=chain[0].space
+                    )
                     lockfile_created = True
                     logger.info(f"Created lockfile for {item_id}@{version}")
                 except Exception as e:
@@ -438,24 +458,28 @@ class PrimitiveExecutor:
         Returns:
             (path, space) tuple or None if not found
         """
+        # Build system entries from all bundles
+        system_entries = [
+            (bundle.root_path / AI_DIR / "tools", f"system:{bundle.bundle_id}")
+            for bundle in self.system_spaces
+        ]
+
         # Determine search order based on current space
-        if current_space == "system":
+        if current_space == "system" or current_space.startswith("system"):
             # System tools can only depend on system tools
-            search_order = [
-                (self.system_space / AI_DIR / "tools", "system"),
-            ]
+            search_order = system_entries
         elif current_space == "user":
             # User tools can depend on user or system tools
             search_order = [
                 (self.user_space / AI_DIR / "tools", "user"),
-                (self.system_space / AI_DIR / "tools", "system"),
+                *system_entries,
             ]
         else:  # project
             # Project tools can depend on any space
             search_order = [
                 (self.project_path / AI_DIR / "tools", "project"),
                 (self.user_space / AI_DIR / "tools", "user"),
-                (self.system_space / AI_DIR / "tools", "system"),
+                *system_entries,
             ]
 
         # Get extensions data-driven from extractors
@@ -621,7 +645,8 @@ class PrimitiveExecutor:
         try:
             content = element.path.read_text(encoding="utf-8")
             integrity = MetadataManager.compute_hash(
-                ItemType.TOOL, content,
+                ItemType.TOOL,
+                content,
                 file_path=element.path,
                 project_path=self.project_path,
             )
@@ -711,7 +736,7 @@ class PrimitiveExecutor:
 
         # Execute primitive
         # All config values are available for {param} templating in args
-        # This includes: tool_path, project_path, params_json, system_space, 
+        # This includes: tool_path, project_path, params_json, system_space,
         # user_space, and any tool config values (server_config_path, tool_name, etc.)
         enriched_params = {**config, **parameters}
 
@@ -723,10 +748,11 @@ class PrimitiveExecutor:
                 # Try to parse stdout as JSON (for tool_runner output)
                 error_msg = result.stderr if not result.success else None
                 parsed_data = None
-                
+
                 if result.stdout:
                     try:
                         import json
+
                         parsed_data = json.loads(result.stdout)
                         # Extract error from tool output if present
                         if isinstance(parsed_data, dict):
@@ -734,10 +760,13 @@ class PrimitiveExecutor:
                                 error_msg = parsed_data.get("error", "")
                     except json.JSONDecodeError:
                         pass
-                
+
                 return {
-                    "success": result.success and (parsed_data.get("success", True) if parsed_data else True),
-                    "data": parsed_data if parsed_data else {
+                    "success": result.success
+                    and (parsed_data.get("success", True) if parsed_data else True),
+                    "data": parsed_data
+                    if parsed_data
+                    else {
                         "stdout": result.stdout,
                         "stderr": result.stderr,
                         "return_code": result.return_code,
@@ -816,7 +845,8 @@ class PrimitiveExecutor:
 
             # Build params_json from parameters (excluding config keys)
             tool_params = {
-                k: v for k, v in parameters.items()
+                k: v
+                for k, v in parameters.items()
                 if k not in ("command", "args", "cwd", "env", "timeout")
             }
             config["params_json"] = json.dumps(tool_params)
@@ -828,9 +858,11 @@ class PrimitiveExecutor:
         # (optional provider fields like tools that weren't supplied)
         if isinstance(config.get("body"), dict):
             import re
+
             config["body"] = {
-                k: v for k, v in config["body"].items()
-                if not (isinstance(v, str) and re.match(r'^\{\w+\}$', v.strip()))
+                k: v
+                for k, v in config["body"].items()
+                if not (isinstance(v, str) and re.match(r"^\{\w+\}$", v.strip()))
             }
 
         return config
@@ -839,7 +871,7 @@ class PrimitiveExecutor:
         self, config: Dict[str, Any], env: Dict[str, str]
     ) -> Dict[str, Any]:
         """Substitute ${VAR} and {param} templates in config values.
-        
+
         Two-pass templating:
         1. ${VAR} - environment variable substitution (with shell escaping)
         2. {param} - config value substitution (recursive until stable)
@@ -850,13 +882,32 @@ class PrimitiveExecutor:
             """Escape values that will be used in shell commands."""
             if isinstance(value, str):
                 # Only escape if value contains shell-special characters
-                if any(c in value for c in ['$', '`', ';', '|', '&', '<', '>', '(', ')', '{', '}', '[', ']', '\\']):
+                if any(
+                    c in value
+                    for c in [
+                        "$",
+                        "`",
+                        ";",
+                        "|",
+                        "&",
+                        "<",
+                        ">",
+                        "(",
+                        ")",
+                        "{",
+                        "}",
+                        "[",
+                        "]",
+                        "\\",
+                    ]
+                ):
                     return shlex.quote(value)
             return value
 
         def substitute_env(value: Any) -> Any:
             """Substitute ${VAR} with environment values (with escaping)."""
             if isinstance(value, str):
+
                 def replace_var(match: re.Match[str]) -> str:
                     var_expr = match.group(1)
                     if ":-" in var_expr:
@@ -865,6 +916,7 @@ class PrimitiveExecutor:
                     else:
                         raw_value = env.get(var_expr, "")
                     return str(escape_shell_value(raw_value)) if raw_value else ""
+
                 return re.sub(r"\$\{([^}]+)\}", replace_var, value)
             elif isinstance(value, dict):
                 return {k: substitute_env(v) for k, v in value.items()}
@@ -881,17 +933,19 @@ class PrimitiveExecutor:
             """
             if isinstance(value, str):
                 stripped = value.strip()
-                single_match = re.match(r'^\{(\w+)\}$', stripped)
+                single_match = re.match(r"^\{(\w+)\}$", stripped)
                 if single_match:
                     param_name = single_match.group(1)
                     if param_name in params:
                         return params[param_name]
                     return value
+
                 def replace_param(match: re.Match[str]) -> str:
                     param_name = match.group(1)
                     if param_name in params:
                         return str(params[param_name])
                     return match.group(0)
+
                 return re.sub(r"\{([^}]+)\}", replace_param, value)
             elif isinstance(value, dict):
                 return {k: substitute_params(v, params) for k, v in value.items()}
@@ -901,7 +955,7 @@ class PrimitiveExecutor:
 
         # Pass 1: env var substitution
         result = substitute_env(config)
-        
+
         # Pass 2: param substitution (iterate until stable, max 3 passes)
         for _ in range(3):
             new_result = substitute_params(result, result)
@@ -945,7 +999,9 @@ class PrimitiveExecutor:
         markers = anchor_cfg.get("markers_any", [])
         return any((tool_dir / marker).exists() for marker in markers)
 
-    def _resolve_anchor_path(self, anchor_cfg: Dict[str, Any], ctx: Dict[str, str]) -> Path:
+    def _resolve_anchor_path(
+        self, anchor_cfg: Dict[str, Any], ctx: Dict[str, str]
+    ) -> Path:
         """Resolve the anchor root directory from config."""
         root = anchor_cfg.get("root", "tool_dir")
         if root == "tool_dir":
@@ -989,12 +1045,16 @@ class PrimitiveExecutor:
     def _template_string(self, template: str, ctx: Dict[str, str]) -> str:
         """Substitute {var} placeholders in a template string."""
         import re
+
         def replace(match):
             key = match.group(1)
             return ctx.get(key, match.group(0))
+
         return re.sub(r"\{(\w+)\}", replace, template)
 
-    def _verify_tool_dependencies(self, chain: List[ChainElement], anchor_path: Path) -> None:
+    def _verify_tool_dependencies(
+        self, chain: List[ChainElement], anchor_path: Path
+    ) -> None:
         """Verify all files in the tool's dependency scope before execution.
 
         Walks the anchor directory tree, verifying every file matching
@@ -1015,9 +1075,17 @@ class PrimitiveExecutor:
             return
 
         extensions = set(verify_cfg.get("extensions", []))
-        exclude_dirs = set(verify_cfg.get("exclude_dirs", [
-            "__pycache__", ".venv", "node_modules", ".git",
-        ]))
+        exclude_dirs = set(
+            verify_cfg.get(
+                "exclude_dirs",
+                [
+                    "__pycache__",
+                    ".venv",
+                    "node_modules",
+                    ".git",
+                ],
+            )
+        )
         recursive = verify_cfg.get("recursive", True)
 
         # Determine base path from scope
@@ -1050,7 +1118,9 @@ class PrimitiveExecutor:
                 # Guard against symlink escapes
                 real = filepath.resolve()
                 if not str(real).startswith(str(base)):
-                    raise IntegrityError(f"Symlink escape: {filepath} resolves to {real}")
+                    raise IntegrityError(
+                        f"Symlink escape: {filepath} resolves to {real}"
+                    )
 
                 verify_item(filepath, ItemType.TOOL, project_path=self.project_path)
 
@@ -1065,6 +1135,12 @@ class PrimitiveExecutor:
         from rye.utils.path_utils import get_system_space
 
         return get_system_space()
+
+    def _get_system_spaces(self) -> List[BundleInfo]:
+        """Get all system space roots (core + addon bundles)."""
+        from rye.utils.path_utils import get_system_spaces
+
+        return get_system_spaces()
 
     # -------------------------------------------------------------------------
     # Cache Management

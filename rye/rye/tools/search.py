@@ -26,10 +26,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from rye.constants import ItemType
 from rye.utils.path_utils import (
     get_user_space,
-    get_system_space,
     get_project_type_path,
     get_user_type_path,
-    get_system_type_path,
+    get_system_type_paths,
     get_extractor_search_paths,
 )
 from rye.utils.integrity import verify_item, IntegrityError
@@ -883,9 +882,9 @@ class SearchTool:
                 paths.append((d, "user"))
 
         if opts.source in ("system", "all"):
-            d = get_system_type_path(opts.item_type)
-            if d.exists():
-                paths.append((d, "system"))
+            for root_id, d in get_system_type_paths(opts.item_type):
+                if d.exists():
+                    paths.append((d, f"system:{root_id}"))
 
         return paths
 

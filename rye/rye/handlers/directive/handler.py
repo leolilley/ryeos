@@ -11,10 +11,9 @@ from typing import Any, Dict, Optional
 from rye.utils.resolvers import get_user_space
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
-    get_system_space,
     get_project_type_path,
     get_user_type_path,
-    get_system_type_path,
+    get_system_type_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,9 +45,9 @@ class DirectiveHandler:
             paths.append(user_directives)
 
         # System directives
-        system_directives = get_system_type_path("directive")
-        if system_directives.exists():
-            paths.append(system_directives)
+        for _root_id, system_dir in get_system_type_paths("directive"):
+            if system_dir.exists():
+                paths.append(system_dir)
 
         return paths
 

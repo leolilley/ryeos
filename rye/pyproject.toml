@@ -17,6 +17,9 @@ dev = [
     "pytest-cov>=4.0",
 ]
 
+[project.entry-points."rye.bundles"]
+rye-core = "rye.bundle_entrypoints:get_rye_core_bundle"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

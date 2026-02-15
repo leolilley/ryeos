@@ -20,11 +20,11 @@ from rye.utils.extensions import get_tool_extensions
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     get_project_type_path,
-    get_system_type_path,
+    get_system_type_paths,
     get_user_type_path,
 )
 from rye.utils.integrity import verify_item, IntegrityError
-from rye.utils.resolvers import get_system_space, get_user_space
+from rye.utils.resolvers import get_user_space
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +265,6 @@ class ExecuteTool:
             self._executor = PrimitiveExecutor(
                 project_path=proj_path,
                 user_space=Path(self.user_space),
-                system_space=get_system_space(),
             )
 
         return self._executor
@@ -310,7 +309,8 @@ class ExecuteTool:
         if project_path:
             search_bases.append(get_project_type_path(Path(project_path), item_type))
         search_bases.append(get_user_type_path(item_type))
-        search_bases.append(get_system_type_path(item_type))
+        for _root_id, sys_path in get_system_type_paths(item_type):
+            search_bases.append(sys_path)
 
         # Get extensions data-driven from extractors
         if item_type == ItemType.TOOL:

@@ -11,10 +11,9 @@ from typing import Any, Dict, Optional
 from rye.utils.resolvers import get_user_space
 from rye.utils.extensions import get_tool_extensions
 from rye.utils.path_utils import (
-    get_system_space,
     get_project_type_path,
     get_user_type_path,
-    get_system_type_path,
+    get_system_type_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,9 +44,9 @@ class ToolHandler:
             paths.append(user_tools)
 
         # System tools
-        system_tools = get_system_type_path("tool")
-        if system_tools.exists():
-            paths.append(system_tools)
+        for _root_id, system_tools in get_system_type_paths("tool"):
+            if system_tools.exists():
+                paths.append(system_tools)
 
         return paths
 

@@ -5,13 +5,65 @@ Provides functions to:
 - Validate filename matches metadata name/id
 - Validate path structure
 - Ensure directories exist (filesystem helpers)
+- Discover and validate bundle manifests via entry points
 """
 
+import importlib.metadata
+import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from rye.constants import AI_DIR, ItemType
+
+logger = logging.getLogger(__name__)
+
+_system_spaces_cache: Optional[List["BundleInfo"]] = None
+
+
+@dataclass(frozen=True)
+class BundleInfo:
+    """Information about a registered bundle.
+
+    Bundles are discovered via the `rye.bundles` entry point group.
+    Each bundle provides a manifest that describes the directives, tools,
+    and knowledge items it contains, along with their hashes for integrity.
+
+    Attributes:
+        bundle_id: Unique identifier for the bundle (e.g., "rye-core", "rye-mcp")
+        version: Semantic version of the bundle
+        root_path: Path to the bundle root directory containing .ai/
+        manifest_path: Path to the bundle manifest.yaml (if exists)
+        source: Entry point name that registered this bundle
+    """
+
+    bundle_id: str
+    version: str
+    root_path: Path
+    manifest_path: Optional[Path]
+    source: str
+    categories: Optional[List[str]] = None
+
+    def get_type_paths(self, item_type: str) -> List[Path]:
+        """Get item type directories for this bundle.
+
+        If categories is set, returns one path per category
+        (e.g., .ai/tools/rye/core/). Otherwise returns the top-level
+        type directory (e.g., .ai/tools/).
+        """
+        folder_name = ItemType.TYPE_DIRS.get(item_type, item_type)
+        base = self.root_path / AI_DIR / folder_name
+        if self.categories:
+            return [base / cat for cat in self.categories]
+        return [base]
+
+    def has_manifest(self) -> bool:
+        """Check if this bundle has a valid manifest file."""
+        return self.manifest_path is not None and self.manifest_path.exists()
+
+    def __repr__(self) -> str:
+        return f"BundleInfo({self.bundle_id}@{self.version}, source={self.source})"
 
 
 def ensure_directory(path: Path) -> Path:
@@ -45,7 +97,7 @@ def ensure_parent_directory(file_path: Path) -> Path:
 
 def get_user_space() -> Path:
     """Get user space base directory from env var or default to home directory.
-    
+
     Returns the base path (home dir or $USER_SPACE), not including .ai folder.
     AI_DIR is appended by get_user_ai_path() and get_user_type_path().
     """
@@ -57,7 +109,7 @@ def get_user_space() -> Path:
 
 def get_user_ai_path() -> Path:
     """Get .ai directory in user space (e.g., ~/.ai).
-    
+
     This is the working directory for user space.
     Item types are in subdirectories: .ai/tools/, .ai/directives/, .ai/knowledge/
     """
@@ -71,6 +123,88 @@ def get_system_space() -> Path:
     Consistent with get_user_space() and project_path — all return the base.
     """
     return Path(__file__).parent.parent
+
+
+def _parse_bundle_entry_point(ep_name: str, result: Any) -> Optional[BundleInfo]:
+    """Parse entry point result into BundleInfo.
+
+    Entry points must return a dict with:
+        - bundle_id: Unique identifier for the bundle
+        - root_path: Path to bundle root directory containing .ai/
+        - version: Semantic version (optional, defaults to "0.0.0")
+        - manifest_path: Path to manifest.yaml (optional, auto-discovered)
+        - categories: List of category prefixes to include (optional, None = all)
+    """
+    if isinstance(result, dict):
+        bundle_id = result.get("bundle_id", ep_name)
+        version = result.get("version", "0.0.0")
+        root_path = Path(result.get("root_path", "."))
+        categories = result.get("categories")
+
+        # Manifest path can be explicit or auto-discovered
+        manifest_path = result.get("manifest_path")
+        if manifest_path:
+            manifest_path = Path(manifest_path)
+        else:
+            # Auto-discover: .ai/bundles/{bundle_id}/manifest.yaml
+            manifest_path = root_path / AI_DIR / "bundles" / bundle_id / "manifest.yaml"
+            if not manifest_path.exists():
+                manifest_path = None
+
+        return BundleInfo(
+            bundle_id=bundle_id,
+            version=version,
+            root_path=root_path,
+            manifest_path=manifest_path,
+            source=ep_name,
+            categories=categories,
+        )
+
+    logger.warning(
+        "Entry point %r returned unsupported type %r, expected dict",
+        ep_name,
+        type(result).__name__,
+    )
+    return None
+
+
+def get_system_spaces() -> List[BundleInfo]:
+    """Get all system bundle spaces discovered via entry points.
+
+    Returns a list of BundleInfo objects sorted alphabetically by entry point name.
+    All bundles are discovered via the ``rye.bundles`` entry point group.
+
+    Entry points must return a dict with:
+        - bundle_id: Unique identifier for the bundle
+        - root_path: Path to bundle root directory containing .ai/
+        - version: Semantic version (optional, defaults to "0.0.0")
+        - manifest_path: Path to manifest.yaml (optional, auto-discovered)
+
+    Results are cached at module level after first computation.
+    """
+    global _system_spaces_cache
+    if _system_spaces_cache is not None:
+        return _system_spaces_cache
+
+    # Discover all bundles via entry points
+    bundles: List[BundleInfo] = []
+    eps = importlib.metadata.entry_points(group="rye.bundles")
+    for ep in sorted(eps, key=lambda e: e.name):
+        try:
+            fn = ep.load()
+            result = fn()
+            bundle_info = _parse_bundle_entry_point(ep.name, result)
+            if bundle_info:
+                bundles.append(bundle_info)
+        except Exception:
+            logger.warning(
+                "Failed to load rye.bundles entry point %r",
+                ep.name,
+                exc_info=True,
+            )
+
+    _system_spaces_cache = bundles
+    return _system_spaces_cache
 
 
 def get_project_ai_path(project_path: Path) -> Path:
@@ -91,9 +225,24 @@ def get_user_type_path(item_type: str) -> Path:
 
 
 def get_system_type_path(item_type: str) -> Path:
-    """Get item type directory in system space (e.g., site-packages/rye/.ai/tools/)."""
+    """Get item type directory in system space (e.g., site-packages/rye/.ai/tools/).
+
+    Returns the core rye-os path only. For all roots use get_system_type_paths().
+    """
     folder_name = get_type_folder(item_type)
     return get_system_space() / AI_DIR / folder_name
+
+
+def get_system_type_paths(item_type: str) -> List[Tuple[str, Path]]:
+    """Get item type directories across all system bundles.
+
+    Each bundle may contribute multiple paths if it has categories set.
+    """
+    result: List[Tuple[str, Path]] = []
+    for bundle in get_system_spaces():
+        for path in bundle.get_type_paths(item_type):
+            result.append((bundle.bundle_id, path))
+    return result
 
 
 def get_extractor_search_paths(project_path: Optional[Path] = None) -> List[Path]:
@@ -122,10 +271,13 @@ def get_extractor_search_paths(project_path: Optional[Path] = None) -> List[Path
     if user_extractors.exists():
         paths.append(user_extractors)
 
-    # System extractors (lowest priority)
-    system_extractors = get_system_space() / AI_DIR / "tools" / "rye" / "core" / "extractors"
-    if system_extractors.exists():
-        paths.append(system_extractors)
+    # System extractors from all roots (lowest priority)
+    for bundle in get_system_spaces():
+        system_extractors = (
+            bundle.root_path / AI_DIR / "tools" / "rye" / "core" / "extractors"
+        )
+        if system_extractors.exists():
+            paths.append(system_extractors)
 
     return paths
 
@@ -158,6 +310,7 @@ def extract_category_path(
         .ai/knowledge/patterns/api.md -> "patterns"
     """
     folder_name = get_type_folder(item_type)
+    expected_base: Optional[Path] = None
 
     if location == "project":
         if not project_path:
@@ -165,11 +318,19 @@ def extract_category_path(
         expected_base = Path(project_path) / AI_DIR / folder_name
     elif location == "user":
         expected_base = get_user_ai_path() / folder_name
-    elif location == "system":
-        # System is bundled with rye package
-        rye_pkg = Path(__file__).parent.parent
-        expected_base = rye_pkg / AI_DIR / folder_name
-    else:
+    elif location.startswith("system"):
+        # Try all system roots to find which one contains this file
+        for bundle in get_system_spaces():
+            expected_base = bundle.root_path / AI_DIR / folder_name
+            try:
+                relative = file_path.relative_to(expected_base)
+                parts = list(relative.parent.parts)
+                return "/".join(parts) if parts else ""
+            except ValueError:
+                continue
+        return ""
+
+    if expected_base is None:
         return ""
 
     try:

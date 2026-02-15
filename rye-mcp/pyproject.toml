@@ -17,6 +17,9 @@ dev = [
 [project.scripts]
 rye-mcp = "rye_mcp.server:main"
 
+[project.entry-points."rye.bundles"]
+rye-os = "rye_mcp.bundle_entrypoints:get_rye_os_bundle"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
