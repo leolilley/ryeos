@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+from rye.constants import AI_DIR
+
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_function_runtime"
@@ -63,7 +65,7 @@ def _get_paths(config: Dict[str, Any]) -> Dict[str, Any]:
     """Get filesystem paths relevant to the MCP."""
     project_path = config.get("project_path", os.getcwd())
     user_space = config.get(
-        "user_space", os.environ.get("USER_SPACE", str(Path.home() / ".ai"))
+        "user_space", os.environ.get("USER_SPACE", str(Path.home()))
     )
     system_space = config.get("system_space", _get_system_space())
 
@@ -100,17 +102,17 @@ def _get_runtime() -> Dict[str, Any]:
 
 
 def _get_system_space() -> str:
-    """Get system space path (where rye is installed)."""
+    """Get system space base path (where rye is installed)."""
     try:
         import rye
 
         if rye.__file__:
-            return str(Path(rye.__file__).parent / ".ai")
+            return str(Path(rye.__file__).parent)
         import importlib.util
 
         spec = importlib.util.find_spec("rye")
         if spec and spec.origin:
-            return str(Path(spec.origin).parent / ".ai")
+            return str(Path(spec.origin).parent)
         return ""
     except ImportError:
         return ""

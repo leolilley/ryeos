@@ -3,7 +3,7 @@
 Three-tier architecture:
     - System: site-packages/rye/.ai/lockfiles/ (bundled, read-only, lowest precedence)
     - User: {USER_SPACE}/.ai/lockfiles/ (default, read-write, medium precedence)
-    - Project: {project}/lockfiles/ (opt-in, read-write, highest precedence)
+    - Project: {project}/.ai/lockfiles/ (opt-in, read-write, highest precedence)
 
 The orchestrator resolves all paths and passes explicit paths to Lilux.
 Lilux never does path discovery or precedence logic.
@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from lilux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
 
+from rye.constants import AI_DIR
 from rye.utils.path_utils import (
     ensure_parent_directory,
     get_system_space,
@@ -62,18 +63,18 @@ class LockfileResolver:
     @property
     def system_dir(self) -> Path:
         """Get system lockfile directory (bundled, read-only)."""
-        return self.system_space / "lockfiles"
+        return self.system_space / AI_DIR / "lockfiles"
 
     @property
     def user_dir(self) -> Path:
         """Get user lockfile directory."""
-        return self.user_space / "lockfiles"
+        return self.user_space / AI_DIR / "lockfiles"
 
     @property
     def project_dir(self) -> Optional[Path]:
         """Get project lockfile directory (only if project_path set)."""
         if self.project_path:
-            return self.project_path / ".ai" / "lockfiles"
+            return self.project_path / AI_DIR / "lockfiles"
         return None
 
     def get_lockfile(self, tool_id: str, version: str) -> Optional[Lockfile]:

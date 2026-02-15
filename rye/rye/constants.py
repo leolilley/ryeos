@@ -1,7 +1,11 @@
-"""RYE MCP Constants
+"""RYE Constants
 
-Centralized constants for item types and tool actions.
+Centralized constants for the AI directory name, item types, and tool actions.
 """
+
+# The name of the working directory used in all three spaces.
+# Every space follows: base_path / AI_DIR / {type_dir} / {item_id}
+AI_DIR = ".ai"
 
 
 class ItemType:

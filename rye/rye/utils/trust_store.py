@@ -1,6 +1,6 @@
 """Trust store for Ed25519 public keys.
 
-Manages trusted keys under get_user_space() / "trusted_keys/".
+Manages trusted keys under get_user_space() / AI_DIR / "trusted_keys/".
 - Own pubkey auto-trusted on keygen
 - Registry pubkey pinned on first pull (TOFU)
 - Peer pubkeys manually trusted via sign tool
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from lilux.primitives.signing import compute_key_fingerprint
+from rye.constants import AI_DIR
 from rye.utils.path_utils import get_user_space
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ class TrustStore:
     REGISTRY_KEY_NAME = "registry.pem"
 
     def __init__(self, trust_dir: Optional[Path] = None):
-        self.trust_dir = trust_dir or (get_user_space() / "trusted_keys")
+        self.trust_dir = trust_dir or (get_user_space() / AI_DIR / "trusted_keys")
 
     def _ensure_dir(self) -> None:
         self.trust_dir.mkdir(parents=True, exist_ok=True)

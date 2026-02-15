@@ -28,23 +28,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rye.constants import AI_DIR
+
 logger = logging.getLogger(__name__)
 
 
 def get_mcp_servers_dir(project_path: Path, scope: str = "project") -> Path:
     """Get the MCP servers directory for the given scope."""
     if scope == "user":
-        return Path.home() / ".ai" / "tools" / "mcp" / "servers"
+        return Path.home() / AI_DIR / "tools" / "mcp" / "servers"
     else:
-        return project_path / ".ai" / "tools" / "mcp" / "servers"
+        return project_path / AI_DIR / "tools" / "mcp" / "servers"
 
 
 def get_mcp_tools_dir(project_path: Path, server_name: str, scope: str = "project") -> Path:
     """Get the MCP tools directory for a server."""
     if scope == "user":
-        return Path.home() / ".ai" / "tools" / "mcp" / server_name
+        return Path.home() / AI_DIR / "tools" / "mcp" / server_name
     else:
-        return project_path / ".ai" / "tools" / "mcp" / server_name
+        return project_path / AI_DIR / "tools" / "mcp" / server_name
 
 
 def generate_signature_placeholder() -> str:
@@ -123,8 +125,9 @@ def create_tool_config(
     )
 
     # Build server config path template based on scope
+    # user_space is the base path; AI_DIR (".ai") is appended
     if scope == "user":
-        server_config_path = "{user_space}/tools/mcp/servers/" + server_name + ".yaml"
+        server_config_path = "{user_space}/.ai/tools/mcp/servers/" + server_name + ".yaml"
     else:
         server_config_path = "{project_path}/.ai/tools/mcp/servers/" + server_name + ".yaml"
 
@@ -309,8 +312,8 @@ async def action_list(
 
     # Search in project and user space
     search_paths = [
-        ("project", project_path / ".ai" / "tools" / "mcp" / "servers"),
-        ("user", Path.home() / ".ai" / "tools" / "mcp" / "servers"),
+        ("project", project_path / AI_DIR / "tools" / "mcp" / "servers"),
+        ("user", Path.home() / AI_DIR / "tools" / "mcp" / "servers"),
     ]
 
     for scope, servers_dir in search_paths:
@@ -367,8 +370,8 @@ async def action_refresh(
     scope = None
 
     for s, servers_dir in [
-        ("project", project_path / ".ai" / "tools" / "mcp" / "servers"),
-        ("user", Path.home() / ".ai" / "tools" / "mcp" / "servers"),
+        ("project", project_path / AI_DIR / "tools" / "mcp" / "servers"),
+        ("user", Path.home() / AI_DIR / "tools" / "mcp" / "servers"),
     ]:
         candidate = servers_dir / f"{name}.yaml"
         if candidate.exists():
@@ -458,8 +461,8 @@ async def action_remove(
     removed = []
 
     for scope, base_dir in [
-        ("project", project_path / ".ai" / "tools" / "mcp"),
-        ("user", Path.home() / ".ai" / "tools" / "mcp"),
+        ("project", project_path / AI_DIR / "tools" / "mcp"),
+        ("user", Path.home() / AI_DIR / "tools" / "mcp"),
     ]:
         server_file = base_dir / "servers" / f"{name}.yaml"
         tools_dir = base_dir / name

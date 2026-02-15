@@ -5,10 +5,9 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rye.constants import ItemType
-from rye.utils.path_utils import get_project_type_path, get_system_type_path
+from rye.constants import ItemType, AI_DIR
+from rye.utils.path_utils import get_project_type_path, get_system_type_path, get_user_space
 from rye.utils.extensions import get_tool_extensions
-from rye.utils.resolvers import get_user_space
 from rye.utils.integrity import verify_item
 
 logger = logging.getLogger(__name__)
@@ -90,7 +89,7 @@ class LoadTool:
         if source == "project":
             base = get_project_type_path(Path(project_path), item_type)
         elif source == "user":
-            base = Path(self.user_space) / type_dir
+            base = Path(self.user_space) / AI_DIR / type_dir
         elif source == "system":
             base = get_system_type_path(item_type)
         else:
@@ -123,7 +122,7 @@ class LoadTool:
         if destination == "project":
             base = get_project_type_path(Path(project_path), item_type)
         elif destination == "user":
-            base = Path(self.user_space) / type_dir
+            base = Path(self.user_space) / AI_DIR / type_dir
         else:
             return None
 

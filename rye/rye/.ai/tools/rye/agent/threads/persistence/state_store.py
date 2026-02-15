@@ -15,13 +15,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from rye.constants import AI_DIR
+
 
 class StateStore:
     """Atomic thread state persistence."""
 
     def __init__(self, project_path: Path):
         self.project_path = Path(project_path)
-        self.state_dir = self.project_path / ".ai" / "threads"
+        self.state_dir = self.project_path / AI_DIR / "threads"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def save_state(self, thread_id: str, state: Dict[str, Any]):

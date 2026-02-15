@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import ItemType
+from rye.constants import AI_DIR, ItemType
 
 
 def ensure_directory(path: Path) -> Path:
@@ -44,39 +44,56 @@ def ensure_parent_directory(file_path: Path) -> Path:
 
 
 def get_user_space() -> Path:
-    """Get user space directory from env var or default to ~/.ai."""
+    """Get user space base directory from env var or default to home directory.
+    
+    Returns the base path (home dir or $USER_SPACE), not including .ai folder.
+    AI_DIR is appended by get_user_ai_path() and get_user_type_path().
+    """
     user_space = os.getenv("USER_SPACE")
     if user_space:
         return Path(user_space).expanduser()
-    return Path.home() / ".ai"
+    return Path.home()
+
+
+def get_user_ai_path() -> Path:
+    """Get .ai directory in user space (e.g., ~/.ai).
+    
+    This is the working directory for user space.
+    Item types are in subdirectories: .ai/tools/, .ai/directives/, .ai/knowledge/
+    """
+    return get_user_space() / AI_DIR
 
 
 def get_system_space() -> Path:
-    """Get system space directory (bundled with rye package)."""
-    return Path(__file__).parent.parent / ".ai"
+    """Get system space base directory (bundled with rye package).
+
+    Returns the BASE path (the rye package root), not the AI_DIR folder.
+    Consistent with get_user_space() and project_path — all return the base.
+    """
+    return Path(__file__).parent.parent
 
 
 def get_project_ai_path(project_path: Path) -> Path:
     """Get .ai directory in project space."""
-    return project_path / ".ai"
+    return project_path / AI_DIR
 
 
 def get_project_type_path(project_path: Path, item_type: str) -> Path:
     """Get item type directory in project space (e.g., {project}/.ai/tools/)."""
     folder_name = get_type_folder(item_type)
-    return project_path / ".ai" / folder_name
+    return project_path / AI_DIR / folder_name
 
 
 def get_user_type_path(item_type: str) -> Path:
     """Get item type directory in user space (e.g., ~/.ai/tools/)."""
     folder_name = get_type_folder(item_type)
-    return get_user_space() / folder_name
+    return get_user_space() / AI_DIR / folder_name
 
 
 def get_system_type_path(item_type: str) -> Path:
     """Get item type directory in system space (e.g., site-packages/rye/.ai/tools/)."""
     folder_name = get_type_folder(item_type)
-    return get_system_space() / folder_name
+    return get_system_space() / AI_DIR / folder_name
 
 
 def get_extractor_search_paths(project_path: Optional[Path] = None) -> List[Path]:
@@ -95,18 +112,18 @@ def get_extractor_search_paths(project_path: Optional[Path] = None) -> List[Path
     # Project extractors (highest priority)
     if project_path:
         project_extractors = (
-            project_path / ".ai" / "tools" / "rye" / "core" / "extractors"
+            project_path / AI_DIR / "tools" / "rye" / "core" / "extractors"
         )
         if project_extractors.exists():
             paths.append(project_extractors)
 
     # User extractors
-    user_extractors = get_user_space() / "tools" / "rye" / "core" / "extractors"
+    user_extractors = get_user_ai_path() / "tools" / "rye" / "core" / "extractors"
     if user_extractors.exists():
         paths.append(user_extractors)
 
     # System extractors (lowest priority)
-    system_extractors = get_system_space() / "tools" / "rye" / "core" / "extractors"
+    system_extractors = get_system_space() / AI_DIR / "tools" / "rye" / "core" / "extractors"
     if system_extractors.exists():
         paths.append(system_extractors)
 
@@ -145,13 +162,13 @@ def extract_category_path(
     if location == "project":
         if not project_path:
             return ""
-        expected_base = Path(project_path) / ".ai" / folder_name
+        expected_base = Path(project_path) / AI_DIR / folder_name
     elif location == "user":
-        expected_base = get_user_space() / folder_name
+        expected_base = get_user_ai_path() / folder_name
     elif location == "system":
         # System is bundled with rye package
         rye_pkg = Path(__file__).parent.parent
-        expected_base = rye_pkg / ".ai" / folder_name
+        expected_base = rye_pkg / AI_DIR / folder_name
     else:
         return ""
 

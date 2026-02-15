@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rye.utils.signature_formats import get_signature_format
-from rye.constants import ItemType
+from rye.constants import ItemType, AI_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +334,7 @@ class MetadataManager:
         )
         from rye.utils.trust_store import TrustStore
 
-        key_dir = get_user_space() / "keys"
+        key_dir = get_user_space() / AI_DIR / "keys"
         private_pem, public_pem = ensure_keypair(key_dir)
 
         ed25519_sig = sign_hash(content_hash, private_pem)
@@ -368,7 +368,7 @@ class MetadataManager:
         )
         from rye.utils.trust_store import TrustStore
 
-        key_dir = get_user_space() / "keys"
+        key_dir = get_user_space() / AI_DIR / "keys"
         private_pem, public_pem = ensure_keypair(key_dir)
 
         ed25519_sig = sign_hash(content_hash, private_pem)

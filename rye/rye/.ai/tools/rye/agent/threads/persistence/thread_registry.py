@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rye.constants import AI_DIR
+
 DB_FILE = "registry.db"
 
 
@@ -19,7 +21,7 @@ class ThreadRegistry:
     """
 
     def __init__(self, project_path: Path):
-        self.db_path = project_path / ".ai" / "threads" / DB_FILE
+        self.db_path = project_path / AI_DIR / "threads" / DB_FILE
         self._ensure_schema()
 
     def _ensure_schema(self):

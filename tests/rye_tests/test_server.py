@@ -1,13 +1,10 @@
 """Tests for MCP server."""
 
-import asyncio
 import os
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from rye.server import RYEServer
+from rye_mcp.server import RYEServer
 
 
 class TestRYEServer:
@@ -23,12 +20,12 @@ class TestRYEServer:
             assert server.debug is False
 
     def test_server_user_space_default(self):
-        """User space defaults to ~/.ai."""
+        """User space defaults to home directory (base path)."""
         if "USER_SPACE" in os.environ:
             del os.environ["USER_SPACE"]
 
         server = RYEServer()
-        assert server.user_space.endswith(".ai")
+        assert server.user_space == str(Path.home())
 
     def test_server_debug_mode(self):
         """Debug mode from environment."""

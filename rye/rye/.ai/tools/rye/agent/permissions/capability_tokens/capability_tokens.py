@@ -34,12 +34,14 @@ except ImportError:
     CRYPTOGRAPHY_AVAILABLE = False
 
 
-# Default key paths — unified under USER_SPACE (~/.ai/keys/)
+# Default key paths — unified under USER_SPACE / AI_DIR / keys/
 try:
+    from rye.constants import AI_DIR
     from rye.utils.path_utils import get_user_space
-    DEFAULT_KEY_DIR = get_user_space() / "keys"
+    DEFAULT_KEY_DIR = get_user_space() / AI_DIR / "keys"
 except ImportError:
-    DEFAULT_KEY_DIR = Path.home() / ".ai" / "keys"
+    from rye.constants import AI_DIR
+    DEFAULT_KEY_DIR = Path.home() / AI_DIR / "keys"
 PRIVATE_KEY_FILE = "private_key.pem"
 PUBLIC_KEY_FILE = "public_key.pem"
 
@@ -614,7 +616,7 @@ def load_capabilities(project_path: Path) -> Tuple[Dict[Tuple, str], Dict[str, L
     agent_dir = permissions_dir.parent  # agent/
     system_caps_dir = agent_dir / "permissions" / "capabilities" / "tools"
     
-    project_caps_dir = project_path / ".ai" / "tools" / "agent" / "permissions" / "capabilities" / "tools"
+    project_caps_dir = project_path / AI_DIR / "tools" / "agent" / "permissions" / "capabilities" / "tools"
     
     search_order = [
         (system_caps_dir, True),      # System space (can define system capabilities)

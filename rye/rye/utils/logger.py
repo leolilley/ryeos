@@ -18,6 +18,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
+from rye.constants import AI_DIR
 from rye.utils.path_utils import get_user_space
 
 
@@ -43,7 +44,7 @@ class JsonFormatter(logging.Formatter):
 
 def _get_log_dir() -> Path:
     """Get log directory from user space."""
-    log_dir = get_user_space() / "logs"
+    log_dir = get_user_space() / AI_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 

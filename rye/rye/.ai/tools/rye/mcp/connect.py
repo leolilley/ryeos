@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rye.constants import AI_DIR
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,10 +45,10 @@ def load_dotenv_files(project_path: Optional[Path] = None) -> Dict[str, str]:
         logger.debug("python-dotenv not installed, skipping .env loading")
         return env_vars
 
-    user_space = Path.home() / ".ai"
+    user_space = Path.home()
 
     # Load from user space
-    user_env = user_space / ".env"
+    user_env = user_space / AI_DIR / ".env"
     if user_env.exists():
         try:
             loaded = dotenv_values(user_env)
@@ -58,7 +60,7 @@ def load_dotenv_files(project_path: Optional[Path] = None) -> Dict[str, str]:
     if project_path:
         project_path = Path(project_path)
         env_paths = [
-            project_path / ".ai" / ".env",
+            project_path / AI_DIR / ".env",
             project_path / ".env",
             project_path / ".env.local",
         ]

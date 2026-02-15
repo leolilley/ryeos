@@ -1,6 +1,7 @@
 """RYE utility modules."""
 
 from rye.utils.metadata_manager import MetadataManager
+from rye.utils.path_utils import get_user_ai_path
 from rye.utils.resolvers import (
     get_user_space,
     get_system_space,
@@ -15,11 +16,12 @@ from rye.utils.signature_formats import (
 )
 from rye.utils.logger import get_logger
 from rye.utils.parser_router import ParserRouter
-from rye.constants import ItemType, Action
+from rye.constants import AI_DIR, ItemType, Action
 
 __all__ = [
     "MetadataManager",
     "get_user_space",
+    "get_user_ai_path",
     "get_system_space",
     "DirectiveResolver",
     "ToolResolver",
@@ -30,6 +32,7 @@ __all__ = [
     "clear_signature_formats_cache",
     "get_logger",
     "ParserRouter",
+    "AI_DIR",
     "ItemType",
     "Action",
 ]

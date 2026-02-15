@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Dict
 
+from rye.constants import AI_DIR
+
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
@@ -27,7 +29,7 @@ def execute(params: Dict, project_path: str) -> Dict:
     payload = params.get("payload", {})
     thread_id = params.get("thread_id", "unknown")
 
-    thread_dir = Path(project_path) / ".ai" / "threads" / thread_id
+    thread_dir = Path(project_path) / AI_DIR / "threads" / thread_id
     thread_dir.mkdir(parents=True, exist_ok=True)
 
     entry = {

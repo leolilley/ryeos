@@ -3,8 +3,10 @@ Path Resolution Utilities
 
 Finds directives, tools, and knowledge entries across 3-tier space system:
   1. Project space: {project}/.ai/ (highest priority)
-  2. User space: ~/.ai/ or $USER_SPACE
+  2. User space: {$USER_SPACE or ~}/.ai/ (defaults to ~/.ai)
   3. System space: site-packages/rye/.ai/ (lowest priority, immutable)
+
+USER_SPACE env var sets the base path (home dir), not the .ai folder itself.
 """
 
 from pathlib import Path

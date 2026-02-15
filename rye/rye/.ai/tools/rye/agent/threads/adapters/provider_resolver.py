@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+from rye.constants import AI_DIR
 from rye.utils.path_utils import get_user_space, get_system_space
 
 logger = logging.getLogger(__name__)
@@ -40,13 +41,13 @@ def _get_provider_dirs(project_path: Optional[Path] = None) -> List[Path]:
     """Get provider config directories in precedence order: project → user → system."""
     dirs = []
     if project_path:
-        p = project_path / ".ai" / "tools" / "rye" / "agent" / "providers"
+        p = project_path / AI_DIR / "tools" / "rye" / "agent" / "providers"
         if p.exists():
             dirs.append(p)
-    user = get_user_space() / "tools" / "rye" / "agent" / "providers"
+    user = get_user_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"
     if user.exists():
         dirs.append(user)
-    system = get_system_space() / "tools" / "rye" / "agent" / "providers"
+    system = get_system_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"
     if system.exists():
         dirs.append(system)
     return dirs
@@ -98,7 +99,7 @@ def resolve_provider(
         searched = ", ".join(str(d) for d in dirs) if dirs else "no provider directories found"
         raise ProviderNotFoundError(
             f"No provider configs found. Searched: {searched}. "
-            f"Create a provider YAML at .ai/tools/rye/agent/providers/"
+            f"Create a provider YAML at {AI_DIR}/tools/rye/agent/providers/"
         )
 
     # Pass 1: Check tier_mapping
@@ -136,5 +137,5 @@ def resolve_provider(
         f"No provider found for model '{model}'. "
         f"Available tiers:\n{tier_list}\n"
         f"Either use a known tier/model ID or add a provider config at "
-        f".ai/tools/rye/agent/providers/"
+        f"{AI_DIR}/tools/rye/agent/providers/"
     )

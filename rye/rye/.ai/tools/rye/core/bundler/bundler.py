@@ -33,6 +33,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from rye.constants import AI_DIR
+
 TOOL_METADATA = {
     "name": "bundler",
     "description": "Create, verify, and inspect bundle manifests",
@@ -97,7 +99,7 @@ def _sha256_file(path: Path) -> str:
 def _classify_file(rel_path: str) -> str:
     """Classify a file into directive/tool/knowledge/asset by its relative path."""
     for item_type, dir_name in _TYPE_DIRS.items():
-        if rel_path.startswith(f".ai/{dir_name}/"):
+        if rel_path.startswith(f"{AI_DIR}/{dir_name}/"):
             return item_type
     return "asset"
 
@@ -124,9 +126,9 @@ def _load_collect_config(project_path: Path) -> Dict[str, Any]:
 
     config_name = "rye/core/bundler/collect.yaml"
     search_order = [
-        project_path / ".ai" / "tools" / config_name,
-        get_user_space() / "tools" / config_name,
-        get_system_space() / "tools" / config_name,
+        project_path / AI_DIR / "tools" / config_name,
+        get_user_space() / AI_DIR / "tools" / config_name,
+        get_system_space() / AI_DIR / "tools" / config_name,
     ]
 
     for path in search_order:
@@ -156,7 +158,7 @@ def _collect_bundle_files(
 
     # Standard item type directories
     for dir_name in _TYPE_DIRS.values():
-        bundle_dir = project_path / ".ai" / dir_name / bundle_id
+        bundle_dir = project_path / AI_DIR / dir_name / bundle_id
         if not bundle_dir.is_dir():
             continue
 
@@ -175,7 +177,7 @@ def _collect_bundle_files(
     # Plans and lockfiles (use slug: bundle_id with / -> _)
     bundle_slug = bundle_id.replace("/", "_")
 
-    plans_dir = project_path / ".ai" / "plans" / bundle_slug
+    plans_dir = project_path / AI_DIR / "plans" / bundle_slug
     if plans_dir.is_dir():
         for file_path in sorted(plans_dir.rglob("*")):
             if not file_path.is_file():
@@ -187,7 +189,7 @@ def _collect_bundle_files(
                 "inline_signed": _has_inline_signature(file_path),
             })
 
-    lockfiles_dir = project_path / ".ai" / "lockfiles"
+    lockfiles_dir = project_path / AI_DIR / "lockfiles"
     if lockfiles_dir.is_dir():
         prefix = f"{bundle_slug}_"
         for file_path in sorted(lockfiles_dir.iterdir()):
@@ -223,7 +225,7 @@ def _sign_manifest(content: str) -> str:
     content_hash = compute_content_hash(content)
     timestamp = generate_timestamp()
 
-    key_dir = get_user_space() / "keys"
+    key_dir = get_user_space() / AI_DIR / "keys"
     private_pem, public_pem = ensure_keypair(key_dir)
 
     ed25519_sig = sign_hash(content_hash, private_pem)
@@ -267,7 +269,7 @@ async def _create(
         return {
             "error": f"No files found for bundle '{bundle_id}'",
             "searched": [
-                f".ai/{d}/{bundle_id}/" for d in _TYPE_DIRS.values()
+                f"{AI_DIR}/{d}/{bundle_id}/" for d in _TYPE_DIRS.values()
             ],
         }
 
@@ -291,7 +293,7 @@ async def _create(
     manifest_yaml = yaml.dump(manifest, default_flow_style=False, sort_keys=False)
     signed_yaml = _sign_manifest(manifest_yaml)
 
-    manifest_dir = project_path / ".ai" / "bundles" / bundle_id
+    manifest_dir = project_path / AI_DIR / "bundles" / bundle_id
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_dir / "manifest.yaml"
     manifest_path.write_text(signed_yaml, encoding="utf-8")
@@ -312,7 +314,7 @@ async def _verify(
     if not bundle_id:
         return {"error": "bundle_id is required for verify"}
 
-    manifest_path = project_path / ".ai" / "bundles" / bundle_id / "manifest.yaml"
+    manifest_path = project_path / AI_DIR / "bundles" / bundle_id / "manifest.yaml"
     if not manifest_path.exists():
         return {"error": f"Manifest not found: {manifest_path}"}
 
@@ -384,7 +386,7 @@ async def _inspect(
     if not bundle_id:
         return {"error": "bundle_id is required for inspect"}
 
-    manifest_path = project_path / ".ai" / "bundles" / bundle_id / "manifest.yaml"
+    manifest_path = project_path / AI_DIR / "bundles" / bundle_id / "manifest.yaml"
     if not manifest_path.exists():
         return {"error": f"Manifest not found: {manifest_path}"}
 
@@ -412,7 +414,7 @@ async def _list(
     project_path: Path, params: Dict[str, Any]
 ) -> Dict[str, Any]:
     """List all bundles under .ai/bundles/."""
-    bundles_dir = project_path / ".ai" / "bundles"
+    bundles_dir = project_path / AI_DIR / "bundles"
     if not bundles_dir.is_dir():
         return {"bundles": []}
 

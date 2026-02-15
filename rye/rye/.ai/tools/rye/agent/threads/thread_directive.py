@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from rye.constants import AI_DIR
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
@@ -97,7 +98,7 @@ def _write_thread_meta(
     Stores resolved limits (including depth) and capabilities so child
     threads can look up parent context from the filesystem.
     """
-    thread_dir = project_path / ".ai" / "threads" / thread_id
+    thread_dir = project_path / AI_DIR / "threads" / thread_id
     thread_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {
@@ -125,7 +126,7 @@ def _write_thread_meta(
 
 def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
     """Read a thread's thread.json. Returns None if not found."""
-    meta_path = project_path / ".ai" / "threads" / thread_id / "thread.json"
+    meta_path = project_path / AI_DIR / "threads" / thread_id / "thread.json"
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)

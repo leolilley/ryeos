@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "RYE - AI operating system running on Lilux microkernel"
 
 dependencies = [
-    "mcp",
     "lilux",
     "pyyaml",
     "cryptography",
@@ -17,9 +16,6 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0",
 ]
-
-[project.scripts]
-rye = "rye.server:main"
 
 [build-system]
 requires = ["hatchling"]

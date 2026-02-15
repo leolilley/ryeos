@@ -66,6 +66,8 @@ except ImportError:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+from rye.constants import AI_DIR
+
 # Telemetry integration
 try:
     from .telemetry.lib import TelemetryStore
@@ -1380,7 +1382,7 @@ async def _pull(
                 base_dir = _get_rye_state_dir()
             else:
                 # project (default)
-                base_dir = Path(project_path) / ".ai" if project_path else Path(".ai")
+                base_dir = Path(project_path) / AI_DIR if project_path else Path(AI_DIR)
             
             # Build path like {base}/{item_type}s/{category}/{name}.ext
             ext = ".md" if item_type in ["directive", "knowledge"] else ".py"
@@ -1868,7 +1870,7 @@ async def _push_bundle(
             "usage": "push_bundle(bundle_id='my-bundle', version='1.0.0')",
         }
 
-    base_dir = Path(project_path) / ".ai" if project_path else Path(".ai")
+    base_dir = Path(project_path) / AI_DIR if project_path else Path(AI_DIR)
     bundle_dir = base_dir / "bundles" / bundle_id
     manifest_path = bundle_dir / "manifest.yaml"
 
@@ -2074,7 +2076,7 @@ async def _pull_bundle(
         bundle_files = body.get("files", {})
         pulled_version = body.get("version", version)
 
-        base_dir = Path(project_path) / ".ai" if project_path else Path(".ai")
+        base_dir = Path(project_path) / AI_DIR if project_path else Path(AI_DIR)
 
         # Write manifest
         bundle_dir = base_dir / "bundles" / bundle_id

@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 
+from rye.constants import AI_DIR
+
 # Default log location - can be overridden
-DEFAULT_LOG_DIR = Path.home() / ".ai" / "logs" / "rye"
+DEFAULT_LOG_DIR = Path.home() / AI_DIR / "logs" / "rye"
 
 
 async def get_logs(

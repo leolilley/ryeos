@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rye.constants import AI_DIR
 from rye.utils.path_utils import get_user_space, get_system_space
 
 logger = logging.getLogger(__name__)
@@ -31,17 +32,17 @@ class ParserRouter:
 
         # Project parsers (highest priority)
         if self.project_path:
-            project_parsers = self.project_path / ".ai" / "parsers"
+            project_parsers = self.project_path / AI_DIR / "parsers"
             if project_parsers.exists():
                 paths.append(project_parsers)
 
         # User parsers
-        user_parsers = get_user_space() / "parsers"
+        user_parsers = get_user_space() / AI_DIR / "parsers"
         if user_parsers.exists():
             paths.append(user_parsers)
 
         # System parsers (bundled with rye in .ai/tools/rye/core/parsers/)
-        system_parsers = get_system_space() / "tools" / "rye" / "core" / "parsers"
+        system_parsers = get_system_space() / AI_DIR / "tools" / "rye" / "core" / "parsers"
         if system_parsers.exists():
             paths.append(system_parsers)
 

@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rye.constants import AI_DIR
+
 
 class Transcript:
     """Append-only JSONL transcript for a thread.
@@ -27,7 +29,7 @@ class Transcript:
 
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
-        self._dir = project_path / ".ai" / "threads" / thread_id
+        self._dir = project_path / AI_DIR / "threads" / thread_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "transcript.jsonl"
         self._events: List[Dict[str, Any]] = []

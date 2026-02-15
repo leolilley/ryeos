@@ -31,7 +31,7 @@ from rye.executor.lockfile_resolver import LockfileResolver
 from rye.utils.extensions import get_tool_extensions
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.metadata_manager import MetadataManager
-from rye.constants import ItemType
+from rye.constants import AI_DIR, ItemType
 
 logger = logging.getLogger(__name__)
 
@@ -442,20 +442,20 @@ class PrimitiveExecutor:
         if current_space == "system":
             # System tools can only depend on system tools
             search_order = [
-                (self.system_space / "tools", "system"),
+                (self.system_space / AI_DIR / "tools", "system"),
             ]
         elif current_space == "user":
             # User tools can depend on user or system tools
             search_order = [
-                (self.user_space / "tools", "user"),
-                (self.system_space / "tools", "system"),
+                (self.user_space / AI_DIR / "tools", "user"),
+                (self.system_space / AI_DIR / "tools", "system"),
             ]
         else:  # project
             # Project tools can depend on any space
             search_order = [
-                (self.project_path / ".ai" / "tools", "project"),
-                (self.user_space / "tools", "user"),
-                (self.system_space / "tools", "system"),
+                (self.project_path / AI_DIR / "tools", "project"),
+                (self.user_space / AI_DIR / "tools", "user"),
+                (self.system_space / AI_DIR / "tools", "system"),
             ]
 
         # Get extensions data-driven from extractors

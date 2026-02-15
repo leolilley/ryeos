@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from rye.constants import AI_DIR
+
 
 class ConfigLoader:
     """Base loader for YAML configs with extends support."""
@@ -26,7 +28,7 @@ class ConfigLoader:
         system_path = Path(__file__).parent.parent / "config" / self.config_name
         config = self._load_yaml(system_path)
 
-        project_config_path = project_path / ".ai" / "config" / self.config_name
+        project_config_path = project_path / AI_DIR / "config" / self.config_name
         if project_config_path.exists():
             project_config = self._load_yaml(project_config_path)
             config = self._merge(config, project_config)
