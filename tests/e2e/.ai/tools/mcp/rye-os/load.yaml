@@ -1,0 +1,39 @@
+# rye:validated:2026-02-05T00:23:43Z:placeholder
+tool_type: mcp
+executor_id: rye/core/runtimes/mcp_stdio_runtime
+category: mcp/rye-os
+version: 1.0.0
+description: Load item content for inspection or copy between locations
+config:
+  server: mcp/servers/rye-os
+  server_config_path: '{project_path}/.ai/tools/mcp/servers/rye-os.yaml'
+  tool_name: load
+input_schema:
+  type: object
+  properties:
+    item_type:
+      type: string
+      enum:
+      - directive
+      - tool
+      - knowledge
+    item_id:
+      type: string
+    project_path:
+      type: string
+    source:
+      type: string
+      enum:
+      - project
+      - user
+      - system
+      default: project
+    destination:
+      type: string
+      enum:
+      - project
+      - user
+  required:
+  - item_type
+  - item_id
+  - project_path

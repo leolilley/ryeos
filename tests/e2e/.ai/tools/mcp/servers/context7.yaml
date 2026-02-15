@@ -1,0 +1,13 @@
+# rye:validated:2026-02-05T00:15:01Z:placeholder
+tool_type: mcp_server
+executor_id: null
+category: mcp/servers
+version: 1.0.0
+description: 'MCP server: context7'
+config:
+  transport: http
+  timeout: 30
+  url: https://mcp.context7.com/mcp
+cache:
+  discovered_at: '2026-02-05T00:15:01.468662+00:00'
+  tool_count: 2

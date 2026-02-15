@@ -1,0 +1,16 @@
+# rye:validated:2026-02-05T00:23:43Z:placeholder
+tool_type: mcp_server
+executor_id: null
+category: mcp/servers
+version: 1.0.0
+description: 'MCP server: rye-os'
+config:
+  transport: stdio
+  timeout: 30
+  command: /home/leo/projects/rye-os/.venv/bin/python
+  args:
+  - -m
+  - rye.server
+cache:
+  discovered_at: '2026-02-05T00:23:43.927670+00:00'
+  tool_count: 4

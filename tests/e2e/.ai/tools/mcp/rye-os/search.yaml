@@ -1,0 +1,38 @@
+# rye:validated:2026-02-05T00:23:43Z:placeholder
+tool_type: mcp
+executor_id: rye/core/runtimes/mcp_stdio_runtime
+category: mcp/rye-os
+version: 1.0.0
+description: Search for directives, tools, or knowledge by query
+config:
+  server: mcp/servers/rye-os
+  server_config_path: '{project_path}/.ai/tools/mcp/servers/rye-os.yaml'
+  tool_name: search
+input_schema:
+  type: object
+  properties:
+    item_type:
+      type: string
+      enum:
+      - directive
+      - tool
+      - knowledge
+    query:
+      type: string
+    project_path:
+      type: string
+    source:
+      type: string
+      enum:
+      - project
+      - user
+      - system
+      - all
+      default: project
+    limit:
+      type: integer
+      default: 10
+  required:
+  - item_type
+  - query
+  - project_path
