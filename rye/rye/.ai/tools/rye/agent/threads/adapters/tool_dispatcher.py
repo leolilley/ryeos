@@ -1,9 +1,11 @@
-# rye:signed:2026-02-14T00:28:39Z:6b4e22d9a204bc57f3e46e8fc5a739d66633fb564ab54c0721a0006c482af112:U8BI1_K1RODjLiZi--x5BK9rf6kKyFbu08KK9tXyjzMzw4Wc930Tak9op-mX8D1hjSJAGw7CB04zDxogOwKABg==:440443d0858f0199
-__version__ = "1.0.0"
+# rye:signed:2026-02-16T05:55:29Z:c96904bb9945cd43fa4b314b79f3202ae2fa0fac1bee74345a52c353a868ac96:I1dK9oPkeLmeirjmXWkpZyDDBO4M-Tn200EAnaarzTo-BLtc9-vxFce23QmfPnRtUPPe_k6VKLFjDroatPHMCw==:440443d0858f0199
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Tool dispatcher for thread tool calls"
 
+import os
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -14,6 +16,8 @@ from rye.tools.execute import ExecuteTool
 from rye.tools.sign import SignTool
 from module_loader import load_module
 from rye.utils.resolvers import get_user_space
+
+logger = logging.getLogger(__name__)
 
 _THREADS_ROOT = Path(__file__).resolve().parent.parent
 
@@ -99,6 +103,12 @@ class ToolDispatcher:
                     source=self._get(action, params, "source", "project"),
                 )
         except Exception as e:
+            if os.environ.get("RYE_DEBUG"):
+                import traceback
+                logger.error(
+                    "Dispatch %s %s/%s failed: %s\n%s",
+                    primary, item_type, item_id, e, traceback.format_exc()
+                )
             return {"status": "error", "error": str(e)}
 
         return {"status": "error", "error": f"Unhandled primary: {primary}"}

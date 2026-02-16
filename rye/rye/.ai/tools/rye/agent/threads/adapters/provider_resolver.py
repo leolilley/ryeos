@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:28:39Z:10cc0e40ab9681828bb58275746b2516b3d3f423e3cd68e50f47f71a24c659b7:X68qqaIq0tGND_FS0b9dJig1-aPhyo8yAFQsfz-RXIpsG0XlewwiGs5c2OGDeGUo6mjYwOxVRFl7op2Aq5weAA==:440443d0858f0199
+# rye:signed:2026-02-16T05:55:29Z:cdf75bde26b6d1d358ca77eca329be35bfb670c10b28490bdef4ac6d1049dcbe:cMY3jwHGtXYm_t6sG_QhIYpQuwiZRa2ZU4gvPsyq6Gv-AUDuowPkohQOsxluNYfLg8_Dlv0gETrwyJypAGi9Dw==:440443d0858f0199
 """
 provider_resolver.py: Resolve model/tier to a concrete provider adapter.
 
@@ -6,12 +6,13 @@ Searches provider YAML configs in project → user → system space.
 No hardcoded provider — if no config matches, raises ProviderNotFoundError.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Provider resolver for thread execution"
 
 import logging
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -50,6 +51,13 @@ def _get_provider_dirs(project_path: Optional[Path] = None) -> List[Path]:
     system = get_system_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"
     if system.exists():
         dirs.append(system)
+    if os.environ.get("RYE_DEBUG"):
+        all_searched = []
+        if project_path:
+            all_searched.append(str(project_path / AI_DIR / "tools" / "rye" / "agent" / "providers"))
+        all_searched.append(str(get_user_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"))
+        all_searched.append(str(get_system_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"))
+        logger.debug("Provider dirs searched: %s → found: %s", all_searched, [str(d) for d in dirs])
     return dirs
 
 

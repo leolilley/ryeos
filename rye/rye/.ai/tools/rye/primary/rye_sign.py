@@ -3,9 +3,7 @@
 
 import argparse
 import json
-import sys
 import asyncio
-from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"

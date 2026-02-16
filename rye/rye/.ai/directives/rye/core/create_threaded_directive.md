@@ -62,7 +62,7 @@
       <description>Write the threaded directive file with full thread execution metadata including model, limits, permissions, inputs, and structured action tags in process steps</description>
       <execute item_type="tool" item_id="rye/file-system/fs_write">
         <param name="path" value=".ai/directives/{input:category}/{input:name}.md" />
-        <param name="content" value="Generate a threaded directive with: name={input:name}, category={input:category}, description={input:description}, complexity={input:complexity}, permissions={input:permissions_needed}, steps={input:process_steps}. Include <model>, <limits>, <permissions> with hierarchical <execute>/<search>/<load>/<sign> permission entries (NOT legacy <cap> tags), and use <execute>, <search>, <load>, <sign> action tags in process steps." />
+        <param name="content" value="Generate a threaded directive with: name={input:name}, category={input:category}, description={input:description}, complexity={input:complexity}, permissions={input:permissions_needed}, steps={input:process_steps}. Include <model>, <limits>, <permissions> with hierarchical <execute>/<search>/<load>/<sign> permission entries, and use <execute>, <search>, <load>, <sign> action tags in process steps." />
       </execute>
     </step>
 

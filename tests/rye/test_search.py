@@ -49,10 +49,10 @@ class TestSearchTool:
     async def test_search_directives(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="create",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -62,10 +62,10 @@ class TestSearchTool:
     async def test_search_tools(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="tool",
+            scope="rye.search.tool.*",
             query="scraper",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -74,10 +74,10 @@ class TestSearchTool:
     async def test_search_knowledge(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="knowledge",
+            scope="rye.search.knowledge.*",
             query="api",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -86,10 +86,10 @@ class TestSearchTool:
     async def test_search_empty_query(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -98,10 +98,10 @@ class TestSearchTool:
     async def test_search_with_limit(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            source="project",
+            space="project",
             limit=1,
         )
 
@@ -111,10 +111,10 @@ class TestSearchTool:
     async def test_search_nonexistent_project(self):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="test",
             project_path="/nonexistent/path",
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -123,10 +123,10 @@ class TestSearchTool:
     async def test_boolean_or(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="create OR bootstrap",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -135,10 +135,10 @@ class TestSearchTool:
     async def test_boolean_not(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="NOT bootstrap",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -149,10 +149,10 @@ class TestSearchTool:
     async def test_phrase_search(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query='"Create a new tool"',
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -161,10 +161,10 @@ class TestSearchTool:
     async def test_wildcard_search(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="boot*",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -173,11 +173,11 @@ class TestSearchTool:
     async def test_field_specific_search(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="",
             fields={"name": "bootstrap"},
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "error" not in result
@@ -187,17 +187,17 @@ class TestSearchTool:
     async def test_pagination_offset(self, temp_project):
         tool = SearchTool("")
         all_results = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            source="project",
+            space="project",
             limit=100,
         )
         page2 = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            source="project",
+            space="project",
             limit=1,
             offset=1,
         )
@@ -208,17 +208,17 @@ class TestSearchTool:
     async def test_response_schema(self, temp_project):
         tool = SearchTool("")
         result = await tool.handle(
-            item_type="directive",
+            scope="rye.search.directive.*",
             query="create",
             project_path=str(temp_project),
-            source="project",
+            space="project",
         )
 
         assert "results" in result
         assert "total" in result
         assert "query" in result
-        assert "item_type" in result
-        assert "source" in result
+        assert "scope" in result
+        assert "space" in result
         assert "limit" in result
         assert "offset" in result
         assert "search_type" in result

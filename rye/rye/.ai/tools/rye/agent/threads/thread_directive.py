@@ -1,5 +1,5 @@
-# rye:signed:2026-02-14T00:28:39Z:43298b65ef5614023b37be19f23423c82d8d3d0ef473901fdaa6aa0646f4fec7:AXBja0PigzHdSpJMrmuiXPGwm71sX4MNtzaNkZaihHOZD1DKtaI15hI5sPwvQFzPHw_rE3IoVXqjD0yyLuJoAw==:440443d0858f0199
-__version__ = "1.0.0"
+# rye:signed:2026-02-16T05:55:29Z:2b1baad80b0a0619444df59c3c1c92a62846883378fee98461dd1a5717b22dae:YNS10Xc1DjJj9V6fpzmKm5qrTd7rZ9DeM-SlAS7yzhqXn2NkRTcU21cCtvVAyAsCwHkfrpT60ucuR9H6uGetBw==:440443d0858f0199
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
 __category__ = "rye/agent/threads"
@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -409,6 +410,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
         proj_path,
     )
 
+    # Ensure non-empty error message on failure
+    if not result.get("success") and not result.get("error"):
+        result["error"] = result.get("status", "unknown error (no message from runner)")
+
     # 12. Report spend + cascade to parent + release
     actual_spend = result.get("cost", {}).get("spend", 0.0)
     ledger.report_actual(thread_id, actual_spend)
@@ -429,6 +434,26 @@ async def execute(params: Dict, project_path: str) -> Dict:
         limits=limits, capabilities=harness._capabilities,
     )
 
+    # Write per-thread diagnostics file on error for debugging
+    if not result.get("success") and os.environ.get("RYE_DEBUG"):
+        diag_path = proj_path / ".ai" / "threads" / thread_id.replace("/", os.sep) / "diagnostics.json"
+        try:
+            import json as _json
+            diag_path.parent.mkdir(parents=True, exist_ok=True)
+            diag_data = {
+                "thread_id": thread_id,
+                "directive": directive_name,
+                "model": resolved_model,
+                "error": result.get("error", ""),
+                "cost": result.get("cost", {}),
+                "provider_item_id": provider_item_id,
+                "limits": limits,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            diag_path.write_text(_json.dumps(diag_data, indent=2, default=str))
+        except Exception:
+            pass  # diagnostics are best-effort
+
     return {**result, "directive": directive_name}
 
 
@@ -437,5 +462,15 @@ if __name__ == "__main__":
     parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
+
+    # Initialize debug logging if RYE_DEBUG is set
+    if os.environ.get("RYE_DEBUG"):
+        import logging
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="[%(name)s] %(levelname)s: %(message)s",
+            stream=sys.stderr,
+        )
+
     result = asyncio.run(execute(json.loads(args.params), args.project_path))
     print(json.dumps(result))

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:28:39Z:e03fd03b94cf119b5cef6f44297004c683eb5d3f3efb4925f4c4e00f00988a92:bzfYA-QGiL1EKIuOM1GLJrjzu722SUmDJxgOCo15wgUZRYCUjyY6UJM5PN4QTvjMYJ374uZvJG89HrqA5ahJCg==:440443d0858f0199
+# rye:signed:2026-02-16T05:55:29Z:25a3c3361b342464564be606445bdac19822953a3f9ebea6e89436710c9c857c:VaCHtfmENAKOgJCwf2IAzGOrGU6jeKXDDuP-pEsfrIlmW179A4h33LdnEFwRhngpw96DHiPRllS4heEmYg4PDQ==:440443d0858f0199
 """
 runner.py: Core LLM loop for thread execution
 
@@ -11,17 +11,21 @@ Main loop that:
 6. Repeats until completion or error
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Core LLM loop for thread execution"
 
 import asyncio
+import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict
 
 from module_loader import load_module
+
+logger = logging.getLogger(__name__)
 
 _ANCHOR = Path(__file__).parent
 
@@ -127,6 +131,12 @@ async def run(
                     messages, harness.available_tools
                 )
             except Exception as e:
+                if os.environ.get("RYE_DEBUG"):
+                    import traceback
+                    logger.error("LLM call failed: %s: %s\n%s", type(e).__name__, e, traceback.format_exc())
+
+                original_error = {"success": False, "error": str(e) or type(e).__name__}
+
                 error_loader = load_module("loaders/error_loader", anchor=_ANCHOR)
                 classification = error_loader.classify(
                     project_path, _error_to_context(e)
@@ -146,15 +156,16 @@ async def run(
                         )
                         await asyncio.sleep(delay)
                         continue
+                    # Preserve original error if hook blanked it out
+                    if not hook_result.get("error"):
+                        hook_result["error"] = original_error["error"]
+                    if "success" not in hook_result:
+                        hook_result["success"] = False
                     return _finalize(
                         thread_id, cost, hook_result, emitter, transcript
                     )
                 return _finalize(
-                    thread_id,
-                    cost,
-                    {"success": False, "error": str(e)},
-                    emitter,
-                    transcript,
+                    thread_id, cost, original_error, emitter, transcript
                 )
 
             # Track tokens
@@ -272,6 +283,8 @@ async def run(
 
 def _finalize(thread_id, cost, result, emitter, transcript) -> Dict:
     status = "completed" if result.get("success") else result.get("status", "error")
+    if not result.get("success") and not result.get("error"):
+        result["error"] = "Unknown error (no message provided)"
     emitter.emit(
         thread_id, f"thread_{status}", {"cost": cost}, transcript, criticality="critical"
     )
@@ -300,10 +313,15 @@ def _clean_tool_result(result: Any) -> Any:
 
 def _error_to_context(e: Exception) -> Dict:
     """Convert exception to context dict for error classification."""
-    return {
+    ctx = {
         "error": {
             "type": type(e).__name__,
             "message": str(e),
             "code": getattr(e, "code", None),
         }
     }
+    if os.environ.get("RYE_DEBUG"):
+        import traceback
+        ctx["error"]["class_hierarchy"] = [c.__name__ for c in type(e).__mro__]
+        ctx["error"]["traceback"] = traceback.format_exc()
+    return ctx

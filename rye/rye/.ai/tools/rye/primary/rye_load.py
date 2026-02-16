@@ -3,9 +3,7 @@
 
 import argparse
 import json
-import sys
 import asyncio
-from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
@@ -31,6 +29,11 @@ CONFIG_SCHEMA = {
             "default": "project",
             "description": "Space to load from",
         },
+        "destination": {
+            "type": "string",
+            "enum": ["project", "user"],
+            "description": "Copy item to this space",
+        },
     },
     "required": ["item_type", "item_id"],
 }
@@ -41,12 +44,15 @@ def execute(params: dict, project_path: str) -> dict:
         from rye.tools.load import LoadTool
 
         tool = LoadTool()
-        result = asyncio.run(tool.handle(
-            item_type=params["item_type"],
-            item_id=params["item_id"],
-            project_path=project_path,
-            source=params.get("source", "project"),
-        ))
+        kwargs = {
+            "item_type": params["item_type"],
+            "item_id": params["item_id"],
+            "project_path": project_path,
+            "source": params.get("source", "project"),
+        }
+        if "destination" in params:
+            kwargs["destination"] = params["destination"]
+        result = asyncio.run(tool.handle(**kwargs))
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}

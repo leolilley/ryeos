@@ -1,4 +1,4 @@
-# rye:signed:2026-02-13T07:29:16Z:e82c37374aaa02251d38bba2bfb8de956a301e294fd6feb4a1453bfedd06871f:Md2NIFKzoQgKvCtK3mm_srm0gp8KcBPSwt-ZnAZMii3IcEPsCAKtnxRPUfGyVzYziDjZ_QX4FZlTD7v_Ad2cCQ==:440443d0858f0199
+# rye:signed:2026-02-16T05:55:29Z:1216d5901c16bf8afceb6c1198a79d6b2bd5666cf635966eb0bf1d72bc5e4a9e:ecl6iyykiAVtksvuxjffRlZEvNTC0ZncXL8P8oDMeh5f1ATWyZyVXed9IKJvGEGfFQ4nq78pQp8DF2V7OmbUDg==:440443d0858f0199
 tool_id: anthropic
 tool_type: http
 version: "1.1.0"
@@ -10,25 +10,23 @@ requires:
   - net.call
 
 tier_mapping:
-  fast: "claude-3-5-haiku-20241022"
-  haiku: "claude-3-5-haiku-20241022"
-  sonnet: "claude-3-5-sonnet-20241022"
-  opus: "claude-3-opus-20240229"
-  high: "claude-3-5-sonnet-20241022"
-  max: "claude-3-opus-20240229"
+  fast: "claude-haiku-4-20250414"
+  haiku: "claude-haiku-4-20250414"
+  sonnet: "claude-sonnet-4-20250514"
+  opus: "claude-opus-4-20250918"
+  high: "claude-sonnet-4-20250514"
+  max: "claude-opus-4-20250918"
+  general: "claude-haiku-4-20250414"
 
 # Per-million-token pricing (USD)
 pricing:
-  claude-3-5-haiku-20241022:
-    input: 1.00
-    output: 5.00
-  claude-3-5-sonnet-20241022:
-    input: 3.00
-    output: 15.00
+  claude-haiku-4-20250414:
+    input: 0.80
+    output: 4.00
   claude-sonnet-4-20250514:
     input: 3.00
     output: 15.00
-  claude-3-opus-20240229:
+  claude-opus-4-20250918:
     input: 15.00
     output: 75.00
 
@@ -91,7 +89,7 @@ parameters:
   - name: model
     type: string
     required: true
-    default: "claude-3-5-haiku-20241022"
+    default: "claude-haiku-4-20250414"
   - name: tokens
     type: integer
     required: true

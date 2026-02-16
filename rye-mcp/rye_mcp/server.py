@@ -53,24 +53,24 @@ class RYEServer:
             return [
                 Tool(
                     name="search",
-                    description="Search for directives, tools, or knowledge by query",
+                    description="Search for directives, tools, or knowledge by scope",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "item_type": {
+                            "scope": {
                                 "type": "string",
-                                "enum": ["directive", "tool", "knowledge"],
+                                "description": "Capability-format scope: rye.search.{item_type}.{namespace}.* (e.g., rye.search.directive.rye.core.*) or shorthand: directive, tool.rye.core.*",
                             },
                             "query": {"type": "string"},
                             "project_path": {"type": "string"},
-                            "source": {
+                            "space": {
                                 "type": "string",
                                 "enum": ["project", "user", "system", "all"],
-                                "default": "project",
+                                "default": "all",
                             },
                             "limit": {"type": "integer", "default": 10},
                         },
-                        "required": ["item_type", "query", "project_path"],
+                        "required": ["scope", "query", "project_path"],
                     },
                 ),
                 Tool(

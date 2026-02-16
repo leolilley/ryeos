@@ -20,15 +20,14 @@ CONFIG_SCHEMA = {
             "type": "string",
             "description": "Search query (supports AND, OR, NOT, wildcards, phrases)",
         },
-        "item_type": {
+        "scope": {
             "type": "string",
-            "enum": ["directive", "tool", "knowledge"],
-            "description": "Type of items to search",
+            "description": "Capability-format scope: rye.search.{item_type}.{namespace}.* or shorthand: directive, tool.rye.core.*",
         },
-        "source": {
+        "space": {
             "type": "string",
             "enum": ["project", "user", "system", "all"],
-            "default": "project",
+            "default": "all",
             "description": "Space to search in",
         },
         "limit": {
@@ -37,7 +36,7 @@ CONFIG_SCHEMA = {
             "description": "Maximum results to return",
         },
     },
-    "required": ["query", "item_type"],
+    "required": ["query", "scope"],
 }
 
 
@@ -48,9 +47,9 @@ def execute(params: dict, project_path: str) -> dict:
         tool = SearchTool()
         result = asyncio.run(tool.handle(
             query=params["query"],
-            item_type=params["item_type"],
+            scope=params["scope"],
             project_path=project_path,
-            source=params.get("source", "project"),
+            space=params.get("space", "all"),
             limit=params.get("limit", 10),
         ))
         return result

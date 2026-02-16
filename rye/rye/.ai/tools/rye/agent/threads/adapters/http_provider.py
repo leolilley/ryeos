@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:28:39Z:ba0b44dda7516a05c248ea742131fe8a21b8d95700c3d20717a1f9759cc8af29:c-LudslAgM3_UDhQU02qXQdqC_aD5wy-F-9mW1TkA-RxcJDZ66rHRcf8fRUFp61gKEPW85EZDZTmPJEjEMLaBQ==:440443d0858f0199
+# rye:signed:2026-02-16T05:55:29Z:fa48640a150887f2badd94469933b6a1da057d47d426549d542a814d3bf13cca:eC-N_yPQJ0vI4rxO_mGT01kzIC6zamHCaNf3Hze1cVLUiKDjvR4tEgTQbpaeBNWRVhG--z7pQ5OvfFEa0hCSDA==:440443d0858f0199
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -11,12 +11,13 @@ This adapter only handles:
 2. Parsing the API response using the provider YAML's tool_use.response config
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "HTTP provider adapter for LLM API calls"
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from .provider_adapter import ProviderAdapter
@@ -217,18 +218,49 @@ class HttpProvider(ProviderAdapter):
         })
 
         if result.get("status") != "success":
+            from ..errors import ProviderCallError
+
+            # Debug: log full dispatch result
+            if os.environ.get("RYE_DEBUG"):
+                logger.error("Provider dispatch failed: %s", result)
+
             data = result.get("data", {})
+
+            # Priority 1: Tool-chain error (lockfile, permission, resolution)
+            chain_error = result.get("error") or data.get("error")
+            if chain_error and not isinstance(data.get("body"), dict):
+                raise ProviderCallError(
+                    provider_id=self._provider_item_id,
+                    message=str(chain_error),
+                    error_type="tool_chain_error",
+                )
+
+            # Priority 2: HTTP API error with structured body
             body = data.get("body", {})
-            # Extract structured error from API response body if available
+            http_status = data.get("status_code")
+            headers = data.get("headers", {})
+            request_id = headers.get("request-id", "")
+
             if isinstance(body, dict) and "error" in body:
                 api_error = body["error"]
                 if isinstance(api_error, dict):
                     error_msg = api_error.get("message", str(api_error))
+                    error_type = api_error.get("type", "api_error")
                 else:
                     error_msg = str(api_error)
+                    error_type = "api_error"
             else:
-                error_msg = result.get("error") or data.get("error") or str(body or "Unknown provider error")
-            raise RuntimeError(f"Provider '{self._provider_item_id}' failed: {error_msg}")
+                error_msg = chain_error or str(body or "Unknown provider error")
+                error_type = "unknown"
+
+            raise ProviderCallError(
+                provider_id=self._provider_item_id,
+                message=error_msg,
+                http_status=http_status,
+                request_id=request_id,
+                error_type=error_type,
+                retryable=http_status in (429, 500, 502, 503, 529) if http_status else False,
+            )
 
         data = result.get("data", {})
         response_body = data.get("body", data)

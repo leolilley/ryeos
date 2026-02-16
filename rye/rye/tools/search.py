@@ -23,11 +23,12 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from rye.constants import ItemType
+from rye.constants import AI_DIR, ItemType
 from rye.utils.path_utils import (
     get_user_space,
     get_project_type_path,
     get_user_type_path,
+    get_system_spaces,
     get_system_type_paths,
     get_extractor_search_paths,
 )
@@ -168,8 +169,8 @@ class SearchOptions:
     """Search configuration options."""
 
     query: str = ""
-    item_type: str = ""
-    source: str = "project"
+    scope: str = ""  # Capability format: rye.search.directive.rye.core.*
+    space: str = "all"  # project | user | system | all
     project_path: str = ""
     limit: int = 10
     offset: int = 0
@@ -178,6 +179,72 @@ class SearchOptions:
     filters: Dict[str, Any] = field(default_factory=dict)
     fuzzy: Dict[str, Any] = field(default_factory=dict)
     proximity: Dict[str, Any] = field(default_factory=dict)
+
+
+def parse_search_scope(scope: str) -> Dict[str, Any]:
+    """Parse a scope string into its components.
+
+    Accepts capability format: rye.search.directive.rye.core.*
+    Or shorthand: directive (all directives), tool.rye.core.* (tools in rye/core)
+
+    Returns dict with keys: item_type, namespace_filter
+    - item_type: directive | tool | knowledge
+    - namespace_filter: prefix to match item IDs against (e.g., "rye/core/")
+      or None for no filtering
+    """
+    if not scope:
+        return {"item_type": "", "namespace_filter": None}
+
+    # Full capability format: rye.search.directive.rye.core.*
+    if scope.startswith("rye."):
+        parts = scope[4:].split(".", 2)  # After "rye."
+        if len(parts) < 2:
+            return {"item_type": "", "namespace_filter": None}
+
+        # parts[0] = primary (search), parts[1] = item_type
+        item_type = parts[1]
+        if item_type == "*":
+            return {"item_type": "", "namespace_filter": None}
+
+        if item_type not in ("directive", "tool", "knowledge"):
+            return {"item_type": "", "namespace_filter": None}
+
+        if len(parts) < 3 or parts[2] == "*":
+            return {"item_type": item_type, "namespace_filter": None}
+
+        # Convert specifics dots back to slashes for namespace filter
+        specifics = parts[2]
+        if specifics.endswith(".*"):
+            specifics = specifics[:-2]
+        elif specifics.endswith("*"):
+            specifics = specifics[:-1]
+
+        ns_filter = specifics.replace(".", "/")
+        if ns_filter and not ns_filter.endswith("/"):
+            ns_filter += "/"
+
+        return {"item_type": item_type, "namespace_filter": ns_filter}
+
+    # Shorthand: just item_type, or item_type.namespace
+    parts = scope.split(".", 1)
+    item_type = parts[0]
+    if item_type not in ("directive", "tool", "knowledge"):
+        return {"item_type": "", "namespace_filter": None}
+
+    if len(parts) < 2 or parts[1] == "*":
+        return {"item_type": item_type, "namespace_filter": None}
+
+    specifics = parts[1]
+    if specifics.endswith(".*"):
+        specifics = specifics[:-2]
+    elif specifics.endswith("*"):
+        specifics = specifics[:-1]
+
+    ns_filter = specifics.replace(".", "/")
+    if ns_filter and not ns_filter.endswith("/"):
+        ns_filter += "/"
+
+    return {"item_type": item_type, "namespace_filter": ns_filter}
 
 
 # ---------------------------------------------------------------------------
@@ -810,10 +877,16 @@ class SearchTool:
 
     async def handle(self, **kwargs) -> Dict[str, Any]:
         """Handle search request matching the spec response schema."""
+        scope = kwargs.get("scope", "")
+        parsed_scope = parse_search_scope(scope)
+
+        item_type = parsed_scope["item_type"] or kwargs.get("item_type", "")
+        namespace_filter = parsed_scope["namespace_filter"]
+
         opts = SearchOptions(
             query=kwargs.get("query", ""),
-            item_type=kwargs["item_type"],
-            source=kwargs.get("source", "project"),
+            scope=scope,
+            space=kwargs.get("space", "all"),
             project_path=kwargs["project_path"],
             limit=kwargs.get("limit", 10),
             offset=kwargs.get("offset", 0),
@@ -824,23 +897,26 @@ class SearchTool:
             proximity=kwargs.get("proximity") or {},
         )
 
+        if not item_type:
+            return {"error": "scope must specify an item_type (e.g., rye.search.directive.*)"}
+
         logger.debug(
-            f"Search: item_type={opts.item_type}, query={opts.query}, "
-            f"source={opts.source}"
+            f"Search: scope={opts.scope}, space={opts.space}, query={opts.query}"
         )
 
         try:
             query_ast = QueryParser(opts.query).parse()
-            search_paths = self._resolve_search_paths(opts)
+            search_paths = self._resolve_search_paths(opts, item_type)
             field_weights = get_search_fields(
-                opts.item_type, Path(opts.project_path) if opts.project_path else None
+                item_type, Path(opts.project_path) if opts.project_path else None
             )
 
             extractor = MetadataExtractor(
                 Path(opts.project_path) if opts.project_path else None
             )
             results = self._search_items(
-                search_paths, opts, query_ast, field_weights, extractor
+                search_paths, opts, item_type, namespace_filter,
+                query_ast, field_weights, extractor
             )
             results = self._sort_results(results, opts.sort_by)
             total = len(results)
@@ -850,8 +926,8 @@ class SearchTool:
                 "results": results,
                 "total": total,
                 "query": opts.query,
-                "item_type": opts.item_type,
-                "source": opts.source,
+                "scope": opts.scope,
+                "space": opts.space,
                 "limit": opts.limit,
                 "offset": opts.offset,
                 "search_type": "keyword",
@@ -865,26 +941,33 @@ class SearchTool:
     # ------------------------------------------------------------------
 
     def _resolve_search_paths(
-        self, opts: SearchOptions
+        self, opts: SearchOptions, item_type: str
     ) -> List[Tuple[Path, str]]:
-        """Resolve (search_dir, source_label) pairs for the given item type."""
+        """Resolve (search_dir, source_label) pairs for the given item type.
+
+        Always returns type-root directories (.ai/directives/, .ai/tools/, etc.)
+        so that item IDs are computed correctly as full paths from the type root.
+        """
         project_path = Path(opts.project_path) if opts.project_path else None
         paths: List[Tuple[Path, str]] = []
 
-        if opts.source in ("project", "all") and project_path:
-            d = get_project_type_path(project_path, opts.item_type)
+        if opts.space in ("project", "all") and project_path:
+            d = get_project_type_path(project_path, item_type)
             if d.exists():
                 paths.append((d, "project"))
 
-        if opts.source in ("user", "all"):
-            d = get_user_type_path(opts.item_type)
+        if opts.space in ("user", "all"):
+            d = get_user_type_path(item_type)
             if d.exists():
                 paths.append((d, "user"))
 
-        if opts.source in ("system", "all"):
-            for root_id, d in get_system_type_paths(opts.item_type):
-                if d.exists():
-                    paths.append((d, f"system:{root_id}"))
+        if opts.space in ("system", "all"):
+            for bundle in get_system_spaces():
+                type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+                type_root = bundle.root_path / AI_DIR / type_folder
+                if not type_root.exists():
+                    continue
+                paths.append((type_root, f"system:{bundle.bundle_id}"))
 
         return paths
 
@@ -896,6 +979,8 @@ class SearchTool:
         self,
         search_paths: List[Tuple[Path, str]],
         opts: SearchOptions,
+        item_type: str,
+        namespace_filter: Optional[str],
         query_ast: QueryNode,
         field_weights: Dict[str, float],
         extractor: MetadataExtractor,
@@ -912,8 +997,12 @@ class SearchTool:
                 if not file_path.is_file() or file_path.name.startswith("_"):
                     continue
 
-                item = extractor.extract(file_path, opts.item_type, search_dir)
+                item = extractor.extract(file_path, item_type, search_dir)
                 if not item:
+                    continue
+
+                # Apply namespace filter from scope
+                if namespace_filter and not item["id"].startswith(namespace_filter.rstrip("/")):
                     continue
 
                 if not self._matches_query(item, query_ast, opts, fuzzy_distance):
@@ -937,7 +1026,7 @@ class SearchTool:
                     item, opts, field_weights, fuzzy_distance
                 )
                 item["score"] = round(score, 4)
-                item["type"] = opts.item_type
+                item["type"] = item_type
                 results.append(item)
 
         return results
