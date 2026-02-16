@@ -1,5 +1,5 @@
-# rye:signed:2026-02-16T05:55:29Z:c96904bb9945cd43fa4b314b79f3202ae2fa0fac1bee74345a52c353a868ac96:I1dK9oPkeLmeirjmXWkpZyDDBO4M-Tn200EAnaarzTo-BLtc9-vxFce23QmfPnRtUPPe_k6VKLFjDroatPHMCw==:440443d0858f0199
-__version__ = "1.1.0"
+# rye:signed:2026-02-16T08:53:25Z:bca467142c9a28332d7c8c8e81dcc3ea177452497137e1cc666b5d5c61fe814b:B7RQpIcwTkvSwDrSgYFam0lMDeqFvn2zyI1uTyhFd8iThPIq06yTNq93gAk284A39DJr2rMeprPklh1pI6fqDw==:440443d0858f0199
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Tool dispatcher for thread tool calls"
@@ -70,6 +70,15 @@ class ToolDispatcher:
         params = dict(action.get("params", {}))
 
         project_path_str = str(self.project_path)
+
+        # LLMs sometimes pass `parameters` as a JSON string instead of an
+        # object.  Detect and parse so downstream tools receive a dict.
+        if "parameters" in params and isinstance(params["parameters"], str):
+            import json
+            try:
+                params["parameters"] = json.loads(params["parameters"])
+            except (json.JSONDecodeError, ValueError):
+                pass  # leave as-is; tool will report the real error
 
         try:
             if primary == Action.EXECUTE:

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T05:55:29Z:cdf75bde26b6d1d358ca77eca329be35bfb670c10b28490bdef4ac6d1049dcbe:cMY3jwHGtXYm_t6sG_QhIYpQuwiZRa2ZU4gvPsyq6Gv-AUDuowPkohQOsxluNYfLg8_Dlv0gETrwyJypAGi9Dw==:440443d0858f0199
+# rye:signed:2026-02-16T07:32:54Z:a748b6f85277c0bf5ed6a721ab0436e3363d5c45dcf1a97f74e65af4b806488e:X0edDd1oLtU5zTIyGrnq1PQaniEDfO848QxZfDoQUQ_AT7BxyUNtHqcAenqvrMViIHvrTQ8owvNz_vMwGtaVAA==:440443d0858f0199
 """
 provider_resolver.py: Resolve model/tier to a concrete provider adapter.
 
@@ -6,7 +6,7 @@ Searches provider YAML configs in project → user → system space.
 No hardcoded provider — if no config matches, raises ProviderNotFoundError.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Provider resolver for thread execution"
@@ -133,6 +133,18 @@ def resolve_provider(
             )
             return model, item_id, config
 
+    # Pass 3: Check if model is a prefix of any known model ID
+    for yaml_path, config in configs:
+        tier_mapping = config.get("tier_mapping", {})
+        for tier, model_id in tier_mapping.items():
+            if model_id.startswith(model) or model.startswith(model_id):
+                item_id = _build_item_id(config, yaml_path)
+                logger.debug(
+                    "Prefix-matched model '%s' → '%s' via %s",
+                    model, model_id, yaml_path.name,
+                )
+                return model_id, item_id, config
+
     # No match
     available_tiers = {}
     for yaml_path, config in configs:
@@ -147,3 +159,32 @@ def resolve_provider(
         f"Either use a known tier/model ID or add a provider config at "
         f"{AI_DIR}/tools/rye/agent/providers/"
     )
+
+
+def list_providers(
+    project_path: Optional[Path] = None,
+) -> List[Dict]:
+    """List all available providers with their tier mappings and models.
+
+    Returns list of dicts, each with:
+        provider_id: str — tool item_id
+        tool_id: str — short name
+        tiers: dict — tier → model_id mapping
+        models: list — all model IDs this provider supports
+        pricing: dict — per-model pricing info
+    """
+    configs = _load_provider_configs(project_path)
+    providers = []
+    for yaml_path, config in configs:
+        item_id = _build_item_id(config, yaml_path)
+        tier_mapping = config.get("tier_mapping", {})
+        providers.append({
+            "provider_id": item_id,
+            "tool_id": config.get("tool_id", yaml_path.stem),
+            "tool_type": config.get("tool_type", "http"),
+            "tiers": tier_mapping,
+            "models": list(set(tier_mapping.values())),
+            "pricing": config.get("pricing", {}),
+            "context_window": config.get("context_window"),
+        })
+    return providers

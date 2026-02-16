@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:35:18Z:dfd6f7cde3abf1a990f9d081863fc66dcc8e11b33680fa04b6e6bc6a0436b521:01T2V0l4RiWheSKMvFqsuTsAyb9EpOUtPCjwgIXRHQ1ueXXjbU5aqVIx7mYeUFS1GzCu3y1mS6UxocQnY4CZDw==:440443d0858f0199
+# rye:signed:2026-02-16T06:58:52Z:0d9db6838f4bfa5808872909b048c05429613d815f065efc6f5b56dde49a9cd0:4IcVAkx3noP5dFQkY0Zz-1sVUwqBHxbYyij0_jIpGAkmMIl4vrR8FfgCa5Ij0ed8caRIs1-KHeM5R-37zYK2AQ==:440443d0858f0199
 """Search for directives, tools, or knowledge items."""
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
-__category__ = "rye/primary-tools"
+__category__ = "rye/primary"
 __tool_description__ = "Search for directives, tools, or knowledge items by query"
 
 CONFIG_SCHEMA = {

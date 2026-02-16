@@ -1,11 +1,11 @@
-# rye:signed:2026-02-12T23:55:37Z:ddf86da8d0be6d8a7c8b0f7689073a0252ce11059429e1d6d92361d6c6babb06:OLXPcEFMh2AaDFKifSws58QZ3KEo9_RIyyHiedNJMHTcJLoST8EXTNa2o5zi6PdJDLsZ5h0aXQrMS80xEYoqAg==:440443d0858f0199
+# rye:signed:2026-02-16T08:20:49Z:429fcdccac55df25a334fe2167172a3b09569fb66cc401669fe05ccf8c686fb1:gDXKtpnRPHf_x--8eqr0ljFJX2U1WcTgeOSrpezQJuKBloKYpBg8d_PCAwC7rbsaFpPurt_Cz5ES8YmCqoGOAA==:440443d0858f0199
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
 with support for opaque sections (template, example, raw tags).
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "parser"
 __category__ = "rye/core/parsers"
 __tool_description__ = (
@@ -27,7 +27,7 @@ def parse(content: str) -> Dict[str, Any]:
     Returns parsed directive data with all metadata.
     """
     # Extract XML from markdown fence
-    xml_str, body = _extract_xml_block(content)
+    xml_str, preamble, body = _extract_xml_block(content)
     if xml_str is None:
         return {
             "body": content,
@@ -61,6 +61,7 @@ def parse(content: str) -> Dict[str, Any]:
         except ET.ParseError as e:
             return {
                 **result,
+                "preamble": preamble,
                 "body": body,
                 "raw": content,
                 "error": f"Invalid XML: {e}",
@@ -71,6 +72,7 @@ def parse(content: str) -> Dict[str, Any]:
 
         # Reattach opaque content
         result["templates"] = opaque_content
+        result["preamble"] = preamble
         result["body"] = body
         result["raw"] = content
         result["content"] = xml_str
@@ -86,25 +88,29 @@ def parse(content: str) -> Dict[str, Any]:
         }
 
 
-def _extract_xml_block(content: str) -> Tuple[Optional[str], str]:
+def _extract_xml_block(content: str) -> Tuple[Optional[str], str, str]:
     """Extract XML from markdown ```xml ... ``` block.
 
-    Returns (xml_content, body_before_fence) or (None, content).
+    Returns (xml_content, preamble, body) where:
+      - preamble: markdown text before the XML fence (title, summary)
+      - body: everything after the closing fence — free-form LLM prompt
     """
     match = re.search(r"^```xml\s*$", content, re.MULTILINE)
     if not match:
-        return None, ""
+        return None, "", ""
 
-    body = content[: match.start()].strip()
+    preamble = content[: match.start()].strip()
     start = match.end() + 1
 
     # Find closing ```
     close_match = re.search(r"^```\s*$", content[start:], re.MULTILINE)
     if close_match:
         xml_content = content[start : start + close_match.start()].strip()
-        return xml_content, body
+        after_fence = start + close_match.end()
+        body = content[after_fence:].strip()
+        return xml_content, preamble, body
 
-    return None, ""
+    return None, "", ""
 
 
 def _mask_opaque_sections(xml_str: str) -> Tuple[str, Dict[str, str]]:
@@ -226,6 +232,8 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                 "type": inp.get("type", "string"),
                 "required": inp.get("required", "false").lower() == "true",
             }
+            if inp.get("default") is not None:
+                input_data["default"] = inp.get("default")
             if inp.text:
                 input_data["description"] = inp.text.strip()
             inputs.append(input_data)

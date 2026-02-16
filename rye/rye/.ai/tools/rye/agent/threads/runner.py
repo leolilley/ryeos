@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T05:55:29Z:25a3c3361b342464564be606445bdac19822953a3f9ebea6e89436710c9c857c:VaCHtfmENAKOgJCwf2IAzGOrGU6jeKXDDuP-pEsfrIlmW179A4h33LdnEFwRhngpw96DHiPRllS4heEmYg4PDQ==:440443d0858f0199
+# rye:signed:2026-02-16T09:39:45Z:31a5fb48ae563b79924455eca8ff8d495242ff3646d09c6338d626b8fbf93eb5:F-wuDRzkI6rIUQHem55nG0hmRN-qYK_oAssMcpWwIFqg0RqAwDaQ_Q2EhtFRobH3U7Y4KC3vTPoaEH-0B4WCAg==:440443d0858f0199
 """
 runner.py: Core LLM loop for thread execution
 
@@ -11,7 +11,7 @@ Main loop that:
 6. Repeats until completion or error
 """
 
-__version__ = "1.1.0"
+__version__ = "1.8.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Core LLM loop for thread execution"
@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from module_loader import load_module
 
@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 _ANCHOR = Path(__file__).parent
 
 orchestrator = load_module("orchestrator", anchor=_ANCHOR)
+text_tool_parser = load_module("internal/text_tool_parser", anchor=_ANCHOR)
+thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
+tool_result_guard = load_module("internal/tool_result_guard", anchor=_ANCHOR)
 
 
 async def run(
@@ -41,6 +44,7 @@ async def run(
     emitter: "EventEmitter",
     transcript: Any,
     project_path: Path,
+    resume_messages: Optional[List[Dict]] = None,
 ) -> Dict:
     """Execute the LLM loop until completion, error, or limit.
 
@@ -59,6 +63,9 @@ async def run(
       4. Execute tool calls via dispatcher
       5. Run hooks (after_step)
       6. Check cancellation
+
+    If resume_messages is provided, skips first message construction
+    and uses the pre-built messages directly (for thread resumption).
     """
     thread_ctx = {"emitter": emitter, "transcript": transcript, "thread_id": thread_id}
 
@@ -77,22 +84,26 @@ async def run(
     start_time = time.monotonic()
 
     try:
-        # --- Build first message ---
-        # Hook context: thread_started hooks load knowledge items (identity, rules)
-        hook_context = await harness.run_hooks_context(
-            {
-                "directive": harness.directive_name,
-                "model": provider.model,
-                "limits": harness.limits,
-            },
-            dispatcher,
-        )
+        if resume_messages:
+            # Resume mode: use pre-built messages (summary + trailing turns + new message)
+            messages = list(resume_messages)
+        else:
+            # --- Build first message ---
+            # Hook context: thread_started hooks load knowledge items (identity, rules)
+            hook_context = await harness.run_hooks_context(
+                {
+                    "directive": harness.directive_name,
+                    "model": provider.model,
+                    "limits": harness.limits,
+                },
+                dispatcher,
+            )
 
-        first_message_parts = []
-        if hook_context:
-            first_message_parts.append(hook_context)
-        first_message_parts.append(user_prompt)
-        messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})
+            first_message_parts = []
+            if hook_context:
+                first_message_parts.append(hook_context)
+            first_message_parts.append(user_prompt)
+            messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})
 
         while True:
             # Pre-turn limit check
@@ -106,6 +117,20 @@ async def run(
                     return _finalize(
                         thread_id, cost, hook_result, emitter, transcript
                     )
+                # Fail-safe: terminate even if no hook handled the limit
+                limit_code = limit_result.get("limit_code", "unknown_limit")
+                current = limit_result.get("current_value", "?")
+                maximum = limit_result.get("current_max", "?")
+                return _finalize(
+                    thread_id,
+                    cost,
+                    {
+                        "success": False,
+                        "error": f"Limit exceeded: {limit_code} ({current}/{maximum})",
+                    },
+                    emitter,
+                    transcript,
+                )
 
             # Cancellation check
             if harness.is_cancelled():
@@ -180,9 +205,32 @@ async def run(
                 transcript,
             )
 
-            # Process tool calls
+            # Process tool calls based on provider's tool_use mode
             tool_calls = response.get("tool_calls", [])
+            text_parsed = False
+
+            if not tool_calls and provider.tool_use_mode == "text_parsed":
+                # Provider doesn't support native tool_use — parse from text
+                tool_calls = text_tool_parser.extract_tool_calls(
+                    response.get("text", "")
+                )
+                text_parsed = bool(tool_calls)
+
             if not tool_calls:
+                # Native mode: if this is the first turn and we expected tool use,
+                # nudge the model to use tools rather than terminating
+                if (
+                    provider.tool_use_mode == "native"
+                    and cost["turns"] == 1
+                    and harness.available_tools
+                ):
+                    messages.append({"role": "assistant", "content": response["text"]})
+                    messages.append({
+                        "role": "user",
+                        "content": "You did not call any tools. Please use the provided tools to complete the directive steps. Call tools using the tool_use mechanism.",
+                    })
+                    continue
+
                 return _finalize(
                     thread_id,
                     cost,
@@ -191,8 +239,13 @@ async def run(
                     transcript,
                 )
 
-            # Append assistant message (with tool_use blocks) to conversation
-            messages.append({"role": "assistant", "content": response["text"], "tool_calls": tool_calls})
+            # Append assistant message to conversation
+            if text_parsed:
+                # Text-parsed: assistant message is plain text (no tool_use blocks)
+                messages.append({"role": "assistant", "content": response["text"]})
+            else:
+                # API structured: include tool_use blocks for provider reconstruction
+                messages.append({"role": "assistant", "content": response["text"], "tool_calls": tool_calls})
 
             for tool_call in tool_calls:
                 emitter.emit(
@@ -253,10 +306,21 @@ async def run(
 
                 clean = _clean_tool_result(result)
 
+                # Guard: bound large results, dedupe, store artifacts
+                context_ratio = _estimate_context_ratio(messages, provider)
+                guarded = tool_result_guard.guard_result(
+                    clean,
+                    call_id=tool_call["id"],
+                    tool_name=tool_call["name"],
+                    thread_id=thread_id,
+                    project_path=project_path,
+                    context_usage_ratio=context_ratio,
+                )
+
                 emitter.emit(
                     thread_id,
                     "tool_call_result",
-                    {"call_id": tool_call["id"], "output": str(clean)},
+                    {"call_id": tool_call["id"], "output": str(guarded)},
                     transcript,
                 )
 
@@ -264,7 +328,7 @@ async def run(
                     {
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
-                        "content": str(clean),
+                        "content": str(guarded),
                     }
                 )
 
@@ -272,6 +336,59 @@ async def run(
             await harness.run_hooks(
                 "after_step", {"cost": cost, "thread_id": thread_id}, dispatcher, thread_ctx
             )
+
+            # Update cost snapshot in registry (post-turn)
+            try:
+                registry = thread_registry.get_registry(project_path)
+                registry.update_cost_snapshot(thread_id, cost)
+            except Exception:
+                pass  # cost snapshot is best-effort
+
+            # Context limit check — handoff to a new thread
+            limit_info = _check_context_limit(messages, provider, project_path)
+            if limit_info:
+                emitter.emit(
+                    thread_id,
+                    "context_limit_reached",
+                    limit_info,
+                    transcript,
+                    criticality="critical",
+                )
+                try:
+                    handoff_result = await orchestrator.handoff_thread(
+                        thread_id, project_path, messages=list(messages),
+                    )
+                    if handoff_result.get("success"):
+                        return _finalize(
+                            thread_id,
+                            cost,
+                            {
+                                "success": True,
+                                "status": "continued",
+                                "continuation_thread_id": handoff_result.get("new_thread_id"),
+                                "handoff": handoff_result,
+                            },
+                            emitter,
+                            transcript,
+                        )
+                except Exception as handoff_err:
+                    logger.error("Handoff failed: %s", handoff_err)
+                # Handoff failed — fall back to hook-based handling
+                hook_result = await harness.run_hooks(
+                    "context_limit_reached", limit_info, dispatcher, thread_ctx
+                )
+                if hook_result and hook_result.get("action") == "continue":
+                    return _finalize(
+                        thread_id,
+                        cost,
+                        {
+                            "success": True,
+                            "status": "continued",
+                            "continuation_thread_id": hook_result.get("continuation_thread_id"),
+                        },
+                        emitter,
+                        transcript,
+                    )
 
     finally:
         final = {
@@ -282,11 +399,20 @@ async def run(
 
 
 def _finalize(thread_id, cost, result, emitter, transcript) -> Dict:
-    status = "completed" if result.get("success") else result.get("status", "error")
+    # Preserve explicit status (e.g. "continued", "cancelled") over default
+    if "status" in result and result["status"] not in ("", None):
+        status = result["status"]
+    elif result.get("success"):
+        status = "completed"
+    else:
+        status = "error"
     if not result.get("success") and not result.get("error"):
         result["error"] = "Unknown error (no message provided)"
+    emit_payload = {"cost": cost}
+    if result.get("error"):
+        emit_payload["error"] = result["error"]
     emitter.emit(
-        thread_id, f"thread_{status}", {"cost": cost}, transcript, criticality="critical"
+        thread_id, f"thread_{status}", emit_payload, transcript, criticality="critical"
     )
     return {**result, "thread_id": thread_id, "cost": cost, "status": status}
 
@@ -295,20 +421,82 @@ def _clean_tool_result(result: Any) -> Any:
     """Strip chain/metadata bloat from rye execute results.
 
     Unwraps the rye_execute envelope to get the inner tool result.
-    Drops chain, metadata, resolved_env_keys.
+    Drops chain, metadata, resolved_env_keys, path, source.
+    Strips rye signature headers from content fields.
     """
     if not isinstance(result, dict):
         return result
 
+    DROP_KEYS = frozenset(("chain", "metadata", "path", "source", "resolved_env_keys"))
+
     def _strip(d: dict) -> dict:
-        return {k: v for k, v in d.items() if k not in ("chain", "metadata")}
+        cleaned = {k: v for k, v in d.items() if k not in DROP_KEYS}
+        # Strip rye signature line from content
+        if "content" in cleaned and isinstance(cleaned["content"], str):
+            cleaned["content"] = _strip_signature(cleaned["content"])
+        return cleaned
 
     # Unwrap rye_execute envelope: {status, type, item_id: "rye/primary-tools/rye_execute", data: {actual result}}
     inner = result.get("data")
-    if isinstance(inner, dict) and result.get("item_id", "").startswith("rye/primary-tools/"):
+    if isinstance(inner, dict) and result.get("item_id", "").startswith("rye/primary/"):
         return _strip(inner)
 
     return _strip(result)
+
+
+def _strip_signature(text: str) -> str:
+    """Remove rye signature lines from content."""
+    lines = text.split("\n")
+    cleaned = [l for l in lines if not l.strip().startswith(("# rye:signed:", "<!-- rye:signed:"))]
+    return "\n".join(cleaned).strip()
+
+
+def _check_context_limit(messages, provider, project_path):
+    """Check if context window is approaching capacity.
+
+    Returns event dict if threshold crossed, else None.
+    """
+    tokens_used = _estimate_message_tokens(messages)
+    context_limit = getattr(provider, "context_window", None)
+    if not context_limit:
+        context_limit = provider.config.get("context_window", 200000) if hasattr(provider, "config") else 200000
+    if context_limit <= 0:
+        return None
+
+    usage_ratio = tokens_used / context_limit
+
+    # Default threshold 0.9 — load from coordination config if available
+    threshold = 0.9
+    try:
+        coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
+        config = coordination_loader.load(project_path)
+        threshold = config.get("coordination", {}).get("continuation", {}).get("trigger_threshold", 0.9)
+    except Exception:
+        pass
+
+    if usage_ratio >= threshold:
+        return {
+            "usage_ratio": usage_ratio,
+            "tokens_used": tokens_used,
+            "tokens_limit": context_limit,
+        }
+
+    return None
+
+
+def _estimate_message_tokens(messages):
+    """Rough token estimate: ~4 chars per token for English text."""
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    return total_chars // 4
+
+
+def _estimate_context_ratio(messages, provider):
+    """Current context usage as a ratio (0.0 to 1.0)."""
+    tokens_used = _estimate_message_tokens(messages)
+    context_limit = getattr(provider, "context_window", None)
+    if not context_limit:
+        context_limit = provider.config.get("context_window", 200000) if hasattr(provider, "config") else 200000
+    return tokens_used / context_limit if context_limit > 0 else 0.0
 
 
 def _error_to_context(e: Exception) -> Dict:

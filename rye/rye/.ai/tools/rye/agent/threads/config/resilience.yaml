@@ -24,12 +24,12 @@ retry:
 limits:
   defaults:
     turns: 25
-    tokens: 4096
+    tokens: 200000
     spend: 1.0
     spend_currency: "USD"
-    spawns: 10
+    spawns: 50
     depth: 10
-    duration_seconds: 600
+    duration_seconds: 1800
 
   enforcement:
     check_before_turn: true

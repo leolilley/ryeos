@@ -1,10 +1,10 @@
-# rye:signed:2026-02-12T23:55:37Z:7c085e425b14b6cabcb7bca8abd13a037aa08a15105b736c38e2d952f0b6dfbc:EdRuoLsMYNy_WU_1TIGPCTE5VErOhxKvCbv8PHa1kVx8FzAxPxIhGyubTSiv6BaRp9YIqDzKKSfr7tGXp5R0Ag==:440443d0858f0199
+# rye:signed:2026-02-16T07:16:19Z:6dacbf26764fb8feccb4d590da0eb757b5b8e2be32b51790226e1b9d4584dcfc:E7OdqL0CUZ5TJOCvPlzECcSGpQ_EyoiBpKnc4PJwvRaeZNdw0k5Qq683-5aIxtyZwOGVSnyHmFlZUHNbOSWdAw==:440443d0858f0199
 """Markdown frontmatter parser for knowledge entries.
 
 Extracts YAML frontmatter and separates it from body content.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "parser"
 __category__ = "rye/core/parsers"
 __tool_description__ = (
@@ -25,6 +25,14 @@ def parse(content: str) -> Dict[str, Any]:
     }
 
     if not content.startswith("---"):
+        # Pure YAML file — parse entire content as metadata
+        try:
+            import yaml
+            data = yaml.safe_load(content)
+            if isinstance(data, dict):
+                result.update(data)
+        except Exception:
+            pass
         return result
 
     lines = content.split("\n")

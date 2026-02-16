@@ -24,6 +24,12 @@ class ItemType:
         KNOWLEDGE: "knowledge",
     }
 
+    # File extensions to search per item type (tools use dynamic lookup)
+    CONTENT_EXTENSIONS = {
+        DIRECTIVE: [".md"],
+        KNOWLEDGE: [".md", ".yaml", ".yml"],
+    }
+
 
 class Action:
     """Tool action constants."""

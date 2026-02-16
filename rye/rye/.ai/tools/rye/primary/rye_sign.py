@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:35:18Z:74d34ffaaf9830b59ca5fd54ef6f8cff0858034a1cf0c271cfd955820c18d76c:x9KBUC44Q-yYGzR4ULb6ctgLp4GNVfhYzb5h-smYUqyaZY6F59jt3rT-N3XDvJ9e-BFrlqvUXs85yIQqSQYfAA==:440443d0858f0199
+# rye:signed:2026-02-16T06:58:52Z:b449f1d2b0d655247ed3bf39703ffa3afad1ca4b7798460210a16db3b15431b0:6T1Bmb6AwcMzAGWhTlsL37KT3_QU10BYryeezCZSa7m1zbpfmd_PeeoRZjMtYpW-WBu_jN0p4QV9LbPDLkZKCQ==:440443d0858f0199
 """Validate and sign a directive, tool, or knowledge item."""
 
 import argparse
@@ -8,7 +8,7 @@ import asyncio
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
-__category__ = "rye/primary-tools"
+__category__ = "rye/primary"
 __tool_description__ = "Validate and sign a directive, tool, or knowledge item"
 
 CONFIG_SCHEMA = {

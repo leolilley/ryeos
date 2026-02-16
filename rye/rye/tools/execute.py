@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from rye.constants import ItemType
 from rye.executor import ExecutionResult, PrimitiveExecutor
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     get_project_type_path,
@@ -147,9 +147,12 @@ class ExecuteTool:
         if "error" in parsed:
             return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
 
-        # Validate required inputs
+        # Apply defaults then validate required inputs
         inputs = parameters.get("inputs", parameters)
         declared_inputs: List[Dict] = parsed.get("inputs", [])
+        for inp in declared_inputs:
+            if inp["name"] not in inputs and "default" in inp:
+                inputs[inp["name"]] = inp["default"]
         missing = [
             inp["name"]
             for inp in declared_inputs
@@ -312,13 +315,7 @@ class ExecuteTool:
         for _root_id, sys_path in get_system_type_paths(item_type):
             search_bases.append(sys_path)
 
-        # Get extensions data-driven from extractors
-        if item_type == ItemType.TOOL:
-            extensions = get_tool_extensions(
-                Path(project_path) if project_path else None
-            )
-        else:
-            extensions = [".md"]
+        extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
         for base in search_bases:
             if not base.exists():

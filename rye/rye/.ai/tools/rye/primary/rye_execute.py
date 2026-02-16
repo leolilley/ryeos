@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:35:18Z:bd9bd839110700156d10eb29f4cf669e8f4cbe10431db990d3d9898fdec7c44c:Ig3a8Uu4Tfq1_OuBdWFgd2OUjnMD6xb-A6KUAExn3wQdF650jOgJnrBJzfp-C0fR6wrgz97qQlFlY2hn6fYRDQ==:440443d0858f0199
+# rye:signed:2026-02-16T06:58:52Z:89cd30d22d6edc34bda544a40eec5a155dfd68d37ea8b66d62c5361f7501e2af:oc6rr9PDt0AkGi-KvQpnWSgDPLn-HmeslaJ5SfEv1unl7K5N0Qfh64QWKelnRjcO6iVhLMs9QG8ErBzTnH_PBw==:440443d0858f0199
 """Execute a directive, tool, or knowledge item via rye."""
 
 import argparse
@@ -8,7 +8,7 @@ import asyncio
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
-__category__ = "rye/primary-tools"
+__category__ = "rye/primary"
 __tool_description__ = "Execute a directive, tool, or knowledge item"
 
 CONFIG_SCHEMA = {

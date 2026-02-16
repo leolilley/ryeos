@@ -1,4 +1,4 @@
-"""Centralized tool extension registry.
+"""Centralized extension registry.
 
 Loads extensions from data-driven extractor tools across 3-tier space:
   1. Project: {project}/.ai/tools/rye/core/extractors/
@@ -9,7 +9,7 @@ Loads extensions from data-driven extractor tools across 3-tier space:
 import ast
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from rye.utils.path_utils import get_extractor_search_paths
 
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Global cache - single source of truth
 _extensions_cache: Optional[List[str]] = None
+_type_extensions_cache: Dict[str, List[str]] = {}
 
 
 def get_tool_extensions(
@@ -60,6 +61,50 @@ def get_tool_extensions(
     return _extensions_cache
 
 
+_TYPE_EXTRACTOR_GLOB = {
+    "tool": "tool/*_extractor.*",
+    "directive": "directive/*_extractor.*",
+    "knowledge": "knowledge/*_extractor.*",
+}
+
+_TYPE_DEFAULTS = {
+    "tool": [".py"],
+    "directive": [".md"],
+    "knowledge": [".md"],
+}
+
+
+def get_item_extensions(
+    item_type: str,
+    project_path: Optional[Path] = None,
+    force_reload: bool = False,
+) -> List[str]:
+    """Get supported file extensions for an item type from its extractor.
+
+    Reads the `extensions` field from the type-specific extractor YAML
+    (e.g., knowledge/knowledge_extractor.yaml) across the 3-tier space.
+    """
+    if item_type in _type_extensions_cache and not force_reload:
+        return _type_extensions_cache[item_type]
+
+    glob_pattern = _TYPE_EXTRACTOR_GLOB.get(item_type)
+    if not glob_pattern:
+        return _TYPE_DEFAULTS.get(item_type, [".md"])
+
+    extensions = set()
+    for extractors_dir in get_extractor_search_paths(project_path):
+        if not extractors_dir.exists():
+            continue
+        for file_path in extractors_dir.glob(glob_pattern):
+            if file_path.name.startswith("_"):
+                continue
+            extensions.update(_extract_extensions_from_file(file_path))
+
+    result = list(extensions) if extensions else _TYPE_DEFAULTS.get(item_type, [".md"])
+    _type_extensions_cache[item_type] = result
+    return result
+
+
 def _extract_extensions_from_file(file_path: Path) -> List[str]:
     """Extract EXTENSIONS list from an extractor file."""
     if file_path.suffix in (".yaml", ".yml"):
@@ -94,6 +139,7 @@ def _extract_extensions_from_file(file_path: Path) -> List[str]:
 
 
 def clear_extensions_cache():
-    """Clear the extensions cache. Useful for testing."""
+    """Clear all extensions caches. Useful for testing."""
     global _extensions_cache
     _extensions_cache = None
+    _type_extensions_cache.clear()

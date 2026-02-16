@@ -24,7 +24,7 @@ from rye.utils.path_utils import (
     get_system_type_paths,
     get_user_type_path,
 )
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.resolvers import get_user_space
 from rye.utils.validators import apply_field_mapping, validate_parsed_data
 
@@ -432,11 +432,7 @@ class SignTool:
         elif source == "user":
             base = get_user_type_path(item_type)
         elif source == "system":
-            # Get extensions data-driven from extractors
-            if item_type == ItemType.TOOL:
-                extensions = get_tool_extensions(Path(project_path) if project_path else None)
-            else:
-                extensions = [".md"]
+            extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
             for _root_id, base in get_system_type_paths(item_type):
                 if not base.exists():
@@ -452,11 +448,7 @@ class SignTool:
         if not base.exists():
             return None
 
-        # Get extensions data-driven from extractors
-        if item_type == ItemType.TOOL:
-            extensions = get_tool_extensions(Path(project_path) if project_path else None)
-        else:
-            extensions = [".md"]
+        extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
         for ext in extensions:
             file_path = base / f"{item_id}{ext}"

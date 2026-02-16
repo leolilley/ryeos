@@ -1,5 +1,5 @@
-# rye:signed:2026-02-16T05:32:26Z:a221257c5837b129f0e60127a84cb199daf9a332bb5ce0fcc5f2e4d12945411f:10RcFMdXpKsqtX1s5PBcXUNwuc3GDMJMsh_UqxMWFx9x4YjhBu1imjJPxBBI23oAmH7r5OxpmFk4lV-jatrzCw==:440443d0858f0199
-__version__ = "1.0.0"
+# rye:signed:2026-02-16T08:16:12Z:954a58e4b55dfccf88668a9fae76af4f16db64ed338189ccc658730d959fd764:EOBwrMTus8szmyncNablouvhimYmANG3tQCwehFtMOGaPGl-w5hPnwtEo-ko9u37ghqpS2hv64JZR6dRmHgWAA==:440443d0858f0199
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_function_runtime"
 __category__ = "rye/agent/threads/internal"
@@ -12,11 +12,15 @@ CONFIG_SCHEMA = {
     "properties": {
         "operation": {
             "type": "string",
-            "enum": ["reserve", "report_actual", "release", "check_remaining"],
+            "enum": [
+                "reserve", "report_actual", "release", "check_remaining",
+                "can_spawn", "increment_actual", "get_tree_spend",
+            ],
         },
         "thread_id": {"type": "string"},
         "parent_thread_id": {"type": "string"},
         "amount": {"type": "number"},
+        "final_status": {"type": "string"},
     },
     "required": ["operation", "thread_id"],
 }
@@ -25,22 +29,20 @@ CONFIG_SCHEMA = {
 def execute(params: Dict, project_path: str) -> Dict:
     """Execute budget operation."""
     from pathlib import Path
-    import importlib.util
 
-    budgets_path = Path(__file__).parent.parent / "persistence" / "budgets.py"
-    spec = importlib.util.spec_from_file_location("budgets", budgets_path)
-    budgets = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(budgets)
+    from module_loader import load_module
+    _anchor = Path(__file__).parent.parent
+    budgets = load_module("persistence/budgets", anchor=_anchor)
 
-    operation = params.get("operation")
-    thread_id = params.get("thread_id")
+    operation = params["operation"]
+    thread_id = params["thread_id"]
     ledger = budgets.get_ledger(Path(project_path))
 
     if operation == "reserve":
         parent_id = params.get("parent_thread_id")
         amount = params.get("amount", 0.0)
-        success = ledger.reserve(thread_id, amount, parent_thread_id=parent_id)
-        return {"success": success, "reserved": amount if success else 0}
+        ledger.reserve(thread_id, amount, parent_id)
+        return {"success": True, "reserved": amount}
 
     if operation == "report_actual":
         amount = params.get("amount", 0.0)
@@ -48,11 +50,21 @@ def execute(params: Dict, project_path: str) -> Dict:
         return {"success": True, "reported": amount}
 
     if operation == "release":
-        ledger.release(thread_id)
+        ledger.release(thread_id, params.get("final_status", "completed"))
         return {"success": True, "released": True}
 
     if operation == "check_remaining":
         remaining = ledger.get_remaining(thread_id)
         return {"success": True, "remaining": remaining}
+
+    if operation == "can_spawn":
+        return ledger.can_spawn(thread_id, params.get("amount", 0.0))
+
+    if operation == "increment_actual":
+        ledger.increment_actual(thread_id, params.get("amount", 0.0))
+        return {"success": True}
+
+    if operation == "get_tree_spend":
+        return {"success": True, **ledger.get_tree_spend(thread_id)}
 
     return {"success": False, "error": f"Unknown operation: {operation}"}

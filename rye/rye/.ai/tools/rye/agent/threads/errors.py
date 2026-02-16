@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T05:55:29Z:af631135341691298d4ad784fad244d83d86aaee0407d0327f4cc940433ed272:8NkHFoW2bccUC6DQ4-XRGZdzen8Ww4725SxLSNoWitpEbt2H_9L5FDQnalaETmOrtz45MUUxVcRs6c0R0eUYAQ==:440443d0858f0199
+# rye:signed:2026-02-16T07:26:17Z:a10d2b176bab755251d8d5fa79ae1b3f7faeb72fa9abcb30e3245e0ea813d18c:CUfclZ672EsQYTI4E7uSTNKKKEaUADf9l4r3RNwQpzqrej6w2G-RxgDac_P-zSdhjxAlUXwDUwjzq1PcQ-sQBg==:440443d0858f0199
 """
 errors.py: Typed exceptions for the thread system.
 
@@ -6,7 +6,7 @@ All Part 2 modules raise typed exceptions instead of returning
 None/False/empty dicts. Classified by error_classification.yaml.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Typed exceptions for the thread system"
@@ -135,6 +135,62 @@ class HookOverrideError(ThreadSystemError):
             f"Hook for '{self.hook_event}' attempted empty error override. "
             f"Original: {self.original_error}"
         )
+
+
+class BudgetNotRegistered(ThreadSystemError):
+    """Thread has no budget ledger entry."""
+    def __init__(self, thread_id: str):
+        self.thread_id = thread_id
+        super().__init__(f"No budget ledger entry for thread: {thread_id}")
+
+
+class InsufficientBudget(ThreadSystemError):
+    """Parent cannot afford requested reservation."""
+    def __init__(self, parent_id: str, remaining: float, requested: float):
+        self.parent_id = parent_id
+        self.remaining = remaining
+        self.requested = requested
+        super().__init__(f"Insufficient budget: parent={parent_id} remaining={remaining} requested={requested}")
+
+
+class BudgetOverspend(ThreadSystemError):
+    """Actual spend exceeded reserved amount."""
+    def __init__(self, thread_id: str, reserved: float, actual: float):
+        self.thread_id = thread_id
+        self.reserved = reserved
+        self.actual = actual
+        super().__init__(f"Overspend: thread={thread_id} reserved={reserved} actual={actual}")
+
+
+class BudgetLedgerLocked(ThreadSystemError):
+    """SQLite write lock contention."""
+    def __init__(self, operation: str):
+        self.operation = operation
+        super().__init__(f"Budget ledger locked during: {operation}")
+
+
+class ContinuationFailed(ThreadSystemError):
+    """Failed to spawn continuation thread."""
+    def __init__(self, thread_id: str, reason: str):
+        self.thread_id = thread_id
+        self.reason = reason
+        super().__init__(f"Continuation failed for {thread_id}: {reason}")
+
+
+class ChainResolutionError(ThreadSystemError):
+    """Cycle or break in continuation chain."""
+    def __init__(self, thread_id: str, chain_issue: str):
+        self.thread_id = thread_id
+        self.chain_issue = chain_issue
+        super().__init__(f"Chain resolution error at {thread_id}: {chain_issue}")
+
+
+class ToolInputParseError(ThreadSystemError):
+    """Streaming tool input JSON could not be parsed."""
+    def __init__(self, tool_id: str, raw: str):
+        self.tool_id = tool_id
+        self.raw = raw[:200]
+        super().__init__(f"Failed to parse tool input for {tool_id}")
 
 
 def make_error_dict(

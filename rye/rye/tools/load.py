@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from rye.constants import ItemType, AI_DIR
 from rye.utils.path_utils import get_project_type_path, get_system_type_paths, get_user_space
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.integrity import verify_item
 
 logger = logging.getLogger(__name__)
@@ -91,11 +91,7 @@ class LoadTool:
         elif source == "user":
             base = Path(self.user_space) / AI_DIR / type_dir
         elif source == "system":
-            # Get extensions data-driven from extractors
-            if item_type == ItemType.TOOL:
-                extensions = get_tool_extensions(Path(project_path) if project_path else None)
-            else:
-                extensions = [".md"]
+            extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
             for _root_id, base in get_system_type_paths(item_type):
                 if not base.exists():
@@ -111,11 +107,7 @@ class LoadTool:
         if not base.exists():
             return None
 
-        # Get extensions data-driven from extractors
-        if item_type == ItemType.TOOL:
-            extensions = get_tool_extensions(Path(project_path) if project_path else None)
-        else:
-            extensions = [".md"]
+        extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
         for ext in extensions:
             file_path = base / f"{item_id}{ext}"

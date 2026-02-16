@@ -1,5 +1,5 @@
-# rye:signed:2026-02-16T05:32:16Z:a80f399358997054c2d96936ee823cdd8610ff36b06718f2e0cacd75a7584327:PY-cA7pGwn5etrbL8IgOSNaAy1ssfP9gWGlOirx01_zRqwHcvX6tLEK43hY06YOI1tc_C1Ylf0Vcp5nT2GSBDg==:440443d0858f0199
-__version__ = "1.0.0"
+# rye:signed:2026-02-16T06:57:00Z:eb2ef1388953958d162323b859940bb65cc18efaa1da8662faba0ce0640dccce:dviCmiIOhFeMCIDJbRDarfrXaWY8J2j-_BonDsNVXqhoq5rvAGg3Z3hZB_HiKypjMwbBAdi4MaBeAyNNBVWwCg==:440443d0858f0199
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Base provider adapter interface"
@@ -17,6 +17,11 @@ class ProviderAdapter:
     def __init__(self, model: str, provider_config: Dict):
         self.model = model
         self.config = provider_config
+
+    @property
+    def tool_use_mode(self) -> str:
+        """Whether to use native API tool_use or text-parsed tool calls."""
+        return self.config.get("tool_use", {}).get("mode", "native")
 
     async def create_completion(self, messages: List[Dict], tools: List[Dict]) -> Dict:
         """Send messages to LLM and return structured response.

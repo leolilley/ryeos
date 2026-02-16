@@ -1,7 +1,7 @@
-# rye:signed:2026-02-16T05:55:29Z:1216d5901c16bf8afceb6c1198a79d6b2bd5666cf635966eb0bf1d72bc5e4a9e:ecl6iyykiAVtksvuxjffRlZEvNTC0ZncXL8P8oDMeh5f1ATWyZyVXed9IKJvGEGfFQ4nq78pQp8DF2V7OmbUDg==:440443d0858f0199
+# rye:signed:2026-02-16T06:57:01Z:bcee96589117166156f90105511d48b21352f8da1d4c8d052c01b83f4f95c504:BeHyKbhftjPWT8qZKBDyLicSUaHyk7hp5Qr20ozBOun4LWj12hqxTDNrFhA82ChFQj8AI2C5j08tz3jxFiFxDQ==:440443d0858f0199
 tool_id: anthropic
 tool_type: http
-version: "1.1.0"
+version: "1.3.0"
 description: "Anthropic Messages API — system default provider for thread execution"
 executor_id: rye/core/primitives/http_client
 category: rye/agent/providers
@@ -10,25 +10,25 @@ requires:
   - net.call
 
 tier_mapping:
-  fast: "claude-haiku-4-20250414"
-  haiku: "claude-haiku-4-20250414"
-  sonnet: "claude-sonnet-4-20250514"
-  opus: "claude-opus-4-20250918"
-  high: "claude-sonnet-4-20250514"
-  max: "claude-opus-4-20250918"
-  general: "claude-haiku-4-20250414"
+  fast: "claude-haiku-4-5-20251001"
+  haiku: "claude-haiku-4-5-20251001"
+  sonnet: "claude-sonnet-4-5-20250929"
+  opus: "claude-opus-4-6"
+  high: "claude-sonnet-4-5-20250929"
+  max: "claude-opus-4-6"
+  general: "claude-haiku-4-5-20251001"
 
 # Per-million-token pricing (USD)
 pricing:
-  claude-haiku-4-20250414:
-    input: 0.80
-    output: 4.00
-  claude-sonnet-4-20250514:
+  claude-haiku-4-5-20251001:
+    input: 1.00
+    output: 5.00
+  claude-sonnet-4-5-20250929:
     input: 3.00
     output: 15.00
-  claude-opus-4-20250918:
-    input: 15.00
-    output: 75.00
+  claude-opus-4-6:
+    input: 5.00
+    output: 25.00
 
 env_config:
   env:
@@ -89,7 +89,7 @@ parameters:
   - name: model
     type: string
     required: true
-    default: "claude-haiku-4-20250414"
+    default: "claude-haiku-4-5-20251001"
   - name: tokens
     type: integer
     required: true
@@ -109,6 +109,7 @@ parameters:
     description: "Array of tool definitions for function calling"
 
 tool_use:
+  mode: native
   tool_definition:
     name: "{name}"
     description: "{description}"

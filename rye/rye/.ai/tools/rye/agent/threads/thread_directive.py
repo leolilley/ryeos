@@ -1,5 +1,5 @@
-# rye:signed:2026-02-16T05:55:29Z:2b1baad80b0a0619444df59c3c1c92a62846883378fee98461dd1a5717b22dae:YNS10Xc1DjJj9V6fpzmKm5qrTd7rZ9DeM-SlAS7yzhqXn2NkRTcU21cCtvVAyAsCwHkfrpT60ucuR9H6uGetBw==:440443d0858f0199
-__version__ = "1.1.0"
+# rye:signed:2026-02-16T10:05:20Z:c1d5a0a2c5d256681c6aadbeb2c399af9820de93944b2463afb46925b21014c5:SXRIQdEpVHcHjFpqgu7z027ILz98ZLrqhdkKjMC8dAm9E6cnj61ZwRRwtVN9TzJJi6lIL5yyGbD5U7sZdkjSBQ==:440443d0858f0199
+__version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
 __category__ = "rye/agent/threads"
@@ -48,7 +48,7 @@ CONFIG_SCHEMA = {
 }
 
 
-_PRIMARY_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "primary-tools"
+_PRIMARY_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "primary"
 
 
 def _build_tool_schemas() -> list:
@@ -135,11 +135,10 @@ def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
 
 
 def _build_prompt(directive: Dict) -> str:
-    """Build the LLM prompt from parsed directive data.
+    """Build the LLM prompt from the directive body.
 
-    Passes the directive as structured data — description, actions with
-    interpolated params, and expected outputs — so the LLM knows exactly
-    what to execute. Reads directive_key.md for the framing instruction.
+    The body is free-form text after the XML fence — it IS the prompt.
+    Injected verbatim with framing from directive_key.md and outputs appended.
     """
     key_path = _ANCHOR / "config" / "directive_key.md"
     key = key_path.read_text().strip() if key_path.exists() else "Execute the following directive."
@@ -148,40 +147,23 @@ def _build_prompt(directive: Dict) -> str:
 
     desc = directive.get("description", "")
     if desc:
-        parts.append(f"## Description\n{desc}")
+        parts.append(f"## Directive\n{desc}")
 
-    actions = directive.get("actions", [])
-    if actions:
-        parts.append("## Actions")
-        for i, action in enumerate(actions, 1):
-            item_id = action.get("item_id", "")
-            params = {}
-            for k, v in action.get("params", {}).items():
-                if isinstance(v, str):
-                    try:
-                        params[k] = json.loads(v)
-                    except (json.JSONDecodeError, ValueError):
-                        params[k] = v
-                else:
-                    params[k] = v
-            primary = action.get("primary", "execute")
-            tool_name = f"rye_{primary}"
-            item_type = action.get("item_type", "tool")
-            if primary == "search":
-                query = action.get("query", params.pop("query", ""))
-                parts.append(f"{i}. {tool_name}(item_type=\"{item_type}\", query=\"{query}\")")
-            else:
-                parts.append(f"{i}. {tool_name}(item_type=\"{item_type}\", item_id=\"{item_id}\", parameters={json.dumps(params)})")
+    body = directive.get("body", "")
+    if body:
+        parts.append(body)
 
     outputs = directive.get("outputs", {})
     if outputs:
         parts.append("## Expected Output")
-        if isinstance(outputs, dict):
+        if isinstance(outputs, list):
+            for o in outputs:
+                name = o.get("name", "")
+                odesc = o.get("description", "")
+                parts.append(f"- **{name}**: {odesc}" if odesc else f"- **{name}**")
+        elif isinstance(outputs, dict):
             for k, v in outputs.items():
                 parts.append(f"- **{k}**: {v}")
-        elif isinstance(outputs, list):
-            for o in outputs:
-                parts.append(f"- {o}")
 
     return "\n\n".join(parts)
 
@@ -231,12 +213,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
     thread_created_at = datetime.now(timezone.utc).isoformat()
     proj_path = Path(project_path)
 
-    # 1. Resolve parent context from env var
-    #    RYE_PARENT_THREAD_ID is set by the parent's process — subprocess
-    #    inheritance scopes it to this process tree. Frontend calls have
-    #    no env var → root thread. If the env var is set but thread.json
-    #    is missing/corrupt, fail hard — misaligned parent data.
-    parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID")
+    # 1. Resolve parent context
+    #    Explicit param (from handoff/resume) takes precedence, then env var
+    #    (subprocess inheritance), then no parent (root thread).
+    parent_thread_id = params.get("parent_thread_id") or os.environ.get("RYE_PARENT_THREAD_ID")
     parent_meta = None
     if parent_thread_id:
         parent_meta = _read_thread_meta(proj_path, parent_thread_id)
@@ -257,22 +237,36 @@ async def execute(params: Dict, project_path: str) -> Dict:
     registry.register(thread_id, directive_name, parent_id=parent_thread_id)
 
     # 3. Load directive
-    from rye.tools.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
-
     user_space = str(get_user_space())
-    exec_tool = ExecuteTool(user_space=user_space)
-    result = await exec_tool.handle(
-        item_type="directive",
-        item_id=directive_name,
-        project_path=project_path,
-        parameters={"inputs": inputs},
-    )
-    if result["status"] != "success":
-        registry.update_status(thread_id, "error")
-        return result
 
-    directive = result["data"]
+    if params.get("resume_messages"):
+        # Handoff/resume: use LoadTool (no input validation) then parse manually
+        from rye.tools.load import LoadTool
+        from rye.utils.parser_router import ParserRouter
+        load_tool = LoadTool(user_space=user_space)
+        result = await load_tool.handle(
+            item_type="directive",
+            item_id=directive_name,
+            project_path=project_path,
+        )
+        if result["status"] != "success":
+            registry.update_status(thread_id, "error")
+            return result
+        directive = ParserRouter().parse("markdown_xml", result["content"])
+    else:
+        from rye.tools.execute import ExecuteTool
+        exec_tool = ExecuteTool(user_space=user_space)
+        result = await exec_tool.handle(
+            item_type="directive",
+            item_id=directive_name,
+            project_path=project_path,
+            parameters={"inputs": inputs},
+        )
+        if result["status"] != "success":
+            registry.update_status(thread_id, "error")
+            return result
+        directive = result["data"]
 
     # 4. Build limits with parent as upper bound (depth decrements automatically)
     parent_limits = parent_meta.get("limits") if parent_meta else None
@@ -316,19 +310,33 @@ async def execute(params: Dict, project_path: str) -> Dict:
         parent_capabilities=parent_capabilities,
     )
     harness.available_tools = _build_tool_schemas()
+    if not harness.available_tools:
+        registry.update_status(thread_id, "error")
+        return {
+            "success": False,
+            "error": (
+                f"No tool schemas found in {_PRIMARY_TOOLS_DIR}. "
+                "Thread cannot execute without tools."
+            ),
+            "thread_id": thread_id,
+        }
 
     # 8. Reserve budget
     budgets = load_module("persistence/budgets", anchor=_ANCHOR)
     ledger = budgets.get_ledger(proj_path)
     spend_limit = limits.get("spend", 1.0)
-    reserved = ledger.reserve(thread_id, spend_limit, parent_thread_id)
-    if not reserved:
-        registry.update_status(thread_id, "error")
-        return {
-            "success": False,
-            "error": f"Insufficient parent budget to reserve ${spend_limit}",
-            "thread_id": thread_id,
-        }
+    if parent_thread_id:
+        try:
+            ledger.reserve(thread_id, spend_limit, parent_thread_id)
+        except Exception as e:
+            registry.update_status(thread_id, "error")
+            return {
+                "success": False,
+                "error": f"Budget reservation failed: {e}",
+                "thread_id": thread_id,
+            }
+    else:
+        ledger.register(thread_id, max_spend=spend_limit)
 
     user_prompt = _build_prompt(directive)
 
@@ -379,26 +387,61 @@ async def execute(params: Dict, project_path: str) -> Dict:
     os.environ["RYE_PARENT_THREAD_ID"] = thread_id
 
     if params.get("async_exec"):
-        asyncio.create_task(
-            runner.run(
-                thread_id,
-                user_prompt,
-                harness,
-                provider,
-                dispatcher,
-                emitter,
-                transcript,
-                proj_path,
-            )
-        )
-        return {
-            "success": True,
-            "thread_id": thread_id,
-            "status": "running",
-            "directive": directive_name,
-        }
+        # Fork: child process runs the thread, parent returns immediately.
+        # os.fork() duplicates the process — child gets pid=0, parent gets child pid.
+        # The child daemonizes (new session) so it survives parent exit.
+        child_pid = os.fork()
+        if child_pid == 0:
+            # Child process — run the thread to completion
+            try:
+                os.setsid()  # detach from parent's process group
+                # Redirect stdout/stderr to devnull so we don't corrupt parent's output
+                devnull = os.open(os.devnull, os.O_RDWR)
+                os.dup2(devnull, 0)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                os.close(devnull)
+
+                result = asyncio.run(runner.run(
+                    thread_id, user_prompt, harness, provider,
+                    dispatcher, emitter, transcript, proj_path,
+                    resume_messages=params.get("resume_messages"),
+                ))
+
+                # Finalize: report spend, update registry
+                actual_spend = result.get("cost", {}).get("spend", 0.0)
+                try:
+                    ledger.report_actual(thread_id, actual_spend)
+                except Exception:
+                    pass
+                if parent_thread_id:
+                    ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)
+                status = result.get("status", "completed")
+                ledger.release(thread_id, final_status=status)
+                registry.update_status(thread_id, status)
+                registry.set_result(thread_id, result.get("cost"))
+                _write_thread_meta(
+                    proj_path, thread_id, directive_name, status,
+                    thread_created_at, datetime.now(timezone.utc).isoformat(),
+                    model=resolved_model, cost=result.get("cost"),
+                    limits=limits, capabilities=harness._capabilities,
+                )
+            except Exception:
+                registry.update_status(thread_id, "error")
+            finally:
+                os._exit(0)
+        else:
+            # Parent process — return immediately
+            return {
+                "success": True,
+                "thread_id": thread_id,
+                "status": "running",
+                "directive": directive_name,
+                "pid": child_pid,
+            }
 
     # 11. Run thread synchronously
+    # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
     result = await runner.run(
         thread_id,
         user_prompt,
@@ -408,6 +451,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         emitter,
         transcript,
         proj_path,
+        resume_messages=params.get("resume_messages"),
     )
 
     # Ensure non-empty error message on failure
@@ -416,10 +460,14 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
     # 12. Report spend + cascade to parent + release
     actual_spend = result.get("cost", {}).get("spend", 0.0)
-    ledger.report_actual(thread_id, actual_spend)
+    try:
+        ledger.report_actual(thread_id, actual_spend)
+    except Exception:
+        pass  # overspend is logged but shouldn't block finalization
     if parent_thread_id:
         ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)
-    ledger.release(thread_id)
+    status = result.get("status", "completed")
+    ledger.release(thread_id, final_status=status)
 
     # 13. Update registry with final status
     status = result.get("status", "completed")
@@ -453,6 +501,12 @@ async def execute(params: Dict, project_path: str) -> Dict:
             diag_path.write_text(_json.dumps(diag_data, indent=2, default=str))
         except Exception:
             pass  # diagnostics are best-effort
+
+    # Trim result text to prevent context bloat in parent threads
+    MAX_RESULT_CHARS = 4000
+    if isinstance(result.get("result"), str) and len(result["result"]) > MAX_RESULT_CHARS:
+        result["result"] = result["result"][:MAX_RESULT_CHARS] + "\n\n[... truncated]"
+        result["result_truncated"] = True
 
     return {**result, "directive": directive_name}
 

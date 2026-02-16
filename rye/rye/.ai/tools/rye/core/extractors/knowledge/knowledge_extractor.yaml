@@ -1,4 +1,4 @@
-# rye:signed:2026-02-12T23:55:37Z:92e78c32f78f86b4251153fdec52d2fc3f4a72c0bf92bba637d5c012fa642716:KL8w9BvsV-ahLWwYIsFjuhuKbVdrP4rLOUVZvo7w_E3KHiUYnxh2IAVH3jiWYXy2RaE0y3PeM3t2JoHYy-FgDw==:440443d0858f0199
+# rye:signed:2026-02-16T07:12:55Z:8f00364e0d83c1991af254da75bdc6bd4ea9d015d6e25586a213b3cb2c6c1e92:jN0oSm_2gdswFRyMzEHGCjeCMCtH77kn02kq1w8U2gkWU-7DuU0mAHtxNu0gzVs_G9yMxhiFEgXVM7NTDkkJDg==:440443d0858f0199
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -7,6 +7,8 @@ description: "Knowledge extractor - extracts metadata from YAML frontmatter in m
 
 extensions:
   - .md
+  - .yaml
+  - .yml
 
 parser: markdown_frontmatter
 

@@ -1,5 +1,5 @@
-# rye:signed:2026-02-16T05:32:35Z:a6b71b1c7657c4ca9a638f5ba3cdbd6fc42919a0d08812bdf7ab308b29beea05:SzUBVZJ6SpOiJ4TR-2GPJgm_iR5UbDzAOaCZT8HTRNGsjfkbhf3oBtcULmuqLNZ6e6WTeeubV0YNjvA6Zgf1Aw==:440443d0858f0199
-__version__ = "1.0.0"
+# rye:signed:2026-02-16T08:16:12Z:5f4b3cdb5d23f5e6a69897cd225ca2293b1c72583074609980331590bd1edd09:U1kElJK8Ii7ylY_z1wg4bL5Advf3SnaA6Gnu_YFxRUv3uXCpxPl8frucUgoPoAg3jc5bLMX2Wwa6G7eNVjmVBg==:440443d0858f0199
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
 __tool_description__ = "Thread registry for tracking active threads"
@@ -48,6 +48,25 @@ class ThreadRegistry:
             )
             conn.commit()
 
+            # Part 2: migrate schema — add columns if missing
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(threads)").fetchall()}
+            migrations = [
+                ("turns", "INTEGER DEFAULT 0"),
+                ("input_tokens", "INTEGER DEFAULT 0"),
+                ("output_tokens", "INTEGER DEFAULT 0"),
+                ("spend", "REAL DEFAULT 0.0"),
+                ("spawn_count", "INTEGER DEFAULT 0"),
+                ("pid", "INTEGER"),
+                ("model", "TEXT"),
+                ("continuation_of", "TEXT"),
+                ("continuation_thread_id", "TEXT"),
+                ("chain_root_id", "TEXT"),
+            ]
+            for col_name, col_type in migrations:
+                if col_name not in existing:
+                    conn.execute(f"ALTER TABLE threads ADD COLUMN {col_name} {col_type}")
+            conn.commit()
+
     def register(self, thread_id: str, directive: str, parent_id: str = None) -> None:
         """Register a new thread."""
         now = datetime.utcnow().isoformat()
@@ -59,6 +78,11 @@ class ThreadRegistry:
             """,
                 (thread_id, directive, parent_id, now, now),
             )
+            import os
+            conn.execute(
+                "UPDATE threads SET pid = ? WHERE thread_id = ?",
+                (os.getpid(), thread_id),
+            )
             conn.commit()
 
     def update_status(self, thread_id: str, status: str) -> None:
@@ -67,7 +91,7 @@ class ThreadRegistry:
         with sqlite3.connect(self.db_path) as conn:
             extra = ""
             params = [status, now, thread_id]
-            if status in ("completed", "error", "cancelled"):
+            if status in ("completed", "error", "cancelled", "continued"):
                 extra = ", completed_at = ?"
                 params.insert(2, now)
             conn.execute(
@@ -131,6 +155,84 @@ class ThreadRegistry:
                 (json.dumps(result, default=str), now, thread_id),
             )
             conn.commit()
+
+    def update_cost_snapshot(self, thread_id: str, cost: Dict[str, Any]) -> None:
+        """Update cost columns from runner's cost dict (called post-turn)."""
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                UPDATE threads SET
+                    turns = ?, input_tokens = ?, output_tokens = ?,
+                    spend = ?, updated_at = ?
+                WHERE thread_id = ?
+            """, (cost.get("turns", 0), cost.get("input_tokens", 0),
+                  cost.get("output_tokens", 0), cost.get("spend", 0.0),
+                  now, thread_id))
+            conn.commit()
+
+    def set_continuation(self, thread_id: str, continuation_thread_id: str) -> None:
+        """Mark thread as continued with forward pointer."""
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                UPDATE threads SET
+                    continuation_thread_id = ?,
+                    status = 'continued',
+                    updated_at = ?
+                WHERE thread_id = ?
+            """, (continuation_thread_id, now, thread_id))
+            conn.commit()
+
+    def set_chain_info(self, thread_id: str, chain_root_id: str,
+                       continuation_of: str) -> None:
+        """Set chain metadata for a continuation thread."""
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                UPDATE threads SET
+                    chain_root_id = ?,
+                    continuation_of = ?,
+                    updated_at = ?
+                WHERE thread_id = ?
+            """, (chain_root_id, continuation_of, now, thread_id))
+            conn.commit()
+
+    def get_chain(self, thread_id: str) -> List[Dict[str, Any]]:
+        """Get the full continuation chain containing this thread.
+
+        Walks backward to find root, then forward to build ordered chain.
+        Returns list of thread dicts from root to terminal.
+        """
+        # Walk backward to find root
+        root_id = thread_id
+        visited = set()
+        while True:
+            if root_id in visited:
+                break  # cycle
+            visited.add(root_id)
+            thread = self.get_thread(root_id)
+            if not thread:
+                break
+            prev = thread.get("continuation_of")
+            if not prev:
+                break
+            root_id = prev
+
+        # Walk forward from root
+        chain = []
+        current = root_id
+        visited.clear()
+        while current:
+            if current in visited:
+                break  # cycle
+            visited.add(current)
+            thread = self.get_thread(current)
+            if not thread:
+                break
+            chain.append(thread)
+            current = thread.get("continuation_thread_id")
+
+        return chain
 
 
 _registry_cache: Dict[str, ThreadRegistry] = {}

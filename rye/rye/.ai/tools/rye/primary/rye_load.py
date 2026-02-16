@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:35:18Z:15d955f52cfd757c6868fc02c2be72571549645d8ea4db6f51c8fb2746e21f76:ScJzCBQW00gey0ZoOB3cjm9DsyHMRR_42yWiNahtX_yZl2ipoMG_pk81cRJrgeNtOpdF4RHuOu0xqqoOKVrdBw==:440443d0858f0199
+# rye:signed:2026-02-16T06:58:52Z:2f3aaf6a8b7e762bf2edf98fb3d24127f6143021a72bf8bfcaf37937bb107615:c7y2kkduil52Cc59Rc3gOjkerkJJXRlp52_gHLSIow06-ArcHRiWSziobPI2ALPOZrhB4GMXmTzyY5ojupXBDA==:440443d0858f0199
 """Load item content for inspection."""
 
 import argparse
@@ -8,7 +8,7 @@ import asyncio
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
-__category__ = "rye/primary-tools"
+__category__ = "rye/primary"
 __tool_description__ = "Load a directive, tool, or knowledge item for inspection"
 
 CONFIG_SCHEMA = {

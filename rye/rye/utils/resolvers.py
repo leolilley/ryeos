@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List
 import logging
 
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.path_utils import (
     get_user_space,
     get_system_space,
@@ -171,15 +171,17 @@ class KnowledgeResolver:
                      e.g., "patterns/singleton" -> .ai/knowledge/patterns/singleton.md
         """
         for search_dir, _ in self.get_search_paths():
-            file_path = search_dir / f"{entry_id}.md"
-            if file_path.is_file():
-                return file_path
+            for ext in get_item_extensions("knowledge"):
+                file_path = search_dir / f"{entry_id}{ext}"
+                if file_path.is_file():
+                    return file_path
         return None
 
     def resolve_with_space(self, entry_id: str) -> Optional[Tuple[Path, str]]:
         """Find knowledge entry by relative path ID and return (path, space) tuple."""
         for search_dir, space in self.get_search_paths():
-            file_path = search_dir / f"{entry_id}.md"
-            if file_path.is_file():
-                return (file_path, space)
+            for ext in get_item_extensions("knowledge"):
+                file_path = search_dir / f"{entry_id}{ext}"
+                if file_path.is_file():
+                    return (file_path, space)
         return None
