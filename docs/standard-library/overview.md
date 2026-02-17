@@ -1,11 +1,11 @@
----
+```yaml
 id: standard-library-overview
 title: "Standard Library Overview"
 description: Everything that ships with Rye OS out of the box
 category: standard-library
 tags: [standard-library, bundled, system-space, catalog]
 version: "1.0.0"
----
+```
 
 # Standard Library Overview
 

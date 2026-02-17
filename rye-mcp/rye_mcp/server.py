@@ -152,7 +152,7 @@ class RYEServer:
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
-                return [TextContent(type="text", text=json.dumps(result))]
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
             except Exception as e:
                 import traceback
 

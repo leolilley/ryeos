@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-primary
 title: "Primary Tools"
 description: The four core MCP tools — search, load, execute, sign — that everything in Rye OS builds on
 category: standard-library/tools
 tags: [tools, primary, search, load, execute, sign, mcp]
 version: "1.0.0"
----
+```
 
 # Primary Tools
 
@@ -66,7 +66,7 @@ Load an item's full content for inspection. Can also copy items between spaces.
 | ------------- | ------ | -------- | --------- | ----------------------------------------------- |
 | `item_type`   | string | ✅       | —         | `directive`, `tool`, or `knowledge`             |
 | `item_id`     | string | ✅       | —         | Item ID (relative path without extension)       |
-| `source`      | string | ❌       | `project` | Space to load from: `project`, `user`, `system` |
+| `source`      | string | ❌       | —         | Space to load from: `project`, `user`, `system`. When omitted, cascades **project → user → system** (first match wins). |
 | `destination` | string | ❌       | —         | Copy to this space: `project` or `user`         |
 
 ### Example

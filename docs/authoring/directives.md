@@ -1,11 +1,11 @@
----
+```yaml
 id: directives
 title: "Authoring Directives"
 description: How to write directive files — the workflow instructions that AI agents follow
 category: authoring
 tags: [directives, authoring, format, metadata]
 version: "1.0.0"
----
+```
 
 # Authoring Directives
 
@@ -193,6 +193,37 @@ Wildcard shortcuts:
 ```
 
 Input values are interpolated in process steps as `{input:name}`.
+
+### How Outputs Become `<returns>` in the Prompt
+
+When a directive is executed via `thread_directive`, the `<outputs>` block from the XML fence is **not** sent to the LLM as-is. Instead, the infrastructure deterministically transforms it into a `<returns>` block appended to the end of the prompt body. This tells the LLM what structured output to produce.
+
+**What you write** (in the XML fence):
+
+```xml
+<outputs>
+  <output name="directive_path">Path to the created file</output>
+  <output name="signed">Whether signing succeeded</output>
+</outputs>
+```
+
+**What the LLM sees** (appended after process steps):
+
+```xml
+<returns>
+  <output name="directive_path">Path to the created file</output>
+  <output name="signed">Whether signing succeeded</output>
+</returns>
+```
+
+The transformation handles two formats:
+
+| `outputs` format                    | Behavior                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------ |
+| List of `{name, description}` dicts | Each becomes `<output name="...">description</output>` (or self-closing if no description) |
+| Dict of `{key: value}` pairs        | Each becomes `<output name="key">value</output>`                                           |
+
+Parent threads and orchestrators match these output keys when consuming child thread results, so the names must be consistent between the directive's `<outputs>` declaration and what the parent expects.
 
 ## Process Steps
 

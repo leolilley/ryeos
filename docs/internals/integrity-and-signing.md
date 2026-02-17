@@ -1,11 +1,11 @@
----
+```yaml
 id: integrity-and-signing
 title: "Integrity and Signing"
 description: Content hashing, Ed25519 signatures, and lockfile-based pinning
 category: internals
 tags: [integrity, signing, security, lockfiles, ed25519]
 version: "1.0.0"
----
+```
 
 # Integrity and Signing
 

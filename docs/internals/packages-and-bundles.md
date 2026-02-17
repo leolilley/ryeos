@@ -1,11 +1,11 @@
----
+```yaml
 id: packages-and-bundles
 title: "Packages and Bundles"
 description: How Rye OS is distributed — pip packages, bundle entry points, and dependency layering
 category: internals
 tags: [packages, bundles, dependencies, distribution, pyproject]
 version: "1.0.0"
----
+```
 
 # Packages and Bundles
 

@@ -1,11 +1,11 @@
----
+```yaml
 id: building-a-pipeline
 title: "Building a Pipeline"
 description: Step-by-step guide to building a multi-phase orchestrated pipeline
 category: orchestration
 tags: [pipeline, tutorial, orchestration, practical]
 version: "1.0.0"
----
+```
 
 # Building a Pipeline
 

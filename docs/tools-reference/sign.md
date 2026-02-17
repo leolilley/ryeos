@@ -1,11 +1,11 @@
----
+```yaml
 id: sign
 title: "rye_sign"
 description: Validate and sign items with integrity hashes
 category: tools-reference
 tags: [sign, mcp-tool, api, integrity]
 version: "1.0.0"
----
+```
 
 # rye_sign
 

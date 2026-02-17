@@ -1,11 +1,11 @@
----
+```yaml
 id: load
 title: "rye_load"
 description: Load item content for inspection or copy between locations
 category: tools-reference
 tags: [load, mcp-tool, api]
 version: "1.0.0"
----
+```
 
 # rye_load
 
@@ -18,7 +18,7 @@ Load the raw content and metadata of a directive, tool, or knowledge item. Optio
 | `item_type`    | string | yes      | —           | `"directive"`, `"tool"`, or `"knowledge"`                                           |
 | `item_id`      | string | yes      | —           | Relative path from `.ai/<type>/` without extension (e.g., `"rye/core/create_tool"`) |
 | `project_path` | string | yes      | —           | Absolute path to the project root                                                   |
-| `source`       | string | no       | `"project"` | Where to find the item: `"project"`, `"user"`, or `"system"`                        |
+| `source`       | string | no       | —           | Where to find the item: `"project"`, `"user"`, or `"system"`. When omitted, cascades **project → user → system** (first match wins). |
 | `destination`  | string | no       | —           | If set and different from `source`, copies the item to this space                   |
 
 ## Response

@@ -1,11 +1,11 @@
----
+```yaml
 id: thread-lifecycle
 title: "Thread Lifecycle"
 description: How threads are created, executed, and finalized
 category: orchestration
 tags: [threads, lifecycle, states, registry]
 version: "1.0.0"
----
+```
 
 # Thread Lifecycle
 

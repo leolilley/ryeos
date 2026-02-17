@@ -1,11 +1,11 @@
----
+```yaml
 id: agent-integration
 title: "Agent Integration with the Registry"
 description: How AI agents discover, pull, and use registry items in practice — search, pull-and-use, trust verification, and bundle flows
 category: registry
 tags: [registry, agent, integration, pull, search, workflow, bundles]
 version: "1.0.0"
----
+```
 
 # Agent Integration with the Registry
 

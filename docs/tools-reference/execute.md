@@ -1,11 +1,11 @@
----
+```yaml
 id: execute
 title: "rye_execute"
 description: Execute directives, tools, or knowledge items
 category: tools-reference
 tags: [execute, mcp-tool, api]
 version: "1.0.0"
----
+```
 
 # rye_execute
 
@@ -68,6 +68,8 @@ Parses the markdown+XML directive file, validates required inputs, applies defau
 ```
 
 **Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without sending the directive instruction.
+
+**`<returns>` injection (threaded execution):** When a directive is executed through `thread_directive` (not plain `execute`), the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the end of the rendered prompt. This tells the LLM what structured output keys to produce. The LLM never sees the raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps. See [Authoring Directives — How Outputs Become `<returns>`](../authoring/directives.md#how-outputs-become-returns-in-the-prompt) for details.
 
 ### Tools
 

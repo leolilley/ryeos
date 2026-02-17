@@ -1,11 +1,11 @@
----
+```yaml
 id: bundled-tools
 title: "Bundled Tools"
 description: All tools that ship with Rye OS — from file operations to the orchestration engine
 category: standard-library
 tags: [tools, bundled, standard-library, catalog]
 version: "1.0.0"
----
+```
 
 # Bundled Tools
 

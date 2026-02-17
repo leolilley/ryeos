@@ -1,11 +1,11 @@
----
+```yaml
 id: knowledge
 title: "Authoring Knowledge"
 description: How to write knowledge entries — domain information for AI agents
 category: authoring
-tags: [knowledge, authoring, format, frontmatter]
-version: "1.0.0"
----
+tags: [knowledge, authoring, format, yaml-fence]
+version: "2.0.0"
+```
 
 # Authoring Knowledge
 
@@ -13,81 +13,88 @@ Knowledge entries are markdown documents that provide **context to AI agents** �
 
 ## File Format
 
-Knowledge entries use standard YAML frontmatter followed by markdown content:
+Knowledge entries use ` ```yaml ` code fences for metadata, matching how directives use ` ```xml ` fences. This is consistent across all item types.
 
-```markdown
----
+````markdown
+<!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
+
+```yaml
 id: category/entry-name
 title: Entry Title
 description: What this knowledge covers
 category: category
-tags: [tag1, tag2]
+tags:
+  - tag1
+  - tag2
 entry_type: reference
 version: "1.0.0"
 author: rye-os
 created_at: 2026-02-10T00:00:00Z
----
+```
 
 # Knowledge Content
 
 Markdown content that the AI agent reads for context.
-```
+````
 
-The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML metadata and returns the markdown body.
+Pure YAML files (`.yaml`/`.yml`) are also supported — the entire file is parsed as YAML metadata with no fences needed.
+
+The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML metadata from the code fence and returns the markdown body.
 
 ## Frontmatter Fields
 
 ### Required
 
-| Field | Type | Purpose | Example |
-|-------|------|---------|---------|
-| `id` | string (kebab-case) | Unique identifier | `terminology` |
-| `title` | string | Human-readable title | `Terminology and Naming Conventions` |
-| `category` | string | Directory path in `.ai/knowledge/` | `rye/core` |
-| `version` | string (semver) | Content version | `"1.0.0"` |
-| `author` | string | Creator | `rye-os` |
+| Field      | Type                | Purpose                            | Example                              |
+| ---------- | ------------------- | ---------------------------------- | ------------------------------------ |
+| `id`       | string (kebab-case) | Unique identifier                  | `terminology`                        |
+| `title`    | string              | Human-readable title               | `Terminology and Naming Conventions` |
+| `category` | string              | Directory path in `.ai/knowledge/` | `rye/core`                           |
+| `version`  | string (semver)     | Content version                    | `"1.0.0"`                            |
+| `author`   | string              | Creator                            | `rye-os`                             |
 
 ### Optional
 
-| Field | Type | Purpose | Example |
-|-------|------|---------|---------|
-| `description` | string | Brief summary | `"What this knowledge covers"` |
-| `tags` | list of strings | Searchable tags (3-5 recommended) | `[terminology, naming]` |
-| `created_at` | ISO 8601 datetime | Creation timestamp | `2026-02-10T00:00:00Z` |
-| `validated` | ISO 8601 datetime | Last validation timestamp | `2026-02-10T00:00:00Z` |
-| `entry_type` | string | Classification of content | `reference` |
-| `references` | list | Links to related knowledge/URLs | `[oauth-overview, "https://..."]` |
-| `extends` | list | Knowledge this builds upon | `[authentication-basics]` |
-| `used_by` | list | Directives/tools that use this | `[setup-oauth-provider]` |
+| Field         | Type              | Purpose                           | Example                           |
+| ------------- | ----------------- | --------------------------------- | --------------------------------- |
+| `description` | string            | Brief summary                     | `"What this knowledge covers"`    |
+| `tags`        | list of strings   | Searchable tags (3-5 recommended) | `[terminology, naming]`           |
+| `created_at`  | ISO 8601 datetime | Creation timestamp                | `2026-02-10T00:00:00Z`            |
+| `validated`   | ISO 8601 datetime | Last validation timestamp         | `2026-02-10T00:00:00Z`            |
+| `entry_type`  | string            | Classification of content         | `reference`                       |
+| `references`  | list              | Links to related knowledge/URLs   | `[oauth-overview, "https://..."]` |
+| `extends`     | list              | Knowledge this builds upon        | `[authentication-basics]`         |
+| `used_by`     | list              | Directives/tools that use this    | `[setup-oauth-provider]`          |
 
 ### Entry Types
 
-| Type | Purpose | When to Use |
-|------|---------|-------------|
-| `reference` | Stable documentation | Specs, API references, conventions that rarely change |
-| `learning` | From experience | Insights discovered during execution, debugging findings |
-| `pattern` | Reusable approaches | Design patterns, architectural decisions, best practices |
+| Type        | Purpose              | When to Use                                              |
+| ----------- | -------------------- | -------------------------------------------------------- |
+| `reference` | Stable documentation | Specs, API references, conventions that rarely change    |
+| `learning`  | From experience      | Insights discovered during execution, debugging findings |
+| `pattern`   | Reusable approaches  | Design patterns, architectural decisions, best practices |
 
 ## Knowledge Graph
 
-Knowledge entries form a navigable graph through explicit link relationships in the frontmatter:
+Knowledge entries form a navigable graph through explicit link relationships in the metadata:
 
 ```yaml
 references:
-  - jwt-overview                          # Internal knowledge link
-  - cryptographic-algorithms              # Internal knowledge link
+  - jwt-overview # Internal knowledge link
+  - cryptographic-algorithms # Internal knowledge link
   - "https://tools.ietf.org/html/rfc7519" # External URL
 
 extends:
-  - authentication-basics                 # This builds on auth basics
-  - cryptographic-signatures              # And on crypto knowledge
+  - authentication-basics # This builds on auth basics
+  - cryptographic-signatures # And on crypto knowledge
 
 used_by:
-  - api-authentication                    # Used by this directive
-  - service-authorization                 # And this one
+  - api-authentication # Used by this directive
+  - service-authorization # And this one
 ```
 
 Navigation:
+
 - **`extends`** → upward to foundational concepts
 - **`references`** → lateral to related knowledge
 - **`used_by`** → inbound from directives/tools that depend on this entry
@@ -135,8 +142,8 @@ The category determines the directory path within `.ai/knowledge/`. Knowledge ca
 
 From `.ai/knowledge/rye/core/terminology.md`:
 
-```markdown
----
+````markdown
+```yaml
 id: terminology
 title: Terminology and Naming Conventions
 category: rye/core
@@ -147,9 +154,8 @@ tags:
   - naming
   - conventions
   - style-guide
-created: 2026-02-10T00:00:00Z
-validated: 2026-02-10T00:00:00Z
----
+created_at: 2026-02-10T00:00:00Z
+```
 
 # Terminology and Naming Conventions
 
@@ -158,91 +164,51 @@ for Rye OS documentation and code.
 
 ## Project Names
 
-| Term       | Usage           | Notes                |
-| ---------- | --------------- | -------------------- |
-| **Rye OS** | Preferred usage | Official project name |
-| **RYE**    | Acceptable      | Uppercase abbreviation |
+| Term       | Usage           | Notes                   |
+| ---------- | --------------- | ----------------------- |
+| **Rye OS** | Preferred usage | Official project name   |
+| **RYE**    | Acceptable      | Uppercase abbreviation  |
 | **rye**    | Acceptable      | Package name, lowercase |
 
 ## Item Types
 
-| Type          | Location          | Format                 | Purpose                    |
-| ------------- | ----------------- | ---------------------- | -------------------------- |
-| **directive** | `.ai/directives/` | XML in Markdown        | Workflow orchestration     |
-| **tool**      | `.ai/tools/`      | Python, YAML, scripts  | Executable operations      |
-| **knowledge** | `.ai/knowledge/`  | Markdown + frontmatter | Documentation and patterns |
-
-## Naming Conventions
-
-### Knowledge Entry IDs — use kebab-case:
-  - ✅ `data-driven-architecture`
-  - ❌ `data_driven_architecture`
-
-### Directive Names — use kebab-case:
-  - ✅ `deploy-production`
-  - ❌ `deploy_production`
-
-### Tool IDs — use kebab-case:
-  - ✅ `deploy-kubernetes`
-  - ❌ `DeployKubernetes`
-```
+| Type          | Location          | Format                      | Purpose                    |
+| ------------- | ----------------- | --------------------------- | -------------------------- |
+| **directive** | `.ai/directives/` | XML in Markdown             | Workflow orchestration     |
+| **tool**      | `.ai/tools/`      | Python, YAML, scripts       | Executable operations      |
+| **knowledge** | `.ai/knowledge/`  | Markdown + ```yaml metadata | Documentation and patterns |
+````
 
 **What to notice:**
-- Uses `tags` as a YAML list (not inline `[...]`) — both formats work
-- `created` and `validated` timestamps for tracking
+
+- Uses ` ```yaml ` code fence for metadata (same pattern as directives use ` ```xml `)
+- Tags as a YAML list — proper YAML parsing handles all formats
 - Contains tables, code examples — any markdown is valid in the body
-- Cross-references other knowledge entries in `## Related` section
 
-### Specification Entry: `directive-metadata-reference`
+### Specification Entry: `directive-format`
 
-From `rye/rye/.ai/knowledge/rye/core/directive-metadata-reference.md`:
+From `rye/rye/.ai/knowledge/rye/authoring/directive-format.md`:
 
 ```yaml
----
-id: directive-metadata-reference
-title: Directive Metadata Reference
-category: rye/core
+id: directive-format
+title: Directive Format Specification
+category: rye/authoring
 version: "1.0.0"
 author: rye-os
-created_at: 2026-02-02T16:50:00Z
+created_at: 2026-02-18T00:00:00Z
 tags:
-  - metadata
   - directives
+  - format
   - specification
 references:
-  - knowledge-metadata-reference
-  - tool-metadata-reference
----
+  - tool-format
+  - knowledge-format
 ```
 
 **What to notice:**
+
 - `references` links to sibling knowledge entries, forming a knowledge graph
-- Serves as canonical specification — `entry_type: reference` material
 - Tags include both domain (`directives`) and content type (`specification`)
-
-### Knowledge Graph Entry: `knowledge-metadata-reference`
-
-From `rye/rye/.ai/knowledge/rye/core/knowledge-metadata-reference.md`:
-
-```yaml
----
-id: knowledge-metadata-reference
-title: Knowledge Metadata Reference
-category: rye/core
-version: "1.0.0"
-author: rye-os
-created_at: 2026-02-02T16:50:00Z
-tags:
-  - metadata
-  - knowledge
-  - specification
-references:
-  - directive-metadata-reference
-  - tool-metadata-reference
----
-```
-
-All three `*-metadata-reference` entries cross-reference each other via `references`, creating a navigable cluster in the knowledge graph.
 
 ## Creating Knowledge via Directive
 
@@ -262,7 +228,7 @@ rye_execute(
 )
 ```
 
-This handles file creation, frontmatter generation, and signing.
+This handles file creation, metadata generation, and signing.
 
 ## Best Practices
 
@@ -276,5 +242,5 @@ This handles file creation, frontmatter generation, and signing.
 
 ## References
 
-- [Knowledge Metadata Reference](../../rye/rye/.ai/knowledge/rye/core/knowledge-metadata-reference.md)
+- [Knowledge Format Specification](../../rye/rye/.ai/knowledge/rye/authoring/knowledge-format.md)
 - [Terminology](../../rye/rye/.ai/knowledge/rye/core/terminology.md)

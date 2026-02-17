@@ -25,13 +25,27 @@ class LoadTool:
         item_type: str = kwargs["item_type"]
         item_id: str = kwargs["item_id"]
         project_path = kwargs["project_path"]
-        source = kwargs.get("source", "project")
+        source = kwargs.get("source")
         destination = kwargs.get("destination")
 
         logger.debug(f"Load: item_type={item_type}, item_id={item_id}, source={source}")
 
         try:
-            source_path = self._find_item(project_path, source, item_type, item_id)
+            if source:
+                # Explicit source — search only that space
+                source_path = self._find_item(project_path, source, item_type, item_id)
+                resolved_source = source
+            else:
+                # No source specified — cascade project → user → system
+                source_path = None
+                resolved_source = "project"
+                for try_source in ("project", "user", "system"):
+                    source_path = self._find_item(project_path, try_source, item_type, item_id)
+                    if source_path and source_path.exists():
+                        resolved_source = try_source
+                        break
+                    source_path = None
+
             if not source_path or not source_path.exists():
                 return {
                     "status": "error",
@@ -53,11 +67,11 @@ class LoadTool:
                 "content": content,
                 "metadata": metadata,
                 "path": str(source_path),
-                "source": source,
+                "source": resolved_source,
             }
 
             # Copy if destination differs from source
-            if destination and destination != source:
+            if destination and destination != resolved_source:
                 dest_path = self._resolve_destination(
                     project_path, destination, item_type, source_path,
                     item_id=item_id,

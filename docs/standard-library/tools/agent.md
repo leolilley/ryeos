@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-agent
 title: "Agent System"
 description: "The thread orchestration engine — managed LLM loops with budgets, safety controls, permissions, and event streaming"
 category: standard-library/tools
 tags: [tools, agent, threads, orchestration, llm, safety, permissions, budget]
 version: "1.0.0"
----
+```
 
 # Agent System
 

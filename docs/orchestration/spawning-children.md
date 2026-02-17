@@ -1,11 +1,11 @@
----
+```yaml
 id: spawning-children
 title: "Spawning Child Threads"
 description: How to spawn, coordinate, and collect results from child threads
 category: orchestration
 tags: [threads, spawning, children, wait, coordination]
 version: "1.0.0"
----
+```
 
 # Spawning Child Threads
 

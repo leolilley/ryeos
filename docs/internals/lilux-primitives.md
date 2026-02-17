@@ -1,11 +1,11 @@
----
+```yaml
 id: lilux-primitives
 title: "Lilux Primitives"
 description: The microkernel layer — subprocess, HTTP, signing, and env resolution
 category: internals
 tags: [lilux, primitives, microkernel, subprocess, http]
 version: "1.0.0"
----
+```
 
 # Lilux Primitives
 

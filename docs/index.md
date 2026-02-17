@@ -1,11 +1,11 @@
----
+```yaml
 id: index
 title: "Rye OS Documentation"
 description: Documentation for Rye OS — the MCP server that gives AI agents a portable .ai/ directory system
 category: root
 tags: [index, documentation, rye-os]
 version: "1.0.0"
----
+```
 
 # Rye OS Documentation
 

@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-mcp
 title: "MCP Client Tools"
 description: Connect to external MCP servers, discover tools, and manage server configurations
 category: standard-library/tools
 tags: [tools, mcp, connect, discover, manager, external]
 version: "1.0.0"
----
+```
 
 # MCP Client Tools
 

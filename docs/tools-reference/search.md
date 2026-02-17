@@ -1,11 +1,11 @@
----
+```yaml
 id: search
 title: "rye_search"
 description: Find directives, tools, or knowledge entries
 category: tools-reference
 tags: [search, mcp-tool, api]
 version: "1.0.0"
----
+```
 
 # rye_search
 

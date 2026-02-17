@@ -1,11 +1,11 @@
----
+```yaml
 id: bundled-knowledge
 title: "Bundled Knowledge"
 description: Knowledge entries that ship with Rye OS — metadata references for AI agents
 category: standard-library
 tags: [knowledge, bundled, standard-library, metadata, reference]
 version: "1.0.0"
----
+```
 
 # Bundled Knowledge
 

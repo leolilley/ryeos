@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T08:20:49Z:429fcdccac55df25a334fe2167172a3b09569fb66cc401669fe05ccf8c686fb1:gDXKtpnRPHf_x--8eqr0ljFJX2U1WcTgeOSrpezQJuKBloKYpBg8d_PCAwC7rbsaFpPurt_Cz5ES8YmCqoGOAA==:440443d0858f0199
+# rye:signed:2026-02-17T23:53:59Z:44c33f812e022d5857b37e73c50a4671f7a8fc20525c3cbfd83157919776a090:LbMD20S5ifymYl5PY8dcv4RvaMAPSFPBngv1XM4r2OjeuWZLie2Q8SDtDBjHHdL3bp6n3tPEupd0Ppcf9jDVDQ==:440443d0858f0199
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -95,20 +95,25 @@ def _extract_xml_block(content: str) -> Tuple[Optional[str], str, str]:
       - preamble: markdown text before the XML fence (title, summary)
       - body: everything after the closing fence — free-form LLM prompt
     """
-    match = re.search(r"^```xml\s*$", content, re.MULTILINE)
-    if not match:
-        return None, "", ""
+    # Match ```xml not inside an outer fence (````markdown etc.)
+    outer_open_pat = re.compile(r"^`{4,}", re.MULTILINE)
+    outer_close_pat = re.compile(r"^`{4,}\s*$", re.MULTILINE)
 
-    preamble = content[: match.start()].strip()
-    start = match.end() + 1
+    for match in re.finditer(r"^```xml\s*$", content, re.MULTILINE):
+        before = content[: match.start()]
+        if len(outer_open_pat.findall(before)) > len(outer_close_pat.findall(before)):
+            continue  # Inside an outer fence — skip
 
-    # Find closing ```
-    close_match = re.search(r"^```\s*$", content[start:], re.MULTILINE)
-    if close_match:
-        xml_content = content[start : start + close_match.start()].strip()
-        after_fence = start + close_match.end()
-        body = content[after_fence:].strip()
-        return xml_content, preamble, body
+        preamble = before.strip()
+        start = match.end() + 1
+
+        # Find closing ```
+        close_match = re.search(r"^```\s*$", content[start:], re.MULTILINE)
+        if close_match:
+            xml_content = content[start : start + close_match.start()].strip()
+            after_fence = start + close_match.end()
+            body = content[after_fence:].strip()
+            return xml_content, preamble, body
 
     return None, "", ""
 

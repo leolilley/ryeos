@@ -1,11 +1,11 @@
----
+```yaml
 id: ai-directory
 title: "The .ai/ Directory"
 description: Structure and conventions of the .ai/ portable data bundle
 category: getting-started
 tags: [ai-directory, structure, conventions, spaces]
 version: "1.0.0"
----
+```
 
 # The .ai/ Directory
 

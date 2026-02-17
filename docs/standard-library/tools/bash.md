@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-bash
 title: "Bash Tool"
 description: Execute shell commands with timeout and output truncation
 category: standard-library/tools
 tags: [tools, bash, shell, subprocess]
 version: "1.0.0"
----
+```
 
 # Bash Tool
 

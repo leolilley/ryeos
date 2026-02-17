@@ -1,11 +1,11 @@
----
+```yaml
 id: executor-chain
 title: "Executor Chain"
 description: How tools are resolved and executed through the three-layer chain
 category: internals
 tags: [executor, chain, primitive, runtime, resolution]
 version: "1.0.0"
----
+```
 
 # Executor Chain
 

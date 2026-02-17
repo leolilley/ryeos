@@ -1,11 +1,11 @@
----
+```yaml
 id: quickstart
 title: Quickstart
 description: Create your first directive, tool, and knowledge entry in under 5 minutes
 category: getting-started
 tags: [quickstart, tutorial, first-steps]
 version: "1.0.0"
----
+```
 
 # Quickstart
 

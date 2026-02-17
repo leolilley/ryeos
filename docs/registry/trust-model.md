@@ -1,11 +1,11 @@
----
+```yaml
 id: trust-model
 title: "Cryptographic Trust Model"
 description: End-to-end integrity verification for Rye OS items — Ed25519 signing, trust store, TOFU pinning, and registry provenance
 category: registry
 tags: [registry, security, signing, ed25519, trust, integrity, tofu]
 version: "1.0.0"
----
+```
 
 # Cryptographic Trust Model
 

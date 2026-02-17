@@ -1,11 +1,11 @@
----
+```yaml
 id: safety-and-limits
 title: "Safety and Limits"
 description: Cost controls, turn limits, and the SafetyHarness
 category: orchestration
 tags: [safety, limits, budget, cost, harness]
 version: "1.0.0"
----
+```
 
 # Safety and Limits
 

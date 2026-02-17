@@ -1,11 +1,11 @@
----
+```yaml
 id: sharing-items
 title: "Sharing Items via Registry"
 description: Push, pull, and discover items through the Rye OS registry
 category: registry
 tags: [registry, sharing, publish, pull, search]
 version: "1.0.0"
----
+```
 
 # Sharing Items via Registry
 

@@ -1,11 +1,11 @@
----
+```yaml
 id: bundled-directives
 title: "Bundled Directives"
 description: The 5 directives that ship with Rye OS — item creation and thread management
 category: standard-library
 tags: [directives, bundled, create, threaded, standard-library]
 version: "1.0.0"
----
+```
 
 # Bundled Directives
 

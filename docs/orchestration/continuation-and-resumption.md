@@ -1,11 +1,11 @@
----
+```yaml
 id: continuation-and-resumption
 title: "Continuation and Resumption"
 description: How threads handle context limits, handoffs, and user-driven resumption
 category: orchestration
 tags: [continuation, resumption, handoff, context-limit]
 version: "1.0.0"
----
+```
 
 # Continuation and Resumption
 

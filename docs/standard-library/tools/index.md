@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-index
 title: "Tools Reference"
 description: Detailed documentation for every tool in the Rye OS standard library
 category: standard-library/tools
 tags: [tools, standard-library, reference]
 version: "1.0.0"
----
+```
 
 # Tools Reference
 

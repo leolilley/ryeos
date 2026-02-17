@@ -1,11 +1,11 @@
----
+```yaml
 id: orchestration-overview
 title: "Orchestration Overview"
 description: How Rye OS enables AI agents to coordinate multi-step workflows through thread-based orchestration
 category: orchestration
 tags: [orchestration, threads, overview, architecture]
 version: "1.0.0"
----
+```
 
 # Orchestration Overview
 

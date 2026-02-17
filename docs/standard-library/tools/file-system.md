@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-file-system
 title: "File System Tools"
 description: "Read, write, edit, search, and list files — with persistent line IDs for stable editing"
 category: standard-library/tools
 tags: [tools, file-system, read, write, edit, glob, grep, ls]
 version: "1.0.0"
----
+```
 
 # File System Tools
 

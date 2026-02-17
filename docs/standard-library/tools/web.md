@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-web
 title: "Web Tools"
 description: Search the web and fetch page content with format conversion
 category: standard-library/tools
 tags: [tools, web, search, fetch, websearch, webfetch]
 version: "1.0.0"
----
+```
 
 # Web Tools
 

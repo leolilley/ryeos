@@ -1,11 +1,11 @@
----
+```yaml
 id: three-tier-spaces
 title: "Three-Tier Space System"
 description: How items are resolved across project, user, and system spaces
 category: internals
 tags: [spaces, resolution, project, user, system, bundles]
 version: "1.0.0"
----
+```
 
 # Three-Tier Space System
 

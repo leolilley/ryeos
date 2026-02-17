@@ -1,4 +1,4 @@
----
+```yaml
 id: tools-core
 title: "Core Tools"
 description: "Internal tools that power Rye OS — parsers, runtimes, extractors, sinks, bundler, registry, system, and telemetry"
@@ -16,7 +16,7 @@ tags:
     registry,
   ]
 version: "1.0.0"
----
+```
 
 # Core Tools
 

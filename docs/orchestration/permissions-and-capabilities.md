@@ -1,11 +1,11 @@
----
+```yaml
 id: permissions-and-capabilities
 title: "Permissions and Capabilities"
 description: How capability tokens control what threads can do
 category: orchestration
 tags: [permissions, capabilities, security, fail-closed]
 version: "1.0.0"
----
+```
 
 # Permissions and Capabilities
 

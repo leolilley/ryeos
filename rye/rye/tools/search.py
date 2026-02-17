@@ -646,7 +646,8 @@ class MetadataExtractor:
         self._parser_router = ParserRouter(project_path)
 
     def extract(
-        self, file_path: Path, item_type: str, search_dir: Path
+        self, file_path: Path, item_type: str, search_dir: Path,
+        source_label: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Extract metadata from a single file.
 
@@ -664,7 +665,7 @@ class MetadataExtractor:
         item_id = str(relative_path.with_suffix(""))
         name = file_path.stem
 
-        source = self._detect_source(file_path)
+        source = self._detect_source(file_path, source_label=source_label)
 
         metadata: Dict[str, Any] = {
             "id": item_id,
@@ -712,11 +713,25 @@ class MetadataExtractor:
 
         return metadata
 
-    def _detect_source(self, file_path: Path) -> str:
-        path_str = str(file_path)
-        if "site-packages/rye" in path_str:
-            return "system"
-        if str(self.user_space) in path_str:
+    def _detect_source(self, file_path: Path, source_label: Optional[str] = None) -> str:
+        """Detect which space a file belongs to.
+
+        If source_label is provided (from the search path builder), use it
+        directly — this is the authoritative source. Falls back to path-based
+        detection for callers that don't provide a label.
+        """
+        if source_label:
+            # source_label is "project", "user", or "system:<bundle_id>"
+            if source_label.startswith("system"):
+                return "system"
+            return source_label
+
+        # Fallback: check against known system bundle paths
+        resolved = file_path.resolve()
+        for bundle in get_system_spaces():
+            if str(resolved).startswith(str(bundle.root_path.resolve())):
+                return "system"
+        if str(resolved).startswith(str(Path(self.user_space).resolve())):
             return "user"
         return "project"
 
@@ -991,12 +1006,12 @@ class SearchTool:
         prox_enabled = opts.proximity.get("enabled", False)
         prox_distance = opts.proximity.get("max_distance", 5)
 
-        for search_dir, _source_label in search_paths:
+        for search_dir, source_label in search_paths:
             for file_path in search_dir.rglob("*"):
                 if not file_path.is_file() or file_path.name.startswith("_"):
                     continue
 
-                item = extractor.extract(file_path, item_type, search_dir)
+                item = extractor.extract(file_path, item_type, search_dir, source_label=source_label)
                 if not item:
                     continue
 

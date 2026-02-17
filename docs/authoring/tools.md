@@ -1,11 +1,11 @@
----
+```yaml
 id: tools
 title: "Authoring Tools"
 description: How to write tool files — executable scripts that do the actual work
 category: authoring
 tags: [tools, authoring, python, yaml, format]
 version: "1.0.0"
----
+```
 
 # Authoring Tools
 

@@ -1,11 +1,11 @@
----
+```yaml
 id: installation
 title: Installation
 description: Install and configure Rye OS as an MCP server for your AI agent
 category: getting-started
 tags: [install, setup, mcp, configuration]
 version: "1.0.0"
----
+```
 
 # Installation
 

@@ -1,11 +1,11 @@
----
+```yaml
 id: tools-infrastructure
 title: "Infrastructure Tools"
 description: "Internal tools that power Rye OS — parsers, runtimes, extractors, sinks, bundler, registry, system, and telemetry"
 category: standard-library/tools
 tags: [tools, infrastructure, internal, parsers, runtimes, extractors, sinks, bundler, registry]
 version: "1.0.0"
----
+```
 
 # Infrastructure Tools
 

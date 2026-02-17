@@ -1,11 +1,11 @@
----
+```yaml
 id: architecture
 title: "Architecture"
 description: Rye OS system architecture — layers, components, and data flow
 category: internals
 tags: [architecture, layers, components, overview]
 version: "1.0.0"
----
+```
 
 # Architecture
 
