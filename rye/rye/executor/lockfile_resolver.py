@@ -40,8 +40,8 @@ class LockfileResolver:
 
         Args:
             project_path: Project root directory
-            user_space: User space directory (~/.ai/)
-            system_space: System space (site-packages/rye/.ai/)
+            user_space: User space base path (~ or $USER_SPACE)
+            system_space: System space base path (site-packages/rye/)
         """
         self.project_path = Path(project_path) if project_path else None
 

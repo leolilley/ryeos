@@ -1,12 +1,12 @@
 """
 Logger utility for RYE.
 
-Implements rotating file logs in user space ($USER_SPACE/logs/):
+Implements rotating file logs in user space ({$USER_SPACE or ~}/.ai/logs/):
 - rye.log: Main log with 5MB rotation, keeps 3 backups
 - rye.errors.log: Errors only, 2MB rotation, keeps 2 backups
 - rye.json: Structured JSON, 5MB rotation, keeps 2 backups
 
-USER_SPACE defaults to ~/.ai if not set.
+USER_SPACE defaults to ~ (home dir). AI_DIR (.ai/) is appended.
 """
 
 import logging
@@ -55,9 +55,9 @@ def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
 
     Logs to:
     - stderr (console) - warnings and errors only
-    - $USER_SPACE/logs/rye.log (rotating, 5MB max, 3 backups)
-    - $USER_SPACE/logs/rye.errors.log (errors only, 2MB max, 2 backups)
-    - $USER_SPACE/logs/rye.json (structured JSON, 5MB max, 2 backups)
+    - {USER_SPACE}/.ai/logs/rye.log (rotating, 5MB max, 3 backups)
+    - {USER_SPACE}/.ai/logs/rye.errors.log (errors only, 2MB max, 2 backups)
+    - {USER_SPACE}/.ai/logs/rye.json (structured JSON, 5MB max, 2 backups)
 
     Args:
         name: Logger name

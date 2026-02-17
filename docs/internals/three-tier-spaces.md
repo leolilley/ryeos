@@ -48,11 +48,11 @@ Cross-project items stored in the user's home directory (or a custom path).
     my-global-workflow.md
 ```
 
-The `USER_SPACE` environment variable controls the **base path** (not the `.ai/` folder itself). When set, user space is `$USER_SPACE/.ai/`. When unset, it defaults to `~/.ai/`.
+`USER_SPACE` sets the **base path**, just like `project_path`. The `.ai/` directory is always appended via the `AI_DIR` constant — consistent across all three spaces: `project_path / AI_DIR`, `get_user_space() / AI_DIR`, `get_system_space() / AI_DIR`.
 
 ```bash
-# Default: ~/.ai/
-export USER_SPACE=/custom/home   # → /custom/home/.ai/
+# Default: get_user_space() returns ~ → user items at ~/.ai/
+export USER_SPACE=/custom/home   # → user items at /custom/home/.ai/
 ```
 
 ### System Space

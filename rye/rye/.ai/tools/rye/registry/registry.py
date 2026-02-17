@@ -204,7 +204,7 @@ def build_item_id_from_path(
 def _get_rye_state_dir() -> Path:
     """Get RYE state directory.
 
-    Uses rye's USER_SPACE env var or defaults to ~/.ai.
+    Uses rye's get_user_space() (defaults to ~, respects $USER_SPACE).
     """
     from rye.utils.path_utils import get_user_space
 

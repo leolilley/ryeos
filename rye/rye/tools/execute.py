@@ -81,7 +81,7 @@ class ExecuteTool:
         """Initialize execute tool.
 
         Args:
-            user_space: User space path (~/.ai/)
+            user_space: User space base path (~ or $USER_SPACE)
             project_path: Project root path for .ai/ resolution
         """
         self.user_space = user_space or str(get_user_space())

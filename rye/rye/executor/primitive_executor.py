@@ -103,8 +103,8 @@ class PrimitiveExecutor:
 
         Args:
             project_path: Project root for .ai/ resolution
-            user_space: User space (~/.ai/)
-            system_space: System space (site-packages/rye/.ai/)
+            user_space: User space base path (~ or $USER_SPACE)
+            system_space: System space base path (site-packages/rye/)
         """
         self.project_path = Path(project_path) if project_path else Path.cwd()
         self.user_space = Path(user_space) if user_space else self._get_user_space()

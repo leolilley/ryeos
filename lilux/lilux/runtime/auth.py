@@ -1,7 +1,7 @@
 """Authentication store service (Phase 4.2).
 
 Secure credential management with file-based encrypted storage fallback.
-Uses OS keychain when available, otherwise stores encrypted tokens in ~/.ai/auth/.
+Uses OS keychain when available, otherwise stores encrypted tokens in {USER_SPACE}/.ai/auth/.
 """
 
 import base64
@@ -37,9 +37,9 @@ from lilux.primitives.errors import AuthenticationRequired, RefreshError
 
 
 def _get_auth_dir() -> Path:
-    """Get auth storage directory (~/.ai/auth/)."""
-    user_space = os.environ.get("USER_SPACE", str(Path.home() / ".ai"))
-    auth_dir = Path(user_space) / "auth"
+    """Get auth storage directory ({USER_SPACE}/.ai/auth/)."""
+    user_space = os.environ.get("USER_SPACE", str(Path.home()))
+    auth_dir = Path(user_space) / ".ai" / "auth"
     auth_dir.mkdir(parents=True, exist_ok=True)
     # Secure permissions (owner only)
     auth_dir.chmod(stat.S_IRWXU)
