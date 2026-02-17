@@ -4,26 +4,28 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE (RYE Your Execution) is an MCP server that gives AI agents a portable `.ai/` directory system. Agents search, load, execute, and sign three item types — **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information) — across projects, users, and a shared registry.
+RYE (RYE Your Execution)is an MCP server that gives AI agents a portable `.ai/` directory system for managing **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information) — with cryptographic signing, capability-based permissions, and multi-process orchestration.
 
-Built on **Lilux**, a microkernel providing pure execution primitives.
+The agent interacts through 4 MCP tools. The framework provides the scaffolding. The LLM is the execution engine.
 
-## The Problem
+## Why RYE
 
-Workflows, tools, and context are trapped inside individual projects. Your agent can't pull the scraper it built yesterday, can't reuse the deployment pipeline from another project, and can't share what it learned. Every new project starts from scratch.
+Agent frameworks today hardcode their runtimes, trap workflows inside individual projects, and treat tool execution as a black box. RYE inverts this:
 
-RYE breaks that loop. Agents self-serve from a searchable, cryptographically-signed item system — locally and across a shared registry.
+- **Everything is data.** Runtimes, error classification, retry policies, provider configs, hook conditions — all loaded from swappable YAML/Python files, not hardcoded. Adding a new language runtime is a YAML file, not a code change.
+- **The runtime runs on itself.** RYE's own agent system (LLM loop, safety harness, orchestrator) lives inside `.ai/tools/` as signed items — subject to the same integrity checks, space precedence, and override mechanics as user-authored tools.
+- **Workflows are portable, signed artifacts.** Directives carry Ed25519 signatures. A signed workflow runs anywhere, pulls dependencies from a shared registry, and rejects tampered items at execution time.
 
 ## How It Works
 
 ```
 .ai/
-├── directives/     # XML workflow instructions
-├── tools/          # Executable scripts (Python, JS, Bash, YAML)
+├── directives/     # Workflow instructions (XML metadata + free-form process steps)
+├── tools/          # Executable scripts (Python, JS, Bash, YAML runtimes)
 └── knowledge/      # Domain information with YAML frontmatter
 ```
 
-Items live in three spaces with precedence: **project** (`.ai/`) → **user** (`~/.ai/`) → **system** (bundled with the package). Your agent interacts through four MCP tools:
+Items resolve through three spaces: **project** (`.ai/`) → **user** (`~/.ai/`) → **system** (bundled). Four MCP tools are the entire agent-facing surface:
 
 | Tool      | Purpose                                       |
 | --------- | --------------------------------------------- |
@@ -32,7 +34,13 @@ Items live in three spaces with precedence: **project** (`.ai/`) → **user** (`
 | `execute` | Run a directive, tool, or knowledge item      |
 | `sign`    | Cryptographically sign items with Ed25519     |
 
-Every item is Ed25519 signed. Unsigned or tampered items are rejected at execution time.
+### Orchestration
+
+Directives can spawn child threads as separate OS processes (`os.fork`), each with its own LLM loop, budget, and capabilities. Capabilities attenuate down the tree — children can only do what parents allow. Budget cascades upward. Depth is tracked and limited. All configurable via YAML.
+
+### Integrity
+
+Every tool in the execution chain is Ed25519-verified before running. Lockfiles pin versions with hash verification. Bundle manifests cover non-signable assets. The trust store supports TOFU pinning for registry items.
 
 ## Install
 
@@ -40,9 +48,7 @@ Every item is Ed25519 signed. Unsigned or tampered items are rejected at executi
 pip install rye-mcp
 ```
 
-This installs the full stack: `rye-mcp` (MCP transport) → `rye-os` (executor, resolver, standard library) → `lilux` (microkernel primitives).
-
-Configure your MCP client:
+Installs the full stack: `rye-mcp` (MCP transport) → `rye-os` (executor + standard library) → `lilux` (microkernel primitives).
 
 ```json
 {
@@ -64,14 +70,12 @@ Configure your MCP client:
 
 ## Packages
 
-| Package    | What it provides                                              | Bundle                         |
-| ---------- | ------------------------------------------------------------- | ------------------------------ |
-| `lilux`    | Microkernel — subprocess, HTTP, signing, integrity hashing    | —                              |
-| `rye-os`   | Executor, resolver, signing, metadata + full standard library | `rye-os` (all `rye/*` items)   |
-| `rye-core` | Same code as `rye-os`, minimal bundle                         | `rye-core` (only `rye/core/*`) |
-| `rye-mcp`  | MCP server transport (stdio/SSE)                              | —                              |
-
-`rye-os` and `rye-core` are mutually exclusive — install one or the other. `rye-mcp` depends on `rye-os`.
+| Package    | What it provides                                              |
+| ---------- | ------------------------------------------------------------- |
+| `lilux`    | Microkernel — subprocess, HTTP, signing, integrity primitives |
+| `rye-os`   | Executor, resolver, signing, metadata + full standard library |
+| `rye-core` | Same engine, minimal bundle (only `rye/core/*` items)         |
+| `rye-mcp`  | MCP server transport (stdio/SSE)                              |
 
 ## Documentation
 
@@ -81,7 +85,8 @@ Full documentation at [`docs/`](docs/index.md):
 - **[Authoring](docs/authoring/directives.md)** — Writing directives, tools, and knowledge
 - **[MCP Tools Reference](docs/tools-reference/execute.md)** — The four agent-facing tools
 - **[Orchestration](docs/orchestration/overview.md)** — Thread-based multi-agent workflows
-- **[Internals](docs/internals/architecture.md)** — Architecture, executor chain, spaces, signing, packages
+- **[Registry](docs/registry/sharing-items.md)** — Sharing items, trust model, agent integration
+- **[Internals](docs/internals/architecture.md)** — Architecture, executor chain, spaces, signing
 
 ## License
 
