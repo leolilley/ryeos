@@ -15,13 +15,13 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import ItemType
+from rye.constants import AI_DIR, ItemType
 from rye.utils.metadata_manager import MetadataManager
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     extract_filename,
     get_project_type_path,
-    get_system_type_paths,
+    get_system_spaces,
     get_user_type_path,
 )
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
@@ -55,7 +55,9 @@ class SignTool:
         elif source == "user":
             return get_user_type_path(item_type)
         elif source == "system":
-            for _root_id, p in get_system_type_paths(item_type):
+            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            for bundle in get_system_spaces():
+                p = bundle.root_path / AI_DIR / type_folder
                 if p.exists():
                     return p
             return None
@@ -75,7 +77,9 @@ class SignTool:
             base_dir = get_user_type_path(item_type)
         elif source == "system":
             all_items = []
-            for _root_id, sys_dir in get_system_type_paths(item_type):
+            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            for bundle in get_system_spaces():
+                sys_dir = bundle.root_path / AI_DIR / type_folder
                 if not sys_dir.exists():
                     continue
                 all_items.extend(self._glob_in_dir(sys_dir, item_type, pattern, project_path))
@@ -126,6 +130,13 @@ class SignTool:
         source = kwargs.get("source", "project")
 
         logger.debug(f"Sign: item_type={item_type}, item_id={item_id}, source={source}")
+
+        if source == "system":
+            return {
+                "status": "error",
+                "error": "System space items are immutable and cannot be signed. Copy to project or user space first.",
+                "item_id": item_id,
+            }
 
         try:
             # Check for batch signing (glob pattern)
@@ -434,7 +445,9 @@ class SignTool:
         elif source == "system":
             extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
-            for _root_id, base in get_system_type_paths(item_type):
+            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            for bundle in get_system_spaces():
+                base = bundle.root_path / AI_DIR / type_folder
                 if not base.exists():
                     continue
                 for ext in extensions:

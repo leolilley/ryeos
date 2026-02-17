@@ -6,7 +6,7 @@ How bundles are created, verified, and distributed as a core tool — without ad
 
 Bundles are **not** a new `ItemType`. The MCP interface stays at 3 item types (`directive`, `tool`, `knowledge`) and 4 tools (`search`, `load`, `execute`, `sign`). A bundle is an operational concept — a group of items managed by a core tool — not a fundamental data type in the item model.
 
-The bundler lives at `.ai/tools/rye/core/bundler/bundler.py` and follows the same action-dispatch pattern as [registry.py](../../rye/rye/.ai/tools/rye/registry/registry.py) and [system.py](../../rye/rye/.ai/tools/rye/core/system/system.py). It is executed via the standard path:
+The bundler lives at `.ai/tools/rye/core/bundler/bundler.py` and follows the same action-dispatch pattern as [registry.py](../../rye/rye/.ai/tools/rye/core/registry/registry.py) and [system.py](../../rye/rye/.ai/tools/rye/core/system/system.py). It is executed via the standard path:
 
 ```
 rye_execute item_type=tool item_id=rye/core/bundler/bundler action=create ...
@@ -33,7 +33,7 @@ The tool-based approach requires 1 new file (`bundler.py`) and minor additions t
 | Concern                                                         | Owner                                        | Actions                               |
 | --------------------------------------------------------------- | -------------------------------------------- | ------------------------------------- |
 | **Bundle semantics** (create, verify, inspect, list)            | Bundler tool (`rye/core/bundler/bundler.py`) | `create`, `verify`, `inspect`, `list` |
-| **Bundle transport** (push to registry, pull from registry)     | Registry tool (`rye/registry/registry.py`)   | `push_bundle`, `pull_bundle`          |
+| **Bundle transport** (push to registry, pull from registry)     | Registry tool (`rye/core/registry/registry.py`)   | `push_bundle`, `pull_bundle`          |
 | **Item signing** (inline Ed25519 on directives/tools/knowledge) | Sign MCP tool (`rye/rye/tools/sign.py`)      | Existing batch sign with glob         |
 | **Item discovery** (search/load individual items)               | Search/Load MCP tools                        | Unchanged                             |
 
@@ -266,7 +266,7 @@ Bundle transport (push/pull) stays in `registry.py` as new actions. The registry
      entrypoint=apps/task-manager/build_crud_app
 
 3. User pushes bundle to registry:
-   rye_execute item_type=tool item_id=rye/registry/registry
+   rye_execute item_type=tool item_id=rye/core/registry/registry
      action=push_bundle bundle_id=apps/task-manager version=1.0.0
 
 4. Registry server:
@@ -281,7 +281,7 @@ Bundle transport (push/pull) stays in `registry.py` as new actions. The registry
 
 ```
 1. User pulls bundle:
-   rye_execute item_type=tool item_id=rye/registry/registry
+   rye_execute item_type=tool item_id=rye/core/registry/registry
      action=pull_bundle bundle_id=leolilley/apps/task-manager version=1.0.0
 
 2. Registry client:

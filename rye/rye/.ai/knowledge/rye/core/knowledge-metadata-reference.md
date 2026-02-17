@@ -1,6 +1,8 @@
+<!-- rye:signed:2026-02-17T22:03:32Z:353413d184b998e5cfe2c384b98fcd755b063aa8634f9bc31e2fe47ae62d5246:b0Rp77E1v95QouzGFxJ5dP2G8ZOpek_BHb3y2EjcvbzjLc8PVDwPdjICy5sVoVsNeY9_JeaK_xIo5hDWyEHXDA==:440443d0858f0199 -->
 ---
 id: knowledge-metadata-reference
 title: Knowledge Metadata Reference
+entry_type: reference
 category: rye/core
 version: "1.0.0"
 author: rye-os

@@ -304,10 +304,10 @@ files:
   .ai/tools/rye/primary-tools/rye_sign.py:
     sha256: 5a5e37b7eb504c001f77510e8c3ad2ee95913dbdab414b536bd171846c626484
     inline_signed: true
-  .ai/tools/rye/registry/__init__.py:
+  .ai/tools/rye/core/registry/__init__.py:
     sha256: 10e7eb51e676723979d840c958291132af32a50882665b6dd87dff63d7b8b086
     inline_signed: true
-  .ai/tools/rye/registry/registry.py:
+  .ai/tools/rye/core/registry/registry.py:
     sha256: d9ca6b55ccbb1f2f694cc4ee610d0226da7af3e5ed88f217cdfa35f519413bd7
     inline_signed: true
   .ai/knowledge/rye/core/directive-metadata-reference.md:

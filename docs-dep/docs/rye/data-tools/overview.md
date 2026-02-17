@@ -36,7 +36,7 @@ This overview describes all data tools in RYE and how they relate to each other.
 │   │   ├── llm/                      #   LLM provider configs
 │   │   └── mcp/                      #   MCP protocol for agent comms
 │   │
-│   ├── registry/                     # Tool distribution (standalone)
+│   ├── core/registry/                # Tool distribution (in rye/core)
 │   └── rag/                          # Semantic search (optional)
 │
 └── {other}/                          # User/custom categories
@@ -232,7 +232,7 @@ LLM provider configurations.
 **See:** [agent/llm](agent/llm.md)
 
 ### 13. **Registry** (1 tool)
-**Location:** `.ai/tools/rye/registry/`
+**Location:** `.ai/tools/rye/core/registry/`
 
 Tool distribution and package management.
 
@@ -293,7 +293,7 @@ Shared Python libraries for tools.
 | ├ Telemetry | `agent/telemetry/` | 6 | python_runtime | Monitoring agent runs |
 | ├ LLM | `agent/llm/` | 5 | N/A | LLM provider configs |
 | └ MCP | `agent/mcp/` | 3 + YAML | Mixed | MCP protocol |
-| Registry | `registry/` | 1 | http_client | Tool distribution |
+| Registry | `core/registry/` | 1 | http_client | Tool distribution |
 | RAG | `rag/` | 4 | http_client | Semantic search (optional) |
 | Examples | `examples/` | 2 | python_runtime | Reference implementations |
 
@@ -333,7 +333,7 @@ FEATURE GROUPS (Mutable - Features delivered via RYE)
 │   ├─ telemetry/ (Monitoring agent runs)
 │   ├─ llm/ (LLM provider configs)
 │   └─ mcp/ (MCP protocol for agent comms)
-├── registry/ (Tool distribution)
+├── core/registry/ (Tool distribution)
 └── rag/ (Semantic search - optional)
 ```
 

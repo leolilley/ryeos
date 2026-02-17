@@ -1,6 +1,8 @@
+<!-- rye:signed:2026-02-17T22:03:32Z:ae410d018a0a8367022b4cfef204ac2c7d3aab6d6b374fccef2304f42dad96e9:jMpCTdpY3HZY2c4prbuiXv6C27fk4Fqbaj4QJj7UAMy4NbWENZqk1lYe6iGsYnnwZUZMN-SWt96zqmGXm1f1AA==:440443d0858f0199 -->
 ---
 id: directive-metadata-reference
 title: Directive Metadata Reference
+entry_type: reference
 category: rye/core
 version: "1.0.0"
 author: rye-os

@@ -10,7 +10,7 @@ Create a directive with full thread execution support — model configuration, c
     <description>Creates directives with full thread execution support — model configuration, cost limits, capability permissions for autonomous thread-based execution.</description>
     <category>rye/core</category>
     <author>rye</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022" />
+    <model tier="haiku" />
     <limits max_turns="8" max_tokens="4096" />
     <permissions>
       <execute>

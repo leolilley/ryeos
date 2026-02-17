@@ -212,7 +212,7 @@ RYE tools support two locations:
 
 ## Related Tools
 
-For registry operations (searching, downloading, publishing items), see the `.ai/tools/rye/registry` tool, accessed via `execute`.
+For registry operations (searching, downloading, publishing items), see the `.ai/tools/rye/core/registry` tool, accessed via `execute`.
 
 ---
 

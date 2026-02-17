@@ -14,13 +14,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import DIRECTIVE_INSTRUCTION, ItemType
+from rye.constants import AI_DIR, DIRECTIVE_INSTRUCTION, ItemType
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     get_project_type_path,
-    get_system_type_paths,
+    get_system_spaces,
     get_user_type_path,
 )
 from rye.utils.integrity import verify_item, IntegrityError
@@ -308,12 +308,16 @@ class ExecuteTool:
             return None
 
         # Search order: project > user > system
+        # System uses type roots (not category-scoped paths) so item_id
+        # resolution matches search — e.g. "rye/core/system" resolves
+        # against .ai/directives/ not .ai/directives/rye/core/.
         search_bases = []
         if project_path:
             search_bases.append(get_project_type_path(Path(project_path), item_type))
         search_bases.append(get_user_type_path(item_type))
-        for _root_id, sys_path in get_system_type_paths(item_type):
-            search_bases.append(sys_path)
+        type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+        for bundle in get_system_spaces():
+            search_bases.append(bundle.root_path / AI_DIR / type_folder)
 
         extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 

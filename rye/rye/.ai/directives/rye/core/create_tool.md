@@ -9,7 +9,7 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
     <description>Create a tool file with correct metadata headers and parameter schema, then sign it.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022" />
+    <model tier="haiku" />
     <limits max_turns="8" max_tokens="4096" />
     <permissions>
       <execute>

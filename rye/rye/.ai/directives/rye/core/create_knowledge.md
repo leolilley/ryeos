@@ -9,7 +9,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
     <description>Create a knowledge entry file with YAML frontmatter and markdown content, then sign it.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022" />
+    <model tier="haiku" />
     <limits max_turns="6" max_tokens="4096" />
     <permissions>
       <execute>

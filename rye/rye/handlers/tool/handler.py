@@ -10,10 +10,11 @@ from typing import Any, Dict, Optional
 
 from rye.utils.resolvers import get_user_space
 from rye.utils.extensions import get_tool_extensions
+from rye.constants import AI_DIR, ItemType
 from rye.utils.path_utils import (
     get_project_type_path,
     get_user_type_path,
-    get_system_type_paths,
+    get_system_spaces,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,10 @@ class ToolHandler:
         if user_tools.exists():
             paths.append(user_tools)
 
-        # System tools
-        for _root_id, system_tools in get_system_type_paths("tool"):
+        # System tools (type roots, not category-scoped)
+        type_folder = ItemType.TYPE_DIRS.get("tool", "tools")
+        for bundle in get_system_spaces():
+            system_tools = bundle.root_path / AI_DIR / type_folder
             if system_tools.exists():
                 paths.append(system_tools)
 

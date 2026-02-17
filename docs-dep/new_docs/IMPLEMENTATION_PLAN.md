@@ -1153,7 +1153,7 @@ class TestBundleSearchResponseSchema:
 
 **Modify:**
 
-- `rye/rye/.ai/tools/rye/registry/registry.py` — add `push_bundle`, `pull_bundle` actions only
+- `rye/rye/.ai/tools/rye/core/registry/registry.py` — add `push_bundle`, `pull_bundle` actions only
 
 **Actions to add to `ACTIONS` list:**
 

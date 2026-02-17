@@ -534,7 +534,7 @@ This is the top-level entry point. It plans, coordinates waves of parallel work,
     <success>
       App '{input:name}' built and running. Thread transcript at .ai/threads/.
       Bundle shareable via: rye_execute item_type=tool item_id=rye/core/bundler/bundler action=create bundle_id=apps/{input:name}
-      Then: rye_execute item_type=tool item_id=rye/registry/registry action=push_bundle bundle_id=apps/{input:name}
+      Then: rye_execute item_type=tool item_id=rye/core/registry/registry action=push_bundle bundle_id=apps/{input:name}
     </success>
     <failure>
       Build failed. Check thread transcript for error details.
@@ -985,7 +985,7 @@ Then publish the bundle to the registry:
 
 ```
 # 3. Push bundle (uploads manifest + all referenced files)
-rye_execute item_type=tool item_id=rye/registry/registry
+rye_execute item_type=tool item_id=rye/core/registry/registry
   action=push_bundle
   bundle_id=apps/task-manager
 ```
@@ -1000,7 +1000,7 @@ A recipient installs the bundle:
 
 ```
 # 4. Pull bundle (downloads, verifies, extracts to .ai/)
-rye_execute item_type=tool item_id=rye/registry/registry
+rye_execute item_type=tool item_id=rye/core/registry/registry
   action=pull_bundle
   bundle_id=leolilley/apps/task-manager
   version=1.0.0

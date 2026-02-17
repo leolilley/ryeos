@@ -9,7 +9,7 @@ Create a new directive file with proper metadata, validate, and sign it.
     <description>Create a directive file with minimal required fields, check for duplicates, write to disk, and sign it.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022" />
+    <model tier="haiku" />
     <limits max_turns="6" max_tokens="4096" />
     <permissions>
       <search>

@@ -42,7 +42,7 @@ Items are either `public` (visible to all users) or `private` (visible only to t
 
 ## The Registry Tool
 
-**Location:** `.ai/tools/rye/registry/registry.py`
+**Location:** `.ai/tools/rye/core/registry/registry.py`
 
 The registry tool is a Python script that runs through the executor chain like any other tool:
 
@@ -235,16 +235,16 @@ The registry exposes its Ed25519 public key at `GET /v1/public-key` (PEM format)
    sign(item_type="tool", item_id="utilities/web-scraper")
 
 3. Login to registry:
-   execute(tool="rye/registry/registry", action="login")
+   execute(tool="rye/core/registry/registry", action="login")
 
 4. Push to registry:
-   execute(tool="rye/registry/registry", action="push",
+   execute(tool="rye/core/registry/registry", action="push",
            item_type="tool",
            item_id="myuser/utilities/web-scraper",
            version="1.0.0")
 
 5. Make it public:
-   execute(tool="rye/registry/registry", action="publish",
+   execute(tool="rye/core/registry/registry", action="publish",
            item_type="tool",
            item_id="myuser/utilities/web-scraper")
 ```
@@ -253,11 +253,11 @@ The registry exposes its Ed25519 public key at `GET /v1/public-key` (PEM format)
 
 ```
 1. Search for tools:
-   execute(tool="rye/registry/registry", action="search",
+   execute(tool="rye/core/registry/registry", action="search",
            query="web scraper", item_type="tool")
 
 2. Pull to project:
-   execute(tool="rye/registry/registry", action="pull",
+   execute(tool="rye/core/registry/registry", action="pull",
            item_type="tool",
            item_id="myuser/utilities/web-scraper",
            space="project")

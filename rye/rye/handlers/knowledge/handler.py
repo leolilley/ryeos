@@ -10,10 +10,11 @@ from typing import Any, Dict, Optional
 
 from rye.utils.resolvers import get_user_space
 from rye.utils.parser_router import ParserRouter
+from rye.constants import AI_DIR, ItemType
 from rye.utils.path_utils import (
     get_project_type_path,
     get_user_type_path,
-    get_system_type_paths,
+    get_system_spaces,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,8 +45,10 @@ class KnowledgeHandler:
         if user_knowledge.exists():
             paths.append(user_knowledge)
 
-        # System knowledge
-        for _root_id, system_dir in get_system_type_paths("knowledge"):
+        # System knowledge (type roots, not category-scoped)
+        type_folder = ItemType.TYPE_DIRS.get("knowledge", "knowledge")
+        for bundle in get_system_spaces():
+            system_dir = bundle.root_path / AI_DIR / type_folder
             if system_dir.exists():
                 paths.append(system_dir)
 

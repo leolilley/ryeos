@@ -39,7 +39,7 @@ Actions:
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
-__category__ = "rye/registry"
+__category__ = "rye/core/registry"
 __tool_description__ = "Registry tool for auth and item management"
 
 import asyncio

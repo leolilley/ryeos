@@ -29,7 +29,6 @@ from rye.utils.path_utils import (
     get_project_type_path,
     get_user_type_path,
     get_system_spaces,
-    get_system_type_paths,
     get_extractor_search_paths,
 )
 from rye.utils.integrity import verify_item, IntegrityError

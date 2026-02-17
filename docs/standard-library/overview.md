@@ -49,154 +49,17 @@ See [Bundled Directives](bundled-directives.md) for detailed documentation of ea
 
 ### Tools
 
-Tools are organized by namespace under `.ai/tools/rye/`:
+Tools are organized by namespace under `.ai/tools/rye/`. For detailed documentation of every tool, see the [Tools Reference](tools/index.md).
 
-#### File System — `rye/file-system/`
-
-| Tool         | Description                     |
-| ------------ | ------------------------------- |
-| `read`       | Read file contents              |
-| `write`      | Write file contents             |
-| `edit_lines` | Edit specific lines in a file   |
-| `glob`       | Find files by glob pattern      |
-| `grep`       | Search file contents with regex |
-| `ls`         | List directory contents         |
-
-#### Shell — `rye/bash/`
-
-| Tool   | Description            |
-| ------ | ---------------------- |
-| `bash` | Execute shell commands |
-
-#### Web — `rye/web/`
-
-| Tool        | Description                      |
-| ----------- | -------------------------------- |
-| `webfetch`  | Fetch and parse web page content |
-| `websearch` | Search the web                   |
-
-#### MCP Client — `rye/mcp/`
-
-| Tool       | Description                               |
-| ---------- | ----------------------------------------- |
-| `connect`  | Connect to an external MCP server         |
-| `discover` | Discover available tools on an MCP server |
-| `manager`  | Manage MCP server connections             |
-
-#### Registry — `rye/registry/`
-
-| Tool       | Description                              |
-| ---------- | ---------------------------------------- |
-| `registry` | Push, pull, and search the item registry |
-
-#### LSP — `rye/lsp/`
-
-| Tool  | Description                          |
-| ----- | ------------------------------------ |
-| `lsp` | Language Server Protocol integration |
-
-#### System — `rye/core/system/`
-
-| Tool     | Description                                              |
-| -------- | -------------------------------------------------------- |
-| `system` | System info (environment variables, paths, runtime info) |
-
-#### Telemetry — `rye/core/telemetry/`
-
-| Tool       | Description                  |
-| ---------- | ---------------------------- |
-| `mcp_logs` | MCP request/response logging |
-
-#### Primary Tool Wrappers — `rye/primary/`
-
-| Tool          | Description                         |
-| ------------- | ----------------------------------- |
-| `rye_execute` | Execute items (used inside threads) |
-| `rye_load`    | Load item content                   |
-| `rye_search`  | Search for items                    |
-| `rye_sign`    | Validate and sign items             |
-
-These are the tools that threads use to interact with Rye OS itself.
-
-#### Thread Orchestration Engine — `rye/agent/threads/`
-
-The thread system is the largest tool namespace. It provides autonomous, budget-controlled directive execution.
-
-| Component         | Tools                                                                                                                                                                                  | Description                                                           |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| **Core**          | `thread_directive`, `orchestrator`, `runner`, `safety_harness`                                                                                                                         | Thread lifecycle — start, orchestrate, run, and guard execution       |
-| **Adapters**      | `http_provider`, `provider_adapter`, `provider_resolver`, `tool_dispatcher`                                                                                                            | Connect threads to LLM providers and dispatch tool calls              |
-| **Events**        | `event_emitter`, `streaming_tool_parser`                                                                                                                                               | Emit structured events and parse streaming tool-use responses         |
-| **Internal**      | `budget_ops`, `cancel_checker`, `classifier`, `control`, `cost_tracker`, `emitter`, `limit_checker`, `state_persister`, `text_tool_parser`, `thread_chain_search`, `tool_result_guard` | Budget tracking, cancellation, error classification, state management |
-| **Loaders**       | `config_loader`, `coordination_loader`, `error_loader`, `events_loader`, `hooks_loader`, `resilience_loader`, `condition_evaluator`, `interpolation`                                   | Load YAML configs for coordination, resilience, hooks, and events     |
-| **Persistence**   | `thread_registry`, `transcript`, `state_store`, `artifact_store`, `budgets`                                                                                                            | Store thread state, transcripts, artifacts, and budget ledgers        |
-| **Security**      | `security`                                                                                                                                                                             | Capability token enforcement within threads                           |
-| **Config (YAML)** | `events`, `error_classification`, `hook_conditions`, `coordination`, `resilience`, `budget_ledger_schema`                                                                              | Declarative configuration for thread behavior                         |
-
-#### LLM Providers — `rye/agent/providers/`
-
-| Config           | Description                               |
-| ---------------- | ----------------------------------------- |
-| `anthropic.yaml` | Anthropic (Claude) provider configuration |
-| `openai.yaml`    | OpenAI provider configuration             |
-
-#### Permissions — `rye/agent/permissions/`
-
-| Component                                                                                               | Description                              |
-| ------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `capability_tokens.py`                                                                                  | Capability token creation and validation |
-| `primary.yaml`                                                                                          | Primary capability definitions           |
-| `agent.yaml`, `db.yaml`, `fs.yaml`, `git.yaml`, `mcp.yaml`, `net.yaml`, `process.yaml`, `registry.yaml` | Per-domain capability definitions        |
-
-#### Bundler — `rye/core/bundler/`
-
-| Tool           | Description                     |
-| -------------- | ------------------------------- |
-| `bundler`      | Create and verify item bundles  |
-| `collect.yaml` | Bundle collection configuration |
-
-#### Parsers — `rye/core/parsers/`
-
-| Tool                   | Description                                |
-| ---------------------- | ------------------------------------------ |
-| `markdown_frontmatter` | Parse YAML frontmatter from Markdown files |
-| `markdown_xml`         | Parse XML blocks from Markdown files       |
-| `python_ast`           | Extract metadata from Python tool files    |
-| `yaml`                 | Parse YAML files                           |
-
-#### Extractors — `rye/core/extractors/`
-
-| Config                     | Description                                     |
-| -------------------------- | ----------------------------------------------- |
-| `directive_extractor.yaml` | Metadata extraction rules for directives        |
-| `tool_extractor.yaml`      | Metadata extraction rules for tools             |
-| `knowledge_extractor.yaml` | Metadata extraction rules for knowledge entries |
-
-#### Runtimes — `rye/core/runtimes/`
-
-| Config                    | Description                             |
-| ------------------------- | --------------------------------------- |
-| `python_script_runtime`   | Execute Python tool scripts             |
-| `python_function_runtime` | Execute Python functions directly       |
-| `node_runtime`            | Execute JavaScript/Node.js tools        |
-| `bash_runtime`            | Execute Bash scripts                    |
-| `mcp_stdio_runtime`       | Execute MCP servers via stdio transport |
-| `mcp_http_runtime`        | Execute MCP servers via HTTP transport  |
-
-#### Primitives — `rye/core/primitives/`
-
-| Config             | Description                        |
-| ------------------ | ---------------------------------- |
-| `subprocess.yaml`  | Subprocess execution configuration |
-| `http_client.yaml` | HTTP client configuration          |
-
-#### Sinks — `rye/core/sinks/`
-
-| Tool             | Description                      |
-| ---------------- | -------------------------------- |
-| `file_sink`      | Write streaming events to files  |
-| `null_sink`      | Discard streaming events (no-op) |
-| `websocket_sink` | Stream events over WebSocket     |
+| Section | Namespace | Tools | Description |
+| --- | --- | --- | --- |
+| [File System](tools/file-system.md) | `rye/file-system/` | 6 | Read, write, edit (via line IDs), glob, grep, ls |
+| [Bash](tools/bash.md) | `rye/bash/` | 1 | Shell command execution |
+| [Web](tools/web.md) | `rye/web/` | 2 | Web search and page fetching |
+| [MCP Client](tools/mcp.md) | `rye/mcp/` | 3 | Connect to external MCP servers |
+| [Primary Tools](tools/primary.md) | `rye/primary/` | 4 | Search, load, execute, sign items |
+| [Agent System](tools/agent.md) | `rye/agent/` | 40+ | Thread orchestration, LLM loops, budgets, permissions |
+| [Infrastructure](tools/infrastructure.md) | `rye/core/` | 20+ | Parsers, runtimes, extractors, sinks, bundler, registry |
 
 ### Knowledge
 
@@ -225,7 +88,7 @@ The standard library provides the **infrastructure** — the tools and directive
 
 - **Project-specific items** — directives, tools, and knowledge for your particular application (these go in `.ai/`)
 - **User customizations** — personal overrides or additions (these go in `~/.ai/`)
-- **Registry-downloaded items** — community or team items pulled from the registry via `rye_execute(item_type="tool", item_id="rye/registry/registry", ...)`
+- **Registry-downloaded items** — community or team items pulled from the registry via `rye_execute(item_type="tool", item_id="rye/core/registry/registry", ...)`
 - **Demo or example content** — the standard library is production infrastructure, not a tutorial
 
 To add items for your project, create files under `.ai/directives/`, `.ai/tools/`, or `.ai/knowledge/` in your project root — or use the bundled creation directives to scaffold them.

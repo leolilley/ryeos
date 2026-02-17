@@ -81,14 +81,14 @@ Tools for connecting to external MCP servers.
 | discover | `rye/mcp/discover` | Discover available tools on an MCP server |
 | manager  | `rye/mcp/manager`  | Manage MCP server connections             |
 
-### Registry (`rye/registry/`)
+### Registry (`rye/core/registry/`)
 
-| Tool     | Item ID                 | Description                                  |
-| -------- | ----------------------- | -------------------------------------------- |
-| registry | `rye/registry/registry` | Push, pull, and search items in the registry |
+| Tool     | Item ID                      | Description                                  |
+| -------- | ---------------------------- | -------------------------------------------- |
+| registry | `rye/core/registry/registry` | Push, pull, and search items in the registry |
 
 ```python
-rye_execute(item_type="tool", item_id="rye/registry/registry",
+rye_execute(item_type="tool", item_id="rye/core/registry/registry",
     parameters={"action": "search", "query": "deployment"})
 ```
 

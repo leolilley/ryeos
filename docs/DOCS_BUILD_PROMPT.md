@@ -149,7 +149,7 @@ rye/mcp/
 rye/primary/                        # Primary tool wrappers (used inside threads)
   rye_execute.py, rye_load.py, rye_search.py, rye_sign.py
 
-rye/registry/
+rye/core/registry/
   registry.py                       # Registry push/pull/search
 
 rye/web/

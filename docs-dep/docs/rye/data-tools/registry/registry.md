@@ -4,7 +4,7 @@
 
 Registry tool provides **tool distribution and package management** functionality. It's a data-driven tool that uses HTTP client primitive to communicate with remote registry.
 
-**Location:** `.ai/tools/rye/registry/registry.py`
+**Location:** `.ai/tools/rye/core/registry/registry.py`
 **Count:** 1 tool
 **Executor:** `http_client`
 
@@ -292,7 +292,7 @@ Offline package management
 Registry is a single special tool:
 
 ```python
-# .ai/tools/rye/registry/registry.py
+# .ai/tools/rye/core/registry/registry.py
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
@@ -342,7 +342,7 @@ Call registry with:
 | Aspect | Detail |
 |--------|--------|
 | **Count** | 1 tool |
-| **Location** | `.ai/tools/rye/registry/` |
+| **Location** | `.ai/tools/rye/core/registry/` |
 | **Executor** | `http_client` |
 | **Purpose** | Tool distribution & management |
 | **Operations** | publish, pull, search, auth, key |

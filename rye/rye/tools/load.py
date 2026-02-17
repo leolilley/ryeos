@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rye.constants import ItemType, AI_DIR
-from rye.utils.path_utils import get_project_type_path, get_system_type_paths, get_user_space
+from rye.utils.path_utils import get_project_type_path, get_system_spaces, get_user_space
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.integrity import verify_item
 
@@ -59,7 +59,8 @@ class LoadTool:
             # Copy if destination differs from source
             if destination and destination != source:
                 dest_path = self._resolve_destination(
-                    project_path, destination, item_type, source_path
+                    project_path, destination, item_type, source_path,
+                    item_id=item_id,
                 )
                 if dest_path:
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +94,9 @@ class LoadTool:
         elif source == "system":
             extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
-            for _root_id, base in get_system_type_paths(item_type):
+            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            for bundle in get_system_spaces():
+                base = bundle.root_path / AI_DIR / type_folder
                 if not base.exists():
                     continue
                 for ext in extensions:
@@ -117,9 +120,15 @@ class LoadTool:
         return None
 
     def _resolve_destination(
-        self, project_path: str, destination: str, item_type: str, source_path: Path
+        self, project_path: str, destination: str, item_type: str,
+        source_path: Path, item_id: str = "",
     ) -> Optional[Path]:
-        """Resolve destination path preserving relative structure."""
+        """Resolve destination path preserving item_id structure.
+
+        Uses item_id (e.g. "rye/core/system") to reconstruct the full
+        path under the destination type root, preserving category dirs.
+        Falls back to filename-only if item_id is not provided.
+        """
         type_dir = ItemType.TYPE_DIRS.get(item_type)
         if not type_dir:
             return None
@@ -131,6 +140,8 @@ class LoadTool:
         else:
             return None
 
+        if item_id:
+            return base / f"{item_id}{source_path.suffix}"
         return base / source_path.name
 
     def _extract_metadata(self, file_path: Path, content: str) -> Dict[str, Any]:

@@ -3,7 +3,7 @@
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__category__ = "rye/registry"
+__category__ = "rye/core/registry"
 __tool_description__ = "Registry tools package"
 
 from .registry import (

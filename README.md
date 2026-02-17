@@ -4,7 +4,7 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE is an MCP server that gives AI agents a portable `.ai/` directory system. Agents search, load, execute, and sign three item types — **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information) — across projects, users, and a shared registry.
+RYE (RYE Your Execution) is an MCP server that gives AI agents a portable `.ai/` directory system. Agents search, load, execute, and sign three item types — **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information) — across projects, users, and a shared registry.
 
 Built on **Lilux**, a microkernel providing pure execution primitives.
 
@@ -25,12 +25,12 @@ RYE breaks that loop. Agents self-serve from a searchable, cryptographically-sig
 
 Items live in three spaces with precedence: **project** (`.ai/`) → **user** (`~/.ai/`) → **system** (bundled with the package). Your agent interacts through four MCP tools:
 
-| Tool      | Purpose                                         |
-| --------- | ------------------------------------------------ |
-| `search`  | Find items across all spaces and the registry    |
-| `load`    | Read item content or copy between spaces         |
-| `execute` | Run a directive, tool, or knowledge item         |
-| `sign`    | Cryptographically sign items with Ed25519        |
+| Tool      | Purpose                                       |
+| --------- | --------------------------------------------- |
+| `search`  | Find items across all spaces and the registry |
+| `load`    | Read item content or copy between spaces      |
+| `execute` | Run a directive, tool, or knowledge item      |
+| `sign`    | Cryptographically sign items with Ed25519     |
 
 Every item is Ed25519 signed. Unsigned or tampered items are rejected at execution time.
 
@@ -55,6 +55,7 @@ Configure your MCP client:
 ```
 
 > **From source:**
+>
 > ```bash
 > git clone https://github.com/leolilley/rye-os.git
 > cd rye-os
@@ -63,12 +64,12 @@ Configure your MCP client:
 
 ## Packages
 
-| Package | What it provides | Bundle |
-|---------|-----------------|--------|
-| `lilux` | Microkernel — subprocess, HTTP, signing, integrity hashing | — |
-| `rye-os` | Executor, resolver, signing, metadata + full standard library | `rye-os` (all `rye/*` items) |
-| `rye-core` | Same code as `rye-os`, minimal bundle | `rye-core` (only `rye/core/*`) |
-| `rye-mcp` | MCP server transport (stdio/SSE) | — |
+| Package    | What it provides                                              | Bundle                         |
+| ---------- | ------------------------------------------------------------- | ------------------------------ |
+| `lilux`    | Microkernel — subprocess, HTTP, signing, integrity hashing    | —                              |
+| `rye-os`   | Executor, resolver, signing, metadata + full standard library | `rye-os` (all `rye/*` items)   |
+| `rye-core` | Same code as `rye-os`, minimal bundle                         | `rye-core` (only `rye/core/*`) |
+| `rye-mcp`  | MCP server transport (stdio/SSE)                              | —                              |
 
 `rye-os` and `rye-core` are mutually exclusive — install one or the other. `rye-mcp` depends on `rye-os`.
 

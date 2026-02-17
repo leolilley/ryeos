@@ -88,7 +88,7 @@ A separate FastAPI service (`services/registry-api/`) for sharing items across p
 - **POST /v1/bundle/push** and **GET /v1/bundle/pull** — Bundle-level push/pull
 - **GET /v1/public-key** — Expose the registry's Ed25519 public key for TOFU pinning
 
-The registry API runs independently (deployed on Railway) and uses Supabase as its database. The bundled registry tool (`.ai/tools/rye/registry/registry.py`) is the client-side interface.
+The registry API runs independently (deployed on Railway) and uses Supabase as its database. The bundled registry tool (`.ai/tools/rye/core/registry/registry.py`) is the client-side interface.
 
 ## Data Flow
 

@@ -1,6 +1,8 @@
+<!-- rye:signed:2026-02-17T22:03:32Z:6d64b54ea981fb80f7dab4b923889ba0cb7c9227cc458cd4102111855cc86ca9:N_AnWLbjIdMIZrPyqdVrIplZO6U9Da4Nz09wvwyvqiFxQS6ZKEPx6HW214TmITaS4qXFOKTCl3r8FNEdgKBgCg==:440443d0858f0199 -->
 ---
 id: tool-metadata-reference
 title: Tool Metadata Reference
+entry_type: reference
 category: rye/core
 version: "1.0.0"
 author: rye-os

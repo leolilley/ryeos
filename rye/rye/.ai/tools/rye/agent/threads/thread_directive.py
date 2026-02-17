@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T10:05:20Z:c1d5a0a2c5d256681c6aadbeb2c399af9820de93944b2463afb46925b21014c5:SXRIQdEpVHcHjFpqgu7z027ILz98ZLrqhdkKjMC8dAm9E6cnj61ZwRRwtVN9TzJJi6lIL5yyGbD5U7sZdkjSBQ==:440443d0858f0199
+# rye:signed:2026-02-17T21:34:11Z:c1aef793c7a7f2618380baca96cbc47307fd19e752d6583258c2d85e5887f04d:rDBzbn_HyzHiGKxZHZ9lgIPvzDme1KE3OyhnwBIweBJqKQhow3dGkzo63YALfTOHXL12N2xL68S6Qm8i7olHCQ==:440443d0858f0199
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
@@ -137,43 +137,68 @@ def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
 def _build_prompt(directive: Dict) -> str:
     """Build the LLM prompt from the directive content.
 
-    Uses the full raw directive text as the prompt. The XML is not parsed
-    by the LLM — it reads it as structured instructions. The parser only
-    extracts metadata/inputs/outputs for the infrastructure (limits,
-    permissions, model selection, input validation).
+    Only sends what the LLM needs to execute the directive:
+      1. Execute instruction
+      2. Directive name + description (context)
+      3. Body (process steps with resolved input values)
+      4. Returns section (deterministically built from <outputs>)
 
-    Prompt assembly:
-      1. Execute instruction (same as execute.py returns to MCP clients)
-      2. raw directive content (preamble + XML fence + body — the whole file)
+    The LLM does NOT receive: metadata XML, permissions, limits,
+    model config, hooks, signatures, or raw XML fences. Those are
+    consumed by the infrastructure (thread_directive.py, safety_harness).
     """
     from rye.constants import DIRECTIVE_INSTRUCTION
-    parts = [DIRECTIVE_INSTRUCTION, ""]
+    parts = [DIRECTIVE_INSTRUCTION]
 
-    raw = directive.get("raw", "")
-    if raw:
-        # Strip signature comment from top — LLM doesn't need it
-        lines = raw.split("\n")
-        cleaned = [l for l in lines if not l.strip().startswith("<!-- rye:signed:")]
-        parts.append("\n".join(cleaned).strip())
-    else:
-        # Fallback: assemble from parsed fields (legacy/partial parse)
-        desc = directive.get("description", "")
-        if desc:
-            parts.append(f"## Directive\n{desc}")
-        body = directive.get("body", "")
-        if body:
-            parts.append(body)
-        outputs = directive.get("outputs", {})
-        if outputs:
-            parts.append("## Expected Output")
-            if isinstance(outputs, list):
-                for o in outputs:
-                    name = o.get("name", "")
-                    odesc = o.get("description", "")
-                    parts.append(f"- **{name}**: {odesc}" if odesc else f"- **{name}**")
-            elif isinstance(outputs, dict):
-                for k, v in outputs.items():
-                    parts.append(f"- **{k}**: {v}")
+    # Directive name + description
+    name = directive.get("name", "")
+    desc = directive.get("description", "")
+    if name and desc:
+        parts.append(f"<directive name=\"{name}\">\n<description>{desc}</description>")
+    elif name:
+        parts.append(f"<directive name=\"{name}\">")
+    elif desc:
+        parts.append(f"<directive>\n<description>{desc}</description>")
+
+    # Preamble (markdown before the XML fence — summary text)
+    preamble = directive.get("preamble", "").strip()
+    if preamble:
+        preamble_lines = [
+            l for l in preamble.split("\n")
+            if not l.strip().startswith(("<!-- rye:signed:", "# "))
+        ]
+        preamble_clean = "\n".join(preamble_lines).strip()
+        if preamble_clean:
+            parts.append(preamble_clean)
+
+    # Body (process steps — the actual instructions, already pseudo-XML)
+    body = directive.get("body", "").strip()
+    if body:
+        parts.append(body)
+
+    # Returns section — deterministic from <outputs> so the LLM knows
+    # what structured output to produce. Parent threads/orchestrators
+    # match these keys when consuming child thread results.
+    outputs = directive.get("outputs", [])
+    if outputs:
+        output_lines = ["<returns>"]
+        if isinstance(outputs, list):
+            for o in outputs:
+                oname = o.get("name", "")
+                odesc = o.get("description", "")
+                if odesc:
+                    output_lines.append(f"  <output name=\"{oname}\">{odesc}</output>")
+                else:
+                    output_lines.append(f"  <output name=\"{oname}\" />")
+        elif isinstance(outputs, dict):
+            for k, v in outputs.items():
+                output_lines.append(f"  <output name=\"{k}\">{v}</output>")
+        output_lines.append("</returns>")
+        parts.append("\n".join(output_lines))
+
+    # Close directive tag if opened
+    if name or desc:
+        parts.append("</directive>")
 
     return "\n\n".join(parts)
 

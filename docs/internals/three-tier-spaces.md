@@ -13,11 +13,11 @@ Every item in Rye OS (directives, tools, knowledge) lives in one of three spaces
 
 ## The Three Spaces
 
-| Space | Path | Precedence | Mutability |
-|-------|------|------------|------------|
-| **Project** | `{project}/.ai/` | 3 (highest) | Read-write |
-| **User** | `{$USER_SPACE or ~}/.ai/` | 2 | Read-write |
-| **System** | `site-packages/rye/.ai/` | 1 (lowest) | Immutable (ships with package) |
+| Space       | Path                      | Precedence  | Mutability                     |
+| ----------- | ------------------------- | ----------- | ------------------------------ |
+| **Project** | `{project}/.ai/`          | 3 (highest) | Read-write                     |
+| **User**    | `{$USER_SPACE or ~}/.ai/` | 2           | Read-write                     |
+| **System**  | `site-packages/rye/.ai/`  | 1 (lowest)  | Immutable (ships with package) |
 
 ### Project Space
 
@@ -132,11 +132,11 @@ return None  # not found
 
 The item ID is a **relative path** from `.ai/{type}/` without the extension. For example:
 
-| Item ID | File Path |
-|---------|-----------|
-| `core/build` | `.ai/directives/core/build.md` |
+| Item ID                                   | File Path                                                |
+| ----------------------------------------- | -------------------------------------------------------- |
+| `core/build`                              | `.ai/directives/core/build.md`                           |
 | `rye/core/runtimes/python_script_runtime` | `.ai/tools/rye/core/runtimes/python_script_runtime.yaml` |
-| `patterns/singleton` | `.ai/knowledge/patterns/singleton.md` |
+| `patterns/singleton`                      | `.ai/knowledge/patterns/singleton.md`                    |
 
 ## Overriding System Items
 
@@ -223,13 +223,13 @@ SPACE_PRECEDENCE = {"project": 3, "user": 2, "system": 1}
 
 **Rule**: A tool from a lower-precedence space cannot depend on a tool from a higher-precedence space.
 
-| Chain | Valid? | Reason |
-|-------|--------|--------|
-| project tool → user runtime → system primitive | ✅ | Descending precedence |
-| project tool → system runtime | ✅ | Project can use system |
-| user tool → user runtime → system primitive | ✅ | Same then descending |
-| user tool → project runtime | ❌ | User cannot depend on project |
-| system tool → user runtime | ❌ | System cannot depend on user |
+| Chain                                          | Valid? | Reason                        |
+| ---------------------------------------------- | ------ | ----------------------------- |
+| project tool → user runtime → system primitive | ✅     | Descending precedence         |
+| project tool → system runtime                  | ✅     | Project can use system        |
+| user tool → user runtime → system primitive    | ✅     | Same then descending          |
+| user tool → project runtime                    | ❌     | User cannot depend on project |
+| system tool → user runtime                     | ❌     | System cannot depend on user  |
 
 This ensures that:
 
@@ -241,14 +241,14 @@ This ensures that:
 
 `rye/utils/path_utils.py` provides helper functions used throughout the system:
 
-| Function | Purpose |
-|----------|---------|
-| `get_user_space()` | Returns user base path (`$USER_SPACE` or `~`) |
-| `get_system_space()` | Returns system base path (`site-packages/rye/`) |
-| `get_system_spaces()` | Returns all bundle `BundleInfo` objects |
-| `get_project_type_path(project, type)` | Returns `{project}/.ai/{type_dir}/` |
-| `get_user_type_path(type)` | Returns `~/.ai/{type_dir}/` |
-| `get_system_type_path(type)` | Returns core system type path |
-| `get_system_type_paths(type)` | Returns type paths across all bundles |
-| `extract_category_path(file, type, location)` | Extracts category from file path |
-| `validate_path_structure(...)` | Validates filename and category match metadata |
+| Function                                      | Purpose                                         |
+| --------------------------------------------- | ----------------------------------------------- |
+| `get_user_space()`                            | Returns user base path (`$USER_SPACE` or `~`)   |
+| `get_system_space()`                          | Returns system base path (`site-packages/rye/`) |
+| `get_system_spaces()`                         | Returns all bundle `BundleInfo` objects         |
+| `get_project_type_path(project, type)`        | Returns `{project}/.ai/{type_dir}/`             |
+| `get_user_type_path(type)`                    | Returns `~/.ai/{type_dir}/`                     |
+| `get_system_type_path(type)`                  | Returns core system type path                   |
+| `get_system_type_paths(type)`                 | Returns type paths across all bundles           |
+| `extract_category_path(file, type, location)` | Extracts category from file path                |
+| `validate_path_structure(...)`                | Validates filename and category match metadata  |
