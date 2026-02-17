@@ -50,9 +50,9 @@ def get_mcp_tools_dir(project_path: Path, server_name: str, scope: str = "projec
 
 
 def generate_signature_placeholder() -> str:
-    """Generate a placeholder signature line."""
+    """Generate a placeholder signature line (must be re-signed before execution)."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return f"# rye:validated:{timestamp}:placeholder"
+    return f"# rye:signed:{timestamp}:placeholder:unsigned:unsigned"
 
 
 def create_server_config(

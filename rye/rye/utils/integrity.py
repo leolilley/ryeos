@@ -51,12 +51,6 @@ def verify_item(
     if not sig_info:
         raise IntegrityError(f"Unsigned item: {file_path}")
 
-    if not sig_info.get("ed25519_sig"):
-        raise IntegrityError(
-            f"Legacy signature format (rye:validated:) rejected: {file_path}. "
-            f"Re-sign with Ed25519 via the sign tool."
-        )
-
     expected = sig_info["hash"]
     actual = MetadataManager.compute_hash(
         item_type, content, file_path=file_path, project_path=project_path

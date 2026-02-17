@@ -1,15 +1,15 @@
-<!-- rye:validated:2026-02-10T02:00:00Z:placeholder -->
-# Create Simple Directive
+<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+# Create Directive
 
-Create minimal directives with essential fields only.
+Create a new directive file with proper metadata, validate, and sign it.
 
 ```xml
-<directive name="create_directive" version="2.0.0">
+<directive name="create_directive" version="3.0.0">
   <metadata>
-    <description>Create a simple directive file with minimal required fields, check for duplicates, write to disk, and sign it.</description>
+    <description>Create a directive file with minimal required fields, check for duplicates, write to disk, and sign it.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022">Simple directive creation</model>
+    <model tier="haiku" id="claude-3-5-haiku-20241022" />
     <limits max_turns="6" max_tokens="4096" />
     <permissions>
       <search>
@@ -39,86 +39,48 @@ Create minimal directives with essential fields only.
     </input>
   </inputs>
 
-  <process>
-    <step name="check_duplicates">
-      <description>Search for existing directives with a similar name to avoid creating duplicates.</description>
-      <search item_type="directive" query="{input:name}" />
-    </step>
-
-    <step name="validate_inputs">
-      <description>Validate that name is snake_case alphanumeric, category is non-empty, and description is non-empty. Halt if any validation fails.</description>
-    </step>
-
-    <step name="write_directive_file">
-      <description>Generate the directive markdown file and write it to .ai/directives/{input:category}/{input:name}.md</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value=".ai/directives/{input:category}/{input:name}.md" />
-        <param name="content" value="<!-- rye:validated:2026-02-10T02:00:00Z:placeholder -->
-# {input:name}
-
-{input:description}
-
-```xml
-<directive name=&quot;{input:name}&quot; version=&quot;1.0.0&quot;>
-  <metadata>
-    <description>{input:description}</description>
-    <category>{input:category}</category>
-    <author>user</author>
-    <model tier=&quot;haiku&quot; id=&quot;claude-3-5-haiku-20241022&quot;>Brief model rationale</model>
-    <limits max_turns="6" max_tokens="4096" />
-    <permissions>
-      <execute>
-        <tool>*</tool>
-      </execute>
-    </permissions>
-  </metadata>
-
-  <inputs>
-    <input name=&quot;example_input&quot; type=&quot;string&quot; required=&quot;true&quot;>
-      Describe this input
-    </input>
-  </inputs>
-
-  <process>
-    <step name=&quot;step_1&quot;>
-      <description>What this step does</description>
-      <execute item_type=&quot;tool&quot; item_id=&quot;rye/file-system/fs_write&quot;>
-        <param name=&quot;path&quot; value=&quot;target/path&quot; />
-        <param name=&quot;content&quot; value=&quot;file content&quot; />
-      </execute>
-    </step>
-  </process>
-
-  <success_criteria>
-    <criterion>Measurable success condition</criterion>
-  </success_criteria>
-
   <outputs>
-    <success>Success message and next steps</success>
-    <failure>Failure message and common fixes</failure>
-  </outputs>
-</directive>
-``` " />
-        <param name="create_dirs" value="true" />
-      </execute>
-    </step>
-
-    <step name="sign_directive">
-      <description>Validate XML and generate a signature for the new directive file.</description>
-      <sign item_type="directive" item_id="{input:name}" />
-    </step>
-  </process>
-
-  <success_criteria>
-    <criterion>No duplicate directive with the same name exists</criterion>
-    <criterion>Directive file created at .ai/directives/{input:category}/{input:name}.md</criterion>
-    <criterion>All required XML elements present and well-formed</criterion>
-    <criterion>Signature validation comment present at top of file</criterion>
-  </success_criteria>
-
-  <outputs>
-    <success>Created directive: {input:name} at .ai/directives/{input:category}/{input:name}.md (v1.0.0). Run it to test, or edit steps and re-sign.</success>
-    <failure>Failed to create directive: {input:name}. Check that name is snake_case, category path is valid, and XML is well-formed.</failure>
+    <output name="directive_path">Path to the created directive file</output>
+    <output name="signed">Whether the directive was successfully signed</output>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="check_duplicates">
+    Search for existing directives with a similar name to avoid creating duplicates.
+    `rye_search(item_type="directive", query="{input:name}")`
+    If a duplicate exists, stop and report it.
+  </step>
+
+  <step name="validate_inputs">
+    Validate that {input:name} is snake_case alphanumeric, {input:category} is non-empty, and {input:description} is non-empty. Halt if any validation fails.
+  </step>
+
+  <step name="write_directive_file">
+    Generate the directive markdown file and write it to .ai/directives/{input:category}/{input:name}.md
+
+    The generated file must contain:
+    1. A signature comment placeholder at the top
+    2. A markdown title and description
+    3. A single ```xml fenced block containing ONLY metadata, inputs, and outputs
+    4. Pseudo-XML process steps AFTER the fence for the LLM to follow
+
+    Use {input:process_steps} if provided to inform the step content.
+
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
+  </step>
+
+  <step name="sign_directive">
+    Validate and sign the new directive file.
+    `rye_sign(item_type="directive", item_id="{input:category}/{input:name}")`
+  </step>
+</process>
+
+<success_criteria>
+  <criterion>No duplicate directive with the same name exists</criterion>
+  <criterion>Directive file created at .ai/directives/{input:category}/{input:name}.md</criterion>
+  <criterion>XML fence contains well-formed metadata, inputs, and outputs</criterion>
+  <criterion>Signature validation comment present at top of file</criterion>
+</success_criteria>
+

@@ -84,7 +84,7 @@ default:
     <description>Test filesystem read permission</description>
     <category />
     <author>test</author>
-    <model tier="general">File reading</model>
+    <model tier="general" />
     <limits>
       <turns>3</turns>
       <tokens>1000</tokens>
@@ -112,7 +112,7 @@ default:
     <description>Test filesystem write permission</description>
     <category />
     <author>test</author>
-    <model tier="general">File writing</model>
+    <model tier="general" />
     <limits>
       <turns>5</turns>
       <tokens>2000</tokens>
@@ -141,7 +141,7 @@ default:
     <description>Test thread spawn permission</description>
     <category />
     <author>test</author>
-    <model tier="orchestrator">Thread spawning</model>
+    <model tier="orchestrator" />
     <limits>
       <turns>10</turns>
       <tokens>5000</tokens>
@@ -174,7 +174,7 @@ default:
     <description>Test new hierarchical permission format</description>
     <category />
     <author>test</author>
-    <model tier="general">New permissions</model>
+    <model tier="general" />
     <limits>
       <turns>3</turns>
       <tokens>1000</tokens>
@@ -205,7 +205,7 @@ default:
     <description>Test directive with no permissions</description>
     <category />
     <author>test</author>
-    <model tier="general">No permissions</model>
+    <model tier="general" />
     <limits>
       <turns>2</turns>
       <tokens>500</tokens>
@@ -710,7 +710,7 @@ class TestNewPermissionFormat:
     <description>Test</description>
     <category>test</category>
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <permissions>*</permissions>
   </metadata>
 </directive>
@@ -731,7 +731,7 @@ class TestNewPermissionFormat:
     <description>Test</description>
     <category>test</category>
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <permissions><execute>*</execute></permissions>
   </metadata>
 </directive>
@@ -752,7 +752,7 @@ class TestNewPermissionFormat:
     <description>Test</description>
     <category>test</category>
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>
@@ -777,7 +777,7 @@ class TestNewPermissionFormat:
     <description>Test</description>
     <category>test</category>
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>
@@ -805,7 +805,7 @@ class TestNewPermissionFormat:
     <description>Test</description>
     <category>test</category>
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>

@@ -115,7 +115,7 @@ def load_server_config(
     # Remove signature line if present
     if content.startswith("#"):
         lines = content.split("\n", 1)
-        if len(lines) > 1 and "rye:validated:" in lines[0]:
+        if len(lines) > 1 and "rye:signed:" in lines[0]:
             content = lines[1]
 
     data = yaml.safe_load(content)

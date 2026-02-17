@@ -452,7 +452,7 @@ Spawn isolated LLM threads with scoped permissions:
     <description>Run web scraping in parallel using spawned threads</description>
     <category>automation</category>
     <author>rye</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022">Fast scraping with fallback</model>
+    <model tier="haiku" id="claude-3-5-haiku-20241022" />
     <limits max_turns="8" max_tokens="4096" />
     <permissions>
       <execute>

@@ -288,9 +288,7 @@ Update `/docs/rye/primary-items/directive-metadata.md` to make these fields opti
     <category>workflows</category>
     <author>devops-team</author>
 
-    <model tier="orchestrator" fallback="general">
-      Production deployment with multi-stage validation
-    </model>
+    <model tier="orchestrator" fallback="general" />
 
     <permissions>
       <execute resource="shell" action="kubectl" />

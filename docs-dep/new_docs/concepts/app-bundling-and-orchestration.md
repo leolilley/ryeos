@@ -384,7 +384,7 @@ This is the top-level entry point. It plans, coordinates waves of parallel work,
     <description>Orchestrate full-stack CRUD app creation — plan, scaffold, implement features in waves, test, build, and package as MCP bundle.</description>
     <category>apps/task-manager</category>
     <author>rye</author>
-    <model tier="sonnet" id="claude-sonnet-4-20250514">Multi-phase orchestration with wave-based parallelism requires reasoning about dependencies and coordinating child threads.</model>
+    <model tier="sonnet" id="claude-sonnet-4-20250514" />
     <limits max_turns="30" max_tokens="80000" max_spawns="8" max_spend="3.00" />
     <permissions>
       <execute>
@@ -559,7 +559,7 @@ Creates the initial project structure — directories, package.json, base config
     <description>Create project directory structure, package.json files, and base configuration for a full-stack React + Express + SQLite application.</description>
     <category>apps/task-manager</category>
     <author>rye</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022">Deterministic file creation — no reasoning required.</model>
+    <model tier="haiku" id="claude-3-5-haiku-20241022" />
     <limits max_turns="10" max_tokens="8192" max_spend="0.50" />
     <permissions>
       <execute>
@@ -647,7 +647,7 @@ This is the workhorse — each child thread runs one of these to implement a sin
     <description>Execute a single implementation plan — read the plan document, implement each task, verify must_haves, and handle deviations. This directive is designed to be spawned as a child thread by the orchestrator.</description>
     <category>apps/task-manager</category>
     <author>rye</author>
-    <model tier="sonnet" id="claude-sonnet-4-20250514">Feature implementation requires code generation and reasoning about dependencies.</model>
+    <model tier="sonnet" id="claude-sonnet-4-20250514" />
     <limits max_turns="15" max_tokens="30000" max_spend="1.00" />
     <permissions>
       <execute>

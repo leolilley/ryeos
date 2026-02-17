@@ -1,0 +1,234 @@
+---
+id: thread-lifecycle
+title: "Thread Lifecycle"
+description: How threads are created, executed, and finalized
+category: orchestration
+tags: [threads, lifecycle, states, registry]
+version: "1.0.0"
+---
+
+# Thread Lifecycle
+
+Every thread follows a deterministic lifecycle: generate an ID, register in the registry, load the directive, resolve limits and permissions, run the LLM loop, finalize spend and status.
+
+## Thread States
+
+```
+created ──→ running ──→ completed
+                    ├──→ error
+                    ├──→ cancelled
+                    └──→ continued
+```
+
+| State       | Meaning |
+|-------------|---------|
+| `created`   | Registered in registry, not yet executing |
+| `running`   | LLM loop is active |
+| `completed` | Finished successfully — result available |
+| `error`     | Failed — error message in result |
+| `cancelled` | Cancelled via `cancel_thread` operation |
+| `continued` | Handed off to a new thread (context limit reached) |
+
+## Thread ID Generation
+
+Thread IDs are derived from the directive name and a Unix epoch timestamp:
+
+```python
+thread_id = f"{directive_name}-{int(time.time())}"
+# Example: "agency-kiwi/discover_leads-1739820456"
+```
+
+This makes thread IDs human-readable (you can see which directive spawned them) and unique (epoch seconds prevent collisions for typical usage).
+
+## The Full Execution Flow
+
+`thread_directive.execute()` runs these steps in order:
+
+### Step 1: Resolve parent context
+
+The thread discovers its parent through three sources (first match wins):
+
+1. Explicit `parent_thread_id` parameter (used by handoff/resume)
+2. `RYE_PARENT_THREAD_ID` environment variable (set by parent threads)
+3. No parent — this is a root thread
+
+If a parent is declared but its `thread.json` doesn't exist, execution fails immediately.
+
+### Step 2: Register thread
+
+The thread is registered in the SQLite registry (`registry.db`) with status `created`, its directive name, and parent ID. The registry tracks all threads across the project.
+
+### Step 3: Load directive
+
+The directive is loaded via `DirectiveResolver`, searching project → user → system spaces. The markdown_xml parser extracts metadata (limits, permissions, model, inputs) from the XML fence and preserves the raw content for the LLM prompt.
+
+For normal execution, `ExecuteTool` handles input validation and interpolation. For resume/handoff, `LoadTool` is used instead (no input validation needed since the directive ran before).
+
+### Step 4: Resolve limits
+
+Limits are resolved through a layered merge:
+
+```
+defaults (resilience.yaml) → directive metadata → limit_overrides → parent upper bounds
+```
+
+Parent limits **cap** all values via `min()`. A child can never exceed its parent's limits. Depth decrements by 1 per level — if the parent has `depth: 5`, the child gets `depth: 4`.
+
+### Step 5: Check depth
+
+If resolved depth is less than 0 (i.e., the parent's depth was already exhausted), the thread returns an error immediately. This prevents infinite recursion.
+
+### Step 6: Check spawns limit
+
+If the thread has a parent, the orchestrator checks whether the parent has exceeded its `spawns` limit. If so, the thread returns an error. Otherwise, the parent's spawn count is incremented.
+
+### Step 7: Build hooks and harness
+
+Hooks are merged from three sources and sorted by layer:
+
+- **Layer 1** — Directive hooks (from the directive's XML)
+- **Layer 2** — Builtin hooks (project-level, from `.ai/config/`)
+- **Layer 3** — Infra hooks (system-level, always run)
+
+The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities. Tool schemas are loaded from the primary tools directory and attached to the harness.
+
+### Step 8: Reserve budget
+
+The hierarchical budget ledger handles cost tracking:
+
+- **Root threads:** `ledger.register(thread_id, max_spend)` — creates a top-level budget entry
+- **Child threads:** `ledger.reserve(thread_id, spend_limit, parent_thread_id)` — atomically reserves budget from the parent's remaining allocation
+
+If the parent has insufficient remaining budget, the reservation fails and the thread returns an error.
+
+### Step 9: Build prompt and providers
+
+The LLM prompt is built from the directive's raw content (the full markdown file minus the signature comment). The model is resolved from: `params.model` → `directive.model.id` → `directive.model.tier`. An `HttpProvider` is created with the resolved model configuration.
+
+### Step 10: Write initial thread.json
+
+The thread metadata file is written to `.ai/threads/<thread_id>/thread.json`:
+
+```json
+{
+  "thread_id": "agency-kiwi/discover_leads-1739820456",
+  "directive": "agency-kiwi/discover_leads",
+  "status": "running",
+  "created_at": "2026-02-17T10:00:56+00:00",
+  "updated_at": "2026-02-17T10:00:56+00:00",
+  "model": "claude-3-5-haiku-20241022",
+  "limits": {
+    "turns": 10,
+    "tokens": 200000,
+    "spend": 0.10,
+    "depth": 3,
+    "spawns": 10
+  },
+  "capabilities": [
+    "rye.execute.tool.scraping.gmaps.scrape_gmaps",
+    "rye.load.knowledge.agency-kiwi.*"
+  ]
+}
+```
+
+### Step 11: Set parent env var
+
+`RYE_PARENT_THREAD_ID` is set to this thread's ID so any subprocesses (children spawned via `async_exec`) inherit the parent relationship.
+
+### Step 12: Fork or run
+
+- **Synchronous** (default): Calls `runner.run()` directly and blocks until completion
+- **Asynchronous** (`async_exec: true`): Calls `os.fork()` — the child process detaches via `os.setsid()`, redirects stdio to `/dev/null`, runs `runner.run()`, finalizes, and exits. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
+
+### Step 13: Run LLM loop
+
+See "The Runner's LLM Loop" below.
+
+### Step 14: Finalize
+
+After the LLM loop completes:
+
+1. Report actual spend to the ledger: `ledger.report_actual(thread_id, actual_spend)`
+2. Cascade spend to parent: `ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)`
+3. Release budget reservation: `ledger.release(thread_id, final_status)`
+4. Update registry status: `registry.update_status(thread_id, status)`
+5. Store result in registry: `registry.set_result(thread_id, cost)`
+6. Write final `thread.json` with cost and updated status
+
+## The Runner's LLM Loop
+
+`runner.run()` manages the core conversation loop. There is no system prompt — tools are passed via API tool definitions, and context framing is injected through hooks.
+
+### First Message Construction
+
+1. `run_hooks_context()` dispatches `thread_started` hooks — each loads a knowledge item (agent identity, rules, etc.) and its content is extracted
+2. Hook context and the user prompt (full directive content) are concatenated into a single user message
+
+```python
+messages = [{"role": "user", "content": f"{hook_context}\n\n{directive_prompt}"}]
+```
+
+For resumed threads, pre-built `resume_messages` are used instead (summary + trailing turns + continuation message).
+
+### Turn Loop
+
+Each turn follows this sequence:
+
+1. **Check limits** — `harness.check_limits(cost)` tests turns, tokens, spend, duration. If exceeded, hooks evaluate the limit event. If no hook handles it, the thread terminates with a limit error.
+
+2. **Check cancellation** — `harness.is_cancelled()` checks the `_cancelled` flag (set by `cancel_thread` operation). If cancelled, the thread terminates.
+
+3. **LLM call** — `provider.create_completion(messages, tools)` sends the conversation to the LLM. Errors trigger the error classification system and hooks.
+
+4. **Track tokens** — Input/output tokens and spend from the response are accumulated in the `cost` dict.
+
+5. **Parse tool calls** — Native tool_use blocks are used if the provider supports them. Otherwise, `text_tool_parser.extract_tool_calls()` parses tool calls from the response text.
+
+6. **No tool calls** — If the LLM responds with text only (no tool calls), the thread completes with the text as the result. On the first turn with native tool_use, the runner nudges the model to use tools before accepting a text-only response.
+
+7. **Dispatch each tool call:**
+   - Resolve the tool name to an item_id via `tool_id_map`
+   - Check permission via `harness.check_permission()` — denied calls return an error message to the LLM
+   - Auto-inject parent context for child thread spawns (parent_thread_id, parent_depth, parent_limits, parent_capabilities)
+   - Execute via `ToolDispatcher`
+   - Guard result (bound large results, deduplicate, store artifacts)
+   - Append result as a tool message
+
+8. **Run after_step hooks** — Post-turn hooks evaluate (e.g., cost tracking, logging).
+
+9. **Update cost snapshot** — The registry is updated with current cost data (best-effort).
+
+10. **Check context limit** — If estimated token usage exceeds the threshold (default 0.9 of context window), trigger `handoff_thread` to continue in a new thread.
+
+## Thread Storage
+
+Each thread creates a directory at `.ai/threads/<thread_id>/` containing:
+
+| File | Purpose |
+|------|---------|
+| `thread.json` | Thread metadata: ID, directive, status, model, cost, limits, capabilities |
+| `transcript.md` | Full conversation log written by the EventEmitter |
+
+The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/threads/`.
+
+## Thread Registry
+
+The `ThreadRegistry` class provides these operations:
+
+| Method | Purpose |
+|--------|---------|
+| `register(thread_id, directive, parent_id)` | Create thread entry with status `created` |
+| `update_status(thread_id, status)` | Transition to a new state |
+| `get_thread(thread_id)` | Get full thread record |
+| `set_result(thread_id, result)` | Store final result (JSON serialized) |
+| `update_cost_snapshot(thread_id, cost)` | Update cost columns mid-execution |
+| `list_active()` | List all non-terminal threads |
+| `list_children(parent_id)` | List children of a thread |
+| `set_continuation(thread_id, continuation_thread_id)` | Mark thread as continued |
+| `set_chain_info(thread_id, chain_root_id, continuation_of)` | Set chain metadata |
+| `get_chain(thread_id)` | Get full continuation chain |
+
+## What's Next
+
+- [Spawning Children](./spawning-children.md) — How to spawn, wait, and collect results
+- [Safety and Limits](./safety-and-limits.md) — How limits resolve and what happens when they're exceeded

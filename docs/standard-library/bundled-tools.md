@@ -1,0 +1,302 @@
+---
+id: bundled-tools
+title: "Bundled Tools"
+description: All tools that ship with Rye OS — from file operations to the orchestration engine
+category: standard-library
+tags: [tools, bundled, standard-library, catalog]
+version: "1.0.0"
+---
+
+# Bundled Tools
+
+Rye OS ships a standard library of tools inside the Python package at `rye/rye/.ai/tools/rye/`. These live in the **system space** and are always available — no installation required. Tools are organized into two tiers: **agent-facing tools** that users interact with directly, and **infrastructure tools** that power the system internally.
+
+All tools are invoked via `rye_execute(item_type="tool", item_id="<item_id>", parameters={...})`.
+
+---
+
+## Agent-Facing Tools
+
+These are the tools you'll use most often — file I/O, shell access, web, MCP, and the orchestration engine.
+
+### File System (`rye/file-system/`)
+
+Python scripts for file operations, all executed via `python_script_runtime`.
+
+| Tool       | Item ID                      | Description                                      |
+| ---------- | ---------------------------- | ------------------------------------------------ |
+| read       | `rye/file-system/read`       | Read file contents                               |
+| write      | `rye/file-system/write`      | Write content to a file (supports `create_dirs`) |
+| edit_lines | `rye/file-system/edit_lines` | Edit specific lines in a file                    |
+| glob       | `rye/file-system/glob`       | Find files matching glob patterns                |
+| grep       | `rye/file-system/grep`       | Search file contents with regex                  |
+| ls         | `rye/file-system/ls`         | List directory contents                          |
+
+**Examples:**
+
+```python
+# Write a file, creating parent directories
+rye_execute(item_type="tool", item_id="rye/file-system/write",
+    parameters={"path": "config/settings.json", "content": '{"debug": true}', "create_dirs": True})
+
+# Search for a pattern across files
+rye_execute(item_type="tool", item_id="rye/file-system/grep",
+    parameters={"pattern": "TODO:", "path": "src/", "glob": "**/*.py"})
+
+# Find all markdown files
+rye_execute(item_type="tool", item_id="rye/file-system/glob",
+    parameters={"pattern": "**/*.md", "path": "docs/"})
+```
+
+### Bash (`rye/bash/`)
+
+| Tool | Item ID         | Description            |
+| ---- | --------------- | ---------------------- |
+| bash | `rye/bash/bash` | Execute shell commands |
+
+```python
+rye_execute(item_type="tool", item_id="rye/bash/bash",
+    parameters={"command": "git status --short"})
+```
+
+### Web (`rye/web/`)
+
+| Tool      | Item ID             | Description                              |
+| --------- | ------------------- | ---------------------------------------- |
+| webfetch  | `rye/web/webfetch`  | Fetch and extract content from web pages |
+| websearch | `rye/web/websearch` | Search the web                           |
+
+```python
+rye_execute(item_type="tool", item_id="rye/web/webfetch",
+    parameters={"url": "https://docs.example.com/api"})
+```
+
+### MCP Client (`rye/mcp/`)
+
+Tools for connecting to external MCP servers.
+
+| Tool     | Item ID            | Description                               |
+| -------- | ------------------ | ----------------------------------------- |
+| connect  | `rye/mcp/connect`  | Connect to an external MCP server         |
+| discover | `rye/mcp/discover` | Discover available tools on an MCP server |
+| manager  | `rye/mcp/manager`  | Manage MCP server connections             |
+
+### Registry (`rye/registry/`)
+
+| Tool     | Item ID                 | Description                                  |
+| -------- | ----------------------- | -------------------------------------------- |
+| registry | `rye/registry/registry` | Push, pull, and search items in the registry |
+
+```python
+rye_execute(item_type="tool", item_id="rye/registry/registry",
+    parameters={"action": "search", "query": "deployment"})
+```
+
+### LSP (`rye/lsp/`)
+
+| Tool | Item ID       | Description                                                |
+| ---- | ------------- | ---------------------------------------------------------- |
+| lsp  | `rye/lsp/lsp` | Language Server Protocol integration for code intelligence |
+
+### System (`rye/core/system/`)
+
+| Tool   | Item ID                  | Description                                   |
+| ------ | ------------------------ | --------------------------------------------- |
+| system | `rye/core/system/system` | System info: env vars, paths, runtime details |
+
+---
+
+## Orchestration Engine (`rye/agent/threads/`)
+
+The thread system is the largest subsystem. It enables AI agents to run directives in managed threads with full LLM loops, budgets, safety controls, and event streaming.
+
+### Entry Points
+
+These are the two tools you call to orchestrate work:
+
+| Tool             | Item ID                              | Description                                                 |
+| ---------------- | ------------------------------------ | ----------------------------------------------------------- |
+| thread_directive | `rye/agent/threads/thread_directive` | Execute a directive in a managed thread with an LLM loop    |
+| orchestrator     | `rye/agent/threads/orchestrator`     | Thread coordination: wait, cancel, status, chain resolution |
+
+```python
+# Spawn a directive in a managed thread
+rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
+    parameters={"directive": "my-workflow", "inputs": {"target": "staging"}})
+
+# Check thread status
+rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+    parameters={"action": "status", "thread_id": "t-abc123"})
+```
+
+### Core Components (not called directly)
+
+| Tool           | Item ID                            | Description                                             |
+| -------------- | ---------------------------------- | ------------------------------------------------------- |
+| runner         | `rye/agent/threads/runner`         | Core LLM loop for thread execution                      |
+| safety_harness | `rye/agent/threads/safety_harness` | Thread safety: limits, hooks, cancellation, permissions |
+
+### Adapters (`rye/agent/threads/adapters/`)
+
+Bridge between the thread engine and LLM providers:
+
+- **provider_adapter** — Base provider adapter interface
+- **http_provider** — HTTP-based LLM provider (Anthropic, OpenAI)
+- **provider_resolver** — Resolves model name/tier to provider config
+- **tool_dispatcher** — Dispatches tool calls from LLM responses to `rye_execute`
+
+### Events (`rye/agent/threads/events/`)
+
+- **event_emitter** — Emit thread lifecycle events (`cognition_in`, `cognition_out`, `tool_call_result`, `thread_completed`, etc.)
+- **streaming_tool_parser** — Parse streaming tool call responses from LLM providers
+
+### Internal (`rye/agent/threads/internal/`)
+
+Low-level components that power the LLM loop:
+
+- **budget_ops** — Budget arithmetic operations
+- **cancel_checker** — Check cancellation flag
+- **classifier** — Classify thread output
+- **control** — Control flow actions from hooks
+- **cost_tracker** — Track token/spend costs
+- **emitter** — Internal event emission
+- **limit_checker** — Check resource limits
+- **state_persister** — Persist thread state
+- **text_tool_parser** — Parse tool calls from plain text (for models without native `tool_use`)
+- **thread_chain_search** — Search across continuation chain transcripts
+- **tool_result_guard** — Bound large tool results, dedupe, store artifacts
+
+### Loaders (`rye/agent/threads/loaders/`)
+
+Data-driven config loaders — read YAML configs and return structured data:
+
+- **config_loader**, **coordination_loader**, **error_loader**, **events_loader**, **hooks_loader**, **resilience_loader**
+- **condition_evaluator** — Evaluate hook conditions
+- **interpolation** — Interpolate variables in hook actions
+
+### Persistence (`rye/agent/threads/persistence/`)
+
+- **thread_registry** — Register, track, and query threads
+- **transcript** — Record and reconstruct thread conversations
+- **state_store** — Persist thread state between turns
+- **artifact_store** — Store large artifacts outside conversation context
+- **budgets** — Hierarchical budget ledger
+
+### Security (`rye/agent/threads/security/`)
+
+- **security** — Thread-level security enforcement
+
+### Config (`rye/agent/threads/config/`)
+
+YAML configuration files that control thread behavior:
+
+| Config File                 | Purpose                                  |
+| --------------------------- | ---------------------------------------- |
+| `events.yaml`               | Event definitions and criticality levels |
+| `error_classification.yaml` | Error types and retry policies           |
+| `hook_conditions.yaml`      | Built-in hook condition definitions      |
+| `coordination.yaml`         | Wait timeouts, continuation config       |
+| `resilience.yaml`           | Default limits, retry policies           |
+| `budget_ledger_schema.yaml` | Budget ledger JSON schema                |
+
+---
+
+## LLM Providers (`rye/agent/providers/`)
+
+YAML configs for LLM provider integration:
+
+- **anthropic.yaml** — Anthropic Claude API config (model tiers, endpoints, `tool_use` format)
+- **openai.yaml** — OpenAI API config
+
+---
+
+## Capability System (`rye/agent/permissions/`)
+
+Controls what directives and threads are allowed to do:
+
+- **capability_tokens.py** — Capability token creation and validation
+- **Capability YAML files** in `capabilities/`:
+  - `primary.yaml` — Primary capability definitions
+  - `tools/rye/agent.yaml` — Agent tool capabilities
+  - `tools/rye/fs.yaml` — File system capabilities
+  - `tools/rye/db.yaml` — Database capabilities
+  - `tools/rye/git.yaml` — Git capabilities
+  - `tools/rye/mcp.yaml` — MCP capabilities
+  - `tools/rye/net.yaml` — Network capabilities
+  - `tools/rye/process.yaml` — Process capabilities
+  - `tools/rye/registry.yaml` — Registry capabilities
+
+---
+
+## Infrastructure Tools
+
+These tools power the system internally. You won't call them directly, but they're good to know about.
+
+### Parsers (`rye/core/parsers/`)
+
+Parse different file formats into structured metadata:
+
+- **markdown_xml** — Parse directive files (markdown + XML metadata)
+- **markdown_frontmatter** — Parse knowledge files (markdown + YAML frontmatter)
+- **python_ast** — Parse Python tool metadata via AST introspection
+- **yaml** — Parse YAML tool configs
+
+### Extractors (`rye/core/extractors/`)
+
+YAML configs defining search fields, extraction rules, and validation schemas per item type:
+
+- `directive/directive_extractor.yaml`
+- `tool/tool_extractor.yaml`
+- `knowledge/knowledge_extractor.yaml`
+
+### Runtimes (`rye/core/runtimes/`)
+
+YAML configs defining how each language/protocol is executed:
+
+| Runtime                        | Description                       |
+| ------------------------------ | --------------------------------- |
+| `python_script_runtime.yaml`   | Run Python scripts via subprocess |
+| `python_function_runtime.yaml` | Run Python functions in-process   |
+| `node_runtime.yaml`            | Run Node.js scripts               |
+| `bash_runtime.yaml`            | Run bash scripts                  |
+| `mcp_stdio_runtime.yaml`       | Connect to MCP servers via stdio  |
+| `mcp_http_runtime.yaml`        | Connect to MCP servers via HTTP   |
+
+The `lib/python/module_loader.py` handles dynamic Python module loading for thread tools.
+
+### Primitives (`rye/core/primitives/`)
+
+YAML configs for low-level operations:
+
+- **subprocess.yaml** — Shell subprocess config
+- **http_client.yaml** — HTTP client config
+
+### Sinks (`rye/core/sinks/`)
+
+Output sinks for streaming events:
+
+- **file_sink.py** — Write events to file (JSONL format)
+- **null_sink.py** — Discard events
+- **websocket_sink.py** — Stream events via WebSocket
+
+### Telemetry (`rye/core/telemetry/`)
+
+- **mcp_logs.py** — MCP request/response logging
+
+### Bundler (`rye/core/bundler/`)
+
+- **bundler.py** — Create and verify `.ai/` bundles
+- **collect.yaml** — Collection config
+
+### Primary Tools (`rye/primary/`)
+
+Wrappers around the 4 MCP tools, used inside threads:
+
+| Tool        | Item ID                   | Description                             |
+| ----------- | ------------------------- | --------------------------------------- |
+| rye_execute | `rye/primary/rye_execute` | Execute tools, directives, or knowledge |
+| rye_load    | `rye/primary/rye_load`    | Load item content for inspection        |
+| rye_search  | `rye/primary/rye_search`  | Search for items by scope and query     |
+| rye_sign    | `rye/primary/rye_sign`    | Validate and sign item files            |
+
+These are the tools the LLM sees when running inside a thread. They call the same underlying MCP tool implementations but are exposed as individual tool definitions for the LLM's function-calling interface.

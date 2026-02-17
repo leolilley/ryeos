@@ -64,9 +64,7 @@ Creator/maintainer identifier.
 Specifies LLM model complexity tier for execution with fallback options. Only needed for directives that run on the Rye agent harness with model-specific execution.
 
 ```xml
-<model tier="orchestrator" fallback="general" id="model-custom-id">
-  Orchestrator-level directive with parallel execution capabilities
-</model>
+<model tier="orchestrator" fallback="general" id="model-custom-id" />
 ```
 
 **Required attributes:**
@@ -420,9 +418,7 @@ npm run deploy:staging
     <category>workflows</category>
     <author>devops-team</author>
 
-    <model tier="orchestrator" fallback="general">
-      Multi-agent deployment orchestration with parallel health checks
-    </model>
+    <model tier="orchestrator" fallback="general" />
 
     <context>
       <related_files>

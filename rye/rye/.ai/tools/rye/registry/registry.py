@@ -1303,12 +1303,6 @@ async def _pull(
                         "hint": "Content may be corrupted or from an older registry version",
                     }
 
-                if not sig_info.get("ed25519_sig"):
-                    return {
-                        "error": "Legacy signature format rejected",
-                        "hint": "Registry content must use Ed25519 rye:signed: format",
-                    }
-
                 registry_username = sig_info.get("registry_username")
                 if registry_username:
                     if author_username and registry_username != author_username:
@@ -1940,7 +1934,7 @@ async def _push_bundle(
             }
 
         # Check if file has an inline signature
-        inline_signed = "rye:signed:" in content or "rye:validated:" in content
+        inline_signed = "rye:signed:" in content
 
         files[rel_path] = {
             "content": content,

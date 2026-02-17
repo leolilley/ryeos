@@ -138,9 +138,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     <category>category_name</category>
     <author>author_name</author>
     
-    <model tier="orchestrator" fallback="general" parallel="true">
-      Model tier, fallback, and parallelization options
-    </model>
+    <model tier="orchestrator" fallback="general" parallel="true" />
     
     <permissions>
       <execute>

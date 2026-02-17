@@ -213,19 +213,32 @@ class AuthStore:
         return self._metadata_cache.get(service)
 
     def is_authenticated(self, service: str) -> bool:
-        """Check if service has valid authentication."""
+        """Check if service has valid (non-expired) authentication."""
+        token_data = None
+
         if self._use_keyring and keyring:
             access_key = f"{self.service_name}_{service}_access_token"
             try:
-                token = keyring.get_password(self.service_name, access_key)
-                if token is not None:
-                    return True
+                token_json = keyring.get_password(self.service_name, access_key)
+                if token_json:
+                    token_data = json.loads(token_json)
             except Exception:
                 pass
-        
-        # Check file storage
-        token_data = self._read_file_token(service)
-        return token_data is not None
+
+        # Fall back to file storage
+        if not token_data:
+            token_data = self._read_file_token(service)
+
+        if not token_data:
+            return False
+
+        # Check expiry — expired with no refresh token means not authenticated
+        expires_at = token_data.get("expires_at")
+        if expires_at and isinstance(expires_at, (int, float)) and time.time() > expires_at:
+            if not token_data.get("refresh_token"):
+                return False
+
+        return True
 
     def clear_token(self, service: str) -> None:
         """Logout from service (remove token)."""

@@ -40,3 +40,8 @@ class Action:
     EXECUTE = "execute"
 
     ALL = [SEARCH, SIGN, LOAD, EXECUTE]
+
+
+# Instruction returned to the LLM when executing a directive.
+# Single source of truth — used by execute.py and thread_directive.py.
+DIRECTIVE_INSTRUCTION = "Execute the directive as specified now."

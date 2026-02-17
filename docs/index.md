@@ -1,120 +1,71 @@
-# RYE-Lilux Documentation
+---
+id: index
+title: "Rye OS Documentation"
+description: Documentation for Rye OS — the MCP server that gives AI agents a portable .ai/ directory system
+category: root
+tags: [index, documentation, rye-os]
+version: "1.0.0"
+---
 
-## Overview
+# Rye OS Documentation
 
-**RYE** is an AI operating system layer built on top of the **Lilux** microkernel. Together they provide a data-driven, universal tool execution platform for LLMs.
+Rye OS is an MCP server that gives AI agents a portable `.ai/` directory system. Agents interact with it through 4 MCP tools to search, load, execute, and sign three item types: **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information).
 
-| Component | Role | Analogy |
-|-----------|------|---------|
-| **Lilux** | Microkernel with execution primitives | Hardware kernel |
-| **RYE** | Executor + content bundle | Operating system |
+---
 
-## Architecture
+## Getting Started
 
-```
-LLM/User
-    │
-    └─→ RYE (5 MCP Tools)
-        │
-        │  Works with 3 item types:
-        │  ├─→ directives (.ai/directives/)
-        │  ├─→ tools (.ai/tools/)
-        │  └─→ knowledge (.ai/knowledge/)
-        │
-        ├─→ search  - Find items by query
-        ├─→ load    - Get content / copy between locations
-        ├─→ execute - Run item (dispatches to handlers)
-        ├─→ sign    - Validate and sign
-        └─→ help    - Get help
-            │
-            │  Tool execution only:
-            └─→ PrimitiveExecutor → Lilux Primitives
-                ├─→ subprocess (shell commands)
-                └─→ http_client (HTTP requests)
-```
+- [Installation](getting-started/installation.md) — Install and configure Rye OS as an MCP server
+- [Quickstart](getting-started/quickstart.md) — Create your first directive, tool, and knowledge entry
+- [The .ai/ Directory](getting-started/ai-directory.md) — Structure, conventions, and the 3-tier space system
 
-## Quick Links
+## MCP Tools Reference
 
-### Core Concepts
+The 4 tools that agents use to interact with Rye OS:
 
-- [RYE Principles](rye/principles.md) - Data-driven architecture principles
-- [Executor Overview](rye/executor/overview.md) - Three-layer routing model
+- [rye_execute](tools-reference/execute.md) — Execute directives, tools, or knowledge items
+- [rye_load](tools-reference/load.md) — Load item content for inspection or copy between spaces
+- [rye_search](tools-reference/search.md) — Find items with keyword search, fuzzy matching, and BM25 scoring
+- [rye_sign](tools-reference/sign.md) — Validate and sign items with integrity hashes
 
-### RYE OS Layer
+## Authoring Items
 
-- [MCP Server](rye/mcp-server.md) - MCP server configuration
-- [MCP Tools Overview](rye/mcp-tools/overview.md) - The 5 unified MCP tools
-- [On-Demand Loading](rye/loading/overview.md) - How items are loaded
-- [Executor](rye/executor/overview.md) - Tool routing and execution
-- [Executor Components](rye/executor/components.md) - PrimitiveExecutor, ChainValidator, IntegrityVerifier
-- [Chain Validator](rye/executor/chain-validator.md) - Tool chain validation
+- [Directives](authoring/directives.md) — Write workflow instructions with XML metadata and process steps
+- [Tools](authoring/tools.md) — Write executable tools in Python, YAML, Bash, or JavaScript
+- [Knowledge](authoring/knowledge.md) — Write domain information with YAML frontmatter
 
-### MCP Tools (work with directive, tool, knowledge)
+## Orchestration
 
-- [Search](rye/mcp-tools/search.md) - Find items by query
-- [Load](rye/mcp-tools/load.md) - Load content / copy between locations
-- [Execute](rye/mcp-tools/execute.md) - Run items (directives, tools, knowledge)
-- [Sign](rye/mcp-tools/sign.md) - Validate and sign items
+Thread-based orchestration is the flagship capability — AI agents coordinating multi-step workflows through hierarchical thread trees.
 
+- [Overview](orchestration/overview.md) — The orchestration pattern and why it works
+- [Thread Lifecycle](orchestration/thread-lifecycle.md) — Creation, execution, and finalization
+- [Spawning Children](orchestration/spawning-children.md) — Spawn, coordinate, and collect results
+- [Safety and Limits](orchestration/safety-and-limits.md) — Cost controls, turn limits, and the SafetyHarness
+- [Permissions and Capabilities](orchestration/permissions-and-capabilities.md) — Capability tokens and fail-closed security
+- [Continuation and Resumption](orchestration/continuation-and-resumption.md) — Context limit handoffs and user-driven resumption
+- [Building a Pipeline](orchestration/building-a-pipeline.md) — Step-by-step tutorial with a real-world example
 
-### Tool Categories
+## Standard Library
 
-- [Categories Overview](rye/categories/overview.md) - All tool categories
-- [Protection](rye/categories/protection.md) - Core vs App tools, shadowing rules
+Everything that ships with Rye OS out of the box:
 
-**Core Tools (Protected):**
-- [Primitives](rye/categories/primitives.md) - Base executors (Layer 1)
-- [Runtimes](rye/categories/runtimes.md) - Language runtimes (Layer 2)
-- [Parsers](rye/categories/parsers.md) - Content preprocessors
-- [Extractors](rye/categories/extractors.md) - Schema-driven metadata extraction
+- [Overview](standard-library/overview.md) — Full catalog of bundled items
+- [Bundled Directives](standard-library/bundled-directives.md) — Item creation and thread management directives
+- [Bundled Tools](standard-library/bundled-tools.md) — File system, bash, web, MCP, orchestration engine, and more
+- [Bundled Knowledge](standard-library/bundled-knowledge.md) — Metadata references for AI agents
 
-**App Tools (Replaceable):**
-- [Threads](rye/categories/threads.md) - Async execution + capabilities
-- [Registry](rye/categories/registry.md) - Tool distribution
+## Internals
 
-### Bundle Structure
+For contributors and those who want to understand how Rye OS works under the hood:
 
-- [Content Bundle](rye/bundle/structure.md) - `.ai/` directory organization with core/ separation
+- [Architecture](internals/architecture.md) — Layers, components, and data flow
+- [Packages and Bundles](internals/packages-and-bundles.md) — pip packages, bundle entry points, and dependency layering
+- [Executor Chain](internals/executor-chain.md) — Three-layer tool resolution and execution
+- [Three-Tier Spaces](internals/three-tier-spaces.md) — Project, user, and system space resolution
+- [Integrity and Signing](internals/integrity-and-signing.md) — Content hashing, Ed25519, and lockfiles
+- [Lilux Primitives](internals/lilux-primitives.md) — The microkernel layer
 
-### Lilux Microkernel
+## Registry
 
-- [Lilux Principles](lilux/principles.md) - Dumb execution primitives
-- [Package Structure](lilux/package/structure.md) - Lilux module organization
-- [Primitives Overview](lilux/primitives/overview.md) - Subprocess, HTTP, integrity, lockfile
-- [Runtime Services](lilux/runtime-services/overview.md) - AuthStore, EnvResolver
-- [Schemas](lilux/schemas/overview.md) - JSON Schema validation utilities
-
-## Installation
-
-```bash
-pip install rye-lilux  # Installs both RYE + Lilux
-```
-
-## MCP Configuration
-
-### Claude Desktop
-
-```json
-{
-  "mcpServers": {
-    "rye": {
-      "command": "/path/to/venv/bin/python",
-      "args": ["-m", "rye.server"],
-      "environment": {
-        "USER_SPACE": "/home/user/.ai"
-      }
-    }
-  }
-}
-```
-
-## Usage Flow
-
-1. **Search** for tools matching your needs
-2. **Load** the tool schema to understand parameters
-3. **Execute** the tool with appropriate parameters
-4. **Sign** content when publishing to registry
-
-## Project Status
-
-**Architecture Complete - Implementation In Progress**
+- [Sharing Items](registry/sharing-items.md) — Push, pull, and discover items through the registry

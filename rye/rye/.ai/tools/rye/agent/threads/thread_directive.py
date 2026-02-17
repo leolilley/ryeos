@@ -135,35 +135,45 @@ def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
 
 
 def _build_prompt(directive: Dict) -> str:
-    """Build the LLM prompt from the directive body.
+    """Build the LLM prompt from the directive content.
 
-    The body is free-form text after the XML fence — it IS the prompt.
-    Injected verbatim with framing from directive_key.md and outputs appended.
+    Uses the full raw directive text as the prompt. The XML is not parsed
+    by the LLM — it reads it as structured instructions. The parser only
+    extracts metadata/inputs/outputs for the infrastructure (limits,
+    permissions, model selection, input validation).
+
+    Prompt assembly:
+      1. Execute instruction (same as execute.py returns to MCP clients)
+      2. raw directive content (preamble + XML fence + body — the whole file)
     """
-    key_path = _ANCHOR / "config" / "directive_key.md"
-    key = key_path.read_text().strip() if key_path.exists() else "Execute the following directive."
+    from rye.constants import DIRECTIVE_INSTRUCTION
+    parts = [DIRECTIVE_INSTRUCTION, ""]
 
-    parts = [key, ""]
-
-    desc = directive.get("description", "")
-    if desc:
-        parts.append(f"## Directive\n{desc}")
-
-    body = directive.get("body", "")
-    if body:
-        parts.append(body)
-
-    outputs = directive.get("outputs", {})
-    if outputs:
-        parts.append("## Expected Output")
-        if isinstance(outputs, list):
-            for o in outputs:
-                name = o.get("name", "")
-                odesc = o.get("description", "")
-                parts.append(f"- **{name}**: {odesc}" if odesc else f"- **{name}**")
-        elif isinstance(outputs, dict):
-            for k, v in outputs.items():
-                parts.append(f"- **{k}**: {v}")
+    raw = directive.get("raw", "")
+    if raw:
+        # Strip signature comment from top — LLM doesn't need it
+        lines = raw.split("\n")
+        cleaned = [l for l in lines if not l.strip().startswith("<!-- rye:signed:")]
+        parts.append("\n".join(cleaned).strip())
+    else:
+        # Fallback: assemble from parsed fields (legacy/partial parse)
+        desc = directive.get("description", "")
+        if desc:
+            parts.append(f"## Directive\n{desc}")
+        body = directive.get("body", "")
+        if body:
+            parts.append(body)
+        outputs = directive.get("outputs", {})
+        if outputs:
+            parts.append("## Expected Output")
+            if isinstance(outputs, list):
+                for o in outputs:
+                    name = o.get("name", "")
+                    odesc = o.get("description", "")
+                    parts.append(f"- **{name}**: {odesc}" if odesc else f"- **{name}**")
+            elif isinstance(outputs, dict):
+                for k, v in outputs.items():
+                    parts.append(f"- **{k}**: {v}")
 
     return "\n\n".join(parts)
 

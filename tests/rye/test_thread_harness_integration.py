@@ -74,7 +74,7 @@ FULL_DIRECTIVE_XML = """\
     <description>Write hello to a file</description>
     <category />
     <author>test</author>
-    <model tier="general">File writing</model>
+    <model tier="general" />
     <limits>
       <turns>5</turns>
       <tokens>2000</tokens>
@@ -98,7 +98,7 @@ NO_PERMS_DIRECTIVE_XML = """\
     <description>Missing permissions declaration</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <limits>
       <turns>3</turns>
       <tokens>1000</tokens>
@@ -113,7 +113,7 @@ EMPTY_PERMS_DIRECTIVE_XML = """\
     <description>Explicitly declares empty permissions</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <limits>
       <turns>3</turns>
       <tokens>1000</tokens>
@@ -129,7 +129,7 @@ NO_LIMITS_XML = """\
     <description>Missing limits</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <permissions>
       <execute><tool>rye.file-system.fs_read</tool></execute>
     </permissions>
@@ -168,7 +168,7 @@ VALID_HOOKS_XML = """\
     <description>Has valid hooks</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <limits>
       <turns>5</turns>
       <tokens>2000</tokens>
@@ -192,7 +192,7 @@ HOOK_MISSING_EVENT_XML = """\
     <description>Hook missing event/when</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <limits>
       <turns>5</turns>
       <tokens>2000</tokens>
@@ -213,7 +213,7 @@ HOOK_MISSING_DIRECTIVE_XML = """\
     <description>Hook missing directive</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <limits>
       <turns>5</turns>
       <tokens>2000</tokens>
@@ -234,7 +234,7 @@ HOOK_MISSING_BOTH_XML = """\
     <description>Hook missing both event and directive</description>
     <category />
     <author>test</author>
-    <model tier="general">Test</model>
+    <model tier="general" />
     <limits>
       <turns>5</turns>
       <tokens>2000</tokens>

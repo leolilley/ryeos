@@ -153,10 +153,7 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
 
             # Handle model tag specially - extract attributes
             if tag == "model" or tag == "model_class":
-                model_data = dict(child.attrib)
-                if child.text:
-                    model_data["content"] = child.text.strip()
-                result["model"] = model_data
+                result["model"] = dict(child.attrib)
 
             # Handle permissions - parse nested permission elements
             elif tag == "permissions":

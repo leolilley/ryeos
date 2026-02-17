@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import ItemType
+from rye.constants import DIRECTIVE_INSTRUCTION, ItemType
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
@@ -53,7 +53,7 @@ def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
 
 def _interpolate_parsed(parsed: Dict[str, Any], inputs: Dict[str, Any]) -> None:
     """Interpolate {input:name} refs in body, actions, and content fields."""
-    for key in ("body", "content"):
+    for key in ("body", "content", "raw"):
         if isinstance(parsed.get(key), str):
             parsed[key] = _resolve_input_refs(parsed[key], inputs)
 
@@ -176,7 +176,7 @@ class ExecuteTool:
             "item_id": item_id,
             "data": parsed,
             "inputs": inputs,
-            "instructions": "Execute the directive as specified now.",
+            "instructions": DIRECTIVE_INSTRUCTION,
         }
 
         if dry_run:

@@ -5,7 +5,6 @@ Provides unified interface for signing and hashing operations
 across directives, tools, and knowledge entries.
 
 Signature format: rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP
-All signatures include Ed25519. Old rye:validated: format is rejected.
 
 Note: Parsing is delegated to parser_router which uses data-driven parsers.
 """

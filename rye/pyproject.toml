@@ -18,7 +18,7 @@ dev = [
 ]
 
 [project.entry-points."rye.bundles"]
-rye-core = "rye.bundle_entrypoints:get_rye_core_bundle"
+rye-os = "rye.bundle_entrypoints:get_rye_os_bundle"
 
 [build-system]
 requires = ["hatchling"]

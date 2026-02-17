@@ -11,9 +11,8 @@ from lilux.primitives.errors import (
 )
 from lilux.primitives.http_client import HttpClientPrimitive, HttpResult, ReturnSink
 from lilux.primitives.integrity import (
-    compute_directive_integrity,
-    compute_knowledge_integrity,
-    compute_tool_integrity,
+    canonical_json,
+    compute_integrity,
 )
 from lilux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
 from lilux.primitives.subprocess import SubprocessPrimitive, SubprocessResult
@@ -28,9 +27,8 @@ __all__ = [
     "AuthenticationRequired",
     "RefreshError",
     # Integrity
-    "compute_tool_integrity",
-    "compute_directive_integrity",
-    "compute_knowledge_integrity",
+    "canonical_json",
+    "compute_integrity",
     # Lockfile
     "LockfileRoot",
     "Lockfile",

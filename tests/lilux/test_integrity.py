@@ -1,170 +1,94 @@
-"""Tests for integrity hashing (Phase 1.2)."""
+"""Tests for integrity hashing primitives."""
 
 import json
 
 import pytest
 
 from lilux.primitives.integrity import (
-    compute_directive_integrity,
-    compute_knowledge_integrity,
-    compute_tool_integrity,
+    canonical_json,
+    compute_integrity,
 )
 
 
-class TestComputeToolIntegrity:
-    """Test compute_tool_integrity(tool_id, version, manifest, files=None)."""
+class TestCanonicalJson:
+    """Test canonical_json serialization."""
+
+    def test_sorted_keys(self):
+        """Keys are sorted."""
+        result = canonical_json({"b": 2, "a": 1})
+        assert result == '{"a":1,"b":2}'
+
+    def test_no_whitespace(self):
+        """No extra whitespace in output."""
+        result = canonical_json({"key": "value"})
+        assert " " not in result
+
+    def test_nested_sorted(self):
+        """Nested dict keys are sorted."""
+        result = canonical_json({"outer": {"b": 2, "a": 1}})
+        parsed = json.loads(result)
+        assert list(parsed["outer"].keys()) == ["a", "b"]
+
+
+class TestComputeIntegrity:
+    """Test compute_integrity with arbitrary data dicts."""
 
     def test_deterministic_same_input_same_hash(self):
         """Same input produces same hash."""
-        manifest = {"name": "test_tool", "inputs": ["param1"]}
-        hash1 = compute_tool_integrity("my_tool", "1.0.0", manifest)
-        hash2 = compute_tool_integrity("my_tool", "1.0.0", manifest)
+        data = {"id": "my_tool", "version": "1.0.0", "manifest": {"name": "test_tool"}}
+        hash1 = compute_integrity(data)
+        hash2 = compute_integrity(data)
         assert hash1 == hash2
 
     def test_hash_is_64_char_hex(self):
         """Hash is SHA256 hex (64 chars)."""
-        manifest = {"name": "test"}
-        h = compute_tool_integrity("tool_id", "1.0.0", manifest)
-        assert len(h) == 64
-        assert all(c in "0123456789abcdef" for c in h)
-
-    def test_different_tool_ids_different_hash(self):
-        """Different tool_ids produce different hashes."""
-        manifest = {"name": "test"}
-        h1 = compute_tool_integrity("tool1", "1.0.0", manifest)
-        h2 = compute_tool_integrity("tool2", "1.0.0", manifest)
-        assert h1 != h2
-
-    def test_different_versions_different_hash(self):
-        """Different versions produce different hashes."""
-        manifest = {"name": "test"}
-        h1 = compute_tool_integrity("tool_id", "1.0.0", manifest)
-        h2 = compute_tool_integrity("tool_id", "1.0.1", manifest)
-        assert h1 != h2
-
-    def test_different_manifest_different_hash(self):
-        """Different manifest produces different hash."""
-        h1 = compute_tool_integrity("tool_id", "1.0.0", {"name": "test"})
-        h2 = compute_tool_integrity(
-            "tool_id", "1.0.0", {"name": "test", "extra": "field"}
-        )
-        assert h1 != h2
-
-    def test_with_files_parameter(self):
-        """Can optionally include files list."""
-        manifest = {"name": "test"}
-        files = [{"path": "script.py", "hash": "abc123"}]
-        h = compute_tool_integrity("tool_id", "1.0.0", manifest, files=files)
-        assert len(h) == 64
-
-    def test_key_order_irrelevant(self):
-        """Dict key order doesn't affect hash (canonical JSON)."""
-        h1 = compute_tool_integrity("t", "1", {"a": 1, "b": 2})
-        h2 = compute_tool_integrity("t", "1", {"b": 2, "a": 1})
-        assert h1 == h2
-
-    def test_nested_dict_order_irrelevant(self):
-        """Nested dict key order doesn't affect hash."""
-        h1 = compute_tool_integrity("t", "1", {"config": {"x": 1, "y": 2}})
-        h2 = compute_tool_integrity("t", "1", {"config": {"y": 2, "x": 1}})
-        assert h1 == h2
-
-
-class TestComputeDirectiveIntegrity:
-    """Test compute_directive_integrity(directive_name, version, xml_content, metadata=None)."""
-
-    def test_deterministic_directive_hash(self):
-        """Same directive input produces same hash."""
-        xml = "<directive><name>test</name></directive>"
-        h1 = compute_directive_integrity("test_directive", "1.0.0", xml)
-        h2 = compute_directive_integrity("test_directive", "1.0.0", xml)
-        assert h1 == h2
-
-    def test_directive_hash_is_64_char_hex(self):
-        """Directive hash is SHA256 hex (64 chars)."""
-        xml = "<directive></directive>"
-        h = compute_directive_integrity("dir", "1.0.0", xml)
-        assert len(h) == 64
-        assert all(c in "0123456789abcdef" for c in h)
-
-    def test_different_directives_different_hash(self):
-        """Different directive_names produce different hashes."""
-        xml = "<directive></directive>"
-        h1 = compute_directive_integrity("dir1", "1.0.0", xml)
-        h2 = compute_directive_integrity("dir2", "1.0.0", xml)
-        assert h1 != h2
-
-    def test_different_xml_different_hash(self):
-        """Different XML content produces different hash."""
-        h1 = compute_directive_integrity(
-            "dir", "1.0.0", "<directive><step>1</step></directive>"
-        )
-        h2 = compute_directive_integrity(
-            "dir", "1.0.0", "<directive><step>2</step></directive>"
-        )
-        assert h1 != h2
-
-    def test_with_metadata(self):
-        """Can include optional metadata dict."""
-        xml = "<directive></directive>"
-        metadata = {"author": "test"}
-        h = compute_directive_integrity("dir", "1.0.0", xml, metadata=metadata)
-        assert len(h) == 64
-
-
-class TestComputeKnowledgeIntegrity:
-    """Test compute_knowledge_integrity(id, version, content, metadata=None)."""
-
-    def test_deterministic_knowledge_hash(self):
-        """Same knowledge input produces same hash."""
-        content = "This is knowledge"
-        h1 = compute_knowledge_integrity("zettel_1", "1.0.0", content)
-        h2 = compute_knowledge_integrity("zettel_1", "1.0.0", content)
-        assert h1 == h2
-
-    def test_knowledge_hash_is_64_char_hex(self):
-        """Knowledge hash is SHA256 hex (64 chars)."""
-        h = compute_knowledge_integrity("id", "1.0.0", "content")
+        h = compute_integrity({"id": "test", "version": "1.0.0"})
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
     def test_different_ids_different_hash(self):
-        """Different IDs produce different hashes."""
-        content = "knowledge"
-        h1 = compute_knowledge_integrity("id1", "1.0.0", content)
-        h2 = compute_knowledge_integrity("id2", "1.0.0", content)
+        """Different field values produce different hashes."""
+        h1 = compute_integrity({"id": "tool1", "version": "1.0.0"})
+        h2 = compute_integrity({"id": "tool2", "version": "1.0.0"})
         assert h1 != h2
 
-    def test_different_content_different_hash(self):
-        """Different content produces different hash."""
-        h1 = compute_knowledge_integrity("id", "1.0.0", "content1")
-        h2 = compute_knowledge_integrity("id", "1.0.0", "content2")
+    def test_different_versions_different_hash(self):
+        """Different versions produce different hashes."""
+        h1 = compute_integrity({"id": "x", "version": "1.0.0"})
+        h2 = compute_integrity({"id": "x", "version": "1.0.1"})
         assert h1 != h2
 
-    def test_with_metadata(self):
-        """Can include optional metadata dict."""
-        content = "knowledge"
-        metadata = {"author": "test"}
-        h = compute_knowledge_integrity("id", "1.0.0", content, metadata=metadata)
+    def test_different_fields_different_hash(self):
+        """Extra fields change the hash."""
+        h1 = compute_integrity({"id": "x", "version": "1.0.0"})
+        h2 = compute_integrity({"id": "x", "version": "1.0.0", "extra": "field"})
+        assert h1 != h2
+
+    def test_key_order_irrelevant(self):
+        """Dict key order doesn't affect hash (canonical JSON)."""
+        h1 = compute_integrity({"a": 1, "b": 2})
+        h2 = compute_integrity({"b": 2, "a": 1})
+        assert h1 == h2
+
+    def test_nested_dict_order_irrelevant(self):
+        """Nested dict key order doesn't affect hash."""
+        h1 = compute_integrity({"config": {"x": 1, "y": 2}})
+        h2 = compute_integrity({"config": {"y": 2, "x": 1}})
+        assert h1 == h2
+
+    def test_empty_dict(self):
+        """Empty dict produces valid hash."""
+        h = compute_integrity({})
         assert len(h) == 64
 
-
-class TestIntegrityEdgeCases:
-    """Edge cases and integration."""
-
-    def test_empty_manifest(self):
-        """Empty manifest produces valid hash."""
-        h = compute_tool_integrity("t", "1", {})
+    def test_none_values(self):
+        """None values are handled."""
+        h = compute_integrity({"key": None})
         assert len(h) == 64
 
-    def test_none_in_manifest(self):
-        """None values in manifest are handled."""
-        h = compute_tool_integrity("t", "1", {"key": None})
-        assert len(h) == 64
-
-    def test_lists_in_manifest(self):
-        """Lists in manifest are handled."""
-        h = compute_tool_integrity("t", "1", {"items": [1, 2, 3]})
+    def test_lists(self):
+        """Lists are handled."""
+        h = compute_integrity({"items": [1, 2, 3]})
         assert len(h) == 64
 
     def test_complex_nested_structure(self):
@@ -176,6 +100,37 @@ class TestIntegrityEdgeCases:
             },
             "metadata": {"author": "test", "tags": ["a", "b"]},
         }
-        h1 = compute_tool_integrity("t", "1", data)
-        h2 = compute_tool_integrity("t", "1", data)
+        h1 = compute_integrity(data)
+        h2 = compute_integrity(data)
         assert h1 == h2
+
+    def test_tool_style_data(self):
+        """Works with tool-like data (caller structures it)."""
+        data = {
+            "tool_id": "my_tool",
+            "version": "1.0.0",
+            "manifest": {"name": "test"},
+            "files": [{"path": "script.py", "sha256": "abc123"}],
+        }
+        h = compute_integrity(data)
+        assert len(h) == 64
+
+    def test_directive_style_data(self):
+        """Works with directive-like data (caller structures it)."""
+        data = {
+            "directive_name": "test_directive",
+            "version": "1.0.0",
+            "xml_content": "<directive><name>test</name></directive>",
+        }
+        h = compute_integrity(data)
+        assert len(h) == 64
+
+    def test_knowledge_style_data(self):
+        """Works with knowledge-like data (caller structures it)."""
+        data = {
+            "id": "zettel_1",
+            "version": "1.0.0",
+            "content": "This is knowledge",
+        }
+        h = compute_integrity(data)
+        assert len(h) == 64
