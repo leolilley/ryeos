@@ -80,11 +80,11 @@ config:
 
 ### Node Types
 
-| Type        | Behavior                                                    |
-| ----------- | ----------------------------------------------------------- |
-| _(default)_ | Execute `action`, apply `assign`, follow `next`             |
-| `return`    | Terminate the graph and return current state                |
-| `foreach`   | Iterate over a collection, executing the action per item    |
+| Type        | Behavior                                                 |
+| ----------- | -------------------------------------------------------- |
+| _(default)_ | Execute `action`, apply `assign`, follow `next`          |
+| `return`    | Terminate the graph and return current state             |
+| `foreach`   | Iterate over a collection, executing the action per item |
 
 ### Foreach Nodes
 
@@ -93,9 +93,9 @@ Foreach nodes iterate over a list in state, executing an action for each item:
 ```yaml
 fan_out:
   type: foreach
-  over: "${state.tasks}"         # Expression resolving to a list
-  as: task                       # Variable name for current item
-  action:                        # Action to execute per item
+  over: "${state.tasks}" # Expression resolving to a list
+  as: task # Variable name for current item
+  action: # Action to execute per item
     primary: execute
     item_type: tool
     item_id: rye/agent/threads/thread_directive
@@ -104,7 +104,7 @@ fan_out:
       inputs:
         text: "${task.text}"
         output_path: "${task.output_path}"
-  collect: results               # Optional — collect return values into state
+  collect: results # Optional — collect return values into state
   next: process_results
 ```
 
@@ -165,11 +165,11 @@ Dotted paths support both dict key lookups and numeric list indices:
 command: "echo ${state.greeting}"
 
 # List index access
-code: "${state.file_contents.0.stdout}"    # First item's stdout
-path: "${state.files.1.analysis_path}"     # Second item's analysis_path
+code: "${state.file_contents.0.stdout}" # First item's stdout
+path: "${state.files.1.analysis_path}" # Second item's analysis_path
 
 # Nested — list item is a dict
-text: "${state.tasks.2.text}"              # Third task's text field
+text: "${state.tasks.2.text}" # Third task's text field
 ```
 
 ### Type Preservation
@@ -267,10 +267,10 @@ The walker loads the persisted state and continues from the last saved node.
 
 Set `on_error` in `config` to control the default behavior for all nodes:
 
-| Policy                       | Behavior                                              |
-| ---------------------------- | ----------------------------------------------------- |
-| `on_error: "fail"` (default) | Stop the graph on the first error                     |
-| `on_error: "continue"`       | Skip `assign`, proceed to `next` edge evaluation      |
+| Policy                       | Behavior                                         |
+| ---------------------------- | ------------------------------------------------ |
+| `on_error: "fail"` (default) | Stop the graph on the first error                |
+| `on_error: "continue"`       | Skip `assign`, proceed to `next` edge evaluation |
 
 ### Node-Level Error Edges
 
@@ -285,8 +285,8 @@ nodes:
       item_id: rye/bash/bash
       params:
         command: "might-fail"
-    on_error: handle_error     # Route to recovery node on failure
-    next: success_path         # Normal path on success
+    on_error: handle_error # Route to recovery node on failure
+    next: success_path # Normal path on success
 
   handle_error:
     action:
@@ -446,6 +446,7 @@ rye_execute(
 ```
 
 The background process:
+
 - Forks via `os.fork()` and daemonizes (`os.setsid()`)
 - Runs the graph to completion, updating the thread registry
 - Writes stderr to `.ai/threads/<graph_run_id>/async.log` for debugging
