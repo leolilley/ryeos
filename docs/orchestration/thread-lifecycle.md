@@ -182,7 +182,7 @@ Each turn follows this sequence:
 
 2. **Check cancellation** — `harness.is_cancelled()` checks the `_cancelled` flag (set by `cancel_thread` operation). If cancelled, the thread terminates.
 
-3. **LLM call** — `provider.create_completion(messages, tools)` sends the conversation to the LLM. Errors trigger the error classification system and hooks.
+3. **LLM call** — If the provider supports streaming, `provider.create_streaming_completion()` is used with a `TranscriptSink` that writes `token_delta` events to the transcript JSONL and appends text to the knowledge markdown in real-time. Otherwise, `provider.create_completion()` is used. Errors trigger the error classification system and hooks. See [Per-Token Streaming](./streaming.md).
 
 4. **Track tokens** — Input/output tokens and spend from the response are accumulated in the `cost` dict.
 
@@ -237,5 +237,6 @@ The `ThreadRegistry` class provides these operations:
 
 ## What's Next
 
+- [Per-Token Streaming](./streaming.md) — Real-time token streaming to transcript and knowledge files
 - [Spawning Children](./spawning-children.md) — How to spawn, wait, and collect results
 - [Safety and Limits](./safety-and-limits.md) — How limits resolve and what happens when they're exceeded
