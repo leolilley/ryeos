@@ -4,7 +4,7 @@ title: "Thread Lifecycle"
 description: How threads are created, executed, and finalized
 category: orchestration
 tags: [threads, lifecycle, states, registry]
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Thread Lifecycle
@@ -131,6 +131,8 @@ The thread metadata file is written to `.ai/threads/<thread_id>/thread.json`:
 }
 ```
 
+The `thread.json` file is signed using canonical JSON serialization with a `_signature` field, protecting capabilities and limits from tampering.
+
 ### Step 11: Set parent env var
 
 `RYE_PARENT_THREAD_ID` is set to this thread's ID so any subprocesses (children spawned via `async_exec`) inherit the parent relationship.
@@ -147,6 +149,8 @@ See "The Runner's LLM Loop" below.
 ### Step 14: Finalize
 
 After the LLM loop completes:
+
+> **Note:** When `directive_return` was called during the LLM loop, the final result includes an `outputs` dict (the structured key-value pairs from the return call) alongside the raw `result` text.
 
 1. Report actual spend to the ledger: `ledger.report_actual(thread_id, actual_spend)`
 2. Cascade spend to parent: `ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)`
@@ -184,11 +188,12 @@ Each turn follows this sequence:
 
 5. **Parse tool calls** — Native tool_use blocks are used if the provider supports them. Otherwise, `text_tool_parser.extract_tool_calls()` parses tool calls from the response text.
 
-6. **No tool calls** — If the LLM responds with text only (no tool calls), the thread completes with the text as the result. On the first turn with native tool_use, the runner nudges the model to use tools before accepting a text-only response.
+6. **No tool calls** — If the LLM responds with text only (no tool calls), the thread completes with the raw text as the result. For directives with `<outputs>`, the LLM should call `directive_return` via `rye_execute` instead, which provides structured key-value outputs that parent threads can consume programmatically. On the first turn with native tool_use, the runner nudges the model to use tools before accepting a text-only response.
 
 7. **Dispatch each tool call:**
    - Resolve the tool name to an item_id via `tool_id_map`
    - Check permission via `harness.check_permission()` — denied calls return an error message to the LLM
+   - If the inner `item_id` is `rye/agent/threads/directive_return`, the runner intercepts the call before dispatch. It validates that all required output fields (declared in `<outputs>`) are present. If fields are missing, an error is returned to the LLM to retry. If valid, the `directive_return` hook event fires, and the thread finalizes with structured `outputs` in the result.
    - Auto-inject parent context for child thread spawns (parent_thread_id, parent_depth, parent_limits, parent_capabilities)
    - Execute via `ToolDispatcher`
    - Guard result (bound large results, deduplicate, store artifacts)
@@ -206,8 +211,10 @@ Each thread creates a directory at `.ai/threads/<thread_id>/` containing:
 
 | File | Purpose |
 |------|---------|
-| `thread.json` | Thread metadata: ID, directive, status, model, cost, limits, capabilities |
-| `transcript.md` | Full conversation log written by the EventEmitter |
+| `thread.json` | Signed thread metadata: ID, directive, status, model, cost, limits, capabilities |
+| `transcript.jsonl` | Append-only event log with inline checkpoint signatures |
+
+Thread transcripts are also exported as signed knowledge entries at `.ai/knowledge/threads/{thread_id}.md` for discoverability via `rye search knowledge`.
 
 The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/threads/`.
 

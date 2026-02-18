@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T07:26:17Z:a10d2b176bab755251d8d5fa79ae1b3f7faeb72fa9abcb30e3245e0ea813d18c:CUfclZ672EsQYTI4E7uSTNKKKEaUADf9l4r3RNwQpzqrej6w2G-RxgDac_P-zSdhjxAlUXwDUwjzq1PcQ-sQBg==:440443d0858f0199
+# rye:signed:2026-02-18T07:16:04Z:a10d2b176bab755251d8d5fa79ae1b3f7faeb72fa9abcb30e3245e0ea813d18c:CUfclZ672EsQYTI4E7uSTNKKKEaUADf9l4r3RNwQpzqrej6w2G-RxgDac_P-zSdhjxAlUXwDUwjzq1PcQ-sQBg==:440443d0858f0199
 """
 errors.py: Typed exceptions for the thread system.
 

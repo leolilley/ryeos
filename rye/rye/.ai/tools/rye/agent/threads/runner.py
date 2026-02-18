@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T09:39:45Z:31a5fb48ae563b79924455eca8ff8d495242ff3646d09c6338d626b8fbf93eb5:F-wuDRzkI6rIUQHem55nG0hmRN-qYK_oAssMcpWwIFqg0RqAwDaQ_Q2EhtFRobH3U7Y4KC3vTPoaEH-0B4WCAg==:440443d0858f0199
+# rye:signed:2026-02-18T07:53:57Z:d1c32443f6df75315744849578887c47a5825baa3d5e865bae3723f4d4281cd9:5qyxpQvsaA9Y0D_TL2BT7d0UqcD5l5HDK1-_VuxjTabfkVnEQJj3U4mD5VC4_2IZVFXmosVUGwefafnJvS3GAw==:440443d0858f0199
 """
 runner.py: Core LLM loop for thread execution
 
@@ -83,6 +83,12 @@ async def run(
 
     start_time = time.monotonic()
 
+    # Checkpoint signing for transcript integrity
+    transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+    signer = transcript_signer_mod.TranscriptSigner(
+        thread_id, project_path / ".ai" / "threads" / thread_id
+    )
+
     try:
         if resume_messages:
             # Resume mode: use pre-built messages (summary + trailing turns + new message)
@@ -115,7 +121,7 @@ async def run(
                 )
                 if hook_result:
                     return _finalize(
-                        thread_id, cost, hook_result, emitter, transcript
+                        thread_id, cost, hook_result, emitter, transcript, signer
                     )
                 # Fail-safe: terminate even if no hook handled the limit
                 limit_code = limit_result.get("limit_code", "unknown_limit")
@@ -130,6 +136,7 @@ async def run(
                     },
                     emitter,
                     transcript,
+                    signer,
                 )
 
             # Cancellation check
@@ -140,6 +147,17 @@ async def run(
                     {"success": False, "status": "cancelled"},
                     emitter,
                     transcript,
+                    signer,
+                )
+
+            # Checkpoint: sign previous turn and update knowledge entry
+            if cost["turns"] > 0:
+                signer.checkpoint(cost["turns"])
+                transcript.render_knowledge(
+                    directive=harness.directive_name,
+                    status="running",
+                    model=provider.model,
+                    cost=cost,
                 )
 
             # LLM call
@@ -187,10 +205,10 @@ async def run(
                     if "success" not in hook_result:
                         hook_result["success"] = False
                     return _finalize(
-                        thread_id, cost, hook_result, emitter, transcript
+                        thread_id, cost, hook_result, emitter, transcript, signer
                     )
                 return _finalize(
-                    thread_id, cost, original_error, emitter, transcript
+                    thread_id, cost, original_error, emitter, transcript, signer
                 )
 
             # Track tokens
@@ -231,12 +249,14 @@ async def run(
                     })
                     continue
 
+                completion_result = {"success": True, "result": response["text"]}
                 return _finalize(
                     thread_id,
                     cost,
-                    {"success": True, "result": response["text"]},
+                    completion_result,
                     emitter,
                     transcript,
+                    signer,
                 )
 
             # Append assistant message to conversation
@@ -283,6 +303,65 @@ async def run(
                         "content": str(clean),
                     })
                     continue
+
+                # directive_return: completion signal with structured outputs.
+                # Detected by inner item_id before dispatch. Outputs are
+                # extracted from the call parameters (not the tool result)
+                # to avoid envelope/unwrapping fragility.
+                if inner_item_id == "rye/agent/threads/directive_return":
+                    inner_params = tc_input.get("parameters", {})
+                    outputs = dict(inner_params) if inner_params else {}
+
+                    # Validate required fields against harness
+                    missing = [
+                        f for f in getattr(harness, "output_fields", [])
+                        if not outputs.get(f)
+                    ]
+                    if missing:
+                        error_msg = (
+                            f"Missing required output fields: {', '.join(missing)}. "
+                            f"Call directive_return again with all required fields."
+                        )
+                        emitter.emit(
+                            thread_id,
+                            "tool_call_result",
+                            {"call_id": tool_call["id"], "output": error_msg, "error": error_msg},
+                            transcript,
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": error_msg,
+                        })
+                        continue
+
+                    emitter.emit(
+                        thread_id,
+                        "tool_call_result",
+                        {"call_id": tool_call["id"], "output": str(outputs)},
+                        transcript,
+                    )
+
+                    # Fire directive_return hook event
+                    await harness.run_hooks(
+                        "directive_return",
+                        {"outputs": outputs, "cost": cost, "thread_id": thread_id},
+                        dispatcher,
+                        thread_ctx,
+                    )
+
+                    return _finalize(
+                        thread_id,
+                        cost,
+                        {
+                            "success": True,
+                            "result": response["text"],
+                            "outputs": outputs,
+                        },
+                        emitter,
+                        transcript,
+                        signer,
+                    )
 
                 resolved_id = tool_id_map.get(tool_call["name"], tool_call["name"])
                 dispatch_params = dict(tool_call["input"])
@@ -370,6 +449,7 @@ async def run(
                             },
                             emitter,
                             transcript,
+                            signer,
                         )
                 except Exception as handoff_err:
                     logger.error("Handoff failed: %s", handoff_err)
@@ -388,6 +468,7 @@ async def run(
                         },
                         emitter,
                         transcript,
+                        signer,
                     )
 
     finally:
@@ -397,8 +478,17 @@ async def run(
         }
         orchestrator.complete_thread(thread_id, final)
 
+        transcript.render_knowledge(
+            directive=harness.directive_name,
+            status=final["status"],
+            model=provider.model,
+            cost=cost,
+        )
 
-def _finalize(thread_id, cost, result, emitter, transcript) -> Dict:
+
+def _finalize(thread_id, cost, result, emitter, transcript, signer=None) -> Dict:
+    if signer and cost.get("turns"):
+        signer.checkpoint(cost["turns"])
     # Preserve explicit status (e.g. "continued", "cancelled") over default
     if "status" in result and result["status"] not in ("", None):
         status = result["status"]

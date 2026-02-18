@@ -1,11 +1,11 @@
-<!-- rye:signed:2026-02-17T23:54:02Z:21da3173cf06923fb0740485d6332a23dd4059171190d549b86b866ec1c24768:Mau78SUcFxrKd6xkdRg06bW-_ndmR-d5XId1eqem2IgYnR_5Vbb0cjNDZZh0Gb4Mz1EbYbLvU_7wnihW1ZsGDw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T07:19:51Z:785ec8e349cefab3c9af15981bc2a816d6025a5749588b48b85452054a966266:MmSUABq7Lg21D_gJPfBcbrFlSClXHJGkBUwmbtGhS98IdCRMm29z1QPPlCHociwQzYjFzVlJQLVBEpr6v836Aw==:440443d0858f0199 -->
 
 ```yaml
 id: prompt-rendering
 title: Prompt Rendering
 entry_type: reference
 category: rye/agent/threads
-version: "1.0.0"
+version: "1.1.0"
 author: rye-os
 created_at: 2026-02-18T00:00:00Z
 tags:
@@ -32,7 +32,7 @@ The prompt is built by concatenating these parts with `\n\n`:
 2. <directive name="..." >      (name + description tag)
 3. Preamble                     (cleaned markdown before XML fence)
 4. Body                         (process steps — the actual instructions)
-5. <returns>                    (deterministic from <outputs>)
+5. directive_return instruction  (from <outputs>, via rye_execute)
 6. </directive>                 (closing tag)
 ```
 
@@ -45,7 +45,7 @@ The prompt is built by concatenating these parts with `\n\n`:
 | Description           | `directive["description"]`       | Context: what this directive does          |
 | Preamble              | `directive["preamble"]`          | Summary text (markdown before XML fence)   |
 | Body                  | `directive["body"]`              | Process steps — the actual LLM instructions|
-| Returns               | `directive["outputs"]` → `<returns>` | What structured output to produce     |
+| Returns               | `directive["outputs"]` → `directive_return` call | Instructs the LLM to call `directive_return` via `rye_execute` |
 
 ## What's EXCLUDED from the Prompt
 
@@ -78,9 +78,9 @@ Removes:
 
 Keeps: description paragraphs and context text.
 
-## The `<outputs>` → `<returns>` Transformation
+## The `<outputs>` → `directive_return` Transformation
 
-The `<outputs>` block from the XML fence is **not** sent as-is. It's deterministically transformed into a `<returns>` block appended to the prompt body.
+The `<outputs>` block from the XML fence is **not** sent as-is. It's transformed into an instruction telling the LLM to call `directive_return` via `rye_execute` with the declared output fields as parameters.
 
 ### List Format
 
@@ -94,16 +94,14 @@ outputs = [
 ]
 
 # Output in prompt
-<returns>
-  <output name="directive_path">Path to the created file</output>
-  <output name="signed">Whether signing succeeded</output>
-</returns>
+When you have completed all steps, return structured results:
+`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"directive_path": "<Path to the created file>", "signed": "<Whether signing succeeded>"})`
 ```
 
-If an output has no description, it becomes self-closing:
+If an output has no description, the field name is used as the placeholder:
 
-```xml
-<output name="count" />
+```
+parameters={"count": "<count>"}
 ```
 
 ### Dict Format
@@ -115,16 +113,14 @@ When `outputs` is a dict of `{key: value}` pairs:
 outputs = {"score": "Numeric score 0-100", "tier": "hot, warm, cold"}
 
 # Output in prompt
-<returns>
-  <output name="score">Numeric score 0-100</output>
-  <output name="tier">hot, warm, cold</output>
-</returns>
+When you have completed all steps, return structured results:
+`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"score": "<Numeric score 0-100>", "tier": "<hot, warm, cold>"})`
 ```
 
 ## Why This Matters
 
 - **Parent-child contract:** Parent threads match these output keys when consuming child results. Names must be consistent between `<outputs>` declaration and parent expectations.
-- **Structured output:** The `<returns>` block tells the LLM exactly what keys to produce, preventing freeform responses when structured output is needed.
+- **Structured output via tool call:** Instead of a passive XML block, the LLM is instructed to actively call `directive_return` with the declared output fields. This produces structured results that the thread infrastructure can reliably parse.
 - **Separation of concerns:** Infrastructure metadata stays in the XML fence for the parser. Only execution-relevant content reaches the LLM.
 
 ## Code Reference
@@ -158,23 +154,25 @@ def _build_prompt(directive: Dict) -> str:
     if body:
         parts.append(body)
 
-    # Returns (from outputs)
+    # Returns (from outputs) — directive_return call instruction
     outputs = directive.get("outputs", [])
     if outputs:
-        output_lines = ["<returns>"]
+        output_fields = {}
         if isinstance(outputs, list):
             for o in outputs:
                 oname = o.get("name", "")
-                odesc = o.get("description", "")
-                if odesc:
-                    output_lines.append(f'  <output name="{oname}">{odesc}</output>')
-                else:
-                    output_lines.append(f'  <output name="{oname}" />')
+                if oname:
+                    output_fields[oname] = o.get("description", "")
         elif isinstance(outputs, dict):
-            for k, v in outputs.items():
-                output_lines.append(f'  <output name="{k}">{v}</output>')
-        output_lines.append("</returns>")
-        parts.append("\n".join(output_lines))
+            output_fields = dict(outputs)
+
+        if output_fields:
+            params_obj = ", ".join(f'"{k}": "<{v or k}>"' for k, v in output_fields.items())
+            parts.append(
+                "When you have completed all steps, return structured results:\n"
+                f'`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
+                f"parameters={{{params_obj}}})`"
+            )
 
     # Close directive tag (if any opening tag was emitted)
     if name or desc:

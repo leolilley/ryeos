@@ -81,6 +81,21 @@ builtin_hooks:
         tokens_used: "${event.tokens_used}"
     description: "Trigger context compaction"
 
+  - id: "default_directive_return"
+    event: "directive_return"
+    layer: 2
+    action:
+      primary: "execute"
+      item_type: "tool"
+      item_id: "rye/agent/threads/internal/emitter"
+      params:
+        event_type: "directive_return"
+        thread_id: "${thread_id}"
+        payload:
+          outputs: "${outputs}"
+          cost: "${cost}"
+    description: "Emit directive_return event for observability"
+
 infra_hooks:
   - id: "infra_save_state"
     event: "after_step"

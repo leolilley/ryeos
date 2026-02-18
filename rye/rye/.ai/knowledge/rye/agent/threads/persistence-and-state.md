@@ -1,11 +1,11 @@
-<!-- rye:signed:2026-02-17T23:54:02Z:a907f94429ba0d3d67c8041c7938e71a82ed5a12e65ad25f94bd5220d20b5e93:uu3vVzoBik5VQlUGxPaQZ-xl4DmHSyUoDKBBD23mZY8CeaJKZ1VRLAa4SCAvmEQnp8xchLWWxDE10ebwLSGlDQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T07:19:51Z:05266fb888a9666ff1144ab4fe534b1431e4b61601c7ba45735422aa2676fd7c:avptT__MV3RMelSK1WccwSOtAuC0LKjbdkNtkXdiovdgMQ5Yf6WnEx0kEqvpW9RMXC7txO4tpDYoMQ14QCCfDQ==:440443d0858f0199 -->
 
 ```yaml
 id: persistence-and-state
 title: Persistence and State
 entry_type: reference
 category: rye/agent/threads
-version: "1.0.0"
+version: "1.2.0"
 author: rye-os
 created_at: 2026-02-18T00:00:00Z
 tags:
@@ -30,8 +30,11 @@ How threads persist state, handle context limits via continuation, and support u
 ├── registry.db           # Thread registry (SQLite)
 ├── budget_ledger.db      # Hierarchical budget tracking (SQLite)
 └── <thread_id>/
-    ├── thread.json       # Thread metadata
-    └── transcript.md     # Full conversation log
+    ├── thread.json       # Signed thread metadata
+    └── transcript.jsonl  # Append-only event log with checkpoint signatures
+
+.ai/knowledge/threads/
+└── <thread_id>.md        # Signed knowledge entry (cognition-framed transcript)
 ```
 
 ### Thread Registry (`registry.db`)
@@ -79,13 +82,22 @@ Written at thread creation, updated at finalization:
   "model": "claude-3-5-haiku-20241022",
   "limits": {"turns": 10, "tokens": 200000, "spend": 0.10},
   "capabilities": ["rye.execute.tool.scraping.gmaps.scrape_gmaps"],
-  "cost": {"turns": 4, "input_tokens": 3200, "output_tokens": 800, "spend": 0.02}
+  "cost": {"turns": 4, "input_tokens": 3200, "output_tokens": 800, "spend": 0.02},
+  "outputs": {"leads_file": ".ai/data/leads.json", "lead_count": "15"}
 }
 ```
 
-### `transcript.md`
+When a directive declares `<outputs>` and the LLM calls `directive_return`, the thread result includes an `outputs` dict with the structured key-value pairs. This is available in the thread result returned to parent threads via `wait_threads`, and in the `thread.json` metadata.
 
-Full conversation log written by `EventEmitter`. Contains user messages, assistant responses, tool calls, tool results, and system events (handoffs, errors).
+Signed with a `_signature` field using canonical JSON serialization. Protects capabilities and limits from tampering. Verified on resume and handoff.
+
+### `transcript.jsonl`
+
+Append-only JSONL event log. Each line is a JSON object with `timestamp`, `thread_id`, `event_type`, and `payload`. Checkpoint events are interleaved at turn boundaries with SHA256 hash and Ed25519 signature covering all preceding bytes.
+
+### Knowledge Entry (`.ai/knowledge/threads/{thread_id}.md`)
+
+Signed knowledge entry with cognition-framed markdown. Contains YAML frontmatter with thread-specific fields (`thread_id`, `directive`, `status`, `model`, `turns`, `spend`) and `entry_type: thread_transcript`. Updated at each checkpoint and finalization. Discoverable via `rye search knowledge`.
 
 ## Context Limit Detection
 
@@ -227,7 +239,7 @@ rye_execute(item_id="rye/agent/threads/orchestrator",
                 "query": "error.*timeout", "search_type": "regex"})
 ```
 
-Searches `transcript.md` across all threads in the chain.
+Searches transcript knowledge entries across all threads in the chain.
 
 ## User-Driven Resumption
 

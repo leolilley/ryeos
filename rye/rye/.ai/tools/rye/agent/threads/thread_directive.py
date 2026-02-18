@@ -1,4 +1,4 @@
-# rye:signed:2026-02-17T21:34:11Z:c1aef793c7a7f2618380baca96cbc47307fd19e752d6583258c2d85e5887f04d:rDBzbn_HyzHiGKxZHZ9lgIPvzDme1KE3OyhnwBIweBJqKQhow3dGkzo63YALfTOHXL12N2xL68S6Qm8i7olHCQ==:440443d0858f0199
+# rye:signed:2026-02-18T07:52:18Z:bc53dac3c5c4220b8bb6cf47358cb8485a1718b5b09f449c1c2f25037077ed71:-tsX2K87eR1QeixmN_qBW57QLZWv0uAx_ExMnrhUOerf7XCI25qlF-vQ2XLPZJoRrY7P9s4OOayuau8A9x00BQ==:440443d0858f0199
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
@@ -93,6 +93,7 @@ def _write_thread_meta(
     cost: Optional[Dict[str, Any]] = None,
     limits: Optional[Dict] = None,
     capabilities: Optional[list] = None,
+    outputs: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Write thread.json metadata atomically.
 
@@ -117,6 +118,12 @@ def _write_thread_meta(
         meta["limits"] = limits
     if capabilities:
         meta["capabilities"] = capabilities
+    if outputs:
+        meta["outputs"] = outputs
+
+    # Sign thread.json for integrity (protects capabilities/limits)
+    transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+    meta = transcript_signer_mod.sign_json(meta)
 
     meta_path = thread_dir / "thread.json"
     tmp_path = meta_path.with_suffix(".json.tmp")
@@ -139,13 +146,9 @@ def _build_prompt(directive: Dict) -> str:
 
     Only sends what the LLM needs to execute the directive:
       1. Execute instruction
-      2. Directive name + description (context)
+      2. Directive name + description
       3. Body (process steps with resolved input values)
-      4. Returns section (deterministically built from <outputs>)
-
-    The LLM does NOT receive: metadata XML, permissions, limits,
-    model config, hooks, signatures, or raw XML fences. Those are
-    consumed by the infrastructure (thread_directive.py, safety_harness).
+      4. Returns section (from <outputs>)
     """
     from rye.constants import DIRECTIVE_INSTRUCTION
     parts = [DIRECTIVE_INSTRUCTION]
@@ -160,47 +163,37 @@ def _build_prompt(directive: Dict) -> str:
     elif desc:
         parts.append(f"<directive>\n<description>{desc}</description>")
 
-    # Preamble (markdown before the XML fence — summary text)
-    preamble = directive.get("preamble", "").strip()
-    if preamble:
-        preamble_lines = [
-            l for l in preamble.split("\n")
-            if not l.strip().startswith(("<!-- rye:signed:", "# "))
-        ]
-        preamble_clean = "\n".join(preamble_lines).strip()
-        if preamble_clean:
-            parts.append(preamble_clean)
-
     # Body (process steps — the actual instructions, already pseudo-XML)
     body = directive.get("body", "").strip()
     if body:
         parts.append(body)
 
-    # Returns section — deterministic from <outputs> so the LLM knows
-    # what structured output to produce. Parent threads/orchestrators
-    # match these keys when consuming child thread results.
+    # Returns instruction — if the directive declares <outputs>, instruct
+    # the LLM to call directive_return via rye_execute when done.
     outputs = directive.get("outputs", [])
     if outputs:
-        output_lines = ["<returns>"]
+        output_fields = {}
         if isinstance(outputs, list):
             for o in outputs:
                 oname = o.get("name", "")
-                odesc = o.get("description", "")
-                if odesc:
-                    output_lines.append(f"  <output name=\"{oname}\">{odesc}</output>")
-                else:
-                    output_lines.append(f"  <output name=\"{oname}\" />")
+                if oname:
+                    output_fields[oname] = o.get("description", "")
         elif isinstance(outputs, dict):
-            for k, v in outputs.items():
-                output_lines.append(f"  <output name=\"{k}\">{v}</output>")
-        output_lines.append("</returns>")
-        parts.append("\n".join(output_lines))
+            output_fields = dict(outputs)
+
+        if output_fields:
+            params_obj = ", ".join(f'"{k}": "<{v or k}>"' for k, v in output_fields.items())
+            parts.append(
+                "When you have completed all steps, return structured results:\n"
+                f'`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
+                f"parameters={{{params_obj}}})`"
+            )
 
     # Close directive tag if opened
     if name or desc:
         parts.append("</directive>")
 
-    return "\n\n".join(parts)
+    return "\n".join(parts)
 
 
 def _resolve_limits(directive_limits: Dict, overrides: Dict, project_path: str, parent_limits: Optional[Dict] = None) -> Dict:
@@ -345,6 +338,16 @@ async def execute(params: Dict, project_path: str) -> Dict:
         parent_capabilities=parent_capabilities,
     )
     harness.available_tools = _build_tool_schemas()
+
+    # Grant directive_return capability and set output field names if directive declares <outputs>
+    directive_outputs = directive.get("outputs", [])
+    if directive_outputs:
+        harness._capabilities.append("rye.execute.tool.rye.agent.threads.directive_return")
+        if isinstance(directive_outputs, list):
+            harness.output_fields = [o["name"] for o in directive_outputs if o.get("name")]
+        elif isinstance(directive_outputs, dict):
+            harness.output_fields = list(directive_outputs.keys())
+
     if not harness.available_tools:
         registry.update_status(thread_id, "error")
         return {
@@ -454,12 +457,16 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 status = result.get("status", "completed")
                 ledger.release(thread_id, final_status=status)
                 registry.update_status(thread_id, status)
-                registry.set_result(thread_id, result.get("cost"))
+                result_data = {"cost": result.get("cost")}
+                if result.get("outputs"):
+                    result_data["outputs"] = result["outputs"]
+                registry.set_result(thread_id, result_data)
                 _write_thread_meta(
                     proj_path, thread_id, directive_name, status,
                     thread_created_at, datetime.now(timezone.utc).isoformat(),
                     model=resolved_model, cost=result.get("cost"),
                     limits=limits, capabilities=harness._capabilities,
+                    outputs=result.get("outputs"),
                 )
             except Exception:
                 registry.update_status(thread_id, "error")
@@ -507,7 +514,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
     # 13. Update registry with final status
     status = result.get("status", "completed")
     registry.update_status(thread_id, status)
-    registry.set_result(thread_id, result.get("cost"))
+    result_data = {"cost": result.get("cost")}
+    if result.get("outputs"):
+        result_data["outputs"] = result["outputs"]
+    registry.set_result(thread_id, result_data)
 
     # 14. Write final thread.json
     _write_thread_meta(
@@ -515,6 +525,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         thread_created_at, datetime.now(timezone.utc).isoformat(),
         model=resolved_model, cost=result.get("cost"),
         limits=limits, capabilities=harness._capabilities,
+        outputs=result.get("outputs"),
     )
 
     # Write per-thread diagnostics file on error for debugging

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T09:56:55Z:f48bd1dfc2a7246749f7d8eb198aa8000b7a9ea4dc513946efb612d3b4175827:JeVN0ppF8fgmEek4cglBvG_mjx_zhBcoLdeKI4ha_Jrh0VVV5_aYqnj0t-mK0ODEIVVoU_ph109PA-qtZv6nBA==:440443d0858f0199
+# rye:signed:2026-02-18T06:43:51Z:39965b86f823d3ad07817f664b5553afc24ceecfd2557de66aa4e8588449fad8:W_0rfr5xoY6q6wnBYauWB8qWvqozswo2Be88FCVOVUv49JH7JnYXVANizlergnyMPYz2VRkvbtenBkcwvw53CQ==:440443d0858f0199
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -29,13 +29,14 @@ class Transcript:
 
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
+        self._project_path = project_path
         self._dir = project_path / AI_DIR / "threads" / thread_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "transcript.jsonl"
         self._events: List[Dict[str, Any]] = []
 
     def write_event(self, thread_id: str, event_type: str, payload: Dict) -> None:
-        """Append event to JSONL file, in-memory list, and stream to transcript.md."""
+        """Append event to JSONL file and in-memory list."""
         entry = {
             "timestamp": time.time(),
             "thread_id": thread_id,
@@ -46,14 +47,6 @@ class Transcript:
         with open(self._path, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
             f.flush()
-
-        # Stream markdown chunk to transcript.md
-        chunk = self._render_event(entry)
-        if chunk:
-            md_path = self._dir / "transcript.md"
-            with open(md_path, "a", encoding="utf-8") as f:
-                f.write(chunk)
-                f.flush()
 
     def get_events(self) -> List[Dict[str, Any]]:
         """Return accumulated events."""
@@ -149,125 +142,155 @@ class Transcript:
 
         return messages if messages else None
 
-    def render_markdown(self) -> None:
-        """Render transcript.jsonl to transcript.md for human reading."""
+    def render_knowledge(
+        self,
+        directive: str = "",
+        status: str = "completed",
+        model: str = "",
+        cost: Optional[Dict] = None,
+    ) -> Optional[Path]:
+        """Render transcript as a signed knowledge entry.
+
+        Produces a cognition-framed markdown file in .ai/knowledge/threads/
+        with YAML frontmatter. Signed via KnowledgeMetadataStrategy.
+
+        Called at each checkpoint (same cadence as JSONL signing) so the
+        knowledge file stays in sync with the signed transcript.
+
+        Returns the path to the knowledge file, or None if no events.
+        """
         if not self._path.exists():
-            return
+            return None
 
-        md_path = self._dir / "transcript.md"
-        parts = []
-
+        events = []
         with open(self._path) as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    event = json.loads(line)
+                    events.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
 
-                chunk = self._render_event(event)
-                if chunk:
-                    parts.append(chunk)
+        if not events:
+            return None
 
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write("".join(parts))
+        cost = cost or {}
+        # Use thread_id path components for category
+        thread_path = Path(self.thread_id)
+        if thread_path.parent != Path("."):
+            category = f"agent/threads/{thread_path.parent}"
+        else:
+            category = "agent/threads"
+        safe_id = thread_path.name
+        created_at = ""
+        for e in events:
+            if e.get("timestamp"):
+                from datetime import datetime, timezone
+                created_at = datetime.fromtimestamp(
+                    e["timestamp"], tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                break
+
+        frontmatter = (
+            f"```yaml\n"
+            f"id: {safe_id}\n"
+            f'title: "{directive or self.thread_id}"\n'
+            f"entry_type: thread_transcript\n"
+            f"category: {category}\n"
+            f'version: "1.0.0"\n'
+            f"author: rye-os\n"
+            f"created_at: {created_at}\n"
+            f"thread_id: {self.thread_id}\n"
+            f"directive: {directive}\n"
+            f"status: {status}\n"
+            f"model: {model}\n"
+            f"turns: {cost.get('turns', 0)}\n"
+            f"input_tokens: {cost.get('input_tokens', 0)}\n"
+            f"output_tokens: {cost.get('output_tokens', 0)}\n"
+            f"spend: {cost.get('spend', 0)}\n"
+            f"tags: [thread, {status}]\n"
+            f"```\n\n"
+        )
+
+        parts = [frontmatter]
+        parts.append(f"# {directive or self.thread_id}\n\n")
+
+        turn = 0
+        for event in events:
+            et = event.get("event_type", "")
+            if et == "cognition_in":
+                turn += 1
+            chunk = self._render_cognition_event(event, turn)
+            if chunk:
+                parts.append(chunk)
+
+        content = "".join(parts)
+
+        # Mirror thread directory structure under knowledge/agent/threads/
+        # e.g. thread_id "test/tools/file_system/write_file-123" →
+        #   .ai/knowledge/agent/threads/test/tools/file_system/write_file-123.md
+        knowledge_dir = self._project_path / AI_DIR / "knowledge" / "agent" / "threads"
+        # Use the thread_id path components for subdirectories
+        thread_path = Path(self.thread_id)
+        if thread_path.parent != Path("."):
+            knowledge_dir = knowledge_dir / thread_path.parent
+        knowledge_dir.mkdir(parents=True, exist_ok=True)
+        knowledge_path = knowledge_dir / f"{thread_path.name}.md"
+
+        from rye.utils.metadata_manager import MetadataManager
+        from rye.constants import ItemType
+
+        signature = MetadataManager.create_signature(ItemType.KNOWLEDGE, content)
+        signed_content = signature + content
+
+        knowledge_path.write_text(signed_content, encoding="utf-8")
+        return knowledge_path
 
     @staticmethod
-    def _render_event(event: Dict) -> str:
-        """Render a single event to markdown fragment."""
+    def _render_cognition_event(event: Dict, turn: int) -> str:
+        """Render a single event as a cognition thread fragment."""
         event_type = event.get("event_type", "")
         payload = event.get("payload", {})
-
-        if event_type == "thread_started":
-            return (
-                f"# {payload.get('directive', 'Thread')}\n\n"
-                f"**Thread ID:** `{event.get('thread_id', '')}`\n"
-                f"**Model:** {payload.get('model', 'unknown')}\n"
-                f"**Started:** {event.get('timestamp', '')}\n\n---\n\n"
-            )
 
         if event_type == "cognition_in":
             role = payload.get("role", "user")
             if role == "tool":
                 return ""
-            return f"## {role.title()}\n\n{payload.get('text', '')}\n\n---\n\n"
+            return f"## Input — Turn {turn}\n\n{payload.get('text', '')}\n\n"
 
         if event_type == "cognition_out":
             text = payload.get("text", "")
-            return f"**Assistant:**\n\n{text}\n\n"
+            return f"### Response — Turn {turn}\n\n{text}\n\n"
 
         if event_type == "tool_call_start":
             tool = payload.get("tool", "unknown")
-            call_id = payload.get("call_id", "?")
             input_data = payload.get("input", {})
             try:
                 input_str = json.dumps(input_data, indent=2)
             except Exception:
                 input_str = str(input_data)
-            return (
-                f"**Tool Call:** `{tool}` (ID: `{call_id}`)\n\n"
-                f"```json\n{input_str}\n```\n\n"
-            )
+            return f"### Tool: {tool}\n\n```json\n{input_str}\n```\n\n"
 
         if event_type == "tool_call_result":
-            call_id = payload.get("call_id", "?")
             output = payload.get("output", "")
             error = payload.get("error")
-            result = f"**Tool Result** (ID: `{call_id}`)\n\n"
             if error:
-                result += f"**Error:** {error}\n\n"
-            else:
-                result += f"```\n{output}\n```\n\n"
-            return result
+                return f"### Error\n\n{error}\n\n"
+            return f"### Result\n\n```\n{output}\n```\n\n"
 
         if event_type == "thread_completed":
             cost = payload.get("cost", {})
             tokens = cost.get("input_tokens", 0) + cost.get("output_tokens", 0)
             spend = cost.get("spend", 0)
+            turns = cost.get("turns", 0)
             return (
-                f"## Completed\n\n"
-                f"**Total Tokens:** {tokens}\n"
-                f"**Total Cost:** ${spend:.6f}\n\n"
+                f"---\n\n"
+                f"**Completed** -- {turns} turns, {tokens} tokens, ${spend:.4f}\n"
             )
 
         if event_type == "thread_error":
-            return f"## Error\n\n{payload.get('error', 'unknown')}\n\n"
-
-        if event_type == "thread_resumed":
-            new_id = payload.get("new_thread_id", "unknown")
-            directive = payload.get("directive", "")
-            preview = payload.get("message_preview", "")
-            turns = payload.get("reconstructed_turns", 0)
-            return (
-                f"## Resumed → `{new_id}`\n\n"
-                f"**Directive:** {directive}\n"
-                f"**Reconstructed turns:** {turns}\n"
-                f"**Message:** {preview}\n\n"
-            )
-
-        if event_type == "thread_handoff":
-            new_id = payload.get("new_thread_id", "unknown")
-            directive = payload.get("directive", "")
-            summary = "yes" if payload.get("summary_generated") else "no"
-            trailing = payload.get("trailing_turns", 0)
-            return (
-                f"## Handoff → `{new_id}`\n\n"
-                f"**Directive:** {directive}\n"
-                f"**Summary generated:** {summary}\n"
-                f"**Trailing turns carried:** {trailing}\n\n"
-                f"This thread's context limit was reached. "
-                f"Execution continues in the new thread above.\n\n"
-            )
-
-        if event_type == "context_limit_reached":
-            ratio = payload.get("usage_ratio", 0)
-            used = payload.get("tokens_used", 0)
-            limit = payload.get("tokens_limit", 0)
-            return (
-                f"## Context Limit Reached\n\n"
-                f"**Usage:** {ratio:.1%} ({used}/{limit} tokens)\n\n"
-            )
+            return f"---\n\n**Error** -- {payload.get('error', 'unknown')}\n"
 
         return ""

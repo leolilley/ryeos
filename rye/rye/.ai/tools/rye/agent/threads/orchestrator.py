@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T10:05:20Z:b836f09319e800a418edcb1fd5d75088de717022c510fb0dc1616b8b90a28b5f:SCYOnrNrvVjm76RGEzMm_bm0fhy1dR4L7c6T8meUe5-0BUleKvjidzkNSJYIhADURoLTbUyiTvw9KRU1WNO8Bg==:440443d0858f0199
+# rye:signed:2026-02-18T07:16:04Z:688f712fbf4cd89d03d05ca042f562e924fdb0887e083ec02cd7d34bc001630c:rBrokcKZ8FGDEuqpmcUAsx9tlYPDemGmMJpQ8urMy5lhkg9IHGyDZO5LAewLLpFSkXoIp1je37YvWMf5L8xyBA==:440443d0858f0199
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_function_runtime"
@@ -211,6 +211,21 @@ async def handoff_thread(
     summary_limit_overrides = cont_config.get("summary_limit_overrides", {"turns": 3, "spend": 0.02})
     summary_max_tokens = cont_config.get("summary_max_tokens", 4000)
 
+    # Verify transcript integrity before trusting its content
+    from rye.constants import AI_DIR
+    transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+    signer = transcript_signer_mod.TranscriptSigner(
+        thread_id, project_path / AI_DIR / "threads" / thread_id
+    )
+    integrity_policy = cont_config.get("transcript_integrity", "strict")
+    integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
+    if not integrity["valid"]:
+        return {
+            "success": False,
+            "error": f"Transcript integrity check failed: {integrity['error']}. "
+                     f"Cannot hand off from tampered transcript.",
+        }
+
     # Reconstruct messages from transcript if not provided live
     if messages is None:
         transcript_mod = load_module("persistence/transcript", anchor=_ANCHOR)
@@ -223,11 +238,13 @@ async def handoff_thread(
     summary_text = None
     summary_tokens = 0
     if summary_directive:
-        from rye.constants import AI_DIR
-        transcript_md_path = project_path / AI_DIR / "threads" / thread_id / "transcript.md"
+        # Read from signed knowledge entry (replaces legacy transcript.md)
+        from pathlib import PurePosixPath
+        thread_path = PurePosixPath(thread_id)
+        knowledge_path = project_path / AI_DIR / "knowledge" / "agent" / "threads" / thread_path.parent / f"{thread_path.name}.md"
         transcript_content = ""
-        if transcript_md_path.exists():
-            transcript_content = transcript_md_path.read_text(encoding="utf-8")
+        if knowledge_path.exists():
+            transcript_content = knowledge_path.read_text(encoding="utf-8")
 
         if transcript_content:
             thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
@@ -503,7 +520,9 @@ async def execute(params: Dict, project_path: str) -> Dict:
         if not thread_id:
             return {"success": False, "error": "thread_id required"}
         from rye.constants import AI_DIR
-        transcript_path = proj_path / AI_DIR / "threads" / thread_id / "transcript.md"
+        from pathlib import PurePosixPath
+        thread_path = PurePosixPath(thread_id)
+        transcript_path = proj_path / AI_DIR / "knowledge" / "agent" / "threads" / thread_path.parent / f"{thread_path.name}.md"
         if not transcript_path.exists():
             return {"success": False, "error": f"Transcript not found for thread: {thread_id}"}
         content = transcript_path.read_text(encoding="utf-8")
@@ -534,6 +553,23 @@ async def execute(params: Dict, project_path: str) -> Dict:
         directive_name = thread.get("directive")
         if not directive_name:
             return {"success": False, "error": "No directive recorded for thread"}
+
+        # Verify transcript integrity before trusting its content
+        from rye.constants import AI_DIR
+        transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+        signer = transcript_signer_mod.TranscriptSigner(
+            resolved_id, proj_path / AI_DIR / "threads" / resolved_id
+        )
+        coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
+        cont_config = coordination_loader.get_coordination_loader().get_continuation_config(proj_path)
+        integrity_policy = cont_config.get("transcript_integrity", "strict")
+        integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
+        if not integrity["valid"]:
+            return {
+                "success": False,
+                "error": f"Transcript integrity check failed: {integrity['error']}. "
+                         f"Cannot resume from tampered transcript.",
+            }
 
         # Reconstruct full conversation from transcript
         transcript_mod = load_module("persistence/transcript", anchor=_ANCHOR)
