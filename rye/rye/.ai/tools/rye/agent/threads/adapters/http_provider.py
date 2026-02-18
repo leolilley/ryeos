@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T07:36:31Z:5df07dfbebc9366e68705f7bdf50e27fb485c0fc8664b90d1df95510cf2e6d5f:E1icoOxqZ3smB8peFRy77Rl_FlnzPbxN7MRfCupv9iy-vtBHMnSUxsvv_PHVgN6Tou9He73qvHQXk6APnFISDQ==:440443d0858f0199
+# rye:signed:2026-02-18T08:09:06Z:dfe8e077f46455e7b157f775a4817c2895dc7d228e13e3baa73daeaf185ddb19:FTTsZbd13ZYAHlIpv4LSWCGmkAJTcNoCDDEON3hch_zVqbz-N4QkwCMEObQ_leG9yoU-hfpz2ZuRZMCAqhMIBA==:440443d0858f0199
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -11,7 +11,7 @@ This adapter only handles:
 2. Parsing the API response using the provider YAML's tool_use.response config
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "HTTP provider adapter for LLM API calls"
@@ -47,6 +47,10 @@ class HttpProvider(ProviderAdapter):
         self._provider_item_id = provider_item_id
         self._tool_use = provider_config.get("tool_use", {})
         self._prompts = provider_config.get("prompts", {})
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
 
     @property
     def _response_format(self) -> str:
@@ -377,3 +381,208 @@ class HttpProvider(ProviderAdapter):
         data = result.get("data", {})
         response_body = data.get("body", data)
         return self._parse_response(response_body)
+
+    async def create_streaming_completion(
+        self, messages: List[Dict], tools: List[Dict], sinks: Optional[List] = None
+    ) -> Dict:
+        """Send messages to LLM via streaming, with real-time sink fan-out.
+
+        Sinks receive raw SSE events as they arrive (for transcript writing).
+        A ReturnSink is always added to buffer events for final response assembly.
+
+        Returns the same response dict as create_completion().
+        """
+        import json
+
+        from lilux.primitives.http_client import ReturnSink
+
+        converted_messages = self._convert_messages(messages)
+        formatted_tools = self._format_tools(tools) if tools else []
+
+        params = {
+            "model": self.model,
+            "messages": converted_messages,
+            "max_tokens": 4096,
+            "stream": True,
+            "mode": "stream",
+        }
+        if formatted_tools:
+            params["tools"] = formatted_tools
+
+        return_sink = ReturnSink()
+        all_sinks = [return_sink] + (sinks or [])
+        params["__sinks"] = all_sinks
+
+        result = await self._dispatcher.dispatch({
+            "primary": "execute",
+            "item_type": "tool",
+            "item_id": self._provider_item_id,
+            "params": params,
+        })
+
+        if result.get("status") != "success":
+            from ..errors import ProviderCallError
+
+            if os.environ.get("RYE_DEBUG"):
+                logger.error("Streaming provider dispatch failed: %s", result)
+
+            data = result.get("data", {})
+            chain_error = result.get("error") or data.get("error")
+            if chain_error:
+                raise ProviderCallError(
+                    provider_id=self._provider_item_id,
+                    message=str(chain_error),
+                    error_type="tool_chain_error",
+                )
+
+            raise ProviderCallError(
+                provider_id=self._provider_item_id,
+                message=str(data or "Unknown streaming error"),
+                error_type="unknown",
+            )
+
+        events = return_sink.get_events()
+        return self._assemble_stream_response(events)
+
+    def _assemble_stream_response(self, events: List[str]) -> Dict:
+        """Assemble buffered SSE events into the same response dict as non-streaming."""
+        if self._response_format == "chat_completion":
+            return self._assemble_openai_stream(events)
+        return self._assemble_anthropic_stream(events)
+
+    def _assemble_openai_stream(self, events: List[str]) -> Dict:
+        import json
+
+        text_parts = []
+        tool_calls = {}  # index -> {id, name, arguments_parts}
+        finish_reason = "stop"
+        input_tokens = 0
+        output_tokens = 0
+
+        for raw in events:
+            if raw == "[DONE]":
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            choices = data.get("choices", [])
+            if not choices:
+                usage = data.get("usage", {})
+                input_tokens += usage.get("prompt_tokens", 0)
+                output_tokens += usage.get("completion_tokens", 0)
+                continue
+            choice = choices[0]
+            delta = choice.get("delta", {})
+            if "content" in delta and delta["content"]:
+                text_parts.append(delta["content"])
+            for tc in delta.get("tool_calls", []):
+                idx = tc.get("index", 0)
+                if idx not in tool_calls:
+                    tool_calls[idx] = {"id": "", "name": "", "arguments_parts": []}
+                if tc.get("id"):
+                    tool_calls[idx]["id"] = tc["id"]
+                func = tc.get("function", {})
+                if func.get("name"):
+                    tool_calls[idx]["name"] = func["name"]
+                if func.get("arguments"):
+                    tool_calls[idx]["arguments_parts"].append(func["arguments"])
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            usage = data.get("usage", {})
+            input_tokens += usage.get("prompt_tokens", 0)
+            output_tokens += usage.get("completion_tokens", 0)
+
+        assembled_calls = []
+        for idx in sorted(tool_calls):
+            tc = tool_calls[idx]
+            args_str = "".join(tc["arguments_parts"])
+            try:
+                args = json.loads(args_str) if args_str else {}
+            except (json.JSONDecodeError, ValueError):
+                args = {"_raw": args_str}
+            assembled_calls.append({"id": tc["id"], "name": tc["name"], "input": args})
+
+        pricing = self.config.get("pricing", {}).get(self.model, {})
+        spend = (input_tokens * pricing.get("input", 0.0) + output_tokens * pricing.get("output", 0.0)) / 1_000_000
+
+        return {
+            "text": "".join(text_parts),
+            "tool_calls": assembled_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "spend": spend,
+            "finish_reason": finish_reason,
+        }
+
+    def _assemble_anthropic_stream(self, events: List[str]) -> Dict:
+        import json
+
+        text_parts = []
+        tool_calls = []  # list of {id, name, input_parts}
+        current_block_index = -1
+        finish_reason = "end_turn"
+        input_tokens = 0
+        output_tokens = 0
+
+        for raw in events:
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            event_type = data.get("type", "")
+
+            if event_type == "message_start":
+                msg = data.get("message", {})
+                usage = msg.get("usage", {})
+                input_tokens += usage.get("input_tokens", 0)
+                output_tokens += usage.get("output_tokens", 0)
+
+            elif event_type == "content_block_start":
+                current_block_index += 1
+                block = data.get("content_block", {})
+                if block.get("type") == "text":
+                    pass  # text accumulated via deltas
+                elif block.get("type") == "tool_use":
+                    tool_calls.append({
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input_parts": [],
+                    })
+
+            elif event_type == "content_block_delta":
+                delta = data.get("delta", {})
+                delta_type = delta.get("type", "")
+                if delta_type == "text_delta":
+                    text_parts.append(delta.get("text", ""))
+                elif delta_type == "input_json_delta":
+                    if tool_calls:
+                        tool_calls[-1]["input_parts"].append(delta.get("partial_json", ""))
+
+            elif event_type == "message_delta":
+                delta = data.get("delta", {})
+                if delta.get("stop_reason"):
+                    finish_reason = delta["stop_reason"]
+                usage = data.get("usage", {})
+                output_tokens += usage.get("output_tokens", 0)
+
+        assembled_calls = []
+        for tc in tool_calls:
+            input_str = "".join(tc["input_parts"])
+            try:
+                inp = json.loads(input_str) if input_str else {}
+            except (json.JSONDecodeError, ValueError):
+                inp = {"_raw": input_str}
+            assembled_calls.append({"id": tc["id"], "name": tc["name"], "input": inp})
+
+        pricing = self.config.get("pricing", {}).get(self.model, {})
+        spend = (input_tokens * pricing.get("input", 0.0) + output_tokens * pricing.get("output", 0.0)) / 1_000_000
+
+        return {
+            "text": "".join(text_parts),
+            "tool_calls": assembled_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "spend": spend,
+            "finish_reason": finish_reason,
+        }

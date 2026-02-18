@@ -1,4 +1,4 @@
-# rye:signed:2026-02-18T07:53:57Z:d1c32443f6df75315744849578887c47a5825baa3d5e865bae3723f4d4281cd9:5qyxpQvsaA9Y0D_TL2BT7d0UqcD5l5HDK1-_VuxjTabfkVnEQJj3U4mD5VC4_2IZVFXmosVUGwefafnJvS3GAw==:440443d0858f0199
+# rye:signed:2026-02-18T08:24:39Z:9a513e5850c03361ed2d313ec2af7ba9b04190e62901bd2878d29c27cafaed68:QhdU7hS0y0FI-f2TlcJqZxXuc5DCRe0NL2OrhslI8SwJzcmrtVji-3zNqaCNCUMVBkHcOoeuwAZxgTS9aFfUCA==:440443d0858f0199
 """
 runner.py: Core LLM loop for thread execution
 
@@ -11,7 +11,7 @@ Main loop that:
 6. Repeats until completion or error
 """
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Core LLM loop for thread execution"
@@ -170,9 +170,22 @@ async def run(
             )
 
             try:
-                response = await provider.create_completion(
-                    messages, harness.available_tools
-                )
+                if provider.supports_streaming:
+                    from .events.transcript_sink import TranscriptSink
+                    stream_sink = TranscriptSink(
+                        transcript_path=transcript._path,
+                        thread_id=thread_id,
+                        response_format=getattr(provider, "_response_format", "content_blocks"),
+                        knowledge_path=transcript.knowledge_path,
+                        turn=cost["turns"],
+                    )
+                    response = await provider.create_streaming_completion(
+                        messages, harness.available_tools, sinks=[stream_sink]
+                    )
+                else:
+                    response = await provider.create_completion(
+                        messages, harness.available_tools
+                    )
             except Exception as e:
                 if os.environ.get("RYE_DEBUG"):
                     import traceback

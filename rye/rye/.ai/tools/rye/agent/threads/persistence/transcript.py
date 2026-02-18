@@ -1,4 +1,4 @@
-# rye:signed:2026-02-18T06:43:51Z:39965b86f823d3ad07817f664b5553afc24ceecfd2557de66aa4e8588449fad8:W_0rfr5xoY6q6wnBYauWB8qWvqozswo2Be88FCVOVUv49JH7JnYXVANizlergnyMPYz2VRkvbtenBkcwvw53CQ==:440443d0858f0199
+# rye:signed:2026-02-18T08:24:39Z:be854748fa87504f9679c24bb6f5da532a2255384a564e7087a3ea7860a42027:YVIZ9GMXZ1nTAQoK7Lp-d3Z7ehL7DIx1wKiYFdhhAHP0q8i_J68_OOknHdkkOWRI-PYgy5F54iP54bNk6AF8Ag==:440443d0858f0199
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -7,7 +7,7 @@ Events are appended to .ai/threads/{thread_id}/transcript.jsonl
 as newline-delimited JSON for crash resilience.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
 __tool_description__ = "Thread transcript JSONL persistence"
@@ -51,6 +51,15 @@ class Transcript:
     def get_events(self) -> List[Dict[str, Any]]:
         """Return accumulated events."""
         return list(self._events)
+
+    @property
+    def knowledge_path(self) -> Path:
+        """Path to the knowledge markdown file for this thread."""
+        knowledge_dir = self._project_path / AI_DIR / "knowledge" / "agent" / "threads"
+        thread_path = Path(self.thread_id)
+        if thread_path.parent != Path("."):
+            knowledge_dir = knowledge_dir / thread_path.parent
+        return knowledge_dir / f"{thread_path.name}.md"
 
     def reconstruct_messages(self) -> Optional[List[Dict]]:
         """Reconstruct conversation messages from transcript.jsonl.

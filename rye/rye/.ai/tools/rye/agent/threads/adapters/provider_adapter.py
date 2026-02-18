@@ -1,5 +1,5 @@
-# rye:signed:2026-02-16T06:57:00Z:eb2ef1388953958d162323b859940bb65cc18efaa1da8662faba0ce0640dccce:dviCmiIOhFeMCIDJbRDarfrXaWY8J2j-_BonDsNVXqhoq5rvAGg3Z3hZB_HiKypjMwbBAdi4MaBeAyNNBVWwCg==:440443d0858f0199
-__version__ = "1.1.0"
+# rye:signed:2026-02-18T08:09:06Z:48fa175334622448a0a623b772072d74ca007126d5b5c438db0e7ba343cecbab:p5gWujh4M2SZVDUtB3qHQqgIEibWsx8idE5G1rrOIItFHykleitBRIKpNLBg-WoMvsv6YYH2Hv7y50t3SA5cDQ==:440443d0858f0199
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Base provider adapter interface"
@@ -51,10 +51,19 @@ class ProviderAdapter:
             "Subclass ProviderAdapter and implement create_completion()."
         )
 
+    @property
+    def supports_streaming(self) -> bool:
+        """Whether this provider supports streaming completions."""
+        return False
+
     async def create_streaming_completion(
-        self, messages: List[Dict], tools: List[Dict]
-    ):
-        """Streaming variant — yields chunks."""
+        self, messages: List[Dict], tools: List[Dict], sinks: Any = None
+    ) -> Dict:
+        """Streaming variant with sink fan-out.
+
+        Sinks receive raw SSE events in real-time. Returns the same
+        response dict as create_completion() after stream completes.
+        """
         raise NotImplementedError(
             f"No streaming provider implementation for model '{self.model}'. "
             "Subclass ProviderAdapter and implement create_streaming_completion()."

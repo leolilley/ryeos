@@ -827,7 +827,9 @@ class PrimitiveExecutor:
                 config.update(element.config)
 
         # Merge runtime parameters (highest priority - override chain config)
-        config.update(parameters)
+        # Separate __dunder keys (non-serializable passthrough like __sinks)
+        passthrough = {k: v for k, v in parameters.items() if k.startswith("__")}
+        config.update({k: v for k, v in parameters.items() if not k.startswith("__")})
 
         # Apply environment
         config["env"] = resolved_env
@@ -843,11 +845,12 @@ class PrimitiveExecutor:
             tool_element = chain[0]
             config["tool_path"] = str(tool_element.path)
 
-            # Build params_json from parameters (excluding config keys)
+            # Build params_json from parameters (excluding config keys and non-serializable)
             tool_params = {
                 k: v
                 for k, v in parameters.items()
                 if k not in ("command", "args", "cwd", "env", "timeout")
+                and not k.startswith("__")
             }
             config["params_json"] = json.dumps(tool_params)
 
@@ -864,6 +867,9 @@ class PrimitiveExecutor:
                 for k, v in config["body"].items()
                 if not (isinstance(v, str) and re.match(r"^\{\w+\}$", v.strip()))
             }
+
+        # Re-inject passthrough keys for primitive access
+        config.update(passthrough)
 
         return config
 
@@ -904,6 +910,11 @@ class PrimitiveExecutor:
                     return shlex.quote(value)
             return value
 
+        # Env var names: uppercase letters, digits, underscores only.
+        # This excludes dotted paths like ${state.issues} which belong to
+        # the context interpolation system (loaders/interpolation.py).
+        _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*(?::-[^}]*)?)\}")
+
         def substitute_env(value: Any) -> Any:
             """Substitute ${VAR} with environment values (with escaping)."""
             if isinstance(value, str):
@@ -917,7 +928,7 @@ class PrimitiveExecutor:
                         raw_value = env.get(var_expr, "")
                     return str(escape_shell_value(raw_value)) if raw_value else ""
 
-                return re.sub(r"\$\{([^}]+)\}", replace_var, value)
+                return _ENV_VAR_RE.sub(replace_var, value)
             elif isinstance(value, dict):
                 return {k: substitute_env(v) for k, v in value.items()}
             elif isinstance(value, list):

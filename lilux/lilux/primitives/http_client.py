@@ -190,8 +190,7 @@ class HttpClientPrimitive:
                 raise ValueError("url is required in config")
 
             headers = config.get("headers", {})
-            body_config = config.get("body")
-            body = self._template_body(body_config, params) if body_config else None
+            body = config.get("body")
             timeout = config.get("timeout", 30)
             auth_config = config.get("auth", {})
 
