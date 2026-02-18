@@ -41,20 +41,20 @@ config_schema:
       default: "."
 
 config:
-  start: first_node       # Entry node
-  max_steps: 10            # Safety limit — prevents infinite loops
+  start: first_node # Entry node
+  max_steps: 10 # Safety limit — prevents infinite loops
 
   nodes:
     first_node:
-      action:              # Action dict — same format as everywhere in Rye
+      action: # Action dict — same format as everywhere in Rye
         primary: execute
         item_type: tool
         item_id: rye/bash/bash
         params:
           command: "echo hello"
-      assign:              # State mutations — write action results into state
+      assign: # State mutations — write action results into state
         greeting: "${result.stdout}"
-      next: second_node    # Unconditional edge — string
+      next: second_node # Unconditional edge — string
 
     second_node:
       action:
@@ -63,16 +63,16 @@ config:
         item_id: rye/bash/bash
         params:
           command: "echo ${state.greeting}"
-      next:                # Conditional edges — list of {to, when}
+      next: # Conditional edges — list of {to, when}
         - to: happy_path
           when:
             path: "state.greeting"
-            operator: "contains"
+            op: "contains"
             value: "hello"
-        - to: fallback     # Last entry without `when` acts as default
+        - to: fallback # Last entry without `when` acts as default
 
     happy_path:
-      type: return         # Terminates the graph and returns state
+      type: return # Terminates the graph and returns state
 
     fallback:
       type: return
@@ -80,19 +80,49 @@ config:
 
 ### Node Types
 
-| Type | Behavior |
-|------|----------|
-| *(default)* | Execute `action`, apply `assign`, follow `next` |
-| `return` | Terminate the graph and return current state |
-| `foreach` | Iterate over a collection, executing the node body per item |
+| Type        | Behavior                                                    |
+| ----------- | ----------------------------------------------------------- |
+| _(default)_ | Execute `action`, apply `assign`, follow `next`             |
+| `return`    | Terminate the graph and return current state                |
+| `foreach`   | Iterate over a collection, executing the action per item    |
+
+### Foreach Nodes
+
+Foreach nodes iterate over a list in state, executing an action for each item:
+
+```yaml
+fan_out:
+  type: foreach
+  over: "${state.tasks}"         # Expression resolving to a list
+  as: task                       # Variable name for current item
+  action:                        # Action to execute per item
+    primary: execute
+    item_type: tool
+    item_id: rye/agent/threads/thread_directive
+    params:
+      directive_name: my/directive
+      inputs:
+        text: "${task.text}"
+        output_path: "${task.output_path}"
+  collect: results               # Optional — collect return values into state
+  next: process_results
+```
+
+- **`over`** — Expression resolving to a list (e.g., `${state.items}`)
+- **`as`** — Variable name bound to each item during iteration
+- **`action`** — Standard action dict executed per item
+- **`collect`** — Optional state key to store collected results as a list
+- **Parallel mode** — When the action has `async_exec: true` in params, iterations dispatch concurrently via `asyncio.gather`
+
+Items in `over` can be dicts, enabling dotted access: if `task` is `{text: "...", path: "..."}`, then `${task.text}` resolves correctly.
 
 ### Edge Formats
 
-| Format | Example | Behavior |
-|--------|---------|----------|
-| String | `next: done` | Unconditional — always go to `done` |
-| List of `{to, when}` | See above | Conditional — first matching `when` wins |
-| Omitted | *(no `next` key)* | Implicit return — graph terminates |
+| Format               | Example           | Behavior                                 |
+| -------------------- | ----------------- | ---------------------------------------- |
+| String               | `next: done`      | Unconditional — always go to `done`      |
+| List of `{to, when}` | See above         | Conditional — first matching `when` wins |
+| Omitted              | _(no `next` key)_ | Implicit return — graph terminates       |
 
 ## How It Works (The Execution Chain)
 
@@ -107,6 +137,7 @@ graph tool YAML  →  state_graph_runtime  →  subprocess primitive
 This mirrors the standard tool chain — e.g., `my_tool.py → python_function_runtime → subprocess`. The runtime YAML uses an inline `-c` script that locates `state_graph_walker.py` via `{runtime_lib}` (the anchor lib path).
 
 The walker:
+
 1. Loads the graph definition from the tool YAML
 2. Initializes or resumes state
 3. Loops: execute current node's action → apply assign → evaluate edges → move to next node
@@ -119,11 +150,27 @@ Graph templates use `${dotted.path}` syntax — System 3 from the templating doc
 
 ### Available Namespaces
 
-| Namespace | Contents |
-|-----------|----------|
-| `${state.*}` | Current graph state (accumulated `assign` values) |
-| `${inputs.*}` | Graph input parameters (from `config_schema`) |
+| Namespace     | Contents                                                               |
+| ------------- | ---------------------------------------------------------------------- |
+| `${state.*}`  | Current graph state (accumulated `assign` values)                      |
+| `${inputs.*}` | Graph input parameters (from `config_schema`)                          |
 | `${result.*}` | Output of the current node's action (available in `assign` and `next`) |
+
+### Path Resolution
+
+Dotted paths support both dict key lookups and numeric list indices:
+
+```yaml
+# Dict access
+command: "echo ${state.greeting}"
+
+# List index access
+code: "${state.file_contents.0.stdout}"    # First item's stdout
+path: "${state.files.1.analysis_path}"     # Second item's analysis_path
+
+# Nested — list item is a dict
+text: "${state.tasks.2.text}"              # Third task's text field
+```
 
 ### Type Preservation
 
@@ -131,15 +178,15 @@ When `${path}` is the **entire expression** (the whole string value), the resolv
 
 ```yaml
 assign:
-  count: "${result.stdout}"       # If stdout is an int, count is an int
-  items: "${result.data}"         # If data is a list, items is a list
+  count: "${result.stdout}" # If stdout is an int, count is an int
+  items: "${result.data}" # If data is a list, items is a list
 ```
 
 When `${path}` appears **inside** a larger string, string conversion is used:
 
 ```yaml
 params:
-  command: "Found ${state.count} files"   # Always a string
+  command: "Found ${state.count} files" # Always a string
 ```
 
 ## Permissions
@@ -163,10 +210,10 @@ rye_execute(
 
 - **Capability format:** `rye.<primary>.<item_type>.<dotted.item.id>` with fnmatch wildcards
 
-| Example | Grants |
-|---------|--------|
-| `rye.execute.tool.*` | Execute any tool |
-| `rye.execute.tool.rye.bash.bash` | Execute only `rye/bash/bash` |
+| Example                           | Grants                                 |
+| --------------------------------- | -------------------------------------- |
+| `rye.execute.tool.*`              | Execute any tool                       |
+| `rye.execute.tool.rye.bash.bash`  | Execute only `rye/bash/bash`           |
 | `rye.load.knowledge.my-project.*` | Load any knowledge under `my-project/` |
 
 ## Result Unwrapping
@@ -180,10 +227,14 @@ When a node's action executes a tool, the raw result is an `ExecuteTool` envelop
 The walker **unwraps** this envelope — it lifts `data` to the top level and drops envelope keys (`chain`, `metadata`, `path`, `source`, `resolved_env_keys`). After unwrapping:
 
 ```json
-{"stdout": "42", "stderr": "", "exit_code": 0}
+{ "stdout": "42", "stderr": "", "exit_code": 0 }
 ```
 
 This is why `${result.stdout}` in `assign` expressions works naturally — you reference the inner data fields directly.
+
+### Error Propagation
+
+If the outer envelope has `status: "error"` **or** the inner data has `success: false`, the unwrapped result gets `status: "error"` injected. This ensures the walker's error handling (`on_error` edges, hooks, `error_mode`) fires correctly for tool failures like non-zero bash exit codes.
 
 ## State Persistence
 
@@ -212,16 +263,18 @@ The walker loads the persisted state and continues from the last saved node.
 
 ## Error Handling
 
-### Node-Level Error Policy
+### Graph-Level Error Policy
 
-| Policy | Behavior |
-|--------|----------|
-| `on_error: "fail"` (default) | Stop the graph on the first error |
-| `on_error: "continue"` | Skip `assign`, proceed to edge evaluation |
+Set `on_error` in `config` to control the default behavior for all nodes:
 
-### Error Edges
+| Policy                       | Behavior                                              |
+| ---------------------------- | ----------------------------------------------------- |
+| `on_error: "fail"` (default) | Stop the graph on the first error                     |
+| `on_error: "continue"`       | Skip `assign`, proceed to `next` edge evaluation      |
 
-Nodes can route on errors using `when` conditions that check `state._last_error`:
+### Node-Level Error Edges
+
+Individual nodes can define `on_error: <node_name>` to route to a recovery node when the action fails. This takes priority over the graph-level policy:
 
 ```yaml
 nodes:
@@ -232,13 +285,22 @@ nodes:
       item_id: rye/bash/bash
       params:
         command: "might-fail"
-    on_error: continue
-    next:
-      - to: handle_error
-        when:
-          path: "state._last_error"
-      - to: success_path
+    on_error: handle_error     # Route to recovery node on failure
+    next: success_path         # Normal path on success
+
+  handle_error:
+    action:
+      primary: execute
+      item_type: tool
+      item_id: rye/bash/bash
+      params:
+        command: "echo 'recovered'"
+    assign:
+      recovery_note: "Error was caught"
+    next: success_path
 ```
+
+When an error occurs, `state._last_error` is populated with `{node, error}` regardless of which error handling path is taken.
 
 ### Hook-Based Retry
 
@@ -259,13 +321,13 @@ State graphs use the same hook infrastructure as directives.
 
 ### Supported Events
 
-| Event | Fires When |
-|-------|------------|
-| `graph_started` | Graph execution begins |
-| `after_step` | A node completes (action + assign + edge evaluation) |
-| `error` | A node action fails |
-| `limit` | `max_steps` reached |
-| `graph_completed` | Graph terminates (via `return` node or final edge) |
+| Event             | Fires When                                           |
+| ----------------- | ---------------------------------------------------- |
+| `graph_started`   | Graph execution begins                               |
+| `after_step`      | A node completes (action + assign + edge evaluation) |
+| `error`           | A node action fails                                  |
+| `limit`           | `max_steps` reached                                  |
+| `graph_completed` | Graph terminates (via `return` node or final edge)   |
 
 ### Declaration
 
@@ -354,15 +416,42 @@ Result: `{"file_count": "42", "line_count": "1337", "_status": "completed"}`.
 
 ## State Graphs vs Thread Orchestration
 
-| | State Graphs | Thread Orchestration |
-|---|---|---|
-| **Flow** | Deterministic — edges defined in YAML | LLM-driven — model reasons about next step |
-| **Best for** | Data-driven pipelines where the flow is known in advance | Workflows that need reasoning, judgment, or adaptation |
-| **Cost** | Minimal — no LLM calls for routing | Higher — LLM calls at every step |
-| **Flexibility** | Fixed graph structure | Fully dynamic — model can change course |
-| **Debugging** | Read the YAML, follow the edges | Read the transcript |
+|                 | State Graphs                                             | Thread Orchestration                                   |
+| --------------- | -------------------------------------------------------- | ------------------------------------------------------ |
+| **Flow**        | Deterministic — edges defined in YAML                    | LLM-driven — model reasons about next step             |
+| **Best for**    | Data-driven pipelines where the flow is known in advance | Workflows that need reasoning, judgment, or adaptation |
+| **Cost**        | Minimal — no LLM calls for routing                       | Higher — LLM calls at every step                       |
+| **Flexibility** | Fixed graph structure                                    | Fully dynamic — model can change course                |
+| **Debugging**   | Read the YAML, follow the edges                          | Read the transcript                                    |
 
 **Combining them:** Graph nodes can spawn `thread_directive` children for steps that need LLM reasoning. Use graphs for the deterministic scaffold and threads for the intelligent steps.
+
+## Async Graph Execution
+
+Graphs support `async_exec: true` — same pattern as `thread_directive`. The caller returns immediately with a `graph_run_id` while the graph runs in the background.
+
+```python
+rye_execute(
+    item_type="tool",
+    item_id="my-project/workflows/my_graph",
+    parameters={
+        "directory": ".",
+        "async_exec": True,
+        "capabilities": ["rye.execute.tool.*"],
+        "depth": 5
+    }
+)
+# Returns immediately:
+# {"success": true, "graph_run_id": "my_graph-1739820456", "status": "running", "pid": 12345}
+```
+
+The background process:
+- Forks via `os.fork()` and daemonizes (`os.setsid()`)
+- Runs the graph to completion, updating the thread registry
+- Writes stderr to `.ai/threads/<graph_run_id>/async.log` for debugging
+- Updates registry status to `completed` or `error` on finish
+
+Monitor progress by querying the thread registry or checking the persisted state knowledge item.
 
 ## What's Next
 
@@ -372,10 +461,10 @@ Result: `{"file_count": "42", "line_count": "1337", "_status": "completed"}`.
 
 ## Implementation Files
 
-| Component | File |
-|-----------|------|
-| Graph walker | `.ai/tools/rye/core/runtimes/state_graph_walker.py` |
-| Runtime YAML | `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml` |
-| Interpolation | `.ai/tools/rye/agent/threads/loaders/interpolation.py` |
+| Component           | File                                                         |
+| ------------------- | ------------------------------------------------------------ |
+| Graph walker        | `.ai/tools/rye/core/runtimes/state_graph_walker.py`          |
+| Runtime YAML        | `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml`       |
+| Interpolation       | `.ai/tools/rye/agent/threads/loaders/interpolation.py`       |
 | Condition evaluator | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` |
-| Thread registry | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` |
+| Thread registry     | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` |
