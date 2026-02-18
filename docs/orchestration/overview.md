@@ -160,6 +160,7 @@ Call the scoring tool → return score. No reasoning, no knowledge loading.
 
 ## What's Next
 
+- [State Graphs](./state-graphs.md) — Declarative, code-free workflow definitions as YAML graph tools
 - [Thread Lifecycle](./thread-lifecycle.md) — How threads are created, executed, and finalized
 - [Spawning Children](./spawning-children.md) — How to spawn, coordinate, and collect results
 - [Safety and Limits](./safety-and-limits.md) — Cost controls and the SafetyHarness

@@ -293,6 +293,9 @@ class PrimitiveExecutor:
                 parameters = {**(parameters or {}), "cwd": cwd}
 
             # 6. Execute via the root primitive
+            # Inject anchor context vars so {runtime_lib}, {anchor_path},
+            # {tool_dir}, {tool_parent} are available for subprocess templating
+            parameters = {**anchor_ctx, **(parameters or {})}
             result = await self._execute_chain(chain, parameters, resolved_env)
 
             # 7. Create lockfile if execution succeeded and none exists
@@ -757,7 +760,11 @@ class PrimitiveExecutor:
                         # Extract error from tool output if present
                         if isinstance(parsed_data, dict):
                             if not parsed_data.get("success", True) and not error_msg:
-                                error_msg = parsed_data.get("error", "")
+                                error_msg = (
+                                    parsed_data.get("error")
+                                    or parsed_data.get("stderr")
+                                    or ""
+                                )
                     except json.JSONDecodeError:
                         pass
 
@@ -828,8 +835,15 @@ class PrimitiveExecutor:
 
         # Merge runtime parameters (highest priority - override chain config)
         # Separate __dunder keys (non-serializable passthrough like __sinks)
+        # Exclude keys that collide with primitive config (command, args, timeout, cwd)
+        # — those are tool parameters that belong in params_json, not in the
+        # subprocess config.  Anchor context keys are safe to merge.
+        _CONFIG_KEYS = frozenset(("command", "args"))
         passthrough = {k: v for k, v in parameters.items() if k.startswith("__")}
-        config.update({k: v for k, v in parameters.items() if not k.startswith("__")})
+        config.update({
+            k: v for k, v in parameters.items()
+            if not k.startswith("__") and k not in _CONFIG_KEYS
+        })
 
         # Apply environment
         config["env"] = resolved_env
@@ -845,11 +859,19 @@ class PrimitiveExecutor:
             tool_element = chain[0]
             config["tool_path"] = str(tool_element.path)
 
-            # Build params_json from parameters (excluding config keys and non-serializable)
+            # Build params_json from parameters (excluding anchor context
+            # keys and non-serializable — these are execution metadata,
+            # not tool parameters)
+            _EXCLUDE_FROM_PARAMS = frozenset((
+                "env",
+                "tool_path", "tool_dir", "tool_parent",
+                "anchor_path", "runtime_lib",
+                "project_path", "user_space", "system_space",
+            ))
             tool_params = {
                 k: v
                 for k, v in parameters.items()
-                if k not in ("command", "args", "cwd", "env", "timeout")
+                if k not in _EXCLUDE_FROM_PARAMS
                 and not k.startswith("__")
             }
             config["params_json"] = json.dumps(tool_params)

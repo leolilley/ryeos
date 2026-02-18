@@ -1,0 +1,77 @@
+# rye:signed:2026-02-18T09:38:17Z:302160e5d26521240490de797a24d3dd621b494e0cc1fb3619d80293de92da19:UIMXuqZUarxrKao6WwjgHd8mXLW32Z8GNPypdBiz8CeTVEWLo391hXEfSh08MtuQNFZ-5heUmGkDFmMY6bpuDA==:440443d0858f0199
+version: "1.0.0"
+tool_type: graph
+executor_id: rye/core/runtimes/state_graph_runtime
+category: graphs
+description: "Read a Python file, analyze it with an LLM, and produce a structured report"
+
+config_schema:
+  type: object
+  properties:
+    file_path:
+      type: string
+      description: "Path to the Python file to analyze (relative to project)"
+    output_dir:
+      type: string
+      default: "graph-output"
+      description: "Output directory for reports"
+  required: [file_path]
+
+config:
+  start: read_file
+  max_steps: 15
+
+  nodes:
+    read_file:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat ${inputs.file_path}"
+      assign:
+        source_code: "${result.stdout}"
+      next: analyze
+
+    analyze:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/analyze_code
+          inputs:
+            code_snippet: "${state.source_code}"
+            output_path: "${inputs.output_dir}/analysis.json"
+          limit_overrides:
+            turns: 6
+            spend: 0.05
+      assign:
+        analysis_result: "${result.result}"
+        thread_id: "${result.thread_id}"
+      next: read_analysis
+
+    read_analysis:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat ${inputs.output_dir}/analysis.json 2>/dev/null || echo '{\"error\": \"file not found\"}'"
+      assign:
+        analysis_json: "${result.stdout}"
+      next: write_report
+
+    write_report:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "mkdir -p ${inputs.output_dir} && echo '# Code Analysis Report\n\n## Source File\n${inputs.file_path}\n\n## Analysis\n${state.analysis_json}\n\n## Thread\n${state.thread_id}' > ${inputs.output_dir}/report.md"
+      assign:
+        report_written: "${result.success}"
+      next: done
+
+    done:
+      type: return

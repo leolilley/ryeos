@@ -1,0 +1,69 @@
+# rye:signed:2026-02-18T09:47:12Z:81126a429eb6476f2b5ccf06608ca6bef80b1f2edb88aaeb21e9b27bc617d094:P8zjE0V4tvI5JBnsPFyeWFAPuX7EbLwChg3BBcm1J8gq8XEG2HsrhmCadgIudxSQKyzDAAxK0vd9EGJtSIE7BA==:440443d0858f0199
+version: "1.0.0"
+tool_type: graph
+executor_id: rye/core/runtimes/state_graph_runtime
+category: graphs
+description: "Fan out LLM threads to summarize multiple topics in parallel, then collect results"
+
+config_schema:
+  type: object
+  properties:
+    output_dir:
+      type: string
+      default: "graph-output/fanout"
+  required: []
+
+config:
+  start: setup_topics
+  max_steps: 25
+
+  nodes:
+    setup_topics:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "mkdir -p ${inputs.output_dir} && echo 'setup complete'"
+      assign:
+        tasks:
+          - text: "The history and impact of the Unix operating system on modern computing"
+            output_path: "${inputs.output_dir}/summary_0.md"
+          - text: "How neural networks learn through backpropagation"
+            output_path: "${inputs.output_dir}/summary_1.md"
+          - text: "The role of type systems in preventing software bugs"
+            output_path: "${inputs.output_dir}/summary_2.md"
+      next: fan_out_summaries
+
+    fan_out_summaries:
+      type: foreach
+      over: "${state.tasks}"
+      as: task
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/summarize_text
+          inputs:
+            text: "${task.text}"
+            output_path: "${task.output_path}"
+          limit_overrides:
+            turns: 4
+            spend: 0.03
+      collect: summary_results
+      next: collect_results
+
+    collect_results:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "echo '# Fan-Out Results' > ${inputs.output_dir}/combined.md && for f in ${inputs.output_dir}/summary_*.md; do echo '' >> ${inputs.output_dir}/combined.md && echo '---' >> ${inputs.output_dir}/combined.md && cat \"$f\" >> ${inputs.output_dir}/combined.md 2>/dev/null; done && echo 'collected' && cat ${inputs.output_dir}/combined.md"
+      assign:
+        combined_report: "${result.stdout}"
+      next: done
+
+    done:
+      type: return

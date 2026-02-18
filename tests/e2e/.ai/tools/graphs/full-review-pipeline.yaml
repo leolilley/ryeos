@@ -1,0 +1,341 @@
+# rye:signed:2026-02-18T10:01:47Z:573610067d12c8cb2ce0f4bb17930b54b3a09404a2aef3ce9de5e31c0d952d91:P3aXFE1wR4pDuk2_ywzjfAec7eujwpDUJTXMzjISdUs4aMTl0MvRgi6eKzXMHHTsmvSFrTHunsTYqdyvUlacCA==:440443d0858f0199
+version: "1.0.0"
+tool_type: graph
+executor_id: rye/core/runtimes/state_graph_runtime
+category: graphs
+description: "Complex pipeline: foreach analysis, conditional routing, nested LLM thread spawning via orchestrate_review, and nested graph execution"
+
+config_schema:
+  type: object
+  properties:
+    output_dir:
+      type: string
+      default: "graph-output/full-review"
+  required: []
+
+config:
+  start: setup
+  max_steps: 30
+  on_error: continue
+
+  nodes:
+    # ── Phase 1: Setup ──────────────────────────────────────────────
+    setup:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "mkdir -p ${inputs.output_dir}/samples ${inputs.output_dir}/analyses && echo 'setup done'"
+      next: generate_samples
+
+    generate_samples:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: |
+            cat > ${inputs.output_dir}/samples/utils.py << 'PYEOF'
+            import hashlib
+            import hmac
+            import os
+            from typing import Optional
+
+            def generate_token(length: int = 32) -> str:
+                return os.urandom(length).hex()
+
+            def hash_password(password: str, salt: Optional[str] = None) -> tuple:
+                if salt is None:
+                    salt = os.urandom(16).hex()
+                hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+                return hashed.hex(), salt
+
+            def verify_password(password: str, hashed: str, salt: str) -> bool:
+                new_hash, _ = hash_password(password, salt)
+                return hmac.compare_digest(new_hash, hashed)
+
+            def sanitize_input(text: str) -> str:
+                dangerous = ['<script>', '</script>', 'javascript:', 'onerror=']
+                result = text
+                for pattern in dangerous:
+                    result = result.replace(pattern, '')
+                return result.strip()
+            PYEOF
+            cat > ${inputs.output_dir}/samples/cache.py << 'PYEOF'
+            import time
+            from collections import OrderedDict
+            from threading import Lock
+
+            class LRUCache:
+                def __init__(self, capacity: int = 128, ttl: int = 300):
+                    self.capacity = capacity
+                    self.ttl = ttl
+                    self.cache = OrderedDict()
+                    self.timestamps = {}
+                    self.lock = Lock()
+
+                def get(self, key: str):
+                    with self.lock:
+                        if key not in self.cache:
+                            return None
+                        if time.time() - self.timestamps[key] > self.ttl:
+                            del self.cache[key]
+                            del self.timestamps[key]
+                            return None
+                        self.cache.move_to_end(key)
+                        return self.cache[key]
+
+                def put(self, key: str, value) -> None:
+                    with self.lock:
+                        if key in self.cache:
+                            self.cache.move_to_end(key)
+                        self.cache[key] = value
+                        self.timestamps[key] = time.time()
+                        if len(self.cache) > self.capacity:
+                            oldest = next(iter(self.cache))
+                            del self.cache[oldest]
+                            del self.timestamps[oldest]
+
+                def invalidate(self, key: str) -> bool:
+                    with self.lock:
+                        if key in self.cache:
+                            del self.cache[key]
+                            del self.timestamps[key]
+                            return True
+                        return False
+
+                def clear(self) -> int:
+                    with self.lock:
+                        count = len(self.cache)
+                        self.cache.clear()
+                        self.timestamps.clear()
+                        return count
+            PYEOF
+            echo "generated 2 sample files"
+      assign:
+        files:
+          - path: "${inputs.output_dir}/samples/utils.py"
+            analysis_path: "${inputs.output_dir}/analyses/utils_analysis.json"
+          - path: "${inputs.output_dir}/samples/cache.py"
+            analysis_path: "${inputs.output_dir}/analyses/cache_analysis.json"
+      next: analyze_files
+
+    # ── Phase 2: Fan-out analysis ───────────────────────────────────
+    analyze_files:
+      type: foreach
+      over: "${state.files}"
+      as: file_info
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat ${file_info.path}"
+      collect: file_contents
+      next: analyze_first
+
+    analyze_first:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/analyze_code
+          inputs:
+            code_snippet: "${state.file_contents.0.stdout}"
+            output_path: "${state.files.0.analysis_path}"
+          limit_overrides:
+            turns: 6
+            spend: 0.05
+      assign:
+        analysis_thread_1: "${result.thread_id}"
+      next: analyze_second
+
+    analyze_second:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/analyze_code
+          inputs:
+            code_snippet: "${state.file_contents.1.stdout}"
+            output_path: "${state.files.1.analysis_path}"
+          limit_overrides:
+            turns: 6
+            spend: 0.05
+      assign:
+        analysis_thread_2: "${result.thread_id}"
+      next: collect_analyses
+
+    # ── Phase 3: Collect and evaluate ───────────────────────────────
+    collect_analyses:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: |
+            echo '{"analyses": [' > ${inputs.output_dir}/combined_analyses.json
+            cat ${inputs.output_dir}/analyses/utils_analysis.json >> ${inputs.output_dir}/combined_analyses.json
+            echo ',' >> ${inputs.output_dir}/combined_analyses.json
+            cat ${inputs.output_dir}/analyses/cache_analysis.json >> ${inputs.output_dir}/combined_analyses.json
+            echo ']}' >> ${inputs.output_dir}/combined_analyses.json
+            # Count total functions across both analyses
+            total=$(python3 -c "
+            import json
+            with open('${inputs.output_dir}/analyses/utils_analysis.json') as f: a1 = json.load(f)
+            with open('${inputs.output_dir}/analyses/cache_analysis.json') as f: a2 = json.load(f)
+            print(a1.get('function_count', 0) + a2.get('function_count', 0))
+            ")
+            echo "$total"
+      assign:
+        total_functions: "${result.stdout}"
+      next: check_complexity
+
+    check_complexity:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "echo 'total_functions=${state.total_functions}'"
+      next:
+        - when:
+            path: state.total_functions
+            op: gt
+            value: "5"
+          to: deep_review
+        - to: quick_summary
+
+    # ── Phase 4a: Deep review (complex path) ────────────────────────
+    # Uses orchestrate_review which spawns NESTED LLM threads
+    deep_review:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat ${inputs.output_dir}/samples/utils.py"
+      assign:
+        review_code: "${result.stdout}"
+      next: run_orchestrate
+
+    run_orchestrate:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/orchestrate_review
+          inputs:
+            code_snippet: "${state.review_code}"
+            output_dir: "${inputs.output_dir}"
+          limit_overrides:
+            turns: 12
+            spend: 0.15
+      assign:
+        orchestrate_thread: "${result.thread_id}"
+        orchestrate_result: "${result.result}"
+      next: run_nested_graph
+
+    # ── Phase 4b: Quick summary (simple path) ───────────────────────
+    quick_summary:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat ${inputs.output_dir}/combined_analyses.json"
+      assign:
+        summary_input: "${result.stdout}"
+      next: run_quick_summary_thread
+
+    run_quick_summary_thread:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/summarize_text
+          inputs:
+            text: "${state.summary_input}"
+            output_path: "${inputs.output_dir}/quick_summary.md"
+          limit_overrides:
+            turns: 4
+            spend: 0.03
+      assign:
+        summary_thread: "${result.thread_id}"
+      next: run_nested_graph
+
+    # ── Phase 5: Nested graph execution ─────────────────────────────
+    # Runs the code-analysis-pipeline graph as a tool within this graph
+    run_nested_graph:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: graphs/code-analysis-pipeline
+        params:
+          file_path: "${state.files.1.path}"
+          output_dir: "${inputs.output_dir}/nested-pipeline"
+          capabilities:
+            - "rye.execute.tool.*"
+            - "rye.execute.directive.*"
+            - "rye.search.*"
+            - "rye.load.*"
+            - "rye.sign.*"
+          depth: 5
+      assign:
+        nested_result: "${result.success}"
+      on_error: handle_nested_error
+      next: final_report
+
+    handle_nested_error:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "echo 'Nested graph failed, continuing with partial results'"
+      assign:
+        nested_result: "failed"
+      next: final_report
+
+    # ── Phase 6: Final report ───────────────────────────────────────
+    final_report:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: |
+            cat > ${inputs.output_dir}/final_report.md << 'REPORTEOF'
+            # Full Review Pipeline Report
+
+            ## Pipeline Summary
+            - Analysis threads: 2 files analyzed
+            - Total functions found: ${state.total_functions}
+            - Nested graph result: ${state.nested_result}
+
+            ## Analysis Results
+            REPORTEOF
+            echo '### utils.py' >> ${inputs.output_dir}/final_report.md
+            cat ${inputs.output_dir}/analyses/utils_analysis.json >> ${inputs.output_dir}/final_report.md 2>/dev/null
+            echo '' >> ${inputs.output_dir}/final_report.md
+            echo '### cache.py' >> ${inputs.output_dir}/final_report.md
+            cat ${inputs.output_dir}/analyses/cache_analysis.json >> ${inputs.output_dir}/final_report.md 2>/dev/null
+            echo '' >> ${inputs.output_dir}/final_report.md
+            echo '## Review / Summary' >> ${inputs.output_dir}/final_report.md
+            cat ${inputs.output_dir}/orchestrated_review.md >> ${inputs.output_dir}/final_report.md 2>/dev/null
+            cat ${inputs.output_dir}/quick_summary.md >> ${inputs.output_dir}/final_report.md 2>/dev/null
+            echo '' >> ${inputs.output_dir}/final_report.md
+            echo '## Nested Pipeline Output' >> ${inputs.output_dir}/final_report.md
+            cat ${inputs.output_dir}/nested-pipeline/report.md >> ${inputs.output_dir}/final_report.md 2>/dev/null
+            echo 'report complete' && cat ${inputs.output_dir}/final_report.md
+      assign:
+        final_report: "${result.stdout}"
+      next: done
+
+    done:
+      type: return

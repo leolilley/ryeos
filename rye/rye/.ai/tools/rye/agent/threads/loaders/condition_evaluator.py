@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T05:32:06Z:2ac99285fba49d0a2e448bb536e37bdd0eefb35baeea409000b1e49bc6b0f815:eQASq0C8NaeNYCJeiKNBjtatqTCOp7bD_wXyyOCMDpA6X7cuqwMrA9U2KOLzQiMIfmiCVndJiJQpRG1Y23oQDA==:440443d0858f0199
+# rye:signed:2026-02-18T10:01:47Z:5900ba6007a4cfba000794e435d755b651cbd9e7059898c2e59083cc06782d35:FiUhmEecSyVY8cdUZyyenBsp96_QK0WQSIApPhZu51CZePTlYoQUHq1iaxuZ-APfdYVElCR_ceNuDHCGW50dCw==:440443d0858f0199
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -34,7 +34,11 @@ def matches(doc: Dict, condition: Dict) -> bool:
 
 
 def resolve_path(doc: Dict, path: str) -> Any:
-    """Resolve a dotted path in a nested dict."""
+    """Resolve a dotted path in a nested dict/list structure.
+
+    Supports dict key lookups and numeric list indices:
+        state.items.0.name  →  state["items"][0]["name"]
+    """
     if not path:
         return doc
     parts = path.split(".")
@@ -42,6 +46,11 @@ def resolve_path(doc: Dict, path: str) -> Any:
     for part in parts:
         if isinstance(current, dict):
             current = current.get(part)
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return None
         else:
             return None
     return current

@@ -1,0 +1,174 @@
+# rye:signed:2026-02-18T09:50:51Z:85fc1702dd031e6528cd4c1c0a42e1813f94152fe8564af2f15fd852e164da4c:xxjatDy2Ok132tZRNY4rtZGnPlGWuKW2je3Af2zO3WkAYlvz31S7UZe3ZYjoJSGnj_OaapM0PkLHMk27kFwWAQ==:440443d0858f0199
+version: "1.0.0"
+tool_type: graph
+executor_id: rye/core/runtimes/state_graph_runtime
+category: graphs
+description: "Test conditional branching, on_error recovery, and state accumulation"
+
+config_schema:
+  type: object
+  properties:
+    output_dir:
+      type: string
+      default: "graph-output/conditional"
+  required: []
+
+config:
+  start: setup
+  max_steps: 20
+  on_error: continue
+
+  nodes:
+    setup:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "mkdir -p ${inputs.output_dir} && echo 'setup done'"
+      assign:
+        mode: "analyze"
+        attempts: 0
+      next: classify_mode
+
+    # Conditional branching: route based on state.mode
+    classify_mode:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "echo 'routing mode=${state.mode}'"
+      next:
+        - when:
+            path: state.mode
+            op: eq
+            value: "analyze"
+          to: run_analysis
+        - when:
+            path: state.mode
+            op: eq
+            value: "summarize"
+          to: run_summary
+        - to: handle_unknown_mode  # default fallback
+
+    # Happy path: analyze code via LLM
+    run_analysis:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/analyze_code
+          inputs:
+            code_snippet: |
+              def fibonacci(n):
+                  if n <= 1:
+                      return n
+                  return fibonacci(n - 1) + fibonacci(n - 2)
+
+              def factorial(n):
+                  result = 1
+                  for i in range(2, n + 1):
+                      result *= i
+                  return result
+            output_path: "${inputs.output_dir}/analysis.json"
+          limit_overrides:
+            turns: 6
+            spend: 0.05
+      assign:
+        analysis_thread: "${result.thread_id}"
+        mode: "summarize"
+      next: classify_mode
+
+    # Second pass: summarize the analysis
+    run_summary:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat ${inputs.output_dir}/analysis.json 2>/dev/null || echo '{\"error\": \"not found\"}'"
+      assign:
+        analysis_content: "${result.stdout}"
+      next: write_summary
+
+    write_summary:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/agent/threads/thread_directive
+        params:
+          directive_name: test/graphs/summarize_text
+          inputs:
+            text: "${state.analysis_content}"
+            output_path: "${inputs.output_dir}/summary.md"
+          limit_overrides:
+            turns: 4
+            spend: 0.03
+      assign:
+        summary_thread: "${result.thread_id}"
+      next: trigger_error
+
+    # Intentional error node to test on_error recovery
+    trigger_error:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "cat /nonexistent/path/file.txt"
+      on_error: recover_from_error
+      next: write_report
+
+    recover_from_error:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "echo 'recovered from error in trigger_error node'"
+      assign:
+        recovery_note: "Error was caught and recovered via on_error edge"
+      next: write_report
+
+    handle_unknown_mode:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "echo 'unknown mode: ${state.mode}'"
+      assign:
+        recovery_note: "Hit unknown mode fallback"
+      next: write_report
+
+    write_report:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: |
+            cat > ${inputs.output_dir}/report.md << 'ENDREPORT'
+            # Conditional Pipeline Report
+
+            ## Flow Summary
+            - Mode routing: analyze → summarize → error → recovery
+            - Analysis thread: ${state.analysis_thread}
+            - Summary thread: ${state.summary_thread}
+            - Recovery note: ${state.recovery_note}
+
+            ## Analysis Output
+            ENDREPORT
+            cat ${inputs.output_dir}/analysis.json >> ${inputs.output_dir}/report.md 2>/dev/null
+            echo '' >> ${inputs.output_dir}/report.md
+            echo '## Summary Output' >> ${inputs.output_dir}/report.md
+            cat ${inputs.output_dir}/summary.md >> ${inputs.output_dir}/report.md 2>/dev/null
+            echo 'report written' && cat ${inputs.output_dir}/report.md
+      assign:
+        final_report: "${result.stdout}"
+      next: done
+
+    done:
+      type: return

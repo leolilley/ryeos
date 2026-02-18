@@ -3,6 +3,17 @@
 > **Extends:** [`THREAD_SYSTEM_PART2_ADVANCED_ORCHESTRATION.md`](THREAD_SYSTEM_PART2_ADVANCED_ORCHESTRATION.md)
 > **Architecture:** Same data-driven patterns — graph definitions as signed YAML tools, state as signed knowledge items, graph runs registered in the thread registry for status tracking and `wait_threads` support, node actions as standard `{primary, item_type, item_id, params}` dicts dispatched through `rye_execute`, condition_evaluator for edges.
 
+### Thread System Realities Relied Upon by Graphs
+
+The graph walker builds on the following thread system features (all implemented):
+
+- **`thread.json` is Ed25519-signed** — `transcript_signer.sign_json()` signs the metadata dict (capabilities, limits, depth) with a `_signature` field using canonical JSON serialization. The walker should verify this signature before trusting parent context.
+- **`transcript.jsonl` is checkpoint-signed** — `TranscriptSigner.checkpoint()` appends signed checkpoint events at turn boundaries, covering all preceding bytes. `handoff_thread` and `resume_thread` verify transcript integrity before reconstructing messages.
+- **Streaming** — providers with `supports_streaming` write `token_delta` events to both `transcript.jsonl` (JSONL) and the knowledge markdown file in real-time via `TranscriptSink`. Clean rendering occurs at checkpoints via `transcript.render_knowledge()`.
+- **Structured outputs** — directives declaring `<outputs>` instruct the LLM to call `directive_return` with typed fields. Registry persistence stores `{cost, outputs}` (not freeform result text). Graphs should prefer `${result.outputs.<field>}` for machine-shaped consumption.
+- **Extended orchestrator operations** — `resume_thread` (continue a completed/errored thread with a new message), `kill_thread` (SIGTERM/SIGKILL via PID), `get_chain` (full continuation chain), `chain_search` (search across chain transcripts), `read_transcript` (read knowledge markdown with optional tail).
+- **Result truncation** — `thread_directive.py` truncates returned `result.result` to 4000 chars before returning to callers, protecting parent context windows.
+
 ---
 
 ## Table of Contents
@@ -48,7 +59,7 @@ No new abstractions. A graph definition is a YAML tool. Graph state is a knowled
 
 4. **Edges are conditions** — the same `path`/`op`/`value` + `any`/`all`/`not` combinators from `condition_evaluator.py`. No new expression language, no JMESPath dependency.
 
-5. **Registry integration** — graph runs register in the thread registry (SQLite) for status tracking, `wait_threads` support, and `list_children` queries. The registry doesn't care what kind of execution it's tracking — it already tracks thread_id, directive, parent_id, status. Graph runs use the same columns with `graph_run_id` as `thread_id` and `graph_id` as `directive`. No schema changes. State content stays in knowledge (signed, searchable); the registry provides the coordination layer.
+5. **Registry integration** — graph runs register in the thread registry (SQLite) for status tracking, `wait_threads` support, and `list_children` queries. The registry doesn't care what kind of execution it's tracking — it tracks thread_id, directive, parent_id, status, and operational columns (turns, input_tokens, output_tokens, spend, spawn_count, pid, model, continuation chain metadata). Graph runs use the same columns with `graph_run_id` as `thread_id` and `graph_id` as `directive`. No new schema needed — graphs use the existing columns. State content stays in knowledge (signed, searchable); the registry provides the coordination layer.
 
 ---
 
@@ -60,6 +71,9 @@ No new abstractions. A graph definition is a YAML tool. Graph state is a knowled
 | Graph walker     | Runtime (YAML + Python) | `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml` | Like `python_function_runtime.yaml`           |
 | Graph state      | Knowledge               | `.ai/knowledge/graphs/<graph_id>/<graph_run_id>.md`    | Queryable, signed execution state             |
 | Graph run status | Thread registry (SQLite) | `.ai/threads/registry.db`                             | Same registry as LLM threads                  |
+| Thread metadata  | Signed JSON              | `.ai/threads/<thread_id>/thread.json`                 | Ed25519-signed capabilities/limits/depth       |
+| Transcript       | Checkpoint-signed JSONL  | `.ai/threads/<thread_id>/transcript.jsonl`             | Turn-boundary checksums + Ed25519 signatures   |
+| Knowledge entry  | Signed markdown          | `.ai/knowledge/agent/threads/.../<thread>.md`         | Checkpoint-rendered + streaming append          |
 
 ### How It Fits the Existing Chain
 
@@ -166,7 +180,7 @@ config:
             turns: 8
             spend: 0.10
       assign:
-        review_verdict: "${result.result}"
+        review_verdict: "${result.outputs.verdict}"
       next: report
 
     approve:
@@ -194,7 +208,7 @@ config:
 - **`type: return`** terminates the graph and returns `state` to the caller.
 - **Interpolation** uses `${...}` — the existing interpolation engine from `loaders/interpolation.py`, which resolves dotted paths via `condition_evaluator.resolve_path()`. The walker builds a context dict with `state`, `inputs`, and `result` namespaces so templates like `${state.issues}`, `${inputs.files}`, and `${result.fixes}` all resolve naturally.
 - **Missing paths** resolve to empty string (existing interpolation behavior). The walker logs a warning for missing paths in `assign` expressions to aid debugging.
-- **Type preservation** — the current `interpolation.interpolate()` always stringifies values via `str(value)`, meaning `assign: { issues: "${result.issues}" }` where `result.issues` is integer `3` would store the string `"3"` in state. This breaks numeric edge conditions like `op: gt, value: 0` (comparing `"3" > 0` raises TypeError). **Required fix (prerequisite):** when a template is a single whole expression (`"${path}"` with no surrounding text), return the raw resolved value without string conversion. Mixed templates like `"Count: ${x}"` retain string behavior. This is a small change to `interpolation.py`'s `interpolate()` function.
+- **Type preservation (known limitation)** — `interpolation.interpolate()` currently uses `re.sub()` which stringifies all values via `str(value)`. This means `assign: { issues: "${result.issues}" }` where `result.issues` is integer `3` stores the string `"3"` in state, breaking numeric edge conditions like `op: gt, value: 0`. **Recommended fix before numeric graph conditions are used:** when a template is a single whole expression (`"${path}"` with no surrounding text), return the raw resolved value without string conversion. Mixed templates like `"Count: ${x}"` retain string behavior. This is a small change to `interpolation.py`'s `interpolate()` function (~10 lines).
 
 ---
 
@@ -249,15 +263,25 @@ The walker also registers graph runs in the thread registry — the same SQLite 
 
 **Registration:** At graph start, the walker calls `registry.register(graph_run_id, graph_id, parent_thread_id)`. The registry columns map naturally:
 
-| Registry Column  | Graph Run Value                                 |
-| ---------------- | ----------------------------------------------- |
-| `thread_id`      | `graph_run_id` (e.g., `code-review-graph-1739820456`) |
-| `directive`      | `graph_id` (the graph tool's item_id)           |
-| `parent_id`      | `RYE_PARENT_THREAD_ID` (if present)             |
-| `status`         | `created` → `running` → `completed` / `error`  |
-| `pid`            | Walker's process ID (auto-set by `register()`)  |
+| Registry Column            | Graph Run Value                                         | Notes                                      |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------ |
+| `thread_id`                | `graph_run_id` (e.g., `code-review-graph-1739820456`)   | Primary key                                |
+| `directive`                | `graph_id` (the graph tool's item_id)                   |                                            |
+| `parent_id`                | `RYE_PARENT_THREAD_ID` (if present)                     |                                            |
+| `status`                   | `created` → `running` → `completed` / `error`           |                                            |
+| `pid`                      | Walker's process ID (auto-set by `register()`)           |                                            |
+| `turns`                    | N/A for pure graph runs (populated by LLM threads)       | Cost snapshot columns                      |
+| `input_tokens`             | N/A for pure graph runs                                  |                                            |
+| `output_tokens`            | N/A for pure graph runs                                  |                                            |
+| `spend`                    | N/A for pure graph runs                                  |                                            |
+| `spawn_count`              | Number of child threads spawned                          | Incremented by `increment_spawn_count()`   |
+| `model`                    | N/A for graph runs (populated by LLM threads)            |                                            |
+| `continuation_of`          | Previous thread in continuation chain                    | Set by `set_chain_info()`                  |
+| `continuation_thread_id`   | Next thread in continuation chain                        | Set by `set_continuation()`                |
+| `chain_root_id`            | Root of the continuation chain                           | Set by `set_chain_info()`                  |
+| `result`                   | JSON: `{cost, outputs}` (structured outputs if present)  | Set by `set_result()`                      |
 
-No schema changes — these are the existing columns from `thread_registry.py`.
+No new schema needed — these columns already exist in `thread_registry.py` (auto-migrated via `ALTER TABLE` on first access). Graph runs use a subset; cost snapshot and continuation columns are primarily consumed by LLM threads.
 
 **Status updates:** The walker calls `registry.update_status(graph_run_id, status)` at key transitions:
 
@@ -275,6 +299,11 @@ graph cancelled     →  status: cancelled
 - **`list_children`** — `registry.list_children(parent_thread_id)` returns both LLM threads and graph runs spawned by a parent. The registry doesn't distinguish them — they're all rows with a `parent_id`.
 - **`get_status`** — `orchestrator.get_status(graph_run_id)` works out of the box. The orchestrator checks in-process tracking first (won't match for graph runs in a different process), then falls back to registry.
 - **`list_active`** — graph runs appear alongside active threads. Useful for dashboards and monitoring.
+- **`get_chain`** — `registry.get_chain(thread_id)` walks backward to find the chain root, then forward to build an ordered list of all threads in the continuation chain. Useful for inspecting multi-thread LLM runs spawned by graph nodes.
+- **`chain_search`** — search across all transcripts in a continuation chain (regex or text). Returns matching lines with context.
+- **`read_transcript`** — read a thread's knowledge markdown entry (the signed, rendered transcript). Supports `tail_lines` for efficient access.
+- **`resume_thread`** — continue a completed/errored thread with a new user message. Reconstructs conversation from transcript (with integrity verification), spawns a sibling thread, and links via continuation chain.
+- **`kill_thread`** — hard termination using registry PID: SIGTERM with 3s grace period, then SIGKILL.
 
 **What this does NOT replace:**
 
@@ -591,7 +620,7 @@ def _merge_graph_hooks(graph_hooks, project_path):
     - Applicable builtins from hook_conditions.yaml → layer 2
     - Infra hooks → layer 3
     - Sorted by layer
-    - Filters out inapplicable thread-only hooks (context_window_pressure)
+    - Filters out inapplicable thread-only hooks (context_limit_reached)
 
     Uses the existing HooksLoader API (get_builtin_hooks, get_infra_hooks)
     — no new config keys needed.
@@ -602,7 +631,7 @@ def _merge_graph_hooks(graph_hooks, project_path):
     infra = loader.get_infra_hooks(Path(project_path))
 
     # Filter out hooks for events that don't apply to the walker
-    EXCLUDED_EVENTS = {"context_window_pressure", "thread_started"}
+    EXCLUDED_EVENTS = {"context_limit_reached", "thread_started"}
     builtin = [h for h in builtin if h.get("event") not in EXCLUDED_EVENTS]
     infra = [h for h in infra if h.get("event") not in EXCLUDED_EVENTS]
 
@@ -704,8 +733,10 @@ The graph walker is a **subprocess**, not an LLM thread. It runs outside `runner
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | **Hooks**                                   | Yes — same event names (`error`, `limit`, `after_step`) + graph-only events, via async `_run_hooks()` (§6.1). Reuses existing builtins from `hook_conditions.yaml` with event filtering, dispatched through `_dispatch_action()` | Yes — full hook pipeline via `SafetyHarness.run_hooks()`, async, with `ToolDispatcher`                  |
 | **Limits** (turns, tokens, spend, duration) | `max_steps` only — walker doesn't consume LLM tokens                                                                                                                                                                             | Yes — child threads inherit `parent_limits` via §11 injection, capped by `min()` in `_resolve_limits()` |
-| **Context window management**               | No — walker has no context window                                                                                                                                                                                                | Yes — child threads have their own `_check_context_limit()` and `tool_result_guard`                     |
+| **Context window management**               | No — walker has no context window                                                                                                                                                                                                | Yes — child threads have `_check_context_limit()`, `tool_result_guard`, and automatic `handoff_thread()` with transcript integrity verification |
 | **Budget tracking**                         | No — walker makes no LLM calls                                                                                                                                                                                                   | Yes — child threads use `ledger.reserve()` / `ledger.cascade_spend()` with parent thread budget         |
+| **Streaming**                               | No — walker doesn't produce token streams                                                                                                                                                                                         | Yes — `TranscriptSink` writes `token_delta` events to JSONL + knowledge markdown in real-time           |
+| **Transcript signing**                      | No — walker doesn't have a transcript (state is in knowledge items)                                                                                                                                                               | Yes — `TranscriptSigner.checkpoint()` at turn boundaries, verified before handoff/resume                 |
 | **Capability enforcement**                  | Yes — walker checks capabilities before every dispatch (§7)                                                                                                                                                                      | Yes — child threads inherit capabilities, `SafetyHarness` enforces per-call                             |
 | **Integrity verification**                  | Yes — every `rye_execute` call goes through chain verification                                                                                                                                                                   | Yes — same chain                                                                                        |
 
@@ -729,7 +760,7 @@ The walker participates in the hook system using the same infrastructure the thr
 
 Same pipeline, same event names, different dispatch path:
 
-1. **Loading**: `_merge_graph_hooks()` uses the existing `HooksLoader.get_builtin_hooks()` and `get_infra_hooks()` — same API as `thread_directive._merge_hooks()`. Filters out inapplicable thread-only events (`context_window_pressure`, `thread_started`). No new config keys needed.
+1. **Loading**: `_merge_graph_hooks()` uses the existing `HooksLoader.get_builtin_hooks()` and `get_infra_hooks()` — same API as `thread_directive._merge_hooks()`. Filters out inapplicable thread-only events (`context_limit_reached`, `thread_started`). No new config keys needed.
 2. **No SafetyHarness**: Hooks are evaluated directly in the walker loop via `_run_hooks()`.
 3. **Dispatch**: `_run_hooks()` uses `condition_evaluator.matches()` for condition evaluation, `interpolation.interpolate_action()` for template resolution, and `await _dispatch_action()` for execution — the same functions the walker already uses for node actions.
 4. **Error context**: The walker calls `error_loader.classify()` before firing `error` hooks, producing the same `{error, classification}` context shape as `runner.py`. This ensures builtin hooks like `default_retry_transient` (which check `classification.category`) work identically.
@@ -750,7 +781,7 @@ Same pipeline, same event names, different dispatch path:
 | Thread Event                       | Why Not                                                                                                                  |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `thread_started` (context framing) | Walker has no LLM context to frame. `graph_started` serves the setup role without context collection                     |
-| `context_window_pressure`          | Walker has no context window. LLM child threads handle their own context pressure                                        |
+| `context_limit_reached`            | Walker has no context window. LLM child threads handle their own context limits and trigger handoff internally            |
 | `limit` (turns/tokens/spend)       | These are LLM resource limits. Walker doesn't consume LLM resources. Child threads enforce their own via `SafetyHarness` |
 
 **The critical win — transparent retry:**
@@ -794,7 +825,7 @@ default_retry_transient   (event: error)                    — APPLICABLE (same
 default_fail_permanent    (event: error)                    — APPLICABLE
 default_abort_cancelled   (event: error)                    — APPLICABLE
 default_escalate_limit    (event: limit)                    — APPLICABLE (walker fires limit with limit_code)
-default_context_compaction (event: context_window_pressure) — FILTERED OUT (no context window)
+default_context_compaction (event: context_limit_reached)    — FILTERED OUT (no context window)
 
 infra_save_state          (event: after_step)               — APPLICABLE (checkpoint telemetry)
 infra_completion_signal   (event: after_complete)           — FILTERED OUT (graph uses graph_completed instead)
@@ -816,21 +847,22 @@ No `graph_builtin_hooks` config key needed — the walker reuses `builtin_hooks`
 | Error context       | `{error, classification}` via `error_loader.classify()` | Same — walker calls `error_loader.classify()` identically |
 | Config source       | `HooksLoader.get_builtin_hooks()` / `get_infra_hooks()` | Same — filtered by event applicability                    |
 | Shared events       | `error`, `limit`, `after_step`                          | Same — reused, not duplicated                             |
-| Unique events       | `thread_started`, `context_window_pressure`             | `graph_started`, `graph_completed`                        |
+| Unique events       | `thread_started`, `context_limit_reached`               | `graph_started`, `graph_completed`                        |
 
 ### 6.2 Multi-Thread Chains — Context Limit Handoffs in LLM Nodes
 
 When an LLM node spawned by the graph walker runs long enough to fill its context window, `runner.py` triggers a continuation handoff. The walker needs to understand this mechanism because the LLM node's result changes shape.
 
-**How context-limit handoff works in the thread system:**
+**How context-limit handoff works in the thread system (implemented):**
 
-1. **Detection**: After each tool dispatch in `runner.py`, `_check_context_limit()` estimates token usage. If `usage_ratio >= threshold` (default 0.9, configurable in `coordination.yaml`), it returns a limit info dict.
-2. **Handoff**: `runner.py` calls `orchestrator.handoff_thread(thread_id, project_path, messages)`.
-3. **Summary phase**: `handoff_thread()` loads `continuation.summary_directive` from `coordination.yaml`. It spawns a short LLM thread (via `thread_directive`) to summarize the full transcript. Configurable `summary_model` (default "fast"), `summary_limit_overrides` (default `{turns: 3, spend: 0.02}`), `summary_max_tokens` (default 4000).
-4. **Resume construction**: Builds `resume_messages` = summary context + trailing messages (within `resume_ceiling_tokens`, default 16000) + continuation prompt.
-5. **New thread spawn**: Calls `thread_directive.execute()` with `resume_messages` and the same `directive_name`. The new thread starts from the resume messages, not from scratch.
-6. **Chain linking**: `registry.set_continuation(old_id, new_id)` links old→new. `resolve_thread_chain()` follows these links to find the terminal thread.
-7. **Old thread finishes**: `runner.py._finalize()` returns `{status: "continued", continuation_thread_id: "..."}` for the original thread.
+1. **Detection**: After each tool dispatch in `runner.py`, `_check_context_limit()` estimates token usage (~4 chars/token). If `usage_ratio >= threshold` (default 0.9, configurable in `coordination.yaml`), it returns a limit info dict. Runner emits a `context_limit_reached` event.
+2. **Integrity verification**: `handoff_thread()` verifies transcript integrity via `TranscriptSigner.verify()` before trusting transcript content. Supports `strict` (default) and `lenient` (allows unsigned trailing content) policies from `coordination.yaml`.
+3. **Handoff**: `runner.py` calls `orchestrator.handoff_thread(thread_id, project_path, messages)`. If handoff fails, falls back to hooks on `context_limit_reached`.
+4. **Summary phase**: `handoff_thread()` reads the signed knowledge entry (not raw transcript) and spawns a summary thread via `summary_directive` from `coordination.yaml`. Configurable `summary_model` (default "fast"), `summary_limit_overrides` (default `{turns: 3, spend: 0.02}`), `summary_max_tokens` (default 4000).
+5. **Resume construction**: Builds `resume_messages` = summary context + trailing messages (within `resume_ceiling_tokens`, default 16000) + continuation prompt. Ensures trailing slice starts with a user message (provider requirement).
+6. **New thread spawn**: Calls `thread_directive.execute()` with `resume_messages` and the same `directive_name`. The new thread starts from the resume messages, not from scratch.
+7. **Chain linking**: `registry.set_continuation(old_id, new_id)` links old→new. `registry.set_chain_info(new_id, chain_root_id, old_id)` records chain metadata. `resolve_thread_chain()` follows these links to find the terminal thread.
+8. **Old thread finishes**: `runner.py._finalize()` returns `{status: "continued", continuation_thread_id: "..."}` for the original thread. A `thread_handoff` event is logged in the old transcript.
 
 **What the graph walker sees:**
 
@@ -840,12 +872,14 @@ When the walker calls `thread_directive` synchronously (the default), and the ch
 walker calls thread_directive.execute(params) [awaited]
   → runner.run() starts
   → ... many turns ...
-  → _check_context_limit() triggers
+  → _check_context_limit() triggers → emits context_limit_reached
   → handoff_thread() runs:
-      1. Summarizes transcript via summary_directive
-      2. Builds resume_messages
-      3. Calls thread_directive.execute() with resume_messages [awaited — runs synchronously]
-      4. Links old → new via registry.set_continuation()
+      1. Verifies transcript integrity (TranscriptSigner.verify())
+      2. Summarizes transcript via summary_directive (reads signed knowledge entry)
+      3. Builds resume_messages (summary + trailing turns within ceiling)
+      4. Calls thread_directive.execute() with resume_messages [awaited — runs synchronously]
+      5. Links old → new via registry.set_continuation() + set_chain_info()
+      6. Logs thread_handoff event in old transcript
   → The continuation thread completes (or itself continues further)
   → handoff_thread() returns {success: True, new_thread_id: "..."}
   → runner._finalize() returns {status: "continued", continuation_thread_id: "..."}
@@ -855,30 +889,29 @@ walker receives result with status: "continued"
 
 **Key insight:** `handoff_thread()` calls `thread_directive.execute()` **without** `async_exec: true`, meaning the continuation thread runs synchronously (awaited in-process). The continuation may itself trigger another handoff, forming a chain — but each link runs to completion before returning. By the time the original `thread_directive.execute()` returns to the walker, **the entire continuation chain has completed**.
 
-**The problem: final result retrieval.**
+**Result persistence (implemented):**
 
-Although the chain has completed by the time the walker gets the result, `thread_directive.execute()` currently only persists `cost` to the registry via `registry.set_result(thread_id, result.get("cost"))` — the actual LLM output (`result.result`) is not persisted. The walker receives `{status: "continued", continuation_thread_id: "..."}` from the original thread, but can't retrieve the terminal thread's result text.
-
-**Required fix (prerequisite for graph walker):** `thread_directive.execute()` must persist a bounded result payload alongside cost. This is a small change:
+`thread_directive.py` already persists a result payload to the registry alongside cost. The implementation stores structured outputs (from `directive_return`) plus cost:
 
 ```python
-# In thread_directive.py, after line 510:
-# Current:  registry.set_result(thread_id, result.get("cost"))
-# Fixed:    registry.set_result(thread_id, _bounded_result(result))
-
-def _bounded_result(result):
-    """Persist cost + bounded result text for cross-process retrieval."""
-    payload = {"cost": result.get("cost", {})}
-    result_text = result.get("result", "")
-    if isinstance(result_text, str) and len(result_text) > 4000:
-        result_text = result_text[:4000] + "\n\n[... truncated]"
-    if result_text:
-        payload["result"] = result_text
-    payload["status"] = result.get("status", "completed")
-    return payload
+# thread_directive.py (both sync and async paths):
+result_data = {"cost": result.get("cost")}
+if result.get("outputs"):
+    result_data["outputs"] = result["outputs"]
+registry.set_result(thread_id, result_data)
 ```
 
-With this fix, the walker's continuation handling becomes:
+Additionally, the returned `result.result` text is truncated to 4000 chars before returning to callers:
+
+```python
+MAX_RESULT_CHARS = 4000
+if isinstance(result.get("result"), str) and len(result["result"]) > MAX_RESULT_CHARS:
+    result["result"] = result["result"][:MAX_RESULT_CHARS] + "\n\n[... truncated]"
+```
+
+**Important:** Registry persistence stores **structured outputs** (`outputs`), not freeform result text. For reliable cross-process retrieval, directives called from graph nodes should declare `<outputs>` fields and the graph should use `${result.outputs.<field>}` in assign expressions.
+
+The walker's continuation handling:
 
 ```python
 # After _dispatch_action for a thread_directive call
@@ -920,7 +953,7 @@ The graph walker runs as a subprocess (via `state_graph_runtime` → `subprocess
 
 The walker determines its execution context from two sources:
 
-1. **Environment variable `RYE_PARENT_THREAD_ID`** — set by `thread_directive` before forking. If present, the walker reads the parent thread's `thread.json` to get capabilities, limits, and depth.
+1. **Environment variable `RYE_PARENT_THREAD_ID`** — set by `thread_directive` before forking. If present, the walker reads the parent thread's `thread.json` to get capabilities, limits, and depth. **The walker must verify the `thread.json` signature** via `transcript_signer.verify_json(meta)` and fail-closed if invalid — `thread.json` contains security-relevant fields (capabilities, limits, depth) and is Ed25519-signed by `_write_thread_meta()`.
 2. **Explicit `capabilities` parameter** — passed directly in the graph tool's params.
 
 ```python
@@ -931,6 +964,11 @@ def _resolve_execution_context(params, project_path):
     if parent_thread_id:
         meta = _read_thread_meta(project_path, parent_thread_id)
         if meta:
+            # Verify thread.json signature (security-critical: capabilities/limits)
+            transcript_signer = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+            if not transcript_signer.verify_json(meta):
+                logger.warning("thread.json signature invalid for %s — fail-closed", parent_thread_id)
+                return {"parent_thread_id": None, "capabilities": [], "limits": {}, "depth": 0}
             return {
                 "parent_thread_id": parent_thread_id,
                 "capabilities": meta.get("capabilities", []),
@@ -1105,6 +1143,27 @@ action:
 
 This calls `thread_directive` as a tool, which spawns a full LLM thread — building the prompt from the directive, running the LLM loop with the safety harness, and returning the thread result. This is the pattern used for LLM nodes (§11).
 
+**Run the directive through an LLM thread with structured outputs** (recommended for graph consumption):
+
+```yaml
+action:
+  primary: execute
+  item_type: tool
+  item_id: rye/agent/threads/thread_directive
+  params:
+    directive_name: workflows/code-review/review-fixes
+    inputs:
+      fixes: "${state.fixes}"
+    limit_overrides:
+      turns: 8
+      spend: 0.10
+assign:
+  verdict: "${result.outputs.verdict}"
+  confidence: "${result.outputs.confidence}"
+```
+
+When the directive declares `<outputs>` fields, the LLM is instructed to call `rye/agent/threads/directive_return` with typed results. These are persisted to the registry as `{cost, outputs}` and returned in `result.outputs`. This is the preferred pattern for graph nodes because structured outputs are reliably available cross-process (unlike freeform `result.result` which is truncated to 4000 chars).
+
 **The distinction:** `item_type: directive` loads and parses. `item_type: tool, item_id: rye/agent/threads/thread_directive` loads, injects into an LLM context, and executes. The graph walker doesn't need to know the difference — both are just action dicts routed through the same dispatch.
 
 ---
@@ -1240,11 +1299,17 @@ review:
         turns: 8
         spend: 0.10
   assign:
-    verdict: "${result.result}"
+    # Prefer structured outputs for reliable cross-process consumption
+    verdict: "${result.outputs.verdict}"
+    confidence: "${result.outputs.confidence}"
+    # Alternatively, for freeform text (truncated to 4000 chars):
+    # verdict: "${result.result}"
   next: report
 ```
 
 The graph blocks until the thread completes, then assigns the result to state. If the child thread hits a context limit and triggers a continuation handoff, the walker automatically follows the chain (§6.2) — the node appears to complete normally from the graph's perspective.
+
+**Best practice:** Directives called from graph nodes should declare `<outputs>` fields (e.g., `<output name="verdict" type="string" />`) so the LLM returns structured data via `directive_return`. This ensures outputs are persisted in the registry and available via `${result.outputs.<field>}`.
 
 ### Async LLM node (fan-out)
 
@@ -1387,6 +1452,11 @@ Missing template paths resolve to empty string (existing interpolation behavior)
 ### Cancellation
 
 The walker checks for a cancellation signal file (`.ai/threads/<thread_id>/cancel`) at each step. If present, the graph terminates with `status: cancelled` and state is persisted.
+
+For spawned LLM child threads, the orchestrator provides two termination mechanisms:
+
+- **`cancel_thread`** — cooperative cancellation: sets the `SafetyHarness._cancelled` flag in-process. The runner checks this at each turn and exits cleanly. Only works for threads in the same process.
+- **`kill_thread`** — hard termination: sends SIGTERM using the registry's `pid` column, waits 3 seconds for graceful shutdown, then sends SIGKILL if still alive. Works cross-process. Updates registry status to `killed`.
 
 ---
 
@@ -1551,70 +1621,54 @@ All three go through the same execution chain. All three are signed. All three k
 
 ---
 
-## 17. Implementation Plan
+## 17. Implementation Status
 
-### Phase 1: State Graph Runtime (~350-400 lines)
+All phases are **complete**. The implementation lives in two new files plus one modified file:
 
-**New files:**
+| File                                         | Type           | Status       | Description                                                                                  |
+| -------------------------------------------- | -------------- | ------------ | -------------------------------------------------------------------------------------------- |
+| `rye/core/runtimes/state_graph_runtime.yaml` | Runtime YAML   | **Done** ✓   | Points to walker script, configures subprocess (same pattern as `python_script_runtime.yaml`) |
+| `rye/core/runtimes/state_graph_walker.py`    | Runtime script | **Done** ✓   | Graph traversal engine (~550 lines, signed)                                                  |
+| `agent/threads/loaders/interpolation.py`     | Prerequisite   | **Done** ✓   | Type-preserving interpolation — single `${path}` expressions return raw values               |
 
-| File                                         | Type           | Purpose                                        |
-| -------------------------------------------- | -------------- | ---------------------------------------------- |
-| `rye/core/runtimes/state_graph_runtime.yaml` | Runtime YAML   | Points to walker script, configures subprocess |
-| `rye/core/runtimes/state_graph_walker.py`    | Runtime script | Graph traversal engine                         |
+### Phase 0: Prerequisites ✓
 
-**Walker responsibilities:**
+| Change                            | File                       | Status       | Description                                                                                                                                                         |
+| --------------------------------- | -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Type-preserving interpolation** | `loaders/interpolation.py` | **Done** ✓   | When template is exactly `"${path}"` (single whole expression), returns raw value without `str()` conversion. Mixed templates retain string behavior. Enables numeric edge conditions (`op: gt, value: 0`). |
+| **Bounded result persistence**    | `thread_directive.py`      | **Done** ✓   | `registry.set_result()` persists `{cost, outputs}`. Returned `result.result` is truncated to 4000 chars. |
+| **Error classification import**   | (walker itself)            | **Done** ✓   | Walker imports `error_loader.classify()` to produce `{classification}` context for error hooks, matching the thread system's error context shape.                   |
+| **thread.json signature verification** | (walker itself)       | **Done** ✓   | Walker calls `transcript_signer.verify_json()` when reading parent `thread.json` for context resolution. Fails-closed on invalid signature. |
 
-1. Validate graph definition (§14)
-2. Register graph run in thread registry (§5) — `registry.register(graph_run_id, graph_id, parent_thread_id)`
-3. Resolve execution context (§7)
-4. Merge hooks — graph-level (layer 1) + applicable builtins (layer 2) + infra (layer 3) (§6.1)
-5. Validate inputs against `config_schema`
-6. Create state knowledge item, update registry to `running`, fire `graph_started` hooks
-7. Walk nodes: interpolate action → inject parent context for thread spawns → `await _dispatch_action()` → unwrap result → follow continuation chains (§6.2) → classify error + evaluate `error` hooks (retry/handle) → graph-level error routing → assign results (skip on error) → evaluate edges → persist + sign state → fire `after_step` hooks
-8. Handle `type: return` (terminate) and `type: foreach` (iterate)
-9. Enforce `max_steps` guard with `limit` hooks for escalation, cancellation checks
-10. Fire `graph_completed` hooks on termination
-11. Update state knowledge item and registry status on completion/error
+### Phase 1: State Graph Runtime ✓
 
-**Interpolation:** Reuse the existing `${...}` interpolation engine from `loaders/interpolation.py`. Template vars:
+Walker implements all responsibilities described in §6–§14:
 
-- `${state.X}` — current graph state
-- `${result.X}` — current node's unwrapped execution result
-- `${inputs.X}` — input parameter (from `config_schema`)
+1. Graph validation (§14) — start node, edge references, on_error references, return node check
+2. Registry integration (§5) — `registry.register()`, status transitions, `graph_run_id` as `thread_id`
+3. Execution context resolution (§7) — parent `thread.json` with signature verification, explicit capabilities, fail-closed default
+4. Hook merging (§6.1) — graph-level (layer 1) + applicable builtins (layer 2) + infra (layer 3), filtered by event applicability
+5. Input validation against `config_schema`
+6. State persistence as signed knowledge items (§5) — atomic write (temp → rename), YAML frontmatter + JSON body, `MetadataManager.create_signature()`
+7. Node walking — interpolate action → inject parent context for thread spawns → `_check_permission()` → `await _dispatch_action()` → `_unwrap_result()` → continuation chain following (§6.2) → error classification + `error` hooks → graph-level error routing → assign (skipped on error) → edge evaluation → persist state → `after_step` hooks
+8. Capability enforcement (§7) — same `fnmatch` logic as `SafetyHarness.check_permission()`
+9. `max_steps` guard with `limit` hooks, cancellation via signal file
+10. `graph_started` / `graph_completed` hooks
 
-**Edge evaluation:** Call `condition_evaluator.matches({"state": state, "result": result}, condition)` directly.
+### Phase 2: Foreach Support ✓
 
-**State persistence:** Each step writes a knowledge item via the existing knowledge write mechanism (atomic write: temp → rename). The frontmatter captures `current_node`, `step_count`, `status`. The body is the state JSON. After writing, `_persist_state()` calls `await SignTool.handle()` on the knowledge item to sign it. The knowledge item_id is derived from the file path relative to `.ai/knowledge/` (e.g., `graphs/code-review-graph/code-review-graph-1739820456`). Registry status is only updated at key transitions (created → running → completed/error), not per-step — the knowledge item has per-step detail, the registry has terminal status.
+- Sequential mode (default) — each iteration completes before the next
+- Parallel mode (`async_exec: true` in inner action) — all iterations dispatched concurrently via `asyncio.gather()`
+- Collects results into `state[collect]` (thread_ids for async, full results for sync)
+- Permission checking and parent context injection per iteration
 
-### Phase 2: Foreach Support (~50 lines)
+### Phase 3: Resume Support ✓
 
-Add `type: foreach` handling in the walker:
-
-- Iterate over `state[over]`
-- Set `state[as]` for each iteration
-- Execute action for each
-- Collect results into `state[collect]`
-- Support `async_exec` in inner action for parallel fan-out
-
-### Phase 3: Resume Support (~50 lines)
-
-Add `resume: true` parameter to graph tool:
-
-- Load existing state knowledge item for this graph_id + graph_run_id
-- Verify state signature (signed knowledge item — integrity check against tampering between failure and resume)
-- Set `current_node` from state frontmatter
-- Update registry status back to `running`
-- Continue walking from that node
-
-### Phase 0 (Prerequisites): Changes to Existing Code
-
-These are small changes to existing modules required before the walker can work correctly:
-
-| Change                            | File                       | Description                                                                                                                                                         |
-| --------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Type-preserving interpolation** | `loaders/interpolation.py` | When template is exactly `"${path}"` (single whole expression), return raw value without `str()` conversion. Mixed templates retain string behavior. ~10 lines.     |
-| **Bounded result persistence**    | `thread_directive.py`      | Change `registry.set_result(thread_id, result.get("cost"))` to persist cost + bounded result text + status. ~15 lines. Enables continuation chain result retrieval. |
-| **Error classification import**   | (walker itself)            | Walker imports `error_loader.classify()` to produce `{classification}` context for error hooks, matching the thread system's error context shape.                   |
+- `resume: true` + `graph_run_id` params to resume a failed/errored graph run
+- Loads signed knowledge item, verifies signature via `MetadataManager.parse_and_verify()`
+- Extracts `current_node`, `step_count`, and full state JSON from frontmatter + body
+- Updates registry status back to `running`, continues walking from saved node
+- Skips `graph_started` hooks on resume (already fired on original run)
 
 ### What Does NOT Need Building
 
@@ -1632,6 +1686,14 @@ These are small changes to existing modules required before the walker can work 
 | Tool signing                               | `SignTool`                                                      |
 | Knowledge persistence                      | Knowledge write tools                                           |
 | Space precedence                           | `DirectiveResolver` / tool resolution                           |
+| Transcript signing                         | `TranscriptSigner` (checkpoint + JSON signing)                  |
+| Streaming to transcript                    | `TranscriptSink` (JSONL + knowledge markdown)                   |
+| Knowledge rendering                        | `Transcript.render_knowledge()` (signed knowledge entries)      |
+| Result persistence                         | `registry.set_result()` with `{cost, outputs}`                  |
+| Continuation chain management              | `registry.set_continuation()`, `set_chain_info()`, `get_chain()`|
+| Thread resume                              | `orchestrator.resume_thread()` with integrity verification      |
+| Thread hard termination                    | `orchestrator.kill_thread()` (SIGTERM/SIGKILL via PID)          |
+| Structured outputs                         | `directive_return` + `<outputs>` directive sections              |
 
 ---
 
@@ -1647,7 +1709,7 @@ executor_id: rye/core/runtimes/state_graph_runtime
 category: workflows/etl
 description: "Extract sales data, transform, load into report"
 
-config_schema:
+grapconfig_schema:
   type: object
   properties:
     region:
@@ -1708,7 +1770,7 @@ config:
             turns: 6
             spend: 0.05
       assign:
-        report_path: "${result.result}"
+        report_path: "${result.outputs.report_path}"
       next: done
 
     empty_report:
@@ -1832,9 +1894,24 @@ Tool calls inherit all existing guards:
 
 Graph state is a knowledge item on disk. No offload needed — there's no context window to protect. The final graph result is bounded by `tool_result_guard` when it returns to a calling LLM thread.
 
+**Note:** LLM child threads do have context pressure and mitigate it via continuation handoff + `tool_result_guard`. When graphs call into LLM threads, prefer structured outputs (`<outputs>` + `directive_return`) over large freeform text to ensure reliable cross-process result retrieval. Freeform `result.result` is truncated to 4000 chars by `thread_directive.py`.
+
 ### Cycle Detection
 
 The walker tracks visited `(node_id, step_count)` pairs. If a node is visited more than `max_steps` times total, the graph terminates with an error.
+
+### Integrity and Observability
+
+| Layer                    | Mechanism                                                    | Applies To                    |
+| ------------------------ | ------------------------------------------------------------ | ----------------------------- |
+| Tool chain integrity     | Ed25519 signature verification before execution              | All `rye_execute` calls       |
+| Thread metadata          | `thread.json` signed via `sign_json()`, verified on read     | Parent context resolution     |
+| Transcript integrity     | Checkpoint signing at turn boundaries (`TranscriptSigner`)   | LLM child threads             |
+| Handoff/resume integrity | `TranscriptSigner.verify()` before reconstructing messages   | Continuation chains           |
+| Streaming observability  | `TranscriptSink` writes `token_delta` to JSONL + knowledge   | Streaming LLM providers       |
+| Knowledge rendering      | `transcript.render_knowledge()` at checkpoint cadence        | All LLM threads               |
+| Registry chain metadata  | `continuation_of`, `continuation_thread_id`, `chain_root_id` | Continuation chain navigation |
+| Cost tracking            | `registry.update_cost_snapshot()` per-turn                   | LLM threads                   |
 
 ---
 
