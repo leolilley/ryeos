@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:15218cddba41db1b50c10df0bb92bd1e554622e549c104452fad11ab38233da1:0P1D0VSvoWRXGy-T9emaR6Jgntb88R68uicmue_S62_gHQg57I9hJa77rVwd6w6FBByNIKgfNmJaoW_fb-CZBg==:440443d0858f0199 -->
 # Registry Publish
 
 Make an item public in the registry.

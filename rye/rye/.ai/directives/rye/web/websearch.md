@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:353d7921fbc3adf9b2c229e25e5f192093ee8fcf6423c664b0bf9691471447f4:SnnWezuXKSkQ7cVDT5_q61YtThECc_-Nl06z1P2ATpqwADcIdjIcDhr0FkZlT21HcVqPztpVYoxhUb7XA_hbAA==:440443d0858f0199 -->
 # Web Search
 
 Search the web using DuckDuckGo or Exa and return results.

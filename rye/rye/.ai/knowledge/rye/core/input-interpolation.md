@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-17T23:54:02Z:f481665823269f29ae75091285cdd9ca5262efa7071dbda8baa898a509750d83:WQdjpi2zRhijw7z-5Gs2VdiIGn8nGtIOTIaO07Ji8jAp3FlJWxdHzE1cTv_eLCV2sbeHEpC_qeypmS0ouoRuBw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T01:03:26Z:6415c80af8cfb32143c0c2b6397ab3493785b439546d8c7e3e7f2a0bf3609363:blSkUt_jRsh0hsmxOHOWlNexhtbOj3QmV-NJtS9L-gN8iNEIo1PCdyRvaUB4r3Njy8cJivKT1aGibeVXjWFYCw==:440443d0858f0199 -->
 
 ```yaml
 id: input-interpolation
@@ -14,6 +14,7 @@ tags:
   - directives
   - templates
 references:
+  - templating-systems
   - "docs/authoring/directives.md"
   - "docs/tools-reference/execute.md"
 ```
@@ -24,8 +25,8 @@ How `{input:name}` placeholders are resolved in directives during execution.
 
 ## Syntax
 
-| Pattern               | Behavior                                         |
-| --------------------- | ------------------------------------------------ |
+| Pattern               | Behavior                                                |
+| --------------------- | ------------------------------------------------------- |
 | `{input:key}`         | **Required** — kept as literal `{input:key}` if missing |
 | `{input:key?}`        | **Optional** — replaced with empty string if missing    |
 | `{input:key:default}` | **Fallback** — uses `default` value if key missing      |
@@ -34,12 +35,12 @@ How `{input:name}` placeholders are resolved in directives during execution.
 
 When `rye_execute` processes a directive, `_interpolate_parsed()` replaces placeholders in:
 
-| Field     | Description                                     |
-| --------- | ----------------------------------------------- |
+| Field     | Description                                                   |
+| --------- | ------------------------------------------------------------- |
 | `body`    | The full directive body text (everything after the XML fence) |
-| `content` | The rendered content of the directive           |
-| `raw`     | The raw file content                            |
-| `actions` | All action elements extracted from process steps |
+| `content` | The rendered content of the directive                         |
+| `raw`     | The raw file content                                          |
+| `actions` | All action elements extracted from process steps              |
 
 Every string field in these locations is scanned for `{input:...}` patterns.
 
@@ -60,12 +61,12 @@ Inputs are declared in the directive's XML metadata fence:
 
 ### Input Attributes
 
-| Attribute  | Required | Values             | Effect                                  |
-| ---------- | -------- | ------------------ | --------------------------------------- |
-| `name`     | yes      | snake_case string  | The key used in `{input:name}`          |
-| `type`     | yes      | `string`, `integer`, `boolean`, `object` | Type hint (informational) |
-| `required` | yes      | `true`, `false`    | Whether execution fails without it      |
-| `default`  | no       | any string         | Applied before interpolation if missing |
+| Attribute  | Required | Values                                   | Effect                                  |
+| ---------- | -------- | ---------------------------------------- | --------------------------------------- |
+| `name`     | yes      | snake_case string                        | The key used in `{input:name}`          |
+| `type`     | yes      | `string`, `integer`, `boolean`, `object` | Type hint (informational)               |
+| `required` | yes      | `true`, `false`                          | Whether execution fails without it      |
+| `default`  | no       | any string                               | Applied before interpolation if missing |
 
 ## Execution Flow
 
@@ -127,8 +128,8 @@ When required inputs are missing, execution returns an error response:
   "error": "Missing required inputs: name, category",
   "item_id": "rye/core/create_directive",
   "declared_inputs": [
-    {"name": "name", "type": "string", "required": true},
-    {"name": "category", "type": "string", "required": true}
+    { "name": "name", "type": "string", "required": true },
+    { "name": "category", "type": "string", "required": true }
   ]
 }
 ```

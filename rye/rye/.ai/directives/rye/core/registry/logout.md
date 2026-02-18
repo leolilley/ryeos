@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:a2ebf7b22417be3eede7b7247626b7a82b80139b0a9f4fddeeffc5169c349cd6:tb7knkqhjAy8F03AagvumanQ6aPfSNhDI7U8ZHlQkzEqMLaUb9ScIWt68b0IZCLMl1JbGzEnaWqz4BMs6IuPDw==:440443d0858f0199 -->
 # Registry Logout
 
 Clear the local authentication session.

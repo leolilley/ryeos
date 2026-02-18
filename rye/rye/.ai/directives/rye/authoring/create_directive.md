@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:a1bc8ec5c6240be137d4905f750a273dd32bb52e46ecc7b99556b346e8de342d:7Acc6Q4i85NEqHqS_dRF_MCSwjmGt5wqs6aLzKqkKaoTxe7YHIPB9Egl6NTke1b06IKXPmzPgZLGPz3i6rUaBg==:440443d0858f0199 -->
 # Create Directive
 
 Create a new directive file with proper metadata, validate, and sign it.

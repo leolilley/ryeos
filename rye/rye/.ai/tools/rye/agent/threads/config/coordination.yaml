@@ -21,6 +21,11 @@ coordination:
     # Soft target for summary output
     summary_max_tokens: 4000
 
+  # Transcript integrity verification on resume/handoff
+  # "strict" (default): refuse on any integrity failure
+  # "lenient": allow unsigned trailing events with warning
+  transcript_integrity: strict
+
   # Orphan detection
   orphan_detection:
     enabled: true

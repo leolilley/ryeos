@@ -326,4 +326,6 @@ class EnvResolver:
             return env.get(var_name, default_value)
 
         # Pattern: ${VAR_NAME:-default_value} or ${VAR_NAME}
-        return re.sub(r"\$\{([^}]+)\}", replace_var, text)
+        # Only match uppercase env var names (no dots, no lowercase) to avoid
+        # consuming context interpolation templates like ${state.issues}.
+        return re.sub(r"\$\{([A-Z_][A-Z0-9_]*(?::-[^}]*)?)\}", replace_var, text)

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-13T08:58:04Z:4881331fd7cfcb25e90cf09ab54524740d55a49bacdf2e87faf32d9ef2f26db6:Z_osJg9H7GqkGsseQkRsdWAOtT2y1NNGDtarA-RvMn6GRKhi8In0tipuZJgdPkye8ajmYSlIgzHkMb8OPE2NCQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T05:43:37Z:4881331fd7cfcb25e90cf09ab54524740d55a49bacdf2e87faf32d9ef2f26db6:Z_osJg9H7GqkGsseQkRsdWAOtT2y1NNGDtarA-RvMn6GRKhi8In0tipuZJgdPkye8ajmYSlIgzHkMb8OPE2NCQ==:440443d0858f0199 -->
 # Spawn Chain 4 Levels Deep
 
 End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tests budget cascading, limit inheritance, permission inheritance, and depth tracking across 4 levels.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:f229de3f5f9908840606157dba22fe06696a9b88c3d0c20aad50f3728c42ff29:1NTxgB5qYespnd-rY3stb-fAa25F7V89H8ruqvMNSgQbfXzkO2p3pQmBSC7gUBQEsxGag4k7KunbyQR3NTuRAw==:440443d0858f0199 -->
 # Write
 
 Write content to a file, creating directories as needed.

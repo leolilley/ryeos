@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:cd26d0a6fcc33e432af32a539fb0165bce0717f0da502130a6072fd0fed10cbc:mKzbywd5jeim2f08Oy52O9jpLTZLjiISCqG6X9xsEpqA7p0oot3LF-xjTcN0fxzUH2AfurEOdSqPLaBm8XZBBQ==:440443d0858f0199 -->
 # MCP Remove Server
 
 Remove a registered MCP server.

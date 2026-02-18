@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:70d8164af98a9fac26f56ce545b515d8ce80d567111fe8ae0d7b9e68a5d8b69d:jz5G1ZzhBXyO_hwxb4QJ_eid-vKWC1Nyg2bj6XuZ0vnrGy-Y_WZVAMyjC6Bmy2pVavHE7kyDuAVuuxeYjgbDDg==:440443d0858f0199 -->
 # Registry Signup
 
 Create a new registry account.

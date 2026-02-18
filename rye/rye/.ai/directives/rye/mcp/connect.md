@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:428dbc6d2098ecff554101e400f32d22aaa174462f83eb66816b233fa21e0e4a:Iers6LBIRpcuXQaFbd58mpcD_5-YARGis4VSbOFKq3IpKvkQr7cGBS9MV4W1NM274A1thRaWf8FavsDgTLHVCQ==:440443d0858f0199 -->
 # MCP Connect
 
 Execute a tool call on an MCP server via HTTP or stdio transport.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:b2e8004c1ad8e8cfa0fba82a22f4d2500602c7b4530bb5d992eb3b58262c2217:9UWCxiuEPQ10Ie_7Z6bEA-LbJsR6CdfzwJ8lAv40IuH3RIwTUEv8jKVgWBqAJexxqm6EAMTFAz0HtqiP_wYoAQ==:440443d0858f0199 -->
 # Glob
 
 Find files matching a glob pattern.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:07399291edefd6815d814eba081041597fb9fc3370424e1439402479a8dce80b:jHarlPtIoLB-YBpzpukcaAU_a-kdd3IovP5_Hk_mOYLs1ne0wbWhHebr3SvK1wdK_DX6ur4py7wS8Tsp_d3aAA==:440443d0858f0199 -->
 # Verify Bundle
 
 Verify the integrity of an existing bundle.

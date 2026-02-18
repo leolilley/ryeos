@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-13T08:38:46Z:939ee57c40b5e8c5b98ad65f25e76ba930370b2c05226021b5d5d0271440ffd9:47qWa8yDWE4yPcwy9goHyyVQBsxOZ0fbvwHMN1QQCrn186drFU3bKDLUKyZq-v9vqvry3xBwrIEZCeq_OaK2Cw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T05:43:37Z:939ee57c40b5e8c5b98ad65f25e76ba930370b2c05226021b5d5d0271440ffd9:47qWa8yDWE4yPcwy9goHyyVQBsxOZ0fbvwHMN1QQCrn186drFU3bKDLUKyZq-v9vqvry3xBwrIEZCeq_OaK2Cw==:440443d0858f0199 -->
 # Depth Child
 
 Child directive spawned by depth_limit_test. Writes a marker then tries to spawn its own child — which should fail if depth limit is reached.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:22e49ab7e516d7b642511f148212b95f09d46aac804de983d18db157d3ef195b:1y5gtZ4phHxBuad03Fd4Fyx1oadRbeI9xQfN2HqyGsU02sm_oMk0MFwR18lGL5wSUOT7onfBGiogSeMtRPqYBA==:440443d0858f0199 -->
 # Bash
 
 Execute a shell command via subprocess.

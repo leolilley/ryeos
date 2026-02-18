@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:777fc5083e17e0d586fc6aa52fa28cb133064a6761c457606a483e49d08b0ee3:rsOi-gXdfVOMUhSFnL1FvYOOkjRJC1i-Rsy0U-3bj6ETkFHxh2vbpwDu8cV9mBGnhbL9trwG4tqmRWr8tCv9DQ==:440443d0858f0199 -->
 # MCP Add Server
 
 Register a new MCP server and auto-discover its tools.

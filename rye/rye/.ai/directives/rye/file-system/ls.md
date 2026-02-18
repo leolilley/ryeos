@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:98f343f80fe2d26c07eab8fe8da804a6991e0c71d0f3b761ab3e7ab2d1fa99d9:CAulLkstuJTk-oByRbGr1FRxiILJNcC6BTvWWYbqnjxsNDUY5DKhpCWgMK3npDpYoYP1Any8uQzSTrAs7OlfDg==:440443d0858f0199 -->
 # List Directory
 
 List files and directories at a given path.

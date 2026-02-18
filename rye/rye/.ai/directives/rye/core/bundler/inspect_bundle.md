@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:aa3fd85db97334821abff058745cbb0d861e07a727675a4c04b2a1950b2317ad:ktwTwf6U8p6URwpJecMmVP0U1qvH6aarsxNHxZi38kgZq1XQFmydYj_3VCgzZpvG0uSpzmANXdllHFUzKViqAg==:440443d0858f0199 -->
 # Inspect Bundle
 
 Inspect the contents and metadata of a bundle.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:b31a9e3ecb281885559fa5d4f230d0357f77b085b51497dc4d9467ddbf8aa714:6-pr0TDvbbhw6DHH2RisfZHKcr7HAuwSmPDRytKGgCVm4hVTQHKFD0GeeJ2C-x64wZtzBJUNpNJOra8BYny0AA==:440443d0858f0199 -->
 # Search
 
 Search for directives, tools, or knowledge by scope and query.

@@ -1,0 +1,82 @@
+{
+  "file_path": "investigation/mystery.md",
+  "content_hash": "faa72aacf4d193b1f6d8945d13c1825b9221dedff26204a36663ea4e06795b6a",
+  "last_modified": "2026-02-18T08:33:12.305036+00:00",
+  "lines": [
+    {
+      "id": "58b88c",
+      "line_num": 1,
+      "content_hash": "2250310f1f2cc1c73786001cb8a0def9729e3585b4eeb0a674b436b4ccf81569"
+    },
+    {
+      "id": "0c9d12",
+      "line_num": 2,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "2eb71f",
+      "line_num": 3,
+      "content_hash": "244a6b206ec7d8cb1c40dd13d7ea84ae64acc40988f23fc667139b5f713c4d39"
+    },
+    {
+      "id": "4409ea",
+      "line_num": 4,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "b2abfb",
+      "line_num": 5,
+      "content_hash": "74c6c63e1ac305d9ba192beafee057e883b6cd0aa5459c4d364e8eadc6be532e"
+    },
+    {
+      "id": "da30e1",
+      "line_num": 6,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "074be8",
+      "line_num": 7,
+      "content_hash": "46e33eccc0d07185e7e75b25b9c88f114bc678b3117bcd4d25538107532d5ffa"
+    },
+    {
+      "id": "077cf0",
+      "line_num": 8,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "ba8722",
+      "line_num": 9,
+      "content_hash": "73d2edcd7b859baf1edd666e39b59796e5b148289c0ac165f7c136357615bb5a"
+    },
+    {
+      "id": "a0fe63",
+      "line_num": 10,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "83c474",
+      "line_num": 11,
+      "content_hash": "1414114b4b0da31382994722f4c2dca087c30f7979bae0ff61613dfe4afe1ff9"
+    },
+    {
+      "id": "ba805a",
+      "line_num": 12,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "3a547c",
+      "line_num": 13,
+      "content_hash": "6719c92738ed386539e5181c49987dbff872373cc6ab8d357e3571a1f2fb087d"
+    },
+    {
+      "id": "0b357a",
+      "line_num": 14,
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "2d37fa",
+      "line_num": 15,
+      "content_hash": "b5fdbceddc8559a157560bcbf9330ca5cc68d7513b9f5d947ad78bc9df7305b7"
+    }
+  ]
+}

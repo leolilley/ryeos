@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:67ac2c8bbc303ee9729b201fb9191dcf515fd913a63e7c51aed385624945a5bf:ZaErSfrL4FppeQcQ2J-0L5vU_Z9jcVs7jL7SsU3W90uDZ5Q6524AZmiSL2C1r3pBdSxANMCCwwHsGkJNtOJYCg==:440443d0858f0199 -->
 # Create Knowledge Entry
 
 Create a new knowledge entry with proper metadata, validation, and signing.

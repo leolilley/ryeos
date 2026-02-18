@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:4169d3ded01370ea0bc142a1065f29abc6988b1d86d1ca5e9f6e7d41613a1209:XXlCQQN1gU6GeXAQ-aDJA6YZwlziL78FRGSi6GTGukvskcb3m1nTqNVOuSbTKIhmE6Ak-gdzob5OHdqa7fL-Bg==:440443d0858f0199 -->
 # Load
 
 Load or copy a directive, tool, or knowledge item by id and source.

@@ -251,6 +251,66 @@ lockfile = lockfile_resolver.create_lockfile(
 lockfile_resolver.save_lockfile(lockfile, space=chain[0].space)
 ```
 
+## Transcript Integrity
+
+Thread transcripts (JSONL event logs) are signed at turn boundaries using inline checkpoint events. This provides crash-resilient integrity — partial transcripts are still verifiable up to the last checkpoint.
+
+### Checkpoint Signing
+
+`TranscriptSigner` appends checkpoint events to the same JSONL stream as all other events:
+
+```python
+signer = TranscriptSigner(thread_id, thread_dir)
+signer.checkpoint(turn=3)
+# Appends: {"event_type": "checkpoint", "payload": {"turn": 3, "byte_offset": ..., "hash": ..., "sig": ..., "fp": ...}}
+```
+
+Each checkpoint:
+1. Reads all bytes of `transcript.jsonl` up to the current file size
+2. Computes SHA256 of those bytes
+3. Signs the hash with Ed25519
+4. Appends a checkpoint event with the hash, signature, byte offset, and key fingerprint
+
+The runner calls `signer.checkpoint()` at the start of each turn (after the first) and at finalization.
+
+### Checkpoint Verification
+
+```python
+result = signer.verify()
+# {"valid": True, "checkpoints": 5}
+# or {"valid": False, "error": "Content hash mismatch at turn 3", "failed_at_turn": 3}
+```
+
+Verification reads the JSONL, extracts all checkpoint events, and for each one:
+1. Computes SHA256 of file content up to `byte_offset`
+2. Compares to the stored hash
+3. Verifies the Ed25519 signature against the trust store
+4. Checks for unsigned trailing content after the last checkpoint
+
+The `transcript_integrity` setting in `coordination.yaml` controls strictness:
+- `strict` (default): Refuses on any integrity failure, including unsigned trailing events
+- `lenient`: Allows unsigned trailing events with a warning
+
+### thread.json Signing
+
+Thread metadata files use a `_signature` field with canonical JSON serialization:
+
+```python
+from transcript_signer import sign_json, verify_json
+
+data = {"thread_id": "...", "status": "running", "limits": {...}}
+signed = sign_json(data)
+# Adds: data["_signature"] = "rye:signed:TIMESTAMP:HASH:SIG:FP"
+
+is_valid = verify_json(signed)  # True
+```
+
+The hash is computed over canonical JSON (sorted keys, compact separators) of all fields except `_signature`. This protects thread capabilities and limits from tampering.
+
+### Knowledge Entry Export
+
+Transcripts are also exported as signed knowledge entries at `.ai/knowledge/threads/{thread_id}.md`. These use cognition-style framing (`## > Turn N`, `### < Cognition`) and standard knowledge metadata with `entry_type: thread_transcript`. The knowledge entry is updated at each checkpoint and at finalization, replacing the legacy `transcript.md` file in the thread directory.
+
 ## What Breaks Integrity
 
 | Action                            | Result                                                                                |

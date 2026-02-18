@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:e83ec120fb1badd3af44d04cbba7dc385c2515c5df12e3b2b0c11f1fed96c8f5:-pX8ypWWmYxqggVhl_UL0QHtwUhkBK7zkgkPKd1gQJiHAJGkN81WchawzbezEwujn_dQM7HSMCzqc4gew6xoAQ==:440443d0858f0199 -->
 # Setup Provider
 
 Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider YAML config.

@@ -62,7 +62,7 @@ summary_result = await thread_directive.execute({
     "directive_name": "rye/agent/threads/thread_summary",
     "model": "fast",                          # cheap model for summarization
     "inputs": {
-        "transcript_content": transcript_md,  # full transcript text
+        "transcript_content": knowledge_entry_content,      # from .ai/knowledge/threads/{thread_id}.md
         "directive_name": directive_name,
         "max_summary_tokens": 4000,
     },
@@ -235,7 +235,7 @@ rye_execute(
 )
 ```
 
-This searches `transcript.md` files across all threads in the chain — useful for debugging issues that span multiple continuations.
+This searches transcript knowledge entries across all threads in the chain — useful for debugging issues that span multiple continuations.
 
 ## User-Driven Resumption
 
@@ -322,6 +322,7 @@ All continuation behavior is configured in `.ai/config/coordination.yaml`:
 | `summary_limit_overrides` | `{turns: 3, spend: 0.02}` | Limits for the summary thread |
 | `summary_max_tokens` | `4000` | Target max tokens for the summary output |
 | `wait_threads.default_timeout` | `600.0` | Default wait timeout in seconds |
+| `transcript_integrity` | `strict` | Verification mode for transcript signing (`strict` or `lenient`) |
 
 ## What's Next
 

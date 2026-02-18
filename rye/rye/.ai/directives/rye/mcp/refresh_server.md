@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:9dd6394784e459f5ee3d4487b4babb8f86ac0d93f35d8f3afa8c5ed21818104b:MhBI3FgmNUq9WXZ_Rysp518RfmZGzQQEmTTr1Sm3yXv9duh9QZodawZBO9ABJaajZkeKLwXl8Ij4aO5yND_PDw==:440443d0858f0199 -->
 # MCP Refresh Server
 
 Refresh a registered MCP server's tool discovery.

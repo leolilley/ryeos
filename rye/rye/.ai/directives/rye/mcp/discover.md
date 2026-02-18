@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:4369e26b77cf6c0e70bd19a72c5e9c1326dc4953933bfbb892966f4337c31372:sECiCc9z75ZU3VxGEnuPOv9b7T_OiGq2JjwzpmIftkqUGZXEQq_M7YAomSqtzZKpsE1XBgXSFq06sEX7vxnVBQ==:440443d0858f0199 -->
 # MCP Discover
 
 Discover available tools on an MCP server.

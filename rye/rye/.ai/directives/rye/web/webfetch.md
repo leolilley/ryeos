@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:fa0c0a36e8336535432d12f8c408b5449dd410b22ca7b8f2d0aee63f99a1d7a4:2a6Jxg3dxuIWH47UyDmIDDLptWc7EW5eYprecrnlt3xjYU8FGhIsqCXGRCEIZvB0FhdxiFoov_NtnD3hmOddDQ==:440443d0858f0199 -->
 # Web Fetch
 
 Fetch the content of a web page and return it in the specified format.

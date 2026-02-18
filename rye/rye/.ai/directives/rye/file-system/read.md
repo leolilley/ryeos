@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:bc1f7d996a4ca532f248e2e78c821fcbbf8836ae98de41eea92c773a07a5125c:wmiiHfhufRS1serkBCgaY1NA7890pT1UBqW1uw0pR2_7UZ75jJmLl2DKJ_q-w1osT7rY999MPo9IpYkqGOrFAQ==:440443d0858f0199 -->
 # Read
 
 Read file contents with optional offset and line limit.

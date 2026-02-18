@@ -1,0 +1,33 @@
+{
+  "thread_id": "test/tools/file_system/child_write-1771402368",
+  "directive": "test/tools/file_system/child_write",
+  "status": "completed",
+  "created_at": "2026-02-18T08:12:48.615387+00:00",
+  "updated_at": "2026-02-18T08:12:57.075674+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 3,
+    "input_tokens": 5176,
+    "output_tokens": 421,
+    "spend": 0.007280999999999999,
+    "elapsed_seconds": 6.683397339002113
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 16000,
+    "spend": 1.0,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 9,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "path": "child_output.md",
+    "content": "Hello from streaming child"
+  },
+  "_signature": "rye:signed:2026-02-18T08:12:57Z:1b5853d6be663b91b3d667d4729dd05b98ec2ed41542d1abde50a4fd42878cb8:G82e4s_yL9rtX9s04FaH7Ao0fchPU3kvZ-5zlj7IhJBXoAfWoXyzXStsOTZDRfDF50VytXUZDjDvvUkIDiIIBA==:440443d0858f0199"
+}

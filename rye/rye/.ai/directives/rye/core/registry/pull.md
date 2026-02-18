@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:3ef372ba9377a1c6db3838681db19639c1b840455204eb9450efee6c61f03a74:RJ1YZ0-MJM6i3JAlZdZapbhV4XoEBnl--yEFwxymaOh6ebZ1v6CczOuJmCkrqAVDxFuxxXB54RnoQGsAD9-FAA==:440443d0858f0199 -->
 # Registry Pull
 
 Download an item from the registry.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:1f8a17f98ad1054a9bec0ba7f241a8fafdf9fc7604b7a364ca666b1254b0d2f0:Wn7QregYRsH8jGero1jetcfitnInxf6ly25XAe2lYNMRFgCyuS_k_dL4uh1AvMw4dbCOpxcV4UikrFeFXtNdBA==:440443d0858f0199 -->
 # MCP List Servers
 
 List all registered MCP servers.

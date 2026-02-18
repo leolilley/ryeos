@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:008b55c7ef9131d2e746636c6d6ccc515b5dbdd2cfffdcca178a42398688c17e:FQR2j9w5Zskb9LYoiKqiU5FngZF3Pa0SDvUVNoshEVnyGLNXm0XA3Yi9uVYMksbK-m_LdFZW6lBcAP9EivMZBg==:440443d0858f0199 -->
 # Registry Delete
 
 Remove an item from the registry.

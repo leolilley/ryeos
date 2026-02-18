@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:fede662c5841ead6a5e5a7af98474a0c10c90c3fcae091574dd82c7ee4aeaf86:xIkLenowjOii8nMCbMWahnJAnzM1sa2AP6Xvfw-1qPDY3G9z0ocGHpjOLQoJS-wi8DrOZZe85aTYsl3zHMbeBQ==:440443d0858f0199 -->
 # Create Tool
 
 Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign it.

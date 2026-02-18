@@ -1,0 +1,23 @@
+{
+  "thread_id": "test/tools/threads/parent_spawn-1771402330",
+  "directive": "test/tools/threads/parent_spawn",
+  "status": "running",
+  "created_at": "2026-02-18T08:12:10.566533+00:00",
+  "updated_at": "2026-02-18T08:12:10.566533+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "limits": {
+    "turns": 8,
+    "tokens": 32000,
+    "spend": 1.0,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.thread_directive",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "_signature": "rye:signed:2026-02-18T08:12:10Z:b266b0f392d8e8ae9508df902b3045fe53bd3d50421c6e32d649e8df1af5a4bd:w7OsWdZ6SJ56bNccj8X0bOfkogFDmd-WJ197jPBHfpS_tbAHjb5AuYzXUlHzZqZKwRF__fOBCRQSthLXQcEzAA==:440443d0858f0199"
+}

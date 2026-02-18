@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:2057befb161f61c91996c80b2dc98753f0c790137f1cae5b32ec4b57527a1096:Sf6AJAjlH7dParLjNvq1l8UPK786sIuFMo1cXN2oIVjnm7rCo_1WEY0bxlK_n0JIMurU4O8uZlJbvxtAt_I9CA==:440443d0858f0199 -->
 # Edit Lines
 
 Edit specific lines in a file using line IDs from a prior read.

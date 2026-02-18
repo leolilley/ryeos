@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:885ec7866d4adb504667ba7e5d054d0fc3249829496a42b93898bbcee1e12260:o-cymmhOaBI9W0YbjN4cgszbUknAUviPsTnuUE8IwzrmfyLwx34V-3v_HNCVN9GC9Wp6hd9DEuzp6fgRG_k3Aw==:440443d0858f0199 -->
 # LSP Diagnostics
 
 Run LSP linters on a file and return diagnostics.

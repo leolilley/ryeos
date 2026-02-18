@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-13T08:58:04Z:f37ca3767a19eee2ca5cdfdad310e9e85d3d5af124d50b9dbc9cb585b97b8605:ozCV0zzLB42aNRI3PSbw5Qg4dCuHZ2okOp4PKf0N-_8u3istizyJtJ2jfRvKHDJ9CiIcmeSnU4JhYvvpUoS8DA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T05:43:37Z:f37ca3767a19eee2ca5cdfdad310e9e85d3d5af124d50b9dbc9cb585b97b8605:ozCV0zzLB42aNRI3PSbw5Qg4dCuHZ2okOp4PKf0N-_8u3istizyJtJ2jfRvKHDJ9CiIcmeSnU4JhYvvpUoS8DA==:440443d0858f0199 -->
 # Spawn Chain Child
 
 Recursive child for spawn chain test. Writes a marker at its level, then spawns the next level if not at max.

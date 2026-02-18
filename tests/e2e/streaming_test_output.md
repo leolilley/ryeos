@@ -1,0 +1,1 @@
+Hello from streaming e2e test!

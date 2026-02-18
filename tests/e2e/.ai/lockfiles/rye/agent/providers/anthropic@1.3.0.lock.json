@@ -1,0 +1,27 @@
+{
+  "lockfile_version": 1,
+  "generated_at": "2026-02-18T08:25:21.077382+00:00",
+  "root": {
+    "tool_id": "rye/agent/providers/anthropic",
+    "version": "1.3.0",
+    "integrity": "e156255e41857b5e6683da2469f3d5b0e8b3c138d1ea8e3a275eae4fe9f51282"
+  },
+  "resolved_chain": [
+    {
+      "item_id": "rye/agent/providers/anthropic",
+      "space": "system:rye-os",
+      "tool_type": "http",
+      "executor_id": "rye/core/primitives/http_client",
+      "integrity": "e156255e41857b5e6683da2469f3d5b0e8b3c138d1ea8e3a275eae4fe9f51282"
+    },
+    {
+      "item_id": "rye/core/primitives/http_client",
+      "space": "system:rye-os",
+      "tool_type": "primitive",
+      "executor_id": null,
+      "integrity": "935e4b703dbc96851781f0ac01c14854a8fe43d7318886550496aa897f6b550d"
+    }
+  ],
+  "registry": null,
+  "verified_deps": null
+}

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:519eaeda35dece7f0c388591d0f99a07080e6bf30ae598602587be217b40b0d1:NmA1FAcPuUp3w6Z2t1txL9enc0DXHoqYCEt4X3TNoQfIgHiYqpd8sODDdgUmG2gkErtoLdyGGqGSF6WbomWkDg==:440443d0858f0199 -->
 # Telemetry
 
 Retrieve telemetry data including logs, stats, and errors.

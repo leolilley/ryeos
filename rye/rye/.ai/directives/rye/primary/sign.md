@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:a06d2c51f725e25601b263965ff9d37529d56734d3e1e3ed2099938da9e5362a:wOGASBUIsgEGkWI_7TyJz6es8c4Z6aiR3FgrlX7Jn8LG9WeGDJsPlyt35mx7EFpmeGDY50Wt-SwC6nLG5WqVBA==:440443d0858f0199 -->
 # Sign
 
 Validate and sign a directive, tool, or knowledge item.

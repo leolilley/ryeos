@@ -4,7 +4,7 @@ title: "Building a Pipeline"
 description: Step-by-step guide to building a multi-phase orchestrated pipeline
 category: orchestration
 tags: [pipeline, tutorial, orchestration, practical]
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Building a Pipeline
@@ -211,6 +211,30 @@ Scrape Google Maps for businesses in a specific niche and city. Save raw leads t
 ````
 
 **Pattern:** check state → call tool → save output → report. This is the standard leaf pattern.
+
+### Structured Returns with `directive_return`
+
+When a directive declares `<outputs>`, the thread prompt instructs the LLM to call `directive_return` via `rye_execute` when all steps are complete. This provides structured key-value outputs that parent orchestrators can consume programmatically.
+
+For example, the `discover_leads` directive declares:
+
+```xml
+<outputs>
+  <output name="leads_file">Path to the saved leads JSON file</output>
+  <output name="lead_count">Number of leads discovered</output>
+</outputs>
+```
+
+When the LLM finishes, it calls:
+
+```python
+rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return",
+    parameters={"leads_file": ".ai/data/leads.json", "lead_count": "15"})
+```
+
+The parent orchestrator receives these as `result["outputs"]` when waiting on the thread, enabling reliable data flow between pipeline stages.
+
+If the LLM omits required output fields, the runner returns an error asking it to retry — ensuring the contract between parent and child is enforced.
 
 ### `score_lead.md` — Minimal Leaf
 

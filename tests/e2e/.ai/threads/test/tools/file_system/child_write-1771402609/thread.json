@@ -1,0 +1,33 @@
+{
+  "thread_id": "test/tools/file_system/child_write-1771402609",
+  "directive": "test/tools/file_system/child_write",
+  "status": "completed",
+  "created_at": "2026-02-18T08:16:49.122703+00:00",
+  "updated_at": "2026-02-18T08:16:54.586418+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 3,
+    "input_tokens": 5259,
+    "output_tokens": 426,
+    "spend": 0.007389000000000001,
+    "elapsed_seconds": 3.932797503999609
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 16000,
+    "spend": 1.0,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "path": "streaming_test_output.md",
+    "content": "Hello from streaming e2e test!"
+  },
+  "_signature": "rye:signed:2026-02-18T08:16:54Z:6373db7dd20ff7c02119ca26efabfaefc1e25bcfe4dfc44fb6dbdbebde286285:vzDJMCsyDltbxUJJL6qkTbaz_C3cJrAAgVCPxFyuGydAlsF8jeERYAgSMHIDm0L9SfhY4JGmYWdFUvtyD4DtCg==:440443d0858f0199"
+}

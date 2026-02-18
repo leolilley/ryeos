@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:d008af8fd76bdfd5bd7237cac1281496e5a401655608c013ac710f4ea545e0da:3gn5PqGGV5FReAl3muf3Zb9EkH-4N8jeORZ1l7teoK5tz2NbA4VjYEYAE-Q7161j0z5VkV7BYW5sBfJEd_NJCg==:440443d0858f0199 -->
 # Registry Login
 
 Start the device authentication flow for the registry.

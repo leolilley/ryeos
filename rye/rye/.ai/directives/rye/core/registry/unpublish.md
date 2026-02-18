@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:554a3585cc83e0d21e31e533dd98ac3c642fd1f59054e9eb80774f9783fed82d:1fOOAqj9b5h3gczuEyZcOYuaxt2xxor13DaAb4Y204oWEQJcUq4OXXqhr0kXI-PwpkzWhNCPsuvQAVsGAKSAAQ==:440443d0858f0199 -->
 # Registry Unpublish
 
 Make an item private in the registry.

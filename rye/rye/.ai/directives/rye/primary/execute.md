@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:35db36d2f1a11cf6775cf3ac75416295e646b7c2bf11807960de923547ebc6e1:BW7nxIRH5ovAkvr5mlK0530ofq0UwZQ3Lsjfg9gElrRYRBQdOF8BpotHTDWGl0MbaQ59X-NtobFxvQh-OLDeCQ==:440443d0858f0199 -->
 # Execute
 
 Execute a directive, tool, or knowledge item by id with optional parameters.

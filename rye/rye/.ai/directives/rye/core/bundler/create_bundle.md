@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:6fd9872127773c2dab2404808bcb7cff6a4b1d7d8bc0b2c2b7382640ed18a98f:JCFR2xKoPdSgRSSXlacdAu0mHbj74faqjEtpfkzdJkdYn8VN42kmFKixutrrQ68weN6oixQE4uzwsTcAUITBBw==:440443d0858f0199 -->
 # Create Bundle
 
 Create a new bundle using the bundler tool.

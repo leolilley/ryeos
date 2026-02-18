@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-13T09:03:48Z:f31c06a5a6b81317e0257e906553073766df418f60564f0c7a5e841706f462e1:SHJ_V8xDS4aw-fW0WGV6RemWcvWDMZmK-3Jjipje973t2ttvx0MfKsdVwmVdz5mcXPl0lPtK8NORctH67NJ3Bg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T05:43:37Z:f31c06a5a6b81317e0257e906553073766df418f60564f0c7a5e841706f462e1:SHJ_V8xDS4aw-fW0WGV6RemWcvWDMZmK-3Jjipje973t2ttvx0MfKsdVwmVdz5mcXPl0lPtK8NORctH67NJ3Bg==:440443d0858f0199 -->
 # Tokens Limit Test
 
 Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM response exceeds it.

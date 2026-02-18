@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:f08502e65ec7f8a96e791288d9234e29c491b61c01abb899d67e0bb8572379df:bKVDfRij86sInb0BQ2qvHdCbaezwYghXpzNY9zDf248OdhV40_ZOnuAVmck5d7CEzWtJ-cF48WvuMD-Q0x_pCw==:440443d0858f0199 -->
 # Registry Push
 
 Upload an item to the registry.

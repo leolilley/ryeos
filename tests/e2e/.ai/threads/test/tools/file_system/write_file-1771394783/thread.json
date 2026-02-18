@@ -1,0 +1,28 @@
+{
+  "thread_id": "test/tools/file_system/write_file-1771394783",
+  "directive": "test/tools/file_system/write_file",
+  "status": "completed",
+  "created_at": "2026-02-18T06:06:23.949793+00:00",
+  "updated_at": "2026-02-18T06:06:29.295676+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 3,
+    "input_tokens": 4353,
+    "output_tokens": 332,
+    "spend": 0.006012999999999999,
+    "elapsed_seconds": 3.27480788500543
+  },
+  "limits": {
+    "turns": 3,
+    "tokens": 4096,
+    "spend": 1.0,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*"
+  ],
+  "_signature": "rye:signed:2026-02-18T06:06:29Z:cd43be8b05759f7f2d60e33ae43db9a29334f98dfc31df1fc300d529c8a117f9:ptykDdyC3HCUNYCCQyVL7apB3MfFo6HZ6kVucGJvOaxhE1kDgDaT2EB_USl8foqIto7hrau5fCLvwe9Jzh3aBw==:440443d0858f0199"
+}

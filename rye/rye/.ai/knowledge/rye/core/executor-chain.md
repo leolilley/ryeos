@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-17T23:54:02Z:ffb80da188c1b8fa769f4be62739e67f56998fe892e9e95f12946ba2214bbe33:uiuV0GiLcbbK1PEsSEc7JZaMfn48VMEYomy-D8gcNe-y6KMNPvqxcsObuKv1fN_pc9VgY8r6PavyL-VOGRMqAA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T01:03:26Z:41e161392bd02d25ac23a081219df7c36d596e500dfbcad5c23f38b62aae3268:dhHS5-m_iVexWyWeI2a1Huo9NdDeaycINmS2BEIfhJwP3OqDfX59GqJKXDYoC49_NFl66Tzbb9NSKO22Su1hCg==:440443d0858f0199 -->
 
 ```yaml
 id: executor-chain
@@ -16,6 +16,7 @@ tags:
   - primitives
 references:
   - three-tier-spaces
+  - templating-systems
   - "docs/internals/executor-chain.md"
 ```
 

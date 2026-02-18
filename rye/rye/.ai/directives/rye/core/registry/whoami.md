@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:ed8e45671b1b4f2534e08a19c3dec5ae0450da86c8bcae229ef275bd915fca48:cBcyj3zvkqPJRKEXxfsOE88DpgAvf6ZKwy0gmNzlkraFZK-pPU3uoSNgR7ugAy6aC9nbBRGzeqbI_0DEbLODCw==:440443d0858f0199 -->
 # Registry Whoami
 
 Show the currently authenticated user.

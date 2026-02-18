@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:04e8cf618672eb2695ab1216aadea854e8bd3bf04a691d4a773c0928e2e300c6:fjdBKbXyLdHey4OPZr0FdgjXxW2BKJOqvLvKJWK6OnFonMPyjy_NiRBjzMGb5-GCLVfFu-BbG2XXHA5bKx2rAA==:440443d0858f0199 -->
 # Registry Search
 
 Search the registry for items.

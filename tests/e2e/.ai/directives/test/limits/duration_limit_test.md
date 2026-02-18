@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-13T09:03:48Z:08c5145c8127f3c0c695d2b1c1d04307de3e19192621b170407c45866495636a:n_1xAK7gDO5vvw4RgYRG_hd7FdnrBXftNiEp1JEK8WiQ4H5TK0nxoeru8In9aYfJ0-RXCA_p1dMkk2tdLF_6AA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-18T05:43:37Z:08c5145c8127f3c0c695d2b1c1d04307de3e19192621b170407c45866495636a:n_1xAK7gDO5vvw4RgYRG_hd7FdnrBXftNiEp1JEK8WiQ4H5TK0nxoeru8In9aYfJ0-RXCA_p1dMkk2tdLF_6AA==:440443d0858f0199 -->
 # Duration Limit Test
 
 Test that the duration_seconds limit triggers escalation. Set duration_seconds=1 so the thread exceeds it during its first LLM call.

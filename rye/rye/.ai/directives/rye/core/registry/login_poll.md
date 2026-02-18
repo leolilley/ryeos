@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
+<!-- rye:signed:2026-02-18T05:40:31Z:a1f7d909e9bd176ba5d7599e09bc713a97b54ba7e243204c1f5ac334d134f38a:SczZ2b0uTmGgXyUWnJTNsT1IJCyXfrsnKGJDoFiwkw7E2v79MaO0x0hZ42D0eZgbkbQ7qYKwtBxfEWER15VpCQ==:440443d0858f0199 -->
 # Registry Login Poll
 
 Poll for device authentication completion.
