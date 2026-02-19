@@ -1,0 +1,34 @@
+{
+  "thread_id": "test/graphs/analyze_code-1771407910",
+  "directive": "test/graphs/analyze_code",
+  "status": "completed",
+  "created_at": "2026-02-18T09:45:10.001515+00:00",
+  "updated_at": "2026-02-18T09:45:13.982007+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 1,
+    "input_tokens": 1716,
+    "output_tokens": 472,
+    "spend": 0.004076,
+    "elapsed_seconds": 0.0005423439943115227
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 20000,
+    "spend": 0.05,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "language": "Python",
+    "function_count": "4",
+    "summary": "This Python script uses asyncio to asynchronously process a list of integers through a transform function that simulates async work with a sleep delay. The results are collected and written to an output.json file as formatted JSON."
+  },
+  "_signature": "rye:signed:2026-02-18T09:45:13Z:53a2c65442bd0587a67838be7ed104bf45f96e1a85e13e9ee257262e1a82bdae:CFxtppNEBJItH0W7gD893-e0sswj13paSP6hQqnzZJJPuSR6Eb-eVn_N9waqhhI0ocRyXyj6L-xXEko2Yef6Cw==:440443d0858f0199"
+}

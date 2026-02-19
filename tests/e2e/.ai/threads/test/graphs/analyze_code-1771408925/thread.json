@@ -1,0 +1,34 @@
+{
+  "thread_id": "test/graphs/analyze_code-1771408925",
+  "directive": "test/graphs/analyze_code",
+  "status": "completed",
+  "created_at": "2026-02-18T10:02:05.571339+00:00",
+  "updated_at": "2026-02-18T10:02:10.651625+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 1,
+    "input_tokens": 1970,
+    "output_tokens": 578,
+    "spend": 0.00486,
+    "elapsed_seconds": 0.00015039799473015592
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 20000,
+    "spend": 0.05,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "language": "Python",
+    "function_count": 5,
+    "summary": "This code implements an LRU (Least Recently Used) Cache with TTL (Time To Live) functionality. The cache stores key-value pairs with a maximum capacity, automatically evicting the least recently used items when full and removing entries that have exceeded their time-to-live. It uses thread-safe locks to ensure safe concurrent access."
+  },
+  "_signature": "rye:signed:2026-02-18T10:02:10Z:cd9d6052a7b78d97e7dd46b21d8477383016e244e52dbbd879cf9a882db57882:axfh6kksA7vx5WajB2Yq4L-c2wWl1jc7x1P7Y_A_OfVR7K7iekQAp9laP_sC86Cr2Yx_30QtyxJlCAA5grlyDQ==:440443d0858f0199"
+}

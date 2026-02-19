@@ -1,0 +1,33 @@
+{
+  "thread_id": "test/graphs/summarize_text-1771408071",
+  "directive": "test/graphs/summarize_text",
+  "status": "completed",
+  "created_at": "2026-02-18T09:47:51.318633+00:00",
+  "updated_at": "2026-02-18T09:47:56.990909+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 2,
+    "input_tokens": 3412,
+    "output_tokens": 468,
+    "spend": 0.005752,
+    "elapsed_seconds": 3.7084934980011894
+  },
+  "limits": {
+    "turns": 4,
+    "tokens": 16000,
+    "spend": 0.03,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "summary": "Unix operating system has been a foundational technology that fundamentally shaped the landscape of modern computing since its inception. Its design philosophy emphasizing modularity, portability, and simplicity influenced subsequent operating systems and computing practices worldwide. The enduring impact of Unix principles continues to be evident in contemporary systems like Linux, macOS, and various cloud computing platforms.",
+    "word_count": "12"
+  },
+  "_signature": "rye:signed:2026-02-18T09:47:56Z:f48ca79921134a8d233e6ad3fd4d0c8cd7de75cd5cdf0aaaa2fdc30cfe641557:7f2zyi1e2obH6ZK2NyC1t09D7Y0nG21cDlNHMGoCjycZktLklersvTCLSFG_GjoCNO2YVKeYywlFMF7RaSb5CQ==:440443d0858f0199"
+}

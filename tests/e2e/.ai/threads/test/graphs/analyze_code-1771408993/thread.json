@@ -1,0 +1,34 @@
+{
+  "thread_id": "test/graphs/analyze_code-1771408993",
+  "directive": "test/graphs/analyze_code",
+  "status": "completed",
+  "created_at": "2026-02-18T10:03:13.435643+00:00",
+  "updated_at": "2026-02-18T10:03:18.330763+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 1,
+    "input_tokens": 1970,
+    "output_tokens": 606,
+    "spend": 0.005,
+    "elapsed_seconds": 0.00017713399574859068
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 20000,
+    "spend": 0.05,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "language": "Python",
+    "function_count": 5,
+    "summary": "This code implements an LRU (Least Recently Used) Cache class with TTL (Time To Live) support, using OrderedDict for efficient tracking of access order and timestamps for expiration. The cache maintains a fixed capacity and automatically evicts the oldest item when full, while also removing expired entries based on a configurable TTL. Thread-safety is ensured through a Lock mechanism."
+  },
+  "_signature": "rye:signed:2026-02-18T10:03:18Z:f963d1dd4078c06151b3ff2ede678333aefe38dc821c43de8ce524df013b58ce:S7Tx9TABD-Ui0m5dVHXD1xC5n5vH0uTFSY5oaJZYz2VfImpdadR65L3qoKVaVwUHhOsjCnPbR1_QlE0GJPLXDA==:440443d0858f0199"
+}

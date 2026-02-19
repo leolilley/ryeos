@@ -1,0 +1,33 @@
+{
+  "thread_id": "test/graphs/summarize_text-1771408856",
+  "directive": "test/graphs/summarize_text",
+  "status": "completed",
+  "created_at": "2026-02-18T10:00:56.566703+00:00",
+  "updated_at": "2026-02-18T10:01:00.799264+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 1,
+    "input_tokens": 1515,
+    "output_tokens": 399,
+    "spend": 0.00351,
+    "elapsed_seconds": 0.00015997399896150455
+  },
+  "limits": {
+    "turns": 4,
+    "tokens": 16000,
+    "spend": 0.03,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "summary": "The provided text contains a JSON structure with an empty analyses array. This minimal JSON object has no actual data or analysis content to summarize. The original content is essentially a template or placeholder structure.",
+    "word_count": "4"
+  },
+  "_signature": "rye:signed:2026-02-18T10:01:00Z:64f7c83e6ba79016c7ec357eee2baf658dd2956d8730b9cd59ceda00d2bc75a4:qN_PXmRxfklNfQQcRVXrIEJMwRo4w7qnWjxa8BOrdWvGB7OG1LWHPxiBsWsUIiH3_JFq18ol1Scw4fr_AeAMBQ==:440443d0858f0199"
+}

@@ -1,0 +1,34 @@
+{
+  "thread_id": "test/graphs/analyze_code-1771408920",
+  "directive": "test/graphs/analyze_code",
+  "status": "completed",
+  "created_at": "2026-02-18T10:02:00.041754+00:00",
+  "updated_at": "2026-02-18T10:02:05.349598+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 1,
+    "input_tokens": 1817,
+    "output_tokens": 567,
+    "spend": 0.004652,
+    "elapsed_seconds": 0.00014700800238642842
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 20000,
+    "spend": 0.05,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "language": "Python",
+    "function_count": "4",
+    "summary": "This code provides security-related utilities for a Python application, including functions for generating secure tokens, hashing and verifying passwords using PBKDF2 with salt, and sanitizing user input by removing potentially dangerous HTML/JavaScript patterns. The implementation follows cryptographic best practices such as salt generation and constant-time comparison for password verification."
+  },
+  "_signature": "rye:signed:2026-02-18T10:02:05Z:e61b2ec1d61af822d3e36828ff5f18c99c7db644b7d32a14d0fa41c7e52b8358:n5wDs76pTIDbVK2lDr5zU9_ImcCqYLmDmA1KYGQ1CN_9Lr8Ip_A3nAJ--R1L2dQtxFwVqFEUIa8-MeBvLVvVBw==:440443d0858f0199"
+}

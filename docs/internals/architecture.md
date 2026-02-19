@@ -65,6 +65,7 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` that configure how to 
 | `node_runtime`            | `rye/core/primitives/subprocess`  | Run Node.js scripts with `node_modules` resolution               |
 | `mcp_stdio_runtime`       | `rye/core/primitives/subprocess`  | Spawn MCP servers over stdio                                     |
 | `mcp_http_runtime`        | `rye/core/primitives/http_client` | Connect to MCP servers over HTTP/SSE                             |
+| `state_graph_runtime`     | `rye/core/primitives/subprocess`  | Walk declarative graph YAML tools, dispatching `rye_execute` for each node  |
 
 ### Tools
 

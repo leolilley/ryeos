@@ -1,0 +1,30 @@
+{
+  "thread_id": "test/graphs/analyze_code-1771407504",
+  "directive": "test/graphs/analyze_code",
+  "status": "completed",
+  "created_at": "2026-02-18T09:38:24.340731+00:00",
+  "updated_at": "2026-02-18T09:38:28.546165+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 2,
+    "input_tokens": 3217,
+    "output_tokens": 245,
+    "spend": 0.004442,
+    "elapsed_seconds": 2.069512575995759
+  },
+  "limits": {
+    "turns": 6,
+    "tokens": 20000,
+    "spend": 0.05,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.bash.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "_signature": "rye:signed:2026-02-18T09:38:28Z:3554cc0e3ed1d3862bb511c5fb8ccaef1196c2b8705418e65a1554739728ce1a:1O7NwDZ1g8dq2oZVJc2KX-AYc1VGtsz_wC8QOODq_bFi_OqBuCofqFIttUboYpoKOb3d-k7Bqto-lrwd-nhiCA==:440443d0858f0199"
+}

@@ -1,0 +1,33 @@
+Traceback (most recent call last):
+  File "/home/leo/projects/rye-os/rye/rye/.ai/tools/rye/core/runtimes/state_graph_walker.py", line 1187, in run_sync
+    asyncio.run(execute(
+    ~~~~~~~~~~~^^^^^^^^^
+        graph_config, params, project_path,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        graph_run_id=graph_run_id,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ))
+    ^^
+  File "/usr/lib/python3.14/asyncio/runners.py", line 204, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/asyncio/runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/home/leo/projects/rye-os/rye/rye/.ai/tools/rye/core/runtimes/state_graph_walker.py", line 771, in execute
+    registry.register(graph_run_id, graph_id, parent_thread_id)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/leo/projects/rye-os/rye/rye/.ai/tools/rye/agent/threads/persistence/thread_registry.py", line 74, in register
+    conn.execute(
+    ~~~~~~~~~~~~^
+        """
+        ^^^
+    ...<3 lines>...
+        (thread_id, directive, parent_id, now, now),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+sqlite3.IntegrityError: UNIQUE constraint failed: threads.thread_id

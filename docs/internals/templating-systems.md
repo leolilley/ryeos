@@ -64,6 +64,7 @@ env_config:
 | ----------------------------- | ------------------------------- |
 | `{tool_path}`                 | Absolute path to the tool file  |
 | `{tool_dir}`                  | Directory containing the tool   |
+| `{tool_parent}`               | Parent directory of the tool    |
 | `{params_json}`               | JSON-serialized tool parameters |
 | `{project_path}`              | Project root path               |
 | `{anchor_path}`               | Module resolution root          |
@@ -121,6 +122,8 @@ This is the same dollar-brace syntax as System 1, but System 1's tightened regex
 | `limits`    | `${limits.turns}` | Thread limits          |
 
 **Missing paths:** resolve to `""` (empty string). The walker logs warnings for non-empty templates that resolve to empty.
+
+**Type preservation:** When a template is a single whole expression (`"${path}"` with no surrounding text), the raw resolved value is returned without string conversion. This means `assign: { count: "${result.stdout}" }` where `result.stdout` is an integer preserves the integer type. Mixed templates like `"Found ${state.count} items"` use string conversion. This is critical for graph edge conditions that use numeric comparisons (`op: gt, value: 0`).
 
 ## System 4: Directive Input References
 

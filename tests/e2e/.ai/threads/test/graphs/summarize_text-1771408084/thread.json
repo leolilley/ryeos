@@ -1,0 +1,33 @@
+{
+  "thread_id": "test/graphs/summarize_text-1771408084",
+  "directive": "test/graphs/summarize_text",
+  "status": "completed",
+  "created_at": "2026-02-18T09:48:04.587602+00:00",
+  "updated_at": "2026-02-18T09:48:08.331807+00:00",
+  "model": "claude-haiku-4-5-20251001",
+  "cost": {
+    "turns": 1,
+    "input_tokens": 1514,
+    "output_tokens": 470,
+    "spend": 0.003864,
+    "elapsed_seconds": 0.00016840299940668046
+  },
+  "limits": {
+    "turns": 4,
+    "tokens": 16000,
+    "spend": 0.03,
+    "spend_currency": "USD",
+    "spawns": 50,
+    "depth": 10,
+    "duration_seconds": 1800
+  },
+  "capabilities": [
+    "rye.execute.tool.rye.file-system.*",
+    "rye.execute.tool.rye.agent.threads.directive_return"
+  ],
+  "outputs": {
+    "summary": "Type systems play a crucial role in preventing software bugs by providing compile-time verification of data types and operations. By enforcing type safety, developers can catch type-related errors before runtime, significantly reducing debugging costs and improving code reliability. This preventative approach makes type systems an essential component of modern software development practices.",
+    "word_count": "9"
+  },
+  "_signature": "rye:signed:2026-02-18T09:48:08Z:2332b9a7d1d311b04bcc1c371ea8518f82e8372efc93d9f4f0668c13cace9c97:KcrTU9X8PYd7OOQ-WSIquqHKmqw4n5xmt2Y3ne44Gu82cPyhFfnmkAbPpQ5bmSBHEe4IaAi4RByK6Eh9p7PuAA==:440443d0858f0199"
+}

@@ -34,7 +34,7 @@ PRIMITIVE_MAP = {
 
 ### Layer 2: Runtimes
 
-Runtimes are YAML configs in `.ai/tools/rye/core/runtimes/`. They point to a primitive and add configuration: interpreter resolution via `ENV_CONFIG`, command templates, timeout, anchor setup, and dependency verification.
+Runtimes are YAML configs in `.ai/tools/rye/core/runtimes/`. They point to a primitive and add configuration: interpreter resolution via `ENV_CONFIG`, command templates, timeout, anchor setup, and dependency verification. The `state_graph_runtime` is a special runtime that walks declarative graph YAML tools — it resolves state graph definitions and orchestrates node execution rather than running a single script.
 
 Example — `python_script_runtime.yaml`:
 
@@ -174,6 +174,8 @@ When active, the anchor system:
 
 This allows tools with multi-file dependencies (e.g., a tool with a `lib/` directory) to have their entire dependency tree verified and their module paths set up correctly.
 
+When `mode: always` is set, the anchor activates unconditionally — marker files are not checked. This is used by runtimes like `state_graph_runtime` where the tool being executed (a graph YAML) won't have marker files in its directory, but the runtime still needs its `lib/python` path on `PYTHONPATH`.
+
 ## Execution Config Building
 
 `_build_execution_config()` merges configs from the entire chain:
@@ -184,6 +186,8 @@ This allows tools with multi-file dependencies (e.g., a tool with a `lib/` direc
 4. Run two-pass templating:
    - Pass 1: `${VAR}` — environment variable substitution (with shell escaping via `shlex.quote`)
    - Pass 2: `{param}` — config value substitution (iterates up to 3 times until stable)
+
+Anchor context variables (`tool_path`, `tool_dir`, `tool_parent`, `anchor_path`, `runtime_lib`) are injected into the execution parameters before `_execute_chain()`. This makes them available as `{param}` template variables in subprocess args. User-supplied parameters with names matching primitive config keys (`command`, `args`) are excluded from the config merge to prevent collisions — they remain accessible only through `{params_json}`.
 
 ## Caching
 

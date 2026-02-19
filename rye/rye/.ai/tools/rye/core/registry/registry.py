@@ -22,8 +22,7 @@ Uses Railway API for item operations, Supabase for auth.
 Actions:
   Auth:
     - signup: Create account with email/password
-    - login: Start device auth flow (opens browser, works for OAuth signup too)
-    - login_poll: Poll for auth completion
+    - login: Device auth flow (opens browser, polls for completion, works for OAuth signup too)
     - logout: Clear local auth session
     - whoami: Show current authenticated user
 
@@ -99,7 +98,6 @@ ACTIONS = [
     "signup",
     "login",
     "login_email",
-    "login_poll",
     "logout",
     "whoami",
     # Items
@@ -498,8 +496,6 @@ async def execute(
             result = await _login(params)
         elif action == "login_email":
             result = await _login_email(params)
-        elif action == "login_poll":
-            result = await _login_poll(params)
         elif action == "logout":
             result = await _logout()
         elif action == "whoami":
@@ -838,13 +834,11 @@ async def _login_email(params: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Start device authorization flow.
+    Device authorization flow.
 
     1. Generate session ID + ECDH keypair
     2. Open browser to registry auth page with public key
-    3. Return session_id for polling
-
-    User then runs login_poll to complete the flow.
+    3. Poll until auth completes or times out
     """
     if not CRYPTO_AVAILABLE:
         return {
@@ -931,77 +925,27 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
     else:
         browser_opened = False
 
-    return {
-        "status": "awaiting_auth",
-        "session_id": session_id,
-        "auth_url": auth_url,
-        "browser_opened": browser_opened,
-        "expires_in": 300,  # 5 minutes
-        "instructions": [
-            "1. Open the URL in your browser"
-            + (" (already opened)" if browser_opened else ""),
-            "2. Sign in with GitHub or email",
-            "3. The auth will complete automatically, or run:",
-            f"   registry login_poll --session_id={session_id}",
-        ],
-        "next_action": {
-            "action": "login_poll",
-            "params": {"session_id": session_id},
-        },
-    }
-
-
-async def _login_poll(params: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Poll for auth completion and exchange encrypted token.
-
-    Args:
-        session_id: Session ID from login
-        max_attempts: Max poll attempts (default 60)
-        interval: Seconds between polls (default 5)
-    """
-    session_id = params.get("session_id")
-    if not session_id:
-        return {"error": "session_id required"}
-
-    # Load session
-    session = _load_session(session_id)
-    if not session:
-        return {
-            "error": f"Session not found: {session_id}",
-            "solution": "Run 'registry login' first",
-        }
-
-    try:
-        from lilux.runtime.auth import AuthStore
-    except ImportError:
-        return {"error": "AuthStore not available"}
-
+    # Poll for auth completion
     config = RegistryConfig.from_env()
     http = RegistryHttpClient(config)
-    auth_store = AuthStore()  # Uses kernel default service_name="lilux"
 
     max_attempts = params.get("max_attempts", 60)
     interval = params.get("interval", 5)
 
-    private_key = base64.b64decode(session["private_key"])
-
     for attempt in range(max_attempts):
-        # Poll the device-auth-poll endpoint
         result = await http.get(
             f"/functions/v1/device-auth-poll?session_id={session_id}"
         )
 
         if not result["success"]:
             if result["status_code"] == 404:
-                # Session not found or expired
                 _delete_session(session_id)
+                await http.close()
                 return {
                     "error": "Session expired or not found",
                     "solution": "Run 'registry login' again",
                 }
             elif result["status_code"] == 202:
-                # Still pending - wait and retry
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(interval)
                     continue
@@ -1015,7 +959,6 @@ async def _login_poll(params: Dict[str, Any]) -> Dict[str, Any]:
                     continue
 
             if body.get("status") == "completed":
-                # Decrypt token
                 try:
                     server_public_key = base64.b64decode(body["server_public_key"])
                     shared_secret = derive_shared_secret(private_key, server_public_key)
@@ -1026,7 +969,6 @@ async def _login_poll(params: Dict[str, Any]) -> Dict[str, Any]:
                         shared_secret,
                     )
 
-                    # Store in keyring
                     auth_store.set_token(
                         service=REGISTRY_SERVICE,
                         access_token=access_token,
@@ -1035,9 +977,7 @@ async def _login_poll(params: Dict[str, Any]) -> Dict[str, Any]:
                         scopes=["registry:read", "registry:write"],
                     )
 
-                    # Clean up session
                     _delete_session(session_id)
-
                     await http.close()
 
                     return {

@@ -1,0 +1,56 @@
+# rye:signed:2026-02-18T09:15:34Z:ae3e2d97dbf4d8be1c817b20ad1614d4627a2eef457a881f3394a1628be33c94:FUHNYT4H5a2yS7t3Uvp_v3p22SpRBweN79tyQ4_zSu7Z451Aoe1MH4Jm4mY7uAtteMGxqy7VA7kvhpuyNG0UAA==:440443d0858f0199
+version: "1.0.0"
+tool_type: graph
+executor_id: rye/core/runtimes/state_graph_runtime
+category: workflows/test
+description: "Gather project stats: count Python files, count total lines, produce summary"
+
+config_schema:
+  type: object
+  properties:
+    directory:
+      type: string
+      default: "."
+      description: "Directory to scan"
+  required: []
+
+config:
+  start: count_files
+  max_steps: 10
+
+  nodes:
+    count_files:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "find ${inputs.directory} -name '*.py' -not -path '*/.venv/*' -not -path '*/__pycache__/*' | wc -l"
+      assign:
+        file_count: "${result.stdout}"
+      next: count_lines
+
+    count_lines:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "find ${inputs.directory} -name '*.py' -not -path '*/.venv/*' -not -path '*/__pycache__/*' -exec cat {} + 2>/dev/null | wc -l"
+      assign:
+        line_count: "${result.stdout}"
+      next: list_largest
+
+    list_largest:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash/bash
+        params:
+          command: "find ${inputs.directory} -name '*.py' -not -path '*/.venv/*' -not -path '*/__pycache__/*' -exec wc -l {} + 2>/dev/null | sort -rn | head -6"
+      assign:
+        largest_files: "${result.stdout}"
+      next: done
+
+    done:
+      type: return

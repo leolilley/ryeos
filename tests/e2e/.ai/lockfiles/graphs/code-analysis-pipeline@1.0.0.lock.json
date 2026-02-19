@@ -1,0 +1,34 @@
+{
+  "lockfile_version": 1,
+  "generated_at": "2026-02-18T10:11:08.670889+00:00",
+  "root": {
+    "tool_id": "graphs/code-analysis-pipeline",
+    "version": "1.0.0",
+    "integrity": "302160e5d26521240490de797a24d3dd621b494e0cc1fb3619d80293de92da19"
+  },
+  "resolved_chain": [
+    {
+      "item_id": "graphs/code-analysis-pipeline",
+      "space": "project",
+      "tool_type": "graph",
+      "executor_id": "rye/core/runtimes/state_graph_runtime",
+      "integrity": "302160e5d26521240490de797a24d3dd621b494e0cc1fb3619d80293de92da19"
+    },
+    {
+      "item_id": "rye/core/runtimes/state_graph_runtime",
+      "space": "system:rye-os",
+      "tool_type": "runtime",
+      "executor_id": "rye/core/primitives/subprocess",
+      "integrity": "c1f3b66b6d65a4a9e695f2edcbe2dca7220e3a8d69fb06590382c42e309d0103"
+    },
+    {
+      "item_id": "rye/core/primitives/subprocess",
+      "space": "system:rye-os",
+      "tool_type": "primitive",
+      "executor_id": null,
+      "integrity": "c63d03107f4c055b1afe9603ea22191b259170dee5ff838a63f3c8fd9cbab4b8"
+    }
+  ],
+  "registry": null,
+  "verified_deps": null
+}
