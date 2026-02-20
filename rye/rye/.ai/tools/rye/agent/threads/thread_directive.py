@@ -1,4 +1,4 @@
-# rye:signed:2026-02-20T01:18:04Z:387f0b19879a068a773ea83e1bf55c197d8e85fba7b020daa70fc73c67b25e15:Eh9lz85MDQMad4mMRXbIByO9tt-8N9GmsPWm1Y3jC_p6gen9wj0cfLbLrdZ0ZEIcvesqSIuzBoPkxZc2Bc-9AA==:440443d0858f0199
+# rye:signed:2026-02-20T01:34:28Z:89e56f982943e857b1f30bca4c5d826797a30824e2b9d0e740b89ba5aac72cc0:IYGlK4jKPr06RYEmkUd1ghJnEXDVDxSFdwrmeH8MsS-SwpoziIWBeRWg44ZZ7-B1AnLMO8jYX6E6xiEw38vjAA==:440443d0858f0199
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
@@ -392,9 +392,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
         or directive.get("model", {}).get("id")
         or directive.get("model", {}).get("tier", "general")
     )
+    provider_hint = directive.get("model", {}).get("provider")
     provider_resolver = load_module("adapters/provider_resolver", anchor=_ANCHOR)
     resolved_model, provider_item_id, provider_config = provider_resolver.resolve_provider(
-        model, project_path=proj_path
+        model, project_path=proj_path, provider=provider_hint
     )
     provider_type = provider_config.get("tool_type", "http")
     if provider_type == "http":

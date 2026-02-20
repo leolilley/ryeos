@@ -1,12 +1,17 @@
-# rye:signed:2026-02-16T07:32:54Z:a748b6f85277c0bf5ed6a721ab0436e3363d5c45dcf1a97f74e65af4b806488e:X0edDd1oLtU5zTIyGrnq1PQaniEDfO848QxZfDoQUQ_AT7BxyUNtHqcAenqvrMViIHvrTQ8owvNz_vMwGtaVAA==:440443d0858f0199
+# rye:signed:2026-02-20T01:38:25Z:894bc39df2ecf6ac0b4f760ba64dd8fb10de8acafcd5e087d52d64bcceb7a353:VtyIN8JuIl754yYdoXDUYlgD5GlfwWdywfX1CDPi9VNgwk1AqKH4WYr0atPpi5MBTp1Mpk7gy1EOUf8aD9l1Dw==:440443d0858f0199
 """
 provider_resolver.py: Resolve model/tier to a concrete provider adapter.
 
 Searches provider YAML configs in project → user → system space.
-No hardcoded provider — if no config matches, raises ProviderNotFoundError.
+Supports provider hints from directives and default_provider from agent config.
+
+Resolution priority:
+1. Explicit provider hint (from <model provider="openai" /> in directive)
+2. default_provider from agent config (~/.ai/config/agent.yaml)
+3. All providers in alphabetical order (first match wins)
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Provider resolver for thread execution"
@@ -23,10 +28,63 @@ from rye.utils.path_utils import get_user_space, get_system_space
 
 logger = logging.getLogger(__name__)
 
+# Agent config is cached per-process
+_agent_config_cache: Dict[str, Dict] = {}
+
 
 class ProviderNotFoundError(Exception):
     """No provider config found for the requested model/tier."""
     pass
+
+
+def _load_agent_config(project_path: Optional[Path] = None) -> Dict:
+    """Load agent config with 3-tier merge: system → user → project.
+
+    Config paths follow .ai/ conventions:
+        system: {system_space}/.ai/tools/rye/agent/config/agent/rye.yaml
+        user:   ~/.ai/config/agent/rye.yaml
+        project: {project}/.ai/config/agent/rye.yaml
+    """
+    cache_key = str(project_path or "")
+    if cache_key in _agent_config_cache:
+        return _agent_config_cache[cache_key]
+
+    config: Dict = {}
+
+    # System defaults (shipped with rye)
+    system_config = get_system_space() / AI_DIR / "tools" / "rye" / "agent" / "config" / "agent" / "rye.yaml"
+    if system_config.exists():
+        with open(system_config) as f:
+            config = yaml.safe_load(f) or {}
+
+    # User overrides
+    user_config = get_user_space() / AI_DIR / "config" / "agent" / "rye.yaml"
+    if user_config.exists():
+        with open(user_config) as f:
+            user = yaml.safe_load(f) or {}
+        config = _deep_merge(config, user)
+
+    # Project overrides
+    if project_path:
+        project_config = project_path / AI_DIR / "config" / "agent" / "rye.yaml"
+        if project_config.exists():
+            with open(project_config) as f:
+                proj = yaml.safe_load(f) or {}
+            config = _deep_merge(config, proj)
+
+    _agent_config_cache[cache_key] = config
+    return config
+
+
+def _deep_merge(base: Dict, override: Dict) -> Dict:
+    """Deep merge override into base."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def _build_item_id(config: Dict, yaml_path: Path) -> str:
@@ -80,19 +138,45 @@ def _load_provider_configs(project_path: Optional[Path] = None) -> List[Tuple[Pa
     return configs
 
 
+def _order_configs(
+    configs: List[Tuple[Path, Dict]],
+    preferred_provider: Optional[str],
+) -> List[Tuple[Path, Dict]]:
+    """Reorder configs so preferred provider is checked first."""
+    if not preferred_provider:
+        return configs
+    preferred = []
+    rest = []
+    for yaml_path, config in configs:
+        tool_id = config.get("tool_id", yaml_path.stem)
+        if tool_id == preferred_provider:
+            preferred.append((yaml_path, config))
+        else:
+            rest.append((yaml_path, config))
+    return preferred + rest
+
+
 def resolve_provider(
     model: str,
     project_path: Optional[Path] = None,
+    provider: Optional[str] = None,
 ) -> Tuple[str, str, Dict]:
     """Resolve a model string to a concrete provider config.
 
-    Resolution order:
-    1. Check tier_mapping in each provider config (e.g., "haiku" → "claude-3-5-haiku-20241022")
-    2. Check if model string matches a known model ID directly
+    Resolution priority for provider selection:
+    1. Explicit provider hint (from directive <model provider="..." />)
+    2. default_provider from agent config
+    3. All providers alphabetically (first match wins)
+
+    Within the selected provider(s), resolution order:
+    1. Check tier_mapping keys (e.g., "fast" → "claude-haiku-4-5-20251001")
+    2. Check literal model ID match
+    3. Check prefix match on model IDs
 
     Args:
-        model: Model tier name (e.g., "haiku") or full model ID (e.g., "claude-3-5-haiku-20241022")
+        model: Model tier name (e.g., "fast") or full model ID
         project_path: Project root for project-space provider discovery
+        provider: Explicit provider hint (e.g., "openai", "anthropic")
 
     Returns:
         Tuple of (resolved_model_id, provider_item_id, provider_config_dict)
@@ -110,8 +194,40 @@ def resolve_provider(
             f"Create a provider YAML at {AI_DIR}/tools/rye/agent/providers/"
         )
 
+    # Determine preferred provider: explicit hint > agent config > none
+    preferred = provider
+    if not preferred:
+        agent_config = _load_agent_config(project_path)
+        preferred = agent_config.get("provider", {}).get("default")
+
+    # If we have an explicit provider hint (from directive), filter to only that provider
+    if provider:
+        filtered = [(p, c) for p, c in configs if c.get("tool_id", p.stem) == provider]
+        if not filtered:
+            available = [c.get("tool_id", p.stem) for p, c in configs]
+            raise ProviderNotFoundError(
+                f"Provider '{provider}' not found. Available: {', '.join(available)}"
+            )
+        ordered = filtered
+    else:
+        ordered = _order_configs(configs, preferred)
+
     # Pass 1: Check tier_mapping
-    for yaml_path, config in configs:
+    # If no preferred provider, check for ambiguity first
+    if not preferred:
+        matches = [
+            (p, c) for p, c in ordered
+            if model in c.get("tier_mapping", {})
+        ]
+        if len(matches) > 1:
+            providers = [c.get("tool_id", p.stem) for p, c in matches]
+            raise ProviderNotFoundError(
+                f"Multiple providers offer tier '{model}': {', '.join(providers)}. "
+                f"Set provider.default in ~/.ai/config/agent/rye.yaml or use "
+                f'<model tier="{model}" provider="..." /> in the directive.'
+            )
+
+    for yaml_path, config in ordered:
         tier_mapping = config.get("tier_mapping", {})
         if model in tier_mapping:
             resolved_model = tier_mapping[model]
@@ -123,7 +239,7 @@ def resolve_provider(
             return resolved_model, item_id, config
 
     # Pass 2: Check if model is a known model ID in any tier_mapping values
-    for yaml_path, config in configs:
+    for yaml_path, config in ordered:
         tier_mapping = config.get("tier_mapping", {})
         if model in tier_mapping.values():
             item_id = _build_item_id(config, yaml_path)
@@ -134,7 +250,7 @@ def resolve_provider(
             return model, item_id, config
 
     # Pass 3: Check if model is a prefix of any known model ID
-    for yaml_path, config in configs:
+    for yaml_path, config in ordered:
         tier_mapping = config.get("tier_mapping", {})
         for tier, model_id in tier_mapping.items():
             if model_id.startswith(model) or model.startswith(model_id):
