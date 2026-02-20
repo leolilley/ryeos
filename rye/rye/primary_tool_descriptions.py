@@ -14,9 +14,10 @@ PROJECT_PATH_DESC = "Absolute path to the project root containing .ai/."
 
 ITEM_ID_DESC = (
     "Slash-separated path without file extension. "
-    'Examples: "rye/core/init" → .ai/directives/rye/core/init.md, '
+    'Examples: "init" → .ai/directives/init.md, '
+    '"rye/core/create_directive" → .ai/directives/rye/core/create_directive.md, '
     '"rye/bash/bash" → .ai/tools/rye/bash/bash.py. '
-    "If unsure of the ID, use search to discover it first."
+    "If unsure of the ID, call search first to discover it."
 )
 
 # ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ ITEM_ID_DESC = (
 
 EXECUTE_TOOL_DESC = (
     "Run a Rye item. item_id is a slash-separated path without extension "
-    '(e.g. "rye/core/init" resolves to .ai/directives/rye/core/init.md). '
+    '(e.g. "rye/core/create_directive" resolves to .ai/directives/rye/core/create_directive.md). '
     "Resolved project → user → system. If you don't know the ID, call search first. "
     "Executing a directive returns parsed steps with an instructions field — follow them. "
     "Executing a tool runs it. Executing knowledge returns context."
