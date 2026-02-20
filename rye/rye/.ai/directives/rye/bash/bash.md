@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:22e49ab7e516d7b642511f148212b95f09d46aac804de983d18db157d3ef195b:1y5gtZ4phHxBuad03Fd4Fyx1oadRbeI9xQfN2HqyGsU02sm_oMk0MFwR18lGL5wSUOT7onfBGiogSeMtRPqYBA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:bf23ad40fd0ab2989bcabc2e88c7d63a1d1013354ced235139e5bc61ac8a907b:GHwij2opoB91oikxTzC5qPxQ4RbxskqJl1hY0pKlTKJaCQCbaE40-0npSrFKtSMi1oGmfnyW9Lxge3wJgmj3Cg==:440443d0858f0199 -->
 # Bash
 
 Execute a shell command via subprocess.
@@ -9,7 +9,7 @@ Execute a shell command via subprocess.
     <description>Execute a shell command via subprocess with optional timeout and working directory.</description>
     <category>rye/bash</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>

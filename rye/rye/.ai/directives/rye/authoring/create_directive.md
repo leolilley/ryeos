@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:a1bc8ec5c6240be137d4905f750a273dd32bb52e46ecc7b99556b346e8de342d:7Acc6Q4i85NEqHqS_dRF_MCSwjmGt5wqs6aLzKqkKaoTxe7YHIPB9Egl6NTke1b06IKXPmzPgZLGPz3i6rUaBg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:c395af2f34e41bd77d61502d0fca1e38200dacf61dd9e3aaa24663976be0ed61:jp4QjuKK70pJfw64mzwTPvU_xeZDla3d6FltZ7DUTAaY1Hqv-8Fo1TgchLD7HRS1Vu5wyo2bVxJTTJ1QeCyuCA==:440443d0858f0199 -->
 # Create Directive
 
 Create a new directive file with proper metadata, validate, and sign it.
@@ -9,7 +9,7 @@ Create a new directive file with proper metadata, validate, and sign it.
     <description>Create a directive file with minimal required fields, check for duplicates, write to disk, and sign it.</description>
     <category>rye/authoring</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="6" max_tokens="4096" />
     <permissions>
       <search>

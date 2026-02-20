@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:fa0c0a36e8336535432d12f8c408b5449dd410b22ca7b8f2d0aee63f99a1d7a4:2a6Jxg3dxuIWH47UyDmIDDLptWc7EW5eYprecrnlt3xjYU8FGhIsqCXGRCEIZvB0FhdxiFoov_NtnD3hmOddDQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:5aa7c3b6bb16adb4ab4d40a5bfa868ad185bd9860cdb5bc446ae5cf652a7b358:QoZlq50IGp0lppIkvyfm4nw5QMUKHLiwv9586plSMmVZDJnpY9NomB25RSUJjNbP78imXleTg8nNMjor3dE6Ag==:440443d0858f0199 -->
 # Web Fetch
 
 Fetch the content of a web page and return it in the specified format.
@@ -9,7 +9,7 @@ Fetch the content of a web page and return it in the specified format.
     <description>Fetch web page content and return it as text, markdown, or HTML.</description>
     <category>rye/web</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>

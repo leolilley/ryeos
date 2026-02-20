@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:a1f7d909e9bd176ba5d7599e09bc713a97b54ba7e243204c1f5ac334d134f38a:SczZ2b0uTmGgXyUWnJTNsT1IJCyXfrsnKGJDoFiwkw7E2v79MaO0x0hZ42D0eZgbkbQ7qYKwtBxfEWER15VpCQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:1cb0df8f189ab077c85d49861e5ccf32a435914f2c5e78f1c9fe2ae506c1b19b:8l5_Eq1H2uvUOnr-LYiyQwQ9kLn2Vp6Qvl6YrOPnbK-W9h-CibebW5LEkMYY8i37HAJrh2Mk96KeSRWRoFORCA==:440443d0858f0199 -->
 # Registry Login Poll
 
 Poll for device authentication completion.
@@ -9,7 +9,7 @@ Poll for device authentication completion.
     <description>Wraps the registry tool action=login_poll to poll for auth completion.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

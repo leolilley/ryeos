@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:bcab83ad7609bfd4d4342b74195ee43cdbc27f49a011dc02ea26f78f0a63df8b:jy2mLC3JApzj9vHQzlE9R3pJnQr2PnBQxLrVWdbhb5x4lmiU8FzSQnXMYOoZypxf0gHBDAQgI1CqOlq3v7n_Dw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:13:04Z:b596181f60885e1e7e9e00a4d0fe1f753343215c47ac3fb7f4935c0ef98fc450:Iqo2_f8hBvFFLxJNhj26ptQvfemPMMomQey3nB1OBD65AfiAPQj99YUlNel84YJ6t6UUhRhkFl8j-3rzhj47Cg==:440443d0858f0199 -->
 # Thread Directive
 
 Execute a directive in a managed thread with an LLM loop.
@@ -7,7 +7,7 @@ Execute a directive in a managed thread with an LLM loop.
 <directive name="thread_directive" version="1.0.0">
   <metadata>
     <description>Execute a directive in a managed thread with an LLM loop. Main user-facing directive for thread execution.</description>
-    <category>rye/agent</category>
+    <category>rye/agent/threads</category>
     <author>rye-os</author>
     <model tier="general" />
     <limits max_turns="4" max_tokens="4096" />
@@ -19,8 +19,8 @@ Execute a directive in a managed thread with an LLM loop.
   </metadata>
 
   <inputs>
-    <input name="directive_name" type="string" required="true">
-      Fully qualified directive name to execute (e.g., "rye/core/create_directive")
+    <input name="directive_id" type="string" required="true">
+      Fully qualified directive ID to execute (e.g., "rye/core/create_directive")
     </input>
     <input name="async_exec" type="boolean" required="false">
       Run asynchronously (default: false). When true, returns immediately with thread_id.
@@ -47,13 +47,13 @@ Execute a directive in a managed thread with an LLM loop.
 
 <process>
   <step name="validate_input">
-    Validate that {input:directive_name} is non-empty and well-formed.
+    Validate that {input:directive_id} is non-empty and well-formed.
     If empty, halt with an error.
   </step>
 
   <step name="execute_thread">
     Execute the directive in a managed thread:
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "{input:directive_name}", "async_exec": {input:async_exec}, "inputs": {input:inputs}, "model": "{input:model}", "limit_overrides": {input:limit_overrides}})`
+    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "{input:directive_id}", "async_exec": {input:async_exec}, "inputs": {input:inputs}, "model": "{input:model}", "limit_overrides": {input:limit_overrides}})`
   </step>
 
   <step name="return_result">

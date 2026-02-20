@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:777fc5083e17e0d586fc6aa52fa28cb133064a6761c457606a483e49d08b0ee3:rsOi-gXdfVOMUhSFnL1FvYOOkjRJC1i-Rsy0U-3bj6ETkFHxh2vbpwDu8cV9mBGnhbL9trwG4tqmRWr8tCv9DQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:83bbf82679276ce14d646ebece0819042a4061f04b3c5141a91b3a896c27d9f5:e_pqnB81lDHwEPHXrikSq8bIqvCDh46I_z3UxyAxdzdy5kyzQmYCiDsLSt_CF_GEbjiPhZYHTOBhRm9bGIp6Dg==:440443d0858f0199 -->
 # MCP Add Server
 
 Register a new MCP server and auto-discover its tools.
@@ -9,7 +9,7 @@ Register a new MCP server and auto-discover its tools.
     <description>Register a new MCP server configuration and auto-discover its available tools.</description>
     <category>rye/mcp</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="4" max_tokens="4096" />
     <permissions>
       <execute>

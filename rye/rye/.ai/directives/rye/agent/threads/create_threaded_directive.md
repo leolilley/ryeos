@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:b9a1ce9dc2f4b83bd487a8e0d0c94a77525c4f8dd658ed59084413d6beb406e0:f7hnpazNCE1BNFjzXGJwRYUaSIeE8PHrp6rgqc4M5-pTrWL5ouEaObkmSgkDkN8nSieLrVZeF7gM8xDZdrJfDw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:13:04Z:4b59b87de5bcef04a06e87844bea10f11fb022adb88542ed4de81a916455c60e:DQ4bESQAbaeef_8msHgS9AtFqDv_CnWRPJafl6NGG8m-rddgGptBdc7iy6ZlKAiBDiBJraq9p4EzXxpE0w0kCw==:440443d0858f0199 -->
 
 # Create Threaded Directive
 
@@ -8,9 +8,9 @@ Create a directive with full thread execution support — model configuration, c
 <directive name="create_threaded_directive" version="2.0.0">
   <metadata>
     <description>Creates directives with full thread execution support — model configuration, cost limits, capability permissions for autonomous thread-based execution.</description>
-    <category>rye/agent</category>
+    <category>rye/agent/threads</category>
     <author>rye</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="8" max_tokens="4096" />
     <permissions>
       <execute>

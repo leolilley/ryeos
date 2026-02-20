@@ -148,7 +148,7 @@ class ExecuteTool:
             return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
 
         # Apply defaults then validate required inputs
-        inputs = parameters.get("inputs", parameters)
+        inputs = dict(parameters)
         declared_inputs: List[Dict] = parsed.get("inputs", [])
         for inp in declared_inputs:
             if inp["name"] not in inputs and "default" in inp:

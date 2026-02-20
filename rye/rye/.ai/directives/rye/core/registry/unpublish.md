@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:554a3585cc83e0d21e31e533dd98ac3c642fd1f59054e9eb80774f9783fed82d:1fOOAqj9b5h3gczuEyZcOYuaxt2xxor13DaAb4Y204oWEQJcUq4OXXqhr0kXI-PwpkzWhNCPsuvQAVsGAKSAAQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:3a18137035b4ed30fbc50e0d8c2e83324f0c042113d12f108c9daf6eaab8c599:U-VvJGEJMCHleww3YRhZgL_oa8EsKl_2KNmvelU7Pxlol79Q5uOScBBLLZGVP1B_IasjuqaifxcyLU9aVBp-Cw==:440443d0858f0199 -->
 # Registry Unpublish
 
 Make an item private in the registry.
@@ -9,7 +9,7 @@ Make an item private in the registry.
     <description>Wraps the registry tool action=unpublish to make an item private.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

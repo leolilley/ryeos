@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:04e8cf618672eb2695ab1216aadea854e8bd3bf04a691d4a773c0928e2e300c6:fjdBKbXyLdHey4OPZr0FdgjXxW2BKJOqvLvKJWK6OnFonMPyjy_NiRBjzMGb5-GCLVfFu-BbG2XXHA5bKx2rAA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:4215daf85b978a921a48bbdca35b64b1a28379dcf52193d68c10a9092e312a6f:cTfKKJTfNTOgQJo5OOl0iSTqHO4Nb0C0skl3cWEH5lLs5ohy4ieDxW-xhfAoA71PYDgvFHqyzvHgthuB5PeyBg==:440443d0858f0199 -->
 # Registry Search
 
 Search the registry for items.
@@ -9,7 +9,7 @@ Search the registry for items.
     <description>Wraps the registry tool action=search to search the registry.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

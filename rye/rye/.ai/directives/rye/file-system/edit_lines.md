@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:2057befb161f61c91996c80b2dc98753f0c790137f1cae5b32ec4b57527a1096:Sf6AJAjlH7dParLjNvq1l8UPK786sIuFMo1cXN2oIVjnm7rCo_1WEY0bxlK_n0JIMurU4O8uZlJbvxtAt_I9CA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:ccf484ba1052f84fc55e07fcf69224f711744a7b385c3cf5c7e38c90aae67dec:xIu_AaBaLV4d8IqIrfOIHGNDbdYg5FUdmZpBa1FmA6pSUCcXxcMUXTutXvfKda6YbTfrSBu-x1aZKmJBX64kBA==:440443d0858f0199 -->
 # Edit Lines
 
 Edit specific lines in a file using line IDs from a prior read.
@@ -9,7 +9,7 @@ Edit specific lines in a file using line IDs from a prior read.
     <description>Edit specific lines in a file by line ID. Requires reading the file first to obtain line IDs.</description>
     <category>rye/file-system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

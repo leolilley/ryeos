@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:bc1f7d996a4ca532f248e2e78c821fcbbf8836ae98de41eea92c773a07a5125c:wmiiHfhufRS1serkBCgaY1NA7890pT1UBqW1uw0pR2_7UZ75jJmLl2DKJ_q-w1osT7rY999MPo9IpYkqGOrFAQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:b4279811cf896bdf374ab2856d0316b362737c74005752634555db0611f4f06b:6jrXUoVwP6RwevZ_ETc9SFhbWDtjw3-E7ndN0set7bulis_bHha1W_GuKix93HjZmWBpNIbBM5aaVl2GpLJSDw==:440443d0858f0199 -->
 # Read
 
 Read file contents with optional offset and line limit.
@@ -9,7 +9,7 @@ Read file contents with optional offset and line limit.
     <description>Read file contents from disk with optional offset and line limit for large files.</description>
     <category>rye/file-system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

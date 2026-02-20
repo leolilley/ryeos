@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:428dbc6d2098ecff554101e400f32d22aaa174462f83eb66816b233fa21e0e4a:Iers6LBIRpcuXQaFbd58mpcD_5-YARGis4VSbOFKq3IpKvkQr7cGBS9MV4W1NM274A1thRaWf8FavsDgTLHVCQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:5a14eb801ef6b702102bda3c18781fc34bc892d31f77bea9ac5004abad4193a3:y7OtwsL34jStf4VUVGnkTnMtJ63-FREi2wwYdWdz430rsR-3B2Onc_lqdaMt3c7ScbcxvEuzsYZ7IpwYUdXlCQ==:440443d0858f0199 -->
 # MCP Connect
 
 Execute a tool call on an MCP server via HTTP or stdio transport.
@@ -9,7 +9,7 @@ Execute a tool call on an MCP server via HTTP or stdio transport.
     <description>Execute a tool call on an MCP server using HTTP or stdio transport.</description>
     <category>rye/mcp</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="4" max_tokens="4096" />
     <permissions>
       <execute>

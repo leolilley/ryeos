@@ -19,6 +19,25 @@ from mcp.server.lowlevel import NotificationOptions
 from mcp.types import Tool, TextContent
 
 from rye.constants import ItemType, Action
+from rye.primary_tool_descriptions import (
+    EXECUTE_DRY_RUN_DESC,
+    EXECUTE_PARAMETERS_DESC,
+    EXECUTE_TOOL_DESC,
+    ITEM_ID_DESC,
+    ITEM_TYPE_DESC,
+    LOAD_DESTINATION_DESC,
+    LOAD_SOURCE_DESC,
+    LOAD_TOOL_DESC,
+    PROJECT_PATH_DESC,
+    SEARCH_LIMIT_DESC,
+    SEARCH_QUERY_DESC,
+    SEARCH_SCOPE_DESC,
+    SEARCH_SPACE_DESC,
+    SEARCH_TOOL_DESC,
+    SIGN_ITEM_ID_DESC,
+    SIGN_SOURCE_DESC,
+    SIGN_TOOL_DESC,
+)
 from rye.utils.path_utils import get_user_space
 
 
@@ -52,83 +71,127 @@ class RYEServer:
             """Return 4 MCP tools."""
             return [
                 Tool(
+                    name="execute",
+                    description=EXECUTE_TOOL_DESC,
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "item_type": {
+                                "type": "string",
+                                "enum": ["directive", "tool", "knowledge"],
+                                "description": ITEM_TYPE_DESC,
+                            },
+                            "item_id": {
+                                "type": "string",
+                                "description": ITEM_ID_DESC,
+                            },
+                            "project_path": {
+                                "type": "string",
+                                "description": PROJECT_PATH_DESC,
+                            },
+                            "parameters": {
+                                "type": "object",
+                                "description": EXECUTE_PARAMETERS_DESC,
+                            },
+                            "dry_run": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": EXECUTE_DRY_RUN_DESC,
+                            },
+                        },
+                        "required": ["item_type", "item_id", "project_path"],
+                    },
+                ),
+                Tool(
                     name="search",
-                    description="Search for directives, tools, or knowledge by scope",
+                    description=SEARCH_TOOL_DESC,
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "scope": {
                                 "type": "string",
-                                "description": "Capability-format scope: rye.search.{item_type}.{namespace}.* (e.g., rye.search.directive.rye.core.*) or shorthand: directive, tool.rye.core.*",
+                                "description": SEARCH_SCOPE_DESC,
                             },
-                            "query": {"type": "string"},
-                            "project_path": {"type": "string"},
+                            "query": {
+                                "type": "string",
+                                "description": SEARCH_QUERY_DESC,
+                            },
+                            "project_path": {
+                                "type": "string",
+                                "description": PROJECT_PATH_DESC,
+                            },
                             "space": {
                                 "type": "string",
                                 "enum": ["project", "user", "system", "all"],
                                 "default": "all",
+                                "description": SEARCH_SPACE_DESC,
                             },
-                            "limit": {"type": "integer", "default": 10},
+                            "limit": {
+                                "type": "integer",
+                                "default": 10,
+                                "description": SEARCH_LIMIT_DESC,
+                            },
                         },
                         "required": ["scope", "query", "project_path"],
                     },
                 ),
                 Tool(
                     name="load",
-                    description="Load item content for inspection or copy between locations",
+                    description=LOAD_TOOL_DESC,
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "item_type": {
                                 "type": "string",
                                 "enum": ["directive", "tool", "knowledge"],
+                                "description": ITEM_TYPE_DESC,
                             },
-                            "item_id": {"type": "string"},
-                            "project_path": {"type": "string"},
+                            "item_id": {
+                                "type": "string",
+                                "description": ITEM_ID_DESC,
+                            },
+                            "project_path": {
+                                "type": "string",
+                                "description": PROJECT_PATH_DESC,
+                            },
                             "source": {
                                 "type": "string",
                                 "enum": ["project", "user", "system"],
-                                "default": "project",
+                                "description": LOAD_SOURCE_DESC,
                             },
                             "destination": {
                                 "type": "string",
                                 "enum": ["project", "user"],
+                                "description": LOAD_DESTINATION_DESC,
                             },
-                        },
-                        "required": ["item_type", "item_id", "project_path"],
-                    },
-                ),
-                Tool(
-                    name="execute",
-                    description="Execute a directive, tool, or knowledge item",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_type": {
-                                "type": "string",
-                                "enum": ["directive", "tool", "knowledge"],
-                            },
-                            "item_id": {"type": "string"},
-                            "project_path": {"type": "string"},
-                            "parameters": {"type": "object"},
-                            "dry_run": {"type": "boolean", "default": False},
                         },
                         "required": ["item_type", "item_id", "project_path"],
                     },
                 ),
                 Tool(
                     name="sign",
-                    description="Validate and sign an item file",
+                    description=SIGN_TOOL_DESC,
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "item_type": {"type": "string", "enum": ItemType.ALL},
-                            "item_id": {"type": "string"},
-                            "project_path": {"type": "string"},
+                            "item_type": {
+                                "type": "string",
+                                "enum": ItemType.ALL,
+                                "description": ITEM_TYPE_DESC,
+                            },
+                            "item_id": {
+                                "type": "string",
+                                "description": SIGN_ITEM_ID_DESC,
+                            },
+                            "project_path": {
+                                "type": "string",
+                                "description": PROJECT_PATH_DESC,
+                            },
                             "source": {
                                 "type": "string",
                                 "enum": ["project", "user"],
                                 "default": "project",
+                                "description": SIGN_SOURCE_DESC,
                             },
                             "parameters": {"type": "object"},
                         },

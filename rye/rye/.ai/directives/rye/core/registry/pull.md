@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:3ef372ba9377a1c6db3838681db19639c1b840455204eb9450efee6c61f03a74:RJ1YZ0-MJM6i3JAlZdZapbhV4XoEBnl--yEFwxymaOh6ebZ1v6CczOuJmCkrqAVDxFuxxXB54RnoQGsAD9-FAA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:6af2bb2ffaf21c69141c82bf87a48c4dc92c4a852c5971e151906e46d3ae6a8a:X140J7MrbpuR04RFiboyYuW8ltiTWrwe74wigHg0QZZx-4S1azqjs4pOwXU5Kt44bISPAGlui8FdIfYu9szuDQ==:440443d0858f0199 -->
 # Registry Pull
 
 Download an item from the registry.
@@ -9,7 +9,7 @@ Download an item from the registry.
     <description>Wraps the registry tool action=pull to download an item from the registry.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

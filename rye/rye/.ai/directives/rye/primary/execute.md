@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:35db36d2f1a11cf6775cf3ac75416295e646b7c2bf11807960de923547ebc6e1:BW7nxIRH5ovAkvr5mlK0530ofq0UwZQ3Lsjfg9gElrRYRBQdOF8BpotHTDWGl0MbaQ59X-NtobFxvQh-OLDeCQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:5d5c48fc03ba322613a7e8dbd044e7cba022789d8ef728fbaa04c9341d4193b8:9Roro7f8v0fLP9k7N8HRmHkE8GJ89o3etLBuOQNaj4-FVpCGrwdZCwlU4uhqfpUTRQdXqyaue96ZscSyGqrZDA==:440443d0858f0199 -->
 # Execute
 
 Execute a directive, tool, or knowledge item by id with optional parameters.
@@ -9,7 +9,7 @@ Execute a directive, tool, or knowledge item by id with optional parameters.
     <description>Execute a directive, tool, or knowledge item. Supports dry_run mode for validation without side effects.</description>
     <category>rye/primary</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="4" max_tokens="4096" />
     <permissions>
       <execute>

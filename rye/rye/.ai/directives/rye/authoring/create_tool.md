@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:fede662c5841ead6a5e5a7af98474a0c10c90c3fcae091574dd82c7ee4aeaf86:xIkLenowjOii8nMCbMWahnJAnzM1sa2AP6Xvfw-1qPDY3G9z0ocGHpjOLQoJS-wi8DrOZZe85aTYsl3zHMbeBQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:83ec0c21d3431992dae47bdbb3707fd5a91f1567287ee05c71d745f8d11583dc:_fOMRgvzlpIhed2jeSpLG1jDfGPjWtXGpfa7VZbIUFJc1FlhqCpv_S7n8JpHHLenykJeXUAwRxO1tJ44khn4AQ==:440443d0858f0199 -->
 # Create Tool
 
 Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign it.
@@ -9,7 +9,7 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
     <description>Create a tool file with correct metadata headers and parameter schema, then sign it.</description>
     <category>rye/authoring</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="8" max_tokens="4096" />
     <permissions>
       <execute>

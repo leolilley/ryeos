@@ -1,4 +1,4 @@
-# rye:signed:2026-02-18T08:24:39Z:be854748fa87504f9679c24bb6f5da532a2255384a564e7087a3ea7860a42027:YVIZ9GMXZ1nTAQoK7Lp-d3Z7ehL7DIx1wKiYFdhhAHP0q8i_J68_OOknHdkkOWRI-PYgy5F54iP54bNk6AF8Ag==:440443d0858f0199
+# rye:signed:2026-02-20T01:25:20Z:dc1281c1ac3c02cf94cb30488044d548ae43f73d3279d2aadee2dc5839cbac3d:u4DMOgYKWkd5wbqAhw_Y8P5HoB3DBhfCMS-dsnQtWa_Lyl3h-OFHErjUb8Rig-SxSZ6brX79lD4Zv-ETXzLUCQ==:440443d0858f0199
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -202,6 +202,12 @@ class Transcript:
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 break
 
+        elapsed = cost.get("elapsed_seconds", 0)
+        if elapsed >= 60:
+            duration_str = f"{elapsed / 60:.1f}m"
+        else:
+            duration_str = f"{elapsed:.1f}s"
+
         frontmatter = (
             f"```yaml\n"
             f"id: {safe_id}\n"
@@ -209,12 +215,14 @@ class Transcript:
             f"entry_type: thread_transcript\n"
             f"category: {category}\n"
             f'version: "1.0.0"\n'
-            f"author: rye-os\n"
+            f"author: rye\n"
             f"created_at: {created_at}\n"
             f"thread_id: {self.thread_id}\n"
             f"directive: {directive}\n"
             f"status: {status}\n"
             f"model: {model}\n"
+            f"duration: {duration_str}\n"
+            f"elapsed_seconds: {elapsed:.2f}\n"
             f"turns: {cost.get('turns', 0)}\n"
             f"input_tokens: {cost.get('input_tokens', 0)}\n"
             f"output_tokens: {cost.get('output_tokens', 0)}\n"
@@ -231,9 +239,20 @@ class Transcript:
             et = event.get("event_type", "")
             if et == "cognition_in":
                 turn += 1
+            # Skip completion/error events — we regenerate the footer from
+            # the authoritative cost dict so elapsed time is accurate.
+            if et in ("thread_completed", "thread_error"):
+                continue
             chunk = self._render_cognition_event(event, turn)
             if chunk:
                 parts.append(chunk)
+
+        # Append footer from authoritative cost (not the stale event snapshot)
+        tokens = cost.get("input_tokens", 0) + cost.get("output_tokens", 0)
+        spend = cost.get("spend", 0)
+        turns = cost.get("turns", 0)
+        parts.append(f"---\n\n**{'Completed' if status == 'completed' else 'Error'}**"
+                      f" -- {turns} turns, {tokens} tokens, ${spend:.4f}, {duration_str}\n")
 
         content = "".join(parts)
 
@@ -294,9 +313,14 @@ class Transcript:
             tokens = cost.get("input_tokens", 0) + cost.get("output_tokens", 0)
             spend = cost.get("spend", 0)
             turns = cost.get("turns", 0)
+            elapsed = cost.get("elapsed_seconds", 0)
+            if elapsed >= 60:
+                dur = f"{elapsed / 60:.1f}m"
+            else:
+                dur = f"{elapsed:.1f}s"
             return (
                 f"---\n\n"
-                f"**Completed** -- {turns} turns, {tokens} tokens, ${spend:.4f}\n"
+                f"**Completed** -- {turns} turns, {tokens} tokens, ${spend:.4f}, {dur}\n"
             )
 
         if event_type == "thread_error":

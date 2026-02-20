@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:353d7921fbc3adf9b2c229e25e5f192093ee8fcf6423c664b0bf9691471447f4:SnnWezuXKSkQ7cVDT5_q61YtThECc_-Nl06z1P2ATpqwADcIdjIcDhr0FkZlT21HcVqPztpVYoxhUb7XA_hbAA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:c05d15ef2fd6b78886a3412cff7a009f3d27a917692c5254f8e5d7758fc9000b:nGIb5EldIa72vFdy-lz4qs0oy7tRqWzPyTJsGRPykg4qz6Fk7JXRzvK1oDNwhPiRz1qNbQvVqn6YkhRUKeQ7AA==:440443d0858f0199 -->
 # Web Search
 
 Search the web using DuckDuckGo or Exa and return results.
@@ -9,7 +9,7 @@ Search the web using DuckDuckGo or Exa and return results.
     <description>Search the web using configurable provider and return ranked results.</description>
     <category>rye/web</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>

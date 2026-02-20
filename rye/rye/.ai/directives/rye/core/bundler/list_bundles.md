@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:6c67607a78e1c4b2bc6c054a2455968247fae76beddc95c2bcd23c87496c38cf:jMBFyHXOLVwKdU-ixK9tDhgsbLe0i5Bhbx3DSCmeMlyJ49tS8u1Nog1K7Y3ytGvpgMW7WuFbqgFNWCzziYYtDQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:e9c1ae0e34ba4d4fc7ed7ab8ea20651274435e92e8b45a69766cb44343db5071:2b_SrjeDgFhkuf2pha8LHh2FD_YjFgaYAYlUnw7ARsxk3Zjc9qBLByhTVKl8Ek5N7sS0GQGzbY8gNrE2z0HBAQ==:440443d0858f0199 -->
 # List Bundles
 
 List all available bundles.
@@ -9,7 +9,7 @@ List all available bundles.
     <description>Wraps bundler.py action=list to list all available bundles.</description>
     <category>rye/core/bundler</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

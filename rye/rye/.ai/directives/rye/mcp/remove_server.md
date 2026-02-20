@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:cd26d0a6fcc33e432af32a539fb0165bce0717f0da502130a6072fd0fed10cbc:mKzbywd5jeim2f08Oy52O9jpLTZLjiISCqG6X9xsEpqA7p0oot3LF-xjTcN0fxzUH2AfurEOdSqPLaBm8XZBBQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:f5aae73787202ea4f961645030dac3ab9409e132b951cc252f3a72470aa20dc4:-A-V1B57GriAV9gF5oG66a6PbIRys-kKrPum_y-Akq0BvNwxTqcKoAQaLzOB4yriWSt6ROQOAWf6txcqJ5kkBg==:440443d0858f0199 -->
 # MCP Remove Server
 
 Remove a registered MCP server.
@@ -9,7 +9,7 @@ Remove a registered MCP server.
     <description>Remove a registered MCP server configuration and its discovered tools.</description>
     <category>rye/mcp</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

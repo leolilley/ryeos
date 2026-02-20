@@ -1,4 +1,4 @@
-# rye:signed:2026-02-18T07:52:18Z:bc53dac3c5c4220b8bb6cf47358cb8485a1718b5b09f449c1c2f25037077ed71:-tsX2K87eR1QeixmN_qBW57QLZWv0uAx_ExMnrhUOerf7XCI25qlF-vQ2XLPZJoRrY7P9s4OOayuau8A9x00BQ==:440443d0858f0199
+# rye:signed:2026-02-20T01:18:04Z:387f0b19879a068a773ea83e1bf55c197d8e85fba7b020daa70fc73c67b25e15:Eh9lz85MDQMad4mMRXbIByO9tt-8N9GmsPWm1Y3jC_p6gen9wj0cfLbLrdZ0ZEIcvesqSIuzBoPkxZc2Bc-9AA==:440443d0858f0199
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
@@ -24,7 +24,7 @@ _ANCHOR = Path(__file__).parent
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "directive_name": {
+        "directive_id": {
             "type": "string",
             "description": "Directive item_id to execute",
         },
@@ -44,7 +44,7 @@ CONFIG_SCHEMA = {
             "description": "Override default limits (turns, tokens, spend, spawns, duration_seconds, depth)",
         },
     },
-    "required": ["directive_name"],
+    "required": ["directive_id"],
 }
 
 
@@ -235,7 +235,7 @@ def _merge_hooks(directive_hooks: list, project_path: str) -> list:
 
 
 async def execute(params: Dict, project_path: str) -> Dict:
-    directive_name = params["directive_name"]
+    directive_name = params["directive_id"]
     thread_id = _generate_thread_id(directive_name)
     inputs = params.get("inputs", {})
     thread_created_at = datetime.now(timezone.utc).isoformat()
@@ -289,7 +289,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             item_type="directive",
             item_id=directive_name,
             project_path=project_path,
-            parameters={"inputs": inputs},
+            parameters=inputs,
         )
         if result["status"] != "success":
             registry.update_status(thread_id, "error")

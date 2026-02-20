@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:70d8164af98a9fac26f56ce545b515d8ce80d567111fe8ae0d7b9e68a5d8b69d:jz5G1ZzhBXyO_hwxb4QJ_eid-vKWC1Nyg2bj6XuZ0vnrGy-Y_WZVAMyjC6Bmy2pVavHE7kyDuAVuuxeYjgbDDg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:d1d8b203c87e3e51222e90ec6eee0f3d57ae1467f592ccac7b92f9363077ee77:coOJUWS3slLv46zTqa4B7vRzNOZv7ofGz156WCwdPPA48wWFUW8Q2aBYExsZDs7K2vPFWKd1vIW7-8W9898SDA==:440443d0858f0199 -->
 # Registry Signup
 
 Create a new registry account.
@@ -9,7 +9,7 @@ Create a new registry account.
     <description>Wraps the registry tool action=signup to create a new account.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:a2ebf7b22417be3eede7b7247626b7a82b80139b0a9f4fddeeffc5169c349cd6:tb7knkqhjAy8F03AagvumanQ6aPfSNhDI7U8ZHlQkzEqMLaUb9ScIWt68b0IZCLMl1JbGzEnaWqz4BMs6IuPDw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:3ec2792dd35b6e0a611d356af4c470fa700c997043901c31a527bf1cb6f3d5b3:fcWphg8EavqIOgm3gQtkgKU1zWcQOwoES1EM1az7sGrsX96z6QqotW2JQALQttyCOnZUm8Ya8FaM5bQoPzIWBg==:440443d0858f0199 -->
 # Registry Logout
 
 Clear the local authentication session.
@@ -9,7 +9,7 @@ Clear the local authentication session.
     <description>Wraps the registry tool action=logout to clear the local auth session.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:a06d2c51f725e25601b263965ff9d37529d56734d3e1e3ed2099938da9e5362a:wOGASBUIsgEGkWI_7TyJz6es8c4Z6aiR3FgrlX7Jn8LG9WeGDJsPlyt35mx7EFpmeGDY50Wt-SwC6nLG5WqVBA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:22d4c2b20dd873e1dea13d73a927294b5b96b2c1b660a7ff652d8f4b3777e73e:bMbseF24-2xmUCGvd--lRtYGsRUzNMc0wbSb2flyZv2Uuy6q1QjAA8TDrGjgefS7ee0RvIpJ1fzQvErP1A1XBQ==:440443d0858f0199 -->
 # Sign
 
 Validate and sign a directive, tool, or knowledge item.
@@ -9,7 +9,7 @@ Validate and sign a directive, tool, or knowledge item.
     <description>Validate an item's structure and metadata, then sign it with a cryptographic signature.</description>
     <category>rye/primary</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <sign>

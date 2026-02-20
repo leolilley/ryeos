@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:dfac7fadabd70e5a3217210a26cfa0a4156699c8a705cddf5bd7b079cd727733:ClgikVvtYHfQ5bxldyMr_FjkD3Mw_RIoEOy6gWt7Qu7G4zsT3u4etzAtTuxHplCWCJpUX1_mw_lsqYEE2i-WDw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:a522b2f91998b1a9f023226460259ff5fcf61f5599cf3d20e0df6b88e01551e6:TNNAXPqAEdQp1lbV48GWmV0L_697aMqQPyViR8xjLrRwwifLmm_KT5fj_Kd5CMoDCB3KUhRIBao6Z6sNotM7DQ==:440443d0858f0199 -->
 # System
 
 Retrieve system information such as paths, time, and runtime details.
@@ -9,7 +9,7 @@ Retrieve system information such as paths, time, and runtime details.
     <description>Wraps the rye/core/system/system tool to retrieve system information.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

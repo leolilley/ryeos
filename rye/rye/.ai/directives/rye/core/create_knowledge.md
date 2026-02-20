@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:67ac2c8bbc303ee9729b201fb9191dcf515fd913a63e7c51aed385624945a5bf:ZaErSfrL4FppeQcQ2J-0L5vU_Z9jcVs7jL7SsU3W90uDZ5Q6524AZmiSL2C1r3pBdSxANMCCwwHsGkJNtOJYCg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:3110b232b01a651376e6ec4dc04d55e254a6786118b4d2f402cf89eb131a8be4:oFJwh9BmdZOHYnWoRjO4h_WV5G8D0jfPmXR9mOZmtKP-j5Mc4miT7-jqOPXOTs1mDbmnPhzcAB8frvQvdlL9Cw==:440443d0858f0199 -->
 # Create Knowledge Entry
 
 Create a new knowledge entry with proper metadata, validation, and signing.
@@ -9,7 +9,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
     <description>Create a knowledge entry file with YAML frontmatter and markdown content, then sign it.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="6" max_tokens="4096" />
     <permissions>
       <execute>

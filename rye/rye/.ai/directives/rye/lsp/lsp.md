@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:885ec7866d4adb504667ba7e5d054d0fc3249829496a42b93898bbcee1e12260:o-cymmhOaBI9W0YbjN4cgszbUknAUviPsTnuUE8IwzrmfyLwx34V-3v_HNCVN9GC9Wp6hd9DEuzp6fgRG_k3Aw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:9d08128d12cec8c21422edf820c8330dffa70f4e47e949b069d3f1e7a2db5f7d:f3wik7AWzIocD0-Q9UI46SQkveeyKsqpH5ogzcziWFCirm1SnjWArEo22fXsDiWjeYggZJ13M41I1SrOXwhRDg==:440443d0858f0199 -->
 # LSP Diagnostics
 
 Run LSP linters on a file and return diagnostics.
@@ -9,7 +9,7 @@ Run LSP linters on a file and return diagnostics.
     <description>Run LSP-based linters on a file and return diagnostics (errors, warnings, hints).</description>
     <category>rye/lsp</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>

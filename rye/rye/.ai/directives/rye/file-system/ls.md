@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:98f343f80fe2d26c07eab8fe8da804a6991e0c71d0f3b761ab3e7ab2d1fa99d9:CAulLkstuJTk-oByRbGr1FRxiILJNcC6BTvWWYbqnjxsNDUY5DKhpCWgMK3npDpYoYP1Any8uQzSTrAs7OlfDg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:c57a3ae6f4b6e1cbade0ad6ce872c8646b778e110001aa47a454e97c1a8ea419:Y6Y4TMnIdrStcnoSGDlxBQ1BOIwlAiI8jgAHI5ZitVrQhlNVOBu3q2mxLWihH_FlniBiPxAStefRwPbuc5xDAQ==:440443d0858f0199 -->
 # List Directory
 
 List files and directories at a given path.
@@ -9,7 +9,7 @@ List files and directories at a given path.
     <description>List files and directories at a given path, defaulting to the project root.</description>
     <category>rye/file-system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

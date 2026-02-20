@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:f229de3f5f9908840606157dba22fe06696a9b88c3d0c20aad50f3728c42ff29:1NTxgB5qYespnd-rY3stb-fAa25F7V89H8ruqvMNSgQbfXzkO2p3pQmBSC7gUBQEsxGag4k7KunbyQR3NTuRAw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:1a7df0b55bcaa4da3b371dcb84379ef0d70e3e8a58cff061a302c4e2e4b8696f:ZzzH7XWGvo_OH39lH5JO7KEcaTIlfdwblxssf4X2x3edaHI_KrOZrO1Sbz5RO1IDiz6YCs0mOB1SaQX8rFnICA==:440443d0858f0199 -->
 # Write
 
 Write content to a file, creating directories as needed.
@@ -9,7 +9,7 @@ Write content to a file, creating directories as needed.
     <description>Write content to a file on disk, creating parent directories if they do not exist.</description>
     <category>rye/file-system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

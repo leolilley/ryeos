@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:b31a9e3ecb281885559fa5d4f230d0357f77b085b51497dc4d9467ddbf8aa714:6-pr0TDvbbhw6DHH2RisfZHKcr7HAuwSmPDRytKGgCVm4hVTQHKFD0GeeJ2C-x64wZtzBJUNpNJOra8BYny0AA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:f220fac3d71d8c8aa4219a995ffa4a8bf0b8f20131c06efea7d288803c613a9d:KBdSxflyyBVanUMU6ph74WcrI4JK1CAt5wKS4EJJBeXnhPgE5MgDsJwCbgns7j-Vpwlkenia90UDXANPqvQ8Cw==:440443d0858f0199 -->
 # Search
 
 Search for directives, tools, or knowledge by scope and query.
@@ -9,7 +9,7 @@ Search for directives, tools, or knowledge by scope and query.
     <description>Search for directives, tools, or knowledge items by scope and query string.</description>
     <category>rye/primary</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <search>

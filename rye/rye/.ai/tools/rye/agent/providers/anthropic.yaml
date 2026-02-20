@@ -1,4 +1,4 @@
-# rye:signed:2026-02-18T08:09:06Z:e156255e41857b5e6683da2469f3d5b0e8b3c138d1ea8e3a275eae4fe9f51282:A52jfgILPK9uh1fwKbxf_VhpW9zXWfGPoV4AFiNtabaQxwebrNJoVUL1SghlWc2jsYNAm8Rqgh9EZBIZChK9AQ==:440443d0858f0199
+# rye:signed:2026-02-20T01:09:07Z:08d3079afbb945640503026d79cc6ff58ee47666a1e90c63ce0de58b2082fe50:qXKVFGTDsjypplFteDCwjNqZI-QRLF8AKR6wUpHgYroq0pLhXkbvcq_aqvT1NuMpZ2nkW8tdg9FgZQoQAOgeDA==:440443d0858f0199
 tool_id: anthropic
 tool_type: http
 version: "1.3.0"
@@ -11,12 +11,9 @@ requires:
 
 tier_mapping:
   fast: "claude-haiku-4-5-20251001"
-  haiku: "claude-haiku-4-5-20251001"
-  sonnet: "claude-sonnet-4-5-20250929"
-  opus: "claude-opus-4-6"
+  general: "claude-haiku-4-5-20251001"
   high: "claude-sonnet-4-5-20250929"
   max: "claude-opus-4-6"
-  general: "claude-haiku-4-5-20251001"
 
 # Per-million-token pricing (USD)
 pricing:

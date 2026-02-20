@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:b2e8004c1ad8e8cfa0fba82a22f4d2500602c7b4530bb5d992eb3b58262c2217:9UWCxiuEPQ10Ie_7Z6bEA-LbJsR6CdfzwJ8lAv40IuH3RIwTUEv8jKVgWBqAJexxqm6EAMTFAz0HtqiP_wYoAQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:f901f840d5406a52de18ef0bb495a3ea1ac865ddb3dda3e71d9411b840714c80:QHIwIGYbiJimbvqNc1yY-rZFd5LR6amHozELAKGKQjDSM8hwBJhsyT-BkpIdAaEOqhW9xgoRbO4iUaHetShuBQ==:440443d0858f0199 -->
 # Glob
 
 Find files matching a glob pattern.
@@ -9,7 +9,7 @@ Find files matching a glob pattern.
     <description>Find files matching a glob pattern, optionally scoped to a base directory.</description>
     <category>rye/file-system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

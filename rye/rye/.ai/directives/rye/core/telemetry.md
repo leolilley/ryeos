@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:519eaeda35dece7f0c388591d0f99a07080e6bf30ae598602587be217b40b0d1:NmA1FAcPuUp3w6Z2t1txL9enc0DXHoqYCEt4X3TNoQfIgHiYqpd8sODDdgUmG2gkErtoLdyGGqGSF6WbomWkDg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:11cc710adfad74bfe344b4a6a6a13de51cfb12455d2bbd5559d7b732b785a7dc:am2P6UixRSIUfFfBzBjRB7U5k9ATATRIauBxIEjqilPH64bO2gBjp3FBVoX3ZyUC5F_bGgQH3FqRB_-HCs-fBg==:440443d0858f0199 -->
 # Telemetry
 
 Retrieve telemetry data including logs, stats, and errors.
@@ -9,7 +9,7 @@ Retrieve telemetry data including logs, stats, and errors.
     <description>Wraps the rye/core/telemetry/telemetry tool to retrieve telemetry data.</description>
     <category>rye/core</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>

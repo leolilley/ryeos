@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:6fd9872127773c2dab2404808bcb7cff6a4b1d7d8bc0b2c2b7382640ed18a98f:JCFR2xKoPdSgRSSXlacdAu0mHbj74faqjEtpfkzdJkdYn8VN42kmFKixutrrQ68weN6oixQE4uzwsTcAUITBBw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:eff7534269168281e215f0ff925a7f30ec14740b96cd0d0625f1093e8fd57527:gXD0P1VkibOzXriSDMiXpRIVsukqa_c96l0xwq60ZVoteYR7UDBWcKGkhn3l1A-0k6jR--6aMqumTcGZaz6aDw==:440443d0858f0199 -->
 # Create Bundle
 
 Create a new bundle using the bundler tool.
@@ -9,7 +9,7 @@ Create a new bundle using the bundler tool.
     <description>Wraps bundler.py action=create to create a new bundle.</description>
     <category>rye/core/bundler</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="4" max_tokens="4096" />
     <permissions>
       <execute>

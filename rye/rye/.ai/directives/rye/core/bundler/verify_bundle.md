@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:07399291edefd6815d814eba081041597fb9fc3370424e1439402479a8dce80b:jHarlPtIoLB-YBpzpukcaAU_a-kdd3IovP5_Hk_mOYLs1ne0wbWhHebr3SvK1wdK_DX6ur4py7wS8Tsp_d3aAA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:0f558d7c87e22c4bbedd1ad4351c489392d518f5328c2c5198c6bbd06c3b5f58:djSrVY3HDxBeZX3pj5-Lr0zCFLzJrEX2kGcM_DxQCVwc--ytTlLREneDd7OcBSGCRd9i9EH8CY_IDRyXhbzUDA==:440443d0858f0199 -->
 # Verify Bundle
 
 Verify the integrity of an existing bundle.
@@ -9,7 +9,7 @@ Verify the integrity of an existing bundle.
     <description>Wraps bundler.py action=verify to verify a bundle's integrity.</description>
     <category>rye/core/bundler</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

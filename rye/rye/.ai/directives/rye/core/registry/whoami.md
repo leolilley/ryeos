@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:ed8e45671b1b4f2534e08a19c3dec5ae0450da86c8bcae229ef275bd915fca48:cBcyj3zvkqPJRKEXxfsOE88DpgAvf6ZKwy0gmNzlkraFZK-pPU3uoSNgR7ugAy6aC9nbBRGzeqbI_0DEbLODCw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:8731bc830f8d3bcca80fb348eff029fac4babc8eb69bb5bc3c18ccfb7d0fe825:NyJ2cd5cP5uTVVda9NU3JY_HInpgOj4Gv6kG2yCJvRxmTPKk28RR5S4wdo-76tQhHWz6iZrKG8sJyYUu_2ORCQ==:440443d0858f0199 -->
 # Registry Whoami
 
 Show the currently authenticated user.
@@ -9,7 +9,7 @@ Show the currently authenticated user.
     <description>Wraps the registry tool action=whoami to show the authenticated user.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

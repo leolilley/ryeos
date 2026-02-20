@@ -1,4 +1,4 @@
-# rye:signed:2026-02-16T07:36:31Z:7411e0bda4d00cf6fa3a0969570788cedb43943e409791d774db42c99187e8fd:j3aLK-ruTJ6hUDXKEphwcaA8oqWNUG1mirKA8G-cJ-DiYLzbtcwyvxc2Mrra11bUj8zipC0HXFp9gRTCRGBkDQ==:440443d0858f0199
+# rye:signed:2026-02-20T01:09:07Z:29f149c2149707738f79075e3857ca915c9e103589ea9b7078c8a7d26d7cfadc:q_ZTdfR7majF0f74Wq_Ea95NcD5MLvND13pwmfrVoa6cgkHnxI73jhPJAG9aB6ZkBynQEUB9iwszP8-el1xICw==:440443d0858f0199
 tool_id: openai
 tool_type: http
 version: "1.0.0"
@@ -10,11 +10,10 @@ requires:
   - net.call
 
 tier_mapping:
-  gpt4o: "gpt-4o"
-  gpt4o-mini: "gpt-4o-mini"
-  o3: "o3"
-  o3-mini: "o3-mini"
-  o4-mini: "o4-mini"
+  fast: "gpt-4o-mini"
+  general: "gpt-4o-mini"
+  high: "gpt-4o"
+  max: "o3"
 
 # Per-million-token pricing (USD)
 pricing:

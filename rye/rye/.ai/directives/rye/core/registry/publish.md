@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:15218cddba41db1b50c10df0bb92bd1e554622e549c104452fad11ab38233da1:0P1D0VSvoWRXGy-T9emaR6Jgntb88R68uicmue_S62_gHQg57I9hJa77rVwd6w6FBByNIKgfNmJaoW_fb-CZBg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:e78d5f0473ca2515c542e7bcc780484d3e3d0c9fd7ed05b9792b8f9dc32b1887:argC2eLmbypk3KL3PD8VEpgGaHWgrP4uEQCugdSD4Aqf2zbeU9vBuln72_br-tvqEA0zYnYqBKuehwH3ZjtdBA==:440443d0858f0199 -->
 # Registry Publish
 
 Make an item public in the registry.
@@ -9,7 +9,7 @@ Make an item public in the registry.
     <description>Wraps the registry tool action=publish to make an item public.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

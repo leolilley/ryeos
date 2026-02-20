@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:f08502e65ec7f8a96e791288d9234e29c491b61c01abb899d67e0bb8572379df:bKVDfRij86sInb0BQ2qvHdCbaezwYghXpzNY9zDf248OdhV40_ZOnuAVmck5d7CEzWtJ-cF48WvuMD-Q0x_pCw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:b18826c372534bf710683b37ae55e1a80d28cbb4ae4f8bd7af054021c80cea7e:srr8lA1yiSwcJ6m5-gKr0BTPgiL0XJ3EgkD3dOi3F-UF3e1TFcgz_8M1PUSUuVhoWqn77hlQHMzFdGDygR1TDw==:440443d0858f0199 -->
 # Registry Push
 
 Upload an item to the registry.
@@ -9,7 +9,7 @@ Upload an item to the registry.
     <description>Wraps the registry tool action=push to upload an item to the registry.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

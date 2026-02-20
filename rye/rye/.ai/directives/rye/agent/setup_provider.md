@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:e83ec120fb1badd3af44d04cbba7dc385c2515c5df12e3b2b0c11f1fed96c8f5:-pX8ypWWmYxqggVhl_UL0QHtwUhkBK7zkgkPKd1gQJiHAJGkN81WchawzbezEwujn_dQM7HSMCzqc4gew6xoAQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:8e9647fcd231f3aa04428a71275a68457bed4327da0c652843a7f5c68d68a822:GueVslrgkbaHuwosY-DSoQXRAV7P-sSmw_qLLrk_O2A-bvM4VXjURMX8pIrmGxIS3qG3vhBm7MyErO_3qNeAAQ==:440443d0858f0199 -->
 # Setup Provider
 
 Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider YAML config.
@@ -9,7 +9,7 @@ Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider
     <description>Configure an LLM provider by writing/updating the provider YAML config with API key env var reference and default model.</description>
     <category>rye/agent</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="6" max_tokens="4096" />
     <permissions>
       <execute>

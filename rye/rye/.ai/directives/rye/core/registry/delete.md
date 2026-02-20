@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:40:31Z:008b55c7ef9131d2e746636c6d6ccc515b5dbdd2cfffdcca178a42398688c17e:FQR2j9w5Zskb9LYoiKqiU5FngZF3Pa0SDvUVNoshEVnyGLNXm0XA3Yi9uVYMksbK-m_LdFZW6lBcAP9EivMZBg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:09:07Z:e107eb4af8368f73bfb6c0c4f77bbfe8359e4da1a7353fa4dc19406f5bacffc5:9Q78szhKxXE9bzpwWR_l-XiwDBHWP2ObD70EuMnU7jn_9DRDCHt1bKIiaHv8yg_nYmsKiWAJGxSJXST_ND8PAQ==:440443d0858f0199 -->
 # Registry Delete
 
 Remove an item from the registry.
@@ -9,7 +9,7 @@ Remove an item from the registry.
     <description>Wraps the registry tool action=delete to remove an item from the registry.</description>
     <category>rye/core/registry</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits max_turns="3" max_tokens="2048" />
     <permissions>
       <execute>

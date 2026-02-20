@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T08:00:04Z:93bdbbca9714fb475e6ec9901f340ce3e3606547c7779f18690489ab36480c6d:JEpQ-5M2fsD5mdpDM7Ej8AWSanMzYtAoCB8Fs0RPqN1knuq3aisAAP6FqeNvJjcyu9B_8BqY0vlRP_ekApCECg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-20T01:17:33Z:8051ba10f78ba72757633167554d5730d91ee1e41726b52a6181fac53683a6f3:ueIVHR908rkrcanV3hyYhn6-HaCAOpyMK0uKBqiNGBMO7dOi3Of8-S21xW6hIJu55iWUrjM2D6aNanAcr9cWAQ==:440443d0858f0199 -->
 # Child Write
 
 Simple child directive — writes a message to a file, then reads it back to confirm.
@@ -9,7 +9,7 @@ Simple child directive — writes a message to a file, then reads it back to con
     <description>Write a message to a file and read it back to verify. Used as a child thread target.</description>
     <category>test/tools/file_system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="6" tokens="16000" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>

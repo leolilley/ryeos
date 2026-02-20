@@ -1,4 +1,4 @@
-# rye:signed:2026-02-18T07:16:04Z:688f712fbf4cd89d03d05ca042f562e924fdb0887e083ec02cd7d34bc001630c:rBrokcKZ8FGDEuqpmcUAsx9tlYPDemGmMJpQ8urMy5lhkg9IHGyDZO5LAewLLpFSkXoIp1je37YvWMf5L8xyBA==:440443d0858f0199
+# rye:signed:2026-02-20T01:13:04Z:e7c14d9318570c0f9477160f3d05615255bd97282c8fd84a9a17682f3454e6b8:0Wv9iMkCJANPYNcYnnWlwneIea0S3TTw6XH54J1snsCev4ekqu-ogk5yOT5w6lQh8p3Z1Q28mvseBoHTkeK6Cw==:440443d0858f0199
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_function_runtime"
@@ -250,7 +250,7 @@ async def handoff_thread(
             thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
             try:
                 summary_result = await thread_directive_mod.execute({
-                    "directive_name": summary_directive,
+                    "directive_id": summary_directive,
                     "model": summary_model,
                     "inputs": {
                         "transcript_content": transcript_content,
@@ -317,7 +317,7 @@ async def handoff_thread(
     thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
     parent_id = thread.get("parent_id")
     spawn_params = {
-        "directive_name": directive_name,
+        "directive_id": directive_name,
         "resume_messages": resume_messages,
     }
     if parent_id:
@@ -587,7 +587,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
         parent_id = thread.get("parent_id")
         spawn_params = {
-            "directive_name": directive_name,
+            "directive_id": directive_name,
             "resume_messages": resume_messages,
         }
         if parent_id:
