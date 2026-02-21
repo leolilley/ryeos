@@ -2,7 +2,7 @@
 id: encrypted-shared-intelligence
 title: "Encrypted Shared Intelligence"
 description: Encrypt the entire .ai/ intelligence layer with group keys — directives, tools, knowledge become a cryptographically-gated shared knowledge fabric
-category: ideas
+category: future
 tags: [encryption, sharing, intelligence, security, group-keys, zero-knowledge]
 version: "0.1.0"
 status: exploratory

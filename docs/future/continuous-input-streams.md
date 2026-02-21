@@ -2,7 +2,7 @@
 id: continuous-input-streams
 title: "Continuous Input Streams"
 description: Extend the thread continuation mechanism to handle continuous input — browser sessions, live image flow, and high-volume data streams — using domain-specific summarizers and new hook events
-category: ideas
+category: future
 tags: [streams, browser, images, data, continuation, summarizers, hooks]
 version: "0.1.0"
 status: exploratory

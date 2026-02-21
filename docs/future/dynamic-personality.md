@@ -2,7 +2,7 @@
 id: dynamic-personality
 title: "Dynamic Personality via RAG"
 description: Replace static personality documents with a RAG-indexed personality corpus — retrieve relevant character facets per-conversation, accumulate rapport through thread summaries
-category: ideas
+category: future
 tags: [personality, rag, character, thread-summary, corpus, retrieval]
 version: "0.1.0"
 status: exploratory

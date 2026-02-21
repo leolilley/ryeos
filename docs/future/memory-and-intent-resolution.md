@@ -2,7 +2,7 @@
 id: memory-and-intent-resolution
 title: "Memory & Intent Resolution"
 description: Shared cross-thread memory with embedding retrieval, intent resolution via RAG + small model, and predictive pre-fetching during streaming
-category: ideas
+category: future
 tags: [memory, intent, rag, embedding, thread-memory, pre-fetching, search]
 version: "0.1.0"
 status: design-proposal
@@ -336,14 +336,29 @@ The index is built at sign time — when an item is signed and added to the regi
   — deterministic, no LLM in this step —
         │
         ▼
-  Small structured-output model (e.g., Gemma 2B/7B)
+  Small model (e.g., Gemma 2B/7B)
   input: intent + conversation context + candidate metadata
-  output: validated rye_execute(...) call
-  — small model, optimized for structured output —
+  output: see "Output Format" below
         │
         ▼
   Tool Executor (existing, unchanged)
 ```
+
+### Output Format — Open Question
+
+The small model needs to produce a valid RYE invocation from the intent + candidates. There are two plausible output formats, and the right choice is an empirical question:
+
+**Option A — CLI string via [ryeos-cli](ryeos-cli.md) parser:**
+
+The model generates a flat CLI-style string (`rye thread rye/outreach/email_campaign --target "tech companies" --limit 50`). The ryeos-cli parser handles deterministic structuring into a valid `rye_execute()` call. The argument: flat strings have no nesting or JSON escaping, and shell commands are abundant in training data. If this option wins, ryeos-cli becomes a prerequisite for intent resolution.
+
+**Option B — Structured function call (direct):**
+
+The model generates structured JSON directly (`{"name": "rye_execute", "parameters": {...}}`). The argument: function-calling models like Gemma are specifically fine-tuned for structured tool call output — that's literally what they're optimized for. Asking them to generate CLI strings instead may go against their training.
+
+The "CLI is easier" intuition is plausible for base models but may not hold for function-calling fine-tunes. The real question is whether the model knows RYE's specific schema — but the resolver already passes candidate metadata in context, which is exactly how you'd prompt a function-calling model. This needs empirical testing.
+
+See [CLI Syntax as Intermediate Representation](ryeos-cli.md#cli-syntax-as-intermediate-representation) for the full discussion.
 
 ### Intent Syntax
 
@@ -362,9 +377,9 @@ Examples:
 
 Direct tool calls still work as a fallback for agents that know exact syntax.
 
-### Why a Small Structured-Output Model
+### Why a Small Model
 
-The front-end model is optimized for reasoning, not for reliably generating structured XML against a specific schema. A small model (2B/7B class) fine-tuned specifically for structured output is faster, cheaper, and more reliable for this translation task — and it doesn't consume the main model's context window doing it. The model is just another Rye tool, signed and overridable at any space level.
+The front-end model is optimized for reasoning, not for reliably generating tool calls against a specific schema. A small model (2B/7B class) is faster, cheaper, and sufficient for this translation task — and it doesn't consume the main model's context window doing it. Whether it generates CLI strings or structured JSON is an [open question](#output-format--open-question). The model is just another Rye tool, signed and overridable at any space level.
 
 ### Updated AGENTS.md Addition
 
@@ -464,8 +479,8 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 | `thread_rag`            | `rye/memory/thread_rag`        | RAG over shared thread store                                                                |
 | `thread_search`         | `rye/memory/thread_search`     | Cross-tree word/regex search (extends `thread_chain_search` beyond single delegation trees) |
 | `thread_indexer`        | `rye/memory/thread_indexer`    | Indexes thread on completion                                                                |
-| `intent_resolver`       | `rye/intent/resolver`          | Resolves `[TOOL: ...]` to actual calls                                                      |
-| structured output model | `rye/intent/structured_output` | Small LLM for structured output generation                                                  |
+| `intent_resolver`       | `rye/intent/resolver`          | Resolves `[TOOL: ...]` to CLI strings via RAG + small model, then parses via ryeos-cli      |
+| intent model            | `rye/intent/model`             | Small LLM (2B/7B) that generates CLI-style strings from intent + candidates                 |
 | `intent_predictor`      | `rye/intent/predictor`         | Predicts intents during streaming                                                           |
 
 ### Proposed New Infrastructure
@@ -475,6 +490,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 | Embedding primitive               | New Lilux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
 | Shared thread embedding store     | New persistent store under `.ai/tools/rye/memory/thread_store/`                                        |
 | Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_search`                          |
+| ryeos-cli parser                  | **Conditional** — if the small model targets CLI strings ([Option A](#output-format--open-question)), the [ryeos-cli](ryeos-cli.md) parser becomes a prerequisite. If it targets structured JSON (Option B), the parser is not in the critical path. |
 
 ### Proposed New/Extended Hook Events
 

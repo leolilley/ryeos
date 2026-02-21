@@ -24,13 +24,15 @@ Four MCP tools. Any model. Any client. The agent is the interpreter. The workflo
 - [MCP Interface](#mcp-interface)
 - [Install](#install)
 - [Packages](#packages)
+- [Platform Limitations](#platform-limitations)
+- [Future Work](#future-work)
 - [Documentation](#documentation)
 
 ## The Problem
 
 The industry is converging on a hard truth: multi-agent orchestration, delegation, and trust are unsolved problems.
 
-Research on [intelligent AI delegation](https://arxiv.org/abs/2503.18175) maps the failure modes — diffusion of responsibility across delegation chains, privilege escalation through unchecked sub-agents, opacity that makes it impossible to distinguish incompetence from malice, and the complete absence of cryptographic verification for agent-to-agent trust. These aren't edge cases. They're structural gaps in every major agent system shipping today.
+Research on [intelligent AI delegation](https://arxiv.org/abs/2602.11865) maps the failure modes — diffusion of responsibility across delegation chains, privilege escalation through unchecked sub-agents, opacity that makes it impossible to distinguish incompetence from malice, and the complete absence of cryptographic verification for agent-to-agent trust. These aren't edge cases. They're structural gaps in every major agent system shipping today.
 
 Every framework has tried to solve pieces of this independently. Codex built a polished harness — tightly coupled to their runtime, not portable. Claude Code optimized for one model — not interoperable. LangChain, CrewAI, AutoGen all converged on multi-agent support — but workflows live in code, not in a shareable format. Each one is a walled garden solving the same problems in isolation, with no way to share the solutions between them.
 
@@ -114,7 +116,7 @@ Every item is Ed25519-signed. Every chain element is verified before execution. 
 # rye:signed:2026-02-14T00:27:54Z:8e27c5f8...:WOclUqjr...:440443d0
 ```
 
-This directly addresses the delegation trust gap identified in the [research](https://arxiv.org/abs/2503.18175) — every item in a delegation chain is cryptographically attributable to a specific author, and trust is verifiable without requiring a central authority.
+This directly addresses the delegation trust gap identified in the [research](https://arxiv.org/abs/2602.11865) — every item in a delegation chain is cryptographically attributable to a specific author, and trust is verifiable without requiring a central authority.
 
 ### Multi-Agent Orchestration
 
@@ -146,7 +148,7 @@ rye.load.knowledge.my-project.*      — load project knowledge only
 
 A scoring leaf can call one scoring tool. An orchestrator can spawn threads and load knowledge. Nothing gets implicit access. Capabilities are Ed25519-signed tokens with audience binding and expiry — children can only subset their parent's permissions, never escalate.
 
-This is the [privilege attenuation](https://arxiv.org/abs/2503.18175) that MCP and A2A protocols lack — scoped, declarative, cryptographically enforced permissions that attenuate at every delegation boundary.
+This is the [privilege attenuation](https://arxiv.org/abs/2602.11865) that MCP and A2A protocols lack — scoped, declarative, cryptographically enforced permissions that attenuate at every delegation boundary.
 
 ### Declarative State Graphs
 
@@ -184,7 +186,7 @@ Every thread is fully transparent. Parents can read child transcripts — full r
 tail -f .ai/threads/<thread_id>/transcript.jsonl
 ```
 
-No opaque delegation. No hidden reasoning. Every step in every chain is auditable — addressing the [accountability vacuum](https://arxiv.org/abs/2503.18175) that emerges in multi-agent systems.
+No opaque delegation. No hidden reasoning. Every step in every chain is auditable — addressing the [accountability vacuum](https://arxiv.org/abs/2602.11865) that emerges in multi-agent systems.
 
 ### Three-Tier Space System
 
@@ -255,6 +257,21 @@ Installs the full stack: `ryeos-mcp` (MCP transport) → `ryeos` (executor + sta
 | `ryeos-core` | Same engine, minimal bundle (only `rye/core/*` items)         |
 | `ryeos-bare` | Same engine, no bundle (for services like registry-api)       |
 | `ryeos-mcp`  | MCP server transport (stdio/SSE)                              |
+
+## Platform Limitations
+
+RYE currently supports **Linux and macOS only**. Multi-agent orchestration uses `os.fork()` to spawn child threads as separate OS processes — Windows does not support `fork()`. Windows support is not on the near-term roadmap.
+
+## Future Work
+
+Exploratory designs that build on RYE's architecture. Full write-ups at [`docs/future/`](docs/future/index.md):
+
+- **[Encrypted Shared Intelligence](docs/future/encrypted-shared-intelligence.md)** — Encrypt the entire `.ai/` layer with group keys for cryptographically-gated knowledge sharing
+- **[Continuous Input Streams](docs/future/continuous-input-streams.md)** — Extend thread continuation to handle browser automation, live image flow, and high-volume data streams
+- **[Dynamic Personality](docs/future/dynamic-personality.md)** — RAG-indexed personality corpus as an alternative to static personality documents
+- **[Memory & Intent Resolution](docs/future/memory-and-intent-resolution.md)** — Shared thread memory, natural-language intent resolution, and predictive pre-fetching
+- **[ryeos-cli](docs/future/ryeos-cli.md)** — Terminal-native natural-language interface to RYE without needing an MCP client
+- **[ryeos-http](docs/future/ryeos-http.md)** — HTTP server wrapper for deploying RYE as a remote service
 
 ## Documentation
 
