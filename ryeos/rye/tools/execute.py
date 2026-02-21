@@ -1,7 +1,7 @@
 """Execute tool - execute directives, tools, or knowledge items.
 
 Routes execution through PrimitiveExecutor for tools, which handles:
-    - Three-layer routing: Primitive → Runtime → Tool
+    - Multi-layer routing: Tool → Runtime → Primitive (up to 10 links)
     - On-demand tool loading from .ai/tools/
     - Recursive executor chain resolution via __executor_id__
     - ENV_CONFIG resolution for runtimes

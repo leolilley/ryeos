@@ -63,7 +63,7 @@ For contributors and those who want to understand how Rye OS works under the hoo
 
 - [Architecture](internals/architecture.md) — Layers, components, and data flow
 - [Packages and Bundles](internals/packages-and-bundles.md) — pip packages, bundle entry points, and dependency layering
-- [Executor Chain](internals/executor-chain.md) — Three-layer tool resolution and execution
+- [Executor Chain](internals/executor-chain.md) — Multi-layer tool resolution and execution
 - [Three-Tier Spaces](internals/three-tier-spaces.md) — Project, user, and system space resolution
 - [Integrity and Signing](internals/integrity-and-signing.md) — Content hashing, Ed25519, and lockfiles
 - [Lilux Primitives](internals/lilux-primitives.md) — The microkernel layer

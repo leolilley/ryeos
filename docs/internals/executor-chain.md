@@ -1,7 +1,7 @@
 ```yaml
 id: executor-chain
 title: "Executor Chain"
-description: How tools are resolved and executed through the three-layer chain
+description: How tools are resolved and executed through the multi-layer chain
 category: internals
 tags: [executor, chain, primitive, runtime, resolution]
 version: "1.0.0"
@@ -11,7 +11,7 @@ version: "1.0.0"
 
 The executor chain is how Rye routes a tool call from an AI agent down to an OS-level operation. Every tool declares an `__executor_id__` that points to the next element in the chain. The chain terminates at a primitive, where `__executor_id__` is `None`.
 
-## The Three Layers
+## The Layers
 
 ```
 Layer 3: Tool          __executor_id__ = "rye/core/runtimes/python_script_runtime"

@@ -110,9 +110,9 @@ RYE's own agent system — the LLM loop, safety harness, orchestrator, thread sy
 
 Want to modify how the orchestrator waits for threads? Override the file in your project space. The system resolves `project → user → system` — your version wins.
 
-### Three-Layer Executor Chain
+### Multi-Layer Executor Chain
 
-Every tool call follows a deterministic chain from agent request to OS operation:
+Every tool call follows a deterministic chain from agent request to OS operation. Each element declares an `__executor_id__` pointing to the next link; the chain terminates at a primitive where `__executor_id__` is `None`:
 
 ```
 Tool (.py)  →  Runtime (.yaml)  →  Primitive (Lilux)
@@ -120,7 +120,7 @@ Tool (.py)  →  Runtime (.yaml)  →  Primitive (Lilux)
  your code    how to run it      OS-level execution
 ```
 
-Each element is independently signed and verified. The chain is cached, lockfile-pinned, and validated for space compatibility before anything executes.
+Three layers is the common case, but chains can be deeper — up to 10 links, each independently signed and verified. The chain is cached, lockfile-pinned, and validated for space compatibility before anything executes.
 
 ## What You Get
 

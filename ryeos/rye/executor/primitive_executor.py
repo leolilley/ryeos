@@ -81,10 +81,11 @@ class PrimitiveExecutor:
 
     No hardcoded executor IDs - all resolved from .ai/tools/ filesystem.
 
-    Three-layer routing:
+    Multi-layer routing (up to MAX_CHAIN_DEPTH=10):
         1. Primitive (__executor_id__ = None): Direct Lilux execution
         2. Runtime (__executor_id__ = "subprocess"): ENV_CONFIG resolution + primitive
         3. Tool (__executor_id__ = "python_runtime"): Delegate to runtime
+    Three layers is the common case, but chains can be deeper.
     """
 
     # Primitive ID to Lilux primitive class mapping (full path IDs)

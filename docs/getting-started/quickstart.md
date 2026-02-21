@@ -93,7 +93,7 @@ Greet the user by name and offer to help with their project.
 
 ## 3. Create a tool
 
-Tools are executable scripts with metadata that declare which **runtime executor** to use. The Rye OS uses a **three-layer execution chain**:
+Tools are executable scripts with metadata that declare which **runtime executor** to use. The Rye OS uses a **multi-layer execution chain**:
 
 1. **Tool** (your script) — declares `__executor_id__` pointing to a runtime
 2. **Runtime** (YAML config) — defines environment, interpreter, and command templates
