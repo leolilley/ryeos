@@ -46,14 +46,14 @@ RYE is the policy and orchestration layer that MCP is missing. Portable agent wo
 
 Those are harnesses — runtime environments optimized for a specific model or framework. RYE is the layer underneath.
 
-|                         | Codex | Claude Code | LangChain | RYE |
-| ----------------------- | ----- | ----------- | --------- | --- |
-| **Portable workflows**  | No | No | No | Yes — directives are data files |
-| **Model agnostic**      | Limited — OpenAI + OSS via Ollama | Limited — Claude only | Yes | Yes |
-| **Community registry**  | No | No | Partial — Hub for prompts, unsigned | Yes — push, pull, signed, TOFU-pinned |
-| **Cryptographic trust** | No | No | No | Yes — Ed25519 signed, chain-verified |
-| **Permission model**    | OS sandbox + interactive approval | Configurable approval policies | None | Declarative capability attenuation per delegation level |
-| **Cross-client**        | Codex only | Claude only | LangChain only | Any MCP client |
+|                         | Codex                             | Claude Code                    | LangChain                           | RYE                                                     |
+| ----------------------- | --------------------------------- | ------------------------------ | ----------------------------------- | ------------------------------------------------------- |
+| **Portable workflows**  | No                                | No                             | No                                  | Yes — directives are data files                         |
+| **Model agnostic**      | Limited — OpenAI + OSS via Ollama | Limited — Claude only          | Yes                                 | Yes                                                     |
+| **Community registry**  | No                                | Skill registries emerging      | Partial — Hub for prompts, unsigned | Yes — push, pull, signed, TOFU-pinned                   |
+| **Cryptographic trust** | No                                | No                             | No                                  | Yes — Ed25519 signed, chain-verified                    |
+| **Permission model**    | OS sandbox + interactive approval | Configurable approval policies | None                                | Declarative capability attenuation per delegation level |
+| **Cross-client**        | Codex only                        | Claude only                    | LangChain only                      | Any MCP client                                          |
 
 Codex and Claude Code have sophisticated permission models — OS-level sandboxing, configurable approval policies — but they're designed for human-in-the-loop sessions. RYE's capability attenuation solves a different problem: scoping permissions across autonomous multi-agent delegation chains where no human is in the loop to approve.
 
@@ -67,15 +67,17 @@ Skills — as seen in Claude Projects, ChatGPT custom instructions, and various 
 
 RYE decomposes agent cognition into three distinct primitives:
 
-| Primitive       | What it is                                      | Example                                        |
-| --------------- | ----------------------------------------------- | ---------------------------------------------- |
-| **Directives**  | Workflows — what to do, in what order, how      | "Run an outreach campaign with these steps"     |
-| **Knowledge**   | Domain data — context the agent reasons over     | "Here's our rate limiting policy"               |
-| **Tools**       | Executables — actions the agent can take          | "Call this API, run this script"                |
+| Primitive      | What it is                                   | Example                                     |
+| -------------- | -------------------------------------------- | ------------------------------------------- |
+| **Directives** | Workflows — what to do, in what order, how   | "Run an outreach campaign with these steps" |
+| **Knowledge**  | Domain data — context the agent reasons over | "Here's our rate limiting policy"           |
+| **Tools**      | Executables — actions the agent can take     | "Call this API, run this script"            |
 
 Each is independently authored, signed, versioned, and composable. A directive can reference any knowledge and use any tools — the combination is assembled at runtime, not baked into a monolithic blob.
 
-Skills exist because most systems don't have this separation. When your only primitive is "a prompt with some tools attached," you need a container for the bundle. When cognition, knowledge, and execution are distinct composable primitives, the skill concept dissolves — you just compose the right directive with the right knowledge and the right tools for the job.
+Skill registries are emerging — communities sharing bundled agent behaviors — and that's a good instinct. But sharing skills means sharing opaque blobs where the workflow, the domain knowledge, and the tool access are entangled. You can't audit one without the others. You can't reuse the knowledge in a different workflow. You can't verify that the tool access hasn't changed.
+
+RYE's registry shares directives, tools, and knowledge as independent items — each cryptographically signed, each composable, each auditable on its own terms. You don't share a skill. You share the pieces, and the agent assembles them.
 
 ## The Architecture
 
