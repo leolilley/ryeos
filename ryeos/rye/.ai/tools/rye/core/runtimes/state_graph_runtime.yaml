@@ -1,0 +1,55 @@
+# rye:signed:2026-02-21T05:56:40Z:c1f3b66b6d65a4a9e695f2edcbe2dca7220e3a8d69fb06590382c42e309d0103:1MptI9RnklbnxkVPUffFv_H0uajG0oSFCc5KyzR7IRVhyZLrxzhZ-zmDBgmDRu0tZ_5XMZ-FDEzKT2aCEkNVDA==:9fbfabe975fa5a7f
+version: "1.0.0"
+tool_type: runtime
+executor_id: rye/core/primitives/subprocess
+category: rye/core/runtimes
+description: "State graph runtime — walks graph YAML tools, dispatching rye_execute for each node"
+
+env_config:
+  interpreter:
+    type: venv_python
+    venv_path: .venv
+    var: RYE_PYTHON
+    fallback: python3
+  env:
+    PYTHONUNBUFFERED: "1"
+    PROJECT_VENV_PYTHON: "${RYE_PYTHON}"
+
+anchor:
+  enabled: true
+  mode: always
+  root: tool_dir
+  lib: lib/python
+  env_paths:
+    PYTHONPATH:
+      prepend: ["{anchor_path}", "{runtime_lib}"]
+
+verify_deps:
+  enabled: true
+  scope: anchor
+  recursive: true
+  extensions: [".py", ".yaml", ".yml", ".json"]
+  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+
+config:
+  command: "${RYE_PYTHON}"
+  args:
+    - "-c"
+    - |
+      import sys,os,json,importlib.util
+      rl=sys.argv[4]
+      runtime_dir=os.path.dirname(os.path.dirname(rl)) if rl else None
+      if not runtime_dir or not os.path.isdir(runtime_dir):
+          sys.exit("runtime_lib not resolved: "+repr(rl))
+      walker=os.path.join(runtime_dir,"state_graph_walker.py")
+      spec=importlib.util.spec_from_file_location("walker",walker)
+      mod=importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(mod)
+      graph=mod._load_graph_yaml(sys.argv[1])
+      r=mod.run_sync(graph,json.loads(sys.argv[2]),sys.argv[3])
+      print(json.dumps(r,default=str))
+    - "{tool_path}"
+    - "{params_json}"
+    - "{project_path}"
+    - "{runtime_lib}"
+  timeout: 600

@@ -1,0 +1,53 @@
+# rye:signed:2026-02-21T05:56:40Z:935e4b703dbc96851781f0ac01c14854a8fe43d7318886550496aa897f6b550d:1NZQSMgcky-N4XixCfLP26V25r7MnO34jka7vfR80zA6eexMF6EoaZ42SZEv8LWkN8FL73PSlHKDTPGh7lMJDg==:9fbfabe975fa5a7f
+version: "1.0.0"
+tool_type: primitive
+executor_id: null
+category: rye/core/primitives
+description: "HTTP client primitive - execute HTTP requests with configurable method, headers, and retry"
+
+config_schema:
+  type: object
+  properties:
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE, PATCH]
+      default: GET
+    url:
+      type: string
+      description: "Request URL (supports ${VAR} templating)"
+    headers:
+      type: object
+      description: Request headers
+    body:
+      type: object
+      description: "Request body (for POST/PUT/PATCH)"
+    timeout:
+      type: integer
+      default: 30
+      description: Timeout in seconds
+    auth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [bearer, api_key]
+        token:
+          type: string
+          description: "Bearer token (supports ${VAR})"
+        key:
+          type: string
+          description: "API key (supports ${VAR})"
+        header:
+          type: string
+          default: X-API-Key
+    retry:
+      type: object
+      properties:
+        max_attempts:
+          type: integer
+          default: 1
+        backoff:
+          type: string
+          enum: [exponential, linear]
+          default: exponential
+  required: [url]

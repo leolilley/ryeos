@@ -1,0 +1,38 @@
+# rye:signed:2026-02-21T05:56:40Z:a165f8f1c70a97e246da44a39ac25bc59e9a3f38d601fb4b3eba9cb2672680db:OaUtOzimK9wa9W26fGPxJFrNDRl1iv_6q7iU0a-jO0N_8SJ5399xZG7_s1k5YsIJA6jdjZ3I9aLnJ3teA89nAA==:9fbfabe975fa5a7f
+# config/coordination.yaml
+category: "rye/agent/threads/config"
+tool_type: "config"
+version: "1.0.0"
+description: "Thread coordination configuration for wait, continuation, transcript integrity, and orphan detection"
+schema_version: "1.0.0"
+
+coordination:
+  # Wait configuration
+  wait_threads:
+    default_timeout: 600
+    max_timeout: 3600
+
+  # Context limit, continuation, and resume
+  continuation:
+    trigger_threshold: 0.9
+    # Thread summary directive — spawned to summarize prior conversation on resume
+    summary_directive: "rye/agent/threads/thread_summary"
+    summary_model: "fast"
+    summary_limit_overrides:
+      turns: 3
+      spend: 0.02
+    # Hard ceiling: summary + trailing turns must fit under this (tokens)
+    resume_ceiling_tokens: 16000
+    # Soft target for summary output
+    summary_max_tokens: 4000
+
+  # Transcript integrity verification on resume/handoff
+  # "strict" (default): refuse on any integrity failure
+  # "lenient": allow unsigned trailing events with warning
+  transcript_integrity: strict
+
+  # Orphan detection
+  orphan_detection:
+    enabled: true
+    scan_on_startup: true
+    stale_threshold_minutes: 60

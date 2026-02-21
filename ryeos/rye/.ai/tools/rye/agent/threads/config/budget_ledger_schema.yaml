@@ -1,0 +1,61 @@
+# rye:signed:2026-02-21T05:56:40Z:3677e140d6bc7ff918376259cb4ca6025ea06dba079dd59d9860eaf8d1f89ca1:uK5EKuburYXnZoU6YpYT3uxJBxqE7bb518NlaJeS7EQ1vnSa0pWt8fIrnuOP0U4VX9juuhsOh4bp-XWv7I2kCA==:9fbfabe975fa5a7f
+# config/budget_ledger_schema.yaml
+category: "rye/agent/threads/config"
+tool_type: "config"
+version: "1.0.0"
+description: "Schema definition for the budget ledger table used to track thread spending"
+schema_version: "1.0.0"
+
+table:
+  name: "budget_ledger"
+  columns:
+    - name: thread_id
+      type: TEXT
+      primary_key: true
+
+    - name: parent_thread_id
+      type: TEXT
+      nullable: true
+
+    - name: reserved_spend
+      type: REAL
+      default: 0.0
+
+    - name: actual_spend
+      type: REAL
+      default: 0.0
+
+    - name: max_spend
+      type: REAL
+      nullable: true
+
+    - name: status
+      type: TEXT
+      default: "active"
+
+    - name: created_at
+      type: TEXT
+
+    - name: updated_at
+      type: TEXT
+
+  indexes:
+    - name: idx_budget_parent
+      columns: [parent_thread_id]
+    - name: idx_budget_status
+      columns: [status]
+
+operations:
+  reserve:
+    isolation: "IMMEDIATE"
+    check_remaining: true
+
+  report_actual:
+    clamp_to_reserved: true
+
+  release:
+    on_status: ["completed", "cancelled", "error"]
+
+cleanup:
+  archive_after_days: 30
+  vacuum_interval_days: 7

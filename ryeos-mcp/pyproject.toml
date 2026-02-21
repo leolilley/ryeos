@@ -1,0 +1,25 @@
+[project]
+name = "ryeos-mcp"
+version = "0.1.0"
+description = "MCP server transport for RYE OS"
+
+dependencies = [
+    "ryeos",
+    "mcp",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+ryeos-mcp = "rye_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rye_mcp"]

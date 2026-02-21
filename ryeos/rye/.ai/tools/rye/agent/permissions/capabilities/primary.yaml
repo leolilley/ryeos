@@ -1,0 +1,19 @@
+# rye:signed:2026-02-21T05:56:40Z:9b8750c50e65baa13e3f0ee3d54bf0c5babb4e35ad217c02c242a07483ec0c19:t8uaqXfUstx7arXyTTwKF5q_r2btx9nNrkLpS8JIfavbpifq5fw8Uidubg9T3r3a3naqtD4LtxuINahGD9-YCw==:9fbfabe975fa5a7f
+name: primary
+category: "rye/agent/permissions/capabilities"
+tool_type: "config"
+version: "2.0.0"
+description: "Primary rye capability structure: rye.{primary}.{item_type}.{specifics}"
+
+primary_tools:
+  execute: "rye/primary-tools/rye_execute"
+  search: "rye/primary-tools/rye_search"
+  load: "rye/primary-tools/rye_load"
+  sign: "rye/primary-tools/rye_sign"
+
+implies:
+  execute: [search, load]
+  sign: [load]
+
+permissions: []
+hierarchy: {}

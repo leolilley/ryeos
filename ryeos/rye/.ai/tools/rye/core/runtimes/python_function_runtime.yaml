@@ -1,0 +1,60 @@
+# rye:signed:2026-02-21T05:56:40Z:4267136a31f5c016629893105a6ebce4f72b5b8d59440b246c12f31a9071a35d:Exegfm_5CT4-CPZn_o0y8tO4qNgwdMLCbUL0UPmoesjMWt_KQlQnTq02DQI9NRZTspd0SNY9tY2wWunvO4TKCQ==:9fbfabe975fa5a7f
+version: "1.0.0"
+tool_type: runtime
+executor_id: rye/core/primitives/subprocess
+category: rye/core/runtimes
+description: "Python function runtime - calls execute(params, project_path) and serializes result to stdout"
+
+env_config:
+  interpreter:
+    type: venv_python
+    venv_path: .venv
+    var: RYE_PYTHON
+    fallback: python3
+  env:
+    PYTHONUNBUFFERED: "1"
+    PROJECT_VENV_PYTHON: "${RYE_PYTHON}"
+
+anchor:
+  enabled: true
+  mode: auto
+  markers_any: ["__init__.py", "pyproject.toml"]
+  root: tool_dir
+  lib: lib/python
+  env_paths:
+    PYTHONPATH:
+      prepend: ["{anchor_path}", "{runtime_lib}"]
+
+verify_deps:
+  enabled: true
+  scope: anchor
+  recursive: true
+  extensions: [".py", ".yaml", ".yml", ".json"]
+  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+
+config:
+  command: "${RYE_PYTHON}"
+  args:
+    - "-c"
+    - |
+      import sys,json,importlib.util,inspect,asyncio
+      spec=importlib.util.spec_from_file_location("tool",sys.argv[1])
+      mod=importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(mod)
+      fn=getattr(mod,"execute",None)
+      if not fn:sys.exit("No execute() in "+sys.argv[1])
+      p=json.loads(sys.argv[2])
+      if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,sys.argv[3]))
+      else:r=fn(p,sys.argv[3])
+      print(json.dumps(r,default=str)if r is not None else'{}')
+    - "{tool_path}"
+    - "{params_json}"
+    - "{project_path}"
+  timeout: 300
+
+config_schema:
+  type: object
+  properties:
+    script:
+      type: string
+      description: Python module with execute(params, project_path) function

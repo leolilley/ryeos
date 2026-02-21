@@ -1,0 +1,162 @@
+# rye:signed:2026-02-21T05:56:40Z:9491f262ed85dd21bfffbf0d4c1a0918c8fb55a0dffe7a5c3179916a383ac000:_jyERNtpUgFh6xrtNq1duyJc1feR01RseV6e801xcZx96XuXoEa66TDrwIwrGhuWSKNo9ruR7yXyQHX377q1BQ==:9fbfabe975fa5a7f
+# config/error_classification.yaml
+category: "rye/agent/threads/config"
+tool_type: "config"
+version: "1.0.0"
+description: "Error classification patterns, retry policies, and operators for thread error handling"
+schema_version: "1.0.0"
+
+patterns:
+  - id: "http_429"
+    name: "rate_limited"
+    category: "rate_limited"
+    retryable: true
+    match:
+      any:
+        - path: "status_code"
+          op: "eq"
+          value: 429
+        - path: "error.type"
+          op: "in"
+          value: ["rate_limit_error", "RateLimitError"]
+        - path: "error.message"
+          op: "regex"
+          value: "rate limit|too many requests|throttled"
+    retry_policy:
+      type: "use_header"
+      header: "retry-after"
+      fallback:
+        type: "exponential"
+        base: 2.0
+        max: 60.0
+
+  - id: "network_timeout"
+    name: "transient_timeout"
+    category: "transient"
+    retryable: true
+    match:
+      any:
+        - path: "error.type"
+          op: "in"
+          value: ["TimeoutError", "ReadTimeout", "ConnectTimeout"]
+        - path: "error.message"
+          op: "regex"
+          value: "timeout|timed out"
+    retry_policy:
+      type: "exponential"
+      base: 2.0
+      max: 30.0
+
+  - id: "network_connection"
+    name: "transient_connection"
+    category: "transient"
+    retryable: true
+    match:
+      any:
+        - path: "error.type"
+          op: "in"
+          value: ["ConnectionError", "ConnectionResetError"]
+        - path: "error.message"
+          op: "regex"
+          value: "connection reset|connection refused|network"
+    retry_policy:
+      type: "exponential"
+      base: 2.0
+      max: 60.0
+
+  - id: "http_5xx"
+    name: "transient_server"
+    category: "transient"
+    retryable: true
+    match:
+      path: "status_code"
+      op: "in"
+      value: [500, 502, 503, 504]
+    retry_policy:
+      type: "exponential"
+      base: 2.0
+      max: 120.0
+
+  - id: "auth_failure"
+    name: "permanent_auth"
+    category: "permanent"
+    retryable: false
+    match:
+      any:
+        - path: "status_code"
+          op: "in"
+          value: [401, 403]
+        - path: "error.code"
+          op: "in"
+          value: ["authentication_error", "authorization_error"]
+
+  - id: "validation_error"
+    name: "permanent_validation"
+    category: "permanent"
+    retryable: false
+    match:
+      any:
+        - path: "status_code"
+          op: "eq"
+          value: 422
+        - path: "error.type"
+          op: "eq"
+          value: "ValidationError"
+
+  - id: "cancelled"
+    name: "cancelled"
+    category: "cancelled"
+    retryable: false
+    match:
+      any:
+        - path: "error.type"
+          op: "eq"
+          value: "CancelledError"
+        - path: "cancelled"
+          op: "eq"
+          value: true
+
+default:
+  category: "permanent"
+  retryable: false
+  retry_policy:
+    type: "none"
+
+operators:
+  eq: { description: "Equal" }
+  ne: { description: "Not equal" }
+  gt: { description: "Greater than" }
+  gte: { description: "Greater than or equal" }
+  lt: { description: "Less than" }
+  lte: { description: "Less than or equal" }
+  in: { description: "In list" }
+  contains: { description: "String contains" }
+  regex: { description: "Regex match" }
+  exists: { description: "Path exists" }
+
+combinators:
+  any: { description: "Match if any child matches" }
+  all: { description: "Match only if all children match" }
+  not: { description: "Match if child does not match" }
+
+retry_policy_types:
+  exponential:
+    parameters:
+      base: { type: number, default: 2.0 }
+      max: { type: number, default: 120.0 }
+    formula: "min(base * (2 ** attempt), max)"
+
+  fixed:
+    parameters:
+      delay: { type: number, default: 60.0 }
+    formula: "delay"
+
+  use_header:
+    parameters:
+      header: { type: string, default: "retry-after" }
+      fallback: { type: object }
+    formula: "int(headers[header]) or fallback"
+
+  none:
+    parameters: {}
+    formula: "null"

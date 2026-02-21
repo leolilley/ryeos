@@ -1,0 +1,69 @@
+# rye:signed:2026-02-21T05:56:40Z:a824747388c4dce0afa89700525b2d863ee950a75cc4e6211fbd18ab521dcb53:WdF2FVs5URCPEGsVdK0KljlD-qw6PyZEd5PZ6p5ddqGHzwckABxI7p-uM_JOwqGSU5YLozla7VqBusl_Tw__Bw==:9fbfabe975fa5a7f
+# config/resilience.yaml
+category: "rye/agent/threads/config"
+tool_type: "config"
+version: "1.0.0"
+description: "Thread resilience configuration for retry policies, limits, checkpoints, and concurrency"
+schema_version: "1.0.0"
+
+retry:
+  max_retries: 3
+
+  policies:
+    exponential:
+      type: exponential
+      base: 2.0
+      max_delay: 120.0
+
+    fixed:
+      type: fixed
+      delay: 60.0
+
+    rate_limited:
+      type: use_header
+      header: "retry-after"
+      fallback:
+        policy: exponential
+        base: 5.0
+
+limits:
+  defaults:
+    turns: 25
+    tokens: 200000
+    spend: 1.0
+    spend_currency: "USD"
+    spawns: 50
+    depth: 10
+    duration_seconds: 1800
+
+  enforcement:
+    check_before_turn: true
+    check_after_turn: true
+    on_exceed: escalate
+
+checkpoint:
+  triggers:
+    pre_turn: true
+    post_llm: true
+    post_tools: true
+    on_error: true
+
+  persistence:
+    atomic_write: true
+    format: json
+
+coordination:
+  wait_timeout_seconds: 300.0
+  fail_fast: false
+  cancel_siblings_on_failure: false
+  max_wait_thread_ids: 50
+  completion_event_ttl_seconds: 600
+
+child_policy:
+  on_parent_cancel: "cascade_cancel"
+  on_parent_complete: "allow"
+  on_parent_error: "cascade_cancel"
+
+concurrency:
+  max_concurrent_children: 5
+  max_total_threads: 20

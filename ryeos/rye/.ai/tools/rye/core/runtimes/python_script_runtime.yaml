@@ -1,0 +1,58 @@
+# rye:signed:2026-02-21T05:56:40Z:8e27c5f8c129cde37b7f3dab26efdc7f55041e110d395c8ce5cbd40aa0c8c241:6Lj2Np2CCWYG82kNJfAEnepu0v35X-Xc2HfbL7QlTx7ujUmpAR3mHatTVkadamAURdkm-NGShCT3coYX2nANCA==:9fbfabe975fa5a7f
+version: "1.0.0"
+tool_type: runtime
+executor_id: rye/core/primitives/subprocess
+category: rye/core/runtimes
+description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
+
+env_config:
+  interpreter:
+    type: venv_python
+    venv_path: .venv
+    var: RYE_PYTHON
+    fallback: python3
+  env:
+    PYTHONUNBUFFERED: "1"
+    PROJECT_VENV_PYTHON: "${RYE_PYTHON}"
+
+anchor:
+  enabled: true
+  mode: auto
+  markers_any: ["__init__.py", "pyproject.toml"]
+  root: tool_dir
+  lib: lib/python
+  env_paths:
+    PYTHONPATH:
+      prepend: ["{anchor_path}", "{runtime_lib}"]
+
+verify_deps:
+  enabled: true
+  scope: anchor
+  recursive: true
+  extensions: [".py", ".yaml", ".yml", ".json"]
+  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+
+config:
+  command: "${RYE_PYTHON}"
+  args:
+    - "{tool_path}"
+    - "--params"
+    - "{params_json}"
+    - "--project-path"
+    - "{project_path}"
+  timeout: 300
+
+config_schema:
+  type: object
+  properties:
+    script:
+      type: string
+      description: Python script path or inline code
+    args:
+      type: array
+      items:
+        type: string
+      description: Script arguments
+    module:
+      type: string
+      description: "Module to run with -m flag"

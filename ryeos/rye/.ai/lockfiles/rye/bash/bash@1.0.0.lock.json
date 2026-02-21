@@ -1,0 +1,34 @@
+{
+  "lockfile_version": 1,
+  "generated_at": "2026-02-18T09:28:29.247577+00:00",
+  "root": {
+    "tool_id": "rye/bash/bash",
+    "version": "1.0.0",
+    "integrity": "c47c9440e20633b4a22b2d386a7afdcc3ebe865f467974453b3d0f69e47722cd"
+  },
+  "resolved_chain": [
+    {
+      "item_id": "rye/bash/bash",
+      "space": "project",
+      "tool_type": "python",
+      "executor_id": "rye/core/runtimes/python_script_runtime",
+      "integrity": "c47c9440e20633b4a22b2d386a7afdcc3ebe865f467974453b3d0f69e47722cd"
+    },
+    {
+      "item_id": "rye/core/runtimes/python_script_runtime",
+      "space": "project",
+      "tool_type": "runtime",
+      "executor_id": "rye/core/primitives/subprocess",
+      "integrity": "8e27c5f8c129cde37b7f3dab26efdc7f55041e110d395c8ce5cbd40aa0c8c241"
+    },
+    {
+      "item_id": "rye/core/primitives/subprocess",
+      "space": "project",
+      "tool_type": "primitive",
+      "executor_id": null,
+      "integrity": "c63d03107f4c055b1afe9603ea22191b259170dee5ff838a63f3c8fd9cbab4b8"
+    }
+  ],
+  "registry": null,
+  "verified_deps": null
+}

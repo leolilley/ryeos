@@ -1,0 +1,222 @@
+<!-- rye:signed:2026-02-21T05:56:40Z:49896332d176b47e11d49449903e8d15a5595152824afae3e6d5b1b444c806a2:DaNq0TTMiOQdVuAvlnSy4dj8vqr8cgWPa24-xeYpbuLS4_bUP5f2QcBqtqjkxhLvL1NS79Yy00aqmFY6kCW0DA==:9fbfabe975fa5a7f -->
+```yaml
+id: state-graph-walker
+title: "State Graph Walker"
+description: Graph traversal engine that walks declarative YAML graph tools, dispatching rye_execute for each node
+entry_type: reference
+category: rye/core/runtimes
+version: "1.0.0"
+author: rye-os
+created_at: 2026-02-19T00:00:00Z
+tags:
+  - walker
+  - graph
+  - state-graph
+  - orchestration
+  - execution-engine
+references:
+  - state-graph-runtime
+  - executor-chain
+  - "docs/orchestration/state-graphs.md"
+```
+
+# State Graph Walker
+
+The graph walker (`state_graph_walker.py`, ~1240 lines) is the execution engine behind `state_graph_runtime`. It loads a graph YAML tool, walks nodes, dispatches actions through the core MCP tools, persists state as signed knowledge items, and registers runs in the thread registry.
+
+## Entry Points
+
+| Entry | Used By | Pattern |
+| --- | --- | --- |
+| `run_sync(graph_config, params, project_path)` | Runtime YAML inline `-c` script | Handles `async_exec` fork, then calls `asyncio.run(execute(...))` |
+| `execute(graph_config, params, project_path)` | `run_sync` or direct async call | Main graph traversal loop |
+| `_load_graph_yaml(graph_path)` | Runtime inline script | Strips `# rye:signed:` lines, parses YAML |
+
+## Execution Loop
+
+`execute()` follows this cycle per step:
+
+```
+1. Look up node in nodes dict
+2. Check node type:
+   - "return" → persist state as completed, fire graph_completed hooks, return
+   - "foreach" → delegate to _handle_foreach(), persist, continue
+   - default  → proceed to action dispatch
+3. Interpolate action via interpolation.interpolate_action(node["action"], ctx)
+4. If thread_directive call → inject parent context (_inject_parent_context)
+5. Check capabilities via _check_permission()
+6. Dispatch action via _dispatch_action() → _unwrap_result()
+7. Handle continuation chains for LLM nodes (status: "continued")
+8. Error handling:
+   a. Classify error via error_loader.classify()
+   b. Fire "error" hooks — hooks get first chance
+   c. If hook returns retry → re-execute node (up to max_retries)
+   d. Set state._last_error
+   e. Check on_error edge → route to recovery node
+   f. Check error_mode: "fail" → terminate, "continue" → skip assign
+9. Apply assign — interpolate each expression, write to state
+10. Evaluate edges via _evaluate_edges()
+11. Persist state (signed knowledge item, atomic write)
+12. Fire "after_step" hooks
+13. Check cancellation (cancel file sentinel)
+14. Loop back to step 1
+```
+
+Terminates on: `type: return` node, missing `next` (edge dead-end), `max_steps` exceeded, error with `fail` mode, or cancellation.
+
+## Dispatch Pipeline
+
+`_dispatch_action(action, project_path)` routes through the same core tool handles that `ToolDispatcher` uses:
+
+| `primary` | Tool Class | Method |
+| --- | --- | --- |
+| `execute` | `ExecuteTool` | `handle(item_type, item_id, project_path, parameters)` |
+| `search` | `SearchTool` | `handle(item_type, query, project_path, source, limit)` |
+| `load` | `LoadTool` | `handle(item_type, item_id, project_path, source)` |
+| `sign` | `SignTool` | `handle(item_type, item_id, project_path, source)` |
+
+Tool instances are lazily initialized via `_tools_instance()` with `get_user_space()` for space resolution.
+
+## Result Unwrapping
+
+`_unwrap_result(raw_result)` lifts `data` from the `ExecuteTool` envelope to the top level:
+
+```
+Before: {status, type, item_id, data: {stdout, stderr, exit_code}, chain, metadata}
+After:  {stdout, stderr, exit_code}
+```
+
+- Drops envelope keys: `chain`, `metadata`, `path`, `source`, `resolved_env_keys`
+- Error propagation: if outer `status == "error"` or inner `success == false`, injects `status: "error"` into unwrapped result
+- Non-dict results wrapped as `{"result": value}`
+
+This is why `${result.stdout}` works in `assign` expressions.
+
+## Interpolation Context
+
+The walker builds a context dict with three namespaces:
+
+| Namespace | Contents | Available In |
+| --- | --- | --- |
+| `state` | Accumulated state from prior `assign` mutations | `action.params`, `assign`, `next` conditions |
+| `inputs` | Original graph input parameters | `action.params`, `assign`, `next` conditions |
+| `result` | Unwrapped output of current node's action | `assign`, `next` conditions (not `action.params`) |
+
+Foreach nodes add the iteration variable (e.g., `task`) as an additional top-level namespace.
+
+## Permission Enforcement
+
+`_check_permission(exec_ctx, primary, item_type, item_id)`:
+
+- **Fail-closed**: empty capabilities = deny all
+- Internal thread tools (`rye/agent/threads/internal/*`) always allowed
+- Capability format: `rye.<primary>.<item_type>.<dotted.item.id>` with `fnmatch` wildcards
+- Same logic as `SafetyHarness.check_permission()` in `runner.py`
+
+Context resolution (`_resolve_execution_context`):
+1. Check `RYE_PARENT_THREAD_ID` env var → read + verify signed `thread.json`
+2. Fall back to explicit `capabilities` parameter
+3. No context → empty capabilities (deny all)
+
+## Hooks System
+
+`_merge_graph_hooks()` combines:
+- Layer 1: graph-defined hooks (from `config.hooks`)
+- Layer 2: builtin hooks (from `hook_conditions.yaml`, filtered)
+- Layer 3: infra hooks (filtered)
+
+Filtered out events: `context_limit_reached`, `thread_started` (thread-only, not applicable to walker).
+
+`_run_hooks(event, context, hooks, project_path)`:
+- Filters by event name
+- Evaluates conditions via `condition_evaluator.matches()`
+- Interpolates actions via `interpolation.interpolate_action()`
+- Dispatches via `_dispatch_action()`
+- Layers 1-2: first non-None result wins (control flow)
+- Layer 3: always runs (infra telemetry)
+
+### Hook Events
+
+| Event | Context Shape | Fires When |
+| --- | --- | --- |
+| `graph_started` | `{graph_id, state}` | Before first node (fresh runs only) |
+| `error` | `{error, classification, node, state, step_count}` | Node action returns `status: error` |
+| `after_step` | `{node, next_node, state, step_count, result}` | After each successful node |
+| `limit` | `{limit_code, current_value, current_max, state}` | `max_steps` exceeded |
+| `graph_completed` | `{graph_id, state, steps[, error]}` | Terminal node or max_steps |
+
+## Foreach Nodes
+
+`_handle_foreach(node, state, inputs, exec_ctx, project_path)`:
+
+- **`over`**: expression resolving to a list via `interpolation.interpolate()`
+- **`as`**: variable name bound to each item (default: `item`)
+- **`collect`**: optional state key to store collected results
+- **Sequential** (default): each iteration completes before next, full state visible
+- **Parallel** (`async_exec: true` in action params): dispatched via `asyncio.gather`, isolated per-item state
+
+After iteration, the `as` variable is cleaned up from state.
+
+## State Persistence
+
+`_persist_state()` writes state as a signed knowledge item:
+
+- **Path**: `.ai/knowledge/graphs/<graph_id>/<graph_run_id>.md`
+- **Format**: YAML frontmatter (id, title, entry_type, graph_id, graph_run_id, parent_thread_id, status, current_node, step_count, updated_at) + JSON body
+- **Signing**: `MetadataManager.create_signature(ItemType.KNOWLEDGE, content)` prepended
+- **Atomicity**: writes to `.md.tmp` then renames
+
+## Resume
+
+Pass `resume: true` + `graph_run_id` in params:
+
+1. `_load_resume_state()` reads the knowledge item
+2. Verifies signature via `MetadataManager.parse_and_verify()`
+3. Parses frontmatter for `current_node` and `step_count`
+4. Parses body as JSON state
+5. Continues execution from `current_node` at `step_count`
+
+## Continuation Chain Handling
+
+When an LLM node returns `status: "continued"` with `continuation_thread_id`:
+
+1. `_follow_continuation_chain()` calls `orchestrator.resolve_thread_chain()` to find terminal thread
+2. Reads terminal thread's persisted result from registry
+3. Merges result into the walker's result dict
+
+This handles context-limit handoffs transparently — the walker doesn't implement continuation logic itself.
+
+## Async Execution
+
+`run_sync()` with `async_exec: true`:
+
+1. Pre-generates `graph_run_id` and pre-registers in thread registry
+2. Forks via `os.fork()`, child calls `os.setsid()` to daemonize
+3. Child redirects stderr → `.ai/threads/<graph_run_id>/async.log`, stdout → `/dev/null`
+4. Parent returns immediately: `{success, graph_run_id, graph_id, status: "running", pid}`
+5. Child runs `execute()` to completion, updates registry status
+
+## Cancellation
+
+The walker checks for a `cancel` sentinel file at `.ai/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
+
+## Graph Validation
+
+`_validate_graph(cfg)` checks before execution:
+- `start` node exists in `nodes`
+- All `next` edge targets reference existing nodes
+- All `on_error` targets reference existing nodes
+- Warns (non-fatal) if no `return` node exists
+
+## Implementation Files
+
+| File | Purpose |
+| --- | --- |
+| `.ai/tools/rye/core/runtimes/state_graph_walker.py` | Graph traversal engine (~1240 lines) |
+| `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml` | Runtime config (anchor, env, inline loader) |
+| `.ai/tools/rye/core/runtimes/lib/python/module_loader.py` | Module loading utilities |
+| `.ai/tools/rye/agent/threads/loaders/interpolation.py` | Template interpolation (`${...}` syntax) |
+| `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` | Edge condition evaluation + path resolution |
+| `.ai/tools/rye/agent/threads/loaders/error_loader.py` | Error classification for hook context |
+| `.ai/tools/rye/agent/threads/loaders/hooks_loader.py` | Builtin + infra hook loading |
+| `.ai/tools/rye/agent/threads/persistence/thread_registry.py` | Run registration + status tracking |

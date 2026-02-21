@@ -1,0 +1,15 @@
+# rye:signed:2026-02-21T05:56:40Z:27b2699156540a474360abd9a4f457ca0185401bdd04edac86bdc0c0f5c77df9:noGbda-QaKK9dKCGafL_RO3GDmV--EHON808EgPxjOVdGP1jmJmks6b7oTRywZ1fMlWyPKF2AF_ASmiEuqwKAg==:9fbfabe975fa5a7f
+name: agent
+category: "rye/agent/permissions/capabilities/tools/rye"
+tool_type: "config"
+version: "2.0.0"
+description: "Agent thread capabilities"
+
+capabilities:
+  - "rye.execute.tool.rye.agent.threads.orchestrator"
+  - "rye.execute.tool.rye.agent.threads.runner"
+  - "rye.execute.tool.rye.agent.threads.thread_directive"
+  - "rye.execute.tool.rye.agent.threads.safety_harness"
+
+permissions: []
+hierarchy: {}

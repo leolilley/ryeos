@@ -1,0 +1,11 @@
+# Agent configuration — system defaults
+# Override per-user: {USER_SPACE}/.ai/config/agent/agent.yaml
+# Override per-project: .ai/config/agent/agent.yaml
+schema_version: "1.0.0"
+
+provider:
+  # Preferred provider for tier resolution (e.g., "anthropic", "openai").
+  # When set, this provider is checked first for tier matches.
+  # No default — user chooses during onboarding.
+  # Set to "anthropic", "openai", etc. in .ai/config/agent/agent.yaml
+  default: null

@@ -1,0 +1,50 @@
+# rye:signed:2026-02-21T05:56:40Z:ce3a986c11f15628cc236308529634d66da409a6f48538599fdf3bbdea66271c:RiMs_IRVfrYvE_VzAbiO8qVWj-BSMuyKRMocgB_t-gWvReUK9Ew9VcOV2Xsz_y9VdNuZp-6O5A8xSfCcPoyJCg==:9fbfabe975fa5a7f
+version: "1.0.0"
+tool_type: runtime
+executor_id: rye/core/primitives/subprocess
+category: rye/core/runtimes
+description: "Node.js runtime executor - runs JavaScript/TypeScript with Node interpreter resolution"
+
+env_config:
+  interpreter:
+    type: node_modules
+    search_paths: [node_modules/.bin]
+    var: RYE_NODE
+    fallback: node
+  env:
+    NODE_ENV: development
+
+anchor:
+  enabled: true
+  mode: auto
+  markers_any: ["package.json"]
+  root: tool_dir
+  lib: lib/node
+  cwd: "{anchor_path}"
+  env_paths:
+    NODE_PATH:
+      prepend: ["{anchor_path}", "{anchor_path}/node_modules"]
+
+verify_deps:
+  enabled: true
+  scope: anchor
+  recursive: true
+  extensions: [".js", ".ts", ".mjs", ".cjs", ".json", ".yaml", ".yml"]
+  exclude_dirs: ["node_modules", "__pycache__", ".git", "dist", "build"]
+
+config:
+  command: "${RYE_NODE}"
+  args: []
+  timeout: 300
+
+config_schema:
+  type: object
+  properties:
+    script:
+      type: string
+      description: JavaScript file path
+    args:
+      type: array
+      items:
+        type: string
+      description: Script arguments

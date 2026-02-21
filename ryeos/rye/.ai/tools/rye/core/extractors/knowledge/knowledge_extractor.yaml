@@ -1,0 +1,68 @@
+# rye:signed:2026-02-21T05:56:40Z:8f00364e0d83c1991af254da75bdc6bd4ea9d015d6e25586a213b3cb2c6c1e92:DzoL5bbBk7nvfOft4bgCs5Hs9tqrZ2n3rZBFrfXyNhP3n1dnV_eFZnvSs6pKzni7IdeE5tGuFfLq1ZZA_8C-BA==:9fbfabe975fa5a7f
+version: "1.0.0"
+tool_type: extractor
+executor_id: null
+category: rye/core/extractors/knowledge
+description: "Knowledge extractor - extracts metadata from YAML frontmatter in markdown files"
+
+extensions:
+  - .md
+  - .yaml
+  - .yml
+
+parser: markdown_frontmatter
+
+signature_format:
+  prefix: "<!--"
+  suffix: "-->"
+  after_shebang: false
+
+extraction_rules:
+  id:
+    type: path
+    key: id
+  title:
+    type: path
+    key: title
+  version:
+    type: path
+    key: version
+  entry_type:
+    type: path
+    key: entry_type
+  category:
+    type: path
+    key: category
+  tags:
+    type: path
+    key: tags
+  body:
+    type: path
+    key: body
+
+search_fields:
+  title: 3.0
+  name: 3.0
+  description: 2.0
+  category: 1.5
+  content: 1.0
+
+validation_schema:
+  fields:
+    id:
+      required: true
+      type: string
+      match_filename: true
+    title:
+      required: true
+      type: string
+    version:
+      required: true
+      type: semver
+    entry_type:
+      required: true
+      type: string
+    category:
+      required: false
+      type: string
+      match_path: true

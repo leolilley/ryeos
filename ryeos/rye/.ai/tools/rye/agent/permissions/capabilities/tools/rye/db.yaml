@@ -1,0 +1,12 @@
+# rye:signed:2026-02-21T05:56:40Z:0682c5db8ff6c7ba58a0a3c78b62b13982ffa49f771d0da56ee5b6fd33490b68:XxNRorA_BaAX0Ki1kMdc9NyEw55shAs-Y2cSts85mNIIfOsvfE1vUfPLvHtk5MxcQIjP2yDzQ_44dCNmvfEeCw==:9fbfabe975fa5a7f
+name: db
+category: "rye/agent/permissions/capabilities/tools/rye"
+tool_type: "config"
+version: "2.0.0"
+description: "Database capabilities"
+
+capabilities:
+  - "rye.execute.tool.rye.db.*"
+
+permissions: []
+hierarchy: {}

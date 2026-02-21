@@ -1,0 +1,47 @@
+"""RYE Constants
+
+Centralized constants for the AI directory name, item types, and tool actions.
+"""
+
+# The name of the working directory used in all three spaces.
+# Every space follows: base_path / AI_DIR / {type_dir} / {item_id}
+AI_DIR = ".ai"
+
+
+class ItemType:
+    """Item type constants."""
+
+    DIRECTIVE = "directive"
+    TOOL = "tool"
+    KNOWLEDGE = "knowledge"
+
+    ALL = [DIRECTIVE, TOOL, KNOWLEDGE]
+
+    # Type directory mappings
+    TYPE_DIRS = {
+        DIRECTIVE: "directives",
+        TOOL: "tools",
+        KNOWLEDGE: "knowledge",
+    }
+
+    # File extensions to search per item type (tools use dynamic lookup)
+    CONTENT_EXTENSIONS = {
+        DIRECTIVE: [".md"],
+        KNOWLEDGE: [".md", ".yaml", ".yml"],
+    }
+
+
+class Action:
+    """Tool action constants."""
+
+    SEARCH = "search"
+    SIGN = "sign"
+    LOAD = "load"
+    EXECUTE = "execute"
+
+    ALL = [SEARCH, SIGN, LOAD, EXECUTE]
+
+
+# Instruction returned to the LLM when executing a directive.
+# Single source of truth — used by execute.py and thread_directive.py.
+DIRECTIVE_INSTRUCTION = "Execute the directive as specified now."
