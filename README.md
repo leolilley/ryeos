@@ -4,7 +4,7 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE is a portable operating system for AI agents. It gives any LLM a `.ai/` directory with **directives** (workflows), **tools** (executables), and **knowledge** (domain data) — all cryptographically signed, capability-scoped, and shareable through a community registry.
+RYE (RYE Your Execution) is a portable operating system for AI agents. It gives any LLM a `.ai/` directory with **directives** (workflows), **tools** (executables), and **knowledge** (domain data) — all cryptographically signed, capability-scoped, and shareable through a community registry.
 
 Four MCP tools. Any model. Any client. The agent is the interpreter. The workflows are the commons.
 
