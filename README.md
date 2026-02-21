@@ -61,6 +61,22 @@ A directive written in RYE works in Claude Desktop, Cursor, Windsurf, Amp, or an
 
 You could run RYE _inside_ Codex or Claude Code. You could also replace them entirely.
 
+### Why RYE Doesn't Have "Skills"
+
+Skills — as seen in Claude Projects, ChatGPT custom instructions, and various agent frameworks — bundle workflow, domain knowledge, and tool access into a single opaque unit. RYE doesn't have skills because the concept itself conflates things that should be separate.
+
+RYE decomposes agent cognition into three distinct primitives:
+
+| Primitive       | What it is                                      | Example                                        |
+| --------------- | ----------------------------------------------- | ---------------------------------------------- |
+| **Directives**  | Workflows — what to do, in what order, how      | "Run an outreach campaign with these steps"     |
+| **Knowledge**   | Domain data — context the agent reasons over     | "Here's our rate limiting policy"               |
+| **Tools**       | Executables — actions the agent can take          | "Call this API, run this script"                |
+
+Each is independently authored, signed, versioned, and composable. A directive can reference any knowledge and use any tools — the combination is assembled at runtime, not baked into a monolithic blob.
+
+Skills exist because most systems don't have this separation. When your only primitive is "a prompt with some tools attached," you need a container for the bundle. When cognition, knowledge, and execution are distinct composable primitives, the skill concept dissolves — you just compose the right directive with the right knowledge and the right tools for the job.
+
 ## The Architecture
 
 RYE inverts the relationship between code and data. The system is built on three principles:
