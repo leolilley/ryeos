@@ -44,14 +44,16 @@ RYE is the policy and orchestration layer that MCP is missing. Portable agent wo
 
 Those are harnesses — runtime environments optimized for a specific model or framework. RYE is the layer underneath.
 
-|                            | Codex                | Claude Code          | LangChain      | RYE                                          |
-| -------------------------- | -------------------- | -------------------- | -------------- | -------------------------------------------- |
-| **Portable workflows**     | No                   | No                   | No             | Yes — directives are data files              |
-| **Model agnostic**         | No                   | No                   | Yes            | Yes                                          |
-| **Community registry**     | No                   | No                   | No             | Yes — push, pull, TOFU-pinned                |
-| **Cryptographic trust**    | No                   | No                   | No             | Yes — Ed25519 signed, chain-verified         |
-| **Permission attenuation** | Interactive approval | Interactive approval | None           | Declarative, attenuated per delegation level |
-| **Cross-client**           | Codex only           | Claude only          | LangChain only | Any MCP client                               |
+|                         | Codex | Claude Code | LangChain | RYE |
+| ----------------------- | ----- | ----------- | --------- | --- |
+| **Portable workflows**  | No | No | No | Yes — directives are data files |
+| **Model agnostic**      | Limited — OpenAI + OSS via Ollama | Limited — Claude only | Yes | Yes |
+| **Community registry**  | No | No | Partial — Hub for prompts, unsigned | Yes — push, pull, signed, TOFU-pinned |
+| **Cryptographic trust** | No | No | No | Yes — Ed25519 signed, chain-verified |
+| **Permission model**    | OS sandbox + interactive approval | Configurable approval policies | None | Declarative capability attenuation per delegation level |
+| **Cross-client**        | Codex only | Claude only | LangChain only | Any MCP client |
+
+Codex and Claude Code have sophisticated permission models — OS-level sandboxing, configurable approval policies — but they're designed for human-in-the-loop sessions. RYE's capability attenuation solves a different problem: scoping permissions across autonomous multi-agent delegation chains where no human is in the loop to approve.
 
 A directive written in RYE works in Claude Desktop, Cursor, Windsurf, Amp, or any MCP-compatible client. The same workflow, the same trust guarantees, the same permission model — regardless of which LLM executes it.
 
