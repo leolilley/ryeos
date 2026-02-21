@@ -8,6 +8,24 @@ RYE is a portable operating system for AI agents. It gives any LLM a `.ai/` dire
 
 Four MCP tools. Any model. Any client. The agent is the interpreter. The workflows are the commons.
 
+## Contents
+
+- [The Problem](#the-problem)
+- [Why Not Just Use Codex / Claude Code / LangChain?](#why-not-just-use-codex--claude-code--langchain)
+- [The Architecture](#the-architecture)
+- [What You Get](#what-you-get)
+  - [Cryptographic Trust](#cryptographic-trust)
+  - [Multi-Agent Orchestration](#multi-agent-orchestration)
+  - [Fail-Closed Security with Capability Attenuation](#fail-closed-security-with-capability-attenuation)
+  - [Declarative State Graphs](#declarative-state-graphs)
+  - [White-Box Observability](#white-box-observability)
+  - [Three-Tier Space System](#three-tier-space-system)
+  - [Community Registry](#community-registry)
+- [MCP Interface](#mcp-interface)
+- [Install](#install)
+- [Packages](#packages)
+- [Documentation](#documentation)
+
 ## The Problem
 
 The industry is converging on a hard truth: multi-agent orchestration, delegation, and trust are unsolved problems.
