@@ -4,15 +4,40 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE (Rye Your Execution) is a portable operating system for AI agents. It gives any LLM a `.ai/` directory with **directives** (workflows), **tools** (executables), and **knowledge** (domain data) — all cryptographically signed, capability-controlled, and orchestratable across processes.
+RYE is a portable operating system for AI agents. It gives any LLM a `.ai/` directory with **directives** (workflows), **tools** (executables), and **knowledge** (domain data) — all cryptographically signed, capability-scoped, and shareable through a community registry.
 
-Four MCP tools. The framework provides the scaffolding. The LLM is the execution engine.
+Four MCP tools. Any model. Any client. The agent is the interpreter. The workflows are the commons.
 
 ## The Problem
 
-Agent frameworks today hardcode their runtimes, trap workflows inside individual projects, and treat tool execution as a black box. Want to add a new language runtime? Rewrite framework code. Want to share a workflow? Copy-paste and pray. Want to know if a tool was tampered with? You can't.
+The industry is converging on a hard truth: multi-agent orchestration, delegation, and trust are unsolved problems.
 
-MCP itself provides binary access — granting callers full tool utility — without support for semantic permission attenuation, deep delegation chains, or reasoning traces. It's stateless regarding internal reasoning, exposing only results rather than intent. RYE is the policy and orchestration layer that MCP is missing.
+Research on [intelligent AI delegation](https://arxiv.org/abs/2503.18175) maps the failure modes — diffusion of responsibility across delegation chains, privilege escalation through unchecked sub-agents, opacity that makes it impossible to distinguish incompetence from malice, and the complete absence of cryptographic verification for agent-to-agent trust. These aren't edge cases. They're structural gaps in every major agent system shipping today.
+
+Every framework has tried to solve pieces of this independently. Codex built a polished harness — tightly coupled to their runtime, not portable. Claude Code optimized for one model — not interoperable. LangChain, CrewAI, AutoGen all converged on multi-agent support — but workflows live in code, not in a shareable format. Each one is a walled garden solving the same problems in isolation, with no way to share the solutions between them.
+
+None of them have a community registry. None have cryptographic trust. None have declarative permission attenuation. None have portable workflows.
+
+MCP gave us a universal tool protocol — adopted by every major harness and now under the Linux Foundation. But MCP is a pipe: it connects agents to tools without answering who can do what, how far trust extends, whether what you're running has been tampered with, or how to scope permissions down a delegation chain.
+
+RYE is the policy and orchestration layer that MCP is missing. Portable agent workflows, cryptographically signed and capability-scoped, executable by any LLM through any MCP client. The harness becomes optional. The workflows become the commons.
+
+## Why Not Just Use [Codex / Claude Code / LangChain]?
+
+Those are harnesses — runtime environments optimized for a specific model or framework. RYE is the layer underneath.
+
+|                            | Codex                | Claude Code          | LangChain      | RYE                                          |
+| -------------------------- | -------------------- | -------------------- | -------------- | -------------------------------------------- |
+| **Portable workflows**     | No                   | No                   | No             | Yes — directives are data files              |
+| **Model agnostic**         | No                   | No                   | Yes            | Yes                                          |
+| **Community registry**     | No                   | No                   | No             | Yes — push, pull, TOFU-pinned                |
+| **Cryptographic trust**    | No                   | No                   | No             | Yes — Ed25519 signed, chain-verified         |
+| **Permission attenuation** | Interactive approval | Interactive approval | None           | Declarative, attenuated per delegation level |
+| **Cross-client**           | Codex only           | Claude only          | LangChain only | Any MCP client                               |
+
+A directive written in RYE works in Claude Desktop, Cursor, Windsurf, Amp, or any MCP-compatible client. The same workflow, the same trust guarantees, the same permission model — regardless of which LLM executes it.
+
+You could run RYE _inside_ Codex or Claude Code. You could also replace them entirely.
 
 ## The Architecture
 
@@ -59,15 +84,17 @@ Each element is independently signed and verified. The chain is cached, lockfile
 
 ## What You Get
 
-### Cryptographic Integrity
+### Cryptographic Trust
 
-Every item is Ed25519-signed. Every chain element is verified before execution. Lockfiles pin exact versions with SHA256 hashes. Bundle manifests cover multi-file dependencies. TOFU pinning for registry items.
+Every item is Ed25519-signed. Every chain element is verified before execution. Lockfiles pin exact versions with SHA256 hashes. Trusted keys are identity-bound TOML documents resolved through the same three-tier system as everything else. The registry uses TOFU key pinning with author provenance.
 
-**Unsigned or tampered items are rejected. No fallback. No bypass.**
+**Unsigned or tampered items are rejected. No fallback. No bypass. No exceptions — including RYE's own system tools.**
 
 ```
 # rye:signed:2026-02-14T00:27:54Z:8e27c5f8...:WOclUqjr...:440443d0
 ```
+
+This directly addresses the delegation trust gap identified in the [research](https://arxiv.org/abs/2503.18175) — every item in a delegation chain is cryptographically attributable to a specific author, and trust is verifiable without requiring a central authority.
 
 ### Multi-Agent Orchestration
 
@@ -85,7 +112,21 @@ Root Orchestrator (sonnet, $3.00 budget)
 - **Budget cascades** — children can never spend more than the parent allocated. A SQLite-backed ledger tracks reservations atomically across concurrent forks.
 - **Capabilities attenuate** — each level can only have equal or fewer permissions. A leaf that scores leads can execute exactly one tool. Nothing else.
 - **Adaptive coordination** — cancel threads, kill unresponsive processes (SIGTERM → SIGKILL), resume failed threads with new instructions, cascade cancellation policies to children. All configurable via YAML.
-- **Automatic continuation** — when a thread hits 90% of its context window, it hands off to a new thread with a summary, preserving the full execution chain.
+- **Lossless context chains** — when a thread hits its context window, it hands off to a new thread with a generated summary. The full chain is searchable — the model can retrieve any detail from any previous thread. No compression, no information loss.
+
+### Fail-Closed Security with Capability Attenuation
+
+No capabilities declared? All actions denied. Capabilities use fnmatch patterns with full attenuation down the thread hierarchy:
+
+```
+rye.execute.tool.rye.bash.bash       — execute exactly one tool
+rye.execute.tool.rye.file-system.*   — execute any file-system tool
+rye.load.knowledge.my-project.*      — load project knowledge only
+```
+
+A scoring leaf can call one scoring tool. An orchestrator can spawn threads and load knowledge. Nothing gets implicit access. Capabilities are Ed25519-signed tokens with audience binding and expiry — children can only subset their parent's permissions, never escalate.
+
+This is the [privilege attenuation](https://arxiv.org/abs/2503.18175) that MCP and A2A protocols lack — scoped, declarative, cryptographically enforced permissions that attenuate at every delegation boundary.
 
 ### Declarative State Graphs
 
@@ -115,41 +156,6 @@ config:
 
 State graphs persist after each step as signed knowledge items — they're resumable, auditable, and can spawn LLM threads for steps that need reasoning. Foreach nodes fan out work in parallel. Error edges route to recovery nodes. Hooks fire on graph events.
 
-### Fail-Closed Security with Capability Attenuation
-
-No capabilities declared? All actions denied. Capabilities use fnmatch patterns with full attenuation down the thread hierarchy:
-
-```
-rye.execute.tool.rye.bash.bash       — execute exactly one tool
-rye.execute.tool.rye.file-system.*   — execute any file-system tool
-rye.load.knowledge.my-project.*      — load project knowledge only
-```
-
-A scoring leaf can call one scoring tool. An orchestrator can spawn threads and load knowledge. Nothing gets implicit access. Capabilities are Ed25519-signed tokens with audience binding and expiry — children can only subset their parent's permissions, never escalate.
-
-### Data-Driven Error Handling
-
-Error classification, retry policies, and resilience behavior are YAML configs, not hardcoded logic:
-
-```yaml
-# error_classification.yaml
-patterns:
-  - id: "http_429"
-    category: "rate_limited"
-    retryable: true
-    match:
-      any:
-        - path: "error.message"
-          op: "regex"
-          value: "rate limit|too many requests"
-    retry_policy:
-      type: "exponential"
-      base: 2.0
-      max: 60.0
-```
-
-The hook system classifies errors by pattern, determines retryability, and calculates backoff — all swappable without touching framework code. Hooks fire on errors, limit violations, context exhaustion, and step completion.
-
 ### White-Box Observability
 
 Every thread is fully transparent. Parents can read child transcripts — full reasoning traces, tool calls, and results. The orchestrator provides `get_status`, `read_transcript`, `get_chain`, and `chain_search` (regex across an entire delegation tree). Per-token streaming writes to both JSONL transcripts and knowledge markdown in real-time:
@@ -157,6 +163,8 @@ Every thread is fully transparent. Parents can read child transcripts — full r
 ```bash
 tail -f .ai/threads/<thread_id>/transcript.jsonl
 ```
+
+No opaque delegation. No hidden reasoning. Every step in every chain is auditable — addressing the [accountability vacuum](https://arxiv.org/abs/2503.18175) that emerges in multi-agent systems.
 
 ### Three-Tier Space System
 
@@ -170,14 +178,16 @@ Items resolve through three spaces with shadow-override semantics:
 
 Project shadows user shadows system. Override any system behavior by placing a file with the same ID in your project.
 
-### Shared Registry
+### Community Registry
 
-Push signed items to a shared registry. Pull them with TOFU key pinning. Items carry registry provenance (`|rye-registry@username`) so you know who published what.
+Push signed items to a shared registry. Pull them with TOFU key pinning. Items carry registry provenance (`|rye-registry@username`) so you know who published what. Trust is cryptographically provable and author-attributed — not implicit like npm.
 
 ```python
 rye_execute(item_type="tool", item_id="rye/core/registry/registry",
     parameters={"action": "push", "item_type": "tool", "item_id": "my-tool"})
 ```
+
+The registry is essentially a package manager for agent cognition. Search, load, execute, and share workflows the same way you `npm install` a package — except every item is signed and every author is verifiable.
 
 ## MCP Interface
 
@@ -193,16 +203,16 @@ Four tools are the entire agent-facing surface:
 ## Install
 
 ```bash
-pip install rye-mcp
+pip install ryeos-mcp
 ```
 
-Installs the full stack: `rye-mcp` (MCP transport) → `rye-os` (executor + standard library) → `lilux` (microkernel primitives).
+Installs the full stack: `ryeos-mcp` (MCP transport) → `ryeos` (executor + standard library) → `lilux` (microkernel primitives).
 
 ```json
 {
   "mcpServers": {
     "rye": {
-      "command": "rye-mcp"
+      "command": "ryeos-mcp"
     }
   }
 }
@@ -213,17 +223,18 @@ Installs the full stack: `rye-mcp` (MCP transport) → `rye-os` (executor + stan
 > ```bash
 > git clone https://github.com/leolilley/rye-os.git
 > cd rye-os
-> pip install -e lilux -e rye -e rye-mcp
+> pip install -e lilux -e ryeos -e ryeos-mcp
 > ```
 
 ## Packages
 
-| Package    | What it provides                                              |
-| ---------- | ------------------------------------------------------------- |
-| `lilux`    | Microkernel — subprocess, HTTP, signing, integrity primitives |
-| `rye-os`   | Executor, resolver, signing, metadata + full standard library |
-| `rye-core` | Same engine, minimal bundle (only `rye/core/*` items)         |
-| `rye-mcp`  | MCP server transport (stdio/SSE)                              |
+| Package      | What it provides                                              |
+| ------------ | ------------------------------------------------------------- |
+| `lilux`      | Microkernel — subprocess, HTTP, signing, integrity primitives |
+| `ryeos`      | Executor, resolver, signing, metadata + full standard library |
+| `ryeos-core` | Same engine, minimal bundle (only `rye/core/*` items)         |
+| `ryeos-bare` | Same engine, no bundle (for services like registry-api)       |
+| `ryeos-mcp`  | MCP server transport (stdio/SSE)                              |
 
 ## Documentation
 
