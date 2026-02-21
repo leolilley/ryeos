@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:49:45Z:d425a56631c7026c30fa206e6dd682f9272e2afffca0cc01e53f60960e170d08:3X8aIsFUnKQ-kQ7QxJJTZNxX5y2nZn_2bHqPFcbSlza2hqQZPEFD_IvysPeUvMrsl2yl8hL3cgERNiWyJb97AA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-21T05:56:40Z:d425a56631c7026c30fa206e6dd682f9272e2afffca0cc01e53f60960e170d08:3X8aIsFUnKQ-kQ7QxJJTZNxX5y2nZn_2bHqPFcbSlza2hqQZPEFD_IvysPeUvMrsl2yl8hL3cgERNiWyJb97AA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: signing-and-integrity
