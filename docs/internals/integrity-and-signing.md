@@ -170,9 +170,50 @@ def verify_item(file_path, item_type, project_path=None):
 
 ## Trust Store
 
-The `TrustStore` manages which public keys are trusted for signature verification. Keys are identified by their fingerprint (first 16 hex chars of SHA256 of the public key PEM).
+The `TrustStore` manages which Ed25519 public keys are trusted for signature verification. Trusted keys are TOML identity documents at `.ai/trusted_keys/{fingerprint}.toml`. There are no exceptions — every item that executes must pass signature verification against a trusted key, including Rye's own system tools.
 
-To trust a new key, add it via the `sign` MCP tool. The trust store allows the system to verify items signed by different authors or the registry.
+### Zero Exceptions
+
+Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`, and every system item — every directive, tool, runtime, parser, extractor, and knowledge entry — is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key. The same key is used for registry publishing.
+
+There is no bypass for system items. The verification flow is identical whether the item lives in project space, user space, or system space.
+
+### Identity Document Format
+
+```toml
+# .ai/trusted_keys/{fingerprint}.toml
+fingerprint = "bc8e267dadcce3a4"
+owner = "leo"
+attestation = ""
+
+[public_key]
+pem = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA...
+-----END PUBLIC KEY-----
+"""
+```
+
+### 3-Tier Resolution
+
+The trust store uses the same 3-tier resolution as directives, tools, and knowledge:
+
+```
+project/.ai/trusted_keys/{fingerprint}.toml  →  (highest priority)
+user/.ai/trusted_keys/{fingerprint}.toml     →
+system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
+```
+
+First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
+
+### Key Sources
+
+| Source | How Trusted | Scope |
+| --- | --- | --- |
+| Own key | Auto-trusted on first keygen (`owner="local"`) | Signs your project/user items |
+| Bundle author key | Shipped as `.toml` in system bundle, resolved via 3-tier lookup | Verifies system items |
+| Registry key | TOFU-pinned on first pull (`owner="rye-registry"`) | Verifies registry-pulled items |
+| Peer key | Manually trusted via `rye_sign` | Verifies collaborator items |
 
 ## Lockfile Pinning
 

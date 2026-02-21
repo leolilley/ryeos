@@ -15,20 +15,25 @@ Rye OS is distributed as pip packages. Each package has a clear role, minimal de
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  rye-mcp                                            │
+│  ryeos-mcp                                          │
 │  MCP transport (stdio/SSE)                          │
-│  deps: rye-os, mcp                                  │
-│  bundle: none (inherits rye-os bundle from rye-os)  │
+│  deps: ryeos, mcp                                   │
+│  bundle: none (inherits ryeos bundle from ryeos)    │
 ├─────────────────────────────────────────────────────┤
-│  rye-os                                             │
+│  ryeos                                              │
 │  Resolver, executor, signing, metadata              │
 │  deps: lilux, pyyaml, cryptography, packaging       │
-│  bundle: rye-os (all rye/* items)                   │
+│  bundle: ryeos (all rye/* items)                    │
 ├─────────────────────────────────────────────────────┤
-│  rye-core                                           │
-│  Same code as rye-os, minimal bundle                │
+│  ryeos-bare                                         │
+│  Same code as ryeos, no bundle                      │
 │  deps: lilux, pyyaml, cryptography, packaging       │
-│  bundle: rye-core (only rye/core/* items)           │
+│  bundle: none (no .ai/ items registered)            │
+├─────────────────────────────────────────────────────┤
+│  ryeos-core                                         │
+│  Same code as ryeos, minimal bundle                 │
+│  deps: lilux, pyyaml, cryptography, packaging       │
+│  bundle: ryeos-core (only rye/core/* items)         │
 ├─────────────────────────────────────────────────────┤
 │  lilux                                              │
 │  Stateless microkernel primitives                   │
@@ -54,27 +59,27 @@ Lilux declares `cryptography` (for Ed25519 signing in `primitives/signing.py` an
 
 Lilux does **not** contribute a bundle because it has no `.ai/` directory. It's pure library code.
 
-### rye-core
+### ryeos-core
 
-**Package name:** `rye-core`
+**Package name:** `ryeos-core`
 **Source:** `rye-core/` (builds from shared `rye/rye/` source)
 **Dependencies:** `lilux`, `pyyaml`, `cryptography`, `packaging`
-**Bundle:** `rye-core` → items under `rye/core/` only
+**Bundle:** `ryeos-core` → items under `rye/core/` only
 
-The minimal installation. Contains the same Python code as `rye-os` (resolver, executor, metadata manager, etc.) but only registers the `rye-core` bundle — core runtimes, primitives, parsers, extractors, and bundler. No MCP tools, registry client, agent threads, or web search.
+The minimal installation. Contains the same Python code as `ryeos` (resolver, executor, metadata manager, etc.) but only registers the `ryeos-core` bundle — core runtimes, primitives, parsers, extractors, and bundler. No MCP tools, registry client, agent threads, or web search.
 
-Use `rye-core` when you want the execution engine but don't need the full standard library.
+Use `ryeos-core` when you want the execution engine but don't need the full standard library.
 
-> **Note:** `rye-core` and `rye-os` both install the `rye` Python module and are **mutually exclusive** — install one or the other, not both.
+> **Note:** `ryeos-core` and `ryeos` both install the `rye` Python module and are **mutually exclusive** — install one or the other, not both.
 
-### rye-os
+### ryeos
 
-**Package name:** `rye-os`
+**Package name:** `ryeos`
 **Source:** `rye/`
 **Dependencies:** `lilux`, `pyyaml`, `cryptography`, `packaging`
-**Bundle:** `rye-os` → all items under `rye/`
+**Bundle:** `ryeos` → all items under `rye/`
 
-The full standard library. Same Python code as `rye-core`, but registers the `rye-os` bundle which includes **everything**: bash tool, MCP tools, registry client, agent thread system, web search, and all other bundled items.
+The full standard library. Same Python code as `ryeos-core`, but registers the `ryeos` bundle which includes **everything**: bash tool, MCP tools, registry client, agent thread system, web search, and all other bundled items.
 
 This is the package to install when you want to call the executor directly from Python — no MCP transport needed. Useful for thread scripting, CI pipelines, or wrapping in a future `rye-cli`.
 
@@ -85,13 +90,24 @@ executor = ExecuteTool()
 result = await executor.run(item_type="tool", item_id="rye/bash/bash", parameters={"command": "ls"})
 ```
 
-### rye-mcp
+### ryeos-bare
 
-**Package name:** `rye-mcp`
+**Package name:** `ryeos-bare`
+**Source:** `rye/` (same source as `ryeos`)
+**Dependencies:** `lilux`, `pyyaml`, `cryptography`, `packaging`
+**Bundle:** none
+
+Bare installation with no data-driven tools. Same Python code as `ryeos` but registers no bundle. Used by services like `registry-api` that need the engine but not any `.ai/` items.
+
+> **Note:** `ryeos-bare`, `ryeos`, and `ryeos-core` all install the `rye` Python module and are **mutually exclusive** — install one only.
+
+### ryeos-mcp
+
+**Package name:** `ryeos-mcp`
 **Source:** `rye-mcp/`
-**Dependencies:** `rye-os`, `mcp`
+**Dependencies:** `ryeos`, `mcp`
 
-The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so any MCP-compatible AI agent can use them. Does **not** register its own bundle — it inherits the `rye-os` bundle from its `rye-os` dependency.
+The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so any MCP-compatible AI agent can use them. Does **not** register its own bundle — it inherits the `ryeos` bundle from its `ryeos` dependency.
 
 ### services/registry-api
 
@@ -108,16 +124,23 @@ A **package** is a pip-installable Python distribution. A **bundle** is a named 
 The distinction matters because:
 
 1. **The `.ai/` data lives inside the `rye` Python module**, but different packages control how much of it is visible to the resolver.
-2. **Bundle entry points filter by category.** `rye-core` only exposes `rye/core/*` items. `rye-os` exposes all `rye/*` items.
+2. **Bundle entry points filter by category.** `ryeos-core` only exposes `rye/core/*` items. `ryeos` exposes all `rye/*` items. `ryeos-bare` exposes nothing.
 3. **Multiple bundles compose.** The resolver iterates over all discovered bundles, so a third-party package can register its own bundle entry point to contribute items to the system space.
+
+### Author Key Trust
+
+Every bundle ships the author's Ed25519 public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`. All items in the bundle are signed with this key. The Rye system bundle is signed by Leo Lilley — the same key used for registry publishing.
+
+There are no exceptions to signature verification: system items go through the same verification as project and user items. The trust store uses standard 3-tier resolution (project → user → system), so the author's key in the system bundle is discovered automatically — no special bootstrap logic required.
 
 ### What you get with each install
 
 ```
-pip install rye-core        → system space has: rye/core/* only
-pip install rye-os          → system space has: rye/* (everything)
-pip install rye-mcp         → system space has: rye/* (via rye-os dep)
-pip install rye-os my-tools → system space has: rye/* + my-tools/*
+pip install ryeos-core     → system space has: rye/core/* only
+pip install ryeos          → system space has: rye/* (everything)
+pip install ryeos-bare     → system space has: nothing (engine only)
+pip install ryeos-mcp      → system space has: rye/* (via ryeos dep)
+pip install ryeos my-tools → system space has: rye/* + my-tools/*
 ```
 
 ### Entry point registration
@@ -125,40 +148,44 @@ pip install rye-os my-tools → system space has: rye/* + my-tools/*
 Each package registers its bundle in `pyproject.toml`:
 
 ```toml
-# rye-os registers the full bundle:
+# ryeos registers the full bundle:
 [project.entry-points."rye.bundles"]
-rye-os = "rye.bundle_entrypoints:get_rye_os_bundle"
+ryeos = "rye.bundle_entrypoints:get_ryeos_bundle"
 
-# rye-core registers only core:
+# ryeos-core registers only core:
 [project.entry-points."rye.bundles"]
-rye-core = "rye.bundle_entrypoints:get_rye_core_bundle"
+ryeos-core = "rye.bundle_entrypoints:get_ryeos_core_bundle"
+
+# ryeos-bare registers NO entry points (no bundle)
 ```
 
 Both functions live in the same `rye/bundle_entrypoints.py`:
 
 ```python
-def get_rye_os_bundle() -> dict:
+def get_ryeos_bundle() -> dict:
     return {
-        "bundle_id": "rye-os",
+        "bundle_id": "ryeos",
         "root_path": Path(__file__).parent,
-        "categories": ["rye"],         # all rye/* items
+        "categories": ["rye"],              # all rye/* items
     }
 
-def get_rye_core_bundle() -> dict:
+def get_ryeos_core_bundle() -> dict:
     return {
-        "bundle_id": "rye/core",
+        "bundle_id": "ryeos-core",
         "root_path": Path(__file__).parent,
-        "categories": ["rye/core"],    # only rye/core/* items
+        "categories": ["rye/core"],         # only rye/core/* items
     }
 ```
+
+The author's signing key is shipped as a TOML identity document at `rye/.ai/trusted_keys/{fingerprint}.toml` within the bundle root, discovered via standard 3-tier resolution.
 
 ## Dependency Layering
 
 Dependencies flow upward. Each package declares only what it directly imports:
 
 ```
-rye-mcp
-  ├── rye-os (or rye-core)
+ryeos-mcp
+  ├── ryeos (or ryeos-core or ryeos-bare)
   │     ├── lilux
   │     │     ├── cryptography   (signing, auth encryption)
   │     │     └── httpx          (HTTP client primitive, OAuth2 refresh)
@@ -183,10 +210,11 @@ Example: `websocket_sink.py` declares `DEPENDENCIES = ["websockets"]`. The execu
 
 ## Package → Bundle Summary
 
-| Package                  | pip name   | Dependencies                                   | Bundle ID  | Bundle scope | Mutual exclusion             |
-| ------------------------ | ---------- | ---------------------------------------------- | ---------- | ------------ | ---------------------------- |
-| `lilux/`                 | `lilux`    | `cryptography`, `httpx`                        | —          | —            | —                            |
-| `rye/`                   | `rye-os`   | `lilux`, `pyyaml`, `cryptography`, `packaging` | `rye-os`   | `rye/*`      | ⚠️ conflicts with `rye-core` |
-| `rye-core/`              | `rye-core` | `lilux`, `pyyaml`, `cryptography`, `packaging` | `rye-core` | `rye/core/*` | ⚠️ conflicts with `rye-os`   |
-| `rye-mcp/`               | `rye-mcp`  | `rye-os`, `mcp`                                | —          | —            | —                            |
-| `services/registry-api/` | —          | `fastapi`, `supabase`, `httpx`, etc.           | —          | —            | —                            |
+| Package                  | pip name     | Dependencies                                   | Bundle ID    | Bundle scope | Mutual exclusion                              |
+| ------------------------ | ------------ | ---------------------------------------------- | ------------ | ------------ | --------------------------------------------- |
+| `lilux/`                 | `lilux`      | `cryptography`, `httpx`                        | —            | —            | —                                             |
+| `rye/`                   | `ryeos`      | `lilux`, `pyyaml`, `cryptography`, `packaging` | `ryeos`      | `rye/*`      | ⚠️ conflicts with `ryeos-core`, `ryeos-bare`  |
+| `rye-core/`              | `ryeos-core` | `lilux`, `pyyaml`, `cryptography`, `packaging` | `ryeos-core` | `rye/core/*` | ⚠️ conflicts with `ryeos`, `ryeos-bare`       |
+| `rye/` (bare)            | `ryeos-bare` | `lilux`, `pyyaml`, `cryptography`, `packaging` | —            | —            | ⚠️ conflicts with `ryeos`, `ryeos-core`       |
+| `rye-mcp/`               | `ryeos-mcp`  | `ryeos`, `mcp`                                 | —            | —            | —                                             |
+| `services/registry-api/` | —            | `fastapi`, `supabase`, `httpx`, etc.           | —            | —            | —                                             |

@@ -88,7 +88,7 @@ The pull flow:
 
 1. Fetches signed content from `GET /v1/pull/tool/leolilley/utilities/web-scraper`
 2. Verifies the registry Ed25519 signature locally (hash match + signature validation)
-3. On first pull, TOFU-pins the registry public key to `~/.ai/trusted_keys/registry.pem`
+3. On first pull, TOFU-pins the registry public key as a trusted key identity document with `owner="rye-registry"`
 4. Writes the file to `.ai/tools/utilities/web-scraper.py` (category becomes the directory path, name becomes the filename)
 5. The registry signature (`rye:signed:...|rye-registry@leolilley`) is preserved in the file
 
@@ -202,7 +202,7 @@ When a pulled item is later executed, the integrity system verifies it the same 
 1. **Signature check** — `verify_item()` finds the `rye:signed:...|rye-registry@leolilley` comment
 2. **Hash check** — Recomputes SHA256 of content and compares to the embedded hash
 3. **Ed25519 check** — Verifies the signature using the public key matching the fingerprint
-4. **Trust store check** — Looks up the fingerprint in `~/.ai/trusted_keys/`. The registry's key was pinned during the first pull (TOFU), so it's found at `~/.ai/trusted_keys/registry.pem`
+4. **Trust store check** — Looks up the fingerprint via 3-tier resolution (project → user → system `.ai/trusted_keys/{fp}.toml`). The registry's key was pinned during the first pull (TOFU)
 
 If the registry key has not been pinned (e.g., the agent has never pulled before), `verify_item()` raises `IntegrityError("Untrusted key ...")`. The fix is to pull any item from the registry, which triggers TOFU pinning.
 
@@ -231,7 +231,7 @@ rye_execute(
   item_id="rye/core/registry/registry",
   parameters={
     "action": "pull_bundle",
-    "bundle_id": "rye-core",
+    "bundle_id": "ryeos-core",
     "project_path": "/path/to/project"
   }
 )
@@ -239,8 +239,8 @@ rye_execute(
 
 ### Step 2: What Happens Internally
 
-1. **Fetch from registry** — `GET /v1/bundle/pull/rye-core` returns the manifest and all files as JSON
-2. **Write manifest** — Saved to `.ai/bundles/rye-core/manifest.yaml`
+1. **Fetch from registry** — `GET /v1/bundle/pull/ryeos-core` returns the manifest and all files as JSON
+2. **Write manifest** — Saved to `.ai/bundles/ryeos-core/manifest.yaml`
 3. **Write all files** — Each file is written to its relative path (e.g., `.ai/tools/rye/core/registry/registry.py`)
 4. **Verify manifest** — `verify_item(manifest_path, ItemType.TOOL)` checks the manifest's Ed25519 signature
 5. **Verify per-file hashes** — The bundler's `validate_bundle_manifest()` computes SHA256 of each file and compares to the manifest's recorded hash
@@ -255,7 +255,7 @@ rye_execute(
   item_id="rye/core/bundler/bundler",
   parameters={
     "action": "verify",
-    "bundle_id": "rye-core"
+    "bundle_id": "ryeos-core"
   }
 )
 ```

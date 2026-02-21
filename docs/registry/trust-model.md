@@ -68,40 +68,64 @@ def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
 
 ## Trust Store
 
-**Location:** `~/.ai/trusted_keys/`
 **Implementation:** `rye/rye/utils/trust_store.py`
 
-The trust store manages which Ed25519 public keys are considered trustworthy. Keys are stored as PEM files named by their fingerprint.
+The trust store manages which Ed25519 public keys are trusted for signature verification. Every item in Rye — including Rye's own system tools — must pass signature verification against a trusted key. There are no exceptions.
 
-### Structure
+### Zero Exceptions
+
+Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`, and every system item is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key — the same key used for registry publishing. There is no bypass for system items. The verification flow is identical regardless of which space the item lives in.
+
+### Identity Document Format
+
+Trusted keys are TOML identity documents that bind a key to an owner:
+
+```toml
+# .ai/trusted_keys/{fingerprint}.toml
+fingerprint = "bc8e267dadcce3a4"
+owner = "leo"
+attestation = ""
+
+[public_key]
+pem = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA...
+-----END PUBLIC KEY-----
+"""
+```
+
+| Field         | Description                                          |
+| ------------- | ---------------------------------------------------- |
+| `fingerprint` | First 16 hex chars of SHA256(public_key_pem)         |
+| `owner`       | Registry username or `"local"` for self-generated    |
+| `attestation` | Registry attestation signature (optional)            |
+| `pem`         | Ed25519 public key in PEM format                     |
+
+### 3-Tier Resolution
+
+The trust store uses the same 3-tier resolution as directives, tools, and knowledge:
 
 ```
-~/.ai/trusted_keys/
-├── 440443d0858f0199.pem   # Own pubkey (auto-trusted on keygen)
-├── a1b2c3d4e5f60718.pem   # Manually trusted peer key
-└── registry.pem            # Registry public key (TOFU-pinned)
+project/.ai/trusted_keys/{fingerprint}.toml  →  (highest priority)
+user/.ai/trusted_keys/{fingerprint}.toml     →
+system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
 ```
+
+First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
 
 ### Key Operations
 
-| Operation        | Method                    | Behavior                                                                  |
-| ---------------- | ------------------------- | ------------------------------------------------------------------------- |
-| **Check trust**  | `is_trusted(fingerprint)` | Checks `{fingerprint}.pem` exists, then checks `registry.pem` fingerprint |
-| **Get key**      | `get_key(fingerprint)`    | Returns PEM bytes by fingerprint, falls back to registry key              |
-| **Add key**      | `add_key(public_key_pem)` | Writes `{fingerprint}.pem`, returns fingerprint                           |
-| **Remove key**   | `remove_key(fingerprint)` | Deletes `{fingerprint}.pem`                                               |
-| **Pin registry** | `pin_registry_key(pem)`   | Writes `registry.pem` (no-op if already pinned)                           |
-| **List keys**    | `list_keys()`             | Returns all `.pem` files with fingerprints                                |
+| Operation             | Method                        | Behavior                                                                    |
+| --------------------- | ----------------------------- | --------------------------------------------------------------------------- |
+| **Check trust**       | `is_trusted(fingerprint)`     | Delegates to `get_key()`, returns True if key found                         |
+| **Get key**           | `get_key(fingerprint)`        | 3-tier search: project → user → system `.ai/trusted_keys/{fp}.toml`        |
+| **Add key**           | `add_key(public_key_pem)`     | Writes `{fingerprint}.toml` identity document, returns fingerprint          |
+| **Remove key**        | `remove_key(fingerprint)`     | Deletes `{fingerprint}.toml` from user store                               |
+| **Pin registry**      | `pin_registry_key(pem)`       | Adds key with `owner="rye-registry"` (no-op if already exists)             |
+| **Get registry key**  | `get_registry_key()`          | Scans all keys for `owner=="rye-registry"`                                  |
+| **List keys**         | `list_keys()`                 | Returns all `.toml` identity documents across all spaces                    |
 
-The user's own public key is automatically added to the trust store when keys are first generated. This means locally-signed items are trusted immediately.
-
-### Trust Lookup Order
-
-When `is_trusted(fingerprint)` is called:
-
-1. Check if `~/.ai/trusted_keys/{fingerprint}.pem` exists → trusted
-2. Check if `~/.ai/trusted_keys/registry.pem` exists and its computed fingerprint matches → trusted
-3. Otherwise → untrusted
+The user's own public key is automatically added to the trust store when keys are first generated (with `owner="local"`).
 
 ## TOFU (Trust On First Use)
 
@@ -110,7 +134,7 @@ When an agent pulls an item from the registry for the first time and no registry
 1. Pull request returns signed content with a `pubkey_fp` in the signature
 2. Client checks `TrustStore.get_registry_key()` → returns `None` (no pinned key)
 3. Client fetches `GET {REGISTRY_API_URL}/v1/public-key` → receives Ed25519 public key PEM
-4. Client calls `TrustStore.pin_registry_key(registry_key_pem)` → writes to `~/.ai/trusted_keys/registry.pem`
+4. Client calls `TrustStore.pin_registry_key(registry_key_pem)` → writes identity document with `owner="rye-registry"`
 5. All subsequent pulls verify against this pinned key
 
 ```python
@@ -124,7 +148,7 @@ if registry_key is None:
     trust_store.pin_registry_key(registry_key)
 ```
 
-The `pin_registry_key` method is a **no-op if a key already exists** — once pinned, the registry key cannot be silently replaced. This prevents key substitution attacks after initial trust establishment.
+The `pin_registry_key` method is a **no-op if the same fingerprint already exists** — once pinned, the registry key cannot be silently replaced. This prevents key substitution attacks after initial trust establishment. The registry key is stored as a normal trusted key identity document with `owner="rye-registry"`.
 
 ## Registry Signing
 
@@ -192,7 +216,7 @@ def verify_item(file_path, item_type, *, project_path=None) -> str:
         raise IntegrityError(f"Untrusted key {pubkey_fp} for {file_path}")
 ```
 
-If any check fails, an `IntegrityError` is raised and execution is denied. There is no fallback or bypass.
+If any check fails, an `IntegrityError` is raised and execution is denied. There are no exceptions — system items go through the same verification as project and user items.
 
 ### What Triggers Verification
 
@@ -251,7 +275,7 @@ Bundles group multiple items under a single signed manifest. The manifest itself
 ```yaml
 # rye:signed:TIMESTAMP:HASH:SIG:FP
 bundle:
-  id: rye-core
+  id: ryeos-core
   version: 1.0.0
   entrypoint: rye/core/create_directive
   description: Core Rye OS bundle
@@ -301,3 +325,4 @@ The bundle is valid only if the manifest signature passes, all files exist, and 
 | **No supply chain audit** | Supply-chain attack scenarios (e.g., compromised registry server re-signing malicious content) have not been formally tested or modeled.                                           |
 | **Single registry key**   | The registry uses one keypair for all operations. Key rotation requires all clients to re-pin.                                                                                     |
 | **No signature expiry**   | Signatures do not expire. A signed item remains trusted indefinitely regardless of when it was signed.                                                                             |
+| **System key visibility**     | System bundle author keys are trusted by default via 3-tier resolution. Users implicitly trust any installed bundle's author key. |
