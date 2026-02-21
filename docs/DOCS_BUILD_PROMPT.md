@@ -158,7 +158,7 @@ rye/web/
 
 **Bundles** (`rye/rye/.ai/bundles/`):
 ```
-rye-core/manifest.yaml             # Bundle manifest for the core bundle
+ryeos-core/manifest.yaml           # Bundle manifest for the core bundle
 ```
 
 **Lockfiles** (`rye/rye/.ai/lockfiles/`): integrity pinning files.

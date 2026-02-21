@@ -1,9 +1,0 @@
-name: db
-version: "2.0.0"
-description: "Database capabilities"
-
-capabilities:
-  - "rye.execute.tool.rye.db.*"
-
-permissions: []
-hierarchy: {}

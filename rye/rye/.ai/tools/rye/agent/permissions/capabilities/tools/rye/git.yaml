@@ -1,9 +1,0 @@
-name: git
-version: "2.0.0"
-description: "Git capabilities"
-
-capabilities:
-  - "rye.execute.tool.rye.git.*"
-
-permissions: []
-hierarchy: {}

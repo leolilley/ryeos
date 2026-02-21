@@ -32,7 +32,7 @@ resilience.yaml defaults → directive metadata → limit_overrides → parent u
 
 ### Layer 1: Defaults from `resilience.yaml`
 
-Project-level defaults in `.ai/config/resilience.yaml`:
+Project-level defaults in `.ai/config/agent/resilience.yaml`:
 
 ```yaml
 limits:
@@ -224,7 +224,7 @@ Hooks provide event-driven behavior during thread execution. They are evaluated 
 | Layer | Source | Priority | Behavior |
 |-------|--------|----------|----------|
 | 1     | Directive hooks (from XML) | Highest | First match wins |
-| 2     | Builtin hooks (project `.ai/config/`) | Medium | First match wins |
+| 2     | Builtin hooks (project `.ai/config/agent/`) | Medium | First match wins |
 | 3     | Infra hooks (system-level) | Lowest | Always runs |
 
 Hooks from all sources are merged and sorted by layer. For control flow events (`error`, `limit`, `after_step`), the first hook that returns a non-None action wins — except layer 3 hooks which always execute regardless.

@@ -1,4 +1,12 @@
 *
 !.gitignore
 !.ai/
-!.ai/**
+!.ai/directives/
+!.ai/directives/**
+!.ai/knowledge/
+!.ai/knowledge/**
+!.ai/tools/
+!.ai/tools/**
+__pycache__/
+!outputs/
+!outputs/.gitkeep

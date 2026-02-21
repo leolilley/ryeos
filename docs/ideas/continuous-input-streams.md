@@ -74,14 +74,14 @@ The core insight: **none of this is conversation-specific.** The same pipeline c
 
 Everything below is **new** — proposed extensions to the existing infrastructure:
 
-| Component | Type | Purpose |
-| --------- | ---- | ------- |
-| `browser_summarizer` | Proposed directive | Browser session summaries at handoff boundaries |
-| `image_summarizer` | Proposed directive | Visual state summaries from frame batches |
-| `stream_summarizer` | Proposed directive | Data stream processing summaries |
-| `stream_source` hook event | Proposed event | New hook condition for stream-type inputs |
-| `summary_directive` override | Proposed config | Per-directive summarizer selection in `coordination.yaml` |
-| Shared thread memory store | Proposed infrastructure | Indexed summary store for RAG over past sessions |
+| Component                    | Type                    | Purpose                                                   |
+| ---------------------------- | ----------------------- | --------------------------------------------------------- |
+| `browser_summarizer`         | Proposed directive      | Browser session summaries at handoff boundaries           |
+| `image_summarizer`           | Proposed directive      | Visual state summaries from frame batches                 |
+| `stream_summarizer`          | Proposed directive      | Data stream processing summaries                          |
+| `stream_source` hook event   | Proposed event          | New hook condition for stream-type inputs                 |
+| `summary_directive` override | Proposed config         | Per-directive summarizer selection in `coordination.yaml` |
+| Shared thread memory store   | Proposed infrastructure | Indexed summary store for RAG over past sessions          |
 
 ---
 
@@ -94,7 +94,7 @@ The existing `continuation` config uses a single `summary_directive` for all thr
 coordination:
   continuation:
     trigger_threshold: 0.9
-    summary_directive: "rye/agent/threads/thread_summary"  # default
+    summary_directive: "rye/agent/threads/thread_summary" # default
     # Per-directive overrides — keyed by directive name
     summary_directive_overrides:
       "browser/automate": "rye/agent/streams/browser_summarizer"
@@ -126,7 +126,7 @@ The `browser_summarizer` would be a standard Rye directive — same XML metadata
     Produces state-oriented summaries that let the continuation thread
     act immediately.</description>
     <category>rye/agent/streams</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits max_turns="3" max_tokens="8192" max_spend="0.02" />
     <permissions>
@@ -201,7 +201,7 @@ The `image_summarizer` follows the same directive pattern:
     Converts frame observations into structured text that persists
     across thread boundaries without carrying the original images.</description>
     <category>rye/agent/streams</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits max_turns="3" max_tokens="8192" max_spend="0.02" />
   </metadata>
@@ -257,7 +257,7 @@ Image token cost means `context_window_pressure` will fire earlier in practice, 
   condition:
     path: "pressure_ratio"
     op: "gte"
-    value: 0.6  # tighter for image-heavy sessions
+    value: 0.6 # tighter for image-heavy sessions
   action:
     primary: "execute"
     item_type: "directive"
@@ -369,11 +369,11 @@ Getting the summary schema right for a given domain is the main design work. A f
 
 These are **proposed additions** — they do not exist in the codebase today.
 
-| Directive | Proposed Location | Purpose |
-| --------- | ----------------- | ------- |
+| Directive            | Proposed Location                                                | Purpose                                                                                    |
+| -------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `browser_summarizer` | `rye/rye/.ai/directives/rye/agent/streams/browser_summarizer.md` | Browser session summaries — state-oriented, captures page state, actions tried, hypotheses |
-| `image_summarizer` | `rye/rye/.ai/directives/rye/agent/streams/image_summarizer.md` | Visual state summaries — converts frame observations to structured text |
-| `stream_summarizer` | `rye/rye/.ai/directives/rye/agent/streams/stream_summarizer.md` | Data stream summaries — supports both cursor-based (sequential) and stateful (live) modes |
+| `image_summarizer`   | `rye/rye/.ai/directives/rye/agent/streams/image_summarizer.md`   | Visual state summaries — converts frame observations to structured text                    |
+| `stream_summarizer`  | `rye/rye/.ai/directives/rye/agent/streams/stream_summarizer.md`  | Data stream summaries — supports both cursor-based (sequential) and stateful (live) modes  |
 
 All three follow the same pattern as the existing `thread_summary` directive: XML metadata block, same input interface (`transcript_content`, `directive_name`, `max_summary_tokens`), same integration point (`handoff_thread` calls them via `thread_directive.execute()`). They're thin domain-specific wrappers — they produce summaries in the right schema for their input type, then the existing `handoff_thread` pipeline handles injection into the continuation thread.
 
@@ -411,11 +411,11 @@ The existing hook events (`error`, `limit`, `context_window_pressure`, `after_st
 
 ## Relationship to Existing Infrastructure
 
-| Existing Component | What It Does Today | How Streams Extend It |
-| ------------------ | ------------------ | --------------------- |
-| `coordination.yaml` | Defines `trigger_threshold`, `summary_directive`, `resume_ceiling_tokens` | Add `summary_directive_overrides` for per-directive summarizer selection |
-| `thread_summary` directive | Generates structured conversational summaries | Domain-specific summarizers follow the same interface |
-| `handoff_thread` orchestrator | Summary → trailing messages → continuation spawn | Resolves summarizer override before calling `thread_directive.execute()` |
-| `context_window_pressure` hook | Triggers compaction at `pressure_ratio >= 0.8` | Project-level overrides can set tighter thresholds for expensive input types |
-| `events.yaml` lifecycle events | `thread_started`, `thread_completed`, `thread_suspended` | Future: stream-specific events for fine-grained control |
-| Three-tier space system | project → user → system resolution | Stream summarizers resolved through the same space hierarchy |
+| Existing Component             | What It Does Today                                                        | How Streams Extend It                                                        |
+| ------------------------------ | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `coordination.yaml`            | Defines `trigger_threshold`, `summary_directive`, `resume_ceiling_tokens` | Add `summary_directive_overrides` for per-directive summarizer selection     |
+| `thread_summary` directive     | Generates structured conversational summaries                             | Domain-specific summarizers follow the same interface                        |
+| `handoff_thread` orchestrator  | Summary → trailing messages → continuation spawn                          | Resolves summarizer override before calling `thread_directive.execute()`     |
+| `context_window_pressure` hook | Triggers compaction at `pressure_ratio >= 0.8`                            | Project-level overrides can set tighter thresholds for expensive input types |
+| `events.yaml` lifecycle events | `thread_started`, `thread_completed`, `thread_suspended`                  | Future: stream-specific events for fine-grained control                      |
+| Three-tier space system        | project → user → system resolution                                        | Stream summarizers resolved through the same space hierarchy                 |

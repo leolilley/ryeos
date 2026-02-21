@@ -14,24 +14,24 @@ Rye OS is distributed as three pip packages. Install to give your AI agent acces
 ## Install the packages
 
 ```bash
-pip install rye-mcp
+pip install ryeos-mcp
 ```
 
 This pulls in the full dependency chain:
 
-- **`rye-mcp`** — the MCP server that exposes Rye OS to any MCP-compatible AI agent.
-- **`rye-os`** — the orchestration layer with the resolver, executor, signing, and metadata. Registers the `rye-os` bundle (all `rye/*` items).
+- **`ryeos-mcp`** — the MCP server that exposes Rye OS to any MCP-compatible AI agent.
+- **`ryeos`** — the orchestration layer with the resolver, executor, signing, and metadata. Registers the `ryeos` bundle (all `rye/*` items).
 - **`lilux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing).
 
-> **Without MCP:** Install just `rye-os` to call the executor directly from Python — useful for scripting, CI, or wrapping in a CLI.
+> **Without MCP:** Install just `ryeos` to call the executor directly from Python — useful for scripting, CI, or wrapping in a CLI.
 >
-> **Minimal install:** Install `rye-core` instead of `rye-os` for only the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. Note: `rye-core` and `rye-os` are mutually exclusive — install one or the other.
+> **Minimal install:** Install `ryeos-core` instead of `ryeos` for only the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. Note: `ryeos-core` and `ryeos` are mutually exclusive — install one or the other.
 >
 > See [Packages and Bundles](../internals/packages-and-bundles.md) for the full breakdown.
 
 ## Configure your MCP client
 
-Add `rye-mcp` as an MCP server in your AI client's configuration. The server runs over stdio.
+Add `ryeos-mcp` as an MCP server in your AI client's configuration. The server runs over stdio.
 
 ### OpenCode
 
@@ -41,7 +41,7 @@ Add to your OpenCode MCP configuration (`.opencode/opencode.json` or via the UI)
 {
   "mcp": {
     "rye": {
-      "command": "rye-mcp",
+      "command": "ryeos-mcp",
       "env": {
         "USER_SPACE": "/home/you/my-ai-workspace"
       }
@@ -58,7 +58,7 @@ Add to your Amp MCP configuration:
 {
   "amp.mcpServers": {
     "rye": {
-      "command": "rye-mcp"
+      "command": "ryeos-mcp"
     }
   }
 }
@@ -72,7 +72,7 @@ Add to `~/.config/claude/claude_desktop_config.json` (Linux) or `~/Library/Appli
 {
   "mcpServers": {
     "rye": {
-      "command": "rye-mcp",
+      "command": "ryeos-mcp",
       "env": {
         "USER_SPACE": "/home/you"
       }
@@ -81,7 +81,7 @@ Add to `~/.config/claude/claude_desktop_config.json` (Linux) or `~/Library/Appli
 }
 ```
 
-> **Tip:** If you installed into a virtual environment, use the full path to the `rye-mcp` binary (e.g., `/home/you/.venv/bin/rye-mcp`) or activate the venv before launching your MCP client.
+> **Tip:** If you installed into a virtual environment, use the full path to the `ryeos-mcp` binary (e.g., `/home/you/.venv/bin/ryeos-mcp`) or activate the venv before launching your MCP client.
 
 ## Exposed MCP tools
 
@@ -114,7 +114,7 @@ export USER_SPACE="/home/you/my-ai-config"
 
 ```bash
 export RYE_DEBUG=true
-rye-mcp
+ryeos-mcp
 ```
 
 ## Verify the installation
@@ -125,7 +125,7 @@ After configuring your MCP client, verify that Rye OS is running by having your 
 rye_search(scope="directive", query="create", project_path="/path/to/your/project")
 ```
 
-If the installation is correct, this will return results from the system space — the built-in directives that ship with `rye-os`, such as `rye/core/create_directive`, `rye/core/create_tool`, and `rye/core/create_knowledge`.
+If the installation is correct, this will return results from the system space — the built-in directives that ship with `ryeos`, such as `rye/core/create_directive`, `rye/core/create_tool`, and `rye/core/create_knowledge`.
 
 You can also search for tools:
 

@@ -164,7 +164,7 @@ System space supports **multiple bundles** via the `rye.bundles` entry point gro
 ```python
 @dataclass(frozen=True)
 class BundleInfo:
-    bundle_id: str        # e.g., "rye-core", "rye-mcp"
+    bundle_id: str        # e.g., "ryeos-core", "ryeos-mcp"
     version: str          # semver
     root_path: Path       # path to bundle root containing .ai/
     manifest_path: Path   # path to manifest.yaml (optional)
@@ -211,7 +211,7 @@ system_entries = [
 ]
 ```
 
-Each bundle gets a space label like `system:rye-core` or `system:my-tools`.
+Each bundle gets a space label like `system:ryeos-core` or `system:my-tools`.
 
 ## Space Compatibility in Executor Chains
 

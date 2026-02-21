@@ -1,9 +1,0 @@
-name: net
-version: "2.0.0"
-description: "Network capabilities"
-
-capabilities:
-  - "rye.execute.tool.rye.net.*"
-
-permissions: []
-hierarchy: {}

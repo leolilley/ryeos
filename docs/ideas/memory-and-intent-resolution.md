@@ -27,21 +27,21 @@ This document proposes three complementary upgrades that solve both problems whi
 
 Before describing what this proposal adds, here's the infrastructure it builds on — all of this is live in the codebase:
 
-| Component | Location | What It Does |
-| --- | --- | --- |
-| Thread continuation | `coordination.yaml` (`trigger_threshold: 0.9`) | At 90% context window, hands off to a new thread with a structured summary |
-| `thread_summary` directive | `rye/agent/threads/thread_summary.md` | Generates summaries with four sections: Completed Work, Pending Work, Key Decisions & Context, Tool Results |
-| Transcript persistence | `.ai/threads/{thread_id}/transcript.jsonl` | Full JSONL transcripts stored per thread |
-| Thread registry | `thread_registry.py` (SQLite) | Tracks `thread_id`, `directive`, `model`, `status`, `parent_id`, `continuation_of`, `continuation_thread_id`, `chain_root_id`, `turns`, `input_tokens`, `output_tokens`, `spend` |
-| `thread_chain_search` | `rye/agent/threads/internal/thread_chain_search.py` | Regex search across JSONL transcripts within a single delegation tree (resolves ancestry via registry) |
-| `state_graph_walker` | `rye/core/runtimes/state_graph_walker.py` | Follows `continuation_of` links to retrieve results from continued threads |
-| `rye_search` | `rye/rye/tools/search.py` | BM25 + fuzzy matching over the registry — field-weighted scoring, boolean operators, wildcards, phrase matching, namespace filtering |
-| Event system | `events.yaml` | Lifecycle: `thread_started`, `thread_completed`, `thread_suspended`, `thread_cancelled`; Cognition: `cognition_in`, `cognition_out`, `cognition_out_delta`, `cognition_reasoning`; Tools: `tool_call_start`, `tool_call_result`; Errors: `error_classified`, `limit_escalation_requested`; Orchestration: `child_thread_started` |
-| Hook system | `hook_conditions.yaml` | Hook events: `error`, `limit`, `context_window_pressure`, `after_step`, `after_complete`, `directive_return` — each triggers an `execute` action against existing tools/directives |
-| Four MCP tools | `search`, `load`, `execute`, `sign` | The entire agent-facing interface |
-| Capability attenuation | fnmatch patterns (e.g., `rye.execute.tool.rye.bash.bash`) | Granular permission control |
-| Three-tier spaces | project → user → system with shadow-override | Resolution precedence for all items |
-| Lilux primitives | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — no embedding primitive exists today |
+| Component                  | Location                                                        | What It Does                                                                                                                                                                                                                                                                                                                     |
+| -------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Thread continuation        | `coordination.yaml` (`trigger_threshold: 0.9`)                  | At 90% context window, hands off to a new thread with a structured summary                                                                                                                                                                                                                                                       |
+| `thread_summary` directive | `rye/agent/threads/thread_summary.md`                           | Generates summaries with four sections: Completed Work, Pending Work, Key Decisions & Context, Tool Results                                                                                                                                                                                                                      |
+| Transcript persistence     | `.ai/threads/{thread_id}/transcript.jsonl`                      | Full JSONL transcripts stored per thread                                                                                                                                                                                                                                                                                         |
+| Thread registry            | `thread_registry.py` (SQLite)                                   | Tracks `thread_id`, `directive`, `model`, `status`, `parent_id`, `continuation_of`, `continuation_thread_id`, `chain_root_id`, `turns`, `input_tokens`, `output_tokens`, `spend`                                                                                                                                                 |
+| `thread_chain_search`      | `rye/agent/threads/internal/thread_chain_search.py`             | Regex search across JSONL transcripts within a single delegation tree (resolves ancestry via registry)                                                                                                                                                                                                                           |
+| `state_graph_walker`       | `rye/core/runtimes/state_graph_walker.py`                       | Follows `continuation_of` links to retrieve results from continued threads                                                                                                                                                                                                                                                       |
+| `rye_search`               | `rye/rye/tools/search.py`                                       | BM25 + fuzzy matching over the registry — field-weighted scoring, boolean operators, wildcards, phrase matching, namespace filtering                                                                                                                                                                                             |
+| Event system               | `events.yaml`                                                   | Lifecycle: `thread_started`, `thread_completed`, `thread_suspended`, `thread_cancelled`; Cognition: `cognition_in`, `cognition_out`, `cognition_out_delta`, `cognition_reasoning`; Tools: `tool_call_start`, `tool_call_result`; Errors: `error_classified`, `limit_escalation_requested`; Orchestration: `child_thread_started` |
+| Hook system                | `hook_conditions.yaml`                                          | Hook events: `error`, `limit`, `context_window_pressure`, `after_step`, `after_complete`, `directive_return` — each triggers an `execute` action against existing tools/directives                                                                                                                                               |
+| Four MCP tools             | `search`, `load`, `execute`, `sign`                             | The entire agent-facing interface                                                                                                                                                                                                                                                                                                |
+| Capability attenuation     | fnmatch patterns (e.g., `rye.execute.tool.rye.bash.bash`)       | Granular permission control                                                                                                                                                                                                                                                                                                      |
+| Three-tier spaces          | project → user → system with shadow-override                    | Resolution precedence for all items                                                                                                                                                                                                                                                                                              |
+| Lilux primitives           | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — no embedding primitive exists today                                                                                                                                                                                                                                                        |
 
 ---
 
@@ -183,7 +183,7 @@ Indexing happens via a hook on the existing `thread_completed` lifecycle event (
 ```yaml
 # Proposed addition to hook_conditions.yaml
 - id: "index_thread_memory"
-  event: "after_complete"   # existing hook event
+  event: "after_complete" # existing hook event
   layer: 3
   action:
     primary: "execute"
@@ -227,7 +227,7 @@ Results always include provenance metadata so the agent knows where retrieved co
 # These would require new event types in events.yaml as well
 
 - id: "memory_on_thread_start"
-  event: "thread_started"   # existing lifecycle event
+  event: "thread_started" # existing lifecycle event
   layer: 3
   action:
     primary: "execute"
@@ -240,7 +240,7 @@ Results always include provenance metadata so the agent knows where retrieved co
 
 # This requires a new hook event type — on_turn_complete does not exist
 - id: "memory_between_turns"
-  event: "on_turn_complete"  # PROPOSED — new event type needed
+  event: "on_turn_complete" # PROPOSED — new event type needed
   layer: 3
   action:
     primary: "execute"
@@ -439,7 +439,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 # Requires additions to both events.yaml and hook_conditions.yaml
 
 - id: "predictive_prefetch"
-  event: "on_token_buffer"   # PROPOSED — new event type needed
+  event: "on_token_buffer" # PROPOSED — new event type needed
   layer: 3
   action:
     primary: "execute"
@@ -459,57 +459,57 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 
 ### Proposed New Tools (all would be signed, all overridable)
 
-| Tool | Proposed Location | Purpose |
-| --- | --- | --- |
-| `thread_rag` | `rye/memory/thread_rag` | RAG over shared thread store |
-| `thread_search` | `rye/memory/thread_search` | Cross-tree word/regex search (extends `thread_chain_search` beyond single delegation trees) |
-| `thread_indexer` | `rye/memory/thread_indexer` | Indexes thread on completion |
-| `intent_resolver` | `rye/intent/resolver` | Resolves `[TOOL: ...]` to actual calls |
-| structured output model | `rye/intent/structured_output` | Small LLM for structured output generation |
-| `intent_predictor` | `rye/intent/predictor` | Predicts intents during streaming |
+| Tool                    | Proposed Location              | Purpose                                                                                     |
+| ----------------------- | ------------------------------ | ------------------------------------------------------------------------------------------- |
+| `thread_rag`            | `rye/memory/thread_rag`        | RAG over shared thread store                                                                |
+| `thread_search`         | `rye/memory/thread_search`     | Cross-tree word/regex search (extends `thread_chain_search` beyond single delegation trees) |
+| `thread_indexer`        | `rye/memory/thread_indexer`    | Indexes thread on completion                                                                |
+| `intent_resolver`       | `rye/intent/resolver`          | Resolves `[TOOL: ...]` to actual calls                                                      |
+| structured output model | `rye/intent/structured_output` | Small LLM for structured output generation                                                  |
+| `intent_predictor`      | `rye/intent/predictor`         | Predicts intents during streaming                                                           |
 
 ### Proposed New Infrastructure
 
-| Component | What It Requires |
-| --- | --- |
-| Embedding primitive | New Lilux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
-| Shared thread embedding store | New persistent store under `.ai/tools/rye/memory/thread_store/` |
-| Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_search` |
+| Component                         | What It Requires                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Embedding primitive               | New Lilux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
+| Shared thread embedding store     | New persistent store under `.ai/tools/rye/memory/thread_store/`                                        |
+| Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_search`                          |
 
 ### Proposed New/Extended Hook Events
 
-| Hook Event | Status | Trigger | Action |
-| --- | --- | --- | --- |
-| `after_complete` | **Existing** — reused for indexing | Thread exits | Index thread to shared store |
-| `thread_started` | **Existing** — reused for injection | Thread spawns | Inject relevant memory from shared store |
-| `on_turn_complete` | **Proposed** — new event type needed | Each agent turn | Optional mid-session memory injection |
-| `on_token_buffer` | **Proposed** — new event type needed | Every N tokens during streaming | Predict + pre-fetch intents |
+| Hook Event         | Status                               | Trigger                         | Action                                   |
+| ------------------ | ------------------------------------ | ------------------------------- | ---------------------------------------- |
+| `after_complete`   | **Existing** — reused for indexing   | Thread exits                    | Index thread to shared store             |
+| `thread_started`   | **Existing** — reused for injection  | Thread spawns                   | Inject relevant memory from shared store |
+| `on_turn_complete` | **Proposed** — new event type needed | Each agent turn                 | Optional mid-session memory injection    |
+| `on_token_buffer`  | **Proposed** — new event type needed | Every N tokens during streaming | Predict + pre-fetch intents              |
 
 ### Proposed Extension to Thread Summary
 
-| Section | Status |
-| --- | --- |
-| Completed Work | **Existing** |
-| Pending Work | **Existing** |
-| Key Decisions & Context | **Existing** |
-| Tool Results | **Existing** |
-| How It Went | **Proposed** — new fifth section for relational context |
+| Section                 | Status                                                  |
+| ----------------------- | ------------------------------------------------------- |
+| Completed Work          | **Existing**                                            |
+| Pending Work            | **Existing**                                            |
+| Key Decisions & Context | **Existing**                                            |
+| Tool Results            | **Existing**                                            |
+| How It Went             | **Proposed** — new fifth section for relational context |
 
 ### What's Unchanged
 
-| Component | Location | Status |
-| --- | --- | --- |
-| Four MCP tools (`search`, `load`, `execute`, `sign`) | Agent-facing interface | Same interface, no changes |
-| Capability attenuation (fnmatch patterns) | Thread memory permissions use the same model | No new permission concepts |
-| Space resolution (project → user → system) | Three-tier shadow-override | Unchanged |
-| Ed25519 signing, lockfiles, chain verification | Lilux `signing`, `integrity`, `lockfile` primitives | Unchanged |
-| Thread orchestration and budget cascading | `orchestrator.py`, `coordination.yaml` | Unchanged |
-| `thread_chain_search` | `rye/agent/threads/internal/thread_chain_search.py` | Unchanged — new `thread_search` extends it, doesn't replace it |
-| `rye_search` (BM25 + fuzzy) | `rye/rye/tools/search.py` | Unchanged — RAG index complements it, doesn't replace it |
-| Thread registry (SQLite) | `thread_registry.py` | Unchanged — embedding store reads from it |
-| Existing hook events | `hook_conditions.yaml` | Unchanged — new hooks are additions, not modifications |
-| Existing lifecycle events | `events.yaml` | Unchanged — new events are additions |
-| Lilux microkernel | `lilux/` | Unchanged except proposed new `embedding` primitive |
+| Component                                            | Location                                            | Status                                                         |
+| ---------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
+| Four MCP tools (`search`, `load`, `execute`, `sign`) | Agent-facing interface                              | Same interface, no changes                                     |
+| Capability attenuation (fnmatch patterns)            | Thread memory permissions use the same model        | No new permission concepts                                     |
+| Space resolution (project → user → system)           | Three-tier shadow-override                          | Unchanged                                                      |
+| Ed25519 signing, lockfiles, chain verification       | Lilux `signing`, `integrity`, `lockfile` primitives | Unchanged                                                      |
+| Thread orchestration and budget cascading            | `orchestrator.py`, `coordination.yaml`              | Unchanged                                                      |
+| `thread_chain_search`                                | `rye/agent/threads/internal/thread_chain_search.py` | Unchanged — new `thread_search` extends it, doesn't replace it |
+| `rye_search` (BM25 + fuzzy)                          | `rye/rye/tools/search.py`                           | Unchanged — RAG index complements it, doesn't replace it       |
+| Thread registry (SQLite)                             | `thread_registry.py`                                | Unchanged — embedding store reads from it                      |
+| Existing hook events                                 | `hook_conditions.yaml`                              | Unchanged — new hooks are additions, not modifications         |
+| Existing lifecycle events                            | `events.yaml`                                       | Unchanged — new events are additions                           |
+| Lilux microkernel                                    | `lilux/`                                            | Unchanged except proposed new `embedding` primitive            |
 
 ---
 

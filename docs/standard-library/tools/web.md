@@ -32,7 +32,7 @@ Search the web using a configurable provider. Defaults to **DuckDuckGo** (no API
 
 ### Provider Configuration
 
-Providers are configured via YAML at `.ai/config/websearch.yaml` (project) or `~/.ai/config/websearch.yaml` (user). Project config takes precedence.
+Providers are configured via YAML at `.ai/config/web/websearch.yaml` (project) or `{USER_SPACE}/.ai/config/web/websearch.yaml` (user). Project config takes precedence.
 
 ```yaml
 default_provider:

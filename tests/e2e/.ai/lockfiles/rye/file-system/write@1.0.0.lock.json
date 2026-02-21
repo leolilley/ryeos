@@ -1,6 +1,6 @@
 {
   "lockfile_version": 1,
-  "generated_at": "2026-02-18T08:25:21.344139+00:00",
+  "generated_at": "2026-02-20T01:39:36.613657+00:00",
   "root": {
     "tool_id": "rye/file-system/write",
     "version": "1.0.0",
@@ -9,21 +9,21 @@
   "resolved_chain": [
     {
       "item_id": "rye/file-system/write",
-      "space": "system:rye-os",
+      "space": "system:ryeos",
       "tool_type": "python",
       "executor_id": "rye/core/runtimes/python_function_runtime",
       "integrity": "e9727fbb38ce81d4810d88760539d38ea32125ebf6a480660520b3c7b6052c63"
     },
     {
       "item_id": "rye/core/runtimes/python_function_runtime",
-      "space": "system:rye-os",
+      "space": "system:ryeos",
       "tool_type": "runtime",
       "executor_id": "rye/core/primitives/subprocess",
       "integrity": "4267136a31f5c016629893105a6ebce4f72b5b8d59440b246c12f31a9071a35d"
     },
     {
       "item_id": "rye/core/primitives/subprocess",
-      "space": "system:rye-os",
+      "space": "system:ryeos",
       "tool_type": "primitive",
       "executor_id": null,
       "integrity": "c63d03107f4c055b1afe9603ea22191b259170dee5ff838a63f3c8fd9cbab4b8"

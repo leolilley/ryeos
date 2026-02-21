@@ -69,7 +69,7 @@ Items are organized into **namespaces** using directory nesting. The first path 
 ```
 .ai/
 ├── directives/
-│   ├── rye/core/              # rye/core namespace — ships with rye-os
+│   ├── rye/core/              # rye/core namespace — ships with ryeos
 │   │   ├── create_directive.md
 │   │   ├── create_tool.md
 │   │   └── create_knowledge.md
@@ -87,7 +87,7 @@ Items are organized into **namespaces** using directory nesting. The first path 
 
 Common namespace prefixes:
 
-- **`rye/core/`** — core items that ship with the `rye-core` package.
+- **`rye/core/`** — core items that ship with the `ryeos-core` package.
 - **`rye/bash/`**, **`rye/web/`**, **`rye/file-system/`** — built-in tool categories.
 - **`<your-project>/`** — your project-specific items.
 
@@ -115,7 +115,7 @@ Rye OS resolves items across three **spaces**, checked in priority order:
 ├─────────────────────────────────────────────┤
 │  3. System Space   (lowest priority)        │
 │     site-packages/rye/.ai/                  │
-│     Immutable. Ships with the rye-os        │
+│     Immutable. Ships with the ryeos          │
 │     package — the "standard library."       │
 └─────────────────────────────────────────────┘
 ```
@@ -148,7 +148,7 @@ Use user space for:
 
 **Location:** `site-packages/rye/.ai/`
 
-The system space ships inside the `rye-os` Python package. It is immutable — you cannot modify it directly. It provides the built-in "standard library" of directives, tools, and knowledge.
+The system space ships inside the `ryeos` Python package. It is immutable — you cannot modify it directly. It provides the built-in "standard library" of directives, tools, and knowledge.
 
 System-space items include:
 
@@ -189,7 +189,7 @@ A bundle manifest lives at `.ai/bundles/<bundle_id>/manifest.yaml` and declares:
 
 ```yaml
 bundle:
-  id: rye-core
+  id: ryeos-core
   version: 0.1.0
   type: package
   description: Core directives, tools, and knowledge for Rye OS
@@ -203,7 +203,7 @@ files:
 
 The manifest enables integrity verification — Rye OS can confirm that no bundled file has been tampered with by comparing its SHA-256 hash against the manifest.
 
-Multiple bundles can coexist in the system space. The `rye-core` package ships the `rye-core` bundle, the `rye-os` and `rye-mcp` packages ships the `rye-os` bundle. Third-party packages can register their own bundles by declaring a `rye.bundles` entry point in their `pyproject.toml`:
+Multiple bundles can coexist in the system space. The `ryeos-core` package ships the `ryeos-core` bundle, the `ryeos` and `ryeos-mcp` packages ship the `ryeos` bundle. Third-party packages can register their own bundles by declaring a `rye.bundles` entry point in their `pyproject.toml`:
 
 ```toml
 [project.entry-points."rye.bundles"]

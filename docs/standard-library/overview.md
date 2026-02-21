@@ -77,7 +77,7 @@ These are the authoritative references for the metadata schema of each item type
 
 | Path                             | Description                                          |
 | -------------------------------- | ---------------------------------------------------- |
-| `bundles/rye-core/manifest.yaml` | Bundle manifest for the core standard library bundle |
+| `bundles/ryeos-core/manifest.yaml` | Bundle manifest for the core standard library bundle |
 | `lockfiles/`                     | Integrity pinning files for signed items             |
 
 ---

@@ -248,7 +248,7 @@ rye_execute(
    title: JWT Validation Patterns
    category: security/authentication
    version: "1.0.0"
-   author: rye-os
+   author: ryeos
    tags:
      - jwt
      - tokens

@@ -100,7 +100,7 @@ Description of what this directive does.
 | `version`     | Semantic version                        | `1.0.0`                          |
 | `description` | What the directive does                 | `Create a simple directive file` |
 | `category`    | Directory path in `.ai/directives/`     | `rye/core`                       |
-| `author`      | Creator                                 | `rye-os`                         |
+| `author`      | Creator                                 | `ryeos`                          |
 | `model`       | LLM tier for execution                  | `<model tier="haiku" />`         |
 | `permissions` | Capability declarations                 | See below                        |
 
@@ -351,7 +351,7 @@ Create minimal directives with essential fields only.
   <metadata>
     <description>Create a simple directive file with minimal required fields, check for duplicates, write to disk, and sign it.</description>
     <category>rye/core</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="low" />
     <limits turns="6" tokens="4096" />
     <permissions>

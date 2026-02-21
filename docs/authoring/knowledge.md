@@ -28,7 +28,7 @@ tags:
   - tag2
 entry_type: reference
 version: "1.0.0"
-author: rye-os
+author: ryeos
 created_at: 2026-02-10T00:00:00Z
 ```
 
@@ -51,7 +51,7 @@ The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML
 | `title`    | string              | Human-readable title               | `Terminology and Naming Conventions` |
 | `category` | string              | Directory path in `.ai/knowledge/` | `rye/core`                           |
 | `version`  | string (semver)     | Content version                    | `"1.0.0"`                            |
-| `author`   | string              | Creator                            | `rye-os`                             |
+| `author`   | string              | Creator                            | `ryeos`                              |
 
 ### Optional
 
@@ -148,7 +148,7 @@ id: terminology
 title: Terminology and Naming Conventions
 category: rye/core
 version: "1.0.0"
-author: rye-os
+author: ryeos
 tags:
   - terminology
   - naming
@@ -194,7 +194,7 @@ id: directive-format
 title: Directive Format Specification
 category: rye/authoring
 version: "1.0.0"
-author: rye-os
+author: ryeos
 created_at: 2026-02-18T00:00:00Z
 tags:
   - directives

@@ -311,7 +311,7 @@ If the original thread_id pointed to an earlier link in a chain (not the termina
 
 ## Configuration
 
-All continuation behavior is configured in `.ai/config/coordination.yaml`:
+All continuation behavior is configured in `.ai/config/agent/coordination.yaml`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|

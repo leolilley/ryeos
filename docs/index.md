@@ -3,7 +3,7 @@ id: index
 title: "Rye OS Documentation"
 description: Documentation for Rye OS — the MCP server that gives AI agents a portable .ai/ directory system
 category: root
-tags: [index, documentation, rye-os]
+tags: [index, documentation, ryeos]
 version: "1.0.0"
 ```
 
@@ -44,6 +44,8 @@ Thread-based orchestration is the flagship capability — AI agents coordinating
 - [Safety and Limits](orchestration/safety-and-limits.md) — Cost controls, turn limits, and the SafetyHarness
 - [Permissions and Capabilities](orchestration/permissions-and-capabilities.md) — Capability tokens and fail-closed security
 - [Continuation and Resumption](orchestration/continuation-and-resumption.md) — Context limit handoffs and user-driven resumption
+- [State Graphs](orchestration/state-graphs.md) — Declarative, code-free workflows as YAML graph tools
+- [Streaming](orchestration/streaming.md) — Real-time token streaming and transcript rendering
 - [Building a Pipeline](orchestration/building-a-pipeline.md) — Step-by-step tutorial with a real-world example
 
 ## Standard Library

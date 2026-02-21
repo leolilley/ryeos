@@ -87,7 +87,7 @@ If the thread has a parent, the orchestrator checks whether the parent has excee
 Hooks are merged from three sources and sorted by layer:
 
 - **Layer 1** — Directive hooks (from the directive's XML)
-- **Layer 2** — Builtin hooks (project-level, from `.ai/config/`)
+- **Layer 2** — Builtin hooks (project-level, from `.ai/config/agent/`)
 - **Layer 3** — Infra hooks (system-level, always run)
 
 The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities. Tool schemas are loaded from the primary tools directory and attached to the harness.

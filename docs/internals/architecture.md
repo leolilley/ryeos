@@ -145,4 +145,4 @@ The only hardcoded knowledge in the system is the mapping from primitive IDs to 
 
 ## Package and Bundle Distribution
 
-The system is distributed as pip packages (`lilux`, `rye-core`, `rye-os`, `rye-mcp`), each with a clear role. `rye-os` and `rye-core` share the same Python code but register different bundles — `rye-os` exposes all `rye/*` items, while `rye-core` exposes only `rye/core/*`. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.
+The system is distributed as pip packages (`lilux`, `ryeos-core`, `ryeos`, `ryeos-mcp`), each with a clear role. `ryeos` and `ryeos-core` share the same Python code but register different bundles — `ryeos` exposes all `rye/*` items, while `ryeos-core` exposes only `rye/core/*`. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.

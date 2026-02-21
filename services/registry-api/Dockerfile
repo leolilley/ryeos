@@ -5,8 +5,9 @@
 # - rye/core/parsers and rye/core/extractors (data bundle items for validation)
 # - lilux primitives (signing, integrity)
 #
-# It does NOT need the full rye-os bundle (MCP tools, registry client,
+# It does NOT need the full ryeos bundle (MCP tools, registry client,
 # agent threads, etc.) — those are client-side concerns.
+# Uses ryeos-bare which ships no data-driven tools.
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -26,8 +27,7 @@ COPY services/registry-api/registry_api /app/registry-api/registry_api
 
 # Install packages — the registry only uses rye.utils.*, rye.constants, and
 # rye/core/ bundle items (parsers, extractors) for validation. It does not
-# execute any bundled tools. Once rye-core is publishable as a standalone
-# package, switch to: pip install rye-core
+# execute any bundled tools. Uses ryeos-bare (no bundles).
 WORKDIR /app/registry-api
 RUN pip install --no-cache-dir /app/lilux/ /app/rye/ -e .
 
