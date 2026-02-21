@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T06:03:19Z:cf69cb2a2d3dec5870d97320dd9120a827c2b8452f5edd2768f659cbafbdc33c:ndjxRNR9P9jKQ6ZABmVwYRZlcIEez-NGxKhh22yjU4ayr0oqhtXQupRR0yI8fOKZy88sHNqRZEZIw9Dpwpo8BA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-21T06:11:17Z:cf69cb2a2d3dec5870d97320dd9120a827c2b8452f5edd2768f659cbafbdc33c:ndjxRNR9P9jKQ6ZABmVwYRZlcIEez-NGxKhh22yjU4ayr0oqhtXQupRR0yI8fOKZy88sHNqRZEZIw9Dpwpo8BA==:9fbfabe975fa5a7f -->
 
 # Init
 
@@ -120,6 +120,8 @@ User space is {target}. Setting up Rye now.
       If {input:project_type:user} is "user": output the render block below EXACTLY and in FULL. Do not truncate, summarize, or rephrase. The code blocks contain commands the user must copy — they must appear verbatim.
     </instruction>
     <render>
+Ready to go.
+
 Now let's get moving. Here are the guides — run them in order, or jump ahead:
 
 **The basics** — tools, directives, knowledge, and the three-tier space system:
