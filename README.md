@@ -63,7 +63,7 @@ You could run RYE _inside_ Codex or Claude Code. You could also replace them ent
 
 ### Why RYE Doesn't Have "Skills"
 
-Skills — as seen in Claude Projects, ChatGPT custom instructions, and various agent frameworks — bundle workflow, domain knowledge, and tool access into a single opaque unit. RYE doesn't have skills because the concept itself conflates things that should be separate.
+Skills work well for what they are — bundled agent behaviors for solo users on a single platform. RYE isn't competing with Claude Projects for personal productivity. The target is autonomous multi-agent systems where no human is in the loop, and for that use case the bundled skill abstraction works against you: you need to know exactly what each component does, who authored it, and what it can access.
 
 RYE decomposes agent cognition into three distinct primitives:
 
@@ -71,13 +71,15 @@ RYE decomposes agent cognition into three distinct primitives:
 | -------------- | -------------------------------------------- | ------------------------------------------- |
 | **Directives** | Workflows — what to do, in what order, how   | "Run an outreach campaign with these steps" |
 | **Knowledge**  | Domain data — context the agent reasons over | "Here's our rate limiting policy"           |
-| **Tools**      | Executables — actions the agent can take     | "Call this API, run this script"            |
+| **Tools**      | Executables — actions the agent can take     | `rye/bash/bash`, `rye/file-system/read`     |
 
-Each is independently authored, signed, versioned, and composable. A directive can reference any knowledge and use any tools — the combination is assembled at runtime, not baked into a monolithic blob.
+Each is independently authored, signed, versioned, and composable. A directive can reference any knowledge and use any tools — the combination is assembled at runtime, not baked in.
 
-Skill registries are emerging — communities sharing bundled agent behaviors — and that's a good instinct. But sharing skills means sharing opaque blobs where the workflow, the domain knowledge, and the tool access are entangled. You can't audit one without the others. You can't reuse the knowledge in a different workflow. You can't verify that the tool access hasn't changed.
+Skill registries are emerging and that's the right instinct — sharing agent behaviors should be easy. But when you pull someone else's skill from a registry, you're trusting an opaque bundle where the workflow, the domain knowledge, and the tool access are entangled. You can't audit the workflow independently from the tools it calls. You can't reuse the knowledge in a different context. When a composition breaks, you have no visibility into which component failed.
 
-RYE's registry shares directives, tools, and knowledge as independent items — each cryptographically signed, each composable, each auditable on its own terms. You don't share a skill. You share the pieces, and the agent assembles them.
+RYE's registry shares directives, tools, and knowledge as independent items — each cryptographically signed, each auditable on its own terms. These are intentionally small data files (YAML, markdown, short Python), not 50,000-line packages. The auditable surface of any single item is tiny by design. When a composition fails, each step in the executor chain is logged and diagnosable. A Claude Projects skill will never run in Cursor — that's structural. A RYE directive runs in any MCP client, with the same trust guarantees, regardless of who authored it or where it was published.
+
+RYE currently uses TOFU (Trust On First Use) key pinning for the registry — pragmatic but not the end state. A web-of-trust model with author co-signing and a transparency log for published items are planned future work to address the inherent limitations of TOFU bootstrap.
 
 ## The Architecture
 
