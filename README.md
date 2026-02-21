@@ -79,8 +79,6 @@ Skill registries are emerging and that's the right instinct — sharing agent be
 
 RYE's registry shares directives, tools, and knowledge as independent items — each cryptographically signed, each auditable on its own terms. These are intentionally small data files (YAML, markdown, short Python), not 50,000-line packages. The auditable surface of any single item is tiny by design. When a composition fails, each step in the executor chain is logged and diagnosable. A Claude Projects skill will never run in Cursor — that's structural. A RYE directive runs in any MCP client, with the same trust guarantees, regardless of who authored it or where it was published.
 
-RYE currently uses TOFU (Trust On First Use) key pinning for the registry — pragmatic but not the end state. A web-of-trust model with author co-signing and a transparency log for published items are planned future work to address the inherent limitations of TOFU bootstrap.
-
 ## The Architecture
 
 RYE inverts the relationship between code and data. The system is built on three principles:
@@ -222,7 +220,7 @@ Project shadows user shadows system. Override any system behavior by placing a f
 
 ### Community Registry
 
-Push signed items to a shared registry. Pull them with TOFU key pinning. Items carry registry provenance (`|rye-registry@username`) so you know who published what. Trust is cryptographically provable and author-attributed — not implicit like npm.
+Push signed items to a shared registry. Pull them with TOFU key pinning. Items carry registry provenance (`|rye-registry@username`) so you know who published what. Trust is cryptographically provable and author-attributed — not implicit like npm. TOFU is a pragmatic starting point — a web-of-trust model with author co-signing and a transparency log for published items are planned future work.
 
 ```python
 rye_execute(item_type="tool", item_id="rye/core/registry/registry",
