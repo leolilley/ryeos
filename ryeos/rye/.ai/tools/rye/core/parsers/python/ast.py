@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:2035cdfd61e709a1747d5e41f09f98244f622ec2b2014f9d1d5b48cdbe3b1b2d:oEP1ZX47rr7NCpAqbseolGyYDvkoDBKVbJ_hahz8M_w2HHd7eEK06eyJf6AU9_uwQNvlqZ-kxVjOVfgGIltUCg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T23:50:44Z:c37a8b96280d5c5904f0b9606858f04b5be6550abe3e0c40799ba2fce4776490:HKSn8mr8N0nMtAY3uvUq_Iph3RqnLrh1Uf2mDQnLzrO1nmsT5AOfqXQXqVeKuT1kxX9XwmDKLkyudN3ZwyrTAA==:9fbfabe975fa5a7f
 """Python AST parser for extracting metadata from Python tools.
 
 Extracts module-level variables and docstring using AST parsing.
@@ -6,7 +6,7 @@ Extracts module-level variables and docstring using AST parsing.
 
 __version__ = "1.0.0"
 __tool_type__ = "parser"
-__category__ = "rye/core/parsers"
+__category__ = "rye/core/parsers/python"
 __tool_description__ = "Python AST parser - extracts metadata from Python source code"
 
 import ast

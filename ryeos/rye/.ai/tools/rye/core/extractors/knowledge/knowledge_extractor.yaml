@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:8f00364e0d83c1991af254da75bdc6bd4ea9d015d6e25586a213b3cb2c6c1e92:DzoL5bbBk7nvfOft4bgCs5Hs9tqrZ2n3rZBFrfXyNhP3n1dnV_eFZnvSs6pKzni7IdeE5tGuFfLq1ZZA_8C-BA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T23:50:45Z:b049ae1d1f7947ef46b784b80d3fd670bf8b01e036d04ffbe6652d8678a7d2de:OEaQMDEDuO2YShHTy5RPeVtMfFLGXkzEB8bOKSKHRmeX4cG1Ox1aQsxczLO7YCnFTyct-uyls9rZ9UGdgiaOCQ==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -10,7 +10,7 @@ extensions:
   - .yaml
   - .yml
 
-parser: markdown_frontmatter
+parser: markdown/frontmatter
 
 signature_format:
   prefix: "<!--"

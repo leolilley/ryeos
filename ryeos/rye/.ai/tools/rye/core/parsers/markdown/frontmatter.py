@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:db14381140045aa3fe0ac7f43b079ccfad1ef055bf22da175d117bc56c94430a:v035H0ps362SLdOl2GQ7ZBv9ssBTJ7H2TYZT0ua0GEST-XPxerHWuzdu2Nb9deH_nNZ8iXga55Y6vaqnRVcmDw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T23:50:45Z:9f3682386415db6a563cae519ae83a02e17472e17354bb93f49d50a2ef3dcae0:9F0YF30TC5RrJim_eT3Nx7HR_wJxz_bGmeyiHO0Eupb0pbTxHP-3KhORvnb-yZEzDeP0_6n18l-7VJexyeJ8Cw==:9fbfabe975fa5a7f
 """Markdown YAML parser for knowledge entries.
 
 Extracts YAML metadata from ```yaml code fences (matching how
@@ -8,7 +8,7 @@ Also handles pure YAML files (.yaml/.yml) with no fences.
 
 __version__ = "2.0.0"
 __tool_type__ = "parser"
-__category__ = "rye/core/parsers"
+__category__ = "rye/core/parsers/markdown"
 __tool_description__ = (
     "Markdown YAML parser - extracts YAML metadata from code fences in markdown files"
 )

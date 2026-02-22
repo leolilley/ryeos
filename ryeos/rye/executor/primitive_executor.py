@@ -14,7 +14,6 @@ Caching:
     - Automatic invalidation when file content changes (via Lilux hash functions)
 """
 
-import ast
 import hashlib
 import logging
 import shlex
@@ -28,10 +27,11 @@ from lilux.runtime.env_resolver import EnvResolver
 
 from rye.executor.chain_validator import ChainValidator, ChainValidationResult
 from rye.executor.lockfile_resolver import LockfileResolver
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_tool_extensions, get_parsers_map
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.metadata_manager import MetadataManager
 from rye.utils.path_utils import BundleInfo
+from rye.utils.parser_router import ParserRouter
 from rye.constants import AI_DIR, ItemType
 
 logger = logging.getLogger(__name__)
@@ -127,6 +127,7 @@ class PrimitiveExecutor:
         self.system_space = self.system_spaces[0].root_path
 
         self.env_resolver = EnvResolver(project_path=self.project_path)
+        self.parser_router = ParserRouter(project_path=self.project_path)
         self.chain_validator = ChainValidator()
         self.lockfile_resolver = LockfileResolver(
             project_path=self.project_path,
@@ -503,135 +504,104 @@ class PrimitiveExecutor:
     def _load_metadata(self, path: Path) -> Dict[str, Any]:
         """Load tool metadata from file.
 
-        Extracts:
-            - __tool_type__
-            - __executor_id__
-            - __category__
-            - __version__
-            - CONFIG_SCHEMA
-            - ENV_CONFIG
-            - CONFIG
+        Routes parsing to data-driven parsers via ParserRouter, using the
+        extension-to-parser mapping from tool_extractor.yaml.
 
         Args:
             path: Path to tool file
 
         Returns:
-            Metadata dict
+            Metadata dict with normalised keys (version, tool_type, etc.)
         """
         metadata: Dict[str, Any] = {}
 
         try:
             content = path.read_text(encoding="utf-8")
 
-            if path.suffix == ".py":
-                metadata = self._parse_python_metadata(content)
-            elif path.suffix in (".yaml", ".yml"):
-                metadata = self._parse_yaml_metadata(content)
+            # Data-driven: look up parser name for this extension
+            parsers_map = get_parsers_map(self.project_path)
+            parser_name = parsers_map.get(path.suffix)
+            if not parser_name:
+                return metadata
+
+            # Route through ParserRouter (loads parser from .ai/tools/rye/core/parsers/)
+            parsed = self.parser_router.parse(parser_name, content)
+            if "error" in parsed:
+                logger.warning(
+                    f"Parser {parser_name} failed for {path}: {parsed['error']}"
+                )
+                return metadata
+
+            # Normalise parser output to metadata dict
+            metadata = self._extract_metadata_from_parsed(parsed)
 
         except Exception as e:
             logger.warning(f"Failed to load metadata from {path}: {e}")
 
         return metadata
 
-    def _parse_python_metadata(self, content: str) -> Dict[str, Any]:
-        """Parse Python file for metadata using AST.
+    @staticmethod
+    def _extract_metadata_from_parsed(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract metadata fields from parser output.
 
-        Extracts module-level assignments and dict literals.
+        Handles different parser output formats:
+        - python/ast, javascript: keys at top level (__version__, CONFIG_SCHEMA)
+        - yaml: keys under "data" sub-dict with bare names (version, config_schema)
+
+        Uses the extraction_rules key convention: dunder keys for code parsers,
+        bare keys for data parsers.
         """
         metadata: Dict[str, Any] = {}
 
-        try:
-            tree = ast.parse(content)
+        # Build source candidates: top-level parsed dict, plus yaml "data" sub-dict
+        yaml_data = parsed.get("data")
+        sources = [parsed]
+        if isinstance(yaml_data, dict):
+            sources.append(yaml_data)
 
-            for node in tree.body:
-                if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                    target = node.targets[0]
-                    if isinstance(target, ast.Name):
-                        name = target.id
+        # Dunder → metadata field mapping (mirrors extraction_rules in extractor config)
+        _DUNDER_FIELDS = {
+            "__version__": "version",
+            "__tool_type__": "tool_type",
+            "__executor_id__": "executor_id",
+            "__category__": "category",
+            "__tool_description__": "tool_description",
+        }
 
-                        # Simple string/None assignments
-                        if isinstance(node.value, ast.Constant):
-                            if name == "__version__":
-                                metadata["version"] = node.value.value
-                            elif name == "__tool_type__":
-                                metadata["tool_type"] = node.value.value
-                            elif name == "__executor_id__":
-                                metadata["executor_id"] = node.value.value
-                            elif name == "__category__":
-                                metadata["category"] = node.value.value
-                            elif name == "__tool_description__":
-                                metadata["tool_description"] = node.value.value
+        for dunder_key, field_name in _DUNDER_FIELDS.items():
+            for src in sources:
+                if dunder_key in src:
+                    metadata[field_name] = src[dunder_key]
+                    break
+                # Bare key fallback (yaml parser uses version, not __version__)
+                if field_name in src:
+                    metadata[field_name] = src[field_name]
+                    break
 
-                        # Dict assignments (CONFIG_SCHEMA, ENV_CONFIG, CONFIG)
-                        elif isinstance(node.value, ast.Dict):
-                            if name == "CONFIG_SCHEMA":
-                                metadata["config_schema"] = self._ast_dict_to_dict(
-                                    node.value
-                                )
-                            elif name == "ENV_CONFIG":
-                                metadata["env_config"] = self._ast_dict_to_dict(
-                                    node.value
-                                )
-                            elif name == "CONFIG":
-                                metadata["config"] = self._ast_dict_to_dict(node.value)
+        # Config/dict fields (UPPER_CASE in code parsers, lower_case in yaml)
+        _CONFIG_FIELDS = {
+            "CONFIG_SCHEMA": "config_schema",
+            "ENV_CONFIG": "env_config",
+            "CONFIG": "config",
+        }
 
-        except SyntaxError:
-            logger.warning("Failed to parse Python file")
+        for upper_key, lower_key in _CONFIG_FIELDS.items():
+            for src in sources:
+                if upper_key in src:
+                    metadata[lower_key] = src[upper_key]
+                    break
+                if lower_key in src:
+                    metadata[lower_key] = src[lower_key]
+                    break
+
+        # YAML-specific top-level fields
+        for key in ("anchor", "verify_deps"):
+            for src in sources:
+                if key in src:
+                    metadata[key] = src[key]
+                    break
 
         return metadata
-
-    def _ast_dict_to_dict(self, node: ast.Dict) -> Dict[str, Any]:
-        """Convert AST Dict node to Python dict (limited support)."""
-        result = {}
-
-        for key, value in zip(node.keys, node.values):
-            if isinstance(key, ast.Constant):
-                key_str = key.value
-                result[key_str] = self._ast_to_value(value)
-
-        return result
-
-    def _ast_to_value(self, node: ast.AST) -> Any:
-        """Convert AST node to Python value (limited support)."""
-        if isinstance(node, ast.Constant):
-            return node.value
-        elif isinstance(node, ast.Dict):
-            return self._ast_dict_to_dict(node)
-        elif isinstance(node, ast.List):
-            return [self._ast_to_value(item) for item in node.elts]
-        elif isinstance(node, ast.Name):
-            # Handle None, True, False
-            if node.id == "None":
-                return None
-            elif node.id == "True":
-                return True
-            elif node.id == "False":
-                return False
-        return None
-
-    def _parse_yaml_metadata(self, content: str) -> Dict[str, Any]:
-        """Parse YAML file for metadata."""
-        try:
-            import yaml
-
-            data = yaml.safe_load(content)
-
-            if not isinstance(data, dict):
-                return {}
-
-            return {
-                "version": data.get("version"),
-                "tool_type": data.get("tool_type"),
-                "executor_id": data.get("executor_id"),
-                "category": data.get("category"),
-                "config_schema": data.get("config_schema"),
-                "env_config": data.get("env_config"),
-                "config": data.get("config"),
-                "anchor": data.get("anchor"),
-                "verify_deps": data.get("verify_deps"),
-            }
-        except Exception:
-            return {}
 
     def _validate_chain(self, chain: List[ChainElement]) -> ChainValidationResult:
         """Validate executor chain using ChainValidator."""

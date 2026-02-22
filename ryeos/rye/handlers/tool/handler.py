@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rye.utils.resolvers import get_user_space
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_tool_extensions, get_parsers_map
+from rye.utils.parser_router import ParserRouter
 from rye.constants import AI_DIR, ItemType
 from rye.utils.path_utils import (
     get_project_type_path,
@@ -29,6 +30,7 @@ class ToolHandler:
         """Initialize handler."""
         self.project_path = Path(project_path) if project_path else Path.cwd()
         self.user_space = Path(user_space) if user_space else get_user_space()
+        self.parser_router = ParserRouter(project_path=self.project_path)
 
     def get_search_paths(self) -> list[Path]:
         """Get tool search paths in precedence order."""
@@ -65,9 +67,12 @@ class ToolHandler:
         return None
 
     def extract_metadata(self, file_path: Path) -> Dict[str, Any]:
-        """Extract metadata from tool file using AST parsing."""
-        import ast
-        import re
+        """Extract metadata from tool file via data-driven parsers.
+
+        Routes to the appropriate parser based on the extension-to-parser
+        mapping in tool_extractor.yaml.
+        """
+        from rye.executor.primitive_executor import PrimitiveExecutor
 
         metadata = {
             "name": file_path.stem,
@@ -82,35 +87,19 @@ class ToolHandler:
         try:
             content = file_path.read_text(encoding="utf-8")
 
-            if file_path.suffix == ".py":
-                tree = ast.parse(content)
+            parsers_map = get_parsers_map(self.project_path)
+            parser_name = parsers_map.get(file_path.suffix)
+            if not parser_name:
+                return metadata
 
-                for node in tree.body:
-                    if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                        target = node.targets[0]
-                        if isinstance(target, ast.Name) and isinstance(
-                            node.value, ast.Constant
-                        ):
-                            name = target.id
-                            value = node.value.value
-                            if name == "__version__":
-                                metadata["version"] = value
-                            elif name == "__tool_type__":
-                                metadata["tool_type"] = value
-                            elif name == "__executor_id__":
-                                metadata["executor_id"] = value
-                            elif name == "__category__":
-                                metadata["category"] = value
+            parsed = self.parser_router.parse(parser_name, content)
+            if "error" in parsed:
+                return metadata
 
-            elif file_path.suffix in (".yaml", ".yml"):
-                import yaml
-
-                data = yaml.safe_load(content)
-                if isinstance(data, dict):
-                    metadata["version"] = data.get("version")
-                    metadata["tool_type"] = data.get("tool_type")
-                    metadata["executor_id"] = data.get("executor_id")
-                    metadata["category"] = data.get("category")
+            extracted = PrimitiveExecutor._extract_metadata_from_parsed(parsed)
+            metadata.update(
+                {k: v for k, v in extracted.items() if v is not None}
+            )
 
         except Exception as e:
             logger.warning(f"Failed to extract metadata from {file_path}: {e}")

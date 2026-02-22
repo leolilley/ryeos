@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Global cache - single source of truth
 _extensions_cache: Optional[List[str]] = None
 _type_extensions_cache: Dict[str, List[str]] = {}
+_parsers_map_cache: Optional[Dict[str, str]] = None
 
 
 def get_tool_extensions(
@@ -138,8 +139,52 @@ def _extract_extensions_from_file(file_path: Path) -> List[str]:
         return []
 
 
+def get_parsers_map(
+    project_path: Optional[Path] = None, force_reload: bool = False
+) -> Dict[str, str]:
+    """Get extension-to-parser mapping from tool extractor config.
+
+    Reads the ``parsers`` field from the tool extractor YAML across
+    the 3-tier space (project > user > system).  Returns a dict like
+    ``{".py": "python/ast", ".ts": "javascript/javascript", ...}``.
+    """
+    global _parsers_map_cache
+
+    if _parsers_map_cache is not None and not force_reload:
+        return _parsers_map_cache
+
+    parsers_map: Dict[str, str] = {}
+    search_paths = get_extractor_search_paths(project_path)
+
+    for extractors_dir in search_paths:
+        if not extractors_dir.exists():
+            continue
+
+        for file_path in extractors_dir.glob("**/tool/*_extractor.yaml"):
+            if file_path.name.startswith("_"):
+                continue
+
+            try:
+                import yaml
+
+                data = yaml.safe_load(file_path.read_text())
+                if data and isinstance(data.get("parsers"), dict):
+                    # First-found wins (project > user > system)
+                    for ext, parser_name in data["parsers"].items():
+                        if ext not in parsers_map:
+                            parsers_map[ext] = parser_name
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load parsers map from {file_path}: {e}"
+                )
+
+    _parsers_map_cache = parsers_map
+    return _parsers_map_cache
+
+
 def clear_extensions_cache():
     """Clear all extensions caches. Useful for testing."""
-    global _extensions_cache
+    global _extensions_cache, _parsers_map_cache
     _extensions_cache = None
+    _parsers_map_cache = None
     _type_extensions_cache.clear()

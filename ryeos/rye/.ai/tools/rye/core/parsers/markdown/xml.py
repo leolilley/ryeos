@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:44c33f812e022d5857b37e73c50a4671f7a8fc20525c3cbfd83157919776a090:-72tlH0WlluWeExwEKNbGXfx3Lwj1ePJ92ndg-vQqV-KwkfHxpxOQX_0KiLUPbSUYYKXFHXFtxM1trxdFxgrBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T23:50:45Z:570388f5e93bb7a4379b0471f2ff9bcecd3f4dc77098b9b47153a3f23dc15e05:pWhYxeO2OCnyNMbDHvmW0ccHU72_tI0ni0y5E6qdGUykPzYc5NMlPbiJhIbIZd8eSaTmF2GIl92EYZ2V35qiAQ==:9fbfabe975fa5a7f
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -7,7 +7,7 @@ with support for opaque sections (template, example, raw tags).
 
 __version__ = "1.1.0"
 __tool_type__ = "parser"
-__category__ = "rye/core/parsers"
+__category__ = "rye/core/parsers/markdown"
 __tool_description__ = (
     "Markdown XML parser - extracts and parses XML from markdown code fences"
 )
@@ -142,6 +142,21 @@ def _mask_opaque_sections(xml_str: str) -> Tuple[str, Dict[str, str]]:
     return masked, opaque_content
 
 
+def _coerce_value(s: str) -> Any:
+    """Coerce a string value from XML to the appropriate Python type."""
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
 def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
     """Extract all metadata from parsed XML tree."""
 
@@ -198,10 +213,24 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                 hooks = []
                 for hook in child:
                     hook_data = dict(hook.attrib)
-                    if hook.text:
+                    if hook.text and hook.text.strip():
                         hook_data["content"] = hook.text.strip()
                     for hook_child in hook:
-                        if hook_child.tag == "inputs":
+                        if hook_child.tag == "action":
+                            action = dict(hook_child.attrib)
+                            params = {}
+                            for param in hook_child:
+                                if param.tag == "param" and param.text:
+                                    params[param.get("name", param.tag)] = param.text.strip()
+                            if params:
+                                action["params"] = params
+                            hook_data["action"] = action
+                        elif hook_child.tag == "condition":
+                            cond = dict(hook_child.attrib)
+                            if "value" in cond:
+                                cond["value"] = _coerce_value(cond["value"])
+                            hook_data["condition"] = cond
+                        elif hook_child.tag == "inputs":
                             inputs = {}
                             for inp in hook_child:
                                 if inp.text:
