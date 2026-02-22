@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:d2fb0bd3ef28ce5147608ea73350028bde488ef7278dd71d6d3e211638dde429:RfJaSjkmFGBxHotSJdysKwsic7Ij4kZuc7fBuoUqvMLjaSoGRD3YgZqq_zNYcnXaen5hf6HEIM8lyYCDl5CICA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:3ae2ef50aa3fe6d02a7c7deb5cb4dbba72d7aabba95764090501b9e6e8cda01e:X2x8R2w4WdHo2lVUJak6VQ8eLnW5LXX7yAlIpUrW2NWunbX27Y6zyJxAeAChcYLgB7-TrGMGZPn6AzVopGOTDg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: directive-format
@@ -14,6 +14,12 @@ tags:
   - authoring
   - metadata
   - specification
+  - workflow
+  - xml
+  - steps
+  - process
+  - writing-directives
+  - create-directive
 references:
   - tool-format
   - knowledge-format
@@ -455,11 +461,13 @@ Input values are interpolated in process steps using these patterns:
 | `{input:name}` | Required — fails if not provided |
 | `{input:name?}` | Optional — replaced with empty string if absent |
 | `{input:name:default_value}` | Default — uses `default_value` if input absent |
+| `{input:name\|default_value}` | Default — uses `default_value` if input absent (pipe syntax) |
 
 ```xml
 <step name="write_file">
   Write to .ai/directives/{input:category}/{input:name}.md
   Use timeout {input:timeout:120} seconds.
+  Output dir: {input:output_dir|outputs}
   Tags: {input:tags?}
 </step>
 ```

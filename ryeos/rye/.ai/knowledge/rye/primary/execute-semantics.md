@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:a2f89cef18e7ed9196d6560b5b9bcf19b6cfe556a84f276ae80838e266022c97:YApNkWxfDyvc4WBcM_h9C5eio8SsjDEnug3fj_hrpCllCQZqhdchoQjNde4eRt90D423k2EM-jqrGhkNXbkTDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:41:03Z:88639d0cdf35e81bffb709f51550c72387483cdd181d4da561810fe7af6429e0:sDySsR4UTpNha_-lgGX4Ub94DzBZ2X5Rthw8Ed3PUYKZkcn7xS_jfZNgUyHdLHM3h--2qzvB3ChPckW5PB19AQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: execute-semantics
@@ -67,6 +67,7 @@ All items are verified against their signature before execution. Modified or mov
 | `{input:key}`         | Required — kept as-is if missing      |
 | `{input:key?}`        | Optional — replaced with empty string |
 | `{input:key:default}` | Fallback — uses `default` if missing  |
+| `{input:key\|default}` | Fallback — uses `default` if missing (pipe syntax) |
 
 **Input validation order:**
 1. Declared inputs with `default` values applied first

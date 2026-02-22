@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:c35b32c1f3517123ab9029adbfd59e641e9e262aeafad09ae3973e981f346d70:b6WDIFAC7o452r2lGFGoYt6zeTzQdAn_opEAVbwCdVGHNiaiDmHkLvEZxjjUCbrs5PMNoeBGYjvifJc8nqroAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:c35b32c1f3517123ab9029adbfd59e641e9e262aeafad09ae3973e981f346d70:b6WDIFAC7o452r2lGFGoYt6zeTzQdAn_opEAVbwCdVGHNiaiDmHkLvEZxjjUCbrs5PMNoeBGYjvifJc8nqroAw==:9fbfabe975fa5a7f
 """Search file contents with regex, returning line IDs."""
 
 import argparse

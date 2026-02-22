@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:375eb6d1df8bc42f861a4fa88d0d108d903cc03512f38f7956495e249397f10e:wph7MKyUzD_5-K5mfJjL0N3X4c4ffY6-R6UuPDuK1g1mrOx4gWpA4bxcEuWCfmbEtkKAMXWu1PB1OkavyMrXBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:f36c798ecb5f6642bfa74b0e74a9d89997442147f53ddfc4b34a81107e75ceb4:GdfDP6d5l3bR7FQ0Er344pA3Wzxkt3PAWFbXe9XrxEHmhLO0zBN5fiFZgRIL1wTEYoTMDE9GCrdeIt-ApAfpDw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: capability-strings
@@ -12,6 +12,10 @@ tags:
   - capabilities
   - permissions
   - security
+  - fnmatch
+  - authorization
+  - access-control
+  - thread-permissions
 references:
   - "docs/orchestration/permissions-and-capabilities.md"
 ```

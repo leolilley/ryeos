@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:a955f55110db1ae610c881724d0f8fb493faf77b6318fb8f875c90da50a80e3b:8xVHDPF83A1WfPlhsZo9kz1xOd-g10DAdG3y9_A5QjAePd6XqJsZSUfwUDUP21LKCYyuY0JXA-bpfCO_AV4PBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:6b21699dcc863df26f34adb558cc4e596b264a2b4eaf006e29ab6173b9b3bf42:WP2WNZy-9cAwVtjl1nnMJu8deX5aCKk8PkcAceV7_zcQamLMiToLVwUkjus8EGUyRbZPbONW3TB-spq0wbmXDA==:9fbfabe975fa5a7f
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """
@@ -34,7 +34,7 @@ class SafetyHarness:
 
     Two hook dispatch methods:
       - run_hooks()         — for error/limit/after_step events. Returns control action or None.
-      - run_hooks_context() — for thread_started only. Returns concatenated context string.
+      - run_hooks_context() — for thread_started/thread_continued. Returns concatenated context string.
     """
 
     def __init__(
@@ -61,10 +61,28 @@ class SafetyHarness:
                 p["content"].replace("/", ".") for p in permissions if p.get("tag") == "cap"
             ]
 
-        if child_caps:
+        parent_caps = [c.replace("/", ".") for c in parent_capabilities] if parent_capabilities else []
+
+        if child_caps and parent_caps:
+            # Attenuate: capabilities only narrow down the hierarchy.
+            # A child cap is kept if a parent cap covers it (parent as pattern).
+            # If the child is broader than the parent, narrow to parent's scope.
+            attenuated = []
+            for cc in child_caps:
+                for pc in parent_caps:
+                    if fnmatch.fnmatch(cc, pc):
+                        # Parent covers child exactly, or child is narrower
+                        attenuated.append(cc)
+                        break
+                    elif fnmatch.fnmatch(pc, cc):
+                        # Child is broader — narrow to parent's scope
+                        attenuated.append(pc)
+                        break
+            self._capabilities = attenuated
+        elif child_caps:
             self._capabilities = child_caps
-        elif parent_capabilities:
-            self._capabilities = [c.replace("/", ".") for c in parent_capabilities]
+        elif parent_caps:
+            self._capabilities = parent_caps
         else:
             self._capabilities = []
 
@@ -181,18 +199,19 @@ class SafetyHarness:
         self,
         context: Dict,
         dispatcher: Any,
+        event: str,
     ) -> str:
-        """Run thread_started hooks and collect context blocks.
+        """Run context-injection hooks for a given event and collect context blocks.
 
         Unlike run_hooks(), this method:
-        - Only runs hooks with event == "thread_started"
+        - Filters by the specified event (not hardcoded to thread_started)
         - Runs ALL matching hooks (no short-circuit)
         - Maps LoadTool results: result["data"]["content"] → context block
         - Returns concatenated context string (empty string if no hooks matched)
         """
         context_blocks = []
         for hook in self.hooks:
-            if hook.get("event") != "thread_started":
+            if hook.get("event") != event:
                 continue
             if not condition_evaluator.matches(context, hook.get("condition", {})):
                 continue

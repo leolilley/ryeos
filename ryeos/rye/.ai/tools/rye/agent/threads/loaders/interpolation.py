@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:486eb2cea69b4167223f5c505a2fd972e485f06f721b9bc6bfa778facc804dc8:uoO-81cj5U_rnR-pORwbBWqwNgcPAaoTKLjDfPnvOoUXHMvPv_8VTU9DZxHQEUYgm8qlmUKPdLlQPzf0IXc_Aw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:a049b90b83e7edbf855e5dc78b91e11294e294b782ec5b35761cd024147c87b7:wNSrtRdwOYFsAifhHs2i5L_VWZv2rAjR0__3ozpQ_h0RmOnntFEnob0Gg-jLofltaDOi9LCR_rpRsYaEyNzJAA==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -47,11 +47,14 @@ def interpolate(template: Any, context: Dict) -> Any:
 
 
 def interpolate_action(action: Dict, context: Dict) -> Dict:
-    """Interpolate all ${...} in an action's params.
+    """Interpolate all ${...} in an action's interpolable fields.
 
-    Preserves primary/item_type/item_id.
+    Interpolates: item_id, params.
+    Preserves: primary, item_type.
     """
     result = dict(action)
+    if "item_id" in result:
+        result["item_id"] = interpolate(result["item_id"], context)
     if "params" in result:
         result["params"] = interpolate(result["params"], context)
     return result

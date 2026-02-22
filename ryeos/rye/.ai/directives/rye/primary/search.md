@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:f220fac3d71d8c8aa4219a995ffa4a8bf0b8f20131c06efea7d288803c613a9d:uKvCA3SDXJvd6sdqdzKvdvn4qvY7XzEI-q_jD8tjjNvv9XKSui3mbNZ29skBxUXrZKbyRRsOG400_t92aWC6AQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:f220fac3d71d8c8aa4219a995ffa4a8bf0b8f20131c06efea7d288803c613a9d:uKvCA3SDXJvd6sdqdzKvdvn4qvY7XzEI-q_jD8tjjNvv9XKSui3mbNZ29skBxUXrZKbyRRsOG400_t92aWC6AQ==:9fbfabe975fa5a7f -->
 # Search
 
 Search for directives, tools, or knowledge by scope and query.

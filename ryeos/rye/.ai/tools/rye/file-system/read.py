@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:7f14027c65be6fa469d6fac41c001e80696b29edb0fffecf8a77839180c9490c:PAOnBS_UYjoFfs4TTlL_LX5yV6pszQT7WF9YFmto7rMIlsHF_wQQuhrw5ScYmw7pMIStrUcjfyyxDNB6VW1_Cg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:33dd5a5aad9f2820988640d11c1285c3d06e6bb00b7d1cf559977646cc08df9b:PKVTarifNoVsesB8rNJz_KFeTCcc6bRB-9ZszlEzzQJODKj6uF-sqSz0HqOZsxxmSJ2ezQJJ21XQJzrbVQ6MAQ==:9fbfabe975fa5a7f
 """Read a file with persistent line IDs for stable editing."""
 
 import argparse
@@ -16,7 +16,7 @@ __tool_description__ = "Read file content with persistent line IDs"
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "file_path": {
+        "path": {
             "type": "string",
             "description": "Path to file (relative to project root or absolute)",
         },
@@ -31,7 +31,7 @@ CONFIG_SCHEMA = {
             "default": 2000,
         },
     },
-    "required": ["file_path"],
+    "required": ["path"],
 }
 
 MAX_LINE_LENGTH = 2000
@@ -141,7 +141,7 @@ def format_output_with_line_ids(lines: list[str], index: list[dict]) -> str:
 
 def execute(params: dict, project_path: str) -> dict:
     project = Path(project_path).resolve()
-    file_path = Path(params["file_path"])
+    file_path = Path(params["path"])
     offset = params.get("offset", 1)
     limit = params.get("limit", 2000)
 

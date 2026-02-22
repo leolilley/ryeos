@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T08:20:02Z:8ef96f85e031dd38730317933ae6c70c8e9ecc4125c075fc35363249c1c6643a:Ho2nD2MiViPxbSWyXt3v7kB7Z2SWEmfMdtEgni05Lyu0d1-tXUNBN5G-Pfy7E_tPxDMOg9L-XRpbghWtSZiRAQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:8ef96f85e031dd38730317933ae6c70c8e9ecc4125c075fc35363249c1c6643a:PEkv5ddusaC_kWpw_DihdzeiOf19WZAKP6UDSkm1-uJ0DDedtQxbDlLw-KZBvC43-GYAu-dtVvvg1pjqXQd1BA==:9fbfabe975fa5a7f -->
 # File Investigator
 
 Creates a mystery file, then investigates it — reads it back, lists the directory, writes a report summarizing findings.
@@ -33,12 +33,12 @@ Creates a mystery file, then investigates it — reads it back, lists the direct
 <process>
   <step name="create_mystery">
     Write a short mystery file about the topic to `investigation/mystery.md`. Include a title, 3 clues as bullet points, and a hidden answer at the bottom.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"file_path": "investigation/mystery.md", "content": "..."})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "investigation/mystery.md", "content": "..."})`
   </step>
 
   <step name="read_mystery">
     Read the mystery file back to verify its contents:
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"file_path": "investigation/mystery.md"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "investigation/mystery.md"})`
   </step>
 
   <step name="list_directory">
@@ -48,12 +48,12 @@ Creates a mystery file, then investigates it — reads it back, lists the direct
 
   <step name="write_report">
     Based on what you read and found, write an investigation report to `investigation/report.md` summarizing: what the mystery file contained, how many files are in the directory, and your analysis of the clues.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"file_path": "investigation/report.md", "content": "..."})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "investigation/report.md", "content": "..."})`
   </step>
 
   <step name="verify_report">
     Read the report back to confirm:
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"file_path": "investigation/report.md"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "investigation/report.md"})`
   </step>
 
   <step name="return_result">

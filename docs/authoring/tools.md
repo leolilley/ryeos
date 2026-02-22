@@ -144,6 +144,260 @@ if __name__ == "__main__":
 |-------------|------------|
 | `rye/core/runtimes/python_function_runtime` | Pure Python — imported and called in-process |
 | `rye/core/runtimes/python_script_runtime` | Needs subprocess isolation (shell commands, heavy I/O) |
+| `rye/core/runtimes/node_runtime` | JavaScript/TypeScript — subprocess with node resolution |
+
+## JavaScript/TypeScript Tools
+
+JavaScript and TypeScript tools run in Node.js via the `node_runtime`. They use JSDoc comments for metadata and CLI args for parameters.
+
+### Required Structure
+
+```javascript
+/**
+ * @version 1.0.0
+ * @tool_type javascript
+ * @executor_id rye/core/runtimes/node_runtime
+ * @category category/path
+ * @description What this tool does
+ */
+
+const CONFIG_SCHEMA = {
+  type: "object",
+  properties: {
+    param_name: {
+      type: "string",
+      description: "What this param does",
+    },
+  },
+  required: ["param_name"],
+};
+
+async function execute(params, projectPath) {
+  // Implementation
+  return { success: true, data: result };
+}
+
+// CLI entry point
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const paramsIdx = args.indexOf("--params");
+  const projectPathIdx = args.indexOf("--project-path");
+
+  if (paramsIdx === -1 || projectPathIdx === -1) {
+    console.error("Missing --params or --project-path");
+    process.exit(1);
+  }
+
+  const params = JSON.parse(args[paramsIdx + 1]);
+  const projectPath = args[projectPathIdx + 1];
+
+  execute(params, projectPath)
+    .then((result) => {
+      console.log(JSON.stringify(result));
+    })
+    .catch((err) => {
+      console.log(
+        JSON.stringify({
+          success: false,
+          error: err.message,
+        })
+      );
+      process.exit(1);
+    });
+}
+
+module.exports = { execute, CONFIG_SCHEMA };
+```
+
+### JSDoc Metadata
+
+| Annotation | Purpose | Example |
+|-----------|---------|---------|
+| `@version` | Semantic version of the tool | `@version 1.0.0` |
+| `@tool_type` | Tool classification | `@tool_type javascript` |
+| `@executor_id` | Runtime that executes this tool | `@executor_id rye/core/runtimes/node_runtime` |
+| `@category` | Directory path within `.ai/tools/` | `@category rye/file-system` |
+| `@description` | Human-readable description | `@description Create or overwrite a file` |
+
+### Receiving and Parsing CLI Args
+
+The Node runtime passes parameters as CLI arguments:
+
+```javascript
+const args = process.argv.slice(2);
+// Expected: [tool_path, "--params", "{...}", "--project-path", "/path"]
+
+const paramsIdx = args.indexOf("--params");
+const projectPathIdx = args.indexOf("--project-path");
+
+const params = JSON.parse(args[paramsIdx + 1]);
+const projectPath = args[projectPathIdx + 1];
+```
+
+### Returning Results
+
+Always return a JSON object with `success: bool` and either `data`/`output` or `error`:
+
+```javascript
+async function execute(params, projectPath) {
+  try {
+    // Do work
+    const result = await doSomething(params);
+    return {
+      success: true,
+      data: result,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+// In CLI handler:
+console.log(JSON.stringify(result));
+```
+
+### TypeScript Support
+
+TypeScript tools use `tsx` (installed in `node_modules`) to transpile on-the-fly:
+
+```typescript
+/**
+ * @version 1.0.0
+ * @tool_type typescript
+ * @executor_id rye/core/runtimes/node_runtime
+ * @category my/tools
+ * @description TypeScript tool example
+ */
+
+interface Params {
+  name: string;
+  count?: number;
+}
+
+interface Result {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
+async function execute(params: Params, projectPath: string): Promise<Result> {
+  try {
+    const message = `Hello ${params.name}!`;
+    return {
+      success: true,
+      message,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const paramsIdx = args.indexOf("--params");
+  const projectPathIdx = args.indexOf("--project-path");
+
+  const params: Params = JSON.parse(args[paramsIdx + 1]);
+  const projectPath = args[projectPathIdx + 1];
+
+  execute(params, projectPath).then((result) => {
+    console.log(JSON.stringify(result));
+  });
+}
+
+module.exports = { execute };
+```
+
+The runtime resolves `tsx` from `node_modules/.bin` automatically. Ensure `tsx` is in `package.json`:
+
+```json
+{
+  "devDependencies": {
+    "tsx": "^4.0.0"
+  }
+}
+```
+
+### Complete JavaScript Example
+
+```javascript
+// .ai/tools/my/greet.js
+/**
+ * @version 1.0.0
+ * @tool_type javascript
+ * @executor_id rye/core/runtimes/node_runtime
+ * @category my/examples
+ * @description Greet someone
+ */
+
+const fs = require("fs");
+const path = require("path");
+
+const CONFIG_SCHEMA = {
+  type: "object",
+  properties: {
+    name: {
+      type: "string",
+      description: "Person to greet",
+    },
+    formal: {
+      type: "boolean",
+      description: "Use formal greeting",
+      default: false,
+    },
+  },
+  required: ["name"],
+};
+
+async function execute(params, projectPath) {
+  const { name, formal } = params;
+  const greeting = formal
+    ? `Good day, ${name}. It is my pleasure.`
+    : `Hey ${name}!`;
+
+  return {
+    success: true,
+    greeting,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const paramsIdx = args.indexOf("--params");
+  const projectPathIdx = args.indexOf("--project-path");
+
+  if (paramsIdx === -1 || projectPathIdx === -1) {
+    console.error("Usage: node greet.js --params '{}' --project-path /path");
+    process.exit(1);
+  }
+
+  const params = JSON.parse(args[paramsIdx + 1]);
+  const projectPath = args[projectPathIdx + 1];
+
+  execute(params, projectPath)
+    .then((result) => {
+      console.log(JSON.stringify(result));
+    })
+    .catch((err) => {
+      console.log(
+        JSON.stringify({
+          success: false,
+          error: err.message,
+        })
+      );
+      process.exit(1);
+    });
+}
+
+module.exports = { execute, CONFIG_SCHEMA };
+```
 
 ## YAML Tools — Configuration-Driven
 

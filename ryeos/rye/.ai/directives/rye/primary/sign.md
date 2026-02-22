@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:22d4c2b20dd873e1dea13d73a927294b5b96b2c1b660a7ff652d8f4b3777e73e:lB7WTPj0X1eSt5qPYsK8A0SFSNtsgpylp7qUo32--RmkurkXPJoTbioxZh9DytHFZfwQe1VK6PpEqbVrCW7ADA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:22d4c2b20dd873e1dea13d73a927294b5b96b2c1b660a7ff652d8f4b3777e73e:lB7WTPj0X1eSt5qPYsK8A0SFSNtsgpylp7qUo32--RmkurkXPJoTbioxZh9DytHFZfwQe1VK6PpEqbVrCW7ADA==:9fbfabe975fa5a7f -->
 # Sign
 
 Validate and sign a directive, tool, or knowledge item.

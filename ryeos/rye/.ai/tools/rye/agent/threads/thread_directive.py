@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:89e56f982943e857b1f30bca4c5d826797a30824e2b9d0e740b89ba5aac72cc0:xwo1JelhtFpD5wjO3UYl4jAI7JtSKstdYFN7kgR6tVRrKaDIUNRdYcKG4VpvZaHNtAAuVjduxL1PvJt6A7pFBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:96e5bb8c20e65323c2cbc6c9a6d230a2bba3fa5745a1104bf18cfde95cd57ac3:wT8mI5KXgyWFfDqrYwnC9wM_-fkn9FWhpKkZDQvf5A6e8rTlwLdUZOKPLdrsi4VbAckC40MoEE8xdQ_ZqhrkBw==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_script_runtime"
@@ -79,7 +79,8 @@ def _build_tool_schemas() -> list:
 
 def _generate_thread_id(directive_name: str) -> str:
     epoch = int(time.time())
-    return f"{directive_name}-{epoch}"
+    bare_name = directive_name.rsplit("/", 1)[-1]
+    return f"{directive_name}/{bare_name}-{epoch}"
 
 
 def _write_thread_meta(
@@ -100,7 +101,7 @@ def _write_thread_meta(
     Stores resolved limits (including depth) and capabilities so child
     threads can look up parent context from the filesystem.
     """
-    thread_dir = project_path / AI_DIR / "threads" / thread_id
+    thread_dir = project_path / AI_DIR / "agent" / "threads" / thread_id
     thread_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {
@@ -134,7 +135,7 @@ def _write_thread_meta(
 
 def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
     """Read a thread's thread.json. Returns None if not found."""
-    meta_path = project_path / AI_DIR / "threads" / thread_id / "thread.json"
+    meta_path = project_path / AI_DIR / "agent" / "threads" / thread_id / "thread.json"
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -147,9 +148,11 @@ def _build_prompt(directive: Dict) -> str:
     Only sends what the LLM needs to execute the directive:
       1. Execute instruction
       2. Directive name + description
-      3. Body (process steps with resolved input values)
-      4. Returns section (from <outputs>)
+      3. Permissions (raw XML from directive metadata)
+      4. Body (process steps with resolved input values)
+      5. Returns section (from <outputs>)
     """
+    import re as _re
     from rye.constants import DIRECTIVE_INSTRUCTION
     parts = [DIRECTIVE_INSTRUCTION]
 
@@ -162,6 +165,13 @@ def _build_prompt(directive: Dict) -> str:
         parts.append(f"<directive name=\"{name}\">")
     elif desc:
         parts.append(f"<directive>\n<description>{desc}</description>")
+
+    # Permissions — extract raw XML from directive content as-is
+    content = directive.get("content", "")
+    if content:
+        m = _re.search(r"(<permissions>.*?</permissions>)", content, _re.DOTALL)
+        if m:
+            parts.append(m.group(1))
 
     # Body (process steps — the actual instructions, already pseudo-XML)
     body = directive.get("body", "").strip()
@@ -206,6 +216,16 @@ def _resolve_limits(directive_limits: Dict, overrides: Dict, project_path: str, 
     defaults = (
         resilience_loader.load(Path(project_path)).get("limits", {}).get("defaults", {})
     )
+
+    # Validate directive/override keys against resilience defaults.
+    for source_name, source in (("directive <limits>", directive_limits), ("limit overrides", overrides)):
+        for k in source:
+            if k not in defaults:
+                raise ValueError(
+                    f"Unknown limit '{k}' in {source_name}. "
+                    f"Valid limits: {', '.join(sorted(defaults))}"
+                )
+
     resolved = {**defaults, **directive_limits, **overrides}
 
     if parent_limits:
@@ -414,6 +434,13 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
     runner = load_module("runner", anchor=_ANCHOR)
 
+    # Build clean directive intent text for hook context
+    directive_body = directive.get("body", "").strip()
+    directive_desc = directive.get("description", "")
+    clean_directive_text = "\n".join(filter(None, [
+        directive_name, directive_desc, directive_body
+    ]))
+
     # 9. Write initial thread.json (with limits/depth/caps for child lookup)
     registry.update_status(thread_id, "running")
     _write_thread_meta(
@@ -445,6 +472,9 @@ async def execute(params: Dict, project_path: str) -> Dict:
                     thread_id, user_prompt, harness, provider,
                     dispatcher, emitter, transcript, proj_path,
                     resume_messages=params.get("resume_messages"),
+                    directive_body=clean_directive_text,
+                    previous_thread_id=params.get("previous_thread_id"),
+                    inputs=inputs,
                 ))
 
                 # Finalize: report spend, update registry
@@ -495,6 +525,9 @@ async def execute(params: Dict, project_path: str) -> Dict:
         transcript,
         proj_path,
         resume_messages=params.get("resume_messages"),
+        directive_body=clean_directive_text,
+        previous_thread_id=params.get("previous_thread_id"),
+        inputs=inputs,
     )
 
     # Ensure non-empty error message on failure
@@ -531,7 +564,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
     # Write per-thread diagnostics file on error for debugging
     if not result.get("success") and os.environ.get("RYE_DEBUG"):
-        diag_path = proj_path / ".ai" / "threads" / thread_id.replace("/", os.sep) / "diagnostics.json"
+        diag_path = proj_path / ".ai" / "agent" / "threads" / thread_id.replace("/", os.sep) / "diagnostics.json"
         try:
             import json as _json
             diag_path.parent.mkdir(parents=True, exist_ok=True)

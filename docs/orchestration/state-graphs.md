@@ -449,7 +449,7 @@ The background process:
 
 - Forks via `os.fork()` and daemonizes (`os.setsid()`)
 - Runs the graph to completion, updating the thread registry
-- Writes stderr to `.ai/threads/<graph_run_id>/async.log` for debugging
+- Writes stderr to `.ai/agent/threads/<graph_run_id>/async.log` for debugging
 - Updates registry status to `completed` or `error` on finish
 
 Monitor progress by querying the thread registry or checking the persisted state knowledge item.

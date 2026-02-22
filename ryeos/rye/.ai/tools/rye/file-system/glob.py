@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:d4cc9a810a782430e56fc7ab3dab79de5d7e954c49bb78049b796c22293a3688:XDKfNbOnn4ExTXd29Q-rZQMLxojUbHsRgyxnmo4gEH0ARIOUEXFZ1zlShAqJmriTAjLZ_Yo6Tn2JC6sAPnW3Dg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:d4cc9a810a782430e56fc7ab3dab79de5d7e954c49bb78049b796c22293a3688:XDKfNbOnn4ExTXd29Q-rZQMLxojUbHsRgyxnmo4gEH0ARIOUEXFZ1zlShAqJmriTAjLZ_Yo6Tn2JC6sAPnW3Dg==:9fbfabe975fa5a7f
 """Find files by glob pattern."""
 
 import argparse

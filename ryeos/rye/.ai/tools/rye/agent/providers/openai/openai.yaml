@@ -1,0 +1,140 @@
+# rye:signed:2026-02-22T09:00:56Z:9e69da04af63f133f0f63e0bb45eb96aaa215b86e2ae4015df3eeae6e2040f41:Xcr6meNUiIPXdRFXkvCi-Ib8UMwRqoQaZ2K7lyWFK1blmhPyLMtCiSzxa-jvZTZr96c8lxZlwKTMZlmF4CNYBw==:9fbfabe975fa5a7f
+tool_id: openai
+tool_type: http
+version: "1.0.0"
+description: "OpenAI Chat Completions API provider for thread execution"
+executor_id: rye/core/primitives/http_client
+category: rye/agent/providers/openai
+
+requires:
+  - net.call
+
+tier_mapping:
+  fast: "gpt-4o-mini"
+  general: "gpt-4o-mini"
+  high: "gpt-4o"
+  max: "o3"
+
+# Per-million-token pricing (USD)
+pricing:
+  gpt-4o:
+    input: 2.50
+    output: 10.00
+  gpt-4o-mini:
+    input: 0.15
+    output: 0.60
+  o3:
+    input: 2.00
+    output: 8.00
+  o3-mini:
+    input: 1.10
+    output: 4.40
+  o4-mini:
+    input: 1.10
+    output: 4.40
+
+env_config:
+  env:
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
+
+config:
+  method: POST
+  url: "https://api.openai.com/v1/chat/completions"
+
+  auth:
+    type: bearer
+    token: "${OPENAI_API_KEY}"
+
+  headers:
+    Content-Type: application/json
+
+  body:
+    model: "{model}"
+    max_tokens: "{max_tokens}"
+    messages: "{messages}"
+    tools: "{tools}"
+    stream: "{stream}"
+
+  timeout: 120
+
+  retry:
+    max_attempts: 2
+    backoff: exponential
+
+parameters:
+  - name: model
+    type: string
+    required: true
+    default: "gpt-4o-mini"
+  - name: max_tokens
+    type: integer
+    required: false
+    default: 4096
+  - name: messages
+    type: array
+    required: true
+    description: "Array of {role, content} message objects"
+  - name: tools
+    type: array
+    required: false
+    default: []
+    description: "Array of tool definitions for function calling"
+
+tool_use:
+  mode: native
+
+  tool_definition:
+    type: function
+    function:
+      name: "{name}"
+      description: "{description}"
+      parameters: "{schema}"
+
+  response_schema:
+    content_mode: separate
+    content_path: "choices.0.message"
+    text_field: "content"
+    tool_calls_field: "tool_calls"
+    tool_call_name: "function.name"
+    tool_call_input: "function.arguments"
+    tool_call_input_format: json_string
+    tool_call_id: "id"
+    usage_path: "usage"
+    input_tokens: "prompt_tokens"
+    output_tokens: "completion_tokens"
+    finish_reason_path: "choices.0.finish_reason"
+    finish_reason_tool_use: "tool_calls"
+
+  message_schema:
+    role_map: {user: "user", assistant: "assistant"}
+    content_key: "content"
+    content_wrap: "string"
+    tool_result:
+      role: "tool"
+      wrap_mode: "direct"
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      type: "function"
+      id: "{id}"
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+
+  stream_schema:
+    stream_mode: "delta_merge"
+    done_signal: "[DONE]"
+    choices_field: "choices"
+    delta_field: "delta"
+    text_delta_field: "content"
+    tool_calls_field: "tool_calls"
+    tool_call_index_field: "index"
+    tool_call_id_field: "id"
+    tool_call_func_path: "function"
+    tool_call_name_field: "name"
+    tool_call_args_field: "arguments"
+    finish_reason_field: "finish_reason"
+    usage_path: "usage"
+    input_tokens_field: "prompt_tokens"
+    output_tokens_field: "completion_tokens"

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:dfe8e077f46455e7b157f775a4817c2895dc7d228e13e3baa73daeaf185ddb19:yQdbbzrD0UojdFiQ2ZuB9viU59ZaM6VxPnafFygPwUKVpoRbqN-Es6w-I18WZh1rZNb1Kth695a5t6knZic0Dw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:2c8118dd206c4f4bc4e4233fa480c93d08d344fb29e6699cce87a9239d6830fe:DOLHcCvFeqP77YeFjCup27qYussn6gvfSTaPzCBL3Hyt2dM3P3zaSifuay4FFMB9DyCxtTYk4rgAko1MfhD1AQ==:9fbfabe975fa5a7f
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -8,16 +8,22 @@ The primitive handles auth, env resolution, retries, HTTP transport.
 
 This adapter only handles:
 1. Formatting messages/tools into params the provider tool expects
-2. Parsing the API response using the provider YAML's tool_use.response config
+2. Parsing the API response using the provider YAML's response_schema config
+3. Converting messages using the provider YAML's message_schema config
+4. Assembling streaming events using the provider YAML's stream_schema config
+
+All provider-specific behavior is driven by YAML schemas — no hardcoded format handlers.
 """
 
-__version__ = "1.4.0"
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "HTTP provider adapter for LLM API calls"
 
+import json
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 from .provider_adapter import ProviderAdapter
@@ -27,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 class HttpProvider(ProviderAdapter):
     """Provider that dispatches LLM calls through the tool execution chain.
+
+    Fully data-driven: response parsing, message conversion, and stream assembly
+    are all configured via provider YAML schemas (response_schema, message_schema,
+    stream_schema). No provider-specific code paths.
 
     Args:
         model: Resolved model ID (e.g., "claude-3-5-haiku-20241022")
@@ -46,134 +56,185 @@ class HttpProvider(ProviderAdapter):
         self._dispatcher = dispatcher
         self._provider_item_id = provider_item_id
         self._tool_use = provider_config.get("tool_use", {})
-        self._prompts = provider_config.get("prompts", {})
+        self._http_config = provider_config.get("config", {})
 
     @property
     def supports_streaming(self) -> bool:
         return True
 
-    @property
-    def _response_format(self) -> str:
-        """Which response format this provider uses.
+    # ── Utilities ──────────────────────────────────────────────────────
 
-        content_blocks = Anthropic (content is array of typed blocks)
-        chat_completion = OpenAI (content is string, tool_calls is top-level array)
+    def _resolve_path(self, obj: Any, path: str) -> Any:
+        """Navigate nested dicts/lists via dot-separated path.
+
+        Example: _resolve_path(data, "choices.0.message") navigates
+        data["choices"][0]["message"].
         """
-        return self._tool_use.get("response_format", "content_blocks")
+        if not path:
+            return obj
+        for key in path.split("."):
+            if obj is None:
+                return None
+            if isinstance(obj, list):
+                try:
+                    obj = obj[int(key)]
+                except (IndexError, ValueError):
+                    return None
+            elif isinstance(obj, dict):
+                obj = obj.get(key)
+            else:
+                return None
+        return obj
+
+    def _detect_block(self, block: dict, detect_config: dict) -> bool:
+        """Check if a content block matches a detection rule.
+
+        Supports two modes:
+        - field/value: block["type"] == "text"
+        - key presence: "text" in block
+        """
+        if not detect_config:
+            return False
+        if "field" in detect_config:
+            return block.get(detect_config["field"]) == detect_config["value"]
+        if "key" in detect_config:
+            return detect_config["key"] in block
+        return False
+
+    def _wrap_text_block(self, text: str, mode: str) -> Any:
+        """Wrap text content per content_wrap mode."""
+        if mode == "blocks_array":
+            return {"type": "text", "text": text}
+        elif mode == "parts_array":
+            return {"text": text}
+        return text
+
+    # ── Message Conversion ─────────────────────────────────────────────
 
     def _convert_messages(self, messages: List[Dict]) -> List[Dict]:
-        """Convert runner message format to provider format.
+        """Convert runner message format to provider format using message_schema.
 
-        Dispatches to format-specific converter based on response_format.
+        Handles three concerns driven by YAML config:
+        1. Tool result messages → provider-specific format (grouped or individual)
+        2. Assistant messages with tool_calls → reconstructed with provider block format
+        3. Regular messages → role-mapped and content-wrapped if needed
         """
-        if self._response_format == "chat_completion":
-            return self._convert_messages_chat(messages)
-        return self._convert_messages_blocks(messages)
+        schema = self._tool_use.get("message_schema", {})
+        role_map = schema.get("role_map", {"user": "user", "assistant": "assistant"})
+        content_key = schema.get("content_key", "content")
+        content_wrap = schema.get("content_wrap", "string")
+        tr_config = schema.get("tool_result", {})
+        tc_template = schema.get("tool_call_block_template", {})
 
-    def _convert_messages_chat(self, messages: List[Dict]) -> List[Dict]:
-        """Convert messages for OpenAI chat completion format.
-
-        Runner's tool results {"role": "tool", "tool_call_id": "...", "content": "..."}
-        are already in OpenAI format — pass through directly.
-
-        Assistant messages with tool_calls need function wrapper reconstruction.
-        """
-        import json
-
-        resp_config = self._tool_use.get("response", {})
-        tool_call_type = resp_config.get("tool_call_type", "function")
+        tr_role = tr_config.get("role", "user")
+        tr_wrap = tr_config.get("wrap_mode", "content_blocks")
+        tr_template = tr_config.get("block_template", {})
+        tr_error_field = tr_config.get("error_field")
 
         converted = []
-        for msg in messages:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                # Reconstruct OpenAI assistant message with tool_calls array
-                assistant_msg = {"role": "assistant"}
-                if msg.get("content"):
-                    assistant_msg["content"] = msg["content"]
-                else:
-                    assistant_msg["content"] = None
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": tool_call_type,
-                        tool_call_type: {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["input"]) if isinstance(tc["input"], dict) else str(tc["input"]),
-                        },
-                    }
-                    for tc in msg["tool_calls"]
-                ]
-                converted.append(assistant_msg)
-            else:
-                # user, tool, and plain assistant messages pass through
-                converted.append(msg)
-        return converted
+        pending_results = []
+        # Map tool_call_id → name for providers that need name in tool results (Gemini)
+        tc_name_map: Dict[str, str] = {}
 
-    def _convert_messages_blocks(self, messages: List[Dict]) -> List[Dict]:
-        """Convert messages for Anthropic content-block format.
-
-        The runner produces tool results as:
-            {"role": "tool", "tool_call_id": "...", "content": "..."}
-
-        The provider YAML's tool_use.tool_result config defines the target format.
-        For Anthropic, this becomes:
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]}
-        """
-        result_config = self._tool_use.get("tool_result", {})
-        role = result_config.get("role", "user")
-        block_type = result_config.get("block_type", "tool_result")
-        id_field = result_config.get("id_field", "tool_use_id")
-        content_field = result_config.get("content_field", "content")
-        error_field = result_config.get("error_field", "is_error")
-
-        resp_config = self._tool_use.get("response", {})
-        tool_use_block_type = resp_config.get("tool_use_block_type", "tool_use")
-        tool_use_id_field = resp_config.get("tool_use_id_field", "id")
-        tool_use_name_field = resp_config.get("tool_use_name_field", "name")
-        tool_use_input_field = resp_config.get("tool_use_input_field", "input")
-        text_block_type = resp_config.get("text_block_type", "text")
-        text_field = resp_config.get("text_field", "text")
-
-        converted = []
-        pending_tool_results = []
+        def flush_results():
+            nonlocal pending_results
+            if pending_results:
+                converted.append({"role": tr_role, content_key: pending_results})
+                pending_results = []
 
         for msg in messages:
-            if msg.get("role") == "tool":
-                block = {
-                    "type": block_type,
-                    id_field: msg.get("tool_call_id", ""),
-                    content_field: msg.get("content", ""),
+            role = msg.get("role", "")
+
+            if role == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                tool_name = msg.get("tool_name", msg.get("name", ""))
+                if not tool_name:
+                    tool_name = tc_name_map.get(tc_id, "")
+                data = {
+                    "tool_call_id": tc_id,
+                    "tool_name": tool_name,
+                    "content": msg.get("content", ""),
                 }
-                if msg.get("is_error"):
-                    block[error_field] = True
-                pending_tool_results.append(block)
-            elif msg.get("role") == "assistant" and msg.get("tool_calls"):
-                if pending_tool_results:
-                    converted.append({"role": role, "content": pending_tool_results})
-                    pending_tool_results = []
-                # Reconstruct assistant content blocks
-                content_blocks = []
-                text = msg.get("content", "")
-                if text:
-                    content_blocks.append({"type": text_block_type, text_field: text})
+                block = self._apply_template(tr_template, data)
+                if msg.get("is_error") and tr_error_field:
+                    block[tr_error_field] = True
+
+                if tr_wrap == "content_blocks":
+                    pending_results.append(block)
+                elif tr_wrap == "direct":
+                    result_msg = {"role": tr_role}
+                    result_msg.update(block)
+                    converted.append(result_msg)
+                elif tr_wrap == "parts":
+                    converted.append({"role": tr_role, content_key: [block]})
+
+            elif role == "assistant" and msg.get("tool_calls"):
+                flush_results()
+                assistant_role = role_map.get("assistant", "assistant")
                 for tc in msg["tool_calls"]:
-                    content_blocks.append({
-                        "type": tool_use_block_type,
-                        tool_use_id_field: tc["id"],
-                        tool_use_name_field: tc["name"],
-                        tool_use_input_field: tc["input"],
-                    })
-                converted.append({"role": "assistant", "content": content_blocks})
+                    tc_name_map[tc["id"]] = tc["name"]
+
+                if content_wrap == "string":
+                    # OpenAI: tool_calls as top-level array on the message
+                    assistant_msg = {
+                        "role": assistant_role,
+                        "content": msg.get("content") or None,
+                    }
+                    tc_list = []
+                    for tc in msg["tool_calls"]:
+                        tc_data = {
+                            "id": tc["id"],
+                            "name": tc["name"],
+                            "input": tc["input"],
+                            "input_json": json.dumps(tc["input"])
+                            if isinstance(tc["input"], dict)
+                            else str(tc["input"]),
+                        }
+                        tc_list.append(self._apply_template(tc_template, tc_data))
+                    assistant_msg["tool_calls"] = tc_list
+                    converted.append(assistant_msg)
+                else:
+                    # Block-based: tool calls are content blocks (Anthropic, Gemini)
+                    blocks = []
+                    text = msg.get("content", "")
+                    if text:
+                        blocks.append(self._wrap_text_block(text, content_wrap))
+                    for tc in msg["tool_calls"]:
+                        if "_raw_block" in tc:
+                            # Replay raw block (preserves thoughtSignature for Gemini)
+                            blocks.append(tc["_raw_block"])
+                        else:
+                            tc_data = {
+                                "id": tc["id"],
+                                "name": tc["name"],
+                                "input": tc["input"],
+                            }
+                            blocks.append(self._apply_template(tc_template, tc_data))
+                    converted.append({"role": assistant_role, content_key: blocks})
+
             else:
-                if pending_tool_results:
-                    converted.append({"role": role, "content": pending_tool_results})
-                    pending_tool_results = []
-                converted.append(msg)
+                flush_results()
+                mapped_role = role_map.get(role, role)
+                if content_key == "content":
+                    # Pass through as-is (Anthropic/OpenAI accept string content)
+                    out = dict(msg)
+                    if mapped_role != role:
+                        out["role"] = mapped_role
+                    converted.append(out)
+                else:
+                    # Different content key (e.g., Gemini "parts")
+                    content = msg.get("content", "")
+                    converted.append({
+                        "role": mapped_role,
+                        content_key: [self._wrap_text_block(content, content_wrap)]
+                        if content
+                        else [],
+                    })
 
-        if pending_tool_results:
-            converted.append({"role": role, "content": pending_tool_results})
-
+        flush_results()
         return converted
+
+    # ── Tool Formatting ────────────────────────────────────────────────
 
     def _format_tools(self, tools: List[Dict]) -> List[Dict]:
         """Format tool schemas using tool_use.tool_definition from provider config.
@@ -181,23 +242,24 @@ class HttpProvider(ProviderAdapter):
         The YAML defines field mapping via template placeholders:
             Anthropic: {name: "{name}", description: "{description}", input_schema: "{schema}"}
             OpenAI:    {type: function, function: {name: "{name}", parameters: "{schema}"}}
+            Gemini:    {name: "{name}", ...} + tool_list_wrap: "functionDeclarations"
 
-        Supports nested dicts in templates. Generic tool schemas use: name, description, schema.
+        When tool_list_wrap is set, all formatted tools are grouped into a single
+        object under that key (e.g., Gemini needs [{functionDeclarations: [...all...]}]).
         """
         if not tools:
             return tools
         tool_def_template = self._tool_use.get("tool_definition", {})
         if not tool_def_template:
             return tools
-
-        formatted = []
-        for tool in tools:
-            entry = self._apply_template(tool_def_template, tool)
-            formatted.append(entry)
+        formatted = [self._apply_template(tool_def_template, tool) for tool in tools]
+        wrap_key = self._tool_use.get("tool_list_wrap")
+        if wrap_key:
+            return [{wrap_key: formatted}]
         return formatted
 
     def _apply_template(self, template: Any, tool: Dict) -> Any:
-        """Recursively apply template placeholders from tool data."""
+        """Recursively apply template placeholders from data dict."""
         import re
         if isinstance(template, str):
             match = re.match(r"^\{(\w+)\}$", template.strip())
@@ -210,102 +272,90 @@ class HttpProvider(ProviderAdapter):
             return [self._apply_template(item, tool) for item in template]
         return template
 
+    # ── Response Parsing ───────────────────────────────────────────────
+
     def _parse_response(self, response_body: Dict) -> Dict:
-        """Parse API response. Dispatches based on response_format."""
-        if self._response_format == "chat_completion":
-            return self._parse_response_chat(response_body)
-        return self._parse_response_blocks(response_body)
-
-    def _parse_response_chat(self, response_body: Dict) -> Dict:
-        """Parse OpenAI chat completion response.
-
-        OpenAI structure:
-            {choices: [{message: {content: "...", tool_calls: [...]}, finish_reason: "..."}],
-             usage: {prompt_tokens: N, completion_tokens: N}}
-        """
-        import json
-
-        resp_config = self._tool_use.get("response", {})
-        choices = response_body.get("choices", [])
-        message = choices[0].get("message", {}) if choices else {}
-        finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
-
-        text = message.get("content") or ""
-        tool_calls = []
-
-        for tc in message.get("tool_calls", []):
-            tc_type = tc.get("type", "function")
-            func = tc.get(tc_type, tc.get("function", {}))
-            args_raw = func.get("arguments", "{}")
-            try:
-                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-            except (json.JSONDecodeError, ValueError):
-                args = {"_raw": args_raw}
-            tool_calls.append({
-                "id": tc.get("id", ""),
-                "name": func.get("name", ""),
-                "input": args,
-            })
-
-        usage = response_body.get("usage", {})
-        input_tokens = usage.get("prompt_tokens", 0)
-        output_tokens = usage.get("completion_tokens", 0)
-
-        pricing = self.config.get("pricing", {}).get(self.model, {})
-        input_cost = pricing.get("input", 0.0)
-        output_cost = pricing.get("output", 0.0)
-        spend = (input_tokens * input_cost + output_tokens * output_cost) / 1_000_000
-
-        return {
-            "text": text,
-            "tool_calls": tool_calls,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "spend": spend,
-            "finish_reason": finish_reason,
-        }
-
-    def _parse_response_blocks(self, response_body: Dict) -> Dict:
-        """Parse Anthropic content-block response."""
-        resp_config = self._tool_use.get("response", {})
-
-        stop_reason_field = resp_config.get("stop_reason_field", "stop_reason")
-        content_field = resp_config.get("content_field", "content")
-        text_block_type = resp_config.get("text_block_type", "text")
-        text_field = resp_config.get("text_field", "text")
-        tool_use_block_type = resp_config.get("tool_use_block_type", "tool_use")
-        tool_use_id_field = resp_config.get("tool_use_id_field", "id")
-        tool_use_name_field = resp_config.get("tool_use_name_field", "name")
-        tool_use_input_field = resp_config.get("tool_use_input_field", "input")
-
-        content_blocks = response_body.get(content_field, [])
-        finish_reason = response_body.get(stop_reason_field, "end_turn")
+        """Parse any LLM API response using response_schema from provider YAML."""
+        schema = self._tool_use.get("response_schema", {})
+        mode = schema.get("content_mode", "blocks")
 
         text_parts = []
         tool_calls = []
 
-        for block in content_blocks:
-            block_type = block.get("type", "")
-            if block_type == text_block_type:
-                text_parts.append(block.get(text_field, ""))
-            elif block_type == tool_use_block_type:
-                tool_calls.append({
-                    "id": block.get(tool_use_id_field, ""),
-                    "name": block.get(tool_use_name_field, ""),
-                    "input": block.get(tool_use_input_field, {}),
-                })
+        if mode == "blocks":
+            content_path = schema.get("content_path", "content")
+            blocks = self._resolve_path(response_body, content_path) or []
+            detect = schema.get("block_detect", {})
 
-        usage = response_body.get("usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+            for block in blocks:
+                if self._detect_block(block, detect.get("text", {})):
+                    text_parts.append(
+                        self._resolve_path(block, schema.get("text_value", "text")) or ""
+                    )
+                elif self._detect_block(block, detect.get("tool_call", {})):
+                    name = self._resolve_path(block, schema["tool_call_name"]) or ""
+                    raw_input = self._resolve_path(block, schema["tool_call_input"]) or {}
+                    tc_id_path = schema.get("tool_call_id")
+                    tc_id = (
+                        self._resolve_path(block, tc_id_path)
+                        if tc_id_path
+                        else str(uuid.uuid4())
+                    )
+                    tc = {"id": tc_id, "name": name, "input": raw_input}
+                    # Preserve raw block for providers that need it (Gemini thoughtSignature)
+                    if "thoughtSignature" in block:
+                        tc["_raw_block"] = block
+                    tool_calls.append(tc)
 
+        elif mode == "separate":
+            message = (
+                self._resolve_path(response_body, schema.get("content_path", ""))
+                or {}
+            )
+            text_parts.append(message.get(schema.get("text_field", "content")) or "")
+
+            raw_calls = message.get(schema.get("tool_calls_field", "tool_calls")) or []
+            input_format = schema.get("tool_call_input_format")
+
+            for tc in raw_calls:
+                name = self._resolve_path(tc, schema["tool_call_name"]) or ""
+                raw_input = self._resolve_path(tc, schema["tool_call_input"]) or {}
+                if input_format == "json_string" and isinstance(raw_input, str):
+                    try:
+                        raw_input = json.loads(raw_input)
+                    except (json.JSONDecodeError, ValueError):
+                        raw_input = {"_raw": raw_input}
+                tc_id = (
+                    self._resolve_path(tc, schema.get("tool_call_id", "id")) or ""
+                )
+                tool_calls.append({"id": tc_id, "name": name, "input": raw_input})
+
+        # Usage — always via dot-path
+        usage_obj = (
+            self._resolve_path(response_body, schema.get("usage_path", "usage")) or {}
+        )
+        input_tokens = usage_obj.get(schema.get("input_tokens", "input_tokens"), 0)
+        output_tokens = usage_obj.get(schema.get("output_tokens", "output_tokens"), 0)
+
+        # Finish reason — via dot-path
+        finish_reason = (
+            self._resolve_path(
+                response_body, schema.get("finish_reason_path", "stop_reason")
+            )
+            or "stop"
+        )
+
+        # Cost
         pricing = self.config.get("pricing", {}).get(self.model, {})
-        input_cost = pricing.get("input", 0.0)
-        output_cost = pricing.get("output", 0.0)
-        spend = (input_tokens * input_cost + output_tokens * output_cost) / 1_000_000
+        spend = (
+            input_tokens * pricing.get("input", 0.0)
+            + output_tokens * pricing.get("output", 0.0)
+        ) / 1_000_000
 
         return {
-            "text": "\n".join(text_parts),
+            "text": "\n".join(text_parts)
+            if len(text_parts) > 1
+            else (text_parts[0] if text_parts else ""),
             "tool_calls": tool_calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -313,8 +363,80 @@ class HttpProvider(ProviderAdapter):
             "finish_reason": finish_reason,
         }
 
+    # ── HTTP Execution ────────────────────────────────────────────────
+
+    def _build_body(self, params: Dict) -> Dict:
+        """Template the body config with params, substituting {key} placeholders."""
+        body_template = self._http_config.get("body", {})
+        return self._apply_template(body_template, params)
+
+    async def _get_http_client(self):
+        """Lazily import and return the http_client primitive."""
+        from lilux.primitives.http_client import HttpClientPrimitive
+        if not hasattr(self, "_http_client"):
+            self._http_client = HttpClientPrimitive()
+        return self._http_client
+
+    async def _execute_http(self, params: Dict) -> Dict:
+        """Execute HTTP request directly using merged provider config.
+
+        Uses the http_client primitive directly with the merged config
+        (including profile overrides). This avoids re-loading the raw YAML
+        through the dispatch chain, which wouldn't have profile merges.
+        """
+        config = dict(self._http_config)
+        mode = params.pop("mode", "sync")
+
+        # Use stream_url when streaming if the provider defines one (e.g., Gemini)
+        url_key = "stream_url" if mode == "stream" and "stream_url" in config else "url"
+        config["url"] = config.get(url_key, config.get("url", "")).format(**params)
+        config["body"] = self._build_body(params)
+
+        client = await self._get_http_client()
+
+        if mode == "stream":
+            return await client._execute_stream(config, params)
+        return await client._execute_sync(config, params)
+
+    def _raise_on_error(self, result, streaming: bool = False):
+        """Convert http_client result to ProviderCallError if failed."""
+        from ..errors import ProviderCallError
+
+        if result.success:
+            return
+
+        if os.environ.get("RYE_DEBUG"):
+            logger.error("Provider HTTP failed: status=%s body=%s error=%s", result.status_code, result.body, result.error)
+
+        body = result.body if isinstance(result.body, dict) else {}
+        http_status = result.status_code
+        request_id = result.headers.get("request-id", "") if result.headers else ""
+
+        if isinstance(body, dict) and "error" in body:
+            api_error = body["error"]
+            if isinstance(api_error, dict):
+                error_msg = api_error.get("message", str(api_error))
+                error_type = api_error.get("type", "api_error")
+            else:
+                error_msg = str(api_error)
+                error_type = "api_error"
+        else:
+            error_msg = result.error or str(body or "Unknown provider error")
+            error_type = "unknown"
+
+        raise ProviderCallError(
+            provider_id=self._provider_item_id,
+            message=error_msg,
+            http_status=http_status,
+            request_id=request_id,
+            error_type=error_type,
+            retryable=http_status in (429, 500, 502, 503, 529) if http_status else False,
+        )
+
+    # ── Completion ─────────────────────────────────────────────────────
+
     async def create_completion(self, messages: List[Dict], tools: List[Dict]) -> Dict:
-        """Send messages to LLM via the tool execution chain."""
+        """Send messages to LLM via direct HTTP call using merged provider config."""
         converted_messages = self._convert_messages(messages)
         formatted_tools = self._format_tools(tools) if tools else []
 
@@ -326,60 +448,10 @@ class HttpProvider(ProviderAdapter):
         if formatted_tools:
             params["tools"] = formatted_tools
 
-        result = await self._dispatcher.dispatch({
-            "primary": "execute",
-            "item_type": "tool",
-            "item_id": self._provider_item_id,
-            "params": params,
-        })
+        result = await self._execute_http(params)
+        self._raise_on_error(result)
 
-        if result.get("status") != "success":
-            from ..errors import ProviderCallError
-
-            # Debug: log full dispatch result
-            if os.environ.get("RYE_DEBUG"):
-                logger.error("Provider dispatch failed: %s", result)
-
-            data = result.get("data", {})
-
-            # Priority 1: Tool-chain error (lockfile, permission, resolution)
-            chain_error = result.get("error") or data.get("error")
-            if chain_error and not isinstance(data.get("body"), dict):
-                raise ProviderCallError(
-                    provider_id=self._provider_item_id,
-                    message=str(chain_error),
-                    error_type="tool_chain_error",
-                )
-
-            # Priority 2: HTTP API error with structured body
-            body = data.get("body", {})
-            http_status = data.get("status_code")
-            headers = data.get("headers", {})
-            request_id = headers.get("request-id", "")
-
-            if isinstance(body, dict) and "error" in body:
-                api_error = body["error"]
-                if isinstance(api_error, dict):
-                    error_msg = api_error.get("message", str(api_error))
-                    error_type = api_error.get("type", "api_error")
-                else:
-                    error_msg = str(api_error)
-                    error_type = "api_error"
-            else:
-                error_msg = chain_error or str(body or "Unknown provider error")
-                error_type = "unknown"
-
-            raise ProviderCallError(
-                provider_id=self._provider_item_id,
-                message=error_msg,
-                http_status=http_status,
-                request_id=request_id,
-                error_type=error_type,
-                retryable=http_status in (429, 500, 502, 503, 529) if http_status else False,
-            )
-
-        data = result.get("data", {})
-        response_body = data.get("body", data)
+        response_body = result.body if isinstance(result.body, dict) else {}
         return self._parse_response(response_body)
 
     async def create_streaming_completion(
@@ -392,8 +464,6 @@ class HttpProvider(ProviderAdapter):
 
         Returns the same response dict as create_completion().
         """
-        import json
-
         from lilux.primitives.http_client import ReturnSink
 
         converted_messages = self._convert_messages(messages)
@@ -413,45 +483,153 @@ class HttpProvider(ProviderAdapter):
         all_sinks = [return_sink] + (sinks or [])
         params["__sinks"] = all_sinks
 
-        result = await self._dispatcher.dispatch({
-            "primary": "execute",
-            "item_type": "tool",
-            "item_id": self._provider_item_id,
-            "params": params,
-        })
-
-        if result.get("status") != "success":
-            from ..errors import ProviderCallError
-
-            if os.environ.get("RYE_DEBUG"):
-                logger.error("Streaming provider dispatch failed: %s", result)
-
-            data = result.get("data", {})
-            chain_error = result.get("error") or data.get("error")
-            if chain_error:
-                raise ProviderCallError(
-                    provider_id=self._provider_item_id,
-                    message=str(chain_error),
-                    error_type="tool_chain_error",
-                )
-
-            raise ProviderCallError(
-                provider_id=self._provider_item_id,
-                message=str(data or "Unknown streaming error"),
-                error_type="unknown",
-            )
+        result = await self._execute_http(params)
+        self._raise_on_error(result, streaming=True)
 
         events = return_sink.get_events()
         return self._assemble_stream_response(events)
 
-    def _assemble_stream_response(self, events: List[str]) -> Dict:
-        """Assemble buffered SSE events into the same response dict as non-streaming."""
-        if self._response_format == "chat_completion":
-            return self._assemble_openai_stream(events)
-        return self._assemble_anthropic_stream(events)
+    # ── Stream Assembly ────────────────────────────────────────────────
 
-    def _assemble_openai_stream(self, events: List[str]) -> Dict:
-        import json
+    def _assemble_stream_response(self, events: List[str]) -> Dict:
+        """Assemble buffered SSE events into response dict using stream_schema."""
+        schema = self._tool_use.get("stream_schema", {})
+        mode = schema.get("stream_mode", "event_typed")
+
+        if mode == "delta_merge":
+            return self._assemble_delta_merge(events, schema)
+        if mode == "complete_chunks":
+            return self._assemble_complete_chunks(events, schema)
+        return self._assemble_event_typed(events, schema)
+
+    def _assemble_event_typed(self, events: List[str], schema: Dict) -> Dict:
+        """Assemble event-typed SSE stream (Anthropic pattern).
+
+        Events have a type field that determines their structure:
+        message_start, content_block_start, content_block_delta, message_delta.
+        Field names and paths are all driven by stream_schema + response_schema.
+        """
+        event_type_field = schema.get("event_type_field", "type")
+        block_start_path = schema.get("block_start_path", "content_block")
+
+        resp_schema = self._tool_use.get("response_schema", {})
+        block_detect = resp_schema.get("block_detect", {})
+
+        text_parts = []
+        tool_calls = []
+        finish_reason = "end_turn"
+        input_tokens = 0
+        output_tokens = 0
+
+        for raw in events:
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            event_type = data.get(event_type_field, "")
+
+            if event_type == schema.get("message_start_type", "message_start"):
+                usage = (
+                    self._resolve_path(
+                        data, schema.get("message_start_usage", "message.usage")
+                    )
+                    or {}
+                )
+                input_tokens += usage.get(
+                    resp_schema.get("input_tokens", "input_tokens"), 0
+                )
+                output_tokens += usage.get(
+                    resp_schema.get("output_tokens", "output_tokens"), 0
+                )
+
+            elif event_type == schema.get("block_start_type", "content_block_start"):
+                block = self._resolve_path(data, block_start_path) or {}
+                if self._detect_block(block, block_detect.get("tool_call", {})):
+                    tc_id_path = resp_schema.get("tool_call_id")
+                    tc_id = (
+                        self._resolve_path(block, tc_id_path)
+                        if tc_id_path
+                        else str(uuid.uuid4())
+                    )
+                    tool_calls.append({
+                        "id": tc_id,
+                        "name": self._resolve_path(
+                            block, resp_schema.get("tool_call_name", "name")
+                        ) or "",
+                        "input_parts": [],
+                    })
+
+            elif event_type == schema.get("block_delta_type", "content_block_delta"):
+                delta = self._resolve_path(
+                    data, schema.get("delta_path", "delta")
+                ) or {}
+                delta_type = delta.get(
+                    schema.get("delta_type_field", "type"), ""
+                )
+                if delta_type == schema.get("text_delta_type", "text_delta"):
+                    text_parts.append(
+                        delta.get(schema.get("text_delta_field", "text"), "")
+                    )
+                elif delta_type == schema.get(
+                    "tool_input_delta_type", "input_json_delta"
+                ):
+                    if tool_calls:
+                        tool_calls[-1]["input_parts"].append(
+                            delta.get(
+                                schema.get("tool_input_delta_field", "partial_json"),
+                                "",
+                            )
+                        )
+
+            elif event_type == schema.get("message_delta_type", "message_delta"):
+                fr = self._resolve_path(
+                    data, schema.get("finish_reason_path", "delta.stop_reason")
+                )
+                if fr:
+                    finish_reason = fr
+                usage = (
+                    self._resolve_path(
+                        data, schema.get("delta_usage_path", "usage")
+                    )
+                    or {}
+                )
+                output_tokens += usage.get(
+                    resp_schema.get("output_tokens", "output_tokens"), 0
+                )
+
+        assembled_calls = []
+        for tc in tool_calls:
+            input_str = "".join(tc["input_parts"])
+            try:
+                inp = json.loads(input_str) if input_str else {}
+            except (json.JSONDecodeError, ValueError):
+                inp = {"_raw": input_str}
+            assembled_calls.append({"id": tc["id"], "name": tc["name"], "input": inp})
+
+        pricing = self.config.get("pricing", {}).get(self.model, {})
+        spend = (
+            input_tokens * pricing.get("input", 0.0)
+            + output_tokens * pricing.get("output", 0.0)
+        ) / 1_000_000
+
+        return {
+            "text": "".join(text_parts),
+            "tool_calls": assembled_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "spend": spend,
+            "finish_reason": finish_reason,
+        }
+
+    def _assemble_delta_merge(self, events: List[str], schema: Dict) -> Dict:
+        """Assemble delta-merge SSE stream (OpenAI pattern).
+
+        Events are progressive deltas with choices array. Text and tool call
+        fragments are merged across events. Field names driven by stream_schema.
+        """
+        done_signal = schema.get("done_signal", "[DONE]")
+        resp_schema = self._tool_use.get("response_schema", {})
 
         text_parts = []
         tool_calls = {}  # index -> {id, name, arguments_parts}
@@ -459,39 +637,68 @@ class HttpProvider(ProviderAdapter):
         input_tokens = 0
         output_tokens = 0
 
+        in_tok_field = schema.get(
+            "input_tokens_field", resp_schema.get("input_tokens", "prompt_tokens")
+        )
+        out_tok_field = schema.get(
+            "output_tokens_field", resp_schema.get("output_tokens", "completion_tokens")
+        )
+
         for raw in events:
-            if raw == "[DONE]":
+            if raw == done_signal:
                 continue
             try:
                 data = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
                 continue
-            choices = data.get("choices", [])
+
+            choices = data.get(schema.get("choices_field", "choices"), [])
             if not choices:
-                usage = data.get("usage", {})
-                input_tokens += usage.get("prompt_tokens", 0)
-                output_tokens += usage.get("completion_tokens", 0)
+                usage = (
+                    self._resolve_path(data, schema.get("usage_path", "usage"))
+                    or {}
+                )
+                input_tokens += usage.get(in_tok_field, 0)
+                output_tokens += usage.get(out_tok_field, 0)
                 continue
+
             choice = choices[0]
-            delta = choice.get("delta", {})
-            if "content" in delta and delta["content"]:
-                text_parts.append(delta["content"])
-            for tc in delta.get("tool_calls", []):
-                idx = tc.get("index", 0)
+            delta = choice.get(schema.get("delta_field", "delta"), {})
+
+            text_field = schema.get("text_delta_field", "content")
+            if text_field in delta and delta[text_field]:
+                text_parts.append(delta[text_field])
+
+            tc_field = schema.get("tool_calls_field", "tool_calls")
+            for tc in delta.get(tc_field, []):
+                idx = tc.get(schema.get("tool_call_index_field", "index"), 0)
                 if idx not in tool_calls:
                     tool_calls[idx] = {"id": "", "name": "", "arguments_parts": []}
-                if tc.get("id"):
-                    tool_calls[idx]["id"] = tc["id"]
-                func = tc.get("function", {})
-                if func.get("name"):
-                    tool_calls[idx]["name"] = func["name"]
-                if func.get("arguments"):
-                    tool_calls[idx]["arguments_parts"].append(func["arguments"])
-            if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-            usage = data.get("usage", {})
-            input_tokens += usage.get("prompt_tokens", 0)
-            output_tokens += usage.get("completion_tokens", 0)
+                tc_id_field = schema.get("tool_call_id_field", "id")
+                if tc.get(tc_id_field):
+                    tool_calls[idx]["id"] = tc[tc_id_field]
+                func = (
+                    self._resolve_path(
+                        tc, schema.get("tool_call_func_path", "function")
+                    )
+                    or {}
+                )
+                name_field = schema.get("tool_call_name_field", "name")
+                args_field = schema.get("tool_call_args_field", "arguments")
+                if func.get(name_field):
+                    tool_calls[idx]["name"] = func[name_field]
+                if func.get(args_field):
+                    tool_calls[idx]["arguments_parts"].append(func[args_field])
+
+            fr_field = schema.get("finish_reason_field", "finish_reason")
+            if choice.get(fr_field):
+                finish_reason = choice[fr_field]
+
+            usage = (
+                self._resolve_path(data, schema.get("usage_path", "usage")) or {}
+            )
+            input_tokens += usage.get(in_tok_field, 0)
+            output_tokens += usage.get(out_tok_field, 0)
 
         assembled_calls = []
         for idx in sorted(tool_calls):
@@ -504,7 +711,10 @@ class HttpProvider(ProviderAdapter):
             assembled_calls.append({"id": tc["id"], "name": tc["name"], "input": args})
 
         pricing = self.config.get("pricing", {}).get(self.model, {})
-        spend = (input_tokens * pricing.get("input", 0.0) + output_tokens * pricing.get("output", 0.0)) / 1_000_000
+        spend = (
+            input_tokens * pricing.get("input", 0.0)
+            + output_tokens * pricing.get("output", 0.0)
+        ) / 1_000_000
 
         return {
             "text": "".join(text_parts),
@@ -515,72 +725,90 @@ class HttpProvider(ProviderAdapter):
             "finish_reason": finish_reason,
         }
 
-    def _assemble_anthropic_stream(self, events: List[str]) -> Dict:
-        import json
+    def _assemble_complete_chunks(self, events: List[str], schema: Dict) -> Dict:
+        """Assemble complete-chunk SSE stream (Gemini pattern).
+
+        Each event is a complete response-like object with candidates/parts.
+        Reuses response_schema to extract content from each chunk, then
+        accumulates text and tool calls across chunks.
+        """
+        resp_schema = self._tool_use.get("response_schema", {})
+        done_signal = schema.get("done_signal")
+        detect = resp_schema.get("block_detect", {})
+        content_path = resp_schema.get("content_path", "content")
 
         text_parts = []
-        tool_calls = []  # list of {id, name, input_parts}
-        current_block_index = -1
-        finish_reason = "end_turn"
+        tool_calls = []
         input_tokens = 0
         output_tokens = 0
+        finish_reason = "stop"
 
         for raw in events:
+            if done_signal and raw == done_signal:
+                continue
             try:
                 data = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
                 continue
-            event_type = data.get("type", "")
 
-            if event_type == "message_start":
-                msg = data.get("message", {})
-                usage = msg.get("usage", {})
-                input_tokens += usage.get("input_tokens", 0)
-                output_tokens += usage.get("output_tokens", 0)
+            blocks = self._resolve_path(data, content_path) or []
 
-            elif event_type == "content_block_start":
-                current_block_index += 1
-                block = data.get("content_block", {})
-                if block.get("type") == "text":
-                    pass  # text accumulated via deltas
-                elif block.get("type") == "tool_use":
-                    tool_calls.append({
-                        "id": block.get("id", ""),
-                        "name": block.get("name", ""),
-                        "input_parts": [],
-                    })
+            for block in blocks:
+                if self._detect_block(block, detect.get("text", {})):
+                    text_parts.append(
+                        self._resolve_path(
+                            block, resp_schema.get("text_value", "text")
+                        ) or ""
+                    )
+                elif self._detect_block(block, detect.get("tool_call", {})):
+                    name = (
+                        self._resolve_path(block, resp_schema["tool_call_name"])
+                        or ""
+                    )
+                    raw_input = (
+                        self._resolve_path(block, resp_schema["tool_call_input"])
+                        or {}
+                    )
+                    tc_id_path = resp_schema.get("tool_call_id")
+                    tc_id = (
+                        self._resolve_path(block, tc_id_path)
+                        if tc_id_path
+                        else str(uuid.uuid4())
+                    )
+                    tc = {"id": tc_id, "name": name, "input": raw_input}
+                    if "thoughtSignature" in block:
+                        tc["_raw_block"] = block
+                    tool_calls.append(tc)
 
-            elif event_type == "content_block_delta":
-                delta = data.get("delta", {})
-                delta_type = delta.get("type", "")
-                if delta_type == "text_delta":
-                    text_parts.append(delta.get("text", ""))
-                elif delta_type == "input_json_delta":
-                    if tool_calls:
-                        tool_calls[-1]["input_parts"].append(delta.get("partial_json", ""))
+            # Usage — Gemini reports cumulative, take the max
+            usage_obj = (
+                self._resolve_path(data, resp_schema.get("usage_path", "usage"))
+                or {}
+            )
+            chunk_in = usage_obj.get(
+                resp_schema.get("input_tokens", "input_tokens"), 0
+            )
+            chunk_out = usage_obj.get(
+                resp_schema.get("output_tokens", "output_tokens"), 0
+            )
+            input_tokens = max(input_tokens, chunk_in)
+            output_tokens = max(output_tokens, chunk_out)
 
-            elif event_type == "message_delta":
-                delta = data.get("delta", {})
-                if delta.get("stop_reason"):
-                    finish_reason = delta["stop_reason"]
-                usage = data.get("usage", {})
-                output_tokens += usage.get("output_tokens", 0)
-
-        assembled_calls = []
-        for tc in tool_calls:
-            input_str = "".join(tc["input_parts"])
-            try:
-                inp = json.loads(input_str) if input_str else {}
-            except (json.JSONDecodeError, ValueError):
-                inp = {"_raw": input_str}
-            assembled_calls.append({"id": tc["id"], "name": tc["name"], "input": inp})
+            fr = self._resolve_path(
+                data, resp_schema.get("finish_reason_path", "stop_reason")
+            )
+            if fr:
+                finish_reason = fr
 
         pricing = self.config.get("pricing", {}).get(self.model, {})
-        spend = (input_tokens * pricing.get("input", 0.0) + output_tokens * pricing.get("output", 0.0)) / 1_000_000
+        spend = (
+            input_tokens * pricing.get("input", 0.0)
+            + output_tokens * pricing.get("output", 0.0)
+        ) / 1_000_000
 
         return {
             "text": "".join(text_parts),
-            "tool_calls": assembled_calls,
+            "tool_calls": tool_calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "spend": spend,

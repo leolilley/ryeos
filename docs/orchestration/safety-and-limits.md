@@ -135,7 +135,7 @@ When a limit is exceeded:
 
 ## The Budget Ledger
 
-The `BudgetLedger` is a SQLite-backed hierarchical cost tracking system at `.ai/threads/budget_ledger.db`. It ensures threads can't overspend their allocation.
+The `BudgetLedger` is a SQLite-backed hierarchical cost tracking system at `.ai/agent/threads/budget_ledger.db`. It ensures threads can't overspend their allocation.
 
 ### Registration
 

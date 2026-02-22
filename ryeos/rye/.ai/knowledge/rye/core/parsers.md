@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:3568ab0e3235ebbe847a87552bfd730ee4244150c369da14c0794383018eeb3a:KnY8yGBmK-qVNB3ORDi7h8MmPFp8CihHOlrFOAGrR6KErwJq4r1yzTHbmdEGU4fddEgEiO46oGwT_e4Ts9ylBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:d248811792d2b81bb14f0a879d7fb1ad75b401e42a9426b085e9a8a6523cb366:IRHbBVRn6ZFC2aB2C9hr2_-u8mjY2C-d7klpgIz1bQK-SzvNiJJ5hX9-SpGTVgnT6iMOu-i97aYiSPHdUI2tBw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: parsers
@@ -14,6 +14,12 @@ tags:
   - xml
   - yaml
   - ast
+  - python-ast
+  - metadata-extraction
+  - frontmatter
+  - tool-parsing
+  - directive-parsing
+  - knowledge-parsing
 references:
   - "docs/standard-library/tools/core.md"
 ```

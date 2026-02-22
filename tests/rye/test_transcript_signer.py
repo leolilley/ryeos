@@ -39,7 +39,7 @@ def temp_env(tmp_path, monkeypatch):
     fp = compute_key_fingerprint(public_pem)
     trust_store.add_key(public_pem, label="self")
 
-    thread_dir = tmp_path / "project" / AI_DIR / "threads" / "test-thread"
+    thread_dir = tmp_path / "project" / AI_DIR / "agent" / "threads" / "test-thread"
     thread_dir.mkdir(parents=True)
 
     return {

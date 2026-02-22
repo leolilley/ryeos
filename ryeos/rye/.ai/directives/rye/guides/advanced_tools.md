@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:6563ef8fb3f3d77bc8434cd668d850d0746712ea4d00180e6b0538fee8639e18:BnwnqNpU_gv9Gp_6m4_uDBmzTEFbFKiv5SMpS_aHvPQEBCoGZE3mHtz3YVBCgfwbnjBODm2L_K-EB3V3Rq3XDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:6563ef8fb3f3d77bc8434cd668d850d0746712ea4d00180e6b0538fee8639e18:BnwnqNpU_gv9Gp_6m4_uDBmzTEFbFKiv5SMpS_aHvPQEBCoGZE3mHtz3YVBCgfwbnjBODm2L_K-EB3V3Rq3XDg==:9fbfabe975fa5a7f -->
 # Advanced Tools
 
 Multi-file tools, the anchor system, bundles, and dependency management.

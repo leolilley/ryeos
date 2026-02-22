@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:67da930b465b2fbe0025430a3f585785de53d57d561ffaf122fbee526ff837e9:A7_umsIvZsJ0w0CEbS7aeyo_eaTVBjTXR6K5M9MX_R-OsvdA1EuKJeZisiQJP4ImfH-7K7o2xuFkPOb06NJsBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:08250e9d2522f6d3988f831e107896f07df27391b6c9bc02a1157156036ac128:RZ23PWFo6GrWwOJeepa-tKRpOpOOHa4g2aJPtCYMt5Mopp9njALAmgrMLyO2gxSIdydwdh7VWeJW59EH0PDuCQ==:9fbfabe975fa5a7f
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -206,8 +206,17 @@ def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
     return None
 
 
-def _resolve_execution_context(params: Dict, project_path: str) -> Dict:
-    """Resolve capabilities and parent context for permission enforcement."""
+def _resolve_execution_context(
+    params: Dict, project_path: str, graph_config: Optional[Dict] = None,
+) -> Dict:
+    """Resolve capabilities and parent context for permission enforcement.
+
+    Resolution order:
+    1. Parent thread env var (inherited from spawning thread)
+    2. Explicit capabilities in params (programmatic callers)
+    3. Graph YAML permissions field (declared by the graph author)
+    4. Fail-closed (no capabilities)
+    """
     parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID")
 
     if parent_thread_id:
@@ -241,6 +250,17 @@ def _resolve_execution_context(params: Dict, project_path: str) -> Dict:
             "limits": params.get("limits", {}),
             "depth": params.get("depth", 5),
         }
+
+    # Graph-declared permissions: the graph YAML itself declares what it needs
+    if graph_config:
+        graph_caps = graph_config.get("permissions", [])
+        if graph_caps:
+            return {
+                "parent_thread_id": None,
+                "capabilities": graph_caps,
+                "limits": graph_config.get("limits", {}),
+                "depth": graph_config.get("limits", {}).get("depth", 5),
+            }
 
     # No thread context, no explicit capabilities — fail-closed
     return {
@@ -488,9 +508,18 @@ async def _persist_state(
 # ---------------------------------------------------------------------------
 
 
-def _validate_graph(cfg: Dict) -> List[str]:
+def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]:
     """Validate graph definition before execution."""
     errors = []
+
+    # Require permissions field at the graph top level
+    if graph_config and not graph_config.get("permissions"):
+        errors.append(
+            "graph must declare 'permissions' — a list of capability tokens "
+            "(e.g., ['rye.execute.tool.*']). Graphs without permissions cannot "
+            "dispatch any actions."
+        )
+
     nodes = cfg.get("nodes", {})
     start = cfg.get("start")
 
@@ -712,13 +741,13 @@ async def execute(
     resume_run_id = params.pop("graph_run_id", None)
 
     # Resolve execution context
-    exec_ctx = _resolve_execution_context(params, project_path)
+    exec_ctx = _resolve_execution_context(params, project_path, graph_config)
 
     # Merge hooks
     hooks = _merge_graph_hooks(cfg.get("hooks", []), project_path)
 
     # Validate graph
-    validation_errors = _validate_graph(cfg)
+    validation_errors = _validate_graph(cfg, graph_config)
     if validation_errors:
         return {
             "success": False,

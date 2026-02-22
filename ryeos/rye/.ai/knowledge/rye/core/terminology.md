@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:b69cd3155886cd6f2295571f089ec113d9c37eec08e1b9a244a52f1766c89a52:x5uETd6QjgN5H_SdMXAoLvywUEhnv0vzeMwcWh9B7eBi0uPyQUloaxrtfUN0qwNd8nDyLyW4L9t6maQyOtz1BQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:aa3d2cf9511235ec829acfefedec95fcd158ea944beb21bcd813759e95ebd623:BzAmIFji-2HLpJ3iYFNYej4Y86VWCGbqZF2k9A20xUVmLSu5fGt_aXslNm_Fl0khVfLoiiTyjtAkd53y1O-nDA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: terminology
@@ -12,6 +12,16 @@ tags:
   - terminology
   - naming
   - conventions
+  - item-types
+  - directive
+  - tool
+  - knowledge
+  - spaces
+  - project
+  - user
+  - system
+  - item-id
+  - namespace
 references:
   - "docs/getting-started/quickstart.md"
 ```

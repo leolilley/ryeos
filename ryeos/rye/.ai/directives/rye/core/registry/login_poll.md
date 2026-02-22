@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:1cb0df8f189ab077c85d49861e5ccf32a435914f2c5e78f1c9fe2ae506c1b19b:qgFkePvD39lqTFXPIag7jBCVTFnC3Epu2JexZWx1Q1aUkXvSxySwnTICzgixG66BtgZ_-iz1Ze2fnDLDxyUyAQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:1cb0df8f189ab077c85d49861e5ccf32a435914f2c5e78f1c9fe2ae506c1b19b:qgFkePvD39lqTFXPIag7jBCVTFnC3Epu2JexZWx1Q1aUkXvSxySwnTICzgixG66BtgZ_-iz1Ze2fnDLDxyUyAQ==:9fbfabe975fa5a7f -->
 # Registry Login Poll
 
 Poll for device authentication completion.

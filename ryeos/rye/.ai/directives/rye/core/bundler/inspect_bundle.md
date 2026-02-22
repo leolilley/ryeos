@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:59c0aa87ec3b54a2be34f80e3e6845d64e800e8ef267be818d68d7e00e06fc54:oxBGy_OHfQQAnNX3IxFqbtRksDo-yhcc5iRfsXg7xgcs0tJ8X0xWAsJYrHaV1YJdjzHFixlSilhbf0PEsjIOBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:59c0aa87ec3b54a2be34f80e3e6845d64e800e8ef267be818d68d7e00e06fc54:oxBGy_OHfQQAnNX3IxFqbtRksDo-yhcc5iRfsXg7xgcs0tJ8X0xWAsJYrHaV1YJdjzHFixlSilhbf0PEsjIOBA==:9fbfabe975fa5a7f -->
 # Inspect Bundle
 
 Inspect the contents and metadata of a bundle.

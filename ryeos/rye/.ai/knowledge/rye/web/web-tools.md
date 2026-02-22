@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:bbce75e25fdfac9609a4328c6978d9df3ba68777441539d704066f1c3ed7bbc2:kfLoOer8kRCUmDOjS4MrGuTws6cFbhLk-0qQZIbXkWypJNZy4sD5-Gtg8gHb0mo1kOR7TECgRTtkksc3k9B1CQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:41:03Z:bbce75e25fdfac9609a4328c6978d9df3ba68777441539d704066f1c3ed7bbc2:kfLoOer8kRCUmDOjS4MrGuTws6cFbhLk-0qQZIbXkWypJNZy4sD5-Gtg8gHb0mo1kOR7TECgRTtkksc3k9B1CQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: web-tools

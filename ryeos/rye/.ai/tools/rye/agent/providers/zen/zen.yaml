@@ -1,0 +1,336 @@
+# rye:signed:2026-02-22T10:15:11Z:3d043096dd89dada02a451be94a59c0a614a2348ade7721510e47d6a9a82364d:6Q_S9VkWakJtIw4W5EPWcDwrIX5Afht5jIw1hjGiLug_RIokPRH-88AwdaEnWXoMsl7DJl3sxq-zKBQhzlXxCA==:9fbfabe975fa5a7f
+tool_id: zen
+tool_type: http
+version: "1.0.0"
+description: "OpenCode Zen AI gateway — multi-provider access via model profiles"
+executor_id: rye/core/primitives/http_client
+category: rye/agent/providers/zen
+
+requires:
+  - net.call
+
+# Tier mapping across all Zen models
+tier_mapping:
+  fast: "claude-haiku-4-5"
+  general: "claude-sonnet-4-5"
+  high: "claude-sonnet-4-6"
+  max: "claude-opus-4-6"
+
+# Per-million-token pricing (USD) — all Zen models
+pricing:
+  # Claude
+  claude-haiku-4-5:
+    input: 0.80
+    output: 4.00
+  claude-3-5-haiku:
+    input: 0.80
+    output: 4.00
+  claude-sonnet-4:
+    input: 3.00
+    output: 15.00
+  claude-sonnet-4-5:
+    input: 3.00
+    output: 15.00
+  claude-sonnet-4-6:
+    input: 3.00
+    output: 15.00
+  claude-opus-4-1:
+    input: 15.00
+    output: 75.00
+  claude-opus-4-5:
+    input: 15.00
+    output: 75.00
+  claude-opus-4-6:
+    input: 15.00
+    output: 75.00
+  # OpenAI-compatible (MiniMax, GLM, Kimi, Qwen)
+  minimax-m2.5:
+    input: 1.10
+    output: 4.40
+  minimax-m2.5-free:
+    input: 0.00
+    output: 0.00
+  minimax-m2.1:
+    input: 1.10
+    output: 4.40
+  glm-5:
+    input: 0.50
+    output: 2.00
+  glm-5-free:
+    input: 0.00
+    output: 0.00
+  glm-4.7:
+    input: 0.50
+    output: 2.00
+  glm-4.6:
+    input: 0.50
+    output: 2.00
+  kimi-k2.5:
+    input: 1.10
+    output: 4.40
+  kimi-k2.5-free:
+    input: 0.00
+    output: 0.00
+  kimi-k2-thinking:
+    input: 1.10
+    output: 4.40
+  kimi-k2:
+    input: 1.10
+    output: 4.40
+  qwen3-coder:
+    input: 2.00
+    output: 8.00
+  big-pickle:
+    input: 0.00
+    output: 0.00
+  # Gemini
+  gemini-3.1-pro:
+    input: 1.25
+    output: 10.00
+  gemini-3-pro:
+    input: 1.25
+    output: 10.00
+  gemini-3-flash:
+    input: 0.10
+    output: 0.40
+
+env_config:
+  env:
+    ZEN_API_KEY: "${ZEN_API_KEY}"
+
+# Shared config — profiles override url, headers, body, and tool_use per model family
+config:
+  method: POST
+
+  auth:
+    type: bearer
+    token: "${ZEN_API_KEY}"
+
+  headers:
+    Content-Type: application/json
+
+  timeout: 120
+
+  retry:
+    max_attempts: 2
+    backoff: exponential
+
+parameters:
+  - name: model
+    type: string
+    required: true
+  - name: max_tokens
+    type: integer
+    required: false
+    default: 4096
+  - name: messages
+    type: array
+    required: true
+    description: "Array of message objects"
+  - name: tools
+    type: array
+    required: false
+    default: []
+    description: "Array of tool definitions for function calling"
+
+# Base tool_use — overridden per profile
+tool_use:
+  mode: native
+
+# ── Model Profiles ─────────────────────────────────────────────────
+# Each profile matches model IDs by glob pattern and deep-merges
+# its config/tool_use over the base. This lets one provider YAML
+# serve multiple API formats.
+
+profiles:
+  anthropic:
+    match: ["claude-*"]
+    config:
+      url: "https://opencode.ai/zen/v1/messages"
+      auth:
+        type: api_key
+        key: "${ZEN_API_KEY}"
+        header: x-api-key
+      headers:
+        anthropic-version: "2023-06-01"
+      body:
+        model: "{model}"
+        max_tokens: "{max_tokens}"
+        messages: "{messages}"
+        tools: "{tools}"
+        stream: "{stream}"
+    tool_use:
+      tool_definition:
+        name: "{name}"
+        description: "{description}"
+        input_schema: "{schema}"
+      response_schema:
+        content_mode: blocks
+        content_path: "content"
+        block_detect:
+          text: {field: "type", value: "text"}
+          tool_call: {field: "type", value: "tool_use"}
+        text_value: "text"
+        tool_call_name: "name"
+        tool_call_input: "input"
+        tool_call_id: "id"
+        usage_path: "usage"
+        input_tokens: "input_tokens"
+        output_tokens: "output_tokens"
+        finish_reason_path: "stop_reason"
+        finish_reason_tool_use: "tool_use"
+      message_schema:
+        role_map: {user: "user", assistant: "assistant"}
+        content_key: "content"
+        content_wrap: "blocks_array"
+        tool_result:
+          role: "user"
+          wrap_mode: "content_blocks"
+          error_field: "is_error"
+          block_template:
+            type: "tool_result"
+            tool_use_id: "{tool_call_id}"
+            content: "{content}"
+        tool_call_block_template:
+          type: "tool_use"
+          id: "{id}"
+          name: "{name}"
+          input: "{input}"
+      stream_schema:
+        stream_mode: "event_typed"
+        event_type_field: "type"
+        message_start_type: "message_start"
+        message_start_usage: "message.usage"
+        block_start_type: "content_block_start"
+        block_start_path: "content_block"
+        block_delta_type: "content_block_delta"
+        delta_path: "delta"
+        delta_type_field: "type"
+        text_delta_type: "text_delta"
+        text_delta_field: "text"
+        tool_input_delta_type: "input_json_delta"
+        tool_input_delta_field: "partial_json"
+        message_delta_type: "message_delta"
+        finish_reason_path: "delta.stop_reason"
+        delta_usage_path: "usage"
+
+  openai_compat:
+    match: ["minimax-*", "glm-*", "kimi-*", "qwen*", "big-pickle"]
+    config:
+      url: "https://opencode.ai/zen/v1/chat/completions"
+      body:
+        model: "{model}"
+        max_tokens: "{max_tokens}"
+        messages: "{messages}"
+        tools: "{tools}"
+        stream: "{stream}"
+    tool_use:
+      tool_definition:
+        type: function
+        function:
+          name: "{name}"
+          description: "{description}"
+          parameters: "{schema}"
+      response_schema:
+        content_mode: separate
+        content_path: "choices.0.message"
+        text_field: "content"
+        tool_calls_field: "tool_calls"
+        tool_call_name: "function.name"
+        tool_call_input: "function.arguments"
+        tool_call_input_format: json_string
+        tool_call_id: "id"
+        usage_path: "usage"
+        input_tokens: "prompt_tokens"
+        output_tokens: "completion_tokens"
+        finish_reason_path: "choices.0.finish_reason"
+        finish_reason_tool_use: "tool_calls"
+      message_schema:
+        role_map: {user: "user", assistant: "assistant"}
+        content_key: "content"
+        content_wrap: "string"
+        tool_result:
+          role: "tool"
+          wrap_mode: "direct"
+          block_template:
+            tool_call_id: "{tool_call_id}"
+            content: "{content}"
+        tool_call_block_template:
+          type: "function"
+          id: "{id}"
+          function:
+            name: "{name}"
+            arguments: "{input_json}"
+      stream_schema:
+        stream_mode: "delta_merge"
+        done_signal: "[DONE]"
+        choices_field: "choices"
+        delta_field: "delta"
+        text_delta_field: "content"
+        tool_calls_field: "tool_calls"
+        tool_call_index_field: "index"
+        tool_call_id_field: "id"
+        tool_call_func_path: "function"
+        tool_call_name_field: "name"
+        tool_call_args_field: "arguments"
+        finish_reason_field: "finish_reason"
+        usage_path: "usage"
+        input_tokens_field: "prompt_tokens"
+        output_tokens_field: "completion_tokens"
+
+  gemini:
+    match: ["gemini-*"]
+    config:
+      url: "https://opencode.ai/zen/v1/models/{model}:generateContent"
+      stream_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
+      auth:
+        type: api_key
+        key: "${ZEN_API_KEY}"
+        header: x-goog-api-key
+      body:
+        contents: "{messages}"
+        tools: "{tools}"
+        generationConfig:
+          maxOutputTokens: "{max_tokens}"
+          thinkingConfig:
+            includeThoughts: true
+            thinkingLevel: "high"
+    tool_use:
+      tool_list_wrap: "functionDeclarations"
+      tool_definition:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
+      response_schema:
+        content_mode: blocks
+        content_path: "candidates.0.content.parts"
+        block_detect:
+          text: {key: "text"}
+          tool_call: {key: "functionCall"}
+        text_value: "text"
+        tool_call_name: "functionCall.name"
+        tool_call_input: "functionCall.args"
+        tool_call_id: null
+        usage_path: "usageMetadata"
+        input_tokens: "promptTokenCount"
+        output_tokens: "candidatesTokenCount"
+        finish_reason_path: "candidates.0.finishReason"
+        finish_reason_tool_use: "TOOL_CALLS"
+      message_schema:
+        role_map: {user: "user", assistant: "model"}
+        content_key: "parts"
+        content_wrap: "parts_array"
+        tool_result:
+          role: "user"
+          wrap_mode: "content_blocks"
+          block_template:
+            functionResponse:
+              name: "{tool_name}"
+              response:
+                content: "{content}"
+        tool_call_block_template:
+          functionCall:
+            name: "{name}"
+            args: "{input}"
+      stream_schema:
+        stream_mode: "complete_chunks"

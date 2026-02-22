@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T09:44:57Z:1309a0f3fb2ca932821e04c4222c871825a036278bfab51be60f316449c82261:ob9Lx8Jq2URc1kL9KPYfN2IZdHKYApH9Zmt3nbjIY22AyCRuPkmbKjPQx7sq0uIMTmt1R8Z4cGVV_LIoL2n1Cg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:1309a0f3fb2ca932821e04c4222c871825a036278bfab51be60f316449c82261:79LQw0GZUDBkP9hAVJRQqIZB1-TrdVd13EoxqE81tFvz8Te_g0OnohZdBcT8mw1Y7bnkyFzlNIJjuz3jlyxQBg==:9fbfabe975fa5a7f -->
 # Summarize Text
 
 Takes text content and writes a concise summary to a file.
@@ -43,7 +43,7 @@ Takes text content and writes a concise summary to a file.
     Write a concise 2-3 sentence summary of this text. Count the words in the original text.
 
     Then write the summary to `{input:output_path}`:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"file_path": "{input:output_path}", "content": "<your summary text>"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_path}", "content": "<your summary text>"})`
   </step>
 
   <step name="return_result">

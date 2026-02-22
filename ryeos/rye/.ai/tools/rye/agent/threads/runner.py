@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:779f0c4a701bb3ea088e20102596b873b581023cb712afabe23f2bf25b3e42d1:-RDi5frvVmb9LQAgb9hy4KbxFwe_HJ8O1_nUkEankV9QCA_ZJIgg-4DKJVelZDj_zXlJ_QiKnFOZMh5tnHM1Dg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:e7242f629a3a229a7900884706771738c946150dddfe3997bd76236183328f9e:t62nLMycJpcyYOugrZbCurichwn4BtTw6ogBda3-fwOtdR43d158LLOd2fYAsrNNPY63MyvlurCTWz0OrYQxBg==:9fbfabe975fa5a7f
 """
 runner.py: Core LLM loop for thread execution
 
@@ -45,6 +45,9 @@ async def run(
     transcript: Any,
     project_path: Path,
     resume_messages: Optional[List[Dict]] = None,
+    directive_body: str = "",
+    previous_thread_id: Optional[str] = None,
+    inputs: Optional[Dict] = None,
 ) -> Dict:
     """Execute the LLM loop until completion, error, or limit.
 
@@ -86,23 +89,49 @@ async def run(
     # Checkpoint signing for transcript integrity
     transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
     signer = transcript_signer_mod.TranscriptSigner(
-        thread_id, project_path / ".ai" / "threads" / thread_id
+        thread_id, project_path / ".ai" / "agent" / "threads" / thread_id
     )
 
     try:
         if resume_messages:
-            # Resume mode: use pre-built messages (summary + trailing turns + new message)
+            # Continuation mode: fire thread_continued hooks
             messages = list(resume_messages)
-        else:
-            # --- Build first message ---
-            # Hook context: thread_started hooks load knowledge items (identity, rules)
             hook_context = await harness.run_hooks_context(
                 {
                     "directive": harness.directive_name,
+                    "directive_body": directive_body,
                     "model": provider.model,
                     "limits": harness.limits,
+                    "previous_thread_id": previous_thread_id,
+                    "inputs": inputs or {},
                 },
                 dispatcher,
+                event="thread_continued",
+            )
+            if hook_context and messages:
+                # Inject context near the last user message, not at position 0.
+                # insert(0) would disrupt the reconstructed conversation chronology
+                # and push context far from the continuation ask.
+                last_user_idx = len(messages) - 1
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        last_user_idx = i
+                        break
+                messages[last_user_idx]["content"] = (
+                    hook_context + "\n\n" + messages[last_user_idx]["content"]
+                )
+        else:
+            # Fresh thread: fire thread_started hooks (identity, rules, knowledge)
+            hook_context = await harness.run_hooks_context(
+                {
+                    "directive": harness.directive_name,
+                    "directive_body": directive_body,
+                    "model": provider.model,
+                    "limits": harness.limits,
+                    "inputs": inputs or {},
+                },
+                dispatcher,
+                event="thread_started",
             )
 
             first_message_parts = []
@@ -153,7 +182,7 @@ async def run(
             # Checkpoint: sign previous turn and update knowledge entry
             if cost["turns"] > 0:
                 signer.checkpoint(cost["turns"])
-                transcript.render_knowledge(
+                transcript.render_knowledge_transcript(
                     directive=harness.directive_name,
                     status="running",
                     model=provider.model,
@@ -323,7 +352,7 @@ async def run(
                 # to avoid envelope/unwrapping fragility.
                 if inner_item_id == "rye/agent/threads/directive_return":
                     inner_params = tc_input.get("parameters", {})
-                    outputs = dict(inner_params) if inner_params else {}
+                    outputs = inner_params if isinstance(inner_params, dict) else {}
 
                     # Validate required fields against harness
                     missing = [
@@ -492,12 +521,23 @@ async def run(
         }
         orchestrator.complete_thread(thread_id, final)
 
-        transcript.render_knowledge(
+        transcript.render_knowledge_transcript(
             directive=harness.directive_name,
             status=final["status"],
             model=provider.model,
             cost=cost,
         )
+
+        # Dispatch after_complete hooks (best-effort)
+        try:
+            await harness.run_hooks(
+                "after_complete",
+                {"thread_id": thread_id, "cost": cost, "project_path": str(project_path)},
+                dispatcher,
+                {"emitter": emitter, "transcript": transcript, "thread_id": thread_id},
+            )
+        except Exception:
+            pass  # after_complete hooks must not break thread finalization
 
 
 def _finalize(thread_id, cost, result, emitter, transcript, signer=None) -> Dict:

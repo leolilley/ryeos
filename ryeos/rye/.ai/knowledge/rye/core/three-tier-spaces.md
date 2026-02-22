@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:9459b02b9503e95480602c765893c6a926bce28284f78b1e65bff32d002553f8:8sRfqwcMO_V621ReYqYZcVeYkBwz1iscdLCOJP9c_fHJNbpscq9OZ4KWdWwixjKmEavJboAGDlFnJi2YDfhOBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:12a4a0e61b21094e28e02efb39548789afa5cb404eaa409fdc165fe09d05854f:AnxdI6Gu-3wl3m1ipDXsUn6YfRJnNvBMozsKmEgDRpM3NqQZc9eelitkWJi-898lY2JYicTxTrtGQCz8aY8PAQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: three-tier-spaces
@@ -12,6 +12,13 @@ tags:
   - spaces
   - resolution
   - paths
+  - project-space
+  - user-space
+  - system-space
+  - resolution-order
+  - override
+  - precedence
+  - space-resolution
 references:
   - ai-directory
   - "docs/internals/three-tier-spaces.md"

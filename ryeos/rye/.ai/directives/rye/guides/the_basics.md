@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:794b02b5c99916b032e5959fa908a73a6b6f64694e61cf9e7775c25479184f00:5OFRFx5m4KHdI8Dvb1fmtZhUDOeG_wyImkBX_zP7_i9jp7jpMIargQYP4x4dl7lXwV_ENU6kQhZQFOgDwUniCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:794b02b5c99916b032e5959fa908a73a6b6f64694e61cf9e7775c25479184f00:5OFRFx5m4KHdI8Dvb1fmtZhUDOeG_wyImkBX_zP7_i9jp7jpMIargQYP4x4dl7lXwV_ENU6kQhZQFOgDwUniCw==:9fbfabe975fa5a7f -->
 
 # The Basics
 
@@ -168,7 +168,7 @@ Knowledge entries are reference docs that ship with Rye. They have YAML metadata
           main()
       ```
 
-      <tool_call>rye_execute(item_type="tool", item_id="rye/file-system/write", project_path="{user_space}", parameters={"file_path": "{user_space}/.ai/tools/hello/hello.py", "content": "\"\"\"Hello world — your first Rye tool.\"\"\"\n\n__version__ = \"1.0.0\"\n__tool_type__ = \"python\"\n__executor_id__ = \"rye/core/runtimes/python_script_runtime\"\n__category__ = \"hello\"\n__tool_description__ = \"A simple hello world tool\"\n\nimport json\nimport sys\nimport argparse\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--params\", required=True)\n    parser.add_argument(\"--project-path\", required=True)\n    args = parser.parse_args()\n    params = json.loads(args.params)\n    name = params.get(\"name\", \"world\")\n    print(json.dumps({\"success\": True, \"message\": f\"Hello, {name}!\"}))\n\nif __name__ == \"__main__\":\n    main()\n"})</tool_call>
+      <tool_call>rye_execute(item_type="tool", item_id="rye/file-system/write", project_path="{user_space}", parameters={"path": "{user_space}/.ai/tools/hello/hello.py", "content": "\"\"\"Hello world — your first Rye tool.\"\"\"\n\n__version__ = \"1.0.0\"\n__tool_type__ = \"python\"\n__executor_id__ = \"rye/core/runtimes/python_script_runtime\"\n__category__ = \"hello\"\n__tool_description__ = \"A simple hello world tool\"\n\nimport json\nimport sys\nimport argparse\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--params\", required=True)\n    parser.add_argument(\"--project-path\", required=True)\n    args = parser.parse_args()\n    params = json.loads(args.params)\n    name = params.get(\"name\", \"world\")\n    print(json.dumps({\"success\": True, \"message\": f\"Hello, {name}!\"}))\n\nif __name__ == \"__main__\":\n    main()\n"})</tool_call>
 
       <rule>You MUST use rye_execute to call the file-system write tool. Do NOT use shell commands.</rule>
       <rule>The write tool rejects paths outside project_path. Pass project_path={user_space}.</rule>

@@ -28,10 +28,11 @@ from rye.utils.resolvers import get_user_space
 
 logger = logging.getLogger(__name__)
 
-# {input:key}         — required, kept as-is if missing
-# {input:key?}        — optional, empty string if missing
-# {input:key:default}  — fallback to default if missing
-_INPUT_REF = re.compile(r"\{input:(\w+)(\?|:[^}]*)?\}")
+# {input:key}          — required, kept as-is if missing
+# {input:key?}         — optional, empty string if missing
+# {input:key:default}  — fallback to default if missing (colon separator)
+# {input:key|default}  — fallback to default if missing (pipe separator)
+_INPUT_REF = re.compile(r"\{input:(\w+)(\?|[:|][^}]*)?\}")
 
 
 def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
@@ -44,7 +45,7 @@ def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
             return str(inputs[key])
         if modifier == "?":
             return ""
-        if modifier and modifier.startswith(":"):
+        if modifier and modifier[0] in (":", "|"):
             return modifier[1:]
         return m.group(0)
 
@@ -180,8 +181,7 @@ class ExecuteTool:
             }
 
         # Interpolate {input:name} placeholders in body and actions
-        if inputs:
-            _interpolate_parsed(parsed, inputs)
+        _interpolate_parsed(parsed, inputs)
 
         result = {
             "status": "success",

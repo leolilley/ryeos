@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:9d08128d12cec8c21422edf820c8330dffa70f4e47e949b069d3f1e7a2db5f7d:Bf0MVazZaDaQS0ziQXpQW5E4NFcAGpfvwd3MFtmq0c30iB1J9uuRjmbmjdHHep2tdYYyZS-KeZ6ksaMq3H3sAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:9d08128d12cec8c21422edf820c8330dffa70f4e47e949b069d3f1e7a2db5f7d:Bf0MVazZaDaQS0ziQXpQW5E4NFcAGpfvwd3MFtmq0c30iB1J9uuRjmbmjdHHep2tdYYyZS-KeZ6ksaMq3H3sAw==:9fbfabe975fa5a7f -->
 # LSP Diagnostics
 
 Run LSP linters on a file and return diagnostics.

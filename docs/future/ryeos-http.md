@@ -292,7 +292,7 @@ Many external systems (Discord, Slack, GitHub) send webhooks with specific paylo
 
 ### Health and Observability
 
-A `/health` endpoint for load balancers. Thread-level observability comes free from RYE's existing transcript system — every thread writes to `.ai/threads/{id}/transcript.jsonl`. The HTTP layer could add request-level metrics (latency, status codes, directive hit rates).
+A `/health` endpoint for load balancers. Thread-level observability comes free from RYE's existing transcript system — every thread writes to `.ai/agent/threads/{id}/transcript.jsonl`. The HTTP layer could add request-level metrics (latency, status codes, directive hit rates).
 
 ---
 

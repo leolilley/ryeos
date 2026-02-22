@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:41e161392bd02d25ac23a081219df7c36d596e500dfbcad5c23f38b62aae3268:AW3HyRSQDCnpMJBdJ2aySGcJhhJUrP4TWbsdHboskEVOR7iezz0GVWyM7XZTSP17QSe7P_MDfOu0w6w1jiX2Cg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:0b59d3073448e6bf909fa1a12e49800342cdd3fab302d1d489f54feca619b3b1:hjqp3lntAa8vhO9NrEePusbrnyoRr1tnjWx0oESpnjMxXgkclwH-IVT93SGXsm-0Bp2fWuGK8DkjfG8SZx82Dg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: executor-chain
@@ -14,6 +14,16 @@ tags:
   - tools
   - runtime
   - primitives
+  - execution
+  - subprocess
+  - python
+  - node
+  - javascript
+  - bash
+  - mcp
+  - resolution
+  - parameter-passing
+  - how-tools-run
 references:
   - three-tier-spaces
   - templating-systems

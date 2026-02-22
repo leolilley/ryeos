@@ -38,7 +38,7 @@ This means both files update in real-time as the model generates tokens.
 ### JSONL transcript
 
 ```bash
-tail -f .ai/threads/<thread_id>/transcript.jsonl
+tail -f .ai/agent/threads/<thread_id>/transcript.jsonl
 ```
 
 ### Knowledge markdown
@@ -52,7 +52,7 @@ Use `-F` (capital) for knowledge markdown — `render_knowledge()` rewrites the 
 ### Pretty-printed text deltas
 
 ```bash
-tail -f .ai/threads/<thread_id>/transcript.jsonl \
+tail -f .ai/agent/threads/<thread_id>/transcript.jsonl \
   | python3 -c "import sys,json;[print(json.loads(l).get('payload',{}).get('text',''),end='',flush=True) for l in sys.stdin]"
 ```
 
@@ -70,7 +70,7 @@ result = rye_execute(
     },
 )
 thread_id = result["thread_id"]
-# Now tail -f .ai/threads/{thread_id}/transcript.jsonl
+# Now tail -f .ai/agent/threads/{thread_id}/transcript.jsonl
 ```
 
 ## Event Format

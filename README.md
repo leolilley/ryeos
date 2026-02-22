@@ -201,7 +201,7 @@ State graphs persist after each step as signed knowledge items — they're resum
 Every thread is fully transparent. Parents can read child transcripts — full reasoning traces, tool calls, and results. The orchestrator provides `get_status`, `read_transcript`, `get_chain`, and `chain_search` (regex across an entire delegation tree). Per-token streaming writes to both JSONL transcripts and knowledge markdown in real-time:
 
 ```bash
-tail -f .ai/threads/<thread_id>/transcript.jsonl
+tail -f .ai/agent/threads/<thread_id>/transcript.jsonl
 ```
 
 No opaque delegation. No hidden reasoning. Every step in every chain is auditable — addressing the [accountability vacuum](https://arxiv.org/abs/2602.11865) that emerges in multi-agent systems.

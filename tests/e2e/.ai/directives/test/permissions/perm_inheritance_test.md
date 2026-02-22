@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:43:37Z:c791445ba3954e9409856b707f6e778a8ad6de09a21e847e4d5ee2ee0b51904a:AykfWZ-HyuFJ77srRc1hbaILj0alxnLG6sBCHNRGAXZpjsk0wojL_8YqjtpGSMf8gSN89eWlYnMhTzMUXd4aCg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:c791445ba3954e9409856b707f6e778a8ad6de09a21e847e4d5ee2ee0b51904a:HvcV3ahA856p1Qhwghbn21DiVWzF94FkJNcnbwjK9cMYhpZ35KI6MP_3BX16volVqLwh8Niq1-7qXZv4mZpyDQ==:9fbfabe975fa5a7f -->
 # Permission Inheritance Test
 
 Test that child threads inherit parent capabilities when child declares none. Parent has fs+thread permissions. Child (write_file) has its own fs caps — those should be used. But a child with NO caps should inherit parent's.

@@ -192,7 +192,7 @@ Wildcard shortcuts:
 </outputs>
 ```
 
-Input values are interpolated in process steps as `{input:name}`.
+Input values are interpolated in process steps as `{input:name}`. Defaults are supported with both `{input:name:default}` and `{input:name|default}` (colon and pipe separators work identically).
 
 ### How Outputs Become `<returns>` in the Prompt
 
@@ -321,16 +321,15 @@ Steps can also use XML action elements for richer structure:
 
 ```xml
 <hooks>
-  <hook>
-    <when>cost.current > cost.limit * 0.9</when>
-    <execute item_type="directive">warn-cost-critical</execute>
+  <hook id="warn_cost" event="after_step">
+    <condition path="cost.spend" op="gte" value="0.9" />
+    <action primary="execute" item_type="directive" item_id="warn-cost-critical" />
   </hook>
-  <hook>
-    <when>error.type == "permission_denied"</when>
-    <execute item_type="directive">request-elevated-permissions</execute>
-    <inputs>
-      <requested_resource>${error.resource}</requested_resource>
-    </inputs>
+  <hook id="handle_permission_denied" event="error">
+    <condition path="error.type" op="eq" value="permission_denied" />
+    <action primary="execute" item_type="directive" item_id="request-elevated-permissions">
+      <param name="requested_resource">${error.resource}</param>
+    </action>
   </hook>
 </hooks>
 ```

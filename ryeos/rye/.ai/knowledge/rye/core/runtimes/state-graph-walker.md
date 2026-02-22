@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:49896332d176b47e11d49449903e8d15a5595152824afae3e6d5b1b444c806a2:DaNq0TTMiOQdVuAvlnSy4dj8vqr8cgWPa24-xeYpbuLS4_bUP5f2QcBqtqjkxhLvL1NS79Yy00aqmFY6kCW0DA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:38:13Z:e984bc10e9f64fad82a20e9d1fce03fb7be43b584e3f49649402c86998285aab:01YXc9rY40t22EW8UX1u0l2UsXxkThzD4FLcjvS5FgXJCoPimrs8wf8E104blpb4Z3tZPS80C2szhWyfpKACBA==:9fbfabe975fa5a7f -->
 ```yaml
 id: state-graph-walker
 title: "State Graph Walker"
@@ -192,13 +192,13 @@ This handles context-limit handoffs transparently — the walker doesn't impleme
 
 1. Pre-generates `graph_run_id` and pre-registers in thread registry
 2. Forks via `os.fork()`, child calls `os.setsid()` to daemonize
-3. Child redirects stderr → `.ai/threads/<graph_run_id>/async.log`, stdout → `/dev/null`
+3. Child redirects stderr → `.ai/agent/threads/<graph_run_id>/async.log`, stdout → `/dev/null`
 4. Parent returns immediately: `{success, graph_run_id, graph_id, status: "running", pid}`
 5. Child runs `execute()` to completion, updates registry status
 
 ## Cancellation
 
-The walker checks for a `cancel` sentinel file at `.ai/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
+The walker checks for a `cancel` sentinel file at `.ai/agent/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
 
 ## Graph Validation
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T08:00:04Z:d3cd826dacbba4c33f66edc7a0a802d671161613b83338489dec1c43db32bab6:0aAMc6vMIWoOjs_Jh8lJLOqkP0tj7vx9hDRdUKTodYMgfu_bg5r_WMt1Ty3CZn1D45EN1CC7anV0AV8p5Fl0Ag==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:d3cd826dacbba4c33f66edc7a0a802d671161613b83338489dec1c43db32bab6:2UyEKoNa6uKLW8whUr3HSr5oUedHeyhs5Y-WR3brCkCkd1z9dqMLcPgQd6Wc5cDv4cN-4KoPy0TRk5qRvZd2Cw==:9fbfabe975fa5a7f -->
 # Parent Spawn
 
 Parent directive that writes its own file, then spawns a child thread to write a second file. Tests recursive thread spawning — should produce two thread folders.
@@ -37,7 +37,7 @@ Parent directive that writes its own file, then spawns a child thread to write a
 <process>
   <step name="parent_write">
     Write the parent's message to parent_output.md:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"file_path": "parent_output.md", "content": "{input:parent_message}"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "parent_output.md", "content": "{input:parent_message}"})`
   </step>
 
   <step name="spawn_child">
@@ -47,7 +47,7 @@ Parent directive that writes its own file, then spawns a child thread to write a
 
   <step name="verify_parent">
     Read back the parent output file to confirm it was written:
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"file_path": "parent_output.md"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "parent_output.md"})`
   </step>
 
   <step name="return_result">

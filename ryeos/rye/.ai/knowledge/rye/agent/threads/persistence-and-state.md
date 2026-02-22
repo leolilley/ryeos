@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:2b0ddcf30ccad7f2ca6980148adeff32d20f8ddaf086363585f346ac92aff2cc:EhpKtkXoeSumX9f98Z1dq6SJKsykMmNk6lLaJAPRqVj8bchwUaZMPCwzumpZc_5Xh5LFaCcABZSirMV-9kpBAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:41:03Z:5acc414d95fc89c1287b2ebd54071c2060789f9b95372402edfe1438dc4e84c1:nws3tViWoWwhDHCCfq7uEhCI8kU2WC1D5NA1P82uPLgc6nxhYssVe8SE6jt8kCBkzC_tLUXLDt58R5pbln5AAg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: persistence-and-state
@@ -26,7 +26,7 @@ How threads persist state, handle context limits via continuation, and support u
 ## Storage Layout
 
 ```
-.ai/threads/
+.ai/agent/threads/
 ├── registry.db           # Thread registry (SQLite)
 ├── budget_ledger.db      # Hierarchical budget tracking (SQLite)
 └── <thread_id>/
@@ -41,32 +41,32 @@ How threads persist state, handle context limits via continuation, and support u
 
 In-memory + persistent SQLite. Tracks all threads across the project.
 
-| Column                  | Purpose                                  |
-|-------------------------|------------------------------------------|
-| `thread_id`             | Primary key                              |
-| `directive`             | Directive name                           |
-| `parent_id`             | Parent thread (null for root)            |
-| `status`                | Current state                            |
-| `continuation_thread_id`| Forward pointer in continuation chain    |
-| `continuation_of`       | Backward pointer in continuation chain   |
-| `chain_root_id`         | First thread in continuation chain       |
-| `result`                | Final result (JSON serialized)           |
-| `cost`                  | Cost snapshot (JSON)                     |
-| `created_at`            | Creation timestamp                       |
-| `updated_at`            | Last update timestamp                    |
+| Column                   | Purpose                                |
+| ------------------------ | -------------------------------------- |
+| `thread_id`              | Primary key                            |
+| `directive`              | Directive name                         |
+| `parent_id`              | Parent thread (null for root)          |
+| `status`                 | Current state                          |
+| `continuation_thread_id` | Forward pointer in continuation chain  |
+| `continuation_of`        | Backward pointer in continuation chain |
+| `chain_root_id`          | First thread in continuation chain     |
+| `result`                 | Final result (JSON serialized)         |
+| `cost`                   | Cost snapshot (JSON)                   |
+| `created_at`             | Creation timestamp                     |
+| `updated_at`             | Last update timestamp                  |
 
 ### Budget Ledger (`budget_ledger.db`)
 
 SQLite-backed hierarchical cost tracking. Ensures threads can't overspend.
 
-| Column          | Purpose                                      |
-|-----------------|----------------------------------------------|
-| `thread_id`     | Primary key                                  |
-| `parent_id`     | Parent for cascading                         |
-| `max_spend`     | Budget ceiling                               |
-| `reserved_spend`| Amount reserved (for active children)        |
-| `actual_spend`  | Actual spend (includes cascaded child costs) |
-| `status`        | active / completed / error                   |
+| Column           | Purpose                                      |
+| ---------------- | -------------------------------------------- |
+| `thread_id`      | Primary key                                  |
+| `parent_id`      | Parent for cascading                         |
+| `max_spend`      | Budget ceiling                               |
+| `reserved_spend` | Amount reserved (for active children)        |
+| `actual_spend`   | Actual spend (includes cascaded child costs) |
+| `status`         | active / completed / error                   |
 
 ### `thread.json`
 
@@ -80,10 +80,15 @@ Written at thread creation, updated at finalization:
   "created_at": "2026-02-17T10:00:56+00:00",
   "updated_at": "2026-02-17T10:01:23+00:00",
   "model": "claude-3-5-haiku-20241022",
-  "limits": {"turns": 10, "tokens": 200000, "spend": 0.10},
+  "limits": { "turns": 10, "tokens": 200000, "spend": 0.1 },
   "capabilities": ["rye.execute.tool.scraping.gmaps.scrape_gmaps"],
-  "cost": {"turns": 4, "input_tokens": 3200, "output_tokens": 800, "spend": 0.02},
-  "outputs": {"leads_file": ".ai/data/leads.json", "lead_count": "15"}
+  "cost": {
+    "turns": 4,
+    "input_tokens": 3200,
+    "output_tokens": 800,
+    "spend": 0.02
+  },
+  "outputs": { "leads_file": ".ai/data/leads.json", "lead_count": "15" }
 }
 ```
 
@@ -115,54 +120,33 @@ if usage_ratio >= threshold:
 
 ## Automatic Handoff (Continuation)
 
-When context limit reached (default 90%), six-phase handoff:
+When context limit reached (default 90%), five-phase handoff:
 
-### Phase 1: Generate Summary
+### Phase 1: Fill Trailing Messages
 
-Spawn `thread_summary` directive in a separate thread:
-
-```python
-summary_result = await thread_directive.execute({
-    "directive_name": "rye/agent/threads/thread_summary",
-    "model": "fast",
-    "inputs": {"transcript_content": transcript_md, "max_summary_tokens": 4000},
-    "limit_overrides": {"turns": 3, "spend": 0.02},
-})
-```
-
-Produces structured summary: Completed Work, Pending Work, Key Decisions, Tool Results.
-
-If summary fails → handoff continues without summary, more trailing messages carried over.
-
-### Phase 2: Build Trailing Messages
-
-Fill remaining token budget with recent messages (most recent first):
+Fill the resume ceiling budget with recent messages (most recent first):
 
 ```python
-remaining_budget = resume_ceiling_tokens - summary_tokens  # e.g., 16000 - 1200
 trailing_messages = []
 for msg in reversed(messages):
     msg_tokens = len(str(msg.get("content", ""))) // 4
-    if trailing_tokens + msg_tokens > remaining_budget:
+    if trailing_tokens + msg_tokens > resume_ceiling:
         break
     trailing_messages.insert(0, msg)
 ```
 
 Trimmed to start with `user` message (provider requirement).
 
-### Phase 3: Build Resume Messages
+### Phase 2: Build Resume Messages
 
 ```python
 resume_messages = [
-    {"role": "user", "content": "## Thread Handoff Context\n\n"
-     "This thread is a continuation...\n\n" + summary_text},
-    {"role": "assistant", "content": "Understood. Continuing."},
     *trailing_messages,
     {"role": "user", "content": "Continue executing the directive."},
 ]
 ```
 
-### Phase 4: Spawn New Thread
+### Phase 3: Spawn New Thread
 
 New thread with same directive and resume messages:
 
@@ -171,12 +155,15 @@ new_result = await thread_directive.execute({
     "directive_name": directive_name,
     "resume_messages": resume_messages,
     "parent_thread_id": original_parent_id,
+    "previous_thread_id": thread_id,
 })
 ```
 
 Inherits same parent relationship → appears as sibling of original.
 
-### Phase 5: Link Continuation Chain
+`previous_thread_id` enables `thread_continued` hooks in the new thread.
+
+### Phase 4: Link Continuation Chain
 
 ```python
 registry.set_continuation(old_thread_id, new_thread_id)
@@ -186,9 +173,9 @@ chain_root_id = registry.get_chain(old_thread_id)[0]["thread_id"]
 registry.set_chain_info(new_thread_id, chain_root_id, old_thread_id)
 ```
 
-### Phase 6: Log Handoff
+### Phase 5: Log Handoff
 
-Recorded in old thread's transcript with new thread ID, summary stats, trailing turn count.
+Recorded in old thread's transcript with new thread ID and trailing turn count.
 
 ## The Continuation Chain
 
@@ -199,6 +186,7 @@ Thread A (continued) → Thread B (continued) → Thread C (completed)
 ```
 
 Each thread stores:
+
 - `continuation_thread_id` — forward pointer
 - `continuation_of` — backward pointer
 - `chain_root_id` — first thread in chain
@@ -266,25 +254,52 @@ rye_execute(item_id="rye/agent/threads/orchestrator",
 
 ### Resume vs Handoff
 
-| Aspect       | Automatic Handoff                    | User Resume                          |
-|--------------|--------------------------------------|--------------------------------------|
-| Trigger      | Context limit (90%+)                 | User calls `resume_thread`           |
-| Summary      | Generated by `thread_summary`        | No summary — full transcript rebuilt |
-| Context      | Summary + trailing (within ceiling)  | Full reconstruction + new message    |
-| Overflow     | Runner will handoff again if needed  | Same — runner handles if too big     |
-| Chain        | Old → New linked                     | Old → New linked                     |
-| Relationship | Sibling (same parent)                | Sibling (same parent)                |
+| Aspect       | Automatic Handoff                                                    | User Resume                          |
+| ------------ | -------------------------------------------------------------------- | ------------------------------------ |
+| Trigger      | Context limit (90%+)                                                 | User calls `resume_thread`           |
+| Summary      | Hook-driven — directives opt in via `after_complete` hooks           | No summary — full transcript rebuilt |
+| Context      | Trailing messages (within ceiling) + `thread_continued` hook context | Full reconstruction + new message    |
+| Overflow     | Runner will handoff again if needed                                  | Same — runner handles if too big     |
+| Chain        | Old → New linked                                                     | Old → New linked                     |
+| Relationship | Sibling (same parent)                                                | Sibling (same parent)                |
+
+## Example: Hook-Driven Summary on Handoff
+
+Summarization is opt-in. A directive declares hooks for it:
+
+```xml
+<hooks>
+  <!-- Summarize when thread completes or is handed off -->
+  <hook id="summarize_on_complete" event="after_complete">
+    <condition path="cost.turns" op="gte" value="1" />
+    <action primary="execute" item_type="tool" item_id="rye/agent/threads/thread_summary">
+      <param name="thread_id">${thread_id}</param>
+    </action>
+  </hook>
+
+  <!-- Re-inject summary + context into continuation thread -->
+  <hook id="reinject_summary" event="thread_continued">
+    <action primary="execute" item_type="knowledge" item_id="agent/threads/${inputs.previous_summary_id}" />
+  </hook>
+
+  <hook id="reinject_api_schema" event="thread_continued">
+    <action primary="execute" item_type="knowledge" item_id="agent/threads/${inputs.api_thread_id}" />
+  </hook>
+</hooks>
+```
+
+Flow: Thread A hits context limit → `after_complete` runs summary → `handoff_thread()` spawns Thread B with `previous_thread_id` and `inputs` containing the summary ID → `thread_continued` hooks fire in Thread B, re-injecting the summary and dependency context near the last user message.
+
+Without these hooks, handoff still works — continuation thread gets trailing messages only.
+
+**Note:** These are **directive hooks** (XML in `<metadata>`), which handle thread-level knowledge wiring. When using a state graph as the pipeline scaffold, **graph hooks** (YAML in `config.hooks`) handle pipeline-level events (`graph_started`, `after_step`, `graph_completed`). Both use the same underlying infrastructure but operate at different layers. See the orchestrator-patterns knowledge entry for the full relationship.
 
 ## Configuration
 
 All continuation settings in `.ai/config/agent/coordination.yaml`:
 
-| Setting                    | Default                               | Description                       |
-|----------------------------|---------------------------------------|-----------------------------------|
-| `trigger_threshold`        | `0.9`                                 | Context ratio triggering handoff  |
-| `resume_ceiling_tokens`    | `16000`                               | Max tokens for summary + trailing |
-| `summary_directive`        | `rye/agent/threads/thread_summary`    | Directive for summary generation  |
-| `summary_model`            | `fast`                                | Model tier for summaries          |
-| `summary_limit_overrides`  | `{turns: 3, spend: 0.02}`            | Limits for summary thread         |
-| `summary_max_tokens`       | `4000`                                | Target max summary tokens         |
-| `wait_threads.default_timeout` | `600.0`                           | Default wait timeout (seconds)    |
+| Setting                        | Default | Description                                 |
+| ------------------------------ | ------- | ------------------------------------------- |
+| `trigger_threshold`            | `0.9`   | Context ratio triggering handoff            |
+| `resume_ceiling_tokens`        | `16000` | Max tokens for trailing messages in handoff |
+| `wait_threads.default_timeout` | `600.0` | Default wait timeout (seconds)              |

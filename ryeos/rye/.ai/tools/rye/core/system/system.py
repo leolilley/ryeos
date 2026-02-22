@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T06:06:05Z:412455bff3cbf7c7b16d9d13b62ec256befcc4b11656573ecd1ce5a12dd1cc7a:zGJ3Lj71yG45ThBGoH1w_UKmPV6IBp7lxP45tK1ir1iEeHxj_4h2c13h1b2K1g4jDquzMzcODaHi1vwYS3BnCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:412455bff3cbf7c7b16d9d13b62ec256befcc4b11656573ecd1ce5a12dd1cc7a:zGJ3Lj71yG45ThBGoH1w_UKmPV6IBp7lxP45tK1ir1iEeHxj_4h2c13h1b2K1g4jDquzMzcODaHi1vwYS3BnCQ==:9fbfabe975fa5a7f
 """System information tool - exposes MCP runtime paths, time, and environment.
 
 Builtin tool that runs in-process to provide system information

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:dc1281c1ac3c02cf94cb30488044d548ae43f73d3279d2aadee2dc5839cbac3d:r-3m_x1l1-82jmaOhr7dZd5ehpusvG3kSWS6n5fp5q9aZDu1hwuOAgupzLkDjL58KeZ8nsSH_tvLyY7zK8rBCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T10:15:11Z:8d126818cb2d9ddd32af869c00858fd3663912d7f8f6a46e495a7f9a695df4b0:FRAO3KwR2ZZGZNPb1v07Pc9bWYO7n-bGoCBK-1jBzYTxduliSxEUV0gI2mRxekZO-SUjhbsOWxI0I5AsNoJlDg==:9fbfabe975fa5a7f
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -30,7 +30,7 @@ class Transcript:
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
         self._project_path = project_path
-        self._dir = project_path / AI_DIR / "threads" / thread_id
+        self._dir = project_path / AI_DIR / "agent" / "threads" / thread_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "transcript.jsonl"
         self._events: List[Dict[str, Any]] = []
@@ -151,7 +151,7 @@ class Transcript:
 
         return messages if messages else None
 
-    def render_knowledge(
+    def render_knowledge_transcript(
         self,
         directive: str = "",
         status: str = "completed",
@@ -251,7 +251,9 @@ class Transcript:
         tokens = cost.get("input_tokens", 0) + cost.get("output_tokens", 0)
         spend = cost.get("spend", 0)
         turns = cost.get("turns", 0)
-        parts.append(f"---\n\n**{'Completed' if status == 'completed' else 'Error'}**"
+        status_labels = {"completed": "Completed", "running": "Running", "error": "Error"}
+        label = status_labels.get(status, status.title())
+        parts.append(f"---\n\n**{label}**"
                       f" -- {turns} turns, {tokens} tokens, ${spend:.4f}, {duration_str}\n")
 
         content = "".join(parts)
@@ -276,6 +278,14 @@ class Transcript:
         knowledge_path.write_text(signed_content, encoding="utf-8")
         return knowledge_path
 
+    # Maximum characters for a single tool result in the knowledge markdown.
+    # Full output is always preserved in transcript.jsonl.
+    _MAX_RESULT_CHARS = 2000
+
+    # Maximum characters for file content shown in tool call inputs.
+    # Large file writes are summarised to save context.
+    _MAX_FILE_CONTENT_CHARS = 500
+
     @staticmethod
     def _render_cognition_event(event: Dict, turn: int) -> str:
         """Render a single event as a cognition thread fragment."""
@@ -295,6 +305,7 @@ class Transcript:
         if event_type == "tool_call_start":
             tool = payload.get("tool", "unknown")
             input_data = payload.get("input", {})
+            input_data = Transcript._condense_tool_input(tool, input_data)
             try:
                 input_str = json.dumps(input_data, indent=2)
             except Exception:
@@ -306,7 +317,8 @@ class Transcript:
             error = payload.get("error")
             if error:
                 return f"### Error\n\n{error}\n\n"
-            return f"### Result\n\n```\n{output}\n```\n\n"
+            cleaned = Transcript._clean_tool_output(output)
+            return f"### Result\n\n```\n{cleaned}\n```\n\n"
 
         if event_type == "thread_completed":
             cost = payload.get("cost", {})
@@ -327,3 +339,120 @@ class Transcript:
             return f"---\n\n**Error** -- {payload.get('error', 'unknown')}\n"
 
         return ""
+
+    @staticmethod
+    def _parse_output(raw: str) -> Any:
+        """Try to parse a tool output string as structured data.
+
+        Tool outputs may arrive as JSON (double quotes) or Python repr
+        (single quotes). Returns the parsed dict/list on success, or the
+        original string on failure.
+        """
+        if not isinstance(raw, str):
+            return raw
+        stripped = raw.strip()
+        if not stripped or stripped[0] not in ("{", "["):
+            return raw
+        # Try JSON first
+        try:
+            return json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Try Python literal (handles single-quoted dicts from repr())
+        import ast
+        try:
+            return ast.literal_eval(stripped)
+        except Exception:
+            return raw
+
+    @staticmethod
+    def _clean_tool_output(raw: str) -> str:
+        """Extract the meaningful content from a tool result string.
+
+        Handles the common rye tool result wrapper:
+          {'status': 'success', 'data': {'output': '...', ...}, ...}
+
+        Strips internal metadata (_artifact_ref, _artifact_note),
+        deduplicates stdout/output when identical, and caps length.
+        """
+        parsed = Transcript._parse_output(raw)
+
+        if not isinstance(parsed, dict):
+            text = str(raw)
+            if len(text) > Transcript._MAX_RESULT_CHARS:
+                return text[:Transcript._MAX_RESULT_CHARS] + "\n... (truncated)"
+            return text
+
+        # Remove internal metadata keys
+        for key in ("_artifact_ref", "_artifact_note"):
+            parsed.pop(key, None)
+
+        # Extract the actual output from nested wrappers.
+        # Prefer data.output > output > stdout, in that order.
+        data = parsed.get("data", {})
+        if isinstance(data, dict):
+            for key in ("_artifact_ref", "_artifact_note"):
+                data.pop(key, None)
+            actual_output = data.get("output") or parsed.get("output") or parsed.get("stdout")
+        else:
+            actual_output = parsed.get("output") or parsed.get("stdout")
+
+        # If we found a simple output string, use it directly
+        if actual_output and isinstance(actual_output, str):
+            # Include error info if present
+            error = parsed.get("error") or (data.get("error") if isinstance(data, dict) else None)
+            stderr = parsed.get("stderr") or (data.get("stderr", "") if isinstance(data, dict) else "")
+            parts = [actual_output.rstrip()]
+            if stderr and stderr.strip() and stderr.strip() != actual_output.strip():
+                parts.append(f"[stderr] {stderr.strip()}")
+            if error:
+                parts.append(f"[error] {error}")
+            text = "\n".join(parts)
+        else:
+            # Fallback: remove redundant fields and re-serialise
+            # Drop stdout when identical to output
+            output_val = parsed.get("output", "")
+            stdout_val = parsed.get("stdout", "")
+            if output_val and stdout_val and str(output_val).strip() == str(stdout_val).strip():
+                parsed.pop("stdout", None)
+            # Drop empty stderr
+            if not parsed.get("stderr", "").strip():
+                parsed.pop("stderr", None)
+            # Drop exit_code 0 (success is the default assumption)
+            if parsed.get("exit_code") == 0:
+                parsed.pop("exit_code", None)
+            # Drop redundant top-level status/success
+            if parsed.get("status") == "success":
+                parsed.pop("status", None)
+            if parsed.get("success") is True:
+                parsed.pop("success", None)
+            try:
+                text = json.dumps(parsed, indent=2, default=str)
+            except Exception:
+                text = str(parsed)
+
+        if len(text) > Transcript._MAX_RESULT_CHARS:
+            return text[:Transcript._MAX_RESULT_CHARS] + "\n... (truncated)"
+        return text
+
+    @staticmethod
+    def _condense_tool_input(tool: str, input_data: Any) -> Any:
+        """Condense tool call inputs to reduce context bloat.
+
+        File write operations embed the full file content in the input,
+        which can be very large. Since the file itself is the source of
+        truth, we truncate long content values.
+        """
+        if not isinstance(input_data, dict):
+            return input_data
+
+        # For file-system write tools, truncate large content fields
+        if "file-system/write" in tool or "file-system/create" in tool:
+            content = input_data.get("content", "")
+            if isinstance(content, str) and len(content) > Transcript._MAX_FILE_CONTENT_CHARS:
+                lines = content.count("\n") + 1
+                input_data = dict(input_data)  # shallow copy
+                preview = content[:Transcript._MAX_FILE_CONTENT_CHARS]
+                input_data["content"] = f"{preview}\n... ({lines} lines, {len(content)} chars total)"
+
+        return input_data

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:5f4b3cdb5d23f5e6a69897cd225ca2293b1c72583074609980331590bd1edd09:Oq7cHihztrqJEJTQqxRSpS98BQ-WULoKYetdn_PclJMWecxBUKygwbqirEXbhon_0yNlOzniWQpvwItM8eNbCw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:5be2282842d6e826076874cec73b6e751fcf7dbf4402931bdb9d811fc8bdc313:hWicNSwKDH2Y3UIUaMk82xX-UHWdaKk8JVbCVP9ReoFb43SzMkxCPBgZcVlonGlabK1s1Ic8vjGdGFr5-ldKAw==:9fbfabe975fa5a7f
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -17,11 +17,11 @@ DB_FILE = "registry.db"
 class ThreadRegistry:
     """Track thread lifecycle in SQLite.
 
-    DB location: {project_path}/.ai/threads/registry.db
+    DB location: {project_path}/.ai/agent/threads/registry.db
     """
 
     def __init__(self, project_path: Path):
-        self.db_path = project_path / AI_DIR / "threads" / DB_FILE
+        self.db_path = project_path / AI_DIR / "agent" / "threads" / DB_FILE
         self._ensure_schema()
 
     def _ensure_schema(self):

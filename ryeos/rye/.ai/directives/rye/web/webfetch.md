@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:5aa7c3b6bb16adb4ab4d40a5bfa868ad185bd9860cdb5bc446ae5cf652a7b358:a9Q6I2F02l2coB7VVWXNyizv2DYbthgUQhY7rgXyRELvmaUIDSvdo4ZyjVbCnESInbwSpUmVNhKY_TzABsbtCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:5aa7c3b6bb16adb4ab4d40a5bfa868ad185bd9860cdb5bc446ae5cf652a7b358:a9Q6I2F02l2coB7VVWXNyizv2DYbthgUQhY7rgXyRELvmaUIDSvdo4ZyjVbCnESInbwSpUmVNhKY_TzABsbtCw==:9fbfabe975fa5a7f -->
 # Web Fetch
 
 Fetch the content of a web page and return it in the specified format.

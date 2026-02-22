@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T09:41:23Z:35ba7a39c0abc128f4c5bba30c6ee37375495a0b4c01db5235b83de6de562051:INvdLDoo7kW6tiJ89Rk6OEZdappyY0pv03efcK1vsSz9FbUV9KYwe65nbVsEVLvpC8NPX3DzbuZGCOtohmu4Cw==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:35ba7a39c0abc128f4c5bba30c6ee37375495a0b4c01db5235b83de6de562051:sV_Sppf7s-qaYQ0WtD0TzksdBlhM9fL5d-spYJoWo7_TnSxWw_gI9jCpUNL9lVbpUZy14wBGVFyayxSoofhNDA==:9fbfabe975fa5a7f -->
 
 # Analyze Code
 
@@ -45,7 +45,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
     Analyze it and determine: the programming language, the number of function/method definitions (def, async def, function, etc.), and a 2-3 sentence summary of what the code does.
 
     Then write the result as a JSON object to `{input:output_path}`:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"file_path": "{input:output_path}", "content": "{\"language\": \"...\", \"function_count\": N, \"summary\": \"...\"}"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_path}", "content": "{\"language\": \"...\", \"function_count\": N, \"summary\": \"...\"}"})`
   </step>
 
   <step name="return_result">

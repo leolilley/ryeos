@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:b6e4c871d68c9e9468316fa12d7f5296e39536347a1e2fc83309cd13694c2502:b6PWz4pMFu9QfuwCDXFGa84MeYMoppkq5RNbyjvfTkp7E3KfE8Wa5hgamXw3djqWgUbVapH9e0RJAHUbXjvYDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:b6e4c871d68c9e9468316fa12d7f5296e39536347a1e2fc83309cd13694c2502:b6PWz4pMFu9QfuwCDXFGa84MeYMoppkq5RNbyjvfTkp7E3KfE8Wa5hgamXw3djqWgUbVapH9e0RJAHUbXjvYDg==:9fbfabe975fa5a7f
 """Fetch URL content with optional format conversion."""
 
 import argparse

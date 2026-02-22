@@ -52,6 +52,7 @@ Parses the markdown+XML directive file, validates required inputs, applies defau
 | `{input:key}`         | Required — kept as-is if missing            |
 | `{input:key?}`        | Optional — replaced with empty string       |
 | `{input:key:default}` | Fallback — uses `default` if key is missing |
+| `{input:key\|default}` | Fallback — uses `default` if key is missing (pipe syntax) |
 
 **Response fields:**
 

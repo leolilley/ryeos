@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:3a18137035b4ed30fbc50e0d8c2e83324f0c042113d12f108c9daf6eaab8c599:HNnVliIWSVu9SpyukcDkzesztqlBAhIT7yc21qVX2DOlKzV6peVpm40DkwAVqzjyAw_UWoQ6f3xtn3iqexfWAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:3a18137035b4ed30fbc50e0d8c2e83324f0c042113d12f108c9daf6eaab8c599:HNnVliIWSVu9SpyukcDkzesztqlBAhIT7yc21qVX2DOlKzV6peVpm40DkwAVqzjyAw_UWoQ6f3xtn3iqexfWAw==:9fbfabe975fa5a7f -->
 # Registry Unpublish
 
 Make an item private in the registry.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:690560b6de385ab804c69aed3b477b34c7a8734b3aebdb0bc7458db309daddb1:2OHvmQE1FYbzmMtV21hM4MfcOJAzO57yOBG1aNnZu3zkap86Krnq_gkVxfDtdl68srh_Ptuc2ZMS1oqoFDEMCg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:20a0f6d25d4312d2edf61afd22c7aaf66137668ffb58e9483546d572e0eea53e:EOOhGAdEcGDiHmi3GI9XIC2ZFEEJ5po0SQ9XYEFbodJsvoZsJfaMiCTUcWW4J1A2yfxjrPFHkMCc9x62y3FsDg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: tool-format
@@ -14,6 +14,16 @@ tags:
   - authoring
   - metadata
   - specification
+  - python
+  - javascript
+  - node
+  - yaml
+  - bash
+  - execute-function
+  - CONFIG_SCHEMA
+  - executor-id
+  - create-tool
+  - writing-tools
 references:
   - directive-format
   - knowledge-format

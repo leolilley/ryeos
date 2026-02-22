@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:71244b3930bd72ceb6b0cb447220595e451412b331cdece70b04bb7cb4b15333:ceVzb0TalRKdq9LcoQVcjGNWU2dVfLpy0hkumBN7AYrtre7KRf2NizKBPuJ_kmbKT3ksJiraHUEda_vTXgEFCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:71244b3930bd72ceb6b0cb447220595e451412b331cdece70b04bb7cb4b15333:ceVzb0TalRKdq9LcoQVcjGNWU2dVfLpy0hkumBN7AYrtre7KRf2NizKBPuJ_kmbKT3ksJiraHUEda_vTXgEFCw==:9fbfabe975fa5a7f -->
 # Graphs
 
 Guide 8 in the Rye OS onboarding sequence. Declarative state graphs — nodes, edges, conditions, persistence, and error handling.

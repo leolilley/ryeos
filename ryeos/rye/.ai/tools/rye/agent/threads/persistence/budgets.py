@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:29fafeaa222aba4546787afb3cc8186e02f20170a6b4ea80e8a1a7f456dd149b:2y8_8-gj3VrbwMlhClncnqiaz8FkPL1i_GaEcu95_Dag2XZ2p0Ts7bU-e6PxW2uoWgKeL9bfG5Qr3wQYBWPOCw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:5d768a785fca528799a8a3d17fef29299a302f462e7148560997556743ca62f3:6Mn9UURdjrgQ-r_T_LkCof7BBR4YvKc4-vFxMB1eky687Rzyd4j8b0O6NGcdLx-kMlthLDe_7mc8XaYVefUbCg==:9fbfabe975fa5a7f
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -20,7 +20,7 @@ TERMINAL_STATUSES = frozenset({"completed", "cancelled", "error"})
 class BudgetLedger:
     """SQLite-backed hierarchical budget tracking.
 
-    DB location: {project_path}/.ai/threads/budget_ledger.db
+    DB location: {project_path}/.ai/agent/threads/budget_ledger.db
 
     Key invariant: reserve() uses BEGIN IMMEDIATE to prevent concurrent
     over-reservation. Two threads trying to reserve from the same parent
@@ -28,7 +28,7 @@ class BudgetLedger:
     """
 
     def __init__(self, project_path: Path):
-        self.db_path = project_path / AI_DIR / "threads" / DB_FILE
+        self.db_path = project_path / AI_DIR / "agent" / "threads" / DB_FILE
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:

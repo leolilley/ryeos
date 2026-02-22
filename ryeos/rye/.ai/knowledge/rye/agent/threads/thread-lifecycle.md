@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:53aeeee0e64abb9c3f69c641120d74110e97c363db99feb9265295ba510b7529:9HOBa3SnGM4j_9YfdUD6Qz6YKiW-N_1-7uqAN1oItbsTtm1EixC7UJNqqbJZJBRo98WFsQcburEClulU6-QnBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T06:57:41Z:2c1168d22e1c5b90c565eabbbd5852ef942cddbaa482e29a411e8a8e8cd36ad9:AalDm4AA1JxI5SU1QAkuaXVE7PsbixcVaQfAzrV97eNe2EUmYrxt39kYraTS734aI6MDMg4wLE7tAf7VvkckBQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: thread-lifecycle
@@ -110,7 +110,7 @@ Prompt built from directive raw content (markdown minus signature). Model resolv
 
 ### Step 10: Write initial thread.json
 
-Written to `.ai/threads/<thread_id>/thread.json`:
+Written to `.ai/agent/threads/<thread_id>/thread.json`:
 
 ```json
 {
@@ -151,14 +151,15 @@ No system prompt. Tools via API tool definitions. Context framing via hooks.
 
 ### First Message Construction
 
-1. `run_hooks_context()` dispatches `thread_started` hooks → each loads a knowledge item (agent identity, rules)
-2. Hook context + user prompt (directive content) concatenated into single user message:
+`run_hooks_context()` takes a required `event` parameter (no default) and dispatches the matching hooks:
+
+- **Fresh threads:** `thread_started` hooks fire. `directive_body` and `inputs` available in hook context. Hook context + user prompt concatenated into single user message:
 
 ```python
 messages = [{"role": "user", "content": f"{hook_context}\n\n{directive_prompt}"}]
 ```
 
-For resumed threads: pre-built `resume_messages` used instead.
+- **Continuation threads:** `thread_continued` hooks fire, context injected near last user message. `previous_thread_id` and `inputs` available in hook context.
 
 ### Turn Loop
 
@@ -177,20 +178,20 @@ Each turn:
    - Execute via `ToolDispatcher`
    - Guard result (bound large results, deduplicate, store artifacts)
    - Append tool message
-8. **Run `after_step` hooks** — Post-turn hooks evaluate
+8. **Run `after_step` hooks** — Post-turn hooks evaluate. `after_complete` hooks fire in the `finally` block after the loop ends (best-effort, won't break finalization).
 9. **Update cost snapshot** — Registry updated with current cost (best-effort)
-10. **Check context limit** — If token usage > threshold (default 0.9 of context window) → trigger `handoff_thread`
+10. **Check context limit** — If token usage > threshold (default 0.9 of context window) → trigger `handoff_thread`. Handoff no longer generates a summary — summarization is hook-driven.
 
 ## Thread Storage
 
-Each thread creates `.ai/threads/<thread_id>/`:
+Each thread creates `.ai/agent/threads/<thread_id>/`:
 
 | File              | Purpose                                  |
 |-------------------|------------------------------------------|
 | `thread.json`     | Metadata: ID, directive, status, model, cost, limits, capabilities |
 | `transcript.md`   | Full conversation log (EventEmitter)     |
 
-Shared databases at `.ai/threads/`:
+Shared databases at `.ai/agent/threads/`:
 - `registry.db` — thread registry (SQLite)
 - `budget_ledger.db` — hierarchical budget tracking (SQLite)
 

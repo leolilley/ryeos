@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:b4279811cf896bdf374ab2856d0316b362737c74005752634555db0611f4f06b:XnEKtB9ls2IwPi4vqmA2MvR3VmApOqnYeeQ1Tplira3S92NtF1Co1t6njUeoQwemLyWuO9o_FdXNzqb8qajeAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:b4279811cf896bdf374ab2856d0316b362737c74005752634555db0611f4f06b:XnEKtB9ls2IwPi4vqmA2MvR3VmApOqnYeeQ1Tplira3S92NtF1Co1t6njUeoQwemLyWuO9o_FdXNzqb8qajeAg==:9fbfabe975fa5a7f -->
 # Read
 
 Read file contents with optional offset and line limit.
@@ -44,7 +44,7 @@ Read file contents with optional offset and line limit.
 
   <step name="call_read">
     Read the file:
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"file_path": "{input:file_path}", "offset": {input:offset}, "limit": {input:limit}})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "{input:file_path}", "offset": {input:offset}, "limit": {input:limit}})`
   </step>
 
   <step name="return_result">

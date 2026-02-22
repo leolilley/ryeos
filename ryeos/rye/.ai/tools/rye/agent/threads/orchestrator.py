@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:e7c14d9318570c0f9477160f3d05615255bd97282c8fd84a9a17682f3454e6b8:7uzcSJGVVw1iqJmgV_P2sj7flBdvbHYBC1qK0MnwpS3pcvodoG47F4GECcQK7mtichqRWIBrzswj5aQG1yKTCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:9dcbb0ec2739241606aa572033e5285bb012d2eab7f7d2e0fd26325c6015cf84:6CiRqR-AcPsIf-T0lUE7JcaP_UnnHDrDkRRhik7kRf7ZdvawIU84oxKcLyz_aPMKJfFDD7fEGGICTcxhtIESAg==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python_function_runtime"
@@ -178,9 +178,10 @@ async def handoff_thread(
 ) -> Dict:
     """Handoff a stopping thread to a new continuation thread.
 
-    Summarizes the old thread, builds resume context (summary + trailing
-    messages within token ceiling), spawns a new thread with the same
-    directive, and links old→new via the continuation chain.
+    Builds resume context (trailing messages within token ceiling),
+    spawns a new thread with the same directive, and links old→new
+    via the continuation chain. Summarization is hook-driven — if the
+    directive declares an after_complete hook, it runs in the old thread.
 
     Args:
         thread_id: The stopping thread to hand off from.
@@ -206,16 +207,12 @@ async def handoff_thread(
     coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
     cont_config = coordination_loader.get_coordination_loader().get_continuation_config(project_path)
     resume_ceiling = cont_config.get("resume_ceiling_tokens", 16000)
-    summary_directive = cont_config.get("summary_directive")
-    summary_model = cont_config.get("summary_model", "fast")
-    summary_limit_overrides = cont_config.get("summary_limit_overrides", {"turns": 3, "spend": 0.02})
-    summary_max_tokens = cont_config.get("summary_max_tokens", 4000)
 
     # Verify transcript integrity before trusting its content
     from rye.constants import AI_DIR
     transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
     signer = transcript_signer_mod.TranscriptSigner(
-        thread_id, project_path / AI_DIR / "threads" / thread_id
+        thread_id, project_path / AI_DIR / "agent" / "threads" / thread_id
     )
     integrity_policy = cont_config.get("transcript_integrity", "strict")
     integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
@@ -234,45 +231,12 @@ async def handoff_thread(
         if not messages:
             return {"success": False, "error": f"Cannot reconstruct messages for thread: {thread_id}"}
 
-    # --- Phase 1: Generate summary via thread_summary directive ---
-    summary_text = None
-    summary_tokens = 0
-    if summary_directive:
-        # Read from signed knowledge entry (replaces legacy transcript.md)
-        from pathlib import PurePosixPath
-        thread_path = PurePosixPath(thread_id)
-        knowledge_path = project_path / AI_DIR / "knowledge" / "agent" / "threads" / thread_path.parent / f"{thread_path.name}.md"
-        transcript_content = ""
-        if knowledge_path.exists():
-            transcript_content = knowledge_path.read_text(encoding="utf-8")
-
-        if transcript_content:
-            thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
-            try:
-                summary_result = await thread_directive_mod.execute({
-                    "directive_id": summary_directive,
-                    "model": summary_model,
-                    "inputs": {
-                        "transcript_content": transcript_content,
-                        "directive_name": directive_name,
-                        "max_summary_tokens": summary_max_tokens,
-                    },
-                    "limit_overrides": summary_limit_overrides,
-                }, str(project_path))
-
-                if summary_result.get("success") and summary_result.get("result"):
-                    summary_text = summary_result["result"]
-                    summary_tokens = len(summary_text) // 4
-            except Exception:
-                pass  # summary failed — fall back to more trailing turns
-
-    # --- Phase 2: Fill remaining ceiling budget with trailing messages ---
-    remaining_budget = resume_ceiling - summary_tokens
+    # --- Phase 1: Fill ceiling budget with trailing messages ---
     trailing_messages: List[Dict] = []
     trailing_tokens = 0
     for msg in reversed(messages):
         msg_tokens = len(str(msg.get("content", ""))) // 4
-        if trailing_tokens + msg_tokens > remaining_budget:
+        if trailing_tokens + msg_tokens > resume_ceiling:
             break
         trailing_messages.insert(0, msg)
         trailing_tokens += msg_tokens
@@ -284,23 +248,8 @@ async def handoff_thread(
     while trailing_messages and trailing_messages[0].get("role") not in ("user",):
         trailing_messages.pop(0)
 
-    # --- Phase 3: Build resume_messages ---
+    # --- Phase 2: Build resume_messages ---
     resume_messages: List[Dict] = []
-    if summary_text:
-        resume_messages.append({
-            "role": "user",
-            "content": (
-                "## Thread Handoff Context\n\n"
-                "This thread is a continuation of a previous thread that reached its context limit. "
-                "Here is a summary of the previous execution:\n\n"
-                + summary_text
-            ),
-        })
-        resume_messages.append({
-            "role": "assistant",
-            "content": "Understood. I have the context from the previous thread. Continuing.",
-        })
-
     resume_messages.extend(trailing_messages)
 
     if continuation_message:
@@ -311,7 +260,7 @@ async def handoff_thread(
             "content": "Continue executing the directive. Pick up where the previous thread left off.",
         })
 
-    # --- Phase 4: Spawn new thread via thread_directive ---
+    # --- Phase 3: Spawn new thread via thread_directive ---
     # Treat continuation as a normal spawn from the same parent.
     # Same parent chain, same spawn/depth checks, same limits resolution.
     thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
@@ -319,6 +268,7 @@ async def handoff_thread(
     spawn_params = {
         "directive_id": directive_name,
         "resume_messages": resume_messages,
+        "previous_thread_id": thread_id,
     }
     if parent_id:
         spawn_params["parent_thread_id"] = parent_id
@@ -327,14 +277,14 @@ async def handoff_thread(
 
     new_thread_id = new_result.get("thread_id")
 
-    # --- Phase 5: Link old → new in registry ---
+    # --- Phase 4: Link old → new in registry ---
     if new_thread_id:
         registry.set_continuation(thread_id, new_thread_id)
         chain = registry.get_chain(thread_id)
         chain_root_id = chain[0]["thread_id"] if chain else thread_id
         registry.set_chain_info(new_thread_id, chain_root_id, thread_id)
 
-    # --- Phase 6: Log handoff in old thread's transcript ---
+    # --- Phase 5: Log handoff in old thread's transcript ---
     EventEmitter = load_module("events/event_emitter", anchor=_ANCHOR).EventEmitter
     Transcript = load_module("persistence/transcript", anchor=_ANCHOR).Transcript
     emitter = EventEmitter(project_path)
@@ -345,8 +295,6 @@ async def handoff_thread(
         {
             "new_thread_id": new_thread_id,
             "directive": directive_name,
-            "summary_generated": summary_text is not None,
-            "summary_tokens": summary_tokens,
             "trailing_turns": len(trailing_messages),
         },
         old_transcript,
@@ -358,8 +306,6 @@ async def handoff_thread(
         "old_thread_id": thread_id,
         "new_thread_id": new_thread_id,
         "directive": directive_name,
-        "summary_generated": summary_text is not None,
-        "summary_tokens": summary_tokens,
         "trailing_turns": len(trailing_messages),
         "resume_ceiling_tokens": resume_ceiling,
         "new_thread_result": new_result,
@@ -390,11 +336,16 @@ async def execute(params: Dict, project_path: str) -> Dict:
         results_list = await asyncio.gather(*wait_tasks, return_exceptions=True)
 
         results = {}
-        for tid, result in zip(thread_ids, results_list):
+        for i, (tid, result) in enumerate(zip(thread_ids, results_list)):
+            # tid may be a dict (failed spawn error) instead of a string
+            key = tid if isinstance(tid, str) else f"__failed_{i}"
             if isinstance(result, Exception):
-                results[tid] = {"status": "error", "error": str(result)}
+                results[key] = {"status": "error", "error": str(result)}
+            elif not isinstance(tid, str):
+                # Spawn itself failed — tid is the error dict
+                results[key] = tid if isinstance(tid, dict) else {"status": "error", "error": str(tid)}
             else:
-                results[tid] = result
+                results[key] = result
 
         all_success = all(
             r.get("status") == "completed"
@@ -558,7 +509,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         from rye.constants import AI_DIR
         transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
         signer = transcript_signer_mod.TranscriptSigner(
-            resolved_id, proj_path / AI_DIR / "threads" / resolved_id
+            resolved_id, proj_path / AI_DIR / "agent" / "threads" / resolved_id
         )
         coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
         cont_config = coordination_loader.get_coordination_loader().get_continuation_config(proj_path)
@@ -589,6 +540,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         spawn_params = {
             "directive_id": directive_name,
             "resume_messages": resume_messages,
+            "previous_thread_id": resolved_id,
         }
         if parent_id:
             spawn_params["parent_thread_id"] = parent_id

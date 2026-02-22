@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:6b150507528ccbd19c7f18dacd69f8049d78dd3fa0a27380206cf0e50b15040f:0va4-vUKwd3nvtTRK7c42LVFcBafa0YLhd0NXT9QC4-iOs0tIgkRDasMHsYAmDxR5s_ARQ_N73W1TF6956A3DQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:752852983a0ce0134c940c05b417ea044d5481f4b109d5454f64b8e186816cf9:FjM3CIuiBX_4W12k7QdLU_TBek31muWKlsSQbr0toppidtmrnf_Td2vCltCs3mVacuknjlZ-lFVh_rrxRrmvBw==:9fbfabe975fa5a7f
 """
 persistence/artifact_store.py: Filesystem-backed artifact store
 
@@ -26,7 +26,7 @@ class ArtifactStore:
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
         self.project_path = Path(project_path)
-        self.artifacts_dir = self.project_path / AI_DIR / "threads" / thread_id / "artifacts"
+        self.artifacts_dir = self.project_path / AI_DIR / "agent" / "threads" / thread_id / "artifacts"
 
     def store(self, call_id: str, tool_name: str, data: Any) -> str:
         """Write artifact to disk and return its content hash.

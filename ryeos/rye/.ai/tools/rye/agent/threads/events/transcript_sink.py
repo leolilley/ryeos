@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:0afab9f7d1a76ccc66bcf70e1c6b153d37b0c91ff2f0f0c4e8a95ef306ee31fc:h-5d7_yvH-h743_UMQE9QIqtvqmqX2KmRufnrJKWt3KEjaggpeoRk7a3gJizEQRHKfpZ5yrsJjCTyTWR_ZCjAg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:ff8400ed0811055174c6e88f6a06d1b9e1a0c87a23056b610f1a0bf059188f59:TNcX1J0w-VBz-GUMbZiMCEDOuQX97NcASfXSGM7xx_zkIsqnTSIT9y82FOG7oUGlV6vLt8vwTKn1GhxPVQBZDg==:9fbfabe975fa5a7f
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/events"
@@ -19,7 +19,7 @@ class TranscriptSink:
 
     When knowledge_path is set, text deltas are also appended to the
     knowledge markdown file so `tail -f *.md` shows the response forming.
-    render_knowledge() rewrites the file cleanly at each checkpoint.
+    render_knowledge_transcript() rewrites the file cleanly at each checkpoint.
     """
 
     def __init__(

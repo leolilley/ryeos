@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:43:37Z:0704c2b447e8ebaa944c0a2285dfa33819d1ccf688e0babb3246d4d0e52d30c5:H0yvy4rnQn2oQpueITzdG_Pc1pYyOdDhj01pOSgQTr4NkVgzCOkliIPDJPuMRWEkNWzk_eUF2zpcpUuEK-bkCg==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:0704c2b447e8ebaa944c0a2285dfa33819d1ccf688e0babb3246d4d0e52d30c5:YeDus6ZM55eMfTIvsHaejxPOZmt3K3nMMdLDRoQsCBc-vcr1-JrSpbIFRFNefTFPpomIvpRnhkbpgk4iudI8DA==:9fbfabe975fa5a7f -->
 # Permission Test: Wrong Scope
 
 Has permission for rye.core.* tools but tries to use rye/file-system — should be denied.

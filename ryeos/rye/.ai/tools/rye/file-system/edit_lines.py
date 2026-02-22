@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:837a400d4a85f9ae4477f4281294bf3ee4e96318c18886c914deacdbca6313bf:Uo1BeohAUjS0UipgnhbyhoNBfMarAtenqw2Z5_n81fRZ9M8ydnJjeq8TAPxAcCVjzgRfUV1eomhRDIXDYN6bCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:dd6421a81849444170f909807c9f63efcdb2fd29b2e606839dc0a6db07feeb1b:nEd9pvf1VCEJ-jlzV7JaqynNyJMXoKrboKY-SLVdb4DerTn-Ge8A2xTgvFoNFtqDvm8gdHtF_4p1LjTWe0n4Cg==:9fbfabe975fa5a7f
 """Edit files by line ID (not string matching)."""
 
 import argparse
@@ -17,7 +17,7 @@ __tool_description__ = "Edit files using line IDs"
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "file_path": {
+        "path": {
             "type": "string",
             "description": "Path to file (relative to project root or absolute)",
         },
@@ -47,7 +47,7 @@ CONFIG_SCHEMA = {
             "description": "List of change operations",
         },
     },
-    "required": ["file_path", "changes"],
+    "required": ["path", "changes"],
 }
 
 
@@ -166,7 +166,7 @@ def generate_diff(old_lines: list[str], new_lines: list[str], file_path: str) ->
 
 def execute(params: dict, project_path: str) -> dict:
     project = Path(project_path).resolve()
-    file_path = Path(params["file_path"])
+    file_path = Path(params["path"])
     changes = params["changes"]
 
     if not file_path.is_absolute():

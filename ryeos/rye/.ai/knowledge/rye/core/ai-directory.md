@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:824afb6b250bf0623bec6daa7e50636efe306876a69b704ffc0fba4111bb3a81:rbP-pfpw4XnDVO8xQLP58LOf2yK-K4fhKk35tvYNGIFwKYkca2ikhDrD_k1ItsJOoFclH4h84Ypr5HnPSiCEAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:665758c641ff9aaf57900fff5ba071ba8bf274b0599208cdae503a26803f2d0f:SpLp_KxGVLLyozFR3MOuydrXUeeuNXb_IXbrvhhHqSyljkhOrnCTsjU7bbK0WhHW2mY4SJPbCXQeSshO2s3IAA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: ai-directory
@@ -12,6 +12,13 @@ tags:
   - ai-directory
   - structure
   - file-system
+  - dot-ai
+  - directory-layout
+  - directives
+  - tools
+  - knowledge
+  - bundles
+  - lockfiles
 references:
   - terminology
   - three-tier-spaces

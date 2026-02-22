@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:28491686f11dd779965576ac8ceccebeb28bada81efd682e4e98d7cc89db5200:vKQAEfxullcbheiH2Jc2_aDFInmXzEqYKu4MkY6ZYaekYZiGSWi1qp14ysAM_HIBnGRldIyOOZ0oCD6sWDcWCQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:41:03Z:28491686f11dd779965576ac8ceccebeb28bada81efd682e4e98d7cc89db5200:vKQAEfxullcbheiH2Jc2_aDFInmXzEqYKu4MkY6ZYaekYZiGSWi1qp14ysAM_HIBnGRldIyOOZ0oCD6sWDcWCQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: file-operations

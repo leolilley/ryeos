@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:43:37Z:475b82971017d43cd02f029eb2869622a0dd6213533cfe1ac1da45e42b62f75b:UCjwqE-ZRcnFtKsVBjkGyiCdND9QF_ggXQ1gZhM-ejJy9Ec6ZALuPHnhNMeT9rg2COo1b7ZvCdFQnzZ6JsiVCA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:475b82971017d43cd02f029eb2869622a0dd6213533cfe1ac1da45e42b62f75b:6QPrp489hsxzhq52O7H_tUC6aupR4zBL6Qj3elB_VIUEwPjQu-8dBYA6M-6s8_W1Xs5jV7aKch7Gednn_p8CBQ==:9fbfabe975fa5a7f -->
 # Permission Test: Wildcard
 
 Wildcard permissions — all actions should be allowed.

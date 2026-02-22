@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:9a8b3e1b54d989f12b82d54a74febe676fbe90e13433a2665a7e77968424851c:ZvbKhkdOFRg9tf93D6Ms0sDVFQZ6BvoLw73MAbFB954u2OEnJIjmg6ymM9h1fTWIIXutKp5WlNA-P22zr_cbBA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:e795388c56ad3111a67424038754fd5c97345b86f1658ba5646af457e9c5bf29:Z2X-SyPeUCdGFLkwbjdyMI8XMXmQ_-4nQiWKgXqdjAN3k2EckVWIQKwIHg9z7jlfL6VEPzoLQANyoxSLpiQLCQ==:9fbfabe975fa5a7f
 # config/events.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"
@@ -17,6 +17,19 @@ event_types:
       properties:
         directive: { type: string }
         model: { type: string }
+        limits: { type: object }
+
+  thread_continued:
+    category: lifecycle
+    criticality: critical
+    description: "Continuation thread execution begins (handoff from prior thread)"
+    payload_schema:
+      type: object
+      required: [directive, model, previous_thread_id]
+      properties:
+        directive: { type: string }
+        model: { type: string }
+        previous_thread_id: { type: string }
         limits: { type: object }
 
   thread_completed:

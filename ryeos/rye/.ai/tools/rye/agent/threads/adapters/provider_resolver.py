@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:a873c0a90ca1c4ad6096b806a7176006c68e122f8b4430690eb1f1140631e04b:gVwBHqTbEJxPggJYFD5oHPfPboJ9gqKWmjVrGxaYWSTuyZevj-y03rN2gZzGMB82nswXC-gR2HWRcQ2Jz25uBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:0e215b754fb18b5583cf8670f4bd462f68b9d21ad7667f2c0af744b19b8f2306:1Avv0rj6qLfTkQvAxkkAUKbD9wa-W4xmgmjhiIIJWPTV1JdWVwCU79LRGFf7Pki66PHe-lR_Sj-omOzBJaHjCg==:9fbfabe975fa5a7f
 """
 provider_resolver.py: Resolve model/tier to a concrete provider adapter.
 
@@ -87,6 +87,39 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
     return result
 
 
+def _apply_model_profiles(config: Dict, model_id: str) -> Dict:
+    """If config has profiles, find matching profile and deep-merge over base.
+
+    Profiles allow a single provider YAML to support multiple API formats
+    by matching model IDs to config/schema overrides. For example, a Zen
+    gateway provider can route claude-* to Anthropic format and gemini-* to
+    Google format, all from one YAML file.
+
+    Match patterns use fnmatch glob syntax (e.g., "claude-*", "gemini-*").
+    """
+    profiles = config.get("profiles")
+    if not profiles:
+        return config
+
+    import fnmatch
+
+    for profile_name, profile in profiles.items():
+        patterns = profile.get("match", [])
+        for pattern in patterns:
+            if fnmatch.fnmatch(model_id, pattern):
+                merged = dict(config)
+                merged.pop("profiles", None)
+                for key in ("config", "tool_use", "pricing"):
+                    if key in profile:
+                        merged[key] = _deep_merge(merged.get(key, {}), profile[key])
+                logger.debug(
+                    "Applied profile '%s' for model '%s'", profile_name, model_id,
+                )
+                return merged
+
+    return config
+
+
 def _build_item_id(config: Dict, yaml_path: Path) -> str:
     """Build tool item_id from provider config (category/tool_id)."""
     category = config.get("category", "")
@@ -124,7 +157,7 @@ def _load_provider_configs(project_path: Optional[Path] = None) -> List[Tuple[Pa
     configs = []
     seen_ids = set()
     for provider_dir in _get_provider_dirs(project_path):
-        for yaml_path in sorted(provider_dir.glob("*.yaml")):
+        for yaml_path in sorted(provider_dir.rglob("*.yaml")):
             try:
                 with open(yaml_path) as f:
                     config = yaml.safe_load(f) or {}
@@ -201,8 +234,17 @@ def resolve_provider(
         preferred = agent_config.get("provider", {}).get("default")
 
     # If we have an explicit provider hint (from directive), filter to only that provider
+    # Supports both tool_id ("zen_openai") and path-style ("zen/zen_openai")
     if provider:
-        filtered = [(p, c) for p, c in configs if c.get("tool_id", p.stem) == provider]
+        def _matches_provider(yaml_path: Path, config: Dict, hint: str) -> bool:
+            tool_id = config.get("tool_id", yaml_path.stem)
+            if tool_id == hint:
+                return True
+            # Path-style match: "zen/zen_openai" matches category suffix or relative path
+            item_id = _build_item_id(config, yaml_path)
+            return item_id.endswith(f"/{hint}") or item_id == hint
+
+        filtered = [(p, c) for p, c in configs if _matches_provider(p, c, provider)]
         if not filtered:
             available = [c.get("tool_id", p.stem) for p, c in configs]
             raise ProviderNotFoundError(
@@ -236,7 +278,7 @@ def resolve_provider(
                 "Resolved tier '%s' → model '%s' via %s",
                 model, resolved_model, yaml_path.name,
             )
-            return resolved_model, item_id, config
+            return resolved_model, item_id, _apply_model_profiles(config, resolved_model)
 
     # Pass 2: Check if model is a known model ID in any tier_mapping values
     for yaml_path, config in ordered:
@@ -247,7 +289,7 @@ def resolve_provider(
                 "Matched model ID '%s' directly via %s",
                 model, yaml_path.name,
             )
-            return model, item_id, config
+            return model, item_id, _apply_model_profiles(config, model)
 
     # Pass 3: Check if model is a prefix of any known model ID
     for yaml_path, config in ordered:
@@ -259,7 +301,18 @@ def resolve_provider(
                     "Prefix-matched model '%s' → '%s' via %s",
                     model, model_id, yaml_path.name,
                 )
-                return model_id, item_id, config
+                return model_id, item_id, _apply_model_profiles(config, model_id)
+
+    # Pass 4: Check if model is a known model ID in pricing section
+    for yaml_path, config in ordered:
+        pricing = config.get("pricing", {})
+        if model in pricing:
+            item_id = _build_item_id(config, yaml_path)
+            logger.debug(
+                "Matched model ID '%s' via pricing in %s",
+                model, yaml_path.name,
+            )
+            return model, item_id, _apply_model_profiles(config, model)
 
     # No match
     available_tiers = {}

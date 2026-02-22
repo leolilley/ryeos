@@ -107,7 +107,7 @@ The LLM prompt is built from the directive's raw content (the full markdown file
 
 ### Step 10: Write initial thread.json
 
-The thread metadata file is written to `.ai/threads/<thread_id>/thread.json`:
+The thread metadata file is written to `.ai/agent/threads/<thread_id>/thread.json`:
 
 ```json
 {
@@ -165,14 +165,15 @@ After the LLM loop completes:
 
 ### First Message Construction
 
-1. `run_hooks_context()` dispatches `thread_started` hooks — each loads a knowledge item (agent identity, rules, etc.) and its content is extracted
-2. Hook context and the user prompt (full directive content) are concatenated into a single user message
+`run_hooks_context()` takes an explicit `event` parameter (required, no default) and dispatches hooks matching that event:
+
+- **Fresh threads:** `run_hooks_context(event="thread_started")` fires `thread_started` hooks. Context includes `directive_body` and `inputs`. Hook context and the user prompt (full directive content) are concatenated into a single user message.
 
 ```python
 messages = [{"role": "user", "content": f"{hook_context}\n\n{directive_prompt}"}]
 ```
 
-For resumed threads, pre-built `resume_messages` are used instead (summary + trailing turns + continuation message).
+- **Continuation threads** (when `resume_messages` is provided): `run_hooks_context(event="thread_continued")` fires `thread_continued` hooks instead. Context is injected near the last user message (not prepended). The context dict also includes `previous_thread_id` and `inputs`, available for interpolation.
 
 ### Turn Loop
 
@@ -203,11 +204,15 @@ Each turn follows this sequence:
 
 9. **Update cost snapshot** — The registry is updated with current cost data (best-effort).
 
-10. **Check context limit** — If estimated token usage exceeds the threshold (default 0.9 of context window), trigger `handoff_thread` to continue in a new thread.
+10. **Check context limit** — If estimated token usage exceeds the threshold (default 0.9 of context window), trigger `handoff_thread` to continue in a new thread. The handoff no longer generates a summary — summarization is hook-driven via `after_complete` hooks declared by the directive.
+
+### After-Complete Hook Dispatch
+
+After the turn loop exits and `render_knowledge_transcript()` runs, the runner dispatches `after_complete` hooks in the `finally` block. This is best-effort (wrapped in `try/except`) — failures do not affect the thread's final status. This enables directives to declare hooks for post-completion actions like summarization.
 
 ## Thread Storage
 
-Each thread creates a directory at `.ai/threads/<thread_id>/` containing:
+Each thread creates a directory at `.ai/agent/threads/<thread_id>/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -216,7 +221,7 @@ Each thread creates a directory at `.ai/threads/<thread_id>/` containing:
 
 Thread transcripts are also exported as signed knowledge entries at `.ai/knowledge/threads/{thread_id}.md` for discoverability via `rye search knowledge`.
 
-The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/threads/`.
+The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/agent/threads/`.
 
 ## Thread Registry
 

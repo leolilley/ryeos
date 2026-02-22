@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:d1d8b203c87e3e51222e90ec6eee0f3d57ae1467f592ccac7b92f9363077ee77:4ANDWitB9_EmG14skGyxVseQNlVL3he1E47AQ8YPojJrOUoSgdFa7F_MpyEjqsN6I4jeEdh-DNYHwpbyQrdUBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:d1d8b203c87e3e51222e90ec6eee0f3d57ae1467f592ccac7b92f9363077ee77:4ANDWitB9_EmG14skGyxVseQNlVL3he1E47AQ8YPojJrOUoSgdFa7F_MpyEjqsN6I4jeEdh-DNYHwpbyQrdUBg==:9fbfabe975fa5a7f -->
 # Registry Signup
 
 Create a new registry account.

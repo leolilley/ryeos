@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:dda86409e554f65dc42ab16ee447d9ba736a5a2dc6f33f50ac5e49019edc9310:J2yF0v6DjKKvxr_-mvURSOO3BCdvuPwV3BC_iL00KBXSv8xRjqqIZz5PxdrqJ9T5xKklKmOj69kcVLftdy9uBQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:dda86409e554f65dc42ab16ee447d9ba736a5a2dc6f33f50ac5e49019edc9310:J2yF0v6DjKKvxr_-mvURSOO3BCdvuPwV3BC_iL00KBXSv8xRjqqIZz5PxdrqJ9T5xKklKmOj69kcVLftdy9uBQ==:9fbfabe975fa5a7f
 """Checkpoint signing for transcript integrity and JSON signing utilities.
 
 Signs transcript.jsonl at turn boundaries by appending checkpoint events

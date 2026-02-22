@@ -349,6 +349,18 @@ class SignTool:
         )
         file_path.write_text(signed_content)
 
+        # Invalidate stale lockfile — signing changes the integrity hash
+        version = parsed.get("version", "0.0.0")
+        try:
+            from rye.executor.lockfile_resolver import LockfileResolver
+            resolver = LockfileResolver(
+                project_path=Path(project_path) if project_path else None,
+            )
+            if resolver.delete_lockfile(item_id, version):
+                logger.info(f"Deleted stale lockfile for {item_id}@{version}")
+        except Exception as e:
+            logger.debug(f"Lockfile cleanup skipped: {e}")
+
         sig_info = MetadataManager.get_signature_info(
             ItemType.TOOL,
             signed_content,

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:43:37Z:460d2cdbb4f4bab9f42cee2ca1f6574c62f573fc87c295a8ac394944a7c16894:DBPilP_HUPOss0-lPWhQKAzghZHp2Zj7dgw-LTnr8T1KGsIGMzdtjrhVYKcF40L1abR5qnA-p1hmWCzFhLjVBQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:460d2cdbb4f4bab9f42cee2ca1f6574c62f573fc87c295a8ac394944a7c16894:rhH0RxSySCRn8O2EaPfErut7li1oYgvICiUNSPGFgaaLffGN1HpSgjvRUwlDCbxNZD0X43-nLXLQtSUu88YeBA==:9fbfabe975fa5a7f -->
 # Directive Lifecycle Test
 
 Test creating, signing, loading, and searching for a directive.

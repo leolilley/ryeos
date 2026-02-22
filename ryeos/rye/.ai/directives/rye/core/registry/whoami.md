@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:8731bc830f8d3bcca80fb348eff029fac4babc8eb69bb5bc3c18ccfb7d0fe825:UWoszMl--Tzx1nBq-KJlTka8XTvJ9SlY6F_kCr1fQYkKx7F9jkyrN2RbMiq5rgz2Y_lV-B0_10ZpPfLD0pU5Dg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:8731bc830f8d3bcca80fb348eff029fac4babc8eb69bb5bc3c18ccfb7d0fe825:UWoszMl--Tzx1nBq-KJlTka8XTvJ9SlY6F_kCr1fQYkKx7F9jkyrN2RbMiq5rgz2Y_lV-B0_10ZpPfLD0pU5Dg==:9fbfabe975fa5a7f -->
 # Registry Whoami
 
 Show the currently authenticated user.

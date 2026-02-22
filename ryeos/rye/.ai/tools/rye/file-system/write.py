@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:38c6c176ee9cc03c5719febe402bcfd2de742fc9f7d53a438d74357096a58647:zqc24vUsVKgvaOwFQ74ATPlLDfy2oiZxKslsiFFiD3d--yFBqfL2Qtglz3kv57PtQlNBgn9a4cnwFQ3y6EdnAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:2e3e1d770db107710650767f17a0cc0a7a1dddedd5cc20454e4ffca87881c04d:LNrx0rcLsME_MPrZyTJMIYqrbX7eixbNZ__vsiXwPOaRdrQc6ybFm1KS6V0caDyOsxJGD054V-DL6vX8iPnYCA==:9fbfabe975fa5a7f
 """Create or overwrite a file, invalidating line ID cache."""
 
 import argparse
@@ -16,7 +16,7 @@ __tool_description__ = "Create or overwrite one or more files"
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "file_path": {
+        "path": {
             "type": "string",
             "description": "Path to file (single-file mode). Mutually exclusive with 'files'.",
         },
@@ -26,14 +26,14 @@ CONFIG_SCHEMA = {
         },
         "files": {
             "type": "array",
-            "description": "Batch mode — list of {file_path, content} objects to write in one call.",
+            "description": "Batch mode — list of {path, content} objects to write in one call.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
+                    "path": {"type": "string"},
                     "content": {"type": "string"},
                 },
-                "required": ["file_path", "content"],
+                "required": ["path", "content"],
             },
         },
     },
@@ -135,7 +135,7 @@ def execute(params: dict, project_path: str) -> dict:
     # Batch mode
     files = params.get("files")
     if files:
-        results = [_write_one(f["file_path"], f["content"], project) for f in files]
+        results = [_write_one(f["path"], f["content"], project) for f in files]
         failed = [r for r in results if not r["success"]]
         return {
             "success": len(failed) == 0,
@@ -146,10 +146,10 @@ def execute(params: dict, project_path: str) -> dict:
         }
 
     # Single-file mode
-    if "file_path" not in params or "content" not in params:
-        return {"success": False, "error": "Provide either 'files' (batch) or 'file_path'+'content' (single)."}
+    if "path" not in params or "content" not in params:
+        return {"success": False, "error": "Provide either 'files' (batch) or 'path'+'content' (single)."}
 
-    return _write_one(params["file_path"], params["content"], project)
+    return _write_one(params["path"], params["content"], project)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:b3b34121f1eabf2747d1003c6cab5df33c30c9079a8b344c77773f33aea41dd2:VSP3qU0nJNW_ZLHL438R15jhSMo16r-kVCDcPZbo1MboScZGUlXiLfc8BH383YFigzLeIYOcd5tKCvWgfN4ODw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T06:57:41Z:5abb3dd1e337aa733056658f834d4e3588ff51c03e39ef9581dda5949056cc9c:VImJy3v1nCS46WtSY6CVgWwCe2zqr7YcsiL8AA8LsVPB9RBqF8fsFlkPMUfpWhwo-WDRaFet-jwabggwtFFaDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: orchestrator-patterns
@@ -181,6 +181,79 @@ rye_execute(item_id="rye/agent/threads/orchestrator",
 rye_execute(item_id="rye/agent/threads/orchestrator",
     parameters={"operation": "aggregate_results", "thread_ids": [...]})
 ```
+
+## Cross-Thread Context Wiring
+
+Orchestrators pass dependency thread IDs as `inputs` when spawning child directives. The child directive's hooks reference them via interpolation, resolved by `interpolate_action()` which expands `${...}` in both `item_id` and `params` fields.
+
+**Example:** Orchestrator completes Wave 0 (scaffold), gets `thread_id` back, then spawns Wave 1:
+
+```python
+rye_execute(item_id="rye/agent/threads/thread_directive",
+    parameters={
+        "directive_name": "project/implement_feature",
+        "inputs": {"scaffold_thread_id": "scaffold_project/scaffold_project-1740200000"}
+    })
+```
+
+In the child directive's `thread_started` hook:
+
+```xml
+<hooks>
+  <hook id="inject_scaffold" event="thread_started">
+    <action primary="execute" item_type="knowledge" item_id="agent/threads/${inputs.scaffold_thread_id}" />
+  </hook>
+</hooks>
+```
+
+The hook loads the knowledge entry from the scaffold thread — deterministic, zero API calls for context wiring. Any thread ID passed as an input can be referenced this way to pull context from a prior phase.
+
+## Graph Hooks vs Directive Hooks
+
+When combining state graphs with thread orchestration, two hook systems operate at different layers:
+
+**Graph hooks** (YAML in `config.hooks`) handle pipeline-level events — progress logging, error handling, pipeline completion. The state graph defines the deterministic wave structure.
+
+**Directive hooks** (XML in each directive's `<metadata>`) handle thread-level events — knowledge injection at startup (`thread_started`), summarization on completion (`after_complete`), context re-injection after handoff (`thread_continued`).
+
+Example — a graph node spawns a thread directive, and the directive's hooks wire in knowledge:
+
+```yaml
+# Graph node (YAML) — spawns the thread
+implement_api:
+  action:
+    primary: execute
+    item_type: tool
+    item_id: rye/agent/threads/thread_directive
+    params:
+      directive_name: project/implement_api
+      inputs:
+        scaffold_thread_id: "${state.scaffold_thread_id}"
+        database_thread_id: "${state.database_thread_id}"
+  assign:
+    api_thread_id: "${result.thread_id}"
+  next: implement_dashboard
+```
+
+```xml
+<!-- Directive hooks (XML) — wire knowledge into the thread -->
+<hooks>
+  <hook id="inject_scaffold" event="thread_started">
+    <action primary="execute" item_type="knowledge" item_id="agent/threads/${inputs.scaffold_thread_id}" />
+  </hook>
+  <hook id="inject_database" event="thread_started">
+    <action primary="execute" item_type="knowledge" item_id="agent/threads/${inputs.database_thread_id}" />
+  </hook>
+</hooks>
+```
+
+The graph decides **what** runs and **when** (deterministic routing). The directive hooks decide **what context each thread sees** (knowledge injection). Both use the same underlying infrastructure (`condition_evaluator`, `interpolation`), but serve different purposes at different layers.
+
+| Concern                    | Hook System    | Format              | Events                                        |
+| -------------------------- | -------------- | ------------------- | --------------------------------------------- |
+| Pipeline progress/errors   | Graph hook     | YAML `config.hooks` | `graph_started`, `after_step`, `error`        |
+| Thread knowledge injection | Directive hook | XML `<hooks>`       | `thread_started`, `thread_continued`          |
+| Thread summarization       | Directive hook | XML `<hooks>`       | `after_complete`                              |
 
 ## Sequential Phases
 

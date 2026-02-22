@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:4b59b87de5bcef04a06e87844bea10f11fb022adb88542ed4de81a916455c60e:MABOAW6Bglh00oltA86t1kRSDoYFmY1crmOBFRHQLt0z5e4M7w7l_9u85iy3Aaef_9nj9EK4cMfe250FUZsUDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:4b59b87de5bcef04a06e87844bea10f11fb022adb88542ed4de81a916455c60e:MABOAW6Bglh00oltA86t1kRSDoYFmY1crmOBFRHQLt0z5e4M7w7l_9u85iy3Aaef_9nj9EK4cMfe250FUZsUDg==:9fbfabe975fa5a7f -->
 
 # Create Threaded Directive
 
@@ -104,7 +104,3 @@ Create a directive with full thread execution support — model configuration, c
 <criterion>Signature validation passed</criterion>
 </success_criteria>
 
-<results>
-  <success>Created threaded directive: {input:name} at .ai/directives/{input:category}/{input:name}.md with {input:complexity} limits. Execute with: rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "{input:category}/{input:name}"})</success>
-  <failure>Failed to create threaded directive: {input:name}. Check complexity mapping, permissions format, and XML structure.</failure>
-</results>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:c05d15ef2fd6b78886a3412cff7a009f3d27a917692c5254f8e5d7758fc9000b:XSuGroVKgPbYgUPIwuxmVNF8O72zJ8Q5CRUryM_VXDckypao_oqqQevai-qnkP2wLI-9PefJoUkv3YzRKMcgAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:c05d15ef2fd6b78886a3412cff7a009f3d27a917692c5254f8e5d7758fc9000b:XSuGroVKgPbYgUPIwuxmVNF8O72zJ8Q5CRUryM_VXDckypao_oqqQevai-qnkP2wLI-9PefJoUkv3YzRKMcgAw==:9fbfabe975fa5a7f -->
 # Web Search
 
 Search the web using DuckDuckGo or Exa and return results.

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:f4746c38830aa471cd2c7429165abe88adb7e264877ff2dff61d674a38ada8ae:iUNGv64Pkt1_SujKseynYFasFuYvNPus9YBW3w9jH7gVgg49JCUM1ApFY0zZEcp1ReHFr6Ojm32hFISUCS4eCg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:f4746c38830aa471cd2c7429165abe88adb7e264877ff2dff61d674a38ada8ae:iUNGv64Pkt1_SujKseynYFasFuYvNPus9YBW3w9jH7gVgg49JCUM1ApFY0zZEcp1ReHFr6Ojm32hFISUCS4eCg==:9fbfabe975fa5a7f
 """Capability tokens package."""
 
 __version__ = "1.0.0"

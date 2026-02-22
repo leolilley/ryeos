@@ -1,4 +1,4 @@
-# rye:signed:2026-02-21T05:56:40Z:83e5ac41d405a1bf18b3c99b5c7c418a80138b1f1b2c2d42ccdc0d96a20e0fce:Vhp7oZWx2bPv_MCUKcIx1X3Jsy89j9aIbE5OkZ07Cf2KpcfCPwUBqNP3n7biP2pi7QLXCK06UKDcLfF2qC6CDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:83e5ac41d405a1bf18b3c99b5c7c418a80138b1f1b2c2d42ccdc0d96a20e0fce:Vhp7oZWx2bPv_MCUKcIx1X3Jsy89j9aIbE5OkZ07Cf2KpcfCPwUBqNP3n7biP2pi7QLXCK06UKDcLfF2qC6CDA==:9fbfabe975fa5a7f
 """Get LSP diagnostics for a file."""
 
 import argparse

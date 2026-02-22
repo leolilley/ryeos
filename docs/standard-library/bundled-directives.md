@@ -394,7 +394,7 @@ rye_execute(
 
 **Purpose:** Summarize a thread conversation for context carryover during thread resumption. Produces a structured summary that fits within a token budget.
 
-> **Note:** This is an infrastructure directive. It is called internally by the thread system during `handoff_thread` for automatic continuation. You typically do not invoke it directly.
+> **Note:** This directive is no longer called automatically by the infrastructure. Summarization is opt-in — directives that want summarization on handoff declare an `after_complete` hook that invokes this directive. You can also invoke it directly.
 
 ### Configuration
 
@@ -458,7 +458,7 @@ The summary discards conversational filler, redundant tool invocations, and inte
 
 ### Invocation
 
-While typically called by the thread system, you can invoke it directly if needed:
+Invoke it directly or from a directive's `after_complete` hook:
 
 ```python
 rye_execute(
@@ -482,6 +482,6 @@ rye_execute(
 | `create_tool`               | User-facing    | You want to scaffold a new tool (Python, YAML, Bash, or JS)               |
 | `create_knowledge`          | User-facing    | You want to scaffold a new knowledge entry                                |
 | `create_threaded_directive` | User-facing    | You want a directive that runs autonomously in a budget-controlled thread |
-| `thread_summary`            | Infrastructure | Called by `handoff_thread` — you rarely invoke this directly              |
+| `thread_summary`            | Opt-in hook    | Declared in directive `after_complete` hooks for summarization on handoff |
 
 The four creation directives are the primary way to add new items to your project. They handle metadata formatting, file structure, validation, and signing so you don't have to remember the schema manually. Use the [metadata reference knowledge entries](overview.md#knowledge) if you need to write items by hand.

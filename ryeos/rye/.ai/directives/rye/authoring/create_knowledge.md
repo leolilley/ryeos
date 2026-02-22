@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:953f4506a39d84896eb408f5b46a53ba748651e3a788df328287a77a6eff8d5e:RzH2wG-k-knVENKlouHL91s7jRQofAcSjKvx8rAtgCNjC_eTBEqUmRhlrh8-sdim2tsw-E93JSEANbd5DLevDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:953f4506a39d84896eb408f5b46a53ba748651e3a788df328287a77a6eff8d5e:RzH2wG-k-knVENKlouHL91s7jRQofAcSjKvx8rAtgCNjC_eTBEqUmRhlrh8-sdim2tsw-E93JSEANbd5DLevDQ==:9fbfabe975fa5a7f -->
 # Create Knowledge Entry
 
 Create a new knowledge entry with proper metadata, validation, and signing.

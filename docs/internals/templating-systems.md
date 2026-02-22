@@ -127,9 +127,9 @@ This is the same dollar-brace syntax as System 1, but System 1's tightened regex
 
 ## System 4: Directive Input References
 
-**Syntax:** `{input:key}`, `{input:key?}`, `{input:key:default}`
+**Syntax:** `{input:key}`, `{input:key?}`, `{input:key:default}`, `{input:key|default}`
 
-**Regex:** `\{input:(\w+)(\?|:[^}]*)?\}`
+**Regex:** `\{input:(\w+)(\?|[:|][^}]*)?\}`
 
 **Where it runs:**
 

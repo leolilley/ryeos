@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:6c86d2a245cfcc3dda31d2c872c908c08169977af77125fe60a4f7714a8ca698:jeJ6QGJzfHvCu1T8gxON0UO6ZRNJRsnz8oWkbuKxghSqzUzxSZ7kxkvULWghUZPFUiDPu9nScMwYv_KdhS3TBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:262d4d3c10d8bae830f7f10c5ac332b6f0a381b2c46ca66fa8ab99457365827e:Ml-zUV1-HwRZKeYBa5BSYmkcs3wKRQEzQOOjz9KDgUsQnumJ3gzKXs_psb27CKE2MsPSNjkeyR9eHnXeTqSXCA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: templating-systems
@@ -15,6 +15,12 @@ tags:
   - runtime
   - hooks
   - graphs
+  - parameter-substitution
+  - environment-variables
+  - tool-path
+  - params-json
+  - project-path
+  - variable-expansion
 references:
   - executor-chain
   - input-interpolation
@@ -138,7 +144,7 @@ config:
 
 ## System 4: Directive Input References
 
-**Syntax:** `{input:key}`, `{input:key?}`, `{input:key:default}`
+**Syntax:** `{input:key}`, `{input:key?}`, `{input:key:default}`, `{input:key|default}`
 
 **Where it runs:**
 

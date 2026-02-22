@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:054152767e175804682f10bced990fe384b138e126d09a9e3becb0efcd37a433:OhXFa84fzrkYQwVE7WZPDcn94ApKNG5i79NNb4-UyfEGkIyGO6iIZY3pJe_B5PGL04nIVY3jzYnZXcnPplGuCg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:37:08Z:5dbe02d92b14ccbc7867d989fd1fed17022a2b6d85a5876ec6034fbe55530c66:yRnY1IGY1i-kseFPXBbXKI3L-Br9R3LyhMfyu74zaKpNdGBL3lNdQNVF1HKjL8fl3WHrZGHepT7bn79d2CGPDw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: input-interpolation
@@ -13,6 +13,10 @@ tags:
   - inputs
   - directives
   - templates
+  - placeholders
+  - parameters
+  - input-resolution
+  - directive-inputs
 references:
   - templating-systems
   - "docs/authoring/directives.md"
@@ -30,6 +34,7 @@ How `{input:name}` placeholders are resolved in directives during execution.
 | `{input:key}`         | **Required** — kept as literal `{input:key}` if missing |
 | `{input:key?}`        | **Optional** — replaced with empty string if missing    |
 | `{input:key:default}` | **Fallback** — uses `default` value if key missing      |
+| `{input:key\|default}` | **Fallback** — uses `default` value if key missing (pipe syntax) |
 
 ## Where Interpolation Runs
 

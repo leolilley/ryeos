@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:59dbc0835783fed51ce3d3f3a913b273e3aa4e493629ae57d630bcfa6eb1c20d:vm3DPJc5idv7raprpJUJ6wXaupHPosmSKT3iNAj7NZT5RN1B7cvpW65O_ijFXvWvMsMpCnNYgfIUYpiqRDd0Aw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:41:03Z:59dbc0835783fed51ce3d3f3a913b273e3aa4e493629ae57d630bcfa6eb1c20d:vm3DPJc5idv7raprpJUJ6wXaupHPosmSKT3iNAj7NZT5RN1B7cvpW65O_ijFXvWvMsMpCnNYgfIUYpiqRDd0Aw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: streaming

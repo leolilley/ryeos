@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T10:03:52Z:7a04ecd7e14570b3dc877d185838b2fe960714e33e6e32c0538db3d8b8a070e3:SomZ5D2bFpRkkM7FAsqkjSYlFmbUBRZu8o5Dw4gClJXTnzFTopcsSZF5I4ZYkY_5JnnrHtmuP6KuxnvFw_yOCQ==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:7a04ecd7e14570b3dc877d185838b2fe960714e33e6e32c0538db3d8b8a070e3:z3kTeGTljPspX_yet7jOyBy4kkbgphmlrE5no_7zO8n33hIRE3Vfnt09w84HXAY-yxT1YImQBx_6vFx_s3NiDA==:9fbfabe975fa5a7f -->
 # Orchestrate Review
 
 Orchestrates a multi-step code review by spawning nested LLM threads for analysis and summarization, then writes a combined review.
@@ -52,7 +52,7 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
   <step name="read_analysis">
     Now read the analysis file that was written:
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"file_path": "{input:output_dir}/orchestrated_analysis.json"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "{input:output_dir}/orchestrated_analysis.json"})`
   </step>
 
   <step name="summarize">
@@ -70,7 +70,7 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
     3. The summary (from the summary thread)
     4. Your own assessment and recommendations
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"file_path": "{input:output_dir}/orchestrated_review.md", "content": "<your comprehensive review>"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir}/orchestrated_review.md", "content": "<your comprehensive review>"})`
   </step>
 
   <step name="return_result">

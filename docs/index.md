@@ -32,6 +32,7 @@ The 4 tools that agents use to interact with Rye OS:
 
 - [Directives](authoring/directives.md) — Write workflow instructions with XML metadata and process steps
 - [Tools](authoring/tools.md) — Write executable tools in Python, YAML, Bash, or JavaScript
+- [Custom Runtimes](authoring/custom-runtimes.md) — Add support for new languages by creating runtime YAML configurations
 - [Knowledge](authoring/knowledge.md) — Write domain information with YAML frontmatter
 
 ## Orchestration
@@ -64,6 +65,7 @@ For contributors and those who want to understand how Rye OS works under the hoo
 - [Architecture](internals/architecture.md) — Layers, components, and data flow
 - [Packages and Bundles](internals/packages-and-bundles.md) — pip packages, bundle entry points, and dependency layering
 - [Executor Chain](internals/executor-chain.md) — Multi-layer tool resolution and execution
+- [Runtimes](internals/runtimes.md) — How runtimes configure tool execution, interpreter resolution, and the 7 standard runtimes
 - [Three-Tier Spaces](internals/three-tier-spaces.md) — Project, user, and system space resolution
 - [Integrity and Signing](internals/integrity-and-signing.md) — Content hashing, Ed25519, and lockfiles
 - [Lilux Primitives](internals/lilux-primitives.md) — The microkernel layer

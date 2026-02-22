@@ -191,10 +191,11 @@ rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
 
 Automatic continuation when a thread's context window fills up:
 
-1. Generates a summary of the stopping thread (via the `thread_summary` directive)
-2. Builds resume context: summary + trailing messages within a token ceiling
-3. Spawns a new thread with the same directive
-4. Links old → new in the continuation chain
+1. Builds trailing messages within a token ceiling
+2. Spawns a new thread with the same directive and `previous_thread_id`
+3. Links old → new in the continuation chain
+
+Summarization is hook-driven — if the directive declares an `after_complete` hook, it runs before the handoff. The new thread fires `thread_continued` hooks (not `thread_started`), enabling context re-injection.
 
 This is usually triggered automatically by the runner when context usage exceeds the threshold (default 90%), but can be called manually.
 
@@ -220,11 +221,11 @@ The runner is the core execution loop. It is not called directly — `thread_dir
 
 ### How It Works
 
-**First message construction** (non-resume):
+**First message construction:**
 
-1. `run_hooks_context()` dispatches `thread_started` hooks — these load knowledge items (identity, rules, context) and concatenate their content
-2. Hook context + directive prompt are assembled into a single user message
-3. No system prompt is used — everything goes through user messages and tool definitions
+- **Fresh threads:** `run_hooks_context(event="thread_started")` dispatches hooks that load knowledge items (identity, rules, context). Hook context + directive prompt are assembled into a single user message. The hook context includes `directive_body` and `inputs` for interpolation.
+- **Continuation threads** (resume_messages provided): `run_hooks_context(event="thread_continued")` fires instead. Context is injected near the last user message. The hook context includes `previous_thread_id` and `inputs`, enabling `${inputs.*}` interpolation in hook actions.
+- No system prompt is used — everything goes through user messages and tool definitions
 
 **Each turn:**
 
@@ -238,8 +239,10 @@ The runner is the core execution loop. It is not called directly — `thread_dir
 8. **Tool dispatch** — calls routed through `ToolDispatcher` → `rye_execute`
 9. **Result guarding** — large results are truncated, deduped, or stored as artifacts
 10. **Post-turn hooks** — `after_step` hooks run
-11. **Context limit check** — if context usage exceeds threshold, triggers automatic handoff
+11. **Context limit check** — if context usage exceeds threshold, triggers automatic handoff (no summary — summarization is hook-driven)
 12. **Loop or exit** — if no tool calls in the response, the thread completes with the LLM's text as the result
+
+After the loop exits, `after_complete` hooks fire in the `finally` block (best-effort). This enables directives to run post-completion actions like summarization.
 
 ### Tool Call Flow
 
@@ -328,11 +331,11 @@ Three layers of hooks, evaluated in order:
 **Two dispatch modes:**
 
 - `run_hooks()` — for `error`, `limit`, `after_step` events. Returns a control action (retry, terminate, continue) or None.
-- `run_hooks_context()` — for `thread_started` only. Loads knowledge items and returns concatenated context string. All matching hooks run (no short-circuit).
+- `run_hooks_context(event)` — for `thread_started` and `thread_continued` events. Loads knowledge items and returns concatenated context string. All matching hooks run (no short-circuit). The `event` parameter is required.
 
 **Hook condition evaluation** uses variables like `cost.current`, `loop_count`, `error.type`, etc., evaluated by `condition_evaluator.py`.
 
-**Hook action interpolation** supports `${variable}` substitution via `interpolation.py`.
+**Hook action interpolation** supports `${variable}` substitution via `interpolation.py`. Interpolation resolves `${...}` in both `item_id` and `params` fields, enabling patterns like `item_id: "agent/threads/${inputs.dependency_thread_id}"`.
 
 ---
 
@@ -369,11 +372,11 @@ Routes tool calls from the LLM to `rye_execute`. Maps tool names back to item ID
 
 ## Persistence
 
-All thread state is persisted to disk under `.ai/threads/<thread_id>/`.
+All thread state is persisted to disk under `.ai/agent/threads/<thread_id>/`.
 
 ### Thread Registry (`persistence/thread_registry`)
 
-Tracks all threads in `.ai/threads/registry.json`:
+Tracks all threads in `.ai/agent/threads/registry.json`:
 
 - Registration (thread_id, directive, parent_id, timestamp)
 - Status updates (created → running → completed/error/cancelled/continued)
@@ -383,7 +386,7 @@ Tracks all threads in `.ai/threads/registry.json`:
 
 ### Transcript (`persistence/transcript`)
 
-Records the full conversation to `.ai/threads/<thread_id>/transcript.md`:
+Records the full conversation to `.ai/agent/threads/<thread_id>/transcript.md`:
 
 - All LLM messages (user, assistant, tool results)
 - Event markers (thread_started, thread_completed, etc.)
@@ -399,7 +402,7 @@ Stores large tool results outside the conversation context. When a tool result e
 
 ### Budget Ledger (`persistence/budgets`)
 
-Hierarchical budget tracking in `.ai/threads/budget_ledger.json`:
+Hierarchical budget tracking in `.ai/agent/threads/budget_ledger.json`:
 
 - **Register** — create a new budget entry with max spend
 - **Reserve** — child threads reserve budget from parent

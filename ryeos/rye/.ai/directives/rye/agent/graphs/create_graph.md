@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T05:56:40Z:cc86d4f73becccd24d3dba9ad3ba65595f7292445bc7250c2eb80b1262ffb2db:0NFp80QZvi71RAUfaXUwHwD2gbozWoxsUO5U_wtnd54w6nK3HCdtBVAJX-tDm9HwWaBr3QOCw7A5da0ph_AfBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:cc86d4f73becccd24d3dba9ad3ba65595f7292445bc7250c2eb80b1262ffb2db:0NFp80QZvi71RAUfaXUwHwD2gbozWoxsUO5U_wtnd54w6nK3HCdtBVAJX-tDm9HwWaBr3QOCw7A5da0ph_AfBg==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 # Create Graph Tool
@@ -138,7 +138,3 @@ Create a declarative state graph tool — a YAML workflow definition with nodes,
   <criterion>Signature validation passed</criterion>
 </success_criteria>
 
-<results>
-  <success>Created graph tool: {input:name} at .ai/tools/{input:category}/{input:name}.yaml. Execute with: rye_execute(item_type="tool", item_id="{input:category}/{input:name}", parameters={...})</success>
-  <failure>Failed to create graph tool: {input:name}. Check node names, category path, and YAML structure.</failure>
-</results>

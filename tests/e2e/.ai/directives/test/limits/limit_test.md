@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-18T05:43:37Z:cdb00a0e36ef21b5e41f102d8f30d25eadb02a9ebcdecfb5d45a27a55b905fdb:1y2clf9-gWbcLTe5ViMKkyJFTj5DZnq9CnFVKgl9hMGyMTfiJXtE5WuVF09iAnjdf1dDcrgHQ-aUE1OFqIFxBA==:440443d0858f0199 -->
+<!-- rye:signed:2026-02-22T02:31:19Z:cdb00a0e36ef21b5e41f102d8f30d25eadb02a9ebcdecfb5d45a27a55b905fdb:KAaWdqRD5mrXgA5lqYrZJDMnFlXO3XUYEu62EYXY_aGWCZFpnHVua20dlDkSeUBpID1OwBOPc5PeuWz0qnaUCw==:9fbfabe975fa5a7f -->
 # Limit Test: Turns Limit
 
 Test that the default_escalate_limit hook fires when turns limit is exceeded.

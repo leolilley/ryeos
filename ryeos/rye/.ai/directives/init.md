@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-21T06:11:17Z:cf69cb2a2d3dec5870d97320dd9120a827c2b8452f5edd2768f659cbafbdc33c:ndjxRNR9P9jKQ6ZABmVwYRZlcIEez-NGxKhh22yjU4ayr0oqhtXQupRR0yI8fOKZy88sHNqRZEZIw9Dpwpo8BA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T02:31:19Z:cf69cb2a2d3dec5870d97320dd9120a827c2b8452f5edd2768f659cbafbdc33c:ndjxRNR9P9jKQ6ZABmVwYRZlcIEez-NGxKhh22yjU4ayr0oqhtXQupRR0yI8fOKZy88sHNqRZEZIw9Dpwpo8BA==:9fbfabe975fa5a7f -->
 
 # Init
 
@@ -109,7 +109,7 @@ User space is {target}. Setting up Rye now.
       <rule>The write tool rejects paths outside project_path. For user space init, you MUST pass project_path={target} so the write paths are within scope.</rule>
 
       Create all four .gitkeep files in a single batch call — copy this exactly, replacing {target} with the resolved path:
-      <tool_call>rye_execute(item_type="tool", item_id="rye/file-system/write", project_path="{target}", parameters={"files": [{"file_path": "{target}/.ai/config/.gitkeep", "content": ""}, {"file_path": "{target}/.ai/directives/.gitkeep", "content": ""}, {"file_path": "{target}/.ai/tools/.gitkeep", "content": ""}, {"file_path": "{target}/.ai/knowledge/.gitkeep", "content": ""}]})</tool_call>
+      <tool_call>rye_execute(item_type="tool", item_id="rye/file-system/write", project_path="{target}", parameters={"files": [{"path": "{target}/.ai/config/.gitkeep", "content": ""}, {"path": "{target}/.ai/directives/.gitkeep", "content": ""}, {"path": "{target}/.ai/tools/.gitkeep", "content": ""}, {"path": "{target}/.ai/knowledge/.gitkeep", "content": ""}]})</tool_call>
     </instruction>
 
   </step>
