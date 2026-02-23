@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T07:51:57Z:9672d3f61154cfdafde1e7037117dfe720dc090b69b6e3b1502a4f8188c1bde2:R4L3XeEaEmCdhhI5PNDwMjOKRJNUDRV3MD9ptn65o0IOwRSFXKd6qqnst3OG5PNc2hhw7aKN08qNajc_xy3nDQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T07:58:34Z:007caea8eb707f788a9ad4291ab89affc2b5625b69cd1ba9ff05d5f9561d0e0b:rj6P2ZhjekS6_tcZj1q1s42Ddwf1WsfQYamY5r4lzomrIyq7VFVmsTW5HnPN7XH5luaA5RXh8poIWdPjd9txCQ==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -260,9 +260,9 @@ def _merge_hooks(directive_hooks: list, project_path: str) -> list:
     for h in builtin:
         h.setdefault("layer", 2)
     for h in project:
-        h.setdefault("layer", 2.5)
-    for h in infra:
         h.setdefault("layer", 3)
+    for h in infra:
+        h.setdefault("layer", 4)
 
     return sorted(user + directive_hooks + builtin + project + infra, key=lambda h: h.get("layer", 2))
 

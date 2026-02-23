@@ -178,16 +178,16 @@ class TestMergeHooks:
         for h in builtin:
             h.setdefault("layer", 2)
         for h in project:
-            h.setdefault("layer", 2.5)
-        for h in infra:
             h.setdefault("layer", 3)
+        for h in infra:
+            h.setdefault("layer", 4)
 
         merged = sorted(
             user + directive_hooks + builtin + project + infra,
             key=lambda h: h.get("layer", 2),
         )
 
-        # Verify ordering: user (0) < directive (1) < builtin (2) < project (2.5) < infra (3)
+        # Verify ordering: user (0) < directive (1) < builtin (2) < project (3) < infra (4)
         layers = [h.get("layer") for h in merged]
         assert layers == sorted(layers), f"Layers not in order: {layers}"
 
@@ -199,7 +199,7 @@ class TestMergeHooks:
         directive_idx = next(i for i, h in enumerate(merged) if h["id"] == "directive_hook")
         assert merged[directive_idx]["layer"] == 1
 
-        # Verify project hook exists and is at layer 2.5
+        # Verify project hook exists and is at layer 3
         project_hook = next((h for h in merged if h["id"] == "project_hook"), None)
         assert project_hook is not None
-        assert project_hook["layer"] == 2.5
+        assert project_hook["layer"] == 3

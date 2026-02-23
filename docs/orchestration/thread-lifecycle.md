@@ -91,8 +91,8 @@ Hooks are merged from five sources and sorted by layer:
 | 0 | User hooks | `~/.ai/config/agent/hooks.yaml` | Cross-project personal hooks |
 | 1 | Directive hooks | Directive XML `<hooks>` block | Per-directive hooks |
 | 2 | Builtin hooks | System `hook_conditions.yaml` | Error/limit/compaction defaults |
-| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
-| 3 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
+| 3 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
+| 4 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
 
 User and project hooks use the same format as directive hooks — `id`, `event`, optional `condition`, and `action`. See [Hooks Configuration](#hooks-configuration) below.
 

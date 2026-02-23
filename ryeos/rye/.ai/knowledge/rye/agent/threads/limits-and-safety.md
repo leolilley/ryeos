@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T07:56:23Z:29879ffaba94fdd2fd4533314b34e61318fff882b7941f97c1fd5f289ecd9103:isjRvHNx-NlVa-hU_oQ_biaNLj06mO3AKeTTf90H81IH2DxZmHmhMCmAx6QhcyaEQRqaivwpKRT6SIrRlCQoCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:58:34Z:33adbf39cc2f4ee7f222d8276faa67923d6616619c0a2255be6d3b7e71c573ed:O0oORqxq0tu5uvltQVAYpLPuPgcSWrLwT9mmjUEaHvBc1Y7gG7F5YIvZbAqO6v3FWsD2lVNBfWkZA4wn_TxKDA==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: limits-and-safety
@@ -183,8 +183,8 @@ Hooks provide event-driven behavior during thread execution, evaluated by `Safet
 | 0 | User hooks | `~/.ai/config/agent/hooks.yaml` | Cross-project personal hooks |
 | 1 | Directive hooks | Directive XML `<hooks>` block | Per-directive hooks |
 | 2 | Builtin hooks | System `hook_conditions.yaml` | Error/limit/compaction defaults |
-| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
-| 3 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
+| 3 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
+| 4 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
 
 ### Hook Events
 
@@ -198,7 +198,7 @@ Hooks provide event-driven behavior during thread execution, evaluated by `Safet
 
 ### Hook Dispatch Types
 
-- **Control hooks** (`run_hooks`): For error/limit/after_step. Returns control action (retry, terminate) or None (continue). First non-None wins (except Layer 3 always runs).
+- **Control hooks** (`run_hooks`): For error/limit/after_step. Returns control action (retry, terminate) or None (continue). First non-None wins (except layer 4 infra hooks always run).
 - **Context hooks** (`run_hooks_context`): For `thread_started` and `thread_continued` events. Runs ALL matching hooks, concatenates context strings.
 
 ### Control Actions

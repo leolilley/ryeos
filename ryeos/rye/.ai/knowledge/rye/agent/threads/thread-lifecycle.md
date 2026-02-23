@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T07:51:57Z:f56582075b08ed5a52307413f76f3b648a226c1f32f24d2ca27b0c737379a3a5:Muo5trwFTqhuQTmJ4yv2b4stMx5BWyAB5XPkMoACnNQY7-eg6xNsK49osWaIGQS9SytAGtJIs0fASgylpIGGCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:58:34Z:807f1fc62c27ff2fd688fe82f53360bf248a098f22c514324e4acf0ee7a0843d:lNuA11hJFBS4c4y2zdA442OO5veI3jesyBFzCBpowqjwgOe2DdIIoOWjXq0QHJIEQU3S8OpKwRFm07RZWws4Aw==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: thread-lifecycle
@@ -106,8 +106,8 @@ Hooks merged from five sources, sorted by layer:
 | 0 | User hooks | `~/.ai/config/agent/hooks.yaml` |
 | 1 | Directive hooks | Directive XML `<hooks>` block |
 | 2 | Builtin hooks | System `hook_conditions.yaml` |
-| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` |
-| 3 | Infra hooks | System `hook_conditions.yaml` |
+| 3 | Project hooks | `.ai/config/agent/hooks.yaml` |
+| 4 | Infra hooks | System `hook_conditions.yaml` |
 
 User/project hooks use same format as directive hooks: `id`, `event`, optional `condition`, `action`. User hooks are cross-project personal preferences. Project hooks are project-wide context injection and learning.
 
