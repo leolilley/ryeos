@@ -54,7 +54,7 @@ def temp_project():
         knowledge_dir = ai_dir / "knowledge"
         knowledge_dir.mkdir(parents=True)
         (knowledge_dir / "entry.md").write_text(
-            '---\ntitle: Test\nid: entry\nversion: "1.0.0"\nentry_type: note\n---\n\nContent'
+            '---\ntitle: Test\nname: entry\nversion: "1.0.0"\nentry_type: note\n---\n\nContent'
         )
 
         yield project_root

@@ -1,6 +1,6 @@
 <!-- rye:validated:2026-02-10T02:26:12Z:4480db166eb2dd6af490d209dd59b772f4a7cddc518bcbfbcb6ec2ef40d31e5a -->
 ---
-id: capability-tokens-learnings
+name: capability-tokens-learnings
 title: 'Learnings: capability-tokens'
 version: '1.0.0'
 entry_type: learning

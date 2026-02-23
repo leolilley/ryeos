@@ -1,6 +1,6 @@
-<!-- rye:signed:2026-02-22T23:38:13Z:e984bc10e9f64fad82a20e9d1fce03fb7be43b584e3f49649402c86998285aab:01YXc9rY40t22EW8UX1u0l2UsXxkThzD4FLcjvS5FgXJCoPimrs8wf8E104blpb4Z3tZPS80C2szhWyfpKACBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:4d4f6512472c63608312c613ae30164113255a47d581863005039e9f2160aba4:B0BQmghT-Fg20gKcIFak5pVQU-7vf108Ufm_YhIIT2FKKM8iyeI5oIFKBAwqE-nbNgy1uPCxXqddiQ5PGlIYDA==:9fbfabe975fa5a7f -->
 ```yaml
-id: state-graph-walker
+name: state-graph-walker
 title: "State Graph Walker"
 description: Graph traversal engine that walks declarative YAML graph tools, dispatching rye_execute for each node
 entry_type: reference

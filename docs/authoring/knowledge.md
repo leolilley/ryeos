@@ -19,7 +19,7 @@ Knowledge entries use ` ```yaml ` code fences for metadata, matching how directi
 <!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 
 ```yaml
-id: category/entry-name
+name: entry-name
 title: Entry Title
 description: What this knowledge covers
 category: category
@@ -47,7 +47,7 @@ The file is parsed by the `markdown/frontmatter` parser, which extracts the YAML
 
 | Field      | Type                | Purpose                            | Example                              |
 | ---------- | ------------------- | ---------------------------------- | ------------------------------------ |
-| `id`       | string (kebab-case) | Unique identifier                  | `terminology`                        |
+| `name`     | string (kebab-case) | Entry name (must match filename)   | `terminology`                        |
 | `title`    | string              | Human-readable title               | `Terminology and Naming Conventions` |
 | `category` | string              | Directory path in `.ai/knowledge/` | `rye/core`                           |
 | `version`  | string (semver)     | Content version                    | `"1.0.0"`                            |
@@ -144,7 +144,7 @@ From `.ai/knowledge/rye/core/terminology.md`:
 
 ````markdown
 ```yaml
-id: terminology
+name: terminology
 title: Terminology and Naming Conventions
 category: rye/core
 version: "1.0.0"
@@ -190,7 +190,7 @@ for Rye OS documentation and code.
 From `rye/rye/.ai/knowledge/rye/authoring/directive-format.md`:
 
 ```yaml
-id: directive-format
+name: directive-format
 title: Directive Format Specification
 category: rye/authoring
 version: "1.0.0"
@@ -219,7 +219,7 @@ rye_execute(
     item_type="directive",
     item_id="rye/core/create_knowledge",
     parameters={
-        "id": "jwt-validation",
+        "name": "jwt-validation",
         "title": "JWT Validation Patterns",
         "category": "security/authentication",
         "content": "Best practices for validating JWT tokens...",
@@ -233,7 +233,7 @@ This handles file creation, metadata generation, and signing.
 ## Best Practices
 
 - **Focused scope** — one topic per entry; split if it exceeds ~2000 words
-- **Kebab-case IDs** — `data-driven-architecture`, not `data_driven_architecture`
+- **Kebab-case names** — `data-driven-architecture`, not `data_driven_architecture`
 - **3-5 tags** — include both domain and content type
 - **Use `references`** — link to related knowledge to build the graph
 - **Include examples** — code samples, tables, and diagrams make knowledge actionable

@@ -67,7 +67,7 @@ Parse different file formats into structured metadata. Used by the search and ex
 | Parser | File Types | Extracts |
 | --- | --- | --- |
 | `markdown/xml` | Directive `.md` files | XML metadata blocks (model, limits, permissions, hooks, inputs, outputs) |
-| `markdown/frontmatter` | Knowledge `.md` files | YAML frontmatter (id, title, category, tags, version) |
+| `markdown/frontmatter` | Knowledge `.md` files | YAML frontmatter (name, title, category, tags, version) |
 | `python/ast` | Tool `.py` files | Dunder metadata (`__version__`, `__tool_type__`, `__category__`, etc.) and `CONFIG_SCHEMA` |
 | `yaml/yaml` | Tool `.yaml` files | Top-level keys (tool_id, tool_type, executor_id, parameters) |
 | `javascript/javascript` | Tool `.js`/`.ts`/`.mjs`/`.cjs` | `export const` metadata (`__version__`, `__tool_type__`, etc.) and `CONFIG_SCHEMA` |

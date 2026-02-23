@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:f36c798ecb5f6642bfa74b0e74a9d89997442147f53ddfc4b34a81107e75ceb4:GdfDP6d5l3bR7FQ0Er344pA3Wzxkt3PAWFbXe9XrxEHmhLO0zBN5fiFZgRIL1wTEYoTMDE9GCrdeIt-ApAfpDw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:3651f554fe8627477be69ba58de1e740fc69f6b4dcf710ab07b8964826e74595:oTwllHvg7c2ml7jWWx5avuGkZ3m-31Q17kxlG-qq6bzubzHldXnALZsGDxYwCIqw7ymkaiUUTnGthH95GmwHAA==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: capability-strings
+name: capability-strings
 title: Capability Strings & Permissions
 entry_type: reference
 category: rye/core

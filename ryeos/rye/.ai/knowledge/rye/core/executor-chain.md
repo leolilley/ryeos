@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:2280cd8774a056a9aae6f233be194ad3e383150035f4f526eb8cb3fffddc7c3b:8vrGCFqLjmcKpslOmVxSguV_1M3OYcc76oS0AQ2NLOGTsN76jNoWV4QFWCjRK4cgYE3QdsJiUMqU_Q5iO_3dCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:689a0814c67fdafb183fbc8665c664d818b5117c6eaf6cded95cb75c3257395d:vqF09hnr0B-mbB4YxAPE8j2ElzEq-647wUO3qHEsJWFcvOdcYbk3jnDKfZ0Hm5opZNiRmPKL7ghrdnnP2RyHDg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: executor-chain
+name: executor-chain
 title: Executor Chain
 entry_type: reference
 category: rye/core

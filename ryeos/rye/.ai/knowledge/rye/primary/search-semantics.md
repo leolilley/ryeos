@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:dfefed9fa107ad610e1d1186a9443d6cc936990b182a1d3b4764373971392393:GAL-lgVtXKCVFk22-u_i5WgTM6fc5sCIGqbP-KjxKkg0P8ee9_sCz769bMkuMqj7_0f0t4hBKKpmHTO-fgWwBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:03c6a007153e204591b8c5b23dd1f8516a50d1517af07b4e93a8310cc5f43e07:-lx_DCO50J1FjyfVLDOC9nsSTBwvuTI56qm7uxNVpTl1oTRCyBhWFa-xwCku1d-YWWVE4ai--jLBcZzD6UdJCw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: search-semantics
+name: search-semantics
 title: "rye_search — MCP Tool Semantics"
 entry_type: reference
 category: rye/primary

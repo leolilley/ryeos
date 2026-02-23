@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:84aef7f1e74662bfaf39119db8c05905f74a2a8fc5db4b7a85a74644fea48862:H_Ero30-FWMgUA6XZGFfCi6pMCfUIsx6pmKAcbF9oZFdxSpX2L99kpREi6YQXGYvFXd3GxyvgzVP3h_U96RWDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:ca420dd4d9f38b2dfc6bdcc1992b27d3baa8271d9a9dd865b08cf620989540db:VMQG1wEsOqXtJakntKv1QzzZon5hWopdiTlKhFVqK-R9xwNr07-3AcQlQv_H6xMwThAgwRJR2O8A4n1D6rQ2AQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: tool-format
+name: tool-format
 title: "Tool Format Specification"
 entry_type: reference
 category: rye/authoring

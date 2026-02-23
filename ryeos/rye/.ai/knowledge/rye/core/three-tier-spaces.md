@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:12a4a0e61b21094e28e02efb39548789afa5cb404eaa409fdc165fe09d05854f:AnxdI6Gu-3wl3m1ipDXsUn6YfRJnNvBMozsKmEgDRpM3NqQZc9eelitkWJi-898lY2JYicTxTrtGQCz8aY8PAQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:8686374604dd710cb0ed34046361e8bf39953478f4bd9ba0a437c8267d0f4823:xt1drqQpLSTJtDWPdPIV0V3YuYRQDyOTrhPlvrSLU7LDtKQBzVBgX2AN7DglkBcSaSZoIMllADQype61E5cmDw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: three-tier-spaces
+name: three-tier-spaces
 title: Three-Tier Space System
 entry_type: reference
 category: rye/core

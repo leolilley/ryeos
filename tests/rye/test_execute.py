@@ -47,7 +47,7 @@ def main():
         knowledge_dir = ai_dir / "knowledge"
         knowledge_dir.mkdir(parents=True)
         (knowledge_dir / "entry.md").write_text(
-            "---\ntitle: Test Entry\nid: entry\n---\n\nContent here"
+            "---\ntitle: Test Entry\nname: entry\n---\n\nContent here"
         )
 
         from rye.utils.metadata_manager import MetadataManager

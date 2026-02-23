@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:262d4d3c10d8bae830f7f10c5ac332b6f0a381b2c46ca66fa8ab99457365827e:Ml-zUV1-HwRZKeYBa5BSYmkcs3wKRQEzQOOjz9KDgUsQnumJ3gzKXs_psb27CKE2MsPSNjkeyR9eHnXeTqSXCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:f8c5799da85fef9b68669bade217bb5f9c17240c3302b37e8a56889868dc2c35:OAHtwNqJVgpyT-Ck7WA3Dl7zfYQBcr-CXXg4HOoU-OMb_nIhXgNBVRWFRA8vpcAgjActV19rWhvWhCO_wNH3AQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: templating-systems
+name: templating-systems
 title: Templating and Interpolation Systems
 entry_type: reference
 category: rye/core

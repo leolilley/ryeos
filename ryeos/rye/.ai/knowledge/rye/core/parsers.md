@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:e6fcca0891e86e56bbfd156a0de03f74960c2bada8634cb07d660f2b7f9b14e2:pOMPK5RQ5M7quDA4-IvPXLDeBdooyyiM19iD1ekVdp0shuE7eUwpHYtkx9nuvaPusgWWUW_esV9KiCHgtIuABA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:c476466c90f3feed7ab499a851036ebea809e239061f3280f006ea382b7b3e16:SfJ2rHaZOXY5-aISssYdKdaBo4EimUQeOkY_UqJpmKqmVsgc7UVeNvUOQQlCdYz6iJIIrQ-Yt8elCEd2_y2uBg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: parsers
+name: parsers
 title: Parsers
 entry_type: reference
 category: rye/core
@@ -128,7 +128,7 @@ Parses Markdown files with YAML metadata in ` ```yaml ` code fences (matching ho
 
 ````markdown
 ```yaml
-id: my-knowledge
+name: my-knowledge
 title: My Knowledge Entry
 entry_type: reference
 category: rye/core

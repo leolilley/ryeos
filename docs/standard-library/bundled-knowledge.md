@@ -62,7 +62,7 @@ rye_load(item_type="knowledge", item_id="rye/core/tool-metadata-reference")
 
 The complete specification for knowledge entry metadata. Covers:
 
-- **Required frontmatter** — `id` (kebab-case), `title`, `category` (matches directory path), `version` (semver), `author`, `created_at` (ISO 8601)
+- **Required frontmatter** — `name` (kebab-case), `title`, `category` (matches directory path), `version` (semver), `author`, `created_at` (ISO 8601)
 - **File format** — YAML frontmatter between `---` delimiters, followed by markdown content
 - **Knowledge graph links** — `references` (outbound links to other entries or URLs), `extends` (inheritance/dependency chain), `used_by` (inbound from directives/tools that apply this knowledge)
 - **IDs** — Kebab-case, hierarchical when appropriate (e.g., `patterns/retry-logic`)
@@ -137,7 +137,7 @@ The bundled entries cover Rye OS internals. For your own projects, add domain-sp
     └── error-handling.md         # Project error handling patterns
 ```
 
-Each entry needs the required frontmatter (`id`, `title`, `category`, `version`, `author`, `created_at`) and can use `references`, `extends`, and `used_by` to link into the knowledge graph.
+Each entry needs the required frontmatter (`name`, `title`, `category`, `version`, `author`, `created_at`) and can use `references`, `extends`, and `used_by` to link into the knowledge graph.
 
 Knowledge entries are searchable immediately after creation:
 

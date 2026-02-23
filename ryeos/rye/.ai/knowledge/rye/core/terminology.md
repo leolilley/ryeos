@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:b0e8511e1f87873b84c4fcbdb26de2a65e04e4e1f15bcb701a2c6917b509a70d:LRtMBNKL_ghmYPchLYfQ-gnryd-qa1VNkSvkWE2T2DwdpPDFtiuTiInof6euSB6A16LLHki3fJaFJOdhFG5nAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:2ccfea58103648216d087c3636c0031f148bc75a98351e7f7c7e3e9f079790cd:WXU-K66H2i1kxw9oYy0g4BWv9yBaPJGLJH9fb0XXYiTWGewaPPI56wxCY4nkiiaEKwcBvD9J3JPoZ0qVZ26NDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: terminology
+name: terminology
 title: Rye OS Terminology & Naming Conventions
 entry_type: reference
 category: rye/core

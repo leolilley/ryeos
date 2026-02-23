@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:bfa3544c2f5f9b246b876fc757598f5eb2b3eaeea6ff92a9026555e8f921a84c:V7KmI1RaziiB4_wf2hPtHNsdw2VKQADEXa25dNnp1nNtJorn5gQ844H43eNk8q5p4cUEVuta2koFVJBa7Q1kDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:0318ad672e57e47ed8268cbec7c523e116d3da1c28344d983a7b560fdc1facea:QF6r7W_eb7f0IIF-5bj_MZr0yfyEVxr4LqbaqT8hFnCOjqKIsfQWG1WMlrpECd-fdrVMDfGU-SexZt1SnpLVAQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: trust-model
+name: trust-model
 title: Cryptographic Trust Model
 entry_type: reference
 category: rye/core/registry

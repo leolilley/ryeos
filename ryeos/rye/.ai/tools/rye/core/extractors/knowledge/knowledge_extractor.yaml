@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T01:02:24Z:b049ae1d1f7947ef46b784b80d3fd670bf8b01e036d04ffbe6652d8678a7d2de:OEaQMDEDuO2YShHTy5RPeVtMfFLGXkzEB8bOKSKHRmeX4cG1Ox1aQsxczLO7YCnFTyct-uyls9rZ9UGdgiaOCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T05:23:25Z:4622fdca95d2707dfe9fba13ccb6cf7537b3ca9c6f34651980d0f6b1ffa1e19d:V7EW5IaSdHQQugLGZuc4rbjs5unEsNhz-wx8G0rZGk1jB-EJiF2dn-7vsyrajGtscUbhgkvSbX1H5HTz-EdDBA==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -18,9 +18,9 @@ signature_format:
   after_shebang: false
 
 extraction_rules:
-  id:
+  name:
     type: path
-    key: id
+    key: name
   title:
     type: path
     key: title
@@ -49,7 +49,7 @@ search_fields:
 
 validation_schema:
   fields:
-    id:
+    name:
       required: true
       type: string
       match_filename: true

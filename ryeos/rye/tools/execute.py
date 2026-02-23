@@ -296,8 +296,8 @@ class ExecuteTool:
         content = file_path.read_text(encoding="utf-8")
         parsed = self.parser_router.parse("markdown/frontmatter", content)
 
-        if "id" not in parsed:
-            parsed["id"] = item_id
+        if "name" not in parsed:
+            parsed["name"] = item_id
 
         return {
             "status": "success",

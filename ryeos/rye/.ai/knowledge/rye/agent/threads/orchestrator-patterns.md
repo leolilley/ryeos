@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:be6cf4cbb868dd2dd114d3b5997062ce4a701ab4baee4836800948c518bf8170:qLiGVKYFfcpDoldyIPtMC7cVw4_eDLeI3rl_G0KTaq7qEY9a5OCne4AT8metI8LyHTjdwTeoFfDmf5sIi_-JAQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:177829b3a19d74689e69f71ebd927ba44f837c5db9b94d9748ada0e2bac2db02:kPncVE1zVimnWOkad59dMlQuwOGvwRkM7GmdSvPnEnXAZaBf7bjvvkuBQp9i6GpixFlxPn03oITpWYG45OJ2Dg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: orchestrator-patterns
+name: orchestrator-patterns
 title: Orchestrator Patterns
 entry_type: pattern
 category: rye/agent/threads

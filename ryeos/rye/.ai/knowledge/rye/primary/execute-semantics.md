@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:ed84d923e72d263f0b97e6e8ff65bd71a468b1298581f6732ae312731ee5cb04:UY_sYlX2kr5lZ-vdvPFl1Ru2_or0t0_SEnzIa2SzGs_MiI-MNdegwJl1yDEyuXQI4QFm0eQtWuJMZe9d7MjXDw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:b5e6015273a1e94fb01701e9dd218c75828f624d748503c276d0781b1cb5753b:pMI6Jc8sSEKzrOyYqBTOH15ggGX_r8icZBAwgvFMlWCc_4JMIZ5k2i-wuEjvv30E7KHajXlTI64dVR_7uQz1Aw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: execute-semantics
+name: execute-semantics
 title: "rye_execute — MCP Tool Semantics"
 entry_type: reference
 category: rye/primary

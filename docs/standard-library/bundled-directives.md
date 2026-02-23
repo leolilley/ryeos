@@ -232,7 +232,7 @@ rye_execute(
 
 | Name       | Type   | Required | Description                                                                               |
 | ---------- | ------ | -------- | ----------------------------------------------------------------------------------------- |
-| `id`       | string | ✅       | Unique identifier in `kebab-case` (e.g., `jwt-validation`, `deployment-strategies`)       |
+| `name`     | string | ✅       | Entry name in `kebab-case` (e.g., `jwt-validation`, `deployment-strategies`)              |
 | `title`    | string | ✅       | Human-readable title for the knowledge entry                                              |
 | `category` | string | ✅       | Directory path relative to `.ai/knowledge/` (e.g., `security/authentication`, `patterns`) |
 | `content`  | string | ✅       | Main Markdown content of the knowledge entry                                              |
@@ -240,11 +240,11 @@ rye_execute(
 
 ### Process
 
-1. **Check duplicates** — Searches for existing knowledge entries with a similar ID.
-2. **Write entry** — Generates the file at `.ai/knowledge/{category}/{id}.md` with:
+1. **Check duplicates** — Searches for existing knowledge entries with a similar name.
+2. **Write entry** — Generates the file at `.ai/knowledge/{category}/{name}.md` with:
    ```yaml
    ---
-   id: jwt-validation
+   name: jwt-validation
    title: JWT Validation Patterns
    category: security/authentication
    version: "1.0.0"
@@ -272,7 +272,7 @@ rye_execute(
     item_type="directive",
     item_id="rye/core/create_knowledge",
     parameters={
-        "id": "api-patterns",
+        "name": "api-patterns",
         "title": "Common API Design Patterns",
         "category": "patterns",
         "content": "## REST Conventions\n\nUse nouns for resources, HTTP verbs for actions...",

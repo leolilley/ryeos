@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T01:04:46Z:0252f7c0a3f5bcf3a017700bf5caff225a83ff402fedf560dfaefc8c33aaf6c0:3DiqGTm0laLBtwVTGLW3wtKx5j1ov-K2Ww5bi0v_lGfTTbLazMPxA-ih9a7nokmMTUw3qNNxVbEwBBExrC7UCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:b1257c1dccd7b17e66247e56e772e8cba159119fd879050204a5cf7e3a0ab459:qTMIvhPRAw8VobN2dMnsFvxGfVr_pPkU6rIJFJMWGqx4meE2ozoTUsxVRh26rmgiiX4i_5-cslUEggKU0SJzAg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: sign-semantics
+name: sign-semantics
 title: "rye_sign — MCP Tool Semantics"
 entry_type: reference
 category: rye/primary

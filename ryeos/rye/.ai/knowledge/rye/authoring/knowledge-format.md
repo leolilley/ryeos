@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:12774a1c90d945e6b7f89a5716608d0ba78f123846116bb3a83465aa9973f1e8:aXJsQlZi3xrr3VJsvHX44B5epMWf_xB19uTrE2EoklpL4S37xD_m7jWZPiMgGi5GZxEBHKcrOVapCjVpydnaBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:29:51Z:62cb336c9bd7d1f67bf2161f457aa8805537d9243cc6e36f325a016f9b75b42d:NAST6Ql7x4IU4tiJ4-MhcCZqKjOaiiOdcIRTTApdhREQOqfd5bgZiZDDmPr-M406DKO1GG6lmejruhIC_HZADg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: knowledge-format
+name: knowledge-format
 title: "Knowledge Format Specification"
 entry_type: reference
 category: rye/authoring
@@ -54,7 +54,7 @@ Line 1:  Signature comment (added by rye_sign)
 <!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 
 ```yaml
-id: entry-name
+name: entry-name
 title: Entry Title
 entry_type: reference
 category: category/path
@@ -91,7 +91,7 @@ The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML
 
 ## Frontmatter Fields — Required
 
-### `id`
+### `name`
 
 **Type:** string (kebab-case)
 **Required:** Yes
@@ -99,9 +99,9 @@ The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML
 Unique identifier for the knowledge entry. Used in cross-references, searches, and `rye_load` calls.
 
 ```yaml
-id: authentication-patterns
-id: jwt-validation
-id: directive-metadata-reference
+name: authentication-patterns
+name: jwt-validation
+name: directive-metadata-reference
 ```
 
 **Convention:** kebab-case, hierarchical when appropriate:
@@ -478,8 +478,8 @@ Same format as directives and tools:
 
 ## Validation Rules
 
-1. **Required fields:** `id`, `title`, `category`, `version`, `author`, `created_at`
-2. `id` must be kebab-case alphanumeric
+1. **Required fields:** `name`, `title`, `category`, `version`, `author`, `created_at`
+2. `name` must be kebab-case alphanumeric
 3. `category` must match the file path relative to `.ai/knowledge/` directory
 4. `version` must be semantic version (`X.Y.Z`)
 5. `created_at` must be ISO 8601 format
@@ -497,7 +497,7 @@ Same format as directives and tools:
 <!-- rye:signed:2026-02-18T00:00:00Z:abc123:sig456:keyid789 -->
 
 ```yaml
-id: jwt-token-validation
+name: jwt-token-validation
 title: JWT Token Validation Patterns
 entry_type: pattern
 category: security/authentication
@@ -563,7 +563,7 @@ payload = jwt.decode(
 
 ### Writing
 - **Focused scope** — one topic per entry; split if exceeds ~2000 words
-- **Kebab-case IDs** — `data-driven-architecture`, not `data_driven_architecture`
+- **Kebab-case names** — `data-driven-architecture`, not `data_driven_architecture`
 - **3–5 tags** — include both domain and content type
 - **Use `references`** — link to related knowledge to build the graph
 - **Include examples** — code samples, tables, diagrams make knowledge actionable
@@ -579,7 +579,7 @@ payload = jwt.decode(
 
 ### Metadata
 - Keep `tags` focused (3–5 items)
-- Use kebab-case for all IDs
+- Use kebab-case for all names
 - Always include `created_at`
 - Set `entry_type` explicitly
 - Category must match directory structure
@@ -591,7 +591,7 @@ rye_execute(
     item_type="directive",
     item_id="rye/core/create_knowledge",
     parameters={
-        "id": "jwt-validation",
+        "name": "jwt-validation",
         "title": "JWT Validation Patterns",
         "category": "security/authentication",
         "content": "Best practices for validating JWT tokens...",

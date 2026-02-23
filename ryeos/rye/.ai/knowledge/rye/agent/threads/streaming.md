@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:59dbc0835783fed51ce3d3f3a913b273e3aa4e493629ae57d630bcfa6eb1c20d:vm3DPJc5idv7raprpJUJ6wXaupHPosmSKT3iNAj7NZT5RN1B7cvpW65O_ijFXvWvMsMpCnNYgfIUYpiqRDd0Aw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:5e5a3b9b2e3b4fa2225ddc9935b0c438a5f9f8201c4224e7cb2397b3ec3de72e:DiaNX6dBUskt6CXvB_fmSmDe_vq1twzz5UI5d6rlwkZh8t7eewccNntM8Q9winwHK8fkx8yyolHsYjMuFlEyDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: streaming
+name: streaming
 title: Per-Token Streaming
 entry_type: reference
 category: rye/agent/threads

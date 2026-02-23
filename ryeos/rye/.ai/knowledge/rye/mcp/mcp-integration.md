@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:691b019991edf78e078837ccd81c11489d0e08a5d8b1ea07977ad18f92ec86f4:IDYyN6hLvrHKKPf3PQiIMqcuRIZj8sHA04MxPtIvyr4pt9CW0Tsk4gfPz7618BVC4cojmOo_Pd8nyCkPC_NbDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:74bfd1ae79f31c8eb173dabc4a0f1267f5aca700d7f8c14b5d5545a76ea5afb5:jGpkMIju3K2Uq9z1MEhCjZyWnhKb2nZPJ0quh8pEyKNfC3biQ0IACp7o4MdoCrjHMrFY8jYJQAbDkrhagWl-Bg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: mcp-integration
+name: mcp-integration
 title: MCP Client Integration
 entry_type: reference
 category: rye/mcp

@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:5dbe02d92b14ccbc7867d989fd1fed17022a2b6d85a5876ec6034fbe55530c66:yRnY1IGY1i-kseFPXBbXKI3L-Br9R3LyhMfyu74zaKpNdGBL3lNdQNVF1HKjL8fl3WHrZGHepT7bn79d2CGPDw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:a47a50a8533f2ebdfb9eba330e88d888162291f56dbc50dfc75bef9217f71fe0:ltSTqiDAsQiKKyLZ6RC_TLtOduSpgObYwzhz7kA_7yWNewxeZQ758en10fMYt6eAzi3q72dROxZDBx9DfYJ2BA==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: input-interpolation
+name: input-interpolation
 title: Input Interpolation
 entry_type: reference
 category: rye/core

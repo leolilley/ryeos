@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:3ae2ef50aa3fe6d02a7c7deb5cb4dbba72d7aabba95764090501b9e6e8cda01e:X2x8R2w4WdHo2lVUJak6VQ8eLnW5LXX7yAlIpUrW2NWunbX27Y6zyJxAeAChcYLgB7-TrGMGZPn6AzVopGOTDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:92084e8dce2b8c2c341ab8d9fa2feef63692d92d4db1e464d63032fe8ccc05d7:E3cG6-4WOqxZS5R95xf0h7zk7y0N9fD6jBnNA0dvZljmwC2vzHW8827IBYVdpLghi5BTzCGpGDxR0GoPX4a7Cw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: directive-format
+name: directive-format
 title: "Directive Format Specification"
 entry_type: reference
 category: rye/authoring

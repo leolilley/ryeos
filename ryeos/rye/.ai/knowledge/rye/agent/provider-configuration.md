@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:8d316d8aa4d8f1b4a16a0a9da4d9f00fa1135fb3224bc15b05cc83aeba5b0643:0a0ah5yNlPYeE-zNdIz9GFdnzSXx3FgQ5y2XdIEQXUo_egZczgkF-z6PDIc05eNRiAXuTz7A7sF9YJ3YUg3BDw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:156c200c32a52c151eab7e8e89b6fe635085f99032582bf87f7f11da2bfdc259:y2Y-0tumXGkMCh6OSyJThuOO5L0_IoN9ZgcjnqfuRSnfBlr_dcCJL-dKSz4T6e5VQt3ykpbya0TujhInDx_dCw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: provider-configuration
+name: provider-configuration
 title: Provider Configuration
 entry_type: reference
 category: rye/agent

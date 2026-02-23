@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:8cdf2ffdd92b10b92e7f146eb473d418316c4297efbc8b9444b3c208d9464dac:33KZ3atAro851C--67eaMfnWTIfk47AtBsNWIfV72x9jbPcRhaKUOe3HowhTQcoTeKjHGaaLLMYnSB0HtPeQAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:ff5d03ff9e28b41285f485c5bfbbc7a47c0552e3c75e5cb9ea1b38f6359186b9:k8dWYW0lVoE6JDugQgMLtudgbru55b8BT8MQXiN47fj4vR_WN5MUwXdVWGYFNA2K-SPdmIriT8ON-OULSjWLAQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: ai-directory
+name: ai-directory
 title: The .ai/ Directory Structure
 entry_type: reference
 category: rye/core

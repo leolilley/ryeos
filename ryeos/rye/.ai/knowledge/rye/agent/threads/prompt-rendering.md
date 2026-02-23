@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:785ec8e349cefab3c9af15981bc2a816d6025a5749588b48b85452054a966266:wZL2iSXNBM5dVt1lzGoB3YEzpmAHugZ5xCRem4bBBuJBg4vGGJxdlnI0FYy1CM1YxF8AHrr3YLIYDfiB6SdvBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:20bca13d7142a7cf500dbd5ec9fd95fe542f100753a718cfaf49481fdae2079f:QDA74ZjMPIViDqLMD-yKfrH7ubZh2RbbWs3i_auvs2AH5O22rfK8YRv-rIHFqVEIopdiuFW0Q5FF64iwN7lfAw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: prompt-rendering
+name: prompt-rendering
 title: Prompt Rendering
 entry_type: reference
 category: rye/agent/threads

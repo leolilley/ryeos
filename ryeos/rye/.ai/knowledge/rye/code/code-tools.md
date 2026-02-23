@@ -1,8 +1,8 @@
-<!-- rye:signed:2026-02-23T02:07:54Z:eaae71aae2b29d35339f30f1e3f0ac6b5e1052103319759a0a76b3d6778261cf:69yq6YTR1hK1UnsX492ol6AIMYhLXCs3K_f1HV4_LYioN_emSNsU7sOfow4OZ-h65Gav3N25qi0rjwEv1Ou3Cw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:886120f81254f4780dd5e7eeca53c8aa04eff2da5cb74fe9ef29db78386903a4:to7_P_xPw2mbRd87espRr9GkEFBpBUCkRnLpcrz0c2AwL2McnN7TLcZYQlxsm_cXZvXr9QPZQJKp78NT7v0tAA==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
-id: code-tools
+name: code-tools
 title: Code Intelligence Tools
 entry_type: reference
 category: rye/code

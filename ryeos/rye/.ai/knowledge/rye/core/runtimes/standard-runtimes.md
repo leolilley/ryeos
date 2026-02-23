@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:c7fa80a674c18e090272418246d558c4de69fc31008c2c42a72f1195461037dc:qq-atbWUqpfXRQ7GoupQabHXgGBlIbvI7q-Hb_kqrNBWiVkEDjnQ86y1LWiWx-z6qcdNCkvISlM7NDLZQkH7Bg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:1b2a2e04c07995ecacb9eeec876fccb69a826b03466ef052cac6e9867b4dd5c1:XQ-qKa2uUPkXb9XnTf9qsRNeyLpZc2FYeGUelnyi-KxmxkAX-n11JKZ8RQ4BHSfKohiqeph2f9cIjcTRhg6qCQ==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: standard-runtimes
+name: standard-runtimes
 title: "Standard Runtimes Reference"
 entry_type: reference
 category: rye/core/runtimes

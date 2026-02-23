@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:953f4506a39d84896eb408f5b46a53ba748651e3a788df328287a77a6eff8d5e:RzH2wG-k-knVENKlouHL91s7jRQofAcSjKvx8rAtgCNjC_eTBEqUmRhlrh8-sdim2tsw-E93JSEANbd5DLevDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:29:51Z:84f493bbd4a62f100d749a14279067ae4e97edac3fd407a976bb0279b82e6e8d:j2en-Lyii5X0KR1cZMhCLO0ZWu1glUayfJckLxvFAhvGHu80XVQm_QR4rEZ_UcUtlq3ulMVPOvq6WTl6qyFdCg==:9fbfabe975fa5a7f -->
 # Create Knowledge Entry
 
 Create a new knowledge entry with proper metadata, validation, and signing.
@@ -25,7 +25,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
   </metadata>
 
   <inputs>
-    <input name="id" type="string" required="true">
+    <input name="name" type="string" required="true">
       Unique identifier in kebab-case (e.g., "jwt-validation", "deployment-strategies")
     </input>
     <input name="title" type="string" required="true">
@@ -52,15 +52,15 @@ Create a new knowledge entry with proper metadata, validation, and signing.
 <process>
   <step name="check_duplicates">
     Search for existing knowledge entries with a similar ID to avoid duplicates.
-    `rye_search(item_type="knowledge", query="{input:id}")`
+    `rye_search(item_type="knowledge", query="{input:name}")`
   </step>
 
   <step name="write_entry">
-    Write the knowledge file with YAML frontmatter and markdown content to .ai/knowledge/{input:category}/{input:id}.md
+    Write the knowledge file with YAML frontmatter and markdown content to .ai/knowledge/{input:category}/{input:name}.md
 
     Generate this structure:
     ---
-    id: {input:id}
+    name: {input:name}
     title: {input:title}
     category: {input:category}
     version: '1.0.0'
@@ -72,19 +72,19 @@ Create a new knowledge entry with proper metadata, validation, and signing.
 
     {input:content}
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/knowledge/{input:category}/{input:id}.md", "content": "<generated knowledge entry>", "create_dirs": true})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/knowledge/{input:category}/{input:name}.md", "content": "<generated knowledge entry>", "create_dirs": true})`
   </step>
 
   <step name="sign_entry">
     Validate and sign the new knowledge entry.
-    `rye_sign(item_type="knowledge", item_id="{input:category}/{input:id}")`
+    `rye_sign(item_type="knowledge", item_id="{input:category}/{input:name}")`
   </step>
 </process>
 
 <success_criteria>
   <criterion>No duplicate knowledge entry with the same ID exists</criterion>
-  <criterion>Knowledge file created at .ai/knowledge/{input:category}/{input:id}.md</criterion>
-  <criterion>YAML frontmatter contains id, title, category, version, author, and tags</criterion>
+  <criterion>Knowledge file created at .ai/knowledge/{input:category}/{input:name}.md</criterion>
+  <criterion>YAML frontmatter contains name, title, category, version, author, and tags</criterion>
   <criterion>Tags parsed from comma-separated {input:tags} into individual YAML list entries</criterion>
   <criterion>Markdown content follows the frontmatter</criterion>
   <criterion>Signature validation passed</criterion>

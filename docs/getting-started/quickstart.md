@@ -264,7 +264,7 @@ Create `.ai/knowledge/project_conventions.md`:
 
 ```markdown
 ---
-id: project_conventions
+name: project_conventions
 title: Project Conventions
 description: Coding conventions and standards for this project
 category: ""
@@ -298,7 +298,7 @@ version: "1.0.0"
 
 **Key parts of a knowledge entry:**
 
-- **YAML frontmatter** — `id`, `title`, `description`, `category`, `tags`, `entry_type`, and `version`.
+- **YAML frontmatter** — `name`, `title`, `description`, `category`, `tags`, `entry_type`, and `version`.
 - **Markdown body** — the actual knowledge content. Can be as long as needed.
 - **`entry_type`** — classifies the entry (e.g., `reference`, `learning`, `pattern`, `guide`).
 

@@ -1,8 +1,8 @@
-<!-- rye:signed:2026-02-23T02:07:54Z:e5a3f4bf7675da87588dc6cc91a27f03005cf2a3c1d3da5d1e8acff5e9295b19:VtbjbNfgL_oM6yn0Bft8tAqr6KcGgueMBb9ZyrAQnv6_OwO-9RpNm7CD5QkulHp-cSfN76GtuXvZ5_c6EKyhBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:b917c7b561373e9cc35d4fa19a828da628f7e092dddd3b7214ad7a049d66fc69:IgqRc_245_5mrlINFgNkSHNPYFh6-KuRy8qJaJhRwz6e99OXu5b6nPG3bxJOJStAuLLx-um7pu1zMoyHV7qXCA==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
-id: web-tools
+name: web-tools
 title: Web Tools — Search, Fetch & Browser
 entry_type: reference
 category: rye/web

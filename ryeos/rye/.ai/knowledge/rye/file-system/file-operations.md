@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:f8f94292578d733d69dd133dd860f01000d64cc7ad362b41a6b7ad86b13eae12:ulmL8RTl4EpshXcHha7oV92dYkRnKNbp0i2g0UHRyxKqEDEAApmdibsxRCALbmxlaD4ec13iamFkeknZYhUABQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:efc91f305a603c520848ee49e9f14fbddaae4dfe394cb0f2246649e6b4396480:5ihPOY-wD6ldS-YAHEKIXES3GGJLDzt12xUkMrclBzeygz1kdaL0NMIIVK210u4L2sd6_VqBJNo0XmbCgCArBw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: file-operations
+name: file-operations
 title: File System Operations
 entry_type: reference
 category: rye/file-system

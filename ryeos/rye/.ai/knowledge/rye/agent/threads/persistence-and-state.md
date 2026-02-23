@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:90e7e46f088697f226a92a47e4e175aac2b6f8452700f95c67f05b554f5ffdbb:sXra15tBjlnlCHMUzuSc4-zqGPTjIMhgu8FmY7LRGjhOcU9i8NO4TN7FXjAzo9DiXdYCYY7CFIHc2cENR2KGCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:ea645a47ea08207e1e18c5e1412c507ab44605ebef649792c7b176dee405f636:NW5Zof_sH0s2YNdvqeC5aN3Drm9Ulh1Ma8u55kKf_XKjo8bt5kRY3Pj8SxrBXiRKlPWvEWfr_Uu-s84mbJOjAA==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: persistence-and-state
+name: persistence-and-state
 title: Persistence and State
 entry_type: reference
 category: rye/agent/threads

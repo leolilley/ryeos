@@ -1,6 +1,6 @@
 <!-- rye:signed:2026-02-22T02:37:40Z:28f4ab8774b8e5dd04a75cabad54aede3caddcb6d6b63531a6308f25af5e2cc4:HzpkurwfGQ8Ugo6OnKTaL4wFXt7lK75aAYKQbS_F-aDMt0n4U7YKa56_es-Z8GfvPVrrFCZ9CwXdujS4vcwyBg==:9fbfabe975fa5a7f -->
 ```yaml
-id: zen_gemini_test-1771727809
+name: zen_gemini_test-1771727809
 title: "test/zen_gemini_test"
 entry_type: thread_transcript
 category: agent/threads/test/zen_gemini_test

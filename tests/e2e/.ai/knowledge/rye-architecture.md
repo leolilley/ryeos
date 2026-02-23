@@ -1,5 +1,5 @@
 ---
-id: rye-architecture
+name: rye-architecture
 title: Rye Architecture Overview
 version: "1.0.0"
 entry_type: reference

@@ -77,8 +77,8 @@ class KnowledgeHandler:
             issues = []
 
             # Check required fields
-            if not parsed.get("id"):
-                issues.append("Missing 'id' in frontmatter")
+            if not parsed.get("name"):
+                issues.append("Missing 'name' in frontmatter")
             if not parsed.get("title"):
                 issues.append("Missing 'title' in frontmatter")
             if not parsed.get("entry_type"):

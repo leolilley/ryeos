@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:2c1168d22e1c5b90c565eabbbd5852ef942cddbaa482e29a411e8a8e8cd36ad9:AalDm4AA1JxI5SU1QAkuaXVE7PsbixcVaQfAzrV97eNe2EUmYrxt39kYraTS734aI6MDMg4wLE7tAf7VvkckBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:371f964d8316e7ef43df647686ef4ea437291651c03a3e7f9c2b84a60911baaf:MvaJX4XfQqGf86ztSZ0OpoWeXLfSBG5HvfS0ZP9zZ5tAT28G2bRhRTRRqvK36nWVZC9ZMSaF8qtmzdOZDNDvBA==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: thread-lifecycle
+name: thread-lifecycle
 title: Thread Lifecycle
 entry_type: reference
 category: rye/agent/threads

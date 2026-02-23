@@ -1,6 +1,6 @@
 <!-- rye:validated:2026-02-01T23:35:14Z:da23351623d1daeaa56177c63329010673e14a258a9cf2b48a600d7e31a79038 -->
 ---
-id: greeting-patterns
+name: greeting-patterns
 title: Greeting Patterns Reference
 version: "1.0.0"
 entry_type: reference

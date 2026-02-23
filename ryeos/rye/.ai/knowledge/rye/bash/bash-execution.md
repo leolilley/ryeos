@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:dd9ff69902efc456889a591c26ca325dc13945fdb0b80637c3e105300547d17d:elUsihHLa-vuAcL6N7b994vj8cYvH7rztso6YcNBMDzZyYNlsMgl_X-xZOkGJ6LC9r3f8mDh7I0tUQUtwMXLAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:ffda66d6378ed78ef5c12b25c3dde150b828c47f157b5e91e853c5be7bbe2cb5:d7tgzK8h50BEGbagCYdnGTDIln1iX8HfmXyj7wanM6SNufcD229_TKQwQyvxp_UJJ_lWzk3TWOguUZWfWmMdCw==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: bash-execution
+name: bash-execution
 title: Bash Command Execution
 entry_type: reference
 category: rye/bash

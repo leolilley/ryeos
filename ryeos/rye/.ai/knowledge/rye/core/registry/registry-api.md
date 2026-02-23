@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:5a669232500fd1d41c4d1ef3ef45a1328acbe1adf75a6a40988627c7e8b99bcc:GOXF9BM-CsH81Vdk1ssbSDt9-nEpcc4xOJlgywyY8ZdbrSo9cr_B-k8GYqbUc8TyGyoWSmMc3HFqC1GcJ6YlAQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:9509a05dda4e48cc2aa1786c8c07604f993c559f9a752ffef4be7fd45f8b9bb4:sNVgsqsYse-z3VE14PSMgAVwmATfKUwwHHDJeirZqnRJcCLEUCXVsTyWO--DNAMrWR-kCtuOPumghx6HNq49BA==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: registry-api
+name: registry-api
 title: Registry API Reference
 entry_type: reference
 category: rye/core/registry

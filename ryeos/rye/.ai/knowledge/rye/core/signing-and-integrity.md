@@ -1,7 +1,7 @@
-<!-- rye:signed:2026-02-23T01:04:46Z:f80e851238dacf7368c8557b55fd7a05efa19d0ec527a7467f83c20aa48f8cc8:XiGDObzaIs5ngAxwaliCTBAfVe-tjF_iCOgWHZ1kzv-KOtY652m9xXRabYTkTLGQXMrU4xdaNhNnDyoUda_qCQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T05:24:41Z:0ad254088b57e98982de16c880c5026970fa5bf44469d1436a0083ae1810fcf4:IDQCnjaGORgWkh3wOfF828cm7Jdf-_ufi8nCjALvaepX6Z9dafXmF8zcO7baBQbpoLU12BuVLUFmmyFaHv2yDg==:9fbfabe975fa5a7f -->
 
 ```yaml
-id: signing-and-integrity
+name: signing-and-integrity
 title: Signing & Integrity
 entry_type: reference
 category: rye/core
