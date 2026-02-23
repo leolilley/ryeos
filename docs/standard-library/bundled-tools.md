@@ -61,12 +61,28 @@ rye_execute(item_type="tool", item_id="rye/bash/bash",
 
 ### Web (`rye/web/`)
 
-| Tool   | Item ID                | Description                              |
-| ------ | ---------------------- | ---------------------------------------- |
-| fetch  | `rye/web/fetch/fetch`  | Fetch and extract content from web pages |
-| search | `rye/web/search/search` | Search the web                           |
+| Tool    | Item ID                      | Description                              |
+| ------- | ---------------------------- | ---------------------------------------- |
+| fetch   | `rye/web/fetch/fetch`        | Fetch and extract content from web pages |
+| search  | `rye/web/search/search`      | Search the web                           |
+| browser | `rye/web/browser/browser`    | Browser automation via playwright-cli    |
+
+**Browser commands:** `open`, `goto`, `screenshot`, `snapshot`, `click`, `fill`, `type`, `select`, `hover`, `resize`, `console`, `network`, `eval`, `press`, `tab-list`, `tab-new`, `tab-select`, `tab-close`, `close`, `close-all`
 
 ```python
+# Open a page
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "open", "args": ["http://localhost:3000"]})
+
+# Take a screenshot
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "screenshot"})
+
+# Click an element by ref
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "click", "args": ["e15"]})
+
+# Fetch a web page
 rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": "https://docs.example.com/api"})
 ```
@@ -92,19 +108,16 @@ rye_execute(item_type="tool", item_id="rye/core/registry/registry",
     parameters={"action": "search", "query": "deployment"})
 ```
 
-### LSP (`rye/lsp/`)
-
-| Tool | Item ID       | Description                                                |
-| ---- | ------------- | ---------------------------------------------------------- |
-| lsp  | `rye/lsp/lsp` | Language Server Protocol integration for code intelligence |
-
 ### Code Tools (`rye/code/`)
 
-Development tools for package management and build operations.
+Development tools for package management, type checking, diagnostics, and LSP code intelligence.
 
-| Tool | Item ID          | Description                                    |
-| ---- | ---------------- | ---------------------------------------------- |
-| npm  | `rye/code/npm/npm` | NPM/NPX operations — install, run, build, exec |
+| Tool        | Item ID                              | Description                                         |
+| ----------- | ------------------------------------ | --------------------------------------------------- |
+| npm         | `rye/code/npm/npm`                   | NPM/NPX operations — install, run, build, exec      |
+| diagnostics | `rye/code/diagnostics/diagnostics`   | Run linters and type checkers (ruff, mypy, eslint…)  |
+| typescript  | `rye/code/typescript/typescript`     | TypeScript type checker — tsc --noEmit               |
+| lsp         | `rye/code/lsp/lsp`                   | LSP client — go to definition, references, hover…    |
 
 **Actions:** `install`, `run`, `build`, `test`, `init`, `exec`
 

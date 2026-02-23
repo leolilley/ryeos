@@ -1,0 +1,12 @@
+{
+  "name": "rye-code-lsp",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "vscode-jsonrpc": "^8.2.0",
+    "vscode-languageserver-protocol": "^3.17.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0"
+  }
+}

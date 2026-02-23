@@ -1,0 +1,34 @@
+{
+  "lockfile_version": 1,
+  "generated_at": "2026-02-23T02:04:32.127098+00:00",
+  "root": {
+    "tool_id": "rye/web/browser/browser",
+    "version": "1.0.0",
+    "integrity": "f3a7c36f42b746420bbc4829c50e3da78e3826332d10c0113a48b3ae5f3dee49"
+  },
+  "resolved_chain": [
+    {
+      "item_id": "rye/web/browser/browser",
+      "space": "project",
+      "tool_type": "javascript",
+      "executor_id": "rye/core/runtimes/node/node",
+      "integrity": "f3a7c36f42b746420bbc4829c50e3da78e3826332d10c0113a48b3ae5f3dee49"
+    },
+    {
+      "item_id": "rye/core/runtimes/node/node",
+      "space": "project",
+      "tool_type": "runtime",
+      "executor_id": "rye/core/primitives/subprocess",
+      "integrity": "d9ba650fd29f8d821f1a7e233663e698d9c84ea7db7ce5633ebf15ab989e866a"
+    },
+    {
+      "item_id": "rye/core/primitives/subprocess",
+      "space": "project",
+      "tool_type": "primitive",
+      "executor_id": null,
+      "integrity": "c63d03107f4c055b1afe9603ea22191b259170dee5ff838a63f3c8fd9cbab4b8"
+    }
+  ],
+  "registry": null,
+  "verified_deps": null
+}

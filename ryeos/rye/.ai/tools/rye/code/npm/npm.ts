@@ -1,4 +1,4 @@
-// rye:signed:2026-02-23T01:02:24Z:bbbca541fc838deef45e4af0318be9332441dd9ec8039705ff75750c4d331eac:jH17MOR3tBbIAAXxJPe4fMonidTABT4fx8_8zubS0S26xfum3YQDerXcuhFmSCkCGgohEZKpujeaA5083biLBg==:9fbfabe975fa5a7f
+// rye:signed:2026-02-23T01:39:51Z:3bee8b7d861a79339f8fd009ef561e11abb40d1c87b08db49028242be4970d0f:P8p8U0WI5pmVYhqe7CRmFLbSJzKzwGe7OZ4HzWJ-frXdPrijfW7MkCjAHnBMGkg7QWkB0N8nPtFNgEJ3c2HDCA==:9fbfabe975fa5a7f
 import { parseArgs } from "node:util";
 import { execSync } from "node:child_process";
 import { resolve, isAbsolute } from "node:path";
@@ -131,12 +131,6 @@ function execute(params: Params, projectPath: string): Result {
       ? resolve(params.working_dir)
       : resolve(project, params.working_dir);
 
-    if (!cwd.startsWith(project)) {
-      return {
-        success: false,
-        error: "Working directory is outside the project workspace",
-      };
-    }
     if (!existsSync(cwd)) {
       return { success: false, error: `Working directory not found: ${cwd}` };
     }

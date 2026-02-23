@@ -3,16 +3,16 @@ id: tools-web
 title: "Web Tools"
 description: Search the web and fetch page content with format conversion
 category: standard-library/tools
-tags: [tools, web, search, fetch, websearch, webfetch]
+tags: [tools, web, search, fetch, browser]
 version: "1.0.0"
 ```
 
 # Web Tools
 
 **Namespace:** `rye/web/`
-**Runtime:** `python/function`
+**Runtime:** `python/function` (search, fetch) · `node/node` (browser)
 
-Two tools for web interaction — search and fetch. Both use `urllib` from the standard library (no external HTTP dependency required).
+Three tools for web interaction — search, fetch, and browser automation.
 
 ---
 
@@ -112,4 +112,92 @@ Fetch a web page and convert it to a readable format. Includes a built-in HTML-t
 ```python
 rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": "https://docs.example.com/api", "format": "markdown"})
+```
+
+---
+
+## `browser`
+
+**Item ID:** `rye/web/browser/browser`
+
+Browser automation powered by [playwright-cli](https://github.com/nicjackson/playwright-cli). Opens pages, takes screenshots, clicks elements, fills forms, and more — all via a TypeScript tool running on the Node runtime.
+
+### Commands
+
+| Command       | Description                          | Args                    |
+| ------------- | ------------------------------------ | ----------------------- |
+| `open`        | Open a URL in the browser            | `[url]`                 |
+| `goto`        | Navigate to a URL                    | `[url]`                 |
+| `screenshot`  | Take a screenshot                    | —                       |
+| `snapshot`    | Get accessibility snapshot (DOM)     | —                       |
+| `click`       | Click an element by ref              | `[ref]`                 |
+| `fill`        | Fill a form field                    | `[ref, value]`          |
+| `type`        | Type text into focused element       | `[text]`                |
+| `select`      | Select an option                     | `[ref, value]`          |
+| `hover`       | Hover over an element                | `[ref]`                 |
+| `press`       | Press a key                          | `[key]`                 |
+| `resize`      | Resize the browser window            | `[width, height]`       |
+| `eval`        | Evaluate JavaScript in the page      | `[expression]`          |
+| `console`     | Get console messages                 | —                       |
+| `network`     | Get network requests                 | —                       |
+| `tab-list`    | List open tabs                       | —                       |
+| `tab-new`     | Open a new tab                       | `[url]`                 |
+| `tab-select`  | Switch to a tab                      | `[tab_id]`              |
+| `tab-close`   | Close a tab                          | `[tab_id]` (optional)   |
+| `close`       | Close the browser                    | —                       |
+| `close-all`   | Close all browser instances          | —                       |
+
+### Parameters
+
+| Name      | Type    | Required | Default  | Description                                              |
+| --------- | ------- | -------- | -------- | -------------------------------------------------------- |
+| `command` | string  | ✅       | —        | Browser command (see table above)                        |
+| `args`    | array   | ❌       | `[]`     | Positional arguments                                     |
+| `flags`   | object  | ❌       | `{}`     | Named flags like `{ "headed": true, "filename": "page.png" }` |
+| `session` | string  | ❌       | `"rye"`  | Named session for browser isolation                      |
+| `timeout` | integer | ❌       | `30`     | Command timeout in seconds                               |
+
+### Configuration
+
+Browser config is resolved project → user → system from `.ai/config/web/browser.json`:
+
+```json
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "channel": "chromium",
+      "headless": true
+    }
+  }
+}
+```
+
+The `channel: "chromium"` setting is required to use Playwright's bundled Chromium. Without it, playwright-cli defaults to Google Chrome.
+
+### Artifacts
+
+Screenshots save to `.ai/cache/tools/rye/web/browser/screenshots/`. Snapshots save to `.ai/cache/tools/rye/web/browser/snapshots/`. Filenames include timestamps.
+
+### Example
+
+```python
+# Open a page and take a screenshot
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "open", "args": ["http://localhost:3000"]})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "screenshot"})
+
+# Click an element by accessibility ref
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "click", "args": ["e15"]})
+
+# Fill a form field
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "fill", "args": ["e22", "user@example.com"]})
+
+# Open with a named session
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "open", "args": ["http://localhost:3000"], "session": "my-session"})
 ```

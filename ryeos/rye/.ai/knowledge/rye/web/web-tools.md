@@ -1,12 +1,12 @@
-<!-- rye:signed:2026-02-23T01:12:00Z:91e6e1601f8b50b6718da8643934c3cfe0c7a994b24d490037dde20f6e7142c2:KN-_uM91YIfA-zcrOmLBMZu4qFlhAjEfwxn9JxP0yJrDn1TPUaedMZSq1LqGihLl7cdIIXyTrgiTOV557qi4Dg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T02:07:54Z:e5a3f4bf7675da87588dc6cc91a27f03005cf2a3c1d3da5d1e8acff5e9295b19:VtbjbNfgL_oM6yn0Bft8tAqr6KcGgueMBb9ZyrAQnv6_OwO-9RpNm7CD5QkulHp-cSfN76GtuXvZ5_c6EKyhBg==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
 id: web-tools
-title: Web Search & Fetch Tools
+title: Web Tools — Search, Fetch & Browser
 entry_type: reference
 category: rye/web
-version: "1.0.0"
+version: "1.1.0"
 author: rye-os
 created_at: 2026-02-18T00:00:00Z
 tags:
@@ -14,21 +14,27 @@ tags:
   - search
   - fetch
   - scraping
+  - browser
+  - playwright
 references:
   - "docs/standard-library/tools/web.md"
 ```
 
-# Web Search & Fetch Tools
+# Web Tools — Search, Fetch & Browser
 
-Two tools for web interaction — search and fetch. Both use `urllib` from the standard library (no external HTTP dependency).
+Three tools for web interaction — search, fetch, and browser automation.
 
 ## Namespace & Runtime
 
-| Field       | Value                                      |
-| ----------- | ------------------------------------------ |
-| Namespace   | `rye/web/`                                 |
-| Runtime     | `python/function`                  |
-| Executor ID | `rye/core/runtimes/python/function` |
+| Field       | Value        |
+| ----------- | ------------ |
+| Namespace   | `rye/web/`   |
+
+| Tool    | Runtime             | Executor ID                          |
+| ------- | ------------------- | ------------------------------------ |
+| search  | `python/function`   | `rye/core/runtimes/python/function`  |
+| fetch   | `python/function`   | `rye/core/runtimes/python/function`  |
+| browser | `javascript`        | `rye/core/runtimes/node/node`        |
 
 ---
 
@@ -176,6 +182,119 @@ rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
 | Search failed             | search     | Provider request failed            |
 | Exa API key missing       | search     | Exa provider without configured key|
 
+---
+
+## `browser`
+
+**Item ID:** `rye/web/browser/browser`
+
+Browser automation via `playwright-cli`. Open pages, take screenshots, interact with elements, and manage sessions.
+
+### Parameters
+
+| Name      | Type    | Required | Default | Description                                                                 |
+| --------- | ------- | -------- | ------- | --------------------------------------------------------------------------- |
+| `command` | string  | ✅       | —       | playwright-cli command (see below)                                          |
+| `args`    | array   | ❌       | `[]`    | Positional arguments (URL for open/goto, element ref for click, etc.)       |
+| `flags`   | object  | ❌       | `{}`    | Named flags (e.g. `{ "headed": true, "filename": "page.png" }`)            |
+| `session` | string  | ❌       | `"rye"` | Named session for browser isolation between directive threads               |
+| `timeout` | integer | ❌       | `30`    | Command timeout in seconds                                                  |
+
+### Browser Configuration
+
+Config is resolved project → user → system, from `.ai/config/web/browser.json`. The default config uses Playwright's bundled Chromium:
+
+```json
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "channel": "chromium",
+      "headless": true
+    }
+  }
+}
+```
+
+The `channel: "chromium"` is required — without it, playwright-cli defaults to Google Chrome.
+
+### Commands
+
+| Command        | Description                          | Args                        |
+| -------------- | ------------------------------------ | --------------------------- |
+| `open`         | Open a new browser with URL          | URL                         |
+| `goto`         | Navigate current tab to URL          | URL                         |
+| `screenshot`   | Capture page screenshot              | —                           |
+| `snapshot`     | Capture accessibility snapshot       | —                           |
+| `click`        | Click an element                     | element ref                 |
+| `fill`         | Fill an input field                  | element ref, value          |
+| `type`         | Type into focused element            | text                        |
+| `select`       | Select dropdown option               | element ref, value          |
+| `hover`        | Hover over element                   | element ref                 |
+| `press`        | Press a key                          | key name                    |
+| `resize`       | Resize viewport                      | width, height               |
+| `eval`         | Evaluate JavaScript                  | expression                  |
+| `console`      | Get console logs                     | —                           |
+| `network`      | Get network log                      | —                           |
+| `tab-list`     | List open tabs                       | —                           |
+| `tab-new`      | Open new tab                         | URL (optional)              |
+| `tab-select`   | Switch to tab                        | tab index                   |
+| `tab-close`    | Close current tab                    | tab index (optional)        |
+| `close`        | Close browser session                | —                           |
+| `close-all`    | Close all sessions                   | —                           |
+
+### Artifacts
+
+Screenshots are saved to `.ai/cache/tools/rye/web/browser/screenshots/`. Snapshots are saved to `.ai/cache/tools/rye/web/browser/snapshots/`. Auto-generated filenames include timestamps.
+
+### Return
+
+```json
+{
+  "success": true,
+  "output": "...",
+  "stdout": "...",
+  "stderr": "",
+  "exit_code": 0,
+  "truncated": false,
+  "command": "playwright-cli -s=rye open https://example.com",
+  "session": "rye",
+  "screenshot_path": ".ai/cache/tools/rye/web/browser/screenshots/screenshot-1740268800.png"
+}
+```
+
+### Invocation
+
+```python
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "open", "args": ["https://example.com"]})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "screenshot"})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "click", "args": ["e15"]})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "fill", "args": ["e22", "user@example.com"]})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "eval", "args": ["document.title"]})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "close"})
+```
+
+---
+
+## Error Conditions
+
+| Error                     | Tool       | Cause                              |
+| ------------------------- | ---------- | ---------------------------------- |
+| Unknown command           | browser    | Invalid playwright-cli command     |
+| Timeout                   | browser    | Command exceeds timeout            |
+| Ref not found             | browser    | Element ref not in current snapshot |
+
 ## Usage Patterns
 
 ```python
@@ -185,4 +304,14 @@ search = rye_execute(item_type="tool", item_id="rye/web/search/search",
 
 fetch = rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": search["results"][0]["url"]})
+
+# Browser automation — open, interact, screenshot
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "open", "args": ["https://example.com"]})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "screenshot"})
+
+rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+    parameters={"command": "close"})
 ```

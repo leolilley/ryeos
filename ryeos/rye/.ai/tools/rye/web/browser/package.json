@@ -1,0 +1,11 @@
+{
+  "name": "rye-web-browser",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@playwright/cli": "latest"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0"
+  }
+}
