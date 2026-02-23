@@ -27,6 +27,12 @@ Signatures are embedded as comments on the first line of every item file. The fo
 <!-- rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP -->
 ```
 
+**JavaScript and TypeScript files:**
+
+```
+// rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP
+```
+
 ### Field Breakdown
 
 | Field          | Format                                       | Example                |

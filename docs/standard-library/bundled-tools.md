@@ -98,6 +98,30 @@ rye_execute(item_type="tool", item_id="rye/core/registry/registry",
 | ---- | ------------- | ---------------------------------------------------------- |
 | lsp  | `rye/lsp/lsp` | Language Server Protocol integration for code intelligence |
 
+### Code Tools (`rye/code/`)
+
+Development tools for package management and build operations.
+
+| Tool | Item ID          | Description                                    |
+| ---- | ---------------- | ---------------------------------------------- |
+| npm  | `rye/code/npm/npm` | NPM/NPX operations — install, run, build, exec |
+
+**Actions:** `install`, `run`, `build`, `test`, `init`, `exec`
+
+```python
+# Install packages
+rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+    parameters={"action": "install", "args": ["react", "react-dom"], "working_dir": "frontend"})
+
+# Run a script
+rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+    parameters={"action": "run", "args": ["build"], "working_dir": "frontend"})
+
+# Execute via npx
+rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+    parameters={"action": "exec", "args": ["vite", "build"], "working_dir": "frontend"})
+```
+
 ### System (`rye/core/system/`)
 
 | Tool   | Item ID                  | Description                                   |

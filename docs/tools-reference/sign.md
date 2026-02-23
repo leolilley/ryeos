@@ -48,7 +48,10 @@ Each file type uses its own comment syntax for the signature line:
 | Directive | `.md`          | `<!-- rye:signed:<timestamp>:<hash>:<signature> -->` |
 | Tool      | `.py`          | `# rye:signed:<timestamp>:<hash>:<signature>`        |
 | Tool      | `.yaml`/`.yml` | `# rye:signed:<timestamp>:<hash>:<signature>`        |
+| Tool      | `.ts`/`.js`/`.mjs`/`.cjs` | `// rye:signed:<timestamp>:<hash>:<signature>` |
 | Knowledge | `.md`          | `<!-- rye:signed:<timestamp>:<hash>:<signature> -->` |
+
+Signature formats are data-driven — configured per-extension in `tool_extractor.yaml` via the `signature_formats` field. Each item type (tool, directive, knowledge) has its own extractor with independent format mappings.
 
 The signature contains:
 

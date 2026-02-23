@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:43:13Z:d0fb439e8197436cc4d767423a6b59b4e3b21f14210275fc4e910c2c9141ca68:gx9iRAiejXJdmjfI8KxLWRRbz1NzwM5BCW5JKRvzMrP-WivGl7PnOV9Gq16XYxW_nh7JfZQIQGkzwrmQRHntBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T01:02:14Z:d9ba650fd29f8d821f1a7e233663e698d9c84ea7db7ce5633ebf15ab989e866a:Z7npb7354Oj6gyTP1mOqw27eYuFHgB5UQZja9-cf7BwgISy0xtiSDq8mXeSNeq53ZVhgsQE46rVDnxCaf5YlBg==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -33,7 +33,7 @@ verify_deps:
   enabled: true
   scope: anchor
   recursive: true
-  extensions: [".js", ".ts", ".mjs", ".cjs", ".json", ".yaml", ".yml"]
+  extensions: [".js", ".ts", ".mjs", ".cjs", ".yaml", ".yml"]
   exclude_dirs: ["node_modules", "__pycache__", ".git", "dist", "build"]
 
 config:

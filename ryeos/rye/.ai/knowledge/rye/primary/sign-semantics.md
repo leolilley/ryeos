@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:42d8f7ce10aa1e8789a3df4fe92c32417092b4f1e0d04ba19ecb7950ec30e42d:Od6Lqc7hXFvhYMHxQQXM4Y6zuyY4DHKNLDImRZOtVLQX1RIKj1yQMkaOVuV2qK-FE2zOLOKb3iCF37G-WT6GAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T01:04:46Z:0252f7c0a3f5bcf3a017700bf5caff225a83ff402fedf560dfaefc8c33aaf6c0:3DiqGTm0laLBtwVTGLW3wtKx5j1ov-K2Ww5bi0v_lGfTTbLazMPxA-ih9a7nokmMTUw3qNNxVbEwBBExrC7UCw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: sign-semantics
@@ -65,6 +65,7 @@ Each file type uses its own comment syntax:
 | `directive` | `.md`          | `<!-- rye:signed:<timestamp>:<hash>:<signature> -->` |
 | `tool`      | `.py`          | `# rye:signed:<timestamp>:<hash>:<signature>`        |
 | `tool`      | `.yaml`/`.yml` | `# rye:signed:<timestamp>:<hash>:<signature>`        |
+| `tool`      | `.js`/`.ts`    | `// rye:signed:<timestamp>:<hash>:<signature>`       |
 | `knowledge` | `.md`          | `<!-- rye:signed:<timestamp>:<hash>:<signature> -->` |
 
 ### Signature components

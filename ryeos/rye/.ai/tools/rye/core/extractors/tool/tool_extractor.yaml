@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:dac8d5e639a0548de923544e7c111f5e8f394a532a6722a1ebbfcf01c9ae1963:Fjy_9ncxXmn8Ce79KDIrA5H1MmXWFHyPChkjNtSMkjFsTKPR7IKGYt_CxhShO1nnM_0N3B20_-hoF7U2dW6RDQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T01:02:24Z:a77b8215b4dcde6688c36b78202b892a06748f9833e3163b1569004f20b97c57:qaZ04ElvZBBd9NePsqcwfJBA1y-lo24zOK38AjstBHqUiZfpq5tQyyaOIpYxp9GhgL4b4k3aPYe5fGfqD2PRBQ==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -31,6 +31,20 @@ parsers:
 signature_format:
   prefix: "#"
   after_shebang: true
+
+signature_formats:
+  .js:
+    prefix: "//"
+    after_shebang: false
+  .ts:
+    prefix: "//"
+    after_shebang: false
+  .mjs:
+    prefix: "//"
+    after_shebang: false
+  .cjs:
+    prefix: "//"
+    after_shebang: false
 
 extraction_rules:
   name:

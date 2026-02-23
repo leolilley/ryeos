@@ -144,7 +144,7 @@ class ToolMetadataStrategy(MetadataStrategy):
         if self._sig_format is None:
             if self.file_path:
                 self._sig_format = get_signature_format(
-                    self.file_path, self.project_path
+                    self.file_path, self.project_path, item_type="tool"
                 )
             else:
                 self._sig_format = {"prefix": "#", "after_shebang": True}

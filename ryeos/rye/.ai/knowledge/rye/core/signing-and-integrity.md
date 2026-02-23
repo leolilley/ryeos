@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:157643dde0e0bec8dbff8918ac6a8c582a35bcf68bc3b8b22c02bb3773021b7c:efBUV-BorVsBxg8VyoVC91e9gOIACSIEyH3eb8bga0a-aX7PtuU0rQehXqf_JXTWrlhexmuR9yc7UPmljIyMCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T01:04:46Z:f80e851238dacf7368c8557b55fd7a05efa19d0ec527a7467f83c20aa48f8cc8:XiGDObzaIs5ngAxwaliCTBAfVe-tjF_iCOgWHZ1kzv-KOtY652m9xXRabYTkTLGQXMrU4xdaNhNnDyoUda_qCQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: signing-and-integrity
@@ -36,7 +36,10 @@ Signatures are embedded as comments on line 1 of every item file.
 | File Type        | Format                                                         |
 | ---------------- | -------------------------------------------------------------- |
 | Python / YAML    | `# rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP`   |
+| JS / TS          | `// rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP`  |
 | Markdown         | `<!-- rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP -->` |
+
+Formats are data-driven — configured per-extension via the `signature_formats` field in each item type's extractor YAML. The sign tool resolves the correct format by (item_type, extension) lookup.
 
 ### Field Breakdown
 
