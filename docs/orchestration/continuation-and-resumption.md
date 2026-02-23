@@ -45,53 +45,27 @@ coordination:
 
 ## Automatic Handoff
 
-When the context limit is reached, `handoff_thread` is triggered automatically by the runner. The handoff has five phases:
+When the context limit is reached, `handoff_thread` is triggered automatically by the runner. The orchestrator's role is minimal — message reconstruction and transcript verification have moved into the child's `execute()` step 3.5.
 
-### Phase 1: Build Trailing Messages
+### Phase 1: Spawn New Thread
 
-The token budget is filled with trailing messages from the old conversation (most recent messages first):
-
-```python
-trailing_messages = []
-for msg in reversed(messages):
-    msg_tokens = len(str(msg.get("content", ""))) // 4
-    if trailing_tokens + msg_tokens > resume_ceiling:
-        break
-    trailing_messages.insert(0, msg)
-```
-
-The trailing slice is trimmed to start with a `user` message (provider requirement). If no messages fit within the budget, at least the last message is included.
-
-### Phase 2: Build Resume Messages
-
-The resume context is assembled as a new conversation:
-
-```python
-resume_messages = [
-    # Trailing messages from old conversation
-    *trailing_messages,
-    # Continuation instruction
-    {"role": "user", "content": "Continue executing the directive. "
-     "Pick up where the previous thread left off."},
-]
-```
-
-### Phase 3: Spawn New Thread
-
-A new thread is spawned with the same directive, using the resume messages:
+`handoff_thread` passes `previous_thread_id` and a `_continuation_message` to the new thread:
 
 ```python
 new_result = await thread_directive.execute({
     "directive_name": directive_name,
-    "resume_messages": resume_messages,
-    "parent_thread_id": original_parent_id,  # same parent chain
     "previous_thread_id": thread_id,         # enables thread_continued hooks
+    "_continuation_message": "Continue executing the directive. "
+     "Pick up where the previous thread left off.",
+    "parent_thread_id": original_parent_id,  # same parent chain
 }, project_path)
 ```
 
 The new thread inherits the same parent relationship, so it appears as a sibling of the original thread in the hierarchy. `previous_thread_id` is passed so the new thread can fire `thread_continued` hooks.
 
-### Phase 4: Link Continuation Chain
+The child's `execute()` step 3.5 handles all message reconstruction: it reads the previous thread's transcript JSONL, verifies transcript integrity, rebuilds trailing messages within the `resume_ceiling_tokens` budget, and trims to start with a `user` message. No serialization or temp files are needed — everything is reconstructed from the append-only transcript.
+
+### Phase 2: Link Continuation Chain
 
 The old thread is linked to the new one in the registry:
 
@@ -105,12 +79,12 @@ registry.set_chain_info(new_thread_id, chain_root_id, old_thread_id)
 # new thread: chain_root_id → root, continuation_of → old_thread_id
 ```
 
-### Phase 5: Log Handoff
+### Phase 3: Log Handoff
 
 The handoff is recorded in the old thread's transcript:
 
 ```
-[thread_handoff] new_thread_id=..., trailing_turns=8
+[thread_handoff] new_thread_id=...
 ```
 
 The old thread's final status becomes `continued`. The new thread starts with status `running`.
@@ -237,17 +211,13 @@ rye_execute(
 
 2. **Validate state** — The thread must be in a terminal state (`completed`, `error`, `cancelled`). Threads that are still `running` or `created` can't be resumed.
 
-3. **Reconstruct messages** — The transcript is parsed back into a message array (user/assistant/tool messages).
-
-4. **Append user message** — The new message is appended to the reconstructed conversation.
-
-5. **Spawn as sibling** — A new thread is spawned with the same directive and the same parent as the original. This preserves the hierarchy — the resumed thread appears alongside the original, not as a child of it.
+3. **Spawn as sibling** — `resume_thread` passes `previous_thread_id` and a `_continuation_message` (the user's message) to the new thread. The child's `execute()` step 3.5 reconstructs messages from the transcript JSONL, verifies transcript integrity, and appends the user message. No message reconstruction happens in the orchestrator.
 
 ```python
 spawn_params = {
     "directive_name": directive_name,
-    "resume_messages": resume_messages,
     "previous_thread_id": resolved_id,
+    "_continuation_message": message,
 }
 if parent_id:
     spawn_params["parent_thread_id"] = parent_id
@@ -255,9 +225,9 @@ if parent_id:
 new_result = await thread_directive.execute(spawn_params, project_path)
 ```
 
-6. **Link chain** — The original thread gets a `continuation_thread_id` pointing to the new thread. Chain metadata is set on the new thread.
+4. **Link chain** — The original thread gets a `continuation_thread_id` pointing to the new thread. Chain metadata is set on the new thread.
 
-7. **Log in transcript** — A `thread_resumed` event is recorded in the original thread's transcript with the new thread ID, directive name, message preview, and number of reconstructed turns.
+5. **Log in transcript** — A `thread_resumed` event is recorded in the original thread's transcript with the new thread ID, directive name, and message preview.
 
 ### Resume Response
 
@@ -283,7 +253,7 @@ If the original thread_id pointed to an earlier link in a chain (not the termina
 | ---------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | **Trigger**            | Context limit reached (90%+)                                               | User calls `resume_thread`                                               |
 | **Summary**            | Hook-driven — directives declare `after_complete` hooks for summarization  | No summary — full transcript reconstructed                               |
-| **Context**            | Trailing messages (within token ceiling) + `thread_continued` hook context | Full message reconstruction + new user message                           |
+| **Context**            | Trailing messages reconstructed from transcript JSONL (within token ceiling) + `thread_continued` hook context | Full message reconstruction from transcript JSONL + new user message    |
 | **When it's too big**  | Runner's context_limit_reached triggers another handoff                    | Same — if reconstructed messages exceed context, the runner will handoff |
 | **Chain**              | Old → New linked as continuation                                           | Old → New linked as continuation                                         |
 | **Spawn relationship** | Sibling of original (same parent)                                          | Sibling of original (same parent)                                        |

@@ -135,7 +135,7 @@ Key differences from thread transcripts:
 - **Overwrite, not append** — knowledge markdown is fully re-rendered from JSONL at each step
 - **State file separate** — resumable graph state lives at `.ai/knowledge/graphs/{graph_id}/{graph_run_id}.md` (signed JSON), unchanged from before
 
-Cross-process polling in `orchestrator.py` (`_poll_registry`) uses flat 500ms intervals (not exponential backoff).
+Cross-process watching in `orchestrator.py` (`_poll_registry`) uses `rye-watch` (push-based, OS-native file watcher on `registry.db`) with 500ms polling fallback.
 
 ## Context Limit Detection
 
@@ -170,31 +170,26 @@ for msg in reversed(messages):
 
 Trimmed to start with `user` message (provider requirement).
 
-### Phase 2: Build Resume Messages
+### Phase 2: Spawn New Thread
 
-```python
-resume_messages = [
-    *trailing_messages,
-    {"role": "user", "content": "Continue executing the directive."},
-]
-```
-
-### Phase 3: Spawn New Thread
-
-New thread with same directive and resume messages:
+New thread spawned with `previous_thread_id` and a `_continuation_message`:
 
 ```python
 new_result = await thread_directive.execute({
     "directive_name": directive_name,
-    "resume_messages": resume_messages,
     "parent_thread_id": original_parent_id,
     "previous_thread_id": thread_id,
+    "_continuation_message": "Continue executing the directive.",
 })
 ```
 
 Inherits same parent relationship → appears as sibling of original.
 
 `previous_thread_id` enables `thread_continued` hooks in the new thread.
+
+### Phase 3: Reconstruct Messages (in new thread)
+
+The new thread's `execute()` step 3.5 reconstructs `resume_messages` from the previous thread's `transcript.jsonl`. Messages are rebuilt from the JSONL event log with checkpoint signature verification to ensure transcript integrity. This replaces the prior approach of passing `resume_messages` in-memory.
 
 ### Phase 4: Link Continuation Chain
 
@@ -279,11 +274,10 @@ rye_execute(item_id="rye/agent/threads/orchestrator",
 
 1. **Resolve chain** — follow to terminal thread
 2. **Validate state** — must be terminal (`completed`, `error`, `cancelled`). Running/created → rejected
-3. **Reconstruct messages** — parse transcript back into message array
-4. **Append user message** — new message added to conversation
-5. **Spawn as sibling** — same directive, same parent as original
-6. **Link chain** — original gets `continuation_thread_id` pointing to new thread
-7. **Log** — `thread_resumed` event in original transcript
+3. **Spawn as sibling** — passes `previous_thread_id` and `_continuation_message` (the user's resume message). Same directive, same parent as original
+4. **Reconstruct messages** — new thread's `execute()` step 3.5 rebuilds messages from `transcript.jsonl` with integrity verification, then appends the user message
+5. **Link chain** — original gets `continuation_thread_id` pointing to new thread
+6. **Log** — `thread_resumed` event in original transcript
 
 ### Resume vs Handoff
 
@@ -291,7 +285,7 @@ rye_execute(item_id="rye/agent/threads/orchestrator",
 | ------------ | -------------------------------------------------------------------- | ------------------------------------ |
 | Trigger      | Context limit (90%+)                                                 | User calls `resume_thread`           |
 | Summary      | Hook-driven — directives opt in via `after_complete` hooks           | No summary — full transcript rebuilt |
-| Context      | Trailing messages (within ceiling) + `thread_continued` hook context | Full reconstruction + new message    |
+| Context      | Transcript reconstructed in step 3.5 + `thread_continued` hook context | Full reconstruction + new message    |
 | Overflow     | Runner will handoff again if needed                                  | Same — runner handles if too big     |
 | Chain        | Old → New linked                                                     | Old → New linked                     |
 | Relationship | Sibling (same parent)                                                | Sibling (same parent)                |

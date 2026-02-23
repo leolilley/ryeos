@@ -1,0 +1,24 @@
+version: "1.0.0"
+tool_type: runtime
+executor_id: rye/core/primitives/subprocess
+category: rye/core/runtimes/rust
+description: "Rust runtime — executes compiled Rust binaries found on PATH"
+
+env_config:
+  interpreter:
+    type: system_binary
+    binary: rye-watch
+    var: RYE_RUST_WATCH
+  env:
+    RUST_BACKTRACE: "0"
+
+config:
+  command: "${RYE_RUST_WATCH}"
+  args:
+    - "--db"
+    - "{db_path}"
+    - "--thread-id"
+    - "{thread_id}"
+    - "--timeout"
+    - "{timeout}"
+  timeout: 600

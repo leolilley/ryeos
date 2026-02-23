@@ -56,16 +56,15 @@ Returns:
 | Mode         | `async` | Behavior                                      | Use When                        |
 |--------------|-------------|-----------------------------------------------|---------------------------------|
 | Synchronous  | `false`     | Blocks until child completes, returns result  | Need result before proceeding   |
-| Asynchronous | `true`      | Returns `thread_id` immediately, child forks  | Spawning multiple parallel children |
+| Asynchronous | `true`      | Returns `thread_id` immediately, child spawns as subprocess | Spawning multiple parallel children |
 
 ### Async Internals
 
-`os.fork()` duplicates the process. Child process:
-1. Detaches via `os.setsid()`
-2. Redirects stdio to `/dev/null`
-3. Runs LLM loop to completion
-4. Finalizes (report spend, update registry, write `thread.json`)
-5. Calls `os._exit(0)`
+`spawn_detached()` launches a child subprocess. Uses `rye-proc spawn` (cross-platform Rust binary) with POSIX `subprocess.Popen` fallback. Child process:
+1. Runs as a detached subprocess (`__main__` with `--thread-id` and `--pre-registered` flags)
+2. Runs LLM loop to completion
+3. Finalizes (report spend, update registry, write `thread.json`)
+4. Exits
 
 Parent returns immediately with `thread_id` and `pid`.
 
@@ -83,7 +82,7 @@ if resolved_id == "rye/agent/threads/thread_directive":
 
 **The LLM never manually passes parent context** — it just calls `thread_directive` with directive name, inputs, and limit overrides.
 
-Additionally, `RYE_PARENT_THREAD_ID` is set in the environment so forked children inherit the parent relationship.
+Additionally, `RYE_PARENT_THREAD_ID` is set in the environment so spawned children inherit the parent relationship.
 
 ## The Spawn-Wait-Collect Pattern
 
@@ -127,7 +126,7 @@ rye_execute(
 | Thread Type        | Mechanism                                              |
 |--------------------|--------------------------------------------------------|
 | In-process         | `asyncio.Event` — awaits `event.wait()` with timeout   |
-| Cross-process      | Polls SQLite registry with exponential backoff (1s→10s) |
+| Cross-process      | Push-based `rye-watch` on registry.db with 500ms polling fallback |
 | Continuation chain | `resolve_thread_chain()` follows links to terminal thread |
 
 Default timeout from `coordination.yaml` (typically 600s). Override with `timeout` parameter.
@@ -194,4 +193,4 @@ rye_execute(
 )
 ```
 
-Sends `SIGTERM`, waits 3s for graceful shutdown, then `SIGKILL`.
+Uses `rye-proc kill` (graceful→force) with POSIX `os.kill` fallback.

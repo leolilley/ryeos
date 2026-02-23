@@ -125,12 +125,12 @@ Written to `.ai/agent/threads/<thread_id>/thread.json`:
 
 ### Step 11: Set parent env var
 
-`RYE_PARENT_THREAD_ID` set to this thread's ID so child processes inherit the parent relationship.
+`RYE_PARENT_THREAD_ID` set to this thread's ID so spawned child processes inherit the parent relationship.
 
-### Step 12: Fork or run
+### Step 12: Spawn or run
 
 - **Synchronous** (default): `runner.run()` blocks until completion
-- **Asynchronous** (`async: true`): `os.fork()` → child detaches via `os.setsid()`, redirects stdio to `/dev/null`, runs loop, finalizes, calls `os._exit(0)`. Parent returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): `spawn_detached()` launches a child subprocess via `rye-proc spawn` (with POSIX `subprocess.Popen` fallback). Child runs `__main__` with `--thread-id` and `--pre-registered` flags. Parent returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 13: Run LLM loop
 

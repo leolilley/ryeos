@@ -135,12 +135,12 @@ The `thread.json` file is signed using canonical JSON serialization with a `_sig
 
 ### Step 11: Set parent env var
 
-`RYE_PARENT_THREAD_ID` is set to this thread's ID so any subprocesses (children spawned via `async`) inherit the parent relationship.
+`RYE_PARENT_THREAD_ID` is set to this thread's ID so any child subprocesses (spawned via `async`) inherit the parent relationship.
 
-### Step 12: Fork or run
+### Step 12: Spawn or run
 
 - **Synchronous** (default): Calls `runner.run()` directly and blocks until completion
-- **Asynchronous** (`async: true`): Calls `os.fork()` — the child process detaches via `os.setsid()`, redirects stdio to `/dev/null`, runs `runner.run()`, finalizes, and exits. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `rye-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 13: Run LLM loop
 

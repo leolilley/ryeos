@@ -8,7 +8,9 @@ __tool_description__ = "Thread coordination: wait, cancel, status, chain resolut
 from typing import Any, Dict, List, Optional
 
 import asyncio
+import json as _json
 import os
+import shutil
 import signal
 from pathlib import Path
 
@@ -153,7 +155,26 @@ async def _wait_single(thread_id: str, timeout: float, project_path: Path) -> Di
 
 
 async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
-    """Poll registry for thread completion (cross-process threads)."""
+    """Wait for thread completion using rye-watch (push) or polling (fallback)."""
+    # Try push-based watcher first
+    rye_watch = shutil.which("rye-watch")
+    if rye_watch and hasattr(registry, "db_path"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                rye_watch,
+                "--db", str(registry.db_path),
+                "--thread-id", thread_id,
+                "--timeout", str(timeout),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
+            if proc.returncode == 0 and stdout:
+                return _json.loads(stdout.strip())
+        except (asyncio.TimeoutError, OSError, ValueError):
+            pass  # fall through to polling
+
+    # Fallback: 500ms polling
     import time
     deadline = time.monotonic() + timeout
     poll_interval = 0.5
@@ -169,6 +190,102 @@ async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
     return {"status": "timeout", "thread_id": thread_id}
 
 
+async def _kill_pid(pid: int, grace: float = 3.0) -> Dict:
+    """Kill a process by PID using rye-proc (cross-platform) or os.kill fallback."""
+    rye_proc = shutil.which("rye-proc")
+    if rye_proc:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                rye_proc, "kill", "--pid", str(pid), "--grace", str(grace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=grace + 5)
+            if proc.returncode == 0 and stdout:
+                return _json.loads(stdout.strip())
+        except (asyncio.TimeoutError, OSError, ValueError):
+            pass  # fall through to POSIX fallback
+
+    # POSIX fallback (will not work on Windows without rye-proc)
+    try:
+        os.kill(pid, signal.SIGTERM)
+        import time
+        for _ in range(int(grace / 0.3)):
+            time.sleep(0.3)
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return {"success": True, "method": "terminated"}
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        return {"success": True, "method": "killed"}
+    except OSError as e:
+        if e.errno == 3:  # ESRCH — already dead
+            return {"success": True, "method": "already_dead"}
+        return {"success": False, "error": str(e)}
+
+
+async def spawn_detached(
+    cmd: str, args: List[str],
+    log_path: Optional[str] = None,
+    envs: Optional[Dict[str, str]] = None,
+) -> Dict:
+    """Spawn a detached process using rye-proc (cross-platform) or os.fork fallback.
+
+    Returns dict with 'success' and 'pid' on success.
+    """
+    rye_proc = shutil.which("rye-proc")
+    if rye_proc:
+        try:
+            exec_args = [rye_proc, "spawn", "--cmd", cmd]
+            for arg in args:
+                exec_args.extend(["--arg", arg])
+            if log_path:
+                exec_args.extend(["--log", log_path])
+            if envs:
+                for k, v in envs.items():
+                    exec_args.extend(["--env", f"{k}={v}"])
+            proc = await asyncio.create_subprocess_exec(
+                *exec_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode == 0 and stdout:
+                return _json.loads(stdout.strip())
+        except (asyncio.TimeoutError, OSError, ValueError):
+            pass  # fall through to POSIX fallback
+
+    # POSIX fallback
+    import subprocess
+    child_cmd = [cmd] + list(args)
+    kwargs: Dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+    }
+    if log_path:
+        log_file = open(log_path, "w")
+        kwargs["stdout"] = log_file
+        kwargs["stderr"] = subprocess.STDOUT
+    else:
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+    if envs:
+        env = dict(os.environ)
+        env.update(envs)
+        kwargs["env"] = env
+    try:
+        kwargs["preexec_fn"] = os.setsid
+    except AttributeError:
+        pass  # Windows without rye-proc — best effort
+    try:
+        child = subprocess.Popen(child_cmd, **kwargs)
+        return {"success": True, "pid": child.pid}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 async def handoff_thread(
     thread_id: str,
     project_path: Path,
@@ -177,15 +294,15 @@ async def handoff_thread(
 ) -> Dict:
     """Handoff a stopping thread to a new continuation thread.
 
-    Builds resume context (trailing messages within token ceiling),
-    spawns a new thread with the same directive, and links old→new
-    via the continuation chain. Summarization is hook-driven — if the
-    directive declares an after_complete hook, it runs in the old thread.
+    Spawns a new thread with the same directive and links old→new
+    via the continuation chain. The new thread reconstructs resume
+    context from the previous thread's transcript JSONL (verified
+    for integrity in execute() step 3.5).
 
     Args:
         thread_id: The stopping thread to hand off from.
         project_path: Project root path.
-        messages: Live messages from runner (None = reconstruct from transcript).
+        messages: Ignored (kept for API compat). Resume is from JSONL.
         continuation_message: Optional user message to append (for resume_thread).
 
     Returns:
@@ -202,73 +319,16 @@ async def handoff_thread(
     if not directive_name:
         return {"success": False, "error": "No directive recorded for thread"}
 
-    # Load continuation config
-    coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
-    cont_config = coordination_loader.get_coordination_loader().get_continuation_config(project_path)
-    resume_ceiling = cont_config.get("resume_ceiling_tokens", 16000)
-
-    # Verify transcript integrity before trusting its content
-    from rye.constants import AI_DIR
-    transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
-    signer = transcript_signer_mod.TranscriptSigner(
-        thread_id, project_path / AI_DIR / "agent" / "threads" / thread_id
-    )
-    integrity_policy = cont_config.get("transcript_integrity", "strict")
-    integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
-    if not integrity["valid"]:
-        return {
-            "success": False,
-            "error": f"Transcript integrity check failed: {integrity['error']}. "
-                     f"Cannot hand off from tampered transcript.",
-        }
-
-    # Reconstruct messages from transcript if not provided live
-    if messages is None:
-        transcript_mod = load_module("persistence/transcript", anchor=_ANCHOR)
-        transcript_obj = transcript_mod.Transcript(thread_id, project_path)
-        messages = transcript_obj.reconstruct_messages()
-        if not messages:
-            return {"success": False, "error": f"Cannot reconstruct messages for thread: {thread_id}"}
-
-    # --- Phase 1: Fill ceiling budget with trailing messages ---
-    trailing_messages: List[Dict] = []
-    trailing_tokens = 0
-    for msg in reversed(messages):
-        msg_tokens = len(str(msg.get("content", ""))) // 4
-        if trailing_tokens + msg_tokens > resume_ceiling:
-            break
-        trailing_messages.insert(0, msg)
-        trailing_tokens += msg_tokens
-
-    if not trailing_messages and messages:
-        trailing_messages = [messages[-1]]
-
-    # Ensure trailing slice starts with a user message (providers require it)
-    while trailing_messages and trailing_messages[0].get("role") not in ("user",):
-        trailing_messages.pop(0)
-
-    # --- Phase 2: Build resume_messages ---
-    resume_messages: List[Dict] = []
-    resume_messages.extend(trailing_messages)
-
-    if continuation_message:
-        resume_messages.append({"role": "user", "content": continuation_message})
-    else:
-        resume_messages.append({
-            "role": "user",
-            "content": "Continue executing the directive. Pick up where the previous thread left off.",
-        })
-
-    # --- Phase 3: Spawn new thread via thread_directive ---
-    # Treat continuation as a normal spawn from the same parent.
-    # Same parent chain, same spawn/depth checks, same limits resolution.
+    # Spawn new thread — execute() step 3.5 handles transcript integrity
+    # verification, JSONL reconstruction, and ceiling trimming.
     thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
     parent_id = thread.get("parent_id")
     spawn_params = {
         "directive_id": directive_name,
-        "resume_messages": resume_messages,
         "previous_thread_id": thread_id,
     }
+    if continuation_message:
+        spawn_params["_continuation_message"] = continuation_message
     if parent_id:
         spawn_params["parent_thread_id"] = parent_id
 
@@ -276,14 +336,14 @@ async def handoff_thread(
 
     new_thread_id = new_result.get("thread_id")
 
-    # --- Phase 4: Link old → new in registry ---
+    # Link old → new in registry
     if new_thread_id:
         registry.set_continuation(thread_id, new_thread_id)
         chain = registry.get_chain(thread_id)
         chain_root_id = chain[0]["thread_id"] if chain else thread_id
         registry.set_chain_info(new_thread_id, chain_root_id, thread_id)
 
-    # --- Phase 5: Log handoff in old thread's transcript ---
+    # Log handoff in old thread's transcript
     EventEmitter = load_module("events/event_emitter", anchor=_ANCHOR).EventEmitter
     Transcript = load_module("persistence/transcript", anchor=_ANCHOR).Transcript
     emitter = EventEmitter(project_path)
@@ -294,7 +354,6 @@ async def handoff_thread(
         {
             "new_thread_id": new_thread_id,
             "directive": directive_name,
-            "trailing_turns": len(trailing_messages),
         },
         old_transcript,
         criticality="critical",
@@ -305,8 +364,6 @@ async def handoff_thread(
         "old_thread_id": thread_id,
         "new_thread_id": new_thread_id,
         "directive": directive_name,
-        "trailing_turns": len(trailing_messages),
-        "resume_ceiling_tokens": resume_ceiling,
         "new_thread_result": new_result,
     }
 
@@ -372,27 +429,9 @@ async def execute(params: Dict, project_path: str) -> Dict:
         pid = thread.get("pid")
         if not pid:
             return {"success": False, "error": f"No PID recorded for thread: {thread_id}"}
-        try:
-            os.kill(pid, signal.SIGTERM)
-            # Wait briefly for graceful shutdown
-            import time
-            for _ in range(10):
-                time.sleep(0.3)
-                try:
-                    os.kill(pid, 0)  # Check if still alive
-                except OSError:
-                    break  # Process is gone
-            else:
-                # Still alive after 3s — force kill
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-        except OSError as e:
-            if e.errno == 3:  # ESRCH — no such process (already dead)
-                pass
-            else:
-                return {"success": False, "error": f"Failed to kill PID {pid}: {e}"}
+        kill_result = await _kill_pid(pid)
+        if not kill_result.get("success"):
+            return {"success": False, "error": f"Failed to kill PID {pid}: {kill_result.get('error')}"}
         registry.update_status(thread_id, "killed")
         # Clean up in-process tracking if it exists
         _active_harnesses.pop(thread_id, None)
@@ -504,42 +543,14 @@ async def execute(params: Dict, project_path: str) -> Dict:
         if not directive_name:
             return {"success": False, "error": "No directive recorded for thread"}
 
-        # Verify transcript integrity before trusting its content
-        from rye.constants import AI_DIR
-        transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
-        signer = transcript_signer_mod.TranscriptSigner(
-            resolved_id, proj_path / AI_DIR / "agent" / "threads" / resolved_id
-        )
-        coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
-        cont_config = coordination_loader.get_coordination_loader().get_continuation_config(proj_path)
-        integrity_policy = cont_config.get("transcript_integrity", "strict")
-        integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
-        if not integrity["valid"]:
-            return {
-                "success": False,
-                "error": f"Transcript integrity check failed: {integrity['error']}. "
-                         f"Cannot resume from tampered transcript.",
-            }
-
-        # Reconstruct full conversation from transcript
-        transcript_mod = load_module("persistence/transcript", anchor=_ANCHOR)
-        transcript_obj = transcript_mod.Transcript(resolved_id, proj_path)
-        existing_messages = transcript_obj.reconstruct_messages()
-        if not existing_messages:
-            return {"success": False, "error": f"Cannot reconstruct messages for thread: {resolved_id}"}
-
-        # Full reconstruction + new message. If it's too big for context,
-        # the runner's context_limit_reached will trigger handoff_thread.
-        resume_messages = list(existing_messages)
-        resume_messages.append({"role": "user", "content": message})
-
-        # Spawn as sibling of the original (same parent, same guards)
+        # Spawn new thread — execute() step 3.5 handles transcript integrity
+        # verification, JSONL reconstruction, and ceiling trimming.
         thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
         parent_id = thread.get("parent_id")
         spawn_params = {
             "directive_id": directive_name,
-            "resume_messages": resume_messages,
             "previous_thread_id": resolved_id,
+            "_continuation_message": message,
         }
         if parent_id:
             spawn_params["parent_thread_id"] = parent_id
@@ -567,7 +578,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 "new_thread_id": new_thread_id,
                 "directive": directive_name,
                 "message_preview": message[:200],
-                "reconstructed_turns": len(existing_messages),
             },
             old_transcript,
             criticality="critical",
@@ -581,7 +591,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "original_thread_id": thread_id if thread_id != resolved_id else None,
             "resolved_thread_id": resolved_id,
             "directive": directive_name,
-            "reconstructed_turns": len(existing_messages),
             "new_thread_result": new_result,
         }
 

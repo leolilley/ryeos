@@ -262,13 +262,18 @@ def _merge_hooks(directive_hooks: list, project_path: str) -> list:
 
 
 async def execute(params: Dict, project_path: str) -> Dict:
+    # Pop internal-only params before validation (set by subprocess spawn path)
+    thread_id_override = params.pop("_thread_id", None)
+    pre_registered = params.pop("_pre_registered", False)
+    continuation_message = params.pop("_continuation_message", None)
+
     allowed = set(CONFIG_SCHEMA["properties"].keys())
     unknown = set(params.keys()) - allowed
     if unknown:
         raise ValueError(f"Unknown parameters: {unknown}. Valid: {allowed}")
 
     directive_name = params["directive_id"]
-    thread_id = _generate_thread_id(directive_name)
+    thread_id = thread_id_override or _generate_thread_id(directive_name)
     inputs = params.get("inputs", {})
     thread_created_at = datetime.now(timezone.utc).isoformat()
     proj_path = Path(project_path)
@@ -291,10 +296,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 "thread_id": thread_id,
             }
 
-    # 2. Register thread in registry
+    # 2. Register thread in registry (skip if pre-registered by parent process)
     thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
     registry = thread_registry.get_registry(proj_path)
-    registry.register(thread_id, directive_name, parent_id=parent_thread_id)
+    if not pre_registered:
+        registry.register(thread_id, directive_name, parent_id=parent_thread_id)
 
     # 3. Load directive
     from rye.utils.resolvers import get_user_space
@@ -327,6 +333,69 @@ async def execute(params: Dict, project_path: str) -> Dict:
             registry.update_status(thread_id, "error")
             return result
         directive = result["data"]
+
+    # 3.5. Reconstruct resume_messages from previous thread's transcript JSONL
+    if params.get("previous_thread_id") and not params.get("resume_messages"):
+        prev_tid = params["previous_thread_id"]
+
+        # Verify transcript integrity before trusting JSONL content
+        from rye.constants import AI_DIR
+        transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+        signer = transcript_signer_mod.TranscriptSigner(
+            prev_tid, proj_path / AI_DIR / "agent" / "threads" / prev_tid
+        )
+        coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
+        cont_config = coordination_loader.get_coordination_loader().get_continuation_config(proj_path)
+        integrity_policy = cont_config.get("transcript_integrity", "strict")
+        integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
+        if not integrity["valid"]:
+            registry.update_status(thread_id, "error")
+            return {
+                "success": False,
+                "error": f"Transcript integrity check failed: {integrity['error']}. "
+                         f"Cannot resume from tampered transcript.",
+                "thread_id": thread_id,
+            }
+
+        transcript_mod = load_module("persistence/transcript", anchor=_ANCHOR)
+        prev_transcript = transcript_mod.Transcript(prev_tid, proj_path)
+        full_messages = prev_transcript.reconstruct_messages()
+        if not full_messages:
+            registry.update_status(thread_id, "error")
+            return {
+                "success": False,
+                "error": f"Cannot reconstruct messages for thread: {prev_tid}",
+                "thread_id": thread_id,
+            }
+
+        resume_ceiling = cont_config.get("resume_ceiling_tokens", 16000)
+
+        # Trim trailing messages to ceiling
+        trailing: list = []
+        trailing_tokens = 0
+        for msg in reversed(full_messages):
+            msg_tokens = len(str(msg.get("content", ""))) // 4
+            if trailing_tokens + msg_tokens > resume_ceiling:
+                break
+            trailing.insert(0, msg)
+            trailing_tokens += msg_tokens
+
+        if not trailing and full_messages:
+            trailing = [full_messages[-1]]
+
+        # Ensure starts with user message (providers require it)
+        while trailing and trailing[0].get("role") != "user":
+            trailing.pop(0)
+
+        if continuation_message:
+            trailing.append({"role": "user", "content": continuation_message})
+        else:
+            trailing.append({
+                "role": "user",
+                "content": "Continue executing the directive. Pick up where the previous thread left off.",
+            })
+
+        params["resume_messages"] = trailing
 
     # 4. Build limits with parent as upper bound (depth decrements automatically)
     parent_limits = parent_meta.get("limits") if parent_meta else None
@@ -465,65 +534,46 @@ async def execute(params: Dict, project_path: str) -> Dict:
     os.environ["RYE_PARENT_THREAD_ID"] = thread_id
 
     if params.get("async"):
-        # Fork: child process runs the thread, parent returns immediately.
-        # os.fork() duplicates the process — child gets pid=0, parent gets child pid.
-        # The child daemonizes (new session) so it survives parent exit.
-        child_pid = os.fork()
-        if child_pid == 0:
-            # Child process — run the thread to completion
-            try:
-                os.setsid()  # detach from parent's process group
-                # Redirect stdout/stderr to devnull so we don't corrupt parent's output
-                devnull = os.open(os.devnull, os.O_RDWR)
-                os.dup2(devnull, 0)
-                os.dup2(devnull, 1)
-                os.dup2(devnull, 2)
-                os.close(devnull)
+        # Spawn detached subprocess that re-executes this script.
+        # Child rebuilds all state via execute() and runs through the sync path.
+        child_params = {"directive_id": directive_name, "inputs": inputs}
+        if params.get("model"):
+            child_params["model"] = params["model"]
+        if params.get("limit_overrides"):
+            child_params["limit_overrides"] = params["limit_overrides"]
+        if params.get("previous_thread_id"):
+            child_params["previous_thread_id"] = params["previous_thread_id"]
+        if params.get("parent_thread_id"):
+            child_params["parent_thread_id"] = params["parent_thread_id"]
 
-                result = asyncio.run(runner.run(
-                    thread_id, user_prompt, harness, provider,
-                    dispatcher, emitter, transcript, proj_path,
-                    resume_messages=params.get("resume_messages"),
-                    directive_body=clean_directive_text,
-                    previous_thread_id=params.get("previous_thread_id"),
-                    inputs=inputs,
-                ))
+        orchestrator_mod = load_module("orchestrator", anchor=_ANCHOR)
+        spawn_result = await orchestrator_mod.spawn_detached(
+            cmd=sys.executable,
+            args=[
+                str(Path(__file__).resolve()),
+                "--params", json.dumps(child_params),
+                "--project-path", str(proj_path),
+                "--thread-id", thread_id,
+                "--pre-registered",
+            ],
+            envs={"RYE_PARENT_THREAD_ID": thread_id},
+        )
 
-                # Finalize: report spend, update registry
-                actual_spend = result.get("cost", {}).get("spend", 0.0)
-                try:
-                    ledger.report_actual(thread_id, actual_spend)
-                except Exception:
-                    pass
-                if parent_thread_id:
-                    ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)
-                status = result.get("status", "completed")
-                ledger.release(thread_id, final_status=status)
-                registry.update_status(thread_id, status)
-                result_data = {"cost": result.get("cost")}
-                if result.get("outputs"):
-                    result_data["outputs"] = result["outputs"]
-                registry.set_result(thread_id, result_data)
-                _write_thread_meta(
-                    proj_path, thread_id, directive_name, status,
-                    thread_created_at, datetime.now(timezone.utc).isoformat(),
-                    model=resolved_model, cost=result.get("cost"),
-                    limits=limits, capabilities=harness._capabilities,
-                    outputs=result.get("outputs"),
-                )
-            except Exception:
-                registry.update_status(thread_id, "error")
-            finally:
-                os._exit(0)
-        else:
-            # Parent process — return immediately
+        if not spawn_result.get("success"):
+            registry.update_status(thread_id, "error")
             return {
-                "success": True,
+                "success": False,
+                "error": f"Failed to spawn async thread: {spawn_result.get('error')}",
                 "thread_id": thread_id,
-                "status": "running",
-                "directive": directive_name,
-                "pid": child_pid,
             }
+
+        return {
+            "success": True,
+            "thread_id": thread_id,
+            "status": "running",
+            "directive": directive_name,
+            "pid": spawn_result["pid"],
+        }
 
     # 11. Run thread synchronously
     # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
@@ -607,6 +657,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
+    parser.add_argument("--thread-id", default=None)
+    parser.add_argument("--pre-registered", action="store_true")
     args = parser.parse_args()
 
     # Initialize debug logging if RYE_DEBUG is set
@@ -618,5 +670,11 @@ if __name__ == "__main__":
             stream=sys.stderr,
         )
 
-    result = asyncio.run(execute(json.loads(args.params), args.project_path))
+    params = json.loads(args.params)
+    if args.thread_id:
+        params["_thread_id"] = args.thread_id
+    if args.pre_registered:
+        params["_pre_registered"] = True
+
+    result = asyncio.run(execute(params, args.project_path))
     print(json.dumps(result))

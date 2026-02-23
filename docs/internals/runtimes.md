@@ -1,9 +1,9 @@
 ```yaml
 id: runtimes
 title: "Runtimes"
-description: "How runtimes configure tool execution — interpreter resolution, arg templates, anchoring, and the 7 standard runtimes"
+description: "How runtimes configure tool execution — interpreter resolution, arg templates, anchoring, and the 8 standard runtimes"
 category: internals
-tags: [runtimes, interpreter, execution, python, node, javascript, bash, mcp, subprocess, state-graph]
+tags: [runtimes, interpreter, execution, python, node, javascript, bash, mcp, subprocess, state-graph, rust]
 version: "1.0.0"
 ```
 
@@ -26,12 +26,16 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` (system space). You ca
 │   ├── function.yaml                    # Call Python execute() in-process
 │   ├── script.yaml                      # Run Python scripts in subprocess
 │   └── lib/                             # Shared Python runtime libraries
+├── rust/
+│   ├── runtime.yaml                     # Rust binary runtime
+│   ├── rye-proc/                        # Process lifecycle manager
+│   └── rye-watch/                       # Push-based registry watcher (src/)
 └── state-graph/
     ├── runtime.yaml                     # Walk declarative graph YAML
     └── walker.py                        # Graph walking engine
 ```
 
-## The 7 Standard Runtimes
+## The 8 Standard Runtimes
 
 | Runtime | Language | Execution | When to Use |
 |---------|----------|-----------|------------|
@@ -41,6 +45,7 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` (system space). You ca
 | **bash/bash** | Bash/Shell | Direct `/bin/bash` execution | Shell scripts, system administration, `jq` pipes, CLI composition |
 | **mcp/stdio** | MCP (stdin/stdout) | Subprocess, launch MCP server | Call tools from external MCP servers (e.g., brave-search, filesystem) |
 | **mcp/http** | MCP (HTTP/SSE) | HTTP request to MCP server | Call tools from long-running HTTP MCP servers (e.g., Claude-native servers) |
+| **rust/runtime** | Rust | Compiled binary on PATH | Cross-platform process management and file watching |
 | **state-graph/runtime** | YAML Graph | Subprocess, dispatch rye_execute | Declarative workflows, condition branches, node-by-node execution |
 
 ## How Interpreter Resolution Works
@@ -733,6 +738,45 @@ config_schema:
       description: Execution timeout in seconds
       default: 60
   required: [server, tool_name]
+```
+
+### Rust Runtime
+
+The Rust runtime executes compiled Rust binaries found on `$PATH`. It ships two binaries:
+
+- **`rye-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
+- **`rye-proc`**: Cross-platform process lifecycle manager with subcommands `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). Replaces POSIX-only `os.fork`/`os.kill` in the thread system.
+
+```yaml
+# rye/core/runtimes/rust/runtime
+# Executes compiled Rust binaries found on PATH
+# Use for: cross-platform process management, file watching, performance-critical operations
+# Executor: rye/core/primitives/subprocess
+
+version: "1.0.0"
+tool_type: runtime
+executor_id: rye/core/primitives/subprocess
+category: rye/core/runtimes/rust
+description: "Rust runtime — executes compiled Rust binaries found on PATH"
+
+env_config:
+  interpreter:
+    type: system_binary
+    binary: rye-watch
+    var: RYE_RUST_WATCH
+  env:
+    RUST_BACKTRACE: "0"
+
+config:
+  command: "${RYE_RUST_WATCH}"
+  args:
+    - "--db"
+    - "{db_path}"
+    - "--thread-id"
+    - "{thread_id}"
+    - "--timeout"
+    - "{timeout}"
+  timeout: 600
 ```
 
 ### State Graph Runtime

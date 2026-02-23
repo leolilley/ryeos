@@ -85,7 +85,7 @@ thread_id = result["thread_id"]
 
 Use asynchronous execution when spawning multiple children that can run in parallel. The parent collects all `thread_id`s and waits for them in batch.
 
-**How async works internally:** `os.fork()` duplicates the process. The child process detaches from the parent's process group via `os.setsid()`, redirects stdio to `/dev/null`, runs the LLM loop to completion, finalizes (report spend, update registry, write thread.json), and calls `os._exit(0)`. The parent process returns immediately with the `thread_id` and `pid`.
+**How async works internally:** `spawn_detached()` launches the child as a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch (no inherited in-process state). Detached spawning uses the `rye-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with the `thread_id` and `pid`.
 
 ## Parent Context Auto-Injection
 
@@ -102,7 +102,7 @@ if resolved_id == "rye/agent/threads/thread_directive":
 
 This means the LLM never needs to manually pass parent context — it just calls `thread_directive` with the directive name, inputs, and limit overrides. The runner handles the rest.
 
-Additionally, the parent thread sets `RYE_PARENT_THREAD_ID` in the environment before execution, so forked child processes inherit the parent relationship automatically.
+Additionally, the parent thread sets `RYE_PARENT_THREAD_ID` in the environment before execution, so child subprocesses inherit the parent relationship automatically.
 
 ## The Spawn-Wait-Collect Pattern
 
@@ -190,7 +190,7 @@ rye_execute(
 
 - **In-process threads:** Each thread has an `asyncio.Event`. `wait_threads` awaits the event with `asyncio.wait_for(event.wait(), timeout)`. When `runner.run()` completes, it calls `complete_thread()` which sets the event.
 
-- **Cross-process threads (async):** The forked child runs in a separate process — no shared event. `wait_threads` falls back to polling the SQLite registry with exponential backoff (starts at 1s, maxes at 10s).
+- **Cross-process threads (async):** The child runs in a separate process — no shared event. `wait_threads` uses the `rye-watch` Rust binary for push-based file watching (inotify/FSEvents/ReadDirectoryChangesW) on the registry, with a 500ms polling fallback.
 
 - **Continuation chains:** Before waiting, `resolve_thread_chain()` follows any `continued` → `continued` → ... links to find the terminal thread. This means if a thread was handed off, waiting on the original ID still works correctly.
 
@@ -305,7 +305,7 @@ rye_execute(
 )
 ```
 
-Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then sends `SIGKILL` if the process is still alive.
+Uses `rye-proc kill` (cross-platform Rust binary) to terminate the process, with a POSIX `os.kill` fallback. Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then escalates to `SIGKILL` if the process is still alive.
 
 ## What's Next
 

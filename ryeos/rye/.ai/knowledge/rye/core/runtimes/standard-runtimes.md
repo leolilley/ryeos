@@ -20,6 +20,7 @@ tags:
   - mcp
   - subprocess
   - execution
+  - rust
   - how-tools-run
   - interpreter
   - venv
@@ -40,7 +41,7 @@ references:
 
 # Standard Runtimes Reference
 
-The 7 built-in runtimes that execute tools in Rye OS — from subprocess-based script execution to in-process function calls to MCP protocol bridges.
+The 8 built-in runtimes that execute tools in Rye OS — from subprocess-based script execution to in-process function calls to MCP protocol bridges to compiled Rust binaries.
 
 ## What Runtimes Are
 
@@ -63,7 +64,7 @@ Primitive (subprocess, http_client, state_graph)
 Lilux execution layer
 ```
 
-## The 7 Standard Runtimes
+## The 8 Standard Runtimes
 
 | Runtime | Language | Execution | Interpreter Resolution | Use When |
 |---------|----------|-----------|------------------------|----------|
@@ -71,6 +72,7 @@ Lilux execution layer
 | **python/function** | Python | In-process | local_binary (same as script) | Pure functions, fast execution |
 | **node/node** | JavaScript/TypeScript | Subprocess | local_binary (`node_modules/.bin/tsx`) | Node.js tools, npm packages |
 | **bash/bash** | Bash/Shell | Subprocess | System binary (`which bash`) | Shell scripts, CLI tools |
+| **rust/runtime** | Rust | Subprocess | system_binary (`rye-watch`, `rye-proc`) | Native performance, OS-level operations |
 | **mcp/stdio** | MCP (stdio protocol) | Subprocess + stdio | N/A (launches MCP server) | MCP servers via stdio |
 | **mcp/http** | MCP (HTTP protocol) | HTTP client | N/A (connects via HTTP) | Remote MCP servers, APIs |
 | **state-graph/runtime** | State graphs | In-process state machine | N/A (orchestration) | Multi-step workflows, graphs |
@@ -324,6 +326,31 @@ result="{\"success\": true, \"output\": \"$output\"}"
 
 echo "$result"
 ```
+
+## Rust Runtime
+
+**File:** `rust/runtime.yaml`
+
+Executes compiled Rust binaries via `system_binary` interpreter resolution. Two binaries ship with Rye OS:
+
+- **`rye-watch`** — Push-based file watcher for `registry.db`. Uses OS-native watchers (inotify/FSEvents/ReadDirectoryChangesW). CLI: `rye-watch --db <path> --thread-id <id> --timeout <seconds>`. Prints JSON to stdout.
+- **`rye-proc`** — Cross-platform process lifecycle manager. Subcommands: `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). Prints JSON to stdout.
+
+### Config
+
+```yaml
+env_config:
+  interpreter:
+    type: system_binary
+    binary: rye-watch  # or rye-proc
+    var: RYE_RUST_BINARY
+```
+
+### When to Use
+
+- OS-level operations requiring native performance (file watching, process management)
+- Cross-platform binaries with platform-specific backends
+- Operations where Python subprocess overhead matters
 
 ## MCP Stdio Runtime
 

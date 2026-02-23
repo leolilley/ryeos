@@ -1581,29 +1581,19 @@ def run_sync(
             "--pre-registered",
         ]
 
-        # Platform-specific process spawning
-        if platform.system() == "Windows":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-            preexec_fn = None
-        else:
-            creationflags = 0
-            preexec_fn = os.setsid
+        # Cross-platform detached spawn via orchestrator helper
+        orchestrator = load_module("orchestrator", anchor=_ANCHOR)
+        spawn_result = asyncio.run(orchestrator.spawn_detached(
+            cmd=cmd[0],
+            args=cmd[1:],
+            log_path=str(log_path),
+        ))
 
-        try:
-            with open(log_path, "w") as log_file:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    preexec_fn=preexec_fn,
-                )
-        except Exception as e:
+        if not spawn_result.get("success"):
             registry.update_status(graph_run_id, "error")
             return {
                 "success": False,
-                "error": f"Failed to spawn child process: {e}",
+                "error": f"Failed to spawn child process: {spawn_result.get('error')}",
             }
 
         # Parent — return immediately with child PID
@@ -1612,7 +1602,7 @@ def run_sync(
             "graph_run_id": graph_run_id,
             "graph_id": graph_id,
             "status": "running",
-            "pid": proc.pid,
+            "pid": spawn_result["pid"],
         }
 
     # Synchronous execution
