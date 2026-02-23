@@ -152,6 +152,21 @@ Between checkpoints, streaming deltas accumulate at the end of the file as raw a
 
 This is why `tail -F` (follow by name) is required — the file is replaced at each checkpoint.
 
+## Graph Observability (Non-Streaming)
+
+State graphs use the same transcript infrastructure — JSONL event log + signed knowledge markdown — but **without SSE streaming**. Graphs don't produce tokens; they emit discrete lifecycle events (`graph_started`, `step_started`, `step_completed`, `foreach_completed`, `graph_completed`, `graph_error`, `graph_cancelled`) written to the same JSONL format.
+
+The key difference from thread streaming:
+
+| | Threads | State Graphs |
+|---|---------|-------------|
+| **Transport** | SSE token stream via `TranscriptSink` | Direct JSONL append via `GraphTranscript` |
+| **Event granularity** | Per-token (`token_delta`) | Per-step (`step_started`, `step_completed`, …) |
+| **Knowledge markdown** | Rewritten at checkpoints with accumulated tokens | Re-rendered from JSONL at each step with node status table |
+| **Real-time watching** | `tail -f` on JSONL or `tail -F` on knowledge markdown | `tail -f` on JSONL or `cat` knowledge markdown after each step |
+
+See [State Graphs — Observability](./state-graphs.md#observability) for full details on event types, paths, and monitoring workflows.
+
 ## What's Next
 
 - [Thread Lifecycle](./thread-lifecycle.md) — Full execution flow including the streaming path

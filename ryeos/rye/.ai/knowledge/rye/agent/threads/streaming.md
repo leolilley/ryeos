@@ -1,4 +1,3 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:5e5a3b9b2e3b4fa2225ddc9935b0c438a5f9f8201c4224e7cb2397b3ec3de72e:DiaNX6dBUskt6CXvB_fmSmDe_vq1twzz5UI5d6rlwkZh8t7eewccNntM8Q9winwHK8fkx8yyolHsYjMuFlEyDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: streaming
@@ -111,3 +110,13 @@ body:
 ## Integration with render_knowledge
 
 `render_knowledge()` rewrites the knowledge markdown cleanly at each checkpoint. Between checkpoints, streaming deltas accumulate at the end of the file as raw appended text. At the next checkpoint, the full file is regenerated from structured data, incorporating the streamed content.
+
+## Graph Observability
+
+Graphs use the same JSONL transcript pattern as threads but emit discrete events instead of token deltas. There is no SSE stream and no `TranscriptSink` — the graph walker (`walker.py`) writes events directly to `transcript.jsonl`.
+
+Graph event types: `graph_started`, `step_started`, `step_completed`, `foreach_completed`, `graph_completed`, `graph_error`, `graph_cancelled`.
+
+Events are checkpoint-signed at step boundaries using the same `TranscriptSigner`. The knowledge markdown is fully re-rendered from JSONL at each step (not incrementally appended like thread streaming), producing a visual node status table with completion indicators (✅/🔄/⏳/❌).
+
+See `persistence-and-state` for the full storage layout.

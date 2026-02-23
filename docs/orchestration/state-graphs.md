@@ -447,12 +447,98 @@ rye_execute(
 
 The background process:
 
-- Forks via `os.fork()` and daemonizes (`os.setsid()`)
+- Detaches a background process that runs independently of the caller
 - Runs the graph to completion, updating the thread registry
 - Writes stderr to `.ai/agent/threads/<graph_run_id>/async.log` for debugging
+- Emits events to `.ai/agent/threads/<graph_run_id>/transcript.jsonl` (JSONL event log)
+- Re-renders `.ai/knowledge/agent/threads/<graph_id>/<graph_run_id>.md` (signed knowledge markdown) at each step
 - Updates registry status to `completed` or `error` on finish
 
-Monitor progress by querying the thread registry or checking the persisted state knowledge item.
+Monitor progress three ways:
+
+```bash
+# 1. Raw event stream
+tail -f .ai/agent/threads/<graph_run_id>/transcript.jsonl
+
+# 2. Visual state + history (re-rendered at each step)
+cat .ai/knowledge/agent/threads/<graph_id>/<graph_run_id>.md
+
+# 3. Registry query
+rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+            parameters={"operation": "list_active"})
+```
+
+## Observability
+
+Graph execution produces a two-stream observability output — the same architecture used by thread transcripts, minus SSE streaming (graphs don't produce tokens, they emit discrete step events).
+
+### JSONL Event Log
+
+**Path:** `{project}/.ai/agent/threads/{graph_run_id}/transcript.jsonl`
+
+An append-only log of graph lifecycle events. Each line is a JSON object:
+
+```json
+{"timestamp": "2026-02-23T10:00:01.234Z", "graph_run_id": "my_graph-1739820456", "event_type": "step_completed", "payload": {"node": "count_files", "step": 1}}
+```
+
+**Event types:**
+
+| Event                | Fires When                                    |
+| -------------------- | --------------------------------------------- |
+| `graph_started`      | Graph execution begins                        |
+| `step_started`       | A node begins execution                       |
+| `step_completed`     | A node completes (action + assign + edges)    |
+| `foreach_completed`  | A foreach node finishes all iterations        |
+| `graph_completed`    | Graph terminates normally                     |
+| `graph_error`        | Graph terminates due to an error              |
+| `graph_cancelled`    | Graph is cancelled externally                 |
+
+The log is checkpoint-signed at step boundaries via `TranscriptSigner` — each step boundary appends a signature event, making the log tamper-evident.
+
+### Knowledge Markdown
+
+**Path:** `{project}/.ai/knowledge/agent/threads/{graph_id}/{graph_run_id}.md`
+
+A signed knowledge markdown file re-rendered from the JSONL log at each step. It contains:
+
+- **Node status table** — visual overview of all nodes with status indicators: ✅ completed, 🔄 running, ⏳ pending, ❌ errored
+- **Event history** — chronological list of events from the JSONL log
+
+The file is signed via `MetadataManager.create_signature` after each re-render.
+
+> **Note:** This is separate from the state persistence file at `.ai/knowledge/graphs/<graph_id>/<run_id>.md`, which stores the JSON state for resume. The knowledge markdown is a human-readable observability artifact.
+
+### Monitoring Workflow
+
+**Raw event stream** — watch events as they happen:
+
+```bash
+tail -f .ai/agent/threads/<graph_run_id>/transcript.jsonl
+```
+
+**Visual state + history** — human-readable snapshot (re-rendered at each step):
+
+```bash
+cat .ai/knowledge/agent/threads/<graph_id>/<graph_run_id>.md
+```
+
+**Find running graphs** — query the orchestrator:
+
+```python
+rye_execute(
+    item_type="tool",
+    item_id="rye/agent/threads/orchestrator",
+    parameters={"operation": "list_active"}
+)
+```
+
+### Cross-Process Wait
+
+When one graph waits for another (e.g., a foreach node with `async: true` iterations):
+
+- **In-process waits** use `asyncio.Event` — zero polling, the event is set when the child completes
+- **Cross-process waits** poll the thread registry at a flat **500ms** interval until the target reaches a terminal status
 
 ## What's Next
 
@@ -464,7 +550,9 @@ Monitor progress by querying the thread registry or checking the persisted state
 
 | Component           | File                                                         |
 | ------------------- | ------------------------------------------------------------ |
-| Graph walker        | `.ai/tools/rye/core/runtimes/walker.py`          |
+| Graph walker        | `.ai/tools/rye/core/runtimes/state-graph/walker.py`          |
+| GraphTranscript     | `.ai/tools/rye/core/runtimes/state-graph/walker.py`          |
+| TranscriptSigner    | `.ai/tools/rye/core/runtimes/state-graph/walker.py`          |
 | Runtime YAML        | `.ai/tools/rye/core/runtimes/state-graph/runtime.yaml`       |
 | Interpolation       | `.ai/tools/rye/agent/threads/loaders/interpolation.py`       |
 | Condition evaluator | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` |

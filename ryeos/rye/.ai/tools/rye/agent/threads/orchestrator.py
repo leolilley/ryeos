@@ -156,7 +156,7 @@ async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
     """Poll registry for thread completion (cross-process threads)."""
     import time
     deadline = time.monotonic() + timeout
-    poll_interval = 1.0
+    poll_interval = 0.5
 
     while time.monotonic() < deadline:
         thread = registry.get_thread(thread_id)
@@ -165,7 +165,6 @@ async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
             if status in ("completed", "error", "cancelled", "continued"):
                 return {"status": status, "thread_id": thread_id}
         await asyncio.sleep(min(poll_interval, deadline - time.monotonic()))
-        poll_interval = min(poll_interval * 1.5, 10.0)  # backoff
 
     return {"status": "timeout", "thread_id": thread_id}
 

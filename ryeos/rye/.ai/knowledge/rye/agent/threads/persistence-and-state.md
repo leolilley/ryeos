@@ -1,4 +1,3 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:ea645a47ea08207e1e18c5e1412c507ab44605ebef649792c7b176dee405f636:NW5Zof_sH0s2YNdvqeC5aN3Drm9Ulh1Ma8u55kKf_XKjo8bt5kRY3Pj8SxrBXiRKlPWvEWfr_Uu-s84mbJOjAA==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: persistence-and-state
@@ -27,14 +26,20 @@ How threads persist state, handle context limits via continuation, and support u
 
 ```
 .ai/agent/threads/
-├── registry.db           # Thread registry (SQLite)
-├── budget_ledger.db      # Hierarchical budget tracking (SQLite)
-└── <thread_id>/
-    ├── thread.json       # Signed thread metadata
-    └── transcript.jsonl  # Append-only event log with checkpoint signatures
+├── registry.db              # Thread registry (SQLite)
+├── budget_ledger.db         # Hierarchical budget tracking (SQLite)
+├── <thread_id>/             # Thread transcripts
+│   ├── thread.json          # Signed thread metadata
+│   └── transcript.jsonl     # Append-only event log with checkpoint signatures
+└── <graph_run_id>/          # Graph transcripts (same pattern)
+    └── transcript.jsonl     # Graph events, checkpoint-signed
 
-.ai/knowledge/threads/
-└── <thread_id>.md        # Signed knowledge entry (cognition-framed transcript)
+.ai/knowledge/agent/threads/
+├── <directive>/<thread_id>.md   # Thread knowledge transcript (signed)
+└── <graph_id>/<graph_run_id>.md # Graph knowledge transcript (signed)
+
+.ai/knowledge/graphs/
+└── <graph_id>/<graph_run_id>.md # Graph state for resume (signed JSON)
 ```
 
 ### Thread Registry (`registry.db`)
@@ -100,9 +105,37 @@ Signed with a `_signature` field using canonical JSON serialization. Protects ca
 
 Append-only JSONL event log. Each line is a JSON object with `timestamp`, `thread_id`, `event_type`, and `payload`. Checkpoint events are interleaved at turn boundaries with SHA256 hash and Ed25519 signature covering all preceding bytes.
 
-### Knowledge Entry (`.ai/knowledge/threads/{thread_id}.md`)
+### Knowledge Entry (`.ai/knowledge/agent/threads/{directive}/{thread_id}.md`)
 
 Signed knowledge entry with cognition-framed markdown. Contains YAML frontmatter with thread-specific fields (`thread_id`, `directive`, `status`, `model`, `turns`, `spend`) and `entry_type: thread_transcript`. Updated at each checkpoint and finalization. Discoverable via `rye search knowledge`.
+
+### Graph Transcripts
+
+Graph executions use the same two-stream observability pattern as threads:
+
+1. **JSONL event log** — `.ai/agent/threads/{graph_run_id}/transcript.jsonl`. Append-only, checkpoint-signed at step boundaries using the same `TranscriptSigner`.
+2. **Knowledge markdown** — `.ai/knowledge/agent/threads/{graph_id}/{graph_run_id}.md`. Contains a visual node status table (✅ completed, 🔄 running, ⏳ pending, ❌ error) and event history. Re-rendered from JSONL at each step (overwritten, not appended). Signed via `MetadataManager.create_signature`.
+
+Graph event types:
+
+| Event | Emitted When |
+|-------|-------------|
+| `graph_started` | Walker begins execution |
+| `step_started` | A node begins executing |
+| `step_completed` | A node finishes successfully |
+| `foreach_completed` | A foreach iteration completes |
+| `graph_completed` | All nodes finished, graph succeeds |
+| `graph_error` | A node fails and the graph halts |
+| `graph_cancelled` | Graph execution is cancelled |
+
+Key differences from thread transcripts:
+
+- **No SSE streaming** — graphs don't produce tokens; events are discrete
+- **No `TranscriptSink`** — events are written directly by the walker (`walker.py`)
+- **Overwrite, not append** — knowledge markdown is fully re-rendered from JSONL at each step
+- **State file separate** — resumable graph state lives at `.ai/knowledge/graphs/{graph_id}/{graph_run_id}.md` (signed JSON), unchanged from before
+
+Cross-process polling in `orchestrator.py` (`_poll_registry`) uses flat 500ms intervals (not exponential backoff).
 
 ## Context Limit Detection
 

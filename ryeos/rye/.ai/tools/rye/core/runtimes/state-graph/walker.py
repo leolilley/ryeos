@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T04:44:21Z:4ad7f6fd5b52c8826ac231db6f2a44042f7b16b4a3f51c8392396ba67bb5d056:j-El4Pbb20eFhYZgFQ9uYu4g5q6mhkFeK4KBPkriH6jluXoYAdj-Jih-M6RxEwb3_bQ09IRBIV8MLl-kfYKwAg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:43:13Z:40364f4c1b8e54c8288381fcc11d4c971206a8ff8d1a5f0af29431fab1a2a49e:2mwtl_t1VZ116XQWo0TxkgvCRLZa7crdzzXOvqZtmGB1AkCgtyGzetY4kq1dykZM-Ugt_JNa0yAs_2p3lxEEDQ==:9fbfabe975fa5a7f
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -21,6 +21,8 @@ import fnmatch
 import json
 import logging
 import os
+import platform
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +43,286 @@ from module_loader import load_module
 logger = logging.getLogger(__name__)
 
 _ANCHOR = Path(__file__).resolve().parent.parent.parent / "agent" / "threads"
+
+
+# ---------------------------------------------------------------------------
+# Graph transcript — JSONL event log + signed knowledge markdown
+# ---------------------------------------------------------------------------
+
+class GraphTranscript:
+    """JSONL event log + signed knowledge markdown for graph execution.
+
+    Two outputs, same pattern as thread Transcript:
+
+    1. transcript.jsonl — append-only events, ``tail -f`` friendly
+       Path: {project}/.ai/agent/threads/{graph_run_id}/transcript.jsonl
+
+    2. knowledge markdown — visual node status table + event history,
+       re-rendered from JSONL at step boundaries, signed
+       Path: {project}/.ai/knowledge/agent/threads/{graph_id}/{graph_run_id}.md
+
+    No SSE streaming — graphs don't produce tokens.
+    """
+
+    def __init__(
+        self, project_path: str, graph_id: str, graph_run_id: str,
+        nodes_config: Dict,
+    ):
+        self._project_path = Path(project_path)
+        self._graph_id = graph_id
+        self._graph_run_id = graph_run_id
+        self._nodes_config = nodes_config
+
+        # JSONL directory (same location as thread transcripts)
+        self._thread_dir = (
+            self._project_path / AI_DIR / "agent" / "threads" / graph_run_id
+        )
+        self._thread_dir.mkdir(parents=True, exist_ok=True)
+        self._jsonl_path = self._thread_dir / "transcript.jsonl"
+
+    # -- Event log (append-only JSONL) --
+
+    def write_event(self, event_type: str, payload: Dict) -> None:
+        """Append event to JSONL file, flushed immediately."""
+        entry = {
+            "timestamp": time.time(),
+            "thread_id": self._graph_run_id,
+            "event_type": event_type,
+            "payload": payload,
+        }
+        with open(self._jsonl_path, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+            f.flush()
+
+    def checkpoint(self, step: int) -> None:
+        """Sign transcript JSONL at step boundary via TranscriptSigner."""
+        transcript_signer = load_module(
+            "persistence/transcript_signer", anchor=_ANCHOR
+        )
+        signer = transcript_signer.TranscriptSigner(
+            self._graph_run_id, self._thread_dir
+        )
+        signer.checkpoint(step)
+
+    # -- Knowledge markdown (visual state + event history) --
+
+    def render_knowledge(
+        self, status: str = "running", step_count: int = 0,
+        total_elapsed_s: float = 0,
+    ) -> Optional[Path]:
+        """Render signed knowledge markdown from JSONL events.
+
+        Produces a markdown file with:
+        1. YAML frontmatter (graph metadata)
+        2. Visual node status table (✅/🔄/⏳/❌)
+        3. Step-by-step event history
+        4. Footer with status summary
+
+        Overwritten from the JSONL source of truth at each step.
+        """
+        events = self._read_events()
+        if not events:
+            return None
+
+        # Derive per-node state from events
+        node_results: Dict[str, Dict] = {}
+        current_running: Optional[str] = None
+        for event in events:
+            et = event.get("event_type", "")
+            p = event.get("payload", {})
+            if et == "step_started":
+                current_running = p.get("node")
+            elif et == "step_completed":
+                node = p.get("node")
+                node_results[node] = {
+                    "status": "error" if p.get("status") == "error" else "completed",
+                    "elapsed_s": p.get("elapsed_s", 0),
+                    "action_id": p.get("action_id", ""),
+                    "thread_id": p.get("thread_id", ""),
+                    "step": p.get("step", 0),
+                }
+                if current_running == node:
+                    current_running = None
+            elif et == "foreach_completed":
+                node = p.get("node")
+                node_results[node] = {
+                    "status": "completed",
+                    "elapsed_s": 0,
+                    "action_id": "",
+                    "thread_id": "",
+                    "step": p.get("step", 0),
+                }
+                if current_running == node:
+                    current_running = None
+
+        created_at = ""
+        for e in events:
+            if e.get("timestamp"):
+                created_at = datetime.fromtimestamp(
+                    e["timestamp"], tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                break
+
+        if total_elapsed_s >= 60:
+            duration_str = f"{total_elapsed_s / 60:.1f}m"
+        else:
+            duration_str = f"{total_elapsed_s:.1f}s"
+
+        category = f"agent/threads/{self._graph_id}"
+        parts: List[str] = []
+
+        # Frontmatter
+        parts.append(
+            f"```yaml\n"
+            f"id: {self._graph_run_id}\n"
+            f'title: "Graph: {self._graph_id}"\n'
+            f"entry_type: graph_transcript\n"
+            f"category: {category}\n"
+            f'version: "1.0.0"\n'
+            f"author: rye\n"
+            f"created_at: {created_at}\n"
+            f"graph_id: {self._graph_id}\n"
+            f"graph_run_id: {self._graph_run_id}\n"
+            f"status: {status}\n"
+            f"step_count: {step_count}\n"
+            f"duration: {duration_str}\n"
+            f"tags: [graph, {status}]\n"
+            f"```\n\n"
+        )
+
+        # Title + summary line
+        parts.append(f"# {self._graph_id}\n\n")
+        parts.append(
+            f"**Status:** {status} | **Step:** {step_count}"
+            f" | **Elapsed:** {duration_str}\n\n"
+        )
+
+        # Visual node status table
+        parts.append("| # | Node | Status | Duration | Action | Details |\n")
+        parts.append("|---|------|--------|----------|--------|---------|\n")
+        for node_name in self._nodes_config:
+            if node_name in node_results:
+                nr = node_results[node_name]
+                icon = "✅" if nr["status"] == "completed" else "❌"
+                dur = f'{nr["elapsed_s"]:.1f}s'
+                action = nr["action_id"]
+                details = (
+                    f'thread: `{nr["thread_id"]}`' if nr["thread_id"] else ""
+                )
+                parts.append(
+                    f'| {nr["step"]} | {node_name} | {icon}'
+                    f" | {dur} | {action} | {details} |\n"
+                )
+            elif node_name == current_running:
+                parts.append(f"| — | {node_name} | 🔄 | — | | |\n")
+            else:
+                parts.append(f"| — | {node_name} | ⏳ | — | | |\n")
+        parts.append("\n---\n\n")
+
+        # Event history
+        for event in events:
+            chunk = self._render_event(event)
+            if chunk:
+                parts.append(chunk)
+
+        # Footer
+        labels = {
+            "completed": "✅ Completed", "error": "❌ Error",
+            "cancelled": "⏹ Cancelled", "running": "🔄 Running",
+        }
+        label = labels.get(status, status.title())
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        parts.append(
+            f"---\n\n**{label}** — {step_count} steps,"
+            f" {duration_str}, {now}\n"
+        )
+
+        content = "".join(parts)
+
+        # Sign and write
+        from rye.constants import ItemType
+        knowledge_dir = (
+            self._project_path / AI_DIR / "knowledge"
+            / "agent" / "threads" / self._graph_id
+        )
+        knowledge_dir.mkdir(parents=True, exist_ok=True)
+        knowledge_path = knowledge_dir / f"{self._graph_run_id}.md"
+
+        signature = MetadataManager.create_signature(ItemType.KNOWLEDGE, content)
+        signed_content = signature + content
+        knowledge_path.write_text(signed_content, encoding="utf-8")
+        return knowledge_path
+
+    def _read_events(self) -> List[Dict]:
+        """Read all non-checkpoint events from JSONL."""
+        if not self._jsonl_path.exists():
+            return []
+        events: List[Dict] = []
+        with open(self._jsonl_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if event.get("event_type") != "checkpoint":
+                        events.append(event)
+                except json.JSONDecodeError:
+                    continue
+        return events
+
+    @staticmethod
+    def _render_event(event: Dict) -> str:
+        """Render a single graph event as markdown."""
+        et = event.get("event_type", "")
+        p = event.get("payload", {})
+
+        if et == "graph_started":
+            ts = datetime.fromtimestamp(
+                event["timestamp"], tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return (
+                f"**Started** {ts} — entry:"
+                f" `{p.get('start_node', '')}`\n\n"
+            )
+
+        if et == "step_started":
+            step = p.get("step", 0)
+            node = p.get("node", "")
+            node_type = p.get("node_type", "")
+            action_id = p.get("action_id", "")
+            if node_type == "return":
+                return f"### Step {step} — `{node}` ⏹ return\n\n"
+            if node_type == "foreach":
+                return f"### Step {step} — `{node}` 🔁 foreach\n\n"
+            if action_id:
+                return f"### Step {step} — `{node}` → {action_id}\n\n"
+            return f"### Step {step} — `{node}`\n\n"
+
+        if et == "step_completed":
+            elapsed_s = p.get("elapsed_s", 0)
+            status = p.get("status", "ok")
+            thread_id = p.get("thread_id", "")
+            next_node = p.get("next_node")
+            error = p.get("error", "")
+
+            if status != "error":
+                line = f"✅ completed ({elapsed_s:.1f}s)"
+            else:
+                line = f"❌ error ({elapsed_s:.1f}s): {error}"
+            if thread_id:
+                line += f" — thread: `{thread_id}`"
+            if next_node:
+                line += f" → `{next_node}`"
+            return line + "\n\n"
+
+        if et == "foreach_completed":
+            next_node = p.get("next_node")
+            if next_node:
+                return f"🔁 iteration complete → `{next_node}`\n\n"
+            return "🔁 iteration complete\n\n"
+
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -816,9 +1098,26 @@ async def execute(
             project_path,
         )
 
+    # Create graph transcript (JSONL event log + signed knowledge markdown)
+    graph_transcript = GraphTranscript(project_path, graph_id, graph_run_id, nodes)
+    graph_start_time = time.monotonic()
+    if not is_resume:
+        graph_transcript.write_event("graph_started", {
+            "graph_id": graph_id, "graph_run_id": graph_run_id,
+            "start_node": current or "",
+        })
+        graph_transcript.render_knowledge("running", step_count, 0)
+
     while current and step_count < max_steps:
         node = nodes.get(current)
         if node is None:
+            elapsed = time.monotonic() - graph_start_time
+            graph_transcript.write_event("graph_error", {
+                "error": f"Node '{current}' not found", "steps": step_count,
+                "elapsed_s": elapsed,
+            })
+            graph_transcript.checkpoint(step_count)
+            graph_transcript.render_knowledge("error", step_count, elapsed)
             registry.update_status(graph_run_id, "error")
             return {
                 "success": False,
@@ -831,6 +1130,15 @@ async def execute(
 
         # Return node — terminate
         if node.get("type") == "return":
+            elapsed = time.monotonic() - graph_start_time
+            graph_transcript.write_event("step_started", {
+                "step": step_count, "node": executed_node, "node_type": "return",
+            })
+            graph_transcript.write_event("graph_completed", {
+                "status": "completed", "steps": step_count, "elapsed_s": elapsed,
+            })
+            graph_transcript.checkpoint(step_count)
+            graph_transcript.render_knowledge("completed", step_count, elapsed)
             await _persist_state(
                 project_path, graph_id, graph_run_id,
                 state, current, "completed", step_count,
@@ -846,8 +1154,18 @@ async def execute(
 
         # Foreach node — iterate
         if node.get("type") == "foreach":
+            graph_transcript.write_event("step_started", {
+                "step": step_count, "node": executed_node, "node_type": "foreach",
+            })
             current, state = await _handle_foreach(
                 node, state, params, exec_ctx, project_path
+            )
+            graph_transcript.write_event("foreach_completed", {
+                "step": step_count, "node": executed_node, "next_node": current,
+            })
+            graph_transcript.checkpoint(step_count)
+            graph_transcript.render_knowledge(
+                "running", step_count, time.monotonic() - graph_start_time,
             )
             await _persist_state(
                 project_path, graph_id, graph_run_id,
@@ -866,6 +1184,15 @@ async def execute(
             action["params"] = _inject_parent_context(
                 action.get("params", {}), exec_ctx
             )
+
+        action_id = action.get("item_id", "")
+        graph_transcript.write_event("step_started", {
+            "step": step_count, "node": executed_node, "action_id": action_id,
+        })
+        graph_transcript.render_knowledge(
+            "running", step_count, time.monotonic() - graph_start_time,
+        )
+        node_start = time.monotonic()
 
         # Check capabilities before dispatch
         denied = _check_permission(
@@ -926,6 +1253,14 @@ async def execute(
                 )
                 continue
             if error_mode == "fail":
+                elapsed = time.monotonic() - graph_start_time
+                graph_transcript.write_event("graph_error", {
+                    "error": result.get("error", "unknown"),
+                    "node": executed_node, "steps": step_count,
+                    "elapsed_s": elapsed,
+                })
+                graph_transcript.checkpoint(step_count)
+                graph_transcript.render_knowledge("error", step_count, elapsed)
                 await _persist_state(
                     project_path, graph_id, graph_run_id,
                     state, current, "error", step_count,
@@ -956,6 +1291,21 @@ async def execute(
         next_spec = node.get("next")
         current = _evaluate_edges(next_spec, state, result)
 
+        node_elapsed = time.monotonic() - node_start
+        graph_transcript.write_event("step_completed", {
+            "step": step_count, "node": executed_node,
+            "action_id": action_id,
+            "status": result.get("status", "ok"),
+            "elapsed_s": node_elapsed,
+            "next_node": current,
+            "thread_id": result.get("thread_id", ""),
+            "error": result.get("error", ""),
+        })
+        graph_transcript.checkpoint(step_count)
+        graph_transcript.render_knowledge(
+            "running", step_count, time.monotonic() - graph_start_time,
+        )
+
         # Persist + sign state after each step
         await _persist_state(
             project_path, graph_id, graph_run_id,
@@ -981,6 +1331,12 @@ async def execute(
             Path(project_path) / AI_DIR / "threads" / graph_run_id / "cancel"
         )
         if cancel_path.exists():
+            elapsed = time.monotonic() - graph_start_time
+            graph_transcript.write_event("graph_cancelled", {
+                "steps": step_count, "elapsed_s": elapsed,
+            })
+            graph_transcript.checkpoint(step_count)
+            graph_transcript.render_knowledge("cancelled", step_count, elapsed)
             await _persist_state(
                 project_path, graph_id, graph_run_id,
                 state, current, "cancelled", step_count,
@@ -994,6 +1350,13 @@ async def execute(
             }
 
     # Max steps exceeded
+    elapsed = time.monotonic() - graph_start_time
+    graph_transcript.write_event("graph_error", {
+        "error": f"max_steps_exceeded ({max_steps})",
+        "steps": step_count, "elapsed_s": elapsed,
+    })
+    graph_transcript.checkpoint(step_count)
+    graph_transcript.render_knowledge("error", step_count, elapsed)
     limit_ctx = {
         "limit_code": "max_steps_exceeded",
         "current_value": step_count,
@@ -1172,7 +1535,7 @@ def run_sync(
 ) -> Dict:
     """Synchronous entry point for graph execution.
 
-    Supports ``async`` parameter: when True, forks a child process
+    Supports ``async`` parameter: when True, spawns a child process
     that runs the graph in the background.  The parent returns immediately
     with ``{success, graph_run_id, status: "running"}``.
 
@@ -1190,56 +1553,67 @@ def run_sync(
         graph_id = graph_config.get("_item_id") or graph_config.get("category", "unknown")
         graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
 
-        # Register before fork so both parent and child see it
+        # Register before subprocess so child process sees it
         parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID")
         registry = thread_registry.get_registry(Path(project_path))
         registry.register(graph_run_id, graph_id, parent_thread_id)
         registry.update_status(graph_run_id, "running")
 
-        child_pid = os.fork()
-        if child_pid == 0:
-            # Child process — run the graph to completion
-            try:
-                os.setsid()
+        # Prepare log file for child process
+        log_dir = Path(project_path) / AI_DIR / "threads" / graph_run_id
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "async.log"
 
-                # Redirect stdio to log file for debugging, devnull as fallback
-                log_dir = Path(project_path) / AI_DIR / "threads" / graph_run_id
-                log_dir.mkdir(parents=True, exist_ok=True)
-                log_fd = os.open(
-                    str(log_dir / "async.log"),
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                    0o644,
-                )
-                devnull = os.open(os.devnull, os.O_RDWR)
-                os.dup2(devnull, 0)
-                os.dup2(log_fd, 2)  # stderr → log
-                os.dup2(devnull, 1)  # stdout → devnull (prevent corrupting parent)
-                os.close(devnull)
-                os.close(log_fd)
+        # Get path to walker.py for __main__ invocation
+        walker_path = Path(__file__).resolve()
 
-                asyncio.run(execute(
-                    graph_config, params, project_path,
-                    graph_run_id=graph_run_id,
-                    pre_registered=True,
-                ))
-            except Exception:
-                import traceback
-                traceback.print_exc()  # goes to async.log via stderr
-                try:
-                    registry.update_status(graph_run_id, "error")
-                except Exception:
-                    pass
-            finally:
-                os._exit(0)
+        # Prepare subprocess arguments
+        # The __main__ block will load the graph YAML and call run_sync()
+        # We need to add --graph-run-id and --pre-registered to signal
+        # the child to call execute() directly instead of run_sync()
+        cmd = [
+            "python",
+            str(walker_path),
+            "--graph-path", graph_config.get("_file_path", ""),
+            "--params", json.dumps(params),
+            "--project-path", project_path,
+            "--graph-run-id", graph_run_id,
+            "--pre-registered",
+        ]
+
+        # Platform-specific process spawning
+        if platform.system() == "Windows":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            preexec_fn = None
         else:
-            # Parent — return immediately
+            creationflags = 0
+            preexec_fn = os.setsid
+
+        try:
+            with open(log_path, "w") as log_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                    preexec_fn=preexec_fn,
+                )
+        except Exception as e:
+            registry.update_status(graph_run_id, "error")
             return {
-                "success": True,
-                "graph_run_id": graph_run_id,
-                "graph_id": graph_id,
-                "status": "running",
-                "pid": child_pid,
+                "success": False,
+                "error": f"Failed to spawn child process: {e}",
             }
+
+        # Parent — return immediately with child PID
+        return {
+            "success": True,
+            "graph_run_id": graph_run_id,
+            "graph_id": graph_id,
+            "status": "running",
+            "pid": proc.pid,
+        }
 
     # Synchronous execution
     return asyncio.run(execute(graph_config, params, project_path))
@@ -1255,6 +1629,8 @@ if __name__ == "__main__":
     parser.add_argument("--graph-path", required=True)
     parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
+    parser.add_argument("--graph-run-id", default=None)
+    parser.add_argument("--pre-registered", action="store_true")
     args = parser.parse_args()
 
     if os.environ.get("RYE_DEBUG"):
@@ -1265,5 +1641,20 @@ if __name__ == "__main__":
         )
 
     graph_config = _load_graph_yaml(args.graph_path)
-    result = run_sync(graph_config, json.loads(args.params), args.project_path)
+    params = json.loads(args.params)
+
+    # If called from subprocess with --graph-run-id and --pre-registered,
+    # call execute() directly (child process behavior)
+    if args.graph_run_id and args.pre_registered:
+        result = asyncio.run(execute(
+            graph_config,
+            params,
+            args.project_path,
+            graph_run_id=args.graph_run_id,
+            pre_registered=True,
+        ))
+    else:
+        # Normal entry (possibly with async=True for fork/subprocess)
+        result = run_sync(graph_config, params, args.project_path)
+
     print(json.dumps(result, default=str))
