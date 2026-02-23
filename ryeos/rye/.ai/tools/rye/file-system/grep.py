@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:c35b32c1f3517123ab9029adbfd59e641e9e262aeafad09ae3973e981f346d70:b6WDIFAC7o452r2lGFGoYt6zeTzQdAn_opEAVbwCdVGHNiaiDmHkLvEZxjjUCbrs5PMNoeBGYjvifJc8nqroAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:0812d1377b3deff31882566662626b8fcf4c8cfbee62db9f33ef76a5ef8851b4:N4kKlEHF5tRnqHmfK6fuAbdZXAnz-XsMFqLzSBEKKICvMTfgOml_EQPiCHHc-vqCINbxCoPaN0mryACb51IKAA==:9fbfabe975fa5a7f
 """Search file contents with regex, returning line IDs."""
 
 import argparse
@@ -13,7 +13,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
 __tool_description__ = "Search file contents with regex"
 

@@ -10,7 +10,7 @@ version: "1.0.0"
 # Web Tools
 
 **Namespace:** `rye/web/`
-**Runtime:** `python_function_runtime`
+**Runtime:** `python/function`
 
 Two tools for web interaction — search and fetch. Both use `urllib` from the standard library (no external HTTP dependency required).
 

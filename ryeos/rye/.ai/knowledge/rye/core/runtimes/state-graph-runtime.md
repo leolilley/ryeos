@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:38:13Z:27d62b1d30c4f097410152a5b492c4fee8b42954601eb22a6b1b3182530a0ac7:M2fswUaxXVsxJYeoH1YVfXzAAS6J6G6lBCDELYuP3qflWgNyw9P8_DkKdCHykNc63TShIoSeWsM01leFdneuAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:c8e9dfa31389390e0315aaf5bc351bce2fc48af05ebbb22d2cd3806fcbe8384d:9Go2mAZmxj0eiLu1nNfRf6fUHTLFZk-fbia4RY9NXeNTK8vt0amzAQzL2KzRMbh_socciu_JMfHeey8SlfWaBg==:9fbfabe975fa5a7f -->
 ```yaml
 id: state-graph-runtime
 title: "State Graph Runtime"
@@ -11,19 +11,19 @@ version: "1.0.0"
 
 # State Graph Runtime
 
-The state graph runtime (`rye/core/runtimes/state_graph_runtime`) enables declarative, code-free workflow definitions as YAML graph tools. It sits at Layer 2 of the executor chain, between graph tool YAMLs (Layer 3) and the subprocess primitive (Layer 1).
+The state graph runtime (`rye/core/runtimes/state-graph/runtime`) enables declarative, code-free workflow definitions as YAML graph tools. It sits at Layer 2 of the executor chain, between graph tool YAMLs (Layer 3) and the subprocess primitive (Layer 1).
 
 ## Chain Pattern
 
 ```
-graph tool YAML  →  state_graph_runtime.yaml  →  subprocess primitive
+graph tool YAML  →  state-graph/runtime.yaml  →  subprocess primitive
 (nodes/edges)       (inline -c script loads       (runs Python process)
-                     state_graph_walker.py)
+                     walker.py)
 ```
 
 ## How the Walker Is Located
 
-The runtime YAML uses an inline Python `-c` script that receives `{runtime_lib}` as `sys.argv[4]`. Since `runtime_lib` resolves to `<runtime_dir>/lib/python` (from the anchor config's `lib` field), the script navigates up two directories to find `state_graph_walker.py` in the same directory as the runtime YAML.
+The runtime YAML uses an inline Python `-c` script that receives `{runtime_lib}` as `sys.argv[4]`. Since `runtime_lib` resolves to `<runtime_dir>/lib/python` (from the anchor config's `lib` field), the script navigates up two directories to find `walker.py` in the same directory as the runtime YAML.
 
 ## Anchor Configuration
 
@@ -45,8 +45,8 @@ The runtime uses `mode: always` (not `auto`) because graph tool YAMLs typically 
 
 | File                                                      | Purpose                                          |
 | --------------------------------------------------------- | ------------------------------------------------ |
-| `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml`    | Runtime config (anchor, env, inline loader)      |
-| `.ai/tools/rye/core/runtimes/state_graph_walker.py`       | Graph traversal engine (~1240 lines)             |
+| `.ai/tools/rye/core/runtimes/state-graph/runtime.yaml`    | Runtime config (anchor, env, inline loader)      |
+| `.ai/tools/rye/core/runtimes/walker.py`       | Graph traversal engine (~1240 lines)             |
 | `.ai/tools/rye/core/runtimes/lib/python/module_loader.py` | Module loading utilities                         |
 | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` | Path resolution with list index support       |
 | `rye/executor/primitive_executor.py`                      | Anchor context injection, error msg fallback     |

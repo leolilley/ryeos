@@ -2,6 +2,11 @@
 
 Resolves environment variables from multiple sources using ENV_CONFIG rules.
 Pure resolver with no side effects.
+
+Interpreter resolver types (all data-driven):
+    local_binary  — Search for a binary in configured local directories
+    system_binary — Find a binary on system PATH via which/where
+    command       — Run a resolve command and use stdout as the path
 """
 
 import os
@@ -16,7 +21,7 @@ class EnvResolver:
 
     def __init__(self, project_path: Optional[Path] = None):
         """Initialize resolver with project context.
-        
+
         Args:
             project_path: Root directory for relative path resolution.
                          If None, uses current working directory.
@@ -30,20 +35,20 @@ class EnvResolver:
         include_dotenv: bool = True,
     ) -> Dict[str, str]:
         """Resolve environment from all sources.
-        
+
         Resolution order:
         1. Start with os.environ
         2. Load .env files (if include_dotenv=True)
         3. Apply ENV_CONFIG rules (interpreter resolution + static vars)
         4. Apply tool-level overrides
-        
+
         Args:
             env_config: Configuration dict with:
                        - interpreter: resolver config (type, var, paths, etc)
                        - env: static environment variables
             tool_env: Tool-level environment overrides.
             include_dotenv: Load .env files (default: True).
-        
+
         Returns:
             Complete environment dict as strings.
         """
@@ -74,10 +79,10 @@ class EnvResolver:
 
     def _load_dotenv(self, env: Dict[str, str]) -> Dict[str, str]:
         """Load .env file if exists.
-        
+
         Args:
             env: Current environment dict.
-        
+
         Returns:
             Environment with .env variables loaded.
         """
@@ -108,14 +113,14 @@ class EnvResolver:
         self, env: Dict[str, str], config: Dict[str, Any]
     ) -> Dict[str, str]:
         """Resolve interpreter based on config type.
-        
+
         Args:
             env: Current environment.
             config: Interpreter resolver config with keys:
-                   - type: venv_python, node_modules, system_binary, version_manager
+                   - type: local_binary, system_binary, command
                    - var: environment variable name
                    - other type-specific keys
-        
+
         Returns:
             Environment with interpreter variable set.
         """
@@ -125,14 +130,12 @@ class EnvResolver:
         if not var_name:
             return env
 
-        if resolver_type == "venv_python":
-            path = self._resolve_venv_python(config)
-        elif resolver_type == "node_modules":
-            path = self._resolve_node_modules(config)
+        if resolver_type == "local_binary":
+            path = self._resolve_local_binary(config)
         elif resolver_type == "system_binary":
             path = self._resolve_system_binary(config)
-        elif resolver_type == "version_manager":
-            path = self._resolve_version_manager(config)
+        elif resolver_type == "command":
+            path = self._resolve_command(config)
         else:
             return env
 
@@ -143,61 +146,60 @@ class EnvResolver:
 
         return env
 
-    def _resolve_venv_python(self, config: Dict[str, Any]) -> Optional[str]:
-        """Find Python in virtual environment.
-        
-        Searches:
-        - Unix: .venv/bin/python
-        - Windows: .venv\Scripts\python.exe
+    def _resolve_local_binary(self, config: Dict[str, Any]) -> Optional[str]:
+        """Find a binary in configured local directories.
+
+        Config keys:
+            binary: Name of the binary to find (required)
+            candidates: Additional binary names to try (e.g. ["python3"])
+            search_paths: Relative directory paths to search (required)
+            search_roots: Additional absolute roots to search before project_path
         """
-        venv_path_str = config.get("venv_path", ".venv")
-        venv_path = self.project_path / venv_path_str
+        binary = config.get("binary")
+        if not binary:
+            return None
 
-        # Try Unix paths first
-        unix_python = venv_path / "bin" / "python"
-        if unix_python.exists():
-            return str(unix_python)
+        search_paths = config.get("search_paths", [])
+        if not search_paths:
+            return None
 
-        # Try Windows paths
-        windows_python = venv_path / "Scripts" / "python.exe"
-        if windows_python.exists():
-            return str(windows_python)
+        # Build candidate binary names
+        candidates = [binary]
+        for extra in config.get("candidates", []):
+            if extra not in candidates:
+                candidates.append(extra)
+        if os.name == "nt":
+            nt_candidates = []
+            for c in candidates:
+                nt_candidates.extend([c, f"{c}.exe", f"{c}.cmd"])
+            candidates = nt_candidates
 
-        # Try with version suffix (python3)
-        unix_python3 = venv_path / "bin" / "python3"
-        if unix_python3.exists():
-            return str(unix_python3)
+        # Build search roots: explicit roots first, then project_path
+        roots = [Path(r) for r in config.get("search_roots", [])]
+        roots.append(self.project_path)
 
-        return None
-
-    def _resolve_node_modules(self, config: Dict[str, Any]) -> Optional[str]:
-        """Find Node in node_modules/.bin directory."""
-        search_paths = config.get("search_paths", ["node_modules/.bin"])
-
-        for search_path_str in search_paths:
-            search_path = self.project_path / search_path_str
-
-            # Try node executable
-            node_path = search_path / "node"
-            if node_path.exists():
-                return str(node_path)
-
-            # Try node.exe (Windows)
-            node_exe_path = search_path / "node.exe"
-            if node_exe_path.exists():
-                return str(node_exe_path)
+        for root in roots:
+            for search_path_str in search_paths:
+                search_dir = root / search_path_str
+                for name in candidates:
+                    bin_path = search_dir / name
+                    if bin_path.exists():
+                        return str(bin_path)
 
         return None
 
     def _resolve_system_binary(self, config: Dict[str, Any]) -> Optional[str]:
-        """Find binary in system PATH using which/where."""
+        """Find binary in system PATH using which/where.
+
+        Config keys:
+            binary: Name of the binary to find (required)
+        """
         binary = config.get("binary")
 
         if not binary:
             return None
 
         try:
-            # Use 'which' on Unix, 'where' on Windows
             cmd = "where" if os.name == "nt" else "which"
             result = subprocess.run(
                 [cmd, binary],
@@ -213,61 +215,29 @@ class EnvResolver:
 
         return None
 
-    def _resolve_version_manager(
-        self, config: Dict[str, Any]
-    ) -> Optional[str]:
-        """Find interpreter via version manager (pyenv, nvm, rbenv, asdf)."""
-        manager = config.get("manager")
-        version = config.get("version")
+    def _resolve_command(self, config: Dict[str, Any]) -> Optional[str]:
+        """Run a resolve command and use stdout as the binary path.
 
-        if not manager or not version:
+        Config keys:
+            resolve_cmd: Command list to execute (e.g. ["pyenv", "which", "python"])
+        """
+        cmd = config.get("resolve_cmd")
+
+        if not cmd or not isinstance(cmd, list):
             return None
 
         try:
-            if manager == "pyenv":
-                # Use pyenv to find Python
-                result = subprocess.run(
-                    ["pyenv", "which", version],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
 
-            elif manager == "nvm":
-                # Use nvm to find Node
-                result = subprocess.run(
-                    ["nvm", "which", version],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-
-            elif manager == "rbenv":
-                # Use rbenv to find Ruby
-                result = subprocess.run(
-                    ["rbenv", "which", version],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-
-            elif manager == "asdf":
-                # Use asdf to find interpreter
-                result = subprocess.run(
-                    ["asdf", "which", manager, version],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-
+            if result.returncode == 0:
+                path = result.stdout.strip().split("\n")[0]
+                if path:
+                    return path
         except Exception:
             pass
 
@@ -279,13 +249,13 @@ class EnvResolver:
         static_vars: Dict[str, str],
     ) -> Dict[str, str]:
         """Apply static environment variables with variable expansion.
-        
+
         Expands ${VAR} and ${VAR:-default} syntax.
-        
+
         Args:
             env: Current environment.
             static_vars: Static variables to apply.
-        
+
         Returns:
             Environment with static vars applied and expanded.
         """
@@ -302,11 +272,11 @@ class EnvResolver:
 
     def _expand_variables(self, text: str, env: Dict[str, str]) -> str:
         """Expand ${VAR} and ${VAR:-default} in text.
-        
+
         Args:
             text: Text with variable references.
             env: Environment dict for lookups.
-        
+
         Returns:
             Text with variables expanded.
         """

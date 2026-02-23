@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:83e5ac41d405a1bf18b3c99b5c7c418a80138b1f1b2c2d42ccdc0d96a20e0fce:Vhp7oZWx2bPv_MCUKcIx1X3Jsy89j9aIbE5OkZ07Cf2KpcfCPwUBqNP3n7biP2pi7QLXCK06UKDcLfF2qC6CDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:ac78be0d5fd905b2fe5642357fd8017f31db0881f5ea8c0ff094a1fcc1e4c6e4:_HKwQcpYwZYUpkQ1Td1w-XX6vp2xy2Sq3AivJDB9UKUiovBIjdmYQy2pLINLu7gL0cyUcM9gqKg0b99ps_S2Bw==:9fbfabe975fa5a7f
 """Get LSP diagnostics for a file."""
 
 import argparse
@@ -9,7 +9,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/lsp"
 __tool_description__ = "Get LSP diagnostics for a file"
 

@@ -23,10 +23,11 @@ Validate item structure using schema-driven extractors and sign the file with an
 ## Signing Process
 
 1. **Load and parse** — The file is read and routed to the appropriate parser based on item type and file extension:
-   - Directives: `markdown_xml` parser
-   - Tools (`.py`): `python_ast` parser
-   - Tools (`.yaml`/`.yml`): `yaml` parser
-   - Knowledge: `markdown_frontmatter` parser
+   - Directives: `markdown/xml` parser
+   - Tools (`.py`): `python/ast` parser
+   - Tools (`.yaml`/`.yml`): `yaml/yaml` parser
+   - Tools (`.js`/`.ts`/`.mjs`/`.cjs`): `javascript/javascript` parser
+   - Knowledge: `markdown/frontmatter` parser
 
 2. **Schema-driven validation** — Parsed data is validated against the extractor schema for the item type. Checks include:
    - Required fields are present

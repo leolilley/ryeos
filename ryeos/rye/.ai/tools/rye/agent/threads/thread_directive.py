@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:96e5bb8c20e65323c2cbc6c9a6d230a2bba3fa5745a1104bf18cfde95cd57ac3:wT8mI5KXgyWFfDqrYwnC9wM_-fkn9FWhpKkZDQvf5A6e8rTlwLdUZOKPLdrsi4VbAckC40MoEE8xdQ_ZqhrkBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:37f5ac6296c62fff74b6bb861acf2642b7c08aa58590a18af52a251348ab8156:_EcahYtJPw1CKhiXXSFCEuqTEaeh0dXKhziRr3k6fA3a6ZHYaEXd39yirJ3hjpd-HAL2CMMAR1_hPwPvjmBpCA==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Execute a directive in a managed thread with LLM loop"
 

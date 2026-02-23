@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:20a0f6d25d4312d2edf61afd22c7aaf66137668ffb58e9483546d572e0eea53e:EOOhGAdEcGDiHmi3GI9XIC2ZFEEJ5po0SQ9XYEFbodJsvoZsJfaMiCTUcWW4J1A2yfxjrPFHkMCc9x62y3FsDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:84aef7f1e74662bfaf39119db8c05905f74a2a8fc5db4b7a85a74644fea48862:H_Ero30-FWMgUA6XZGFfCi6pMCfUIsx6pmKAcbF9oZFdxSpX2L99kpREi6YQXGYvFXd3GxyvgzVP3h_U96RWDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: tool-format
@@ -43,9 +43,9 @@ tool → runtime → primitive
 ```
 
 Examples:
-- `write.py` → `rye/core/runtimes/python_function_runtime` → in-process
-- `bash.py` → `rye/core/runtimes/python_script_runtime` → subprocess
-- `query-docs.yaml` → `rye/core/runtimes/mcp_http_runtime` → HTTP
+- `write.py` → `rye/core/runtimes/python/function` → in-process
+- `bash.py` → `rye/core/runtimes/python/script` → subprocess
+- `query-docs.yaml` → `rye/core/runtimes/mcp/http` → HTTP
 
 ---
 
@@ -70,7 +70,7 @@ Line 1:  Signature comment (added by rye_sign)
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "category/path"
 __tool_description__ = "What this tool does"
 
@@ -100,7 +100,7 @@ def execute(params: dict, project_path: str) -> dict:
 |----------|------|----------|-------------|---------|
 | `__version__` | string | **Yes** | Semantic version | `"1.0.0"` |
 | `__tool_type__` | string | **Yes** | Tool classification | `"python"` |
-| `__executor_id__` | string | **Yes** | Runtime that executes this tool | `"rye/core/runtimes/python_function_runtime"` |
+| `__executor_id__` | string | **Yes** | Runtime that executes this tool | `"rye/core/runtimes/python/function"` |
 | `__category__` | string | **Yes** | Directory path within `.ai/tools/` | `"rye/file-system"` |
 | `__tool_description__` | string | **Yes** | Human-readable description | `"Create or overwrite a file"` |
 
@@ -110,12 +110,12 @@ The executor ID determines the runtime that runs the tool. Tools don't run on th
 
 | Executor ID | Isolation | When to Use |
 |-------------|-----------|-------------|
-| `rye/core/runtimes/python_function_runtime` | In-process | Pure Python — imported and called directly |
-| `rye/core/runtimes/python_script_runtime` | Subprocess | Needs isolation (shell commands, heavy I/O) |
-| `rye/core/runtimes/mcp_http_runtime` | HTTP | MCP tool wrapping external server |
+| `rye/core/runtimes/python/function` | In-process | Pure Python — imported and called directly |
+| `rye/core/runtimes/python/script` | Subprocess | Needs isolation (shell commands, heavy I/O) |
+| `rye/core/runtimes/mcp/http` | HTTP | MCP tool wrapping external server |
 
-- Use `python_function_runtime` for most tools — faster, no subprocess overhead
-- Use `python_script_runtime` when the tool runs shell commands or needs isolation
+- Use `python/function` for most tools — faster, no subprocess overhead
+- Use `python/script` when the tool runs shell commands or needs isolation
 - `null` executor is only valid for `primitive` tool types
 
 ---
@@ -264,7 +264,7 @@ if __name__ == "__main__":
 tool_id: category/tool_name
 tool_type: yaml
 version: "1.0.0"
-executor_id: rye/core/runtimes/python_script_runtime
+executor_id: rye/core/runtimes/python/script
 category: category/path
 description: What this tool does
 parameters:
@@ -287,7 +287,7 @@ Wraps an external MCP server tool:
 ```yaml
 # rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 tool_type: mcp
-executor_id: rye/core/runtimes/mcp_http_runtime
+executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
 version: 1.0.0
 description: 'Retrieves documentation from Context7 for any library.'
@@ -524,9 +524,9 @@ metadata:
 
 | Type | Executor | Description |
 |------|----------|-------------|
-| `python` | `python_function_runtime` or `python_script_runtime` | Python executable script |
+| `python` | `python/function` or `python/script` | Python executable script |
 | `script` | Language-specific runtime | Executable script in any language |
-| `mcp` | `mcp_http_runtime` | MCP tool wrapping external server |
+| `mcp` | `mcp/http` | MCP tool wrapping external server |
 | `mcp_server` | `null` | MCP server definition (referenced by MCP tools) |
 | `primitive` | `null` | Atomic, low-level operation (subprocess, http_client, filesystem) |
 | `runtime` | `null` | Language runtime/execution environment |
@@ -540,25 +540,40 @@ metadata:
 
 | Language | File Extension | Executor Pattern |
 |----------|---------------|------------------|
-| Python | `.py` | `python_function_runtime`, `python_script_runtime` |
-| YAML | `.yaml`, `.yml` | `mcp_http_runtime`, `python_script_runtime` |
-| JavaScript | `.js` | `node_runtime` |
+| Python | `.py` | `python/function`, `python/script` |
+| YAML | `.yaml`, `.yml` | `mcp/http`, `python/script` |
+| JavaScript | `.js`, `.mjs`, `.cjs` | `node/node` |
+| TypeScript | `.ts` | `node/node` |
 | Bash | `.sh` | `subprocess` |
 | TOML | `.toml` | Configuration-only |
 
-### JavaScript Tool Example
+### JavaScript / TypeScript Tool Example
 
-```javascript
-// .ai/tools/utility/hello_node.js
-/**
- * @version 1.0.0
- * @tool_type javascript
- * @executor_id node_runtime
- * @category utility
- */
-function main() { /* ... */ }
-module.exports = { main };
+```typescript
+// .ai/tools/utility/hello_node.ts
+// rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
+
+export const __version__ = "1.0.0";
+export const __tool_type__ = "javascript";
+export const __executor_id__ = "rye/core/runtimes/node/node";
+export const __category__ = "utility";
+export const __tool_description__ = "Greet a user by name";
+
+export const CONFIG_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string", description: "Name to greet" },
+  },
+  required: ["name"],
+};
+
+function main(params: Record<string, unknown>) {
+  return { success: true, output: `Hello, ${params.name}!` };
+}
+export default main;
 ```
+
+Metadata is extracted by the `javascript/javascript` parser via regex — no JS runtime needed at parse time. The same `export const __dunder__` convention used by Python tools applies, with `export const` instead of bare assignment.
 
 ### Class-Based Python Tool (Runtime)
 

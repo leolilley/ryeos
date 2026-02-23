@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:665758c641ff9aaf57900fff5ba071ba8bf274b0599208cdae503a26803f2d0f:SpLp_KxGVLLyozFR3MOuydrXUeeuNXb_IXbrvhhHqSyljkhOrnCTsjU7bbK0WhHW2mY4SJPbCXQeSshO2s3IAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:8cdf2ffdd92b10b92e7f146eb473d418316c4297efbc8b9444b3c208d9464dac:33KZ3atAro851C--67eaMfnWTIfk47AtBsNWIfV72x9jbPcRhaKUOe3HowhTQcoTeKjHGaaLLMYnSB0HtPeQAA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: ai-directory
@@ -68,7 +68,7 @@ The item ID is the relative path from `.ai/<type>/` to the file, without extensi
 | `greet_user`                            | directive | `.ai/directives/greet_user.md`                           |
 | `rye/core/create_directive`             | directive | `.ai/directives/rye/core/create_directive.md`            |
 | `rye/bash/bash`                         | tool      | `.ai/tools/rye/bash/bash.py`                             |
-| `rye/core/runtimes/python_script_runtime` | tool    | `.ai/tools/rye/core/runtimes/python_script_runtime.yaml` |
+| `rye/core/runtimes/python/script` | tool    | `.ai/tools/rye/core/runtimes/python/script.yaml` |
 | `project_conventions`                   | knowledge | `.ai/knowledge/project_conventions.md`                   |
 | `rye/core/directive-metadata-reference` | knowledge | `.ai/knowledge/rye/core/directive-metadata-reference.md` |
 

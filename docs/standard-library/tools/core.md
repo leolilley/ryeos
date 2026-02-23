@@ -75,12 +75,13 @@ Create and verify `.ai/` bundles — packaged collections of directives, tools, 
 
 Parse different file formats into structured metadata. Used by the search and execution engines.
 
-| Parser                 | File Types            | Extracts                                                                                   |
-| ---------------------- | --------------------- | ------------------------------------------------------------------------------------------ |
-| `markdown_xml`         | Directive `.md` files | XML metadata blocks (model, limits, permissions, hooks, inputs, outputs)                   |
-| `markdown_frontmatter` | Knowledge `.md` files | YAML frontmatter (id, title, category, tags, version)                                      |
-| `python_ast`           | Tool `.py` files      | Dunder metadata (`__version__`, `__tool_type__`, `__category__`, etc.) and `CONFIG_SCHEMA` |
-| `yaml`                 | Tool `.yaml` files    | Top-level keys (tool_id, tool_type, executor_id, parameters)                               |
+| Parser                   | File Types                       | Extracts                                                                                   |
+| ------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------ |
+| `markdown/xml`           | Directive `.md` files            | XML metadata blocks (model, limits, permissions, hooks, inputs, outputs)                   |
+| `markdown/frontmatter`   | Knowledge `.md` files            | YAML frontmatter (id, title, category, tags, version)                                      |
+| `python/ast`             | Tool `.py` files                 | Dunder metadata (`__version__`, `__tool_type__`, `__category__`, etc.) and `CONFIG_SCHEMA` |
+| `yaml/yaml`              | Tool `.yaml` files               | Top-level keys (tool_id, tool_type, executor_id, parameters)                               |
+| `javascript/javascript`  | Tool `.js`/`.ts`/`.mjs`/`.cjs`  | `export const` metadata (`__version__`, `__tool_type__`, etc.) and `CONFIG_SCHEMA`         |
 
 ---
 
@@ -102,41 +103,41 @@ YAML configs defining how each tool type is executed. Runtimes configure interpr
 
 | Runtime | Language | Execution | Args Template | Resolver | Use When |
 |---------|----------|-----------|---|---|---|
-| **python_function_runtime** | Python | In-process (fast) | `python -c "import,load,execute(params)"` | `venv_python` (find Python in .venv, fallback to system) | Pure Python logic, compute-heavy, no subprocess needed — fastest option |
-| **python_script_runtime** | Python | Subprocess with isolation | `python tool.py --params {...} --project-path /path` | `venv_python` (find Python in .venv, fallback to system) | Long-running, heavy I/O, subprocess isolation needed, can use shell commands |
-| **node_runtime** | JavaScript/TypeScript | Subprocess with Node resolution | `node tool.js --params {...} --project-path /path` | `node_modules` (find node in node_modules/.bin, fallback to system) | JavaScript tools, TypeScript via tsx, Node.js ecosystem dependencies |
-| **bash_runtime** | Bash/Shell | Direct `/bin/bash` execution | `/bin/bash -c "{command}"` | `env` (PATH passthrough, no resolution) | Shell scripts, system administration, jq pipes, CLI composition |
-| **mcp_stdio_runtime** | MCP (stdin/stdout) | Subprocess: spawn MCP, call via stdio | `python connect.py --server-config ... --tool ... --params {...}` | `venv_python` (Python for connect.py) | Local MCP servers, stdio transport, lightweight message passing |
-| **mcp_http_runtime** | MCP (HTTP/SSE) | HTTP request to MCP server | `python connect.py --server-config ... --tool ... --params {...}` | `venv_python` (Python for connect.py) | External HTTP MCP servers, long-lived connections, streaming tools |
-| **state_graph_runtime** | YAML Graph | Subprocess: load graph, dispatch rye_execute per node | `python -c "load_graph,walk_nodes,rye_execute(...)"` | `venv_python` with `mode: always` anchoring | Declarative workflows, condition branches, multi-step node execution |
+| **python/function** | Python | In-process (fast) | `python -c "import,load,execute(params)"` | `local_binary` (binary: python3, candidates/search_paths in .venv, fallback to system) | Pure Python logic, compute-heavy, no subprocess needed — fastest option |
+| **python/script** | Python | Subprocess with isolation | `python tool.py --params {...} --project-path /path` | `local_binary` (binary: python3, candidates/search_paths in .venv, fallback to system) | Long-running, heavy I/O, subprocess isolation needed, can use shell commands |
+| **node/node** | JavaScript/TypeScript | Subprocess with Node resolution | `node tool.js --params {...} --project-path /path` | `local_binary` (binary: node, search_paths/search_roots in node_modules/.bin, fallback to system) | JavaScript tools, TypeScript via tsx, Node.js ecosystem dependencies |
+| **bash/bash** | Bash/Shell | Direct `/bin/bash` execution | `/bin/bash -c "{command}"` | `env` (PATH passthrough, no resolution) | Shell scripts, system administration, jq pipes, CLI composition |
+| **mcp/stdio** | MCP (stdin/stdout) | Subprocess: spawn MCP, call via stdio | `python connect.py --server-config ... --tool ... --params {...}` | `local_binary` (binary: python3, for connect.py) | Local MCP servers, stdio transport, lightweight message passing |
+| **mcp/http** | MCP (HTTP/SSE) | HTTP request to MCP server | `python connect.py --server-config ... --tool ... --params {...}` | `local_binary` (binary: python3, for connect.py) | External HTTP MCP servers, long-lived connections, streaming tools |
+| **state-graph/runtime** | YAML Graph | Subprocess: load graph, dispatch rye_execute per node | `python -c "load_graph,walk_nodes,rye_execute(...)"` | `local_binary` (binary: python3) with `mode: always` anchoring | Declarative workflows, condition branches, multi-step node execution |
 
 ### Interpreter Resolution Strategies
 
-**`python_function_runtime` & `python_script_runtime` & `state_graph_runtime`** use `venv_python` resolver:
-- Searches for Python in `{project}/.venv/bin/python3`
+**`python/function`**, **`python/script`**, & **`state-graph/runtime`** use `local_binary` resolver (binary: `python3`):
+- Searches candidates/search_paths for Python in `{project}/.venv/bin/python3`
 - Falls back to system `python3` if not found
 - Enables virtual environment isolation per project
 - Sets `RYE_PYTHON` environment variable for template expansion
 
-**`node_runtime`** uses `node_modules` resolver:
-- Searches `node_modules/.bin` for Node/tsx executables
+**`node/node`** uses `local_binary` resolver (binary: `node`):
+- Searches search_paths/search_roots including `node_modules/.bin` for Node/tsx executables
 - Falls back to system `node` command
 - Enables per-project Node version pinning via `package.json`
 - Sets `RYE_NODE` environment variable
 
-**`bash_runtime`** uses `env` resolver:
+**`bash/bash`** uses `env` resolver:
 - No interpreter resolution, just passes `${PATH}` through
 - Bash is found via absolute path `/bin/bash`
 - Minimal setup, maximum shell power
 
-**MCP runtimes** use `venv_python` for the connect.py script:
-- Same venv resolution as Python runtimes
+**MCP runtimes** (`mcp/stdio`, `mcp/http`) use `local_binary` (binary: `python3`) for the connect.py script:
+- Same `local_binary` resolution as Python runtimes
 - Server config is read from filesystem
 - Tool parameters passed as JSON to MCP call
 
 ### Anchoring & Module Resolution
 
-Runtimes with anchoring enabled (`python_function_runtime`, `python_script_runtime`, `node_runtime`, `state_graph_runtime`) establish a project root for dependency loading:
+Runtimes with anchoring enabled (`python/function`, `python/script`, `node/node`, `state-graph/runtime`) establish a project root for dependency loading:
 - Anchors automatically locate `pyproject.toml` or `package.json`
 - Set `PYTHONPATH` or `NODE_PATH` to include anchor root and runtime lib directories
 - Enables tools to load sibling modules without package-level imports

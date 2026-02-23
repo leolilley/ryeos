@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:335c96ca2e51a1fd078999d8d5edb9e5a8ab8c49143e4e05d3e9640925408c21:YZW_M66nuRIkGoLudzOCxVebKnc1Y0rSh2q9FDqSRq2h7Yr7AVOeRIREx8dIq3hfZjrQu6Tl0o2q2CNHr7FcCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:564abc1205f8e87d0b9689c5049b09d097616e6306f855728880c0e443beaf9f:OVoP0c8sFU74YoQa2NufoxBKLFLtFHr3Blq5_3VmIkrHAbpMSKpI4v-hzXiID1JdTaWX-j48cjNoqMXoLhClDg==:9fbfabe975fa5a7f
 """Web search via configurable provider."""
 
 import argparse
@@ -8,7 +8,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/web"
 __tool_description__ = "Web search via configurable provider"
 

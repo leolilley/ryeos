@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:c5f7cafb9afd4f22a5f452b5de56c8d1e987fadcb605bd18ad9365ae5377f86d:gZdmQ6-8gNeYm4wysqhlId-skBeUTqn65la3qvUq9_6ejb6vTAZprqpBmIruwRPgX8qHxY49dI2MEZl4R2zeDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:9f41d887e2c1cba71b27257e86fc9169f63f851409a288159fdd8437cb1f5389:06OYxtg5h0b2OTZbooRouuXjzfl9CN5LLxyfbUA_i8p2Zm2HHFLylBaDGgkcj7u5ARP302uIIHAX6WRACY9bAg==:9fbfabe975fa5a7f
 """Validate and sign a directive, tool, or knowledge item."""
 
 import argparse
@@ -13,7 +13,7 @@ from rye.primary_tool_descriptions import (
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/primary"
 __tool_description__ = "Validate structure and write an Ed25519 signature to a Rye item file"
 

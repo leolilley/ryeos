@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:423d8f121c2638d86556a680b54ffa3090cc2971ab3117eb12bf64fab7641a65:E7KlL7YS1HL37Ck4IZh-afAYqTbnp3MNfNdX_F2dyPBF8dMXPzY1RXslKDqEK5tcA8gn4NOZKwiqi8bpemshDw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:2df63a4619391d5bacda9a33260998764688ac28b5571e0405567cdd9fe192dc:x6Gv0IWp3H9sKUWnQuwcvAQELJo_igSejckDzOOrCSYLSvpURq4j1yfLx2JYlVU7RoRH_KfUUoZkR-FMSStMDQ==:9fbfabe975fa5a7f
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
 
@@ -19,7 +19,7 @@ Actions:
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/core/bundler"
 __tool_description__ = "Create, verify, and inspect bundle manifests"
 

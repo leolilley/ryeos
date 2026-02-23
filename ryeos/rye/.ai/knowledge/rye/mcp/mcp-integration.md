@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:6840ff767eb241be183855faa96b69d889256ef4effa8f218335b96942e62637:ufqJsDAjqCtOYbH-hW3k3ZX06yD7f6gTYuBwN8aUnDITUFAgOWhKCga108gs-u3XIni4LJ5mKyUUuSn06fpGBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:691b019991edf78e078837ccd81c11489d0e08a5d8b1ea07977ad18f92ec86f4:IDYyN6hLvrHKKPf3PQiIMqcuRIZj8sHA04MxPtIvyr4pt9CW0Tsk4gfPz7618BVC4cojmOo_Pd8nyCkPC_NbDg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: mcp-integration
@@ -26,8 +26,8 @@ Three tools for integrating with external MCP servers. Rye OS acts as an MCP **c
 | Field       | Value                                       |
 | ----------- | ------------------------------------------- |
 | Namespace   | `rye/mcp/`                                  |
-| Runtime     | `python_script_runtime`                     |
-| Executor ID | `rye/core/runtimes/python_script_runtime`   |
+| Runtime     | `python/script`                     |
+| Executor ID | `rye/core/runtimes/python/script`   |
 | Dependency  | `pip install mcp httpx`                     |
 
 ## Transport Types

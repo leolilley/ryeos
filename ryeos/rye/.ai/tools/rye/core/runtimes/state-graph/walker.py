@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:08250e9d2522f6d3988f831e107896f07df27391b6c9bc02a1157156036ac128:RZ23PWFo6GrWwOJeepa-tKRpOpOOHa4g2aJPtCYMt5Mopp9njALAmgrMLyO2gxSIdydwdh7VWeJW59EH0PDuCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:43:13Z:40364f4c1b8e54c8288381fcc11d4c971206a8ff8d1a5f0af29431fab1a2a49e:2mwtl_t1VZ116XQWo0TxkgvCRLZa7crdzzXOvqZtmGB1AkCgtyGzetY4kq1dykZM-Ugt_JNa0yAs_2p3lxEEDQ==:9fbfabe975fa5a7f
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -12,7 +12,7 @@ Entry point: same pattern as thread_directive.py — argparse + asyncio.run().
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__category__ = "rye/core/runtimes"
+__category__ = "rye/core/runtimes/state-graph"
 __tool_description__ = "State graph walker — traverses graph YAML tools"
 
 import argparse

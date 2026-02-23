@@ -81,7 +81,7 @@ class ParserRouter:
         Parse content using the specified parser.
 
         Args:
-            parser_name: Name of parser (e.g., "markdown_xml", "markdown_frontmatter")
+            parser_name: Name of parser (e.g., "markdown/xml", "markdown/frontmatter")
             content: Content to parse
 
         Returns:
@@ -104,7 +104,8 @@ class ParserRouter:
         """List available parser names."""
         parsers = set()
         for search_path in self.get_search_paths():
-            for file_path in search_path.glob("*.py"):
+            for file_path in search_path.rglob("*.py"):
                 if not file_path.name.startswith("_"):
-                    parsers.add(file_path.stem)
+                    rel = file_path.relative_to(search_path).with_suffix("")
+                    parsers.add(str(rel))
         return sorted(parsers)

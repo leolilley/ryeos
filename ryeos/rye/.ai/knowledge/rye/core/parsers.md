@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:d248811792d2b81bb14f0a879d7fb1ad75b401e42a9426b085e9a8a6523cb366:IRHbBVRn6ZFC2aB2C9hr2_-u8mjY2C-d7klpgIz1bQK-SzvNiJJ5hX9-SpGTVgnT6iMOu-i97aYiSPHdUI2tBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:e6fcca0891e86e56bbfd156a0de03f74960c2bada8634cb07d660f2b7f9b14e2:pOMPK5RQ5M7quDA4-IvPXLDeBdooyyiM19iD1ekVdp0shuE7eUwpHYtkx9nuvaPusgWWUW_esV9KiCHgtIuABA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: parsers
@@ -15,6 +15,8 @@ tags:
   - yaml
   - ast
   - python-ast
+  - javascript
+  - typescript
   - metadata-extraction
   - frontmatter
   - tool-parsing
@@ -26,18 +28,48 @@ references:
 
 # Parsers
 
-The 4 parsers that extract structured metadata from item files. Located at `.ai/tools/rye/core/parsers/`.
+The 5 parsers that extract structured metadata from item files. Located at `.ai/tools/rye/core/parsers/` in language-specific subdirectories.
+
+```
+parsers/
+├── javascript/
+│   └── javascript.py     # JS/TS tool metadata
+├── markdown/
+│   ├── frontmatter.py    # Knowledge entry metadata
+│   └── xml.py            # Directive metadata
+├── python/
+│   └── ast.py            # Python tool metadata
+└── yaml/
+    └── yaml.py           # YAML tool metadata
+```
 
 ## Parser ↔ Item Type Mapping
 
-| Parser                 | Item Type  | File Extensions       |
-| ---------------------- | ---------- | --------------------- |
-| `markdown_xml`         | Directive  | `.md`                 |
-| `markdown_frontmatter` | Knowledge  | `.md`                 |
-| `python_ast`           | Tool       | `.py`                 |
-| `yaml`                 | Tool       | `.yaml`, `.yml`       |
+| Parser                    | Item Type  | File Extensions                    |
+| ------------------------- | ---------- | ---------------------------------- |
+| `markdown/xml`            | Directive  | `.md`                              |
+| `markdown/frontmatter`    | Knowledge  | `.md`                              |
+| `python/ast`              | Tool       | `.py`                              |
+| `yaml/yaml`               | Tool       | `.yaml`, `.yml`                    |
+| `javascript/javascript`   | Tool       | `.js`, `.ts`, `.mjs`, `.cjs`       |
 
-## `markdown_xml` — Directive Parser
+### Data-Driven Dispatch
+
+The `tool_extractor.yaml` config now includes a `parsers:` field mapping file extensions to parser names. `ParserRouter` (via `get_parsers_map()` from `extensions.py`) uses this map to dispatch metadata extraction — no hardcoded suffix checks in `PrimitiveExecutor._load_metadata()` or `ToolHandler.extract_metadata()`.
+
+```yaml
+# tool_extractor.yaml (excerpt)
+parsers:
+  .py: python/ast
+  .yaml: yaml/yaml
+  .yml: yaml/yaml
+  .js: javascript/javascript
+  .ts: javascript/javascript
+  .mjs: javascript/javascript
+  .cjs: javascript/javascript
+```
+
+## `markdown/xml` — Directive Parser
 
 Parses Markdown files containing embedded XML metadata in fenced code blocks.
 
@@ -88,9 +120,9 @@ Line 1:  <!-- rye:signed:TIMESTAMP:HASH:SIG:FP -->
 - Signature comment on line 1 is extracted separately
 - Permissions are converted to capability strings: `{tag: "cap", content: "rye.<primary>.<type>.<pattern>"}`
 
-## `markdown_frontmatter` — Knowledge Parser
+## `markdown/frontmatter` — Knowledge Parser
 
-Parses Markdown files with YAML metadata in ` ```yaml ` code fences (matching how `markdown_xml` uses ` ```xml ` fences for directives). Also handles pure YAML files.
+Parses Markdown files with YAML metadata in ` ```yaml ` code fences (matching how `markdown/xml` uses ` ```xml ` fences for directives). Also handles pure YAML files.
 
 ### Input
 
@@ -125,14 +157,14 @@ tags:
 
 ### Key Behavior
 
-- Uses `re.search(r"^```yaml\s*$", ...)` to find the fence (mirrors `_extract_xml_block`)
+- Uses `re.search(r"^```yaml\s*$", ...)` to find the fence (mirrors `markdown/xml`'s `_extract_xml_block`)
 - YAML inside the fence is parsed with `yaml.safe_load` — full YAML support
 - Content below the closing ` ``` ` is the knowledge body
 - Pure `.yaml`/`.yml` files: entire content parsed as YAML metadata (signature stripped first)
 - `rye_execute(item_type="knowledge")` returns only body content
 - `rye_load(item_type="knowledge")` returns full file with metadata
 
-## `python_ast` — Python Tool Parser
+## `python/ast` — Python Tool Parser
 
 Parses Python files using AST to extract dunder metadata and `CONFIG_SCHEMA`.
 
@@ -145,7 +177,7 @@ Parses Python files using AST to extract dunder metadata and `CONFIG_SCHEMA`.
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/bash"
 __tool_description__ = "Execute shell commands"
 
@@ -175,21 +207,23 @@ CONFIG_SCHEMA = {
 - `CONFIG_SCHEMA` is a JSON Schema dict defining tool parameters
 - `__executor_id__` is critical — points to the next chain element
 
-## `yaml` — YAML Tool Parser
+## `yaml/yaml` — YAML Tool Parser
 
 Parses YAML files for runtime configs and tool definitions.
 
 ### Input
 
 ```yaml
-tool_id: rye/core/runtimes/python_script_runtime
+tool_id: rye/core/runtimes/python/script
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
 
 config:
   command: "${RYE_PYTHON}"
@@ -221,6 +255,60 @@ parameters:
 - Used for runtimes (`.yaml`) and primitive configs
 - `executor_id` points to next chain element (or `None` for primitives)
 - `env_config` drives interpreter and environment resolution
+
+## `javascript/javascript` — JS/TS Tool Parser
+
+Parses JavaScript and TypeScript files using regex to extract `export const` metadata variables. Supports `.js`, `.ts`, `.mjs`, `.cjs` extensions.
+
+### Input
+
+```typescript
+// rye:signed:TIMESTAMP:HASH:SIG:FP
+
+export const __version__ = "1.0.0";
+export const __tool_type__ = "javascript";
+export const __executor_id__ = "rye/core/runtimes/node/node";
+export const __category__ = "utility";
+export const __tool_description__ = "Example JS/TS tool";
+
+export const CONFIG_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string", description: "Name to greet" },
+  },
+  required: ["name"],
+};
+
+export const ENV_CONFIG = {
+  interpreter: { type: "node", var: "RYE_NODE" },
+};
+
+export const CONFIG = {
+  timeout: 60,
+};
+```
+
+### Extracts
+
+| Field              | Source                    | Type   |
+| ------------------ | ------------------------- | ------ |
+| `version`          | `__version__`             | string |
+| `tool_type`        | `__tool_type__`           | string |
+| `executor_id`      | `__executor_id__`         | string |
+| `category`         | `__category__`            | string |
+| `tool_description` | `__tool_description__`    | string |
+| `config_schema`    | `CONFIG_SCHEMA`           | dict   |
+| `env_config`       | `ENV_CONFIG`              | dict   |
+| `config`           | `CONFIG`                  | dict   |
+
+### Key Behavior
+
+- Uses regex pattern matching — does not execute the file or require a JS runtime
+- Matches `export const VAR_NAME = VALUE;` at the module level
+- String values extracted from quoted literals
+- Object values (`CONFIG_SCHEMA`, `ENV_CONFIG`, `CONFIG`) extracted via balanced-brace matching and parsed as JSON
+- Same metadata convention as Python tools (`__dunder__` variables) but with `export const` syntax
+- `__executor_id__` typically points to `rye/core/runtimes/node/node`
 
 ## Extractors vs Parsers
 

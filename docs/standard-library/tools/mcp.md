@@ -10,7 +10,7 @@ version: "1.0.0"
 # MCP Client Tools
 
 **Namespace:** `rye/mcp/`
-**Runtime:** `python_script_runtime`
+**Runtime:** `python/script`
 
 Three tools for integrating with external MCP servers. Rye OS itself is an MCP server — these tools let it act as a **client** to other MCP servers, forming a hub-and-spoke architecture.
 

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:0e215b754fb18b5583cf8670f4bd462f68b9d21ad7667f2c0af744b19b8f2306:1Avv0rj6qLfTkQvAxkkAUKbD9wa-W4xmgmjhiIIJWPTV1JdWVwCU79LRGFf7Pki66PHe-lR_Sj-omOzBJaHjCg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:0e215b754fb18b5583cf8670f4bd462f68b9d21ad7667f2c0af744b19b8f2306:1Avv0rj6qLfTkQvAxkkAUKbD9wa-W4xmgmjhiIIJWPTV1JdWVwCU79LRGFf7Pki66PHe-lR_Sj-omOzBJaHjCg==:9fbfabe975fa5a7f
 """
 provider_resolver.py: Resolve model/tier to a concrete provider adapter.
 

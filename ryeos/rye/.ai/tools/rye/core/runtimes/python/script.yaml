@@ -1,14 +1,16 @@
-# rye:signed:2026-02-22T09:00:56Z:8e27c5f8c129cde37b7f3dab26efdc7f55041e110d395c8ce5cbd40aa0c8c241:6Lj2Np2CCWYG82kNJfAEnepu0v35X-Xc2HfbL7QlTx7ujUmpAR3mHatTVkadamAURdkm-NGShCT3coYX2nANCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:43:13Z:11602f07365b438db480fed80041fb3d0ad473b291d5b44bdc9c9bc297579e39:UuSCFvXhHEaQdgh28vpD9xm3zwZYuRI7MERnKInHGZlZLJ3FDh0ht9hRhRX7usvED23zRsfyRKn1yOcx6cprDg==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/python
 description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -20,7 +22,7 @@ anchor:
   mode: auto
   markers_any: ["__init__.py", "pyproject.toml"]
   root: tool_dir
-  lib: lib/python
+  lib: lib
   env_paths:
     PYTHONPATH:
       prepend: ["{anchor_path}", "{runtime_lib}"]

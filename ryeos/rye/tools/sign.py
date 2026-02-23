@@ -24,7 +24,7 @@ from rye.utils.path_utils import (
     get_system_spaces,
     get_user_type_path,
 )
-from rye.utils.extensions import get_tool_extensions, get_item_extensions
+from rye.utils.extensions import get_tool_extensions, get_item_extensions, get_parsers_map
 from rye.utils.resolvers import get_user_space
 from rye.utils.validators import apply_field_mapping, validate_parsed_data
 
@@ -224,7 +224,7 @@ class SignTool:
         content = file_path.read_text(encoding="utf-8")
 
         # Parse content
-        parsed = self.parser_router.parse("markdown_xml", content)
+        parsed = self.parser_router.parse("markdown/xml", content)
         if "error" in parsed:
             return {
                 "status": "error",
@@ -295,26 +295,25 @@ class SignTool:
                 "path": str(file_path),
             }
 
-        # Parse tool file to extract metadata — route by extension
+        # Parse tool file to extract metadata — data-driven dispatch by extension
+        parsers_map = get_parsers_map(Path(project_path) if project_path else None)
+        parser_name = parsers_map.get(file_path.suffix)
+        if not parser_name:
+            return {
+                "status": "error",
+                "error": f"No parser registered for extension: {file_path.suffix}",
+                "path": str(file_path),
+            }
+        parsed = self.parser_router.parse(parser_name, content)
+        if "error" in parsed:
+            return {
+                "status": "error",
+                "error": "Failed to parse tool file",
+                "details": parsed.get("error"),
+                "path": str(file_path),
+            }
         if file_path.suffix in (".yaml", ".yml"):
-            parsed = self.parser_router.parse("yaml", content)
-            if "error" in parsed:
-                return {
-                    "status": "error",
-                    "error": "Failed to parse tool file",
-                    "details": parsed.get("error"),
-                    "path": str(file_path),
-                }
             parsed = parsed.get("data", parsed)
-        else:
-            parsed = self.parser_router.parse("python_ast", content)
-            if "error" in parsed:
-                return {
-                    "status": "error",
-                    "error": "Failed to parse tool file",
-                    "details": parsed.get("error"),
-                    "path": str(file_path),
-                }
 
         # Add name from filename (required field derived from path)
         parsed["name"] = extract_filename(file_path)
@@ -393,7 +392,7 @@ class SignTool:
         content = file_path.read_text(encoding="utf-8")
 
         # Parse content
-        parsed = self.parser_router.parse("markdown_frontmatter", content)
+        parsed = self.parser_router.parse("markdown/frontmatter", content)
         if "error" in parsed:
             return {
                 "status": "error",

@@ -10,7 +10,7 @@ version: "1.0.0"
 # File System Tools
 
 **Namespace:** `rye/file-system/`
-**Runtime:** `python_function_runtime`
+**Runtime:** `python/function`
 
 Six tools for file operations, all sandboxed to the project workspace. Paths outside the project root are rejected.
 

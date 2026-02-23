@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:aa3d2cf9511235ec829acfefedec95fcd158ea944beb21bcd813759e95ebd623:BzAmIFji-2HLpJ3iYFNYej4Y86VWCGbqZF2k9A20xUVmLSu5fGt_aXslNm_Fl0khVfLoiiTyjtAkd53y1O-nDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:b0e8511e1f87873b84c4fcbdb26de2a65e04e4e1f15bcb701a2c6917b509a70d:LRtMBNKL_ghmYPchLYfQ-gnryd-qa1VNkSvkWE2T2DwdpPDFtiuTiInof6euSB6A16LLHki3fJaFJOdhFG5nAg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: terminology
@@ -67,7 +67,7 @@ The item ID is the **relative path** from `.ai/<type>/` to the file, **without t
 | Context                | Convention     | Example                          |
 | ---------------------- | -------------- | -------------------------------- |
 | Directive file names   | `snake_case`   | `create_directive.md`            |
-| Tool file names        | `snake_case`   | `bash.py`, `python_script_runtime.yaml` |
+| Tool file names        | `snake_case`   | `bash.py`, `python/script.yaml` |
 | Knowledge file names   | `kebab-case`   | `directive-metadata-reference.md` |
 | Knowledge IDs          | `kebab-case`   | `directive-metadata-reference`   |
 | Directive names (XML)  | `snake_case`   | `<directive name="create_directive">` |

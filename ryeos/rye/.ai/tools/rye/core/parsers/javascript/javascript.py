@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T23:50:45Z:5593138cb04dc0ddfc601675336e9085a234d469a8216feda10ab5f6bb68f2b9:8oB4y11uGO7uQpCmA1iI9Gjrkwl1-KJ9-sSkzaXu_yNXdpzRznBrZWmrykMDeZkQhIGGd9XXbri2dK2WOiPlCg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:7912663f20de9a0cf3aa406d82351dec0058a6151239fa9323f3d580bab462f7:f8etmnCoJotVePDSXxAwBpr9zYpLvq4RWoagMRUigCobL8M7y_SWAYRNcEj-zYWT3y8g55yAM_BdNyo2J8JrBQ==:9fbfabe975fa5a7f
 """JavaScript/TypeScript parser for extracting metadata from JS/TS tools.
 
 Extracts exported constants and CONFIG_SCHEMA using regex.
@@ -38,7 +38,7 @@ def parse(content: str) -> Dict[str, Any]:
 
     # Handle null assignments: export const __executor_id__ = null
     for match in re.finditer(
-        r'(?:export\s+)?(?:const|let|var)\s+(__\w+__)\s*=\s*null\b',
+        r"(?:export\s+)?(?:const|let|var)\s+(__\w+__)\s*=\s*null\b",
         content,
     ):
         key = match.group(1)
@@ -47,8 +47,8 @@ def parse(content: str) -> Dict[str, Any]:
 
     # Extract CONFIG_SCHEMA via balanced brace matching
     schema_match = re.search(
-        r'(?:export\s+)?(?:const|let|var)\s+CONFIG_SCHEMA\s*'
-        r'(?::\s*\w+)?\s*=\s*(\{)',
+        r"(?:export\s+)?(?:const|let|var)\s+CONFIG_SCHEMA\s*"
+        r"(?::\s*\w+)?\s*=\s*(\{)",
         content,
     )
     if schema_match:
@@ -60,8 +60,7 @@ def parse(content: str) -> Dict[str, Any]:
 
     # Extract ENV_CONFIG
     env_match = re.search(
-        r'(?:export\s+)?(?:const|let|var)\s+ENV_CONFIG\s*'
-        r'(?::\s*\w+)?\s*=\s*(\{)',
+        r"(?:export\s+)?(?:const|let|var)\s+ENV_CONFIG\s*" r"(?::\s*\w+)?\s*=\s*(\{)",
         content,
     )
     if env_match:
@@ -73,8 +72,7 @@ def parse(content: str) -> Dict[str, Any]:
 
     # Extract CONFIG
     config_match = re.search(
-        r'(?:export\s+)?(?:const|let|var)\s+CONFIG\s*'
-        r'(?::\s*\w+)?\s*=\s*(\{)',
+        r"(?:export\s+)?(?:const|let|var)\s+CONFIG\s*" r"(?::\s*\w+)?\s*=\s*(\{)",
         content,
     )
     if config_match:
@@ -113,7 +111,7 @@ def _try_parse_js_object(text: str) -> Optional[Any]:
         cleaned = re.sub(r"//[^\n]*", "", text)
         cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
         # Quote unquoted keys
-        cleaned = re.sub(r'(?<=[{,\n])\s*(\w+)\s*:', r' "\1":', cleaned)
+        cleaned = re.sub(r"(?<=[{,\n])\s*(\w+)\s*:", r' "\1":', cleaned)
         # Single quotes → double quotes
         cleaned = cleaned.replace("'", '"')
         # Trailing commas

@@ -246,7 +246,7 @@ for element in chain:
 A tool's execution chain includes the tool itself and all its runtime dependencies. For example, a Python tool's chain might be:
 
 ```
-my-tool.py → python_script_runtime.yaml → subprocess.yaml
+my-tool.py → python/script.yaml → subprocess.yaml
 ```
 
 All three files must be signed and verified before `my-tool.py` executes.

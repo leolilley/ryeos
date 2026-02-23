@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:0b59d3073448e6bf909fa1a12e49800342cdd3fab302d1d489f54feca619b3b1:hjqp3lntAa8vhO9NrEePusbrnyoRr1tnjWx0oESpnjMxXgkclwH-IVT93SGXsm-0Bp2fWuGK8DkjfG8SZx82Dg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:2280cd8774a056a9aae6f233be194ad3e383150035f4f526eb8cb3fffddc7c3b:8vrGCFqLjmcKpslOmVxSguV_1M3OYcc76oS0AQ2NLOGTsN76jNoWV4QFWCjRK4cgYE3QdsJiUMqU_Q5iO_3dCA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: executor-chain
@@ -37,7 +37,7 @@ How tools are resolved and executed through the three-layer chain.
 ## The Three Layers
 
 ```
-Layer 3: Tool        __executor_id__ = "rye/core/runtimes/python_script_runtime"
+Layer 3: Tool        __executor_id__ = "rye/core/runtimes/python/script"
                               │
 Layer 2: Runtime     __executor_id__ = "rye/core/primitives/subprocess"
                               │
@@ -67,8 +67,10 @@ executor_id: rye/core/primitives/subprocess
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
 
@@ -87,19 +89,19 @@ Available runtimes:
 
 | Runtime                   | Language/Protocol | Execution Method                   |
 | ------------------------- | ----------------- | ---------------------------------- |
-| `python_script_runtime`   | Python            | Subprocess with venv resolution    |
-| `python_function_runtime` | Python            | In-process import + call           |
-| `node_runtime`            | JavaScript        | Subprocess with node resolution    |
-| `bash_runtime`            | Bash              | Subprocess                         |
-| `mcp_stdio_runtime`       | MCP (stdio)       | Launch MCP server, call via stdio  |
-| `mcp_http_runtime`        | MCP (HTTP)        | Connect to MCP server via HTTP     |
+| `python/script`           | Python            | Subprocess with venv resolution    |
+| `python/function`         | Python            | In-process import + call           |
+| `node/node`               | JavaScript        | Subprocess with node resolution    |
+| `bash/bash`               | Bash              | Subprocess                         |
+| `mcp/stdio`               | MCP (stdio)       | Launch MCP server, call via stdio  |
+| `mcp/http`                | MCP (HTTP)        | Connect to MCP server via HTTP     |
 
 ### Layer 3: Tools
 
 Python scripts, shell scripts, or other executables with metadata headers:
 
 ```python
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/bash"
@@ -111,7 +113,7 @@ __category__ = "rye/bash"
 
 1. **Cache check** — if cached chain exists and all file hashes match, return cached
 2. **Resolve path** — `_resolve_tool_path(item_id)` using three-tier space precedence
-3. **Load metadata** — parse via AST (Python) or YAML to extract `__executor_id__`, `ENV_CONFIG`, `CONFIG`, `anchor`, `verify_deps`
+3. **Load metadata** — dispatch to the appropriate parser via `ParserRouter` (data-driven lookup from the `parsers` map in `tool_extractor.yaml` keyed by file extension) to extract `__executor_id__`, `ENV_CONFIG`, `CONFIG`, `anchor`, `verify_deps`
 4. **Create ChainElement** — store item_id, path, space, extracted metadata
 5. **Check termination** — if `executor_id is None`, this is a primitive; stop
 6. **Recurse** — set `current_id = executor_id`, repeat from step 2
@@ -132,17 +134,17 @@ Result ordering: `[tool, runtime, ..., primitive]` — tool at index 0, primitiv
 ```
 Step 1: Resolve "rye/bash/bash"
   → .ai/tools/rye/bash/bash.py (system space)
-  → __executor_id__ = "rye/core/runtimes/python_script_runtime"
+  → __executor_id__ = "rye/core/runtimes/python/script"
 
-Step 2: Resolve "rye/core/runtimes/python_script_runtime"
-  → .ai/tools/rye/core/runtimes/python_script_runtime.yaml (system space)
+Step 2: Resolve "rye/core/runtimes/python/script"
+  → .ai/tools/rye/core/runtimes/python/script.yaml (system space)
   → executor_id = "rye/core/primitives/subprocess"
 
 Step 3: Resolve "rye/core/primitives/subprocess"
   → Matches PRIMITIVE_MAP key (no file needed)
   → executor_id = None (terminal)
 
-Chain: [bash.py, python_script_runtime.yaml, subprocess primitive]
+Chain: [bash.py, python/script.yaml, subprocess primitive]
 ```
 
 ## Chain Validation
@@ -231,10 +233,10 @@ Cache invalidation is automatic: if any file hash differs, the cached entry is d
 ```json
 {
   "status": "validation_passed",
-  "chain": ["rye/file-system/write", "rye/core/runtimes/python_script_runtime", "rye/core/primitives/subprocess"],
+  "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/subprocess"],
   "validated_pairs": [
-    {"child": "rye/file-system/write", "parent": "python_script_runtime", "space_ok": true, "io_ok": true},
-    {"child": "python_script_runtime", "parent": "subprocess", "space_ok": true, "io_ok": true}
+    {"child": "rye/file-system/write", "parent": "python/script", "space_ok": true, "io_ok": true},
+    {"child": "python/script", "parent": "subprocess", "space_ok": true, "io_ok": true}
   ]
 }
 ```

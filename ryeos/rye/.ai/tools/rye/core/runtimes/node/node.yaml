@@ -1,14 +1,16 @@
-# rye:signed:2026-02-22T23:36:41Z:595b2a45b5ba88f5902f1473ae6d6e3afa17be5ed165ab40c1f826bce0bb019b:jo3xwjIAMBzhteKYI89GIjBQHk6QtWZjioDqteF16eChkPh9Nqx_v83iNL3wZNde7RuMj86AQemV5HTA3morBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:43:13Z:d0fb439e8197436cc4d767423a6b59b4e3b21f14210275fc4e910c2c9141ca68:gx9iRAiejXJdmjfI8KxLWRRbz1NzwM5BCW5JKRvzMrP-WivGl7PnOV9Gq16XYxW_nh7JfZQIQGkzwrmQRHntBw==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/node
 description: "Node.js runtime executor - runs JavaScript/TypeScript with Node interpreter resolution"
 
 env_config:
   interpreter:
-    type: node_modules
+    type: local_binary
+    binary: tsx
     search_paths: [node_modules/.bin]
+    search_roots: ["{anchor_path}"]
     var: RYE_NODE
     fallback: node
   env:
@@ -19,9 +21,11 @@ anchor:
   mode: auto
   markers_any: ["package.json"]
   root: tool_dir
-  lib: lib/node
+  lib: lib
   cwd: "{anchor_path}"
   env_paths:
+    PATH:
+      prepend: ["{anchor_path}/node_modules/.bin"]
     NODE_PATH:
       prepend: ["{anchor_path}", "{anchor_path}/node_modules"]
 

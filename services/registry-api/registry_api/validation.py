@@ -40,9 +40,9 @@ def get_parser_router() -> ParserRouter:
 
 
 PARSER_TYPES = {
-    ItemType.DIRECTIVE: "markdown_xml",
-    ItemType.TOOL: "python_ast",
-    ItemType.KNOWLEDGE: "markdown_yaml",
+    ItemType.DIRECTIVE: "markdown/xml",
+    ItemType.TOOL: "python/ast",
+    ItemType.KNOWLEDGE: "markdown/frontmatter",
 }
 
 

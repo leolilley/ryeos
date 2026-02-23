@@ -7,7 +7,7 @@ anchor system. If anchor doesn't work, `from helpers import ...` fails.
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "test/anchor_demo"
 __tool_description__ = "Demo tool testing anchor system with sibling imports"
 

@@ -1,7 +1,7 @@
 # rye:signed:2026-02-18T09:38:17Z:302160e5d26521240490de797a24d3dd621b494e0cc1fb3619d80293de92da19:UIMXuqZUarxrKao6WwjgHd8mXLW32Z8GNPypdBiz8CeTVEWLo391hXEfSh08MtuQNFZ-5heUmGkDFmMY6bpuDA==:440443d0858f0199
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state_graph_runtime
+executor_id: rye/core/runtimes/state-graph/runtime
 category: graphs
 description: "Read a Python file, analyze it with an LLM, and produce a structured report"
 

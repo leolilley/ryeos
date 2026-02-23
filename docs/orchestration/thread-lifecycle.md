@@ -60,7 +60,7 @@ The thread is registered in the SQLite registry (`registry.db`) with status `cre
 
 ### Step 3: Load directive
 
-The directive is loaded via `DirectiveResolver`, searching project → user → system spaces. The markdown_xml parser extracts metadata (limits, permissions, model, inputs) from the XML fence and preserves the raw content for the LLM prompt.
+The directive is loaded via `DirectiveResolver`, searching project → user → system spaces. The `markdown/xml` parser extracts metadata (limits, permissions, model, inputs) from the XML fence and preserves the raw content for the LLM prompt.
 
 For normal execution, `ExecuteTool` handles input validation and interpolation. For resume/handoff, `LoadTool` is used instead (no input validation needed since the directive ran before).
 

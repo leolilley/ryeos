@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:33dd5a5aad9f2820988640d11c1285c3d06e6bb00b7d1cf559977646cc08df9b:PKVTarifNoVsesB8rNJz_KFeTCcc6bRB-9ZszlEzzQJODKj6uF-sqSz0HqOZsxxmSJ2ezQJJ21XQJzrbVQ6MAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:910642536d19b10f61540078c02c5c63f5f33ac10c3a480112278e4af3e99d99:A5dzNvtmCUHTwSLDVldoI4tQMjkeAcM61dkeomHBhd2hGLmOGe-00IB8APKF4S9x92vLxgETs-l5X-OQ0zUYAA==:9fbfabe975fa5a7f
 """Read a file with persistent line IDs for stable editing."""
 
 import argparse
@@ -9,7 +9,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
 __tool_description__ = "Read file content with persistent line IDs"
 

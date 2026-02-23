@@ -283,7 +283,7 @@ class PrimitiveExecutor:
                 self._verify_tool_dependencies(chain, anchor_path)
 
             # 5. Resolve environment through the chain
-            resolved_env = self._resolve_chain_env(chain)
+            resolved_env = self._resolve_chain_env(chain, anchor_ctx)
 
             # 5.5 Apply anchor env mutations
             if anchor_active:
@@ -635,7 +635,11 @@ class PrimitiveExecutor:
             "integrity": integrity,
         }
 
-    def _resolve_chain_env(self, chain: List[ChainElement]) -> Dict[str, str]:
+    def _resolve_chain_env(
+        self,
+        chain: List[ChainElement],
+        ctx: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
         """Resolve environment variables through the chain.
 
         Each runtime in the chain can contribute ENV_CONFIG.
@@ -643,6 +647,7 @@ class PrimitiveExecutor:
 
         Args:
             chain: Executor chain
+            ctx: Template context for {var} substitution in env_config values
 
         Returns:
             Merged resolved environment
@@ -652,8 +657,11 @@ class PrimitiveExecutor:
         # Process chain in reverse (primitive to tool) for proper override
         for element in reversed(chain):
             if element.env_config:
+                env_config = element.env_config
+                if ctx:
+                    env_config = self._template_dict(env_config, ctx)
                 resolved = self.env_resolver.resolve(
-                    env_config=element.env_config,
+                    env_config=env_config,
                     tool_env=merged_env,
                 )
                 merged_env.update(resolved)
@@ -1055,6 +1063,18 @@ class PrimitiveExecutor:
             return ctx.get(key, match.group(0))
 
         return re.sub(r"\{(\w+)\}", replace, template)
+
+    def _template_dict(
+        self, data: Any, ctx: Dict[str, str]
+    ) -> Any:
+        """Recursively template {var} placeholders in a nested dict/list."""
+        if isinstance(data, str):
+            return self._template_string(data, ctx)
+        elif isinstance(data, dict):
+            return {k: self._template_dict(v, ctx) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._template_dict(item, ctx) for item in data]
+        return data
 
     def _verify_tool_dependencies(
         self, chain: List[ChainElement], anchor_path: Path

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:412455bff3cbf7c7b16d9d13b62ec256befcc4b11656573ecd1ce5a12dd1cc7a:zGJ3Lj71yG45ThBGoH1w_UKmPV6IBp7lxP45tK1ir1iEeHxj_4h2c13h1b2K1g4jDquzMzcODaHi1vwYS3BnCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:71927107d2ccec34ddfdd51384196366113b2105d4220db0039e80df851bb84b:IechhYscRsdxtXW5ALT3L5JhlRB_0njoN9SovLPzlDToqECmziN4euEnBdFizOxr3tczBPspp5ABbEo8tiIZBg==:9fbfabe975fa5a7f
 """System information tool - exposes MCP runtime paths, time, and environment.
 
 Builtin tool that runs in-process to provide system information
@@ -17,7 +17,7 @@ from rye.constants import AI_DIR
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/system"
 __tool_description__ = (
     "System information tool - exposes MCP runtime paths, time, and environment"

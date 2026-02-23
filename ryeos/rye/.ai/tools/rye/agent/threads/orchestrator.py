@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:9dcbb0ec2739241606aa572033e5285bb012d2eab7f7d2e0fd26325c6015cf84:6CiRqR-AcPsIf-T0lUE7JcaP_UnnHDrDkRRhik7kRf7ZdvawIU84oxKcLyz_aPMKJfFDD7fEGGICTcxhtIESAg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:65a92254d121fec01b6d31433ffb6af684749baceb9f04a32238decb35e53daa:eLoufiUVdpWKvix3Gz2U8nszNK5XpGpvg_JcP9NVRzxOfi7CQ2H_jLNpdSUOyHHgRMSKtJT0Qzcl59lXLG82BQ==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Thread coordination: wait, cancel, status, chain resolution"
 

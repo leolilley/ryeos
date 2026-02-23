@@ -17,72 +17,113 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` (system space). You ca
 
 ```
 .ai/tools/rye/core/runtimes/
-├── python_function_runtime.yaml    # Call Python execute() in-process
-├── python_script_runtime.yaml       # Run Python scripts in subprocess
-├── node_runtime.yaml                # Run JavaScript/TypeScript with Node
-├── bash_runtime.yaml                # Execute shell commands
-├── mcp_stdio_runtime.yaml           # Spawn MCP servers over stdio
-├── mcp_http_runtime.yaml            # Call MCP tools via HTTP
-└── state_graph_runtime.yaml         # Walk declarative graph YAML
+├── bash/bash.yaml                       # Execute shell commands
+├── mcp/
+│   ├── http.yaml                        # Call MCP tools via HTTP
+│   └── stdio.yaml                       # Spawn MCP servers over stdio
+├── node/node.yaml                       # Run JavaScript/TypeScript with Node
+├── python/
+│   ├── function.yaml                    # Call Python execute() in-process
+│   ├── script.yaml                      # Run Python scripts in subprocess
+│   └── lib/                             # Shared Python runtime libraries
+└── state-graph/
+    ├── runtime.yaml                     # Walk declarative graph YAML
+    └── walker.py                        # Graph walking engine
 ```
 
 ## The 7 Standard Runtimes
 
 | Runtime | Language | Execution | When to Use |
 |---------|----------|-----------|------------|
-| **python_function_runtime** | Python | In-process (fast) | Pure Python logic, fast startup, single-threaded, no shell access needed |
-| **python_script_runtime** | Python | Subprocess with isolation | Heavy I/O, long-running, needs subprocess isolation, can use shell commands |
-| **node_runtime** | JavaScript/TypeScript | Subprocess with Node resolution | JavaScript tools, TypeScript (via tsx), Node.js ecosystem dependencies |
-| **bash_runtime** | Bash/Shell | Direct `/bin/bash` execution | Shell scripts, system administration, `jq` pipes, CLI composition |
-| **mcp_stdio_runtime** | MCP (stdin/stdout) | Subprocess, launch MCP server | Call tools from external MCP servers (e.g., brave-search, filesystem) |
-| **mcp_http_runtime** | MCP (HTTP/SSE) | HTTP request to MCP server | Call tools from long-running HTTP MCP servers (e.g., Claude-native servers) |
-| **state_graph_runtime** | YAML Graph | Subprocess, dispatch rye_execute | Declarative workflows, condition branches, node-by-node execution |
+| **python/function** | Python | In-process (fast) | Pure Python logic, fast startup, single-threaded, no shell access needed |
+| **python/script** | Python | Subprocess with isolation | Heavy I/O, long-running, needs subprocess isolation, can use shell commands |
+| **node/node** | JavaScript/TypeScript | Subprocess with Node resolution | JavaScript tools, TypeScript (via tsx), Node.js ecosystem dependencies |
+| **bash/bash** | Bash/Shell | Direct `/bin/bash` execution | Shell scripts, system administration, `jq` pipes, CLI composition |
+| **mcp/stdio** | MCP (stdin/stdout) | Subprocess, launch MCP server | Call tools from external MCP servers (e.g., brave-search, filesystem) |
+| **mcp/http** | MCP (HTTP/SSE) | HTTP request to MCP server | Call tools from long-running HTTP MCP servers (e.g., Claude-native servers) |
+| **state-graph/runtime** | YAML Graph | Subprocess, dispatch rye_execute | Declarative workflows, condition branches, node-by-node execution |
 
 ## How Interpreter Resolution Works
 
-Every runtime can configure **interpreter resolution** — finding the right Python, Node, bash, etc. to execute tools. There are 4 resolution types:
+Every runtime can configure **interpreter resolution** — finding the right Python, Node, bash, etc. to execute tools. There are 3 resolution types, plus a static environment option:
 
-### Type 1: Virtual Environment Python (`venv_python`)
+### Type 1: Local Binary (`local_binary`)
 
-Finds a Python interpreter inside a virtual environment:
+Finds a binary inside local project directories (virtualenvs, `node_modules`, etc.):
+
+**Python example:**
 
 ```yaml
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv                    # Relative to project root
-    var: RYE_PYTHON                     # Environment variable to set
-    fallback: python3                   # If .venv not found, use this
+    type: local_binary
+    binary: python                       # Binary name to find
+    candidates: [python3]                # Alternative names to try
+    search_paths: [".venv/bin", ".venv/Scripts"]  # Relative to project root
+    var: RYE_PYTHON                      # Environment variable to set
+    fallback: python3                    # If not found, use this
 ```
 
-**How it works:**
-1. Look for `$PROJECT_ROOT/.venv/bin/python3` (Unix) or `.venv\Scripts\python.exe` (Windows)
-2. If found, set `RYE_PYTHON` to that path
-3. If not found, fall back to `python3` from `$PATH`
-
-**Used by:** `python_script_runtime`, `python_function_runtime`, `state_graph_runtime`
-
-### Type 2: Node Modules Bin (`node_modules`)
-
-Finds executable binaries in `node_modules/.bin`:
+**Node example:**
 
 ```yaml
 env_config:
   interpreter:
-    type: node_modules
-    search_paths: [node_modules/.bin]    # Relative to anchor root
+    type: local_binary
+    binary: tsx                          # Binary name to find
+    search_paths: ["node_modules/.bin"]  # Relative to anchor root
+    search_roots: ["{anchor_path}"]      # Where to start searching
     var: RYE_NODE                        # Environment variable to set
     fallback: node                       # If not found, use this
 ```
 
 **How it works:**
-1. Look for `node_modules/.bin/node` (or the first match found in search_paths)
-2. Set `RYE_NODE` to that path
-3. If not found, use system `node`
+1. For each path in `search_paths`, look for `binary` (and each name in `candidates`)
+2. `search_roots` controls where `search_paths` are resolved from (defaults to project root)
+3. If found, set the `var` environment variable to that path
+4. If not found, fall back to the `fallback` binary from `$PATH`
 
-**Used by:** `node_runtime` for finding Node or tsx (TypeScript executor)
+**Used by:** `python/script`, `python/function`, `state-graph/runtime`, `node/node`, `mcp/stdio`, `mcp/http`
 
-### Type 3: Static Environment (`env`)
+### Type 2: System Binary (`system_binary`)
+
+Finds a binary on the system `$PATH`:
+
+```yaml
+env_config:
+  interpreter:
+    type: system_binary
+    binary: python3                      # Binary to find on PATH
+    var: RYE_PYTHON
+```
+
+**How it works:**
+1. Search `$PATH` for the named binary
+2. Set `var` to the resolved path
+
+**Used by:** fallback for any runtime when local binary is not found
+
+### Type 3: Command (`command`)
+
+Run a resolve command and use its stdout as the interpreter path:
+
+```yaml
+env_config:
+  interpreter:
+    type: command
+    resolve_cmd: ["pyenv", "which", "python"]  # Command to run
+    var: RYE_PYTHON
+    fallback: python3
+```
+
+**How it works:**
+1. Execute `resolve_cmd` and capture stdout (trimmed)
+2. Set `var` to the resolved path
+3. If the command fails, fall back to `fallback`
+
+**Used by:** projects using version managers (pyenv, nvm, mise, etc.)
+
+### Static Environment (`env`)
 
 Directly set environment variables without any interpreter resolution:
 
@@ -98,21 +139,7 @@ env_config:
 - Set all other keys as static values
 - No interpreter binary resolution occurs
 
-**Used by:** `bash_runtime` (PATH already has bash), other simple tools
-
-### Type 4: Manual Specification
-
-Some runtimes (like `mcp_http_runtime` and `mcp_stdio_runtime`) use the runtime's configured Python interpreter directly:
-
-```yaml
-env_config:
-  interpreter:
-    type: venv_python
-    var: RYE_PYTHON
-    fallback: python3
-```
-
-The runtime's `args` array references `${RYE_PYTHON}` directly, and the system resolves it during execution.
+**Used by:** `bash/bash` (PATH already has bash), other simple tools
 
 ---
 
@@ -128,7 +155,7 @@ anchor:
   mode: auto                            # 'auto' or 'always'
   markers_any: [__init__.py, pyproject.toml]   # Search for these markers
   root: tool_dir                        # 'tool_dir' (default) or other value
-  lib: lib/python                       # Relative lib path for runtime libraries
+  lib: lib                              # Relative lib path for runtime libraries
   cwd: "{anchor_path}"                  # Optional: change working directory
   env_paths:
     PYTHONPATH:
@@ -153,7 +180,7 @@ Once anchored, use these in `env_paths` and `config.args`:
 | Variable | Expands To | Example |
 |----------|-----------|---------|
 | `{anchor_path}` | Root of anchored project | `/home/user/project/.ai/tools/rye/bash` |
-| `{runtime_lib}` | Combined anchor lib + runtime lib | `/home/user/project/.ai/tools/rye/bash/lib/python` |
+| `{runtime_lib}` | Combined anchor lib + runtime lib | `/home/user/project/.ai/tools/rye/bash/lib` |
 
 **Example:** Python runtime with anchoring:
 
@@ -162,7 +189,7 @@ anchor:
   enabled: true
   markers_any: [__init__.py, pyproject.toml]
   root: tool_dir
-  lib: lib/python
+  lib: lib
   env_paths:
     PYTHONPATH:
       prepend: ["{anchor_path}", "{runtime_lib}"]
@@ -170,8 +197,10 @@ anchor:
 
 When a tool is executed:
 1. Anchor root found at `/project/.ai/tools/rye/bash`
-2. `PYTHONPATH` is set to `/project/.ai/tools/rye/bash:/project/.ai/tools/rye/bash/lib/python`
+2. `PYTHONPATH` is set to `/project/.ai/tools/rye/bash:/project/.ai/tools/rye/bash/lib`
 3. Tool can `import` modules from those directories without package-level imports
+
+> **Note:** The node runtime also uses `env_paths` to prepend `node_modules/.bin` to `PATH`, enabling local binaries to be found without full paths.
 
 ---
 
@@ -186,7 +215,10 @@ Runtimes use two-stage templating to build the final command:
 ```yaml
 env_config:
   interpreter:
-    type: venv_python
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -217,8 +249,8 @@ args:
 | `{system_space}` | System space root | `/usr/local/lib/python3.11/site-packages/rye/rye/.ai` |
 | `{server_config_path}` | MCP server config path | `/project/.ai/tools/mcp/servers/context7.yaml` |
 | `{anchor_path}` | Anchored root | `/project/.ai/tools/rye/bash` |
-| `{runtime_lib}` | Runtime lib directory | `/project/.ai/tools/rye/bash/lib/python` |
-| `{command}` | For bash_runtime: command arg | `ls -la` |
+| `{runtime_lib}` | Runtime lib directory | `/project/.ai/tools/rye/bash/lib` |
+| `{command}` | For bash/bash: command arg | `ls -la` |
 | `{tool_name}` | For MCP runtimes: tool name | `query-docs` |
 
 ### Complete Example: Python Script Runtime
@@ -263,7 +295,9 @@ description: "Ruby runtime — executes Ruby scripts with bundler support"
 
 env_config:
   interpreter:
-    type: venv_python                   # Find Ruby via venv or fallback
+    type: local_binary                  # Find Ruby in local directories or fallback
+    binary: ruby
+    search_paths: [".rbenv/shims", ".rvm/rubies/default/bin"]
     var: RYE_RUBY
     fallback: ruby
   env:
@@ -315,7 +349,7 @@ Create a tool that uses the runtime:
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/ruby_runtime"  # Point to custom runtime
+__executor_id__ = "rye/core/runtimes/ruby/ruby"  # Point to custom runtime
 __category__ = "my/ruby"
 __tool_description__ = "Example Ruby tool"
 
@@ -345,7 +379,7 @@ rye_execute my/ruby_example --name Alice
 ### Python Function Runtime (In-Process)
 
 ```yaml
-# rye/core/runtimes/python_function_runtime
+# rye/core/runtimes/python/function
 # Fastest option: imports Python module and calls execute() directly
 # Use for: pure Python logic, compute-heavy tasks, no subprocess needed
 # Executor: rye/core/primitives/subprocess (uses inline Python code)
@@ -353,13 +387,15 @@ rye_execute my/ruby_example --name Alice
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/python
 description: "Python function runtime - calls execute(params, project_path) in-process"
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -371,7 +407,7 @@ anchor:
   mode: auto
   markers_any: ["__init__.py", "pyproject.toml"]
   root: tool_dir
-  lib: lib/python
+  lib: lib
   env_paths:
     PYTHONPATH:
       prepend: ["{anchor_path}", "{runtime_lib}"]
@@ -416,7 +452,7 @@ config_schema:
 ### Python Script Runtime (Subprocess)
 
 ```yaml
-# rye/core/runtimes/python_script_runtime
+# rye/core/runtimes/python/script
 # Runs Python tool with __main__ entry point
 # Use for: subprocess isolation, long-running tasks, I/O, subprocess commands
 # Executor: rye/core/primitives/subprocess
@@ -424,13 +460,15 @@ config_schema:
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/python
 description: "Python script runtime - runs Python scripts with __main__ entry point"
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -442,7 +480,7 @@ anchor:
   mode: auto
   markers_any: ["__init__.py", "pyproject.toml"]
   root: tool_dir
-  lib: lib/python
+  lib: lib
   env_paths:
     PYTHONPATH:
       prepend: ["{anchor_path}", "{runtime_lib}"]
@@ -485,7 +523,7 @@ config_schema:
 ### Node Runtime (JavaScript/TypeScript)
 
 ```yaml
-# rye/core/runtimes/node_runtime
+# rye/core/runtimes/node/node
 # Runs JavaScript/TypeScript with Node.js
 # Use for: JavaScript tools, TypeScript (via tsx), Node ecosystem
 # Executor: rye/core/primitives/subprocess
@@ -493,13 +531,15 @@ config_schema:
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/node
 description: "Node.js runtime executor - runs JavaScript/TypeScript with Node interpreter resolution"
 
 env_config:
   interpreter:
-    type: node_modules
-    search_paths: [node_modules/.bin]
+    type: local_binary
+    binary: tsx
+    search_paths: ["node_modules/.bin"]
+    search_roots: ["{anchor_path}"]
     var: RYE_NODE
     fallback: node
   env:
@@ -515,6 +555,8 @@ anchor:
   env_paths:
     NODE_PATH:
       prepend: ["{anchor_path}", "{anchor_path}/node_modules"]
+    PATH:
+      prepend: ["{anchor_path}/node_modules/.bin"]
 
 verify_deps:
   enabled: true
@@ -550,7 +592,7 @@ config_schema:
 ### Bash Runtime (Shell)
 
 ```yaml
-# rye/core/runtimes/bash_runtime
+# rye/core/runtimes/bash/bash
 # Executes shell commands via /bin/bash
 # Use for: shell scripts, system administration, CLI composition, jq pipes
 # Executor: rye/core/primitives/subprocess
@@ -558,7 +600,7 @@ config_schema:
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/bash
 description: "Bash runtime - executes shell commands directly"
 
 env_config:
@@ -586,7 +628,7 @@ config_schema:
 ### MCP HTTP Runtime
 
 ```yaml
-# rye/core/runtimes/mcp_http_runtime
+# rye/core/runtimes/mcp/http
 # Calls MCP tools via HTTP/SSE transport
 # Use for: external MCP servers, long-lived HTTP connections, streaming
 # Executor: rye/core/primitives/subprocess (launches connect.py)
@@ -594,12 +636,15 @@ config_schema:
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/mcp
 description: "MCP HTTP runtime - executes MCP tools via HTTP transport"
 
 env_config:
   interpreter:
-    type: venv_python
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -638,7 +683,7 @@ config_schema:
 ### MCP Stdio Runtime
 
 ```yaml
-# rye/core/runtimes/mcp_stdio_runtime
+# rye/core/runtimes/mcp/stdio
 # Spawns MCP servers and calls tools via stdin/stdout
 # Use for: local MCP servers, lightweight stdio transports
 # Executor: rye/core/primitives/subprocess (launches connect.py)
@@ -646,12 +691,15 @@ config_schema:
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/mcp
 description: "MCP stdio runtime - executes MCP tools via stdio transport"
 
 env_config:
   interpreter:
-    type: venv_python
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -690,7 +738,7 @@ config_schema:
 ### State Graph Runtime
 
 ```yaml
-# rye/core/runtimes/state_graph_runtime
+# rye/core/runtimes/state-graph/runtime
 # Walks declarative graph YAML, dispatching rye_execute for each node
 # Use for: declarative workflows, condition branches, node-by-node execution
 # Executor: rye/core/primitives/subprocess
@@ -698,13 +746,15 @@ config_schema:
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/state-graph
 description: "State graph runtime — walks graph YAML tools, dispatching rye_execute for each node"
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -715,7 +765,7 @@ anchor:
   enabled: true
   mode: always
   root: tool_dir
-  lib: lib/python
+  lib: ../python/lib
   env_paths:
     PYTHONPATH:
       prepend: ["{anchor_path}", "{runtime_lib}"]
@@ -727,18 +777,17 @@ verify_deps:
   extensions: [".py", ".yaml", ".yml", ".json"]
   exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
 
-# Args: state_graph_walker.py loads graph YAML and executes node by node
+# Args: walker.py loads graph YAML and executes node by node
 config:
   command: "${RYE_PYTHON}"
   args:
     - "-c"
     - |
       import sys,os,json,importlib.util
-      rl=sys.argv[4]
-      runtime_dir=os.path.dirname(os.path.dirname(rl)) if rl else None
-      if not runtime_dir or not os.path.isdir(runtime_dir):
-          sys.exit("runtime_lib not resolved: "+repr(rl))
-      walker=os.path.join(runtime_dir,"state_graph_walker.py")
+      ap=sys.argv[4]
+      walker=os.path.join(ap,"walker.py")
+      if not os.path.isfile(walker):
+          sys.exit("walker.py not found at: "+repr(walker))
       spec=importlib.util.spec_from_file_location("walker",walker)
       mod=importlib.util.module_from_spec(spec)
       spec.loader.exec_module(mod)
@@ -748,7 +797,7 @@ config:
     - "{tool_path}"
     - "{params_json}"
     - "{project_path}"
-    - "{runtime_lib}"
+    - "{anchor_path}"
   timeout: 600
 
 config_schema:

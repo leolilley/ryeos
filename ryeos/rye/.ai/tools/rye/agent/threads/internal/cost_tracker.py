@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:e1d850d0740d73bebbd866fdb73126e76185afa942259c0d6f66d28e4aff7969:JC_BIC70Zf4A1rjBQNPl6Dwd-qRK-lCWUKHFDP_e1SFon22fEJ6m1HjQCPPqhvylLG6_ffr5JafENWORfRAEAA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:ce92fb6b791a9e95b005ecd2de29a478c98967a85965be49eb8366daffb94f18:r6IAf50fjYTcvtbBRDz073Bf64g6Xp3lnX67KYOVSzfNjRVllTwnzuaa3pPTtfNztEv_E1pjlzOUhDjNXTHvCA==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
 __tool_description__ = "Track LLM costs"
 

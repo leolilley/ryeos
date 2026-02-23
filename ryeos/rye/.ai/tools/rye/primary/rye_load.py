@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:b8ec3c52820424ff399c820e902a46612694ccf67963c316b9c5138c4f6d1e2c:FUQYV-06D3kdKiPmVG_VYo69sVyMbxiCeVwGwFt16-8WiKDq0K8cjvTh1FUM2CXhQxSAxWGCqUerI-vMHdC9DA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:f889ddec6d663449d4de2a50bf290db22cc44298704fdb6049472f9b832d714b:C2ty_VgoBJ1Olrnp6hjYmzQG6yIELRWi4WqTLcNUIEodi2EDkJMAXCpDdd2BYA9dydJg4W5YSgUAhYJTg7PBDg==:9fbfabe975fa5a7f
 """Load item content for inspection."""
 
 import argparse
@@ -14,7 +14,7 @@ from rye.primary_tool_descriptions import (
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/primary"
 __tool_description__ = "Read raw content and metadata of a Rye item for inspection"
 

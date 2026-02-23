@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:262d4d3c10d8bae830f7f10c5ac332b6f0a381b2c46ca66fa8ab99457365827e:Ml-zUV1-HwRZKeYBa5BSYmkcs3wKRQEzQOOjz9KDgUsQnumJ3gzKXs_psb27CKE2MsPSNjkeyR9eHnXeTqSXCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:262d4d3c10d8bae830f7f10c5ac332b6f0a381b2c46ca66fa8ab99457365827e:Ml-zUV1-HwRZKeYBa5BSYmkcs3wKRQEzQOOjz9KDgUsQnumJ3gzKXs_psb27CKE2MsPSNjkeyR9eHnXeTqSXCA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: templating-systems

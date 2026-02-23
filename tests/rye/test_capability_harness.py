@@ -44,8 +44,8 @@ spec.loader.exec_module(safety_harness_module)
 SafetyHarness = safety_harness_module.SafetyHarness
 HarnessAction = safety_harness_module.HarnessAction
 
-# Import markdown_xml parser
-PARSER_PATH = Path(__file__).parent.parent.parent / "rye" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown_xml.py"
+# Import markdown/xml parser
+PARSER_PATH = Path(__file__).parent.parent.parent / "rye" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
 parser_spec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 markdown_xml_module = importlib.util.module_from_spec(parser_spec)
 parser_spec.loader.exec_module(markdown_xml_module)

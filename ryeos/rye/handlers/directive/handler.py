@@ -65,7 +65,7 @@ class DirectiveHandler:
     def parse(self, file_path: Path) -> Dict[str, Any]:
         """Parse directive file."""
         content = file_path.read_text(encoding="utf-8")
-        return self.parser_router.parse("markdown_xml", content)
+        return self.parser_router.parse("markdown/xml", content)
 
     def validate(self, file_path: Path) -> Dict[str, Any]:
         """Validate directive structure."""

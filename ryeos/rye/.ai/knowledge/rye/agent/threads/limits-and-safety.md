@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:0a99e942beb21815d0cc6d68b1f25ce2a45eeb1a72f187c8952985297603eda8:czPQf7mOpmtbOVk6spBfePH6dQJmoTV2Dmhfuv1PwpCrd8x3AXmXoyQlBTm8TNVWfePdxO1hVBwusbGlul3wDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:0a99e942beb21815d0cc6d68b1f25ce2a45eeb1a72f187c8952985297603eda8:czPQf7mOpmtbOVk6spBfePH6dQJmoTV2Dmhfuv1PwpCrd8x3AXmXoyQlBTm8TNVWfePdxO1hVBwusbGlul3wDA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: limits-and-safety

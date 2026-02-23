@@ -110,7 +110,7 @@ Create `.ai/tools/word_count.py`:
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = ""
 __tool_description__ = "Count words in a given text or file"
 
@@ -159,7 +159,7 @@ def execute(params: dict, project_path: str) -> dict:
 
 **Key parts of a Python tool:**
 
-- **`__executor_id__`** — points to `rye/core/runtimes/python_script_runtime`, which resolves `.venv`, sets `PYTHONPATH`, and runs the script.
+- **`__executor_id__`** — points to `rye/core/runtimes/python/script`, which resolves `.venv`, sets `PYTHONPATH`, and runs the script.
 - **`CONFIG_SCHEMA`** — JSON Schema declaring input parameters.
 - **`execute(params, project_path)`** — entry point called by the runtime. Receives validated params and project root.
 
@@ -174,7 +174,7 @@ Create `.ai/tools/text_stats.js`:
 
 const __version__ = "1.0.0";
 const __tool_type__ = "javascript";
-const __executor_id__ = "rye/core/runtimes/node_runtime";
+const __executor_id__ = "rye/core/runtimes/node/node";
 const __category__ = "";
 const __tool_description__ = "Analyze text statistics and reading metrics";
 
@@ -242,7 +242,7 @@ if (typeof module !== "undefined" && module.exports) {
 
 **Key parts of a JavaScript tool:**
 
-- **`__executor_id__`** — points to `rye/core/runtimes/node_runtime`, which finds `node` or uses `.bin/node`, and runs the script.
+- **`__executor_id__`** — points to `rye/core/runtimes/node/node`, which finds `node` or uses `.bin/node`, and runs the script.
 - **`CONFIG_SCHEMA`** — same JSON Schema format as Python.
 - **`execute(params, projectPath)`** — async function receiving validated params and project root.
 
@@ -251,7 +251,7 @@ if (typeof module !== "undefined" && module.exports) {
 When you call `rye_execute(item_type="tool", item_id="word_count", ...)`:
 
 1. **Resolution** — Rye OS loads the tool script and reads `__executor_id__`.
-2. **Runtime Lookup** — Finds the runtime config (e.g., `python_script_runtime.yaml`).
+2. **Runtime Lookup** — Finds the runtime config (e.g., `python/script.yaml`).
 3. **Environment Setup** — Resolves interpreter (`.venv/bin/python` or `node`), sets env vars, prepends `PYTHONPATH` or `NODE_PATH`.
 4. **Execution** — Runs the command template with your params: `python word_count.py --params '{"text":"..."}' --project-path /path`.
 5. **Result** — Collects stdout/stderr, parses the returned dict, and returns to the agent.

@@ -14,7 +14,7 @@ The executor chain is how Rye routes a tool call from an AI agent down to an OS-
 ## The Layers
 
 ```
-Layer 3: Tool          __executor_id__ = "rye/core/runtimes/python_script_runtime"
+Layer 3: Tool          __executor_id__ = "rye/core/runtimes/python/script"
                                 │
 Layer 2: Runtime       __executor_id__ = "rye/core/primitives/subprocess"
                                 │
@@ -34,9 +34,9 @@ PRIMITIVE_MAP = {
 
 ### Layer 2: Runtimes
 
-Runtimes are YAML configs in `.ai/tools/rye/core/runtimes/`. They point to a primitive and add configuration: interpreter resolution via `ENV_CONFIG`, command templates, timeout, anchor setup, and dependency verification. The `state_graph_runtime` is a special runtime that walks declarative graph YAML tools — it resolves state graph definitions and orchestrates node execution rather than running a single script.
+Runtimes are YAML configs in `.ai/tools/rye/core/runtimes/`. They point to a primitive and add configuration: interpreter resolution via `ENV_CONFIG`, command templates, timeout, anchor setup, and dependency verification. The `state-graph/runtime` is a special runtime that walks declarative graph YAML tools — it resolves state graph definitions and orchestrates node execution rather than running a single script.
 
-Example — `python_script_runtime.yaml`:
+Example — `python/script` runtime:
 
 ```yaml
 tool_type: runtime
@@ -44,8 +44,10 @@ executor_id: rye/core/primitives/subprocess
 
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
 
@@ -65,7 +67,7 @@ config:
 Tools are Python scripts, shell scripts, or other executables with metadata headers. They point to a runtime:
 
 ```python
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 ```
 
 ## Chain Building Algorithm
@@ -95,17 +97,17 @@ Executing the bash tool `rye/bash/bash`:
 ```
 Step 1: Resolve "rye/bash/bash"
   → .ai/tools/rye/bash/bash.py (system space)
-  → __executor_id__ = "rye/core/runtimes/python_script_runtime"
+  → __executor_id__ = "rye/core/runtimes/python/script"
 
-Step 2: Resolve "rye/core/runtimes/python_script_runtime"
-  → .ai/tools/rye/core/runtimes/python_script_runtime.yaml (system space)
+Step 2: Resolve "rye/core/runtimes/python/script"
+  → .ai/tools/rye/core/runtimes/python/script.yaml (system space)
   → executor_id = "rye/core/primitives/subprocess"
 
 Step 3: Resolve "rye/core/primitives/subprocess"
   → Matches PRIMITIVE_MAP key (no file needed)
   → executor_id = None (terminal)
 
-Chain: [bash.py, python_script_runtime.yaml, subprocess primitive]
+Chain: [bash.py, python/script.yaml, subprocess primitive]
 ```
 
 ## Chain Validation
@@ -174,7 +176,7 @@ When active, the anchor system:
 
 This allows tools with multi-file dependencies (e.g., a tool with a `lib/` directory) to have their entire dependency tree verified and their module paths set up correctly.
 
-When `mode: always` is set, the anchor activates unconditionally — marker files are not checked. This is used by runtimes like `state_graph_runtime` where the tool being executed (a graph YAML) won't have marker files in its directory, but the runtime still needs its `lib/python` path on `PYTHONPATH`.
+When `mode: always` is set, the anchor activates unconditionally — marker files are not checked. This is used by runtimes like `state-graph/runtime` where the tool being executed (a graph YAML) won't have marker files in its directory, but the runtime still needs its `lib/python` path on `PYTHONPATH`.
 
 ## Execution Config Building
 
@@ -225,7 +227,7 @@ Lockfile format (`{tool_id}@{version}.lock.json`):
   "resolved_chain": [
     { "item_id": "rye/bash/bash", "space": "system", "integrity": "a1b2c3..." },
     {
-      "item_id": "rye/core/runtimes/python_script_runtime",
+      "item_id": "rye/core/runtimes/python/script",
       "space": "system",
       "integrity": "d4e5f6..."
     }

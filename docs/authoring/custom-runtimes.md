@@ -22,11 +22,11 @@ A runtime is a YAML file that describes:
 ### Minimal Example: Go Runtime
 
 ```yaml
-# .ai/tools/rye/core/runtimes/go_runtime.yaml
+# .ai/tools/rye/core/runtimes/go/go.yaml
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/go
 description: "Go runtime - executes Go binaries"
 
 env_config:
@@ -53,39 +53,53 @@ config_schema:
 
 ## How to Configure Interpreter Resolution
 
-Interpreter resolution finds the language's executable. There are 4 built-in types:
+Interpreter resolution finds the language's executable. There are 3 built-in types:
 
-### Type 1: Virtual Environment (`venv_python`)
+### Type 1: Local Binary (`local_binary`)
 
-For Python environments:
+Searches for a binary in local project paths (virtual environments, node_modules, etc.):
 
-```yaml
-env_config:
-  interpreter:
-    type: venv_python
-    venv_path: .venv              # Relative to project root
-    var: RYE_PYTHON               # Environment variable to set
-    fallback: python3             # Fallback if .venv not found
-```
-
-**Used by:** `python_function_runtime`, `python_script_runtime`, `state_graph_runtime`
-
-### Type 2: Node Modules (`node_modules`)
-
-For Node.js environments with node_modules:
+**Python example:**
 
 ```yaml
 env_config:
   interpreter:
-    type: node_modules
-    search_paths: [node_modules/.bin]   # Relative to anchor
-    var: RYE_NODE                       # Environment variable
-    fallback: node                      # Fallback
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
+    var: RYE_PYTHON
 ```
 
-**Used by:** `node_runtime`
+**Node.js example:**
 
-### Type 3: Static Environment (`env`)
+```yaml
+env_config:
+  interpreter:
+    type: local_binary
+    binary: tsx
+    search_paths: ["node_modules/.bin"]
+    search_roots: ["{anchor_path}"]
+    var: RYE_NODE
+```
+
+**Used by:** `rye/core/runtimes/python/function`, `rye/core/runtimes/python/script`, `rye/core/runtimes/node/node`
+
+### Type 2: System Binary (`system_binary`)
+
+Resolves a binary from the system PATH using `which <binary>`:
+
+```yaml
+env_config:
+  interpreter:
+    type: system_binary
+    binary: ruby
+    var: RYE_RUBY
+```
+
+**Used by:** system-installed language runtimes
+
+### Static Environment (`env`)
 
 For simple pass-through or static values:
 
@@ -97,11 +111,21 @@ env_config:
     RUST_BACKTRACE: "1"
 ```
 
-**Used by:** `bash_runtime`, simple tools
+**Used by:** `bash/bash`, simple tools
 
-### Type 4: Custom Script (extend the system)
+### Type 3: Command (`command`)
 
-For advanced needs, write a custom interpreter resolver. This is beyond this guide — see [Architecture](../internals/architecture.md#layer-2-rye-mcp-server) for `EnvResolver` details.
+Resolves an interpreter by running a command and capturing its output:
+
+```yaml
+env_config:
+  interpreter:
+    type: command
+    resolve_cmd: ["pyenv", "which", "python"]
+    var: RYE_PYTHON
+```
+
+**Used by:** advanced setups with version managers (pyenv, rbenv, nvm, etc.)
 
 ---
 
@@ -117,7 +141,7 @@ anchor:
   mode: auto                              # 'auto' (search up) or 'always' (tool dir)
   markers_any: [package.json, Gemfile]   # Stop at first marker found
   root: tool_dir                          # 'tool_dir' is standard
-  lib: lib/ruby                           # Relative path for runtime libs
+  lib: lib                                # Relative path for runtime libs
   cwd: "{anchor_path}"                    # Optional: change working dir
   env_paths:
     RUBYLIB:
@@ -134,7 +158,7 @@ anchor:
   mode: auto
   markers_any: [Gemfile, Gemfile.lock]
   root: tool_dir
-  lib: lib/ruby
+  lib: lib
 ```
 
 **Process:**
@@ -155,10 +179,10 @@ anchor:
   enabled: true
   mode: always
   root: tool_dir
-  lib: lib/state_graph
+  lib: lib
 ```
 
-**Used by:** `state_graph_runtime` (strict graph isolation)
+**Used by:** `state-graph/runtime` (strict graph isolation)
 
 ### Anchor Path Variables
 
@@ -187,21 +211,21 @@ Let's create a complete Ruby runtime for educational purposes.
 
 ### Step 1: Create the Runtime YAML
 
-Create `.ai/tools/rye/core/runtimes/ruby_runtime.yaml`:
+Create `.ai/tools/rye/core/runtimes/ruby/ruby.yaml`:
 
 ```yaml
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/ruby
 description: "Ruby runtime - executes Ruby scripts with bundler support"
 
 env_config:
   # Ruby interpreter resolution
   interpreter:
-    type: venv_python              # Fallback to system ruby for now
+    type: system_binary
+    binary: ruby
     var: RYE_RUBY
-    fallback: ruby
   
   # Environment setup
   env:
@@ -213,7 +237,7 @@ anchor:
   mode: auto                        # Walk up looking for Gemfile
   markers_any: [Gemfile, Gemfile.lock]
   root: tool_dir
-  lib: lib/ruby
+  lib: lib
   cwd: "{anchor_path}"              # Execute from anchor root
   env_paths:
     RUBYLIB:
@@ -304,7 +328,7 @@ Create `.ai/tools/my/ruby_example.yaml`:
 tool_id: my/ruby_example
 tool_type: ruby
 version: "1.0.0"
-executor_id: rye/core/runtimes/ruby_runtime
+executor_id: rye/core/runtimes/ruby/ruby
 category: my/examples
 description: "Ruby greeting example"
 ```
@@ -313,7 +337,7 @@ description: "Ruby greeting example"
 
 ```bash
 # Sign the runtime (one-time)
-rye_sign rye/core/runtimes/ruby_runtime
+rye_sign rye/core/runtimes/ruby/ruby
 
 # Sign the tool
 rye_sign my/ruby_example
@@ -343,7 +367,7 @@ A tool references a custom runtime via `__executor_id__`:
 # .ai/tools/my/custom_tool.py
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/ruby_runtime"  # Point to custom runtime
+__executor_id__ = "rye/core/runtimes/ruby/ruby"  # Point to custom runtime
 __category__ = "my/tools"
 __tool_description__ = "Tool using Ruby runtime"
 
@@ -358,12 +382,12 @@ def execute(params: dict, project_path: str) -> dict:
 tool_id: my/custom_tool
 tool_type: yaml
 version: "1.0.0"
-executor_id: rye/core/runtimes/ruby_runtime
+executor_id: rye/core/runtimes/ruby/ruby
 category: my/tools
 description: "YAML tool using Ruby runtime"
 ```
 
-The system resolves the executor ID (`rye/core/runtimes/ruby_runtime`) and uses the runtime's configuration to build the command.
+The system resolves the executor ID (`rye/core/runtimes/ruby/ruby`) and uses the runtime's configuration to build the command.
 
 ---
 
@@ -374,10 +398,10 @@ The system resolves the executor ID (`rye/core/runtimes/ruby_runtime`) and uses 
 A runtime can itself use another runtime as its executor:
 
 ```yaml
-# .ai/tools/rye/core/runtimes/jupyter_runtime.yaml
+# .ai/tools/rye/core/runtimes/jupyter/jupyter.yaml
 version: "1.0.0"
-executor_id: rye/core/runtimes/python_script_runtime  # Chain!
-category: rye/core/runtimes
+executor_id: rye/core/runtimes/python/script  # Chain!
+category: rye/core/runtimes/jupyter
 description: "Jupyter notebook executor"
 
 config:
@@ -399,9 +423,11 @@ First-stage expansion (before execution):
 ```yaml
 env_config:
   interpreter:
-    type: venv_python
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: MY_PYTHON
-    fallback: python3
 
 config:
   command: "${MY_PYTHON}"      # Expanded: /path/to/.venv/bin/python3
@@ -440,7 +466,7 @@ config:
 
 ```python
 # .ai/tools/test/runtime_test.py
-__executor_id__ = "rye/core/runtimes/ruby_runtime"
+__executor_id__ = "rye/core/runtimes/ruby/ruby"
 __tool_type__ = "python"
 __category__ = "test/runtime"
 

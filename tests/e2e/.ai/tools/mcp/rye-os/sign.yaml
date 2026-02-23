@@ -1,6 +1,6 @@
 # rye:validated:2026-02-05T00:23:43Z:placeholder
 tool_type: mcp
-executor_id: rye/core/runtimes/mcp_stdio_runtime
+executor_id: rye/core/runtimes/mcp/stdio
 category: mcp/rye-os
 version: 1.0.0
 description: Validate and sign an item file

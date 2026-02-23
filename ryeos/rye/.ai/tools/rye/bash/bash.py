@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:c47c9440e20633b4a22b2d386a7afdcc3ebe865f467974453b3d0f69e47722cd:XKOsMLnHWq_9aMAGTuMl6eP0sFyPpmeQISfvA_hnsdkwTciwf2TBxcw99TlPr9qtBIxH9TZyIMIPtkO7PTZQDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:0d26dc604cf0ceddb70ba92891972bdc65402f1abff4f3ab43d1a04d1d25b83f:baAggAZFTLLIjILk-fZsyV3YkJ64Bm9ee_XbRvLT8eXRWF-z-xndiEHAJfchLdwVwh_Svo8QvR2OtYD9mnzZCA==:9fbfabe975fa5a7f
 """Execute shell commands."""
 
 import argparse
@@ -11,7 +11,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/bash"
 __tool_description__ = "Execute shell commands"
 

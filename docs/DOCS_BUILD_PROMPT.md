@@ -125,13 +125,13 @@ rye/core/
     knowledge/knowledge_extractor.yaml
     tool/tool_extractor.yaml
   parsers/                          # File parsers
-    markdown_frontmatter.py, markdown_xml.py, python_ast.py, yaml.py
+    markdown/frontmatter.py, markdown/xml.py, python/ast.py, yaml/yaml.py, javascript/javascript.py
   primitives/                       # Primitive configs
     subprocess.yaml, http_client.yaml
   runtimes/                         # Execution runtimes
-    python_script_runtime.yaml, python_function_runtime.yaml,
-    node_runtime.yaml, bash_runtime.yaml,
-    mcp_stdio_runtime.yaml, mcp_http_runtime.yaml
+    python/script.yaml, python/function.yaml,
+    node/node.yaml, bash/bash.yaml,
+    mcp/stdio.yaml, mcp/http.yaml
   sinks/                            # Output sinks
     file_sink.py, null_sink.py, websocket_sink.py
   system/system.py                  # System info tool

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:7d8ee61da36f497d21a5a1b23b721fc8e9f3df61ae87845a134c3f50e1bf45fe:0qAARsG-5oi15vXgmjg6xFaRc37UDamcMJmubxg-KpBshdACT4SoFhJc58d2WlSqM1JgZc2Sxk3qXjUZEtJPDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:a950dea7705e157f3b189ab72bba228f33185890bd3f2d6828a52d47ba34a890:JKCy97uzSG_LuHbyNT0nWwObdOAprG_esHiCO8ezkTkMAom7k90jQ9lrFgzEIzFrug4lsWYEcLY_5VNCo89kBg==:9fbfabe975fa5a7f
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -37,7 +37,7 @@ Actions:
 
 __version__ = "1.1.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/core/registry"
 __tool_description__ = "Registry tool for auth and item management"
 

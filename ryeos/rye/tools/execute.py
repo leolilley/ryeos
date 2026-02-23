@@ -143,7 +143,7 @@ class ExecuteTool:
         verify_item(file_path, ItemType.DIRECTIVE, project_path=Path(project_path) if project_path else None)
 
         content = file_path.read_text(encoding="utf-8")
-        parsed = self.parser_router.parse("markdown_xml", content)
+        parsed = self.parser_router.parse("markdown/xml", content)
 
         if "error" in parsed:
             return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
@@ -294,7 +294,7 @@ class ExecuteTool:
         verify_item(file_path, ItemType.KNOWLEDGE, project_path=Path(project_path) if project_path else None)
 
         content = file_path.read_text(encoding="utf-8")
-        parsed = self.parser_router.parse("markdown_frontmatter", content)
+        parsed = self.parser_router.parse("markdown/frontmatter", content)
 
         if "id" not in parsed:
             parsed["id"] = item_id

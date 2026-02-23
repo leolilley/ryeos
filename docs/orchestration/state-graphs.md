@@ -13,7 +13,7 @@ State graphs are a declarative way to define multi-step workflows as YAML tool f
 
 ## Core Concept
 
-A state graph is a YAML tool file with `tool_type: graph` and `executor_id: rye/core/runtimes/state_graph_runtime`. The runtime reads the graph definition, starts at the entry node, executes each node's action, applies state mutations, and follows edges to the next node.
+A state graph is a YAML tool file with `tool_type: graph` and `executor_id: rye/core/runtimes/state-graph/runtime`. The runtime reads the graph definition, starts at the entry node, executes each node's action, applies state mutations, and follows edges to the next node.
 
 Key properties:
 
@@ -29,7 +29,7 @@ A graph tool YAML has the same structure as any Rye tool — `config_schema` for
 ```yaml
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state_graph_runtime
+executor_id: rye/core/runtimes/state-graph/runtime
 category: workflows/example
 description: "Example graph tool"
 
@@ -129,12 +129,12 @@ Items in `over` can be dicts, enabling dotted access: if `task` is `{text: "..."
 State graphs follow the same execution chain pattern as any Rye tool:
 
 ```
-graph tool YAML  →  state_graph_runtime  →  subprocess primitive
+graph tool YAML  →  state-graph/runtime  →  subprocess primitive
 (nodes/edges)       (walks graph,              (runs the walker
                      dispatches rye_execute)     Python script)
 ```
 
-This mirrors the standard tool chain — e.g., `my_tool.py → python_function_runtime → subprocess`. The runtime YAML uses an inline `-c` script that locates `state_graph_walker.py` via `{runtime_lib}` (the anchor lib path).
+This mirrors the standard tool chain — e.g., `my_tool.py → python/function → subprocess`. The runtime YAML uses an inline `-c` script that locates `walker.py` via `{runtime_lib}` (the anchor lib path).
 
 The walker:
 
@@ -356,7 +356,7 @@ A complete graph that counts Python files, counts total lines, and returns the r
 ```yaml
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state_graph_runtime
+executor_id: rye/core/runtimes/state-graph/runtime
 category: workflows/test
 description: "Gather project stats: count Python files, count total lines, produce summary"
 
@@ -464,8 +464,8 @@ Monitor progress by querying the thread registry or checking the persisted state
 
 | Component           | File                                                         |
 | ------------------- | ------------------------------------------------------------ |
-| Graph walker        | `.ai/tools/rye/core/runtimes/state_graph_walker.py`          |
-| Runtime YAML        | `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml`       |
+| Graph walker        | `.ai/tools/rye/core/runtimes/walker.py`          |
+| Runtime YAML        | `.ai/tools/rye/core/runtimes/state-graph/runtime.yaml`       |
 | Interpolation       | `.ai/tools/rye/agent/threads/loaders/interpolation.py`       |
 | Condition evaluator | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` |
 | Thread registry     | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` |

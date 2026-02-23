@@ -66,10 +66,11 @@ Parse different file formats into structured metadata. Used by the search and ex
 
 | Parser | File Types | Extracts |
 | --- | --- | --- |
-| `markdown_xml` | Directive `.md` files | XML metadata blocks (model, limits, permissions, hooks, inputs, outputs) |
-| `markdown_frontmatter` | Knowledge `.md` files | YAML frontmatter (id, title, category, tags, version) |
-| `python_ast` | Tool `.py` files | Dunder metadata (`__version__`, `__tool_type__`, `__category__`, etc.) and `CONFIG_SCHEMA` |
-| `yaml` | Tool `.yaml` files | Top-level keys (tool_id, tool_type, executor_id, parameters) |
+| `markdown/xml` | Directive `.md` files | XML metadata blocks (model, limits, permissions, hooks, inputs, outputs) |
+| `markdown/frontmatter` | Knowledge `.md` files | YAML frontmatter (id, title, category, tags, version) |
+| `python/ast` | Tool `.py` files | Dunder metadata (`__version__`, `__tool_type__`, `__category__`, etc.) and `CONFIG_SCHEMA` |
+| `yaml/yaml` | Tool `.yaml` files | Top-level keys (tool_id, tool_type, executor_id, parameters) |
+| `javascript/javascript` | Tool `.js`/`.ts`/`.mjs`/`.cjs` | `export const` metadata (`__version__`, `__tool_type__`, etc.) and `CONFIG_SCHEMA` |
 
 ---
 
@@ -91,12 +92,12 @@ YAML configs defining how each tool type is executed:
 
 | Runtime | Language/Protocol | How It Runs |
 | --- | --- | --- |
-| `python_script_runtime` | Python | Subprocess: `python tool.py --params '{}' --project-path /path` |
-| `python_function_runtime` | Python | In-process: import module, call `execute(params, project_path)` |
-| `node_runtime` | JavaScript | Subprocess: `node tool.js` |
-| `bash_runtime` | Bash | Subprocess: `bash tool.sh` |
-| `mcp_stdio_runtime` | MCP (stdio) | Subprocess: launch MCP server, call tool via stdio |
-| `mcp_http_runtime` | MCP (HTTP) | HTTP: connect to MCP server, call tool via Streamable HTTP |
+| `python/script` | Python | Subprocess: `python tool.py --params '{}' --project-path /path` |
+| `python/function` | Python | In-process: import module, call `execute(params, project_path)` |
+| `node/node` | JavaScript | Subprocess: `node tool.js` |
+| `bash/bash` | Bash | Subprocess: `bash tool.sh` |
+| `mcp/stdio` | MCP (stdio) | Subprocess: launch MCP server, call tool via stdio |
+| `mcp/http` | MCP (HTTP) | HTTP: connect to MCP server, call tool via Streamable HTTP |
 
 The `lib/python/module_loader.py` handles dynamic Python module loading for thread tools — it imports modules relative to an anchor path so thread components can load each other without package-level imports.
 

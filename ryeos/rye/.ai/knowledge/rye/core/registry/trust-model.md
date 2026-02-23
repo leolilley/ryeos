@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:7e18a2739cc17cef317dc9cbf0b6316e03d3bf07f29a424535a94dcb4b771c14:Yq3pFPseicouRTCPDchggdrBExt109gH9AqBslFkcA4EqGA-YGAEGQg9wan4JMUQuH-llC6FSeQi9ISHRgnHBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:bfa3544c2f5f9b246b876fc757598f5eb2b3eaeea6ff92a9026555e8f921a84c:V7KmI1RaziiB4_wf2hPtHNsdw2VKQADEXa25dNnp1nNtJorn5gQ844H43eNk8q5p4cUEVuta2koFVJBa7Q1kDA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: trust-model
@@ -227,7 +227,7 @@ for element in chain:
 Example chain:
 
 ```
-my-tool.py → python_script_runtime.yaml → subprocess.yaml
+my-tool.py → python/script.yaml → subprocess.yaml
 ```
 
 All three must be signed and verified before `my-tool.py` executes.

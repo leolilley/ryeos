@@ -65,7 +65,7 @@ class KnowledgeHandler:
     def parse(self, file_path: Path) -> Dict[str, Any]:
         """Parse knowledge entry file."""
         content = file_path.read_text(encoding="utf-8")
-        return self.parser_router.parse("markdown_frontmatter", content)
+        return self.parser_router.parse("markdown/frontmatter", content)
 
     def validate(self, file_path: Path) -> Dict[str, Any]:
         """Validate knowledge entry structure."""

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:5dbe02d92b14ccbc7867d989fd1fed17022a2b6d85a5876ec6034fbe55530c66:yRnY1IGY1i-kseFPXBbXKI3L-Br9R3LyhMfyu74zaKpNdGBL3lNdQNVF1HKjL8fl3WHrZGHepT7bn79d2CGPDw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:5dbe02d92b14ccbc7867d989fd1fed17022a2b6d85a5876ec6034fbe55530c66:yRnY1IGY1i-kseFPXBbXKI3L-Br9R3LyhMfyu74zaKpNdGBL3lNdQNVF1HKjL8fl3WHrZGHepT7bn79d2CGPDw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: input-interpolation

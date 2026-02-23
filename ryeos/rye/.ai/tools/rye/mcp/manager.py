@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:fc35a936e8acc67ac73d3fcaef8d869746e037b6bf1df29a6dd81b98c119c40e:2nJRUD8iAiWhCaqh5TSkGlqRchtAr2h38HmOTJVHIcZkrEVIKWUGTPDeaNRr21Qeey8MeLLq8hXfF_f1YEC_Dg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:48305b56d45e9292c673f8a18ed4a4001bab02d5984007d088d32b8b3241fd9b:-AO_24c_VW2-Xy-hf-3pKa_cd81lRLEnv8Od0zdi5hugmVs-850i1sNXkMdrHLWT0Aub-LvANWxC6OX3i8WBCA==:9fbfabe975fa5a7f
 """
 MCP Manager Tool
 
@@ -14,7 +14,7 @@ Usage:
 
 __tool_type__ = "python"
 __version__ = "1.0.0"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/mcp"
 __tool_description__ = "MCP manager - add, list, refresh, and remove MCP server configurations"
 
@@ -119,9 +119,9 @@ def create_tool_config(
     import yaml
 
     runtime = (
-        "rye/core/runtimes/mcp_http_runtime"
+        "rye/core/runtimes/mcp/http"
         if transport == "http"
-        else "rye/core/runtimes/mcp_stdio_runtime"
+        else "rye/core/runtimes/mcp/stdio"
     )
 
     # Build server config path template based on scope

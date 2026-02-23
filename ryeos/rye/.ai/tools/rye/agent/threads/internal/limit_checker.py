@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:c5b9c6c85fb45c70c2bbdebbbafcccf5df700e07d1d248789f6e380554fcf140:VSKKhkukc_-RBiiVMZFsGhO0aWx7GTVkmG5xLu9JBojw5veHuEwo7cwkMCR-LZlqesYCzCUP__L3rkjMjj3tDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:ed1be97a724eab8eceb3ff5a90515a169070ece81bea65b596b178b8c9f03c0b:fEWhSgdSQzAcCtVYoeUUbvWAGcVDseZZMbMtP3fLbsvziYI-mLw4yZw5E6DUYpEKRlz9ZcGA5QYDF-0kct5sDg==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
 __tool_description__ = "Check thread limits"
 

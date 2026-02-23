@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:081921dabd977de02cca04a8e58070f9803c15cc9876420e94bbd6e01d7f9c17:LC1dgm3ZzKcULSR_4Xa2VR9PtcMkHe-_uY8Bpk2XduQ1sN5GdGCAKhw9SaYHfcaxUPWH_JNbjVbXa50y9dPBBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:081921dabd977de02cca04a8e58070f9803c15cc9876420e94bbd6e01d7f9c17:LC1dgm3ZzKcULSR_4Xa2VR9PtcMkHe-_uY8Bpk2XduQ1sN5GdGCAKhw9SaYHfcaxUPWH_JNbjVbXa50y9dPBBg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: load-semantics

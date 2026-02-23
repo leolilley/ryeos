@@ -10,7 +10,7 @@ version: "1.0.0"
 # Bash Tool
 
 **Namespace:** `rye/bash/`
-**Runtime:** `python_script_runtime`
+**Runtime:** `python/script`
 
 Execute shell commands via `subprocess.run()` with `shell=True`. Commands run in the project root by default and are sandboxed to the project workspace.
 

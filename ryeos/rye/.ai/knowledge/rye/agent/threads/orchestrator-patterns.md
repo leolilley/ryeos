@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T06:57:41Z:5abb3dd1e337aa733056658f834d4e3588ff51c03e39ef9581dda5949056cc9c:VImJy3v1nCS46WtSY6CVgWwCe2zqr7YcsiL8AA8LsVPB9RBqF8fsFlkPMUfpWhwo-WDRaFet-jwabggwtFFaDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:be6cf4cbb868dd2dd114d3b5997062ce4a701ab4baee4836800948c518bf8170:qLiGVKYFfcpDoldyIPtMC7cVw4_eDLeI3rl_G0KTaq7qEY9a5OCne4AT8metI8LyHTjdwTeoFfDmf5sIi_-JAQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: orchestrator-patterns

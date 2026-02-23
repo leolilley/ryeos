@@ -21,7 +21,7 @@ These are the tools you'll use most often — file I/O, shell access, web, MCP, 
 
 ### File System (`rye/file-system/`)
 
-Python scripts for file operations, all executed via `python_script_runtime`.
+Python scripts for file operations, all executed via `python/script`.
 
 | Tool       | Item ID                      | Description                                      |
 | ---------- | ---------------------------- | ------------------------------------------------ |
@@ -236,10 +236,11 @@ These tools power the system internally. You won't call them directly, but they'
 
 Parse different file formats into structured metadata:
 
-- **markdown_xml** — Parse directive files (markdown + XML metadata)
-- **markdown_frontmatter** — Parse knowledge files (markdown + YAML frontmatter)
-- **python_ast** — Parse Python tool metadata via AST introspection
-- **yaml** — Parse YAML tool configs
+- **markdown/xml** — Parse directive files (markdown + XML metadata)
+- **markdown/frontmatter** — Parse knowledge files (markdown + YAML frontmatter)
+- **python/ast** — Parse Python tool metadata via AST introspection
+- **yaml/yaml** — Parse YAML tool configs
+- **javascript/javascript** — Parse JS/TS tool metadata via regex extraction
 
 ### Extractors (`rye/core/extractors/`)
 
@@ -255,12 +256,12 @@ YAML configs defining how each language/protocol is executed:
 
 | Runtime                        | Description                       |
 | ------------------------------ | --------------------------------- |
-| `python_script_runtime.yaml`   | Run Python scripts via subprocess |
-| `python_function_runtime.yaml` | Run Python functions in-process   |
-| `node_runtime.yaml`            | Run Node.js scripts               |
-| `bash_runtime.yaml`            | Run bash scripts                  |
-| `mcp_stdio_runtime.yaml`       | Connect to MCP servers via stdio  |
-| `mcp_http_runtime.yaml`        | Connect to MCP servers via HTTP   |
+| `python/script.yaml`           | Run Python scripts via subprocess |
+| `python/function.yaml`         | Run Python functions in-process   |
+| `node/node.yaml`               | Run Node.js scripts               |
+| `bash/bash.yaml`               | Run bash scripts                  |
+| `mcp/stdio.yaml`               | Connect to MCP servers via stdio  |
+| `mcp/http.yaml`                | Connect to MCP servers via HTTP   |
 
 The `lib/python/module_loader.py` handles dynamic Python module loading for thread tools.
 

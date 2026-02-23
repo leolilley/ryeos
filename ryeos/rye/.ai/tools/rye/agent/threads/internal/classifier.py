@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:ade43de314f8a1205ae0ceb8e5ecfa4fe355e93342c69676467012e357ea2691:HxJovyLIcBkGi2yug1QnKTJH5rQi3aLmX9xU-2BzrLXF_isvYp25VfsMMwGTB-B4sAhU26T78rbrTXRMynYNAg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:495534590b2385b41cb7eaafc6402178290e208670ca07fd8a10eedef9476cea:89ZxeY-JjfYNRs-HEdiy-6h6yHHoixZN-sfCj1iIJzDts5j7fBgT5cxe3yRkQ6EZACCA3T6y5ToVz_vWi9AkDw==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
 __tool_description__ = "Classify errors using config patterns"
 

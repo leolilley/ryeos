@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:2e3e1d770db107710650767f17a0cc0a7a1dddedd5cc20454e4ffca87881c04d:LNrx0rcLsME_MPrZyTJMIYqrbX7eixbNZ__vsiXwPOaRdrQc6ybFm1KS6V0caDyOsxJGD054V-DL6vX8iPnYCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:19b5910b1b88ea8801cbd0af07f01f00e4b8c2f264cdf3dc30579fdecd0d0f02:NjrTOuir8j1KgZtcniNIERecuUYwtS6tPpu2ZeY-cMfkvYP3WRS-kT8r1zBaJUz5X6lIaUZj50w4TEwuRncXAg==:9fbfabe975fa5a7f
 """Create or overwrite a file, invalidating line ID cache."""
 
 import argparse
@@ -9,7 +9,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
 __tool_description__ = "Create or overwrite one or more files"
 

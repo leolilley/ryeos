@@ -1,8 +1,8 @@
-# rye:signed:2026-02-22T09:00:56Z:0bfd7962efc50fff61ecbcf8bb2449c98252584eab2b6ad89e9b1377579e1346:uApJYHkD1SXkzk5CODXqr9YwC3hYfh742v-V9LHb20El5h0icYtgCaRQS79GjtT1N4Bz0nNmonsxq_eLNBTJDQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:497deaa35aa7a9ee21303ff89e4e86fa94f27f05f4d4b71966e6178fca0e95d0:EMFztw1P4l6x0iB2P7FWWOmYL-oCRC1SFbgQuT6AwioaR7LtGBLE5IIA2Z7Z9g3gtwXGS_Km_pZTEZxtrfb6Dw==:9fbfabe975fa5a7f
 # internal/thread_chain_search.py
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
 __tool_description__ = "Search across all threads in a continuation chain"
 

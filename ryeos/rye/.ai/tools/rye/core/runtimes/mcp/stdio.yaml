@@ -1,13 +1,16 @@
-# rye:signed:2026-02-22T09:00:56Z:2657ae9d5019ad16755e368b7ab63ee17a2181775b808d397edb8572fcbad5bd:JNs_5dMWnNDTlB5ZyXCXisWqY0V7U23-AoSTY51rLGbPsn8Xz6Ubd5S3eZgeJaX4mIfSZEE3thCoieVXCvUuAA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:43:13Z:c42df67b9a342c957516c6082ad6e2343226bfa5b9fc798bd40ee58842647df4:935R2OXTpaTDekVG-53TmjMIZMaw3f-SLiVvbJ4HpqfldWEgSB5V0uO3jsEgM3X29DpcNQbH5e8GR0E8nVpCCA==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/mcp
 description: "MCP stdio runtime - executes MCP tools via stdio transport"
 
 env_config:
   interpreter:
-    type: venv_python
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:

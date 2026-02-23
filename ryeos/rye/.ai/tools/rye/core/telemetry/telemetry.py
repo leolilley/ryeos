@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:9afddfcab670f5f540af0c718805b4a1e3cd9d242baa6151307745c430729a85:nEQ5CGOV0kj_wb9uIbaIs79MjOa9YsGae5C5jIhLclpd7ygQtr2Wz5-KMkJCjMdSS5zPG8y_LHVr8R-dhaeaAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:288bea602f593d6fd59de7a311476e9ae36408d19ed3751e0e646bd412ddeb15:gmz5lXM5ci2WnWAMSxOI5EYKbi2PkRxNBZRGMyjG0vXiY6_4hjZuZJLcylW0TrMjyJcGz6xWkz8DAQCOtc2iAw==:9fbfabe975fa5a7f
 """Telemetry tool - exposes MCP server log reading and diagnostics.
 
 Builtin tool that runs in-process to provide log inspection
@@ -15,7 +15,7 @@ from rye.constants import AI_DIR
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/telemetry"
 __tool_description__ = (
     "Telemetry tool - read and analyze RYE MCP server logs and diagnostics"

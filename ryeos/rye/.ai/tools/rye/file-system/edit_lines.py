@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:dd6421a81849444170f909807c9f63efcdb2fd29b2e606839dc0a6db07feeb1b:nEd9pvf1VCEJ-jlzV7JaqynNyJMXoKrboKY-SLVdb4DerTn-Ge8A2xTgvFoNFtqDvm8gdHtF_4p1LjTWe0n4Cg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:c32e94418b6ac50feebb19600dccff1a722989009fc1e9b82e05fa01f4c3e1c6:wqIkExGwIqQg6ObZ-BGZBfLUkH7rrLX2e8pMWYYv8xb4ATWYgxvhSH-JW6xOM6mtSLqD1VHmbSz3RsSPDVRpAQ==:9fbfabe975fa5a7f
 """Edit files by line ID (not string matching)."""
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
 __tool_description__ = "Edit files using line IDs"
 

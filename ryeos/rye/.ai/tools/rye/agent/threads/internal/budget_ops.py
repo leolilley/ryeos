@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:954a58e4b55dfccf88668a9fae76af4f16db64ed338189ccc658730d959fd764:C5R5DMIVQQkK81CoSZD8DUGjmRzIU0Hzjxw3oZaUI9ovwJkomBbK2F9PGee4prDm-qgmfCXC8D3Z0-fFJ69pAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:cc2b2b0cc22da1502c2fe0e84b597c8f76ca4699c92fd9e4c79322d40df6161b:S_MGpF28mDU_RaUZpJ7Nh7cQY5sTLOtgcjmtsE0LErv4JWZB0sJXJbuWNEmLaAGO8AVdGkInDjqeKE--0cPmCA==:9fbfabe975fa5a7f
 __version__ = "1.1.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
 __tool_description__ = "Budget operations"
 

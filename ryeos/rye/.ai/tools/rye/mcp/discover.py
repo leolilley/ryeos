@@ -1,7 +1,7 @@
-# rye:signed:2026-02-22T09:00:56Z:0e6d7fdb63dab75657a690879c93ed3a625a6636878e5d6a6b160fac6cd3eba2:xeqgxh4dodNq6HUTTRqRU-ALGAhxMW8B-SMH4thG1uvH8sEsWHJc0PmQ0EeujqrAv7GR-H8Whyu60kfb-xffBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:2be52274ee81fc536a215bdcacf5d28f80cebcb8cb2a752056ccdf41ccc1e5b6:ldoKdkHyuWZMb58_iHIutYS_FS4rYQJhQSIu8PaHpDqB1CjBpgPhHAsMLG3nlZ6XZV9r6qWJ0ZTHRke8siB_Dw==:9fbfabe975fa5a7f
 __tool_type__ = "python"
 __version__ = "1.3.0"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/mcp"
 __tool_description__ = "MCP discover tool - discover tools from MCP servers via stdio, HTTP, or SSE transport"
 

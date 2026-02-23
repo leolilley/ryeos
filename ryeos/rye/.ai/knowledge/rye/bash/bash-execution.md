@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:a5abc2c5cd484c3fdc1dfd3ce03683d908f49322eb10a139e6a058ca11a4994e:pvgYw2OFQsB3fH79wzMdqrGMwz5EYvXqYijwcdsjA39u72LW5sihlocPBrEs9Zin9K7RZi2F5mbJIyci6QY9DA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:dd9ff69902efc456889a591c26ca325dc13945fdb0b80637c3e105300547d17d:elUsihHLa-vuAcL6N7b994vj8cYvH7rztso6YcNBMDzZyYNlsMgl_X-xZOkGJ6LC9r3f8mDh7I0tUQUtwMXLAw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: bash-execution
@@ -27,8 +27,8 @@ Execute shell commands via `subprocess.run()` with `shell=True`, sandboxed to th
 | ------------- | -------------------------------------- |
 | Item ID       | `rye/bash/bash`                        |
 | Namespace     | `rye/bash/`                            |
-| Runtime       | `python_script_runtime`                |
-| Executor ID   | `rye/core/runtimes/python_script_runtime` |
+| Runtime       | `python/script`                |
+| Executor ID   | `rye/core/runtimes/python/script` |
 
 ## Parameters
 

@@ -135,7 +135,7 @@ The item ID is a **relative path** from `.ai/{type}/` without the extension. For
 | Item ID                                   | File Path                                                |
 | ----------------------------------------- | -------------------------------------------------------- |
 | `core/build`                              | `.ai/directives/core/build.md`                           |
-| `rye/core/runtimes/python_script_runtime` | `.ai/tools/rye/core/runtimes/python_script_runtime.yaml` |
+| `rye/core/runtimes/python/script` | `.ai/tools/rye/core/runtimes/python/script.yaml` |
 | `patterns/singleton`                      | `.ai/knowledge/patterns/singleton.md`                    |
 
 ## Overriding System Items

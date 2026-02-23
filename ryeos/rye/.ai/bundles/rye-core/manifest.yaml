@@ -253,13 +253,13 @@ files:
   .ai/tools/rye/core/runtimes/lib/python/module_loader.py:
     sha256: 8d66f8fa12783604ba8cfb6a03164b6b69e9e5051f94116fa49e9f31d76b5114
     inline_signed: true
-  .ai/tools/rye/core/runtimes/node_runtime.yaml:
+  .ai/tools/rye/core/runtimes/node/node.yaml:
     sha256: 424477cfaafdd321e11b5b395ac35d9125a804222d8ac6893630fb6577ba48a9
     inline_signed: true
-  .ai/tools/rye/core/runtimes/python_function_runtime.yaml:
+  .ai/tools/rye/core/runtimes/python/function.yaml:
     sha256: 361b3ad89dd58277c32a60fd87dd81416a0865618a6d89c1e6450827a6f5b4c3
     inline_signed: true
-  .ai/tools/rye/core/runtimes/python_script_runtime.yaml:
+  .ai/tools/rye/core/runtimes/python/script.yaml:
     sha256: a7cf3d26fe2bf7c83ff02bb5aa4383a883f3eec96f53817e1b91ad42a7e55a52
     inline_signed: true
   .ai/tools/rye/core/sinks/file_sink.py:

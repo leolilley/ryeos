@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:88639d0cdf35e81bffb709f51550c72387483cdd181d4da561810fe7af6429e0:sDySsR4UTpNha_-lgGX4Ub94DzBZ2X5Rthw8Ed3PUYKZkcn7xS_jfZNgUyHdLHM3h--2qzvB3ChPckW5PB19AQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:ed84d923e72d263f0b97e6e8ff65bd71a468b1298581f6732ae312731ee5cb04:UY_sYlX2kr5lZ-vdvPFl1Ru2_or0t0_SEnzIa2SzGs_MiI-MNdegwJl1yDEyuXQI4QFm0eQtWuJMZe9d7MjXDw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: execute-semantics
@@ -109,7 +109,7 @@ Executes through PrimitiveExecutor with recursive chain resolution:
   "data": { "...execution output..." },
   "chain": [
     "rye/file-system/write",
-    "rye/core/runtimes/python_script_runtime",
+    "rye/core/runtimes/python/script",
     "rye/core/primitives/subprocess"
   ],
   "metadata": { "duration_ms": 45 }

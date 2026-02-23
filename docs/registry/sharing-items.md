@@ -47,7 +47,7 @@ Items are either `public` (visible to all users) or `private` (visible only to t
 The registry tool is a Python script that runs through the executor chain like any other tool:
 
 ```python
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 ```
 
 ### Authentication Actions

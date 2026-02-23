@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:5ba8c526994f805294b290fec8cb3a52a531271e2ab0aac065128b3dee3d1354:NiHTQaMUsGy2LI7IV-jHb-0nJYWXCKExCIPjvNh8NYKPgeOKav9BJ1PIkOorkSbTKV-qRP9Up5r0rNp8dJHeBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:b7159a37773e9b72e25ca1984feeef8d1422103c9c4593e821fad3b835b58b38:e0rFkKisd5JTovQgB1e5Sx8DZPAQC0jqgo30X9nRzyqdVJFhTzepVX4wdDr2vomz-kE3mrNOGG8DcH2Y4QTUCg==:9fbfabe975fa5a7f
 """
 MCP Connect Tool
 
@@ -15,7 +15,7 @@ Usage (direct):
 
 __tool_type__ = "python"
 __version__ = "2.0.0"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/mcp"
 __tool_description__ = (
     "MCP connect tool - execute tool calls on MCP servers via HTTP or stdio"

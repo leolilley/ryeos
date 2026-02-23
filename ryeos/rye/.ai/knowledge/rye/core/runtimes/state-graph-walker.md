@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:38:13Z:e984bc10e9f64fad82a20e9d1fce03fb7be43b584e3f49649402c86998285aab:01YXc9rY40t22EW8UX1u0l2UsXxkThzD4FLcjvS5FgXJCoPimrs8wf8E104blpb4Z3tZPS80C2szhWyfpKACBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:c443789e7261e1c7fc372e79244658f03d324c3c2c488f3338c482b3adaaf839:vzrLtPw_GKdampv15WcBsImuY1RJ7yStxvCoqP-vgOgQDZB_kvE0TPaGzj_WbGZngBnocHtB7v4zhhEUBEwpAA==:9fbfabe975fa5a7f -->
 ```yaml
 id: state-graph-walker
 title: "State Graph Walker"
@@ -22,7 +22,7 @@ references:
 
 # State Graph Walker
 
-The graph walker (`state_graph_walker.py`, ~1240 lines) is the execution engine behind `state_graph_runtime`. It loads a graph YAML tool, walks nodes, dispatches actions through the core MCP tools, persists state as signed knowledge items, and registers runs in the thread registry.
+The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `state-graph/runtime`. It loads a graph YAML tool, walks nodes, dispatches actions through the core MCP tools, persists state as signed knowledge items, and registers runs in the thread registry.
 
 ## Entry Points
 
@@ -212,8 +212,8 @@ The walker checks for a `cancel` sentinel file at `.ai/agent/threads/<graph_run_
 
 | File | Purpose |
 | --- | --- |
-| `.ai/tools/rye/core/runtimes/state_graph_walker.py` | Graph traversal engine (~1240 lines) |
-| `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml` | Runtime config (anchor, env, inline loader) |
+| `.ai/tools/rye/core/runtimes/walker.py` | Graph traversal engine (~1240 lines) |
+| `.ai/tools/rye/core/runtimes/state-graph/runtime.yaml` | Runtime config (anchor, env, inline loader) |
 | `.ai/tools/rye/core/runtimes/lib/python/module_loader.py` | Module loading utilities |
 | `.ai/tools/rye/agent/threads/loaders/interpolation.py` | Template interpolation (`${...}` syntax) |
 | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` | Edge condition evaluation + path resolution |

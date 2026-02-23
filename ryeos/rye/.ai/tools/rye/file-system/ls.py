@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:999d5c38e7ddcca40d2af868726bdc49ea2f4bed925b0579e2595e72cd4aab4e:ucjh9XlRw0SadCKkDf5bVaC9SC1QhU6bx1KqBq5DGG9Eyi3WbQwU_gqweXkHCQJYVk-ugr4wuTqlZT9guV5UBQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:09174c1f8385c5ebec3b2c0aebb678fe3d872e0769b818d2524bec0485d047c5:UTZbb-CMYS0k7OQFkY93v9_7_iB4JMT9NPbKiwQn9UV7NINBAXXaqX8DpfNOXWBDlUYXHTOQEv5McvBWnz-PDg==:9fbfabe975fa5a7f
 """List directory contents."""
 
 import argparse
@@ -8,7 +8,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
 __tool_description__ = "List directory contents"
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:38:13Z:e7958618b83767b74ad1bc9b7f5b02639f29c2d39ce6ef9b6f288a10e9b79760:B-S6GHV3eXqtDnGiHkeEotVQqseX23Kitls2pbVFC2Folnz4ZEmBNEGWz8DKsj98jm6BqvFSOfQRONFDcfncBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:a90776f4e04335a3f0185f3ef29d1ac746ccb3ab39f6e0ca2adaecc6bbf9207b:72CD4tXlYagK77G_szztFIt51X_smU1XC377ZQDLTrcvqENJk8EhH8-umF026xMa9Q1NhWM1ELjdMFMWPpp2AA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: runtime-authoring
@@ -95,35 +95,43 @@ Most custom runtimes use `subprocess`.
 
 Where does your language binary live? Pick a resolution type:
 
-### `venv_python`
+### `local_binary`
 
-Finds Python in a virtual environment:
+Searches for a binary in configured local directories (virtual environments, node_modules, etc.):
 
 ```yaml
+# Python in a virtual environment
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
 ```
 
-**When:** Python scripts in isolated venv.
-
-### `node_modules`
-
-Finds Node binaries in `node_modules/.bin`:
-
 ```yaml
+# Node/tsx in node_modules
 env_config:
   interpreter:
-    type: node_modules
-    search_paths: [node_modules/.bin]
+    type: local_binary
+    binary: tsx
+    search_paths: ["node_modules/.bin"]
+    search_roots: ["{anchor_path}"]
     var: RYE_NODE
     fallback: node
 ```
 
-**When:** Node.js, npm packages, or tools installed via npm.
+**When:** Language binaries installed locally — Python venvs, npm packages, or any project-local toolchain.
+
+**Config fields:**
+- `binary` — name of the executable to find (e.g., `python`, `tsx`)
+- `candidates` — alternative binary names to try (e.g., `[python3]`)
+- `search_paths` — relative directories to search within (e.g., `[".venv/bin"]`)
+- `search_roots` — base directories to search from (e.g., `["{anchor_path}"]`); defaults to project root
+- `var` — env var to store resolved path
+- `fallback` — fallback binary name or path if local search fails
 
 ### `system_binary`
 
@@ -145,27 +153,25 @@ env_config:
 - `var` — env var to store resolved path
 - `fallback` — absolute path to use if `which` fails
 
-### `version_manager`
+### `command`
 
-Queries a version manager (pyenv, nvm, rbenv, asdf):
+Runs a resolve command and uses stdout as the interpreter path:
 
 ```yaml
 env_config:
   interpreter:
-    type: version_manager
-    manager: rbenv
-    version: 3.2.0
+    type: command
+    resolve_cmd: ["rbenv", "which", "ruby"]
     var: RYE_RUBY
     fallback: ruby
 ```
 
-**When:** You want to pin a specific version via a version manager.
+**When:** You need to resolve the interpreter dynamically via a version manager or custom script (pyenv, nvm, rbenv, asdf, etc.).
 
 **Config fields:**
-- `manager` — `pyenv`, `nvm`, `rbenv`, `asdf`, `cargo`, etc.
-- `version` — semantic version to request
+- `resolve_cmd` — command + args to execute; stdout is used as the resolved binary path
 - `var` — env var to store resolved path
-- `fallback` — fallback if version manager unavailable
+- `fallback` — fallback if the resolve command fails
 
 ## Step 3: Static Environment Variables
 
@@ -294,7 +300,7 @@ This schema is informational — actual validation is done at the tool level via
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
-category: rye/core/runtimes
+category: rye/core/runtimes/ruby
 description: "Ruby runtime executor - executes Ruby scripts with Bundler support"
 
 env_config:
@@ -357,7 +363,7 @@ Tool description
 
 __version__ = "1.0.0"
 __tool_type__ = "ruby"
-__executor_id__ = "rye/core/runtimes/ruby_runtime"
+__executor_id__ = "rye/core/runtimes/ruby/ruby"
 __category__ = "category/path"
 __tool_description__ = "What this does"
 

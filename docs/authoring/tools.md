@@ -3,7 +3,7 @@ id: tools
 title: "Authoring Tools"
 description: How to write tool files — executable scripts that do the actual work
 category: authoring
-tags: [tools, authoring, python, yaml, format]
+tags: [tools, authoring, python, yaml, javascript, typescript, format]
 version: "1.0.0"
 ```
 
@@ -20,9 +20,9 @@ tool → runtime → primitive
 ```
 
 For example:
-- `write.py` → `rye/core/runtimes/python_function_runtime` → subprocess
-- `bash.py` → `rye/core/runtimes/python_script_runtime` → subprocess
-- `query-docs.yaml` → `rye/core/runtimes/mcp_http_runtime` → HTTP
+- `write.py` → `rye/core/runtimes/python/function` → subprocess
+- `bash.py` → `rye/core/runtimes/python/script` → subprocess
+- `query-docs.yaml` → `rye/core/runtimes/mcp/http` → HTTP
 
 The `__executor_id__` (Python) or `executor_id` (YAML) field declares which runtime runs the tool.
 
@@ -38,7 +38,7 @@ Python tools are the most common. They use module-level metadata variables and a
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "category/path"
 __tool_description__ = "What this tool does"
 
@@ -66,7 +66,7 @@ def execute(params: dict, project_path: str) -> dict:
 |----------|---------|---------|
 | `__version__` | Semantic version of the tool | `"1.0.0"` |
 | `__tool_type__` | Tool classification | `"python"` |
-| `__executor_id__` | Runtime that executes this tool | `"rye/core/runtimes/python_function_runtime"` |
+| `__executor_id__` | Runtime that executes this tool | `"rye/core/runtimes/python/function"` |
 | `__category__` | Directory path within `.ai/tools/` | `"rye/file-system"` |
 | `__tool_description__` | Human-readable description | `"Create or overwrite a file"` |
 
@@ -142,26 +142,28 @@ if __name__ == "__main__":
 
 | Executor ID | When to Use |
 |-------------|------------|
-| `rye/core/runtimes/python_function_runtime` | Pure Python — imported and called in-process |
-| `rye/core/runtimes/python_script_runtime` | Needs subprocess isolation (shell commands, heavy I/O) |
-| `rye/core/runtimes/node_runtime` | JavaScript/TypeScript — subprocess with node resolution |
+| `rye/core/runtimes/python/function` | Pure Python — imported and called in-process |
+| `rye/core/runtimes/python/script` | Needs subprocess isolation (shell commands, heavy I/O) |
+| `rye/core/runtimes/node/node` | JavaScript/TypeScript — subprocess with node resolution |
 
-## JavaScript/TypeScript Tools
+## TypeScript/JavaScript Tools
 
-JavaScript and TypeScript tools run in Node.js via the `node_runtime`. They use JSDoc comments for metadata and CLI args for parameters.
+TypeScript and JavaScript tools run in Node.js via the `node/node`. They use `export const` metadata variables (mirroring Python's dunder convention) and `parseArgs` for the CLI entry point. Supported extensions: `.ts`, `.js`, `.mjs`, `.cjs`.
+
+The executor chain: `tool.ts` → `node/node` → subprocess.
 
 ### Required Structure
 
-```javascript
-/**
- * @version 1.0.0
- * @tool_type javascript
- * @executor_id rye/core/runtimes/node_runtime
- * @category category/path
- * @description What this tool does
- */
+```typescript
+// rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 
-const CONFIG_SCHEMA = {
+export const __version__ = "1.0.0";
+export const __tool_type__ = "javascript";
+export const __executor_id__ = "rye/core/runtimes/node/node";
+export const __category__ = "category/path";
+export const __tool_description__ = "What this tool does";
+
+export const CONFIG_SCHEMA = {
   type: "object",
   properties: {
     param_name: {
@@ -172,91 +174,78 @@ const CONFIG_SCHEMA = {
   required: ["param_name"],
 };
 
-async function execute(params, projectPath) {
+async function execute(
+  params: Record<string, unknown>,
+  projectPath: string
+): Promise<Record<string, unknown>> {
   // Implementation
   return { success: true, data: result };
 }
 
 // CLI entry point
-if (require.main === module) {
-  const args = process.argv.slice(2);
-  const paramsIdx = args.indexOf("--params");
-  const projectPathIdx = args.indexOf("--project-path");
+import { parseArgs } from "node:util";
 
-  if (paramsIdx === -1 || projectPathIdx === -1) {
-    console.error("Missing --params or --project-path");
+const { values } = parseArgs({
+  options: {
+    params: { type: "string" },
+    "project-path": { type: "string" },
+  },
+});
+
+execute(JSON.parse(values.params!), values["project-path"]!)
+  .then((result) => console.log(JSON.stringify(result)))
+  .catch((err) => {
+    console.log(JSON.stringify({ success: false, error: err.message }));
     process.exit(1);
-  }
-
-  const params = JSON.parse(args[paramsIdx + 1]);
-  const projectPath = args[projectPathIdx + 1];
-
-  execute(params, projectPath)
-    .then((result) => {
-      console.log(JSON.stringify(result));
-    })
-    .catch((err) => {
-      console.log(
-        JSON.stringify({
-          success: false,
-          error: err.message,
-        })
-      );
-      process.exit(1);
-    });
-}
-
-module.exports = { execute, CONFIG_SCHEMA };
+  });
 ```
 
-### JSDoc Metadata
+### Metadata Variables
 
-| Annotation | Purpose | Example |
-|-----------|---------|---------|
-| `@version` | Semantic version of the tool | `@version 1.0.0` |
-| `@tool_type` | Tool classification | `@tool_type javascript` |
-| `@executor_id` | Runtime that executes this tool | `@executor_id rye/core/runtimes/node_runtime` |
-| `@category` | Directory path within `.ai/tools/` | `@category rye/file-system` |
-| `@description` | Human-readable description | `@description Create or overwrite a file` |
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `__version__` | Semantic version of the tool | `"1.0.0"` |
+| `__tool_type__` | Tool classification | `"javascript"` |
+| `__executor_id__` | Runtime that executes this tool | `"rye/core/runtimes/node/node"` |
+| `__category__` | Directory path within `.ai/tools/` | `"rye/file-system"` |
+| `__tool_description__` | Human-readable description | `"Create or overwrite a file"` |
 
-### Receiving and Parsing CLI Args
+Metadata is extracted by the `javascript/javascript` parser via regex, including balanced-brace extraction for `CONFIG_SCHEMA`.
 
-The Node runtime passes parameters as CLI arguments:
+### CLI Entry Point
 
-```javascript
-const args = process.argv.slice(2);
-// Expected: [tool_path, "--params", "{...}", "--project-path", "/path"]
+The Node runtime passes parameters as CLI arguments. Use `parseArgs` from `node:util`:
 
-const paramsIdx = args.indexOf("--params");
-const projectPathIdx = args.indexOf("--project-path");
+```typescript
+import { parseArgs } from "node:util";
 
-const params = JSON.parse(args[paramsIdx + 1]);
-const projectPath = args[projectPathIdx + 1];
+const { values } = parseArgs({
+  options: {
+    params: { type: "string" },
+    "project-path": { type: "string" },
+  },
+});
+
+const params = JSON.parse(values.params!);
+const projectPath = values["project-path"]!;
 ```
 
 ### Returning Results
 
 Always return a JSON object with `success: bool` and either `data`/`output` or `error`:
 
-```javascript
-async function execute(params, projectPath) {
+```typescript
+async function execute(
+  params: Record<string, unknown>,
+  projectPath: string
+): Promise<Record<string, unknown>> {
   try {
-    // Do work
     const result = await doSomething(params);
-    return {
-      success: true,
-      data: result,
-    };
+    return { success: true, data: result };
   } catch (error) {
-    return {
-      success: false,
-      error: error.message,
-    };
+    return { success: false, error: (error as Error).message };
   }
 }
-
-// In CLI handler:
-console.log(JSON.stringify(result));
 ```
 
 ### TypeScript Support
@@ -267,7 +256,7 @@ TypeScript tools use `tsx` (installed in `node_modules`) to transpile on-the-fly
 /**
  * @version 1.0.0
  * @tool_type typescript
- * @executor_id rye/core/runtimes/node_runtime
+ * @executor_id rye/core/runtimes/node/node
  * @category my/tools
  * @description TypeScript tool example
  */
@@ -331,7 +320,7 @@ The runtime resolves `tsx` from `node_modules/.bin` automatically. Ensure `tsx` 
 /**
  * @version 1.0.0
  * @tool_type javascript
- * @executor_id rye/core/runtimes/node_runtime
+ * @executor_id rye/core/runtimes/node/node
  * @category my/examples
  * @description Greet someone
  */
@@ -408,7 +397,7 @@ YAML tools are used for configuration-driven tools, particularly MCP tool defini
 tool_id: category/tool_name
 tool_type: yaml
 version: "1.0.0"
-executor_id: rye/core/runtimes/python_script_runtime
+executor_id: rye/core/runtimes/python/script
 category: category/path
 description: What this tool does
 parameters:
@@ -431,7 +420,7 @@ MCP tools wrap external MCP servers. They define the server connection and input
 ```yaml
 # rye:signed:2026-02-04T23:57:39Z:placeholder:unsigned:unsigned
 tool_type: mcp
-executor_id: rye/core/runtimes/mcp_http_runtime
+executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
 version: 1.0.0
 description: 'Retrieves documentation from Context7 for any library.'
@@ -504,7 +493,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_function_runtime"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
 __tool_description__ = "Create or overwrite a file"
 
@@ -572,7 +561,7 @@ from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/bash"
 __tool_description__ = "Execute shell commands"
 
@@ -615,7 +604,7 @@ def execute(params: dict, project_path: str) -> dict:
 ```
 
 **What to notice:**
-- Uses `python_script_runtime` (subprocess isolation) because it runs shell commands
+- Uses `python/script` (subprocess isolation) because it runs shell commands
 - `working_dir` is optional with a sensible default
 - Returns structured output with exit code
 
@@ -626,7 +615,7 @@ From `.ai/tools/mcp/context7/resolve-library-id.yaml`:
 ```yaml
 # rye:signed:2026-02-04T23:57:39Z:placeholder:unsigned:unsigned
 tool_type: mcp
-executor_id: rye/core/runtimes/mcp_http_runtime
+executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
 version: 1.0.0
 description: 'Resolves a package/product name to a Context7-compatible library ID.'

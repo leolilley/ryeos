@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:ca8c7e9dfae691f54cd7634690ecc0b0d776925922397e51b3da6eca9ce939fe:1UlJMZ3CtxK_yS43aFKPqDTUir25pgDCKAEwlxDYIVIStl7k7eJ8j3Nxg98cpw_uL1j_u-7XlqRD4gUh5_NyAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T00:42:51Z:f7301358fddbbbec06bc86957bab3c1e1c44d1e5b572d4ab7ea9e22aaed39862:KJC2WFNslBEXI3Qz5pEckY_ZH1Zp5rYItNxaihmiZ98dtQvRh9QNabU-T7k86lSNUuezKUa2MCzrfCBsZPBADQ==:9fbfabe975fa5a7f
 """Execute a directive, tool, or knowledge item via rye."""
 
 import argparse
@@ -14,7 +14,7 @@ from rye.primary_tool_descriptions import (
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
+__executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/primary"
 __tool_description__ = "Run a Rye item (directive, tool, or knowledge)"
 

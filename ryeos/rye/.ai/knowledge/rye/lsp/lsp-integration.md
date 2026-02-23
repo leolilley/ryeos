@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:64533928c79cb18d21c9ad300af433ad834193e63f8535ad19d7942421715621:jSRHEix25yD0fVFdAXnncHqqOqOxfqwNRzDLUXDEtmpi9rJ7jh-JTE4_5-bsjD4P10Xdr_CrMNln2Kf-GgQYDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:c55d294c283075ab26219c7c6bcd2bcd6c04a830d16b6f50a81b12a8f0e0bff1:ixHG4wpawB38BZR96SqdQzugJlHQ90pBYNYaf45s8JGMR5qnoL3r6PqUaR8IoOlxIzuzrf3T4lvFbdvaPKKKAg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: lsp-integration
@@ -27,8 +27,8 @@ Run linters on a file and return structured diagnostics. Auto-detects file type 
 | ------------- | ------------------------------------------ |
 | Item ID       | `rye/lsp/lsp`                              |
 | Namespace     | `rye/lsp/`                                 |
-| Runtime       | `python_function_runtime`                  |
-| Executor ID   | `rye/core/runtimes/python_function_runtime` |
+| Runtime       | `python/function`                  |
+| Executor ID   | `rye/core/runtimes/python/function` |
 
 ## Parameters
 

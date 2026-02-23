@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:fcfbc30bb08479d50a0e1b7296e6850badfb596fe28b88015b3b9d7e724799c6:LflSCHv36vYKUndwYHId5tkgfD1vrW88nY14GM2ulScf0ldhq1DF7QGhnmvhArX3ZMTlPS3BBWP9_OV0V1NdCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:fcfbc30bb08479d50a0e1b7296e6850badfb596fe28b88015b3b9d7e724799c6:LflSCHv36vYKUndwYHId5tkgfD1vrW88nY14GM2ulScf0ldhq1DF7QGhnmvhArX3ZMTlPS3BBWP9_OV0V1NdCA==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: bundle-format

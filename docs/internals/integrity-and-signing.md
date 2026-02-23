@@ -237,11 +237,11 @@ Stored as `{tool_id}@{version}.lock.json`:
       "item_id": "rye/bash/bash",
       "space": "system",
       "tool_type": "python",
-      "executor_id": "rye/core/runtimes/python_script_runtime",
+      "executor_id": "rye/core/runtimes/python/script",
       "integrity": "a1b2c3d4e5f6..."
     },
     {
-      "item_id": "rye/core/runtimes/python_script_runtime",
+      "item_id": "rye/core/runtimes/python/script",
       "space": "system",
       "tool_type": "runtime",
       "executor_id": "rye/core/primitives/subprocess",

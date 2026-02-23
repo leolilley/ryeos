@@ -59,13 +59,13 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` that configure how to 
 
 | Runtime                   | `executor_id`                     | Purpose                                                          |
 | ------------------------- | --------------------------------- | ---------------------------------------------------------------- |
-| `python_script_runtime`   | `rye/core/primitives/subprocess`  | Run Python scripts with venv resolution and PYTHONPATH anchoring |
-| `python_function_runtime` | `rye/core/primitives/subprocess`  | Run Python functions via module loader                           |
-| `bash_runtime`            | `rye/core/primitives/subprocess`  | Execute shell commands via `/bin/bash -c`                        |
-| `node_runtime`            | `rye/core/primitives/subprocess`  | Run Node.js scripts with `node_modules` resolution               |
-| `mcp_stdio_runtime`       | `rye/core/primitives/subprocess`  | Spawn MCP servers over stdio                                     |
-| `mcp_http_runtime`        | `rye/core/primitives/http_client` | Connect to MCP servers over HTTP/SSE                             |
-| `state_graph_runtime`     | `rye/core/primitives/subprocess`  | Walk declarative graph YAML tools, dispatching `rye_execute` for each node  |
+| `python/script`           | `rye/core/primitives/subprocess`  | Run Python scripts with venv resolution and PYTHONPATH anchoring |
+| `python/function`         | `rye/core/primitives/subprocess`  | Run Python functions via module loader                           |
+| `bash/bash`               | `rye/core/primitives/subprocess`  | Execute shell commands via `/bin/bash -c`                        |
+| `node/node`               | `rye/core/primitives/subprocess`  | Run Node.js scripts with `node_modules` resolution               |
+| `mcp/stdio`               | `rye/core/primitives/subprocess`  | Spawn MCP servers over stdio                                     |
+| `mcp/http`                | `rye/core/primitives/http_client` | Connect to MCP servers over HTTP/SSE                             |
+| `state-graph/runtime`     | `rye/core/primitives/subprocess`  | Walk declarative graph YAML tools, dispatching `rye_execute` for each node  |
 
 ### Tools
 
@@ -104,7 +104,7 @@ Rye MCP Server
   ▼  PrimitiveExecutor.execute(item_id, params)
 Chain Resolution
   │  _build_chain() follows __executor_id__ recursively
-  │  e.g., "rye/bash/bash" → python_script_runtime → subprocess primitive
+  │  e.g., "rye/bash/bash" → python/script → subprocess primitive
   │
   ▼  verify_item() on every chain element
 Integrity Verification

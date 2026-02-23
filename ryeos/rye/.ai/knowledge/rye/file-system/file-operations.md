@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:28491686f11dd779965576ac8ceccebeb28bada81efd682e4e98d7cc89db5200:vKQAEfxullcbheiH2Jc2_aDFInmXzEqYKu4MkY6ZYaekYZiGSWi1qp14ysAM_HIBnGRldIyOOZ0oCD6sWDcWCQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:f8f94292578d733d69dd133dd860f01000d64cc7ad362b41a6b7ad86b13eae12:ulmL8RTl4EpshXcHha7oV92dYkRnKNbp0i2g0UHRyxKqEDEAApmdibsxRCALbmxlaD4ec13iamFkeknZYhUABQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: file-operations
@@ -28,8 +28,8 @@ Six tools for file operations, all sandboxed to the project workspace. Paths out
 | Field       | Value                                      |
 | ----------- | ------------------------------------------ |
 | Namespace   | `rye/file-system/`                         |
-| Runtime     | `python_function_runtime`                  |
-| Executor ID | `rye/core/runtimes/python_function_runtime` |
+| Runtime     | `python/function`                  |
+| Executor ID | `rye/core/runtimes/python/function` |
 
 ## Path Resolution (All Tools)
 

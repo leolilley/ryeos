@@ -89,7 +89,7 @@ Executes through the PrimitiveExecutor with recursive chain resolution:
   "type": "tool",
   "item_id": "rye/file-system/write",
   "data": { "...execution output..." },
-  "chain": ["rye/file-system/write", "rye/core/runtimes/python_script_runtime", "rye/core/primitives/subprocess"],
+  "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/subprocess"],
   "metadata": { "duration_ms": 45 }
 }
 ```

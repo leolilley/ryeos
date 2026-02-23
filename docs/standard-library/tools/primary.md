@@ -10,7 +10,7 @@ version: "1.0.0"
 # Primary Tools
 
 **Namespace:** `rye/primary/`
-**Runtime:** `python_script_runtime`
+**Runtime:** `python/script`
 
 These are the four foundational MCP tools that Rye OS exposes. They map 1:1 to the MCP tool interface — when you call `rye_search`, `rye_load`, `rye_execute`, or `rye_sign` in an MCP client, these are the tools being invoked.
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:37:08Z:93079dfe1ea072e100fb2833c185c18c597184fc44130eaf5f22b3697378904d:38TgeWa6wCpOROW3edlPT-EX7KNDkLy69mFWviuALk_dkUEe7m0SCKdeDGlwNVC3HUJv9Y1mLNf8sqaa_zamBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:157643dde0e0bec8dbff8918ac6a8c582a35bcf68bc3b8b22c02bb3773021b7c:efBUV-BorVsBxg8VyoVC91e9gOIACSIEyH3eb8bga0a-aX7PtuU0rQehXqf_JXTWrlhexmuR9yc7UPmljIyMCw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: signing-and-integrity
@@ -208,11 +208,11 @@ Stored as `{tool_id}@{version}.lock.json`:
       "item_id": "rye/bash/bash",
       "space": "system",
       "tool_type": "python",
-      "executor_id": "rye/core/runtimes/python_script_runtime",
+      "executor_id": "rye/core/runtimes/python/script",
       "integrity": "a1b2c3d4e5f6..."
     },
     {
-      "item_id": "rye/core/runtimes/python_script_runtime",
+      "item_id": "rye/core/runtimes/python/script",
       "space": "system",
       "tool_type": "runtime",
       "executor_id": "rye/core/primitives/subprocess",

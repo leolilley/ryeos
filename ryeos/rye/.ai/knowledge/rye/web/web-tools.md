@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:41:03Z:bbce75e25fdfac9609a4328c6978d9df3ba68777441539d704066f1c3ed7bbc2:kfLoOer8kRCUmDOjS4MrGuTws6cFbhLk-0qQZIbXkWypJNZy4sD5-Gtg8gHb0mo1kOR7TECgRTtkksc3k9B1CQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:0c586e865c83328299e586b4e15854ac87d39d9be7cd20d7e3a7069eb5349f00:cQArs0Bbh2f2KfkYZVnCZLRdIZxZvsaPrmeYAJVrbi3PUp4cfVC8k1s1WtyHzNJqLI4PmW1JMN8Ra-RnAHVLAw==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: web-tools
@@ -26,8 +26,8 @@ Two tools for web interaction — search and fetch. Both use `urllib` from the s
 | Field       | Value                                      |
 | ----------- | ------------------------------------------ |
 | Namespace   | `rye/web/`                                 |
-| Runtime     | `python_function_runtime`                  |
-| Executor ID | `rye/core/runtimes/python_function_runtime` |
+| Runtime     | `python/function`                  |
+| Executor ID | `rye/core/runtimes/python/function` |
 
 ---
 

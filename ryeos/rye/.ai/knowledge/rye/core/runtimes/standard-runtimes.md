@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T23:38:13Z:31a539793212a2d9dd2cc97f71eb789b457e992852063c52a3e45c07fbac749d:YOvpSBDfwEdwbolg6Qn1HccQis-qU81y8fC_fDIP6ffbh0x-PvLHG0jraCo7d5ErNnpW3pKjnvVXAGUkX0bLAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T00:43:10Z:c7fa80a674c18e090272418246d558c4de69fc31008c2c42a72f1195461037dc:qq-atbWUqpfXRQ7GoupQabHXgGBlIbvI7q-Hb_kqrNBWiVkEDjnQ86y1LWiWx-z6qcdNCkvISlM7NDLZQkH7Bg==:9fbfabe975fa5a7f -->
 
 ```yaml
 id: standard-runtimes
@@ -46,7 +46,7 @@ The 7 built-in runtimes that execute tools in Rye OS — from subprocess-based s
 
 A runtime is a YAML configuration that defines **how** a tool is executed. It maps a tool type (Python, Node, Bash, etc.) to a primitive execution layer (subprocess, HTTP, etc.) and configures:
 
-- **Interpreter resolution** — where to find the language binary (venv, node_modules, system PATH, version manager)
+- **Interpreter resolution** — where to find the language binary (local_binary, system_binary, command)
 - **Command templates** — how to invoke the tool with parameters
 - **Environment setup** — env vars, module paths, anchoring
 - **Dependency verification** — integrity checks before execution
@@ -56,7 +56,7 @@ All runtimes point to an underlying **primitive** — the Lilux layer that actua
 ```
 Tool (Python/JS/Bash)
     ↓
-Runtime (python_script_runtime, node_runtime, bash_runtime, ...)
+Runtime (python/script, node/node, bash/bash, ...)
     ↓
 Primitive (subprocess, http_client, state_graph)
     ↓
@@ -67,17 +67,17 @@ Lilux execution layer
 
 | Runtime | Language | Execution | Interpreter Resolution | Use When |
 |---------|----------|-----------|------------------------|----------|
-| **python_script_runtime** | Python | Subprocess | venv (`.venv/bin/python`) | Scripts, I/O, isolation needed |
-| **python_function_runtime** | Python | In-process | venv (same as script) | Pure functions, fast execution |
-| **node_runtime** | JavaScript/TypeScript | Subprocess | node_modules (`.bin`) or system | Node.js tools, npm packages |
-| **bash_runtime** | Bash/Shell | Subprocess | System binary (`which bash`) | Shell scripts, CLI tools |
-| **mcp_stdio_runtime** | MCP (stdio protocol) | Subprocess + stdio | N/A (launches MCP server) | MCP servers via stdio |
-| **mcp_http_runtime** | MCP (HTTP protocol) | HTTP client | N/A (connects via HTTP) | Remote MCP servers, APIs |
-| **state_graph_runtime** | State graphs | In-process state machine | N/A (orchestration) | Multi-step workflows, graphs |
+| **python/script** | Python | Subprocess | local_binary (`.venv/bin/python`) | Scripts, I/O, isolation needed |
+| **python/function** | Python | In-process | local_binary (same as script) | Pure functions, fast execution |
+| **node/node** | JavaScript/TypeScript | Subprocess | local_binary (`node_modules/.bin/tsx`) | Node.js tools, npm packages |
+| **bash/bash** | Bash/Shell | Subprocess | System binary (`which bash`) | Shell scripts, CLI tools |
+| **mcp/stdio** | MCP (stdio protocol) | Subprocess + stdio | N/A (launches MCP server) | MCP servers via stdio |
+| **mcp/http** | MCP (HTTP protocol) | HTTP client | N/A (connects via HTTP) | Remote MCP servers, APIs |
+| **state-graph/runtime** | State graphs | In-process state machine | N/A (orchestration) | Multi-step workflows, graphs |
 
 ## Python Script Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/python_script_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/python/script.yaml`
 
 Executes Python scripts in a subprocess. Scripts receive parameters as CLI args.
 
@@ -86,8 +86,10 @@ Executes Python scripts in a subprocess. Scripts receive parameters as CLI args.
 ```yaml
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
     fallback: python3
   env:
@@ -129,8 +131,8 @@ config:
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python_script_runtime"
-__category__ = "category/path"
+__executor_id__ = "rye/core/runtimes/python/script"
+__category__ = "rye/core/runtimes/python"
 __tool_description__ = "Description"
 
 CONFIG_SCHEMA = { ... }
@@ -147,7 +149,7 @@ if __name__ == "__main__":
 
 ## Python Function Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/python_function_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/python/function.yaml`
 
 Imports Python modules and calls functions directly (in-process). No subprocess overhead.
 
@@ -156,8 +158,10 @@ Imports Python modules and calls functions directly (in-process). No subprocess 
 ```yaml
 env_config:
   interpreter:
-    type: venv_python
-    venv_path: .venv
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
 
 config:
@@ -182,7 +186,7 @@ Same as script runtime — `execute(params: dict, project_path: str) → dict`. 
 
 ## Node Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/node_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/node/node.yaml`
 
 Executes JavaScript/TypeScript via Node.js in a subprocess. Tools receive parameters as CLI args.
 
@@ -191,8 +195,10 @@ Executes JavaScript/TypeScript via Node.js in a subprocess. Tools receive parame
 ```yaml
 env_config:
   interpreter:
-    type: node_modules
-    search_paths: [node_modules/.bin]
+    type: local_binary
+    binary: tsx
+    search_paths: ["node_modules/.bin"]
+    search_roots: ["{anchor_path}"]
     var: RYE_NODE
     fallback: node
   env:
@@ -206,6 +212,8 @@ anchor:
   lib: lib/node
   cwd: "{anchor_path}"
   env_paths:
+    PATH:
+      prepend: ["{anchor_path}/node_modules/.bin"]
     NODE_PATH:
       prepend: ["{anchor_path}", "{anchor_path}/node_modules"]
 
@@ -233,8 +241,8 @@ config:
 /**
  * @version 1.0.0
  * @tool_type javascript
- * @executor_id rye/core/runtimes/node_runtime
- * @category category/path
+ * @executor_id rye/core/runtimes/node/node
+ * @category rye/core/runtimes/node
  * @description Tool description
  */
 
@@ -256,21 +264,22 @@ module.exports = { execute };
 
 ### TypeScript Support
 
-Use `tsx` (TypeScript executor) via `node_modules/.bin/tsx` or system fallback:
+The node runtime uses `tsx` (TypeScript executor) by default via `local_binary` resolution with `search_roots: ["{anchor_path}"]`:
 
 ```yaml
 env_config:
   interpreter:
-    type: node_modules
-    search_paths: [node_modules/.bin]
+    type: local_binary
     binary: tsx
-    var: RYE_TSX
+    search_paths: ["node_modules/.bin"]
+    search_roots: ["{anchor_path}"]
+    var: RYE_NODE
     fallback: node
 ```
 
 ## Bash Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/bash_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/bash/bash.yaml`
 
 Executes shell scripts directly via bash.
 
@@ -318,7 +327,7 @@ echo "$result"
 
 ## MCP Stdio Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/mcp_stdio_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/mcp/stdio.yaml`
 
 Launches an MCP server process and communicates via stdio (JSON-RPC 2.0). The server process handles all communication.
 
@@ -340,7 +349,7 @@ config:
 
 ## MCP HTTP Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/mcp_http_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/mcp/http.yaml`
 
 Connects to a remote MCP server via HTTP and makes tool calls over HTTP.
 
@@ -360,7 +369,7 @@ config:
 
 ## State Graph Runtime
 
-**File:** `.ai/tools/rye/core/runtimes/state_graph_runtime.yaml`
+**File:** `.ai/tools/rye/core/runtimes/state-graph/runtime.yaml`
 
 Executes state machine graphs in-process. Graphs coordinate multi-step workflows with conditional branching.
 
@@ -380,12 +389,11 @@ config:
 
 ## Interpreter Resolution Types
 
-| Type | Config | Resolution Strategy |
-|------|--------|---------------------|
-| `venv_python` | `venv_path: .venv` | Check `.venv/bin/python`, fallback to `fallback` |
-| `node_modules` | `search_paths: [node_modules/.bin]` | Check `node_modules/.bin/<binary>`, fallback |
-| `system_binary` | `binary: ruby` | Run `which ruby` / `where ruby`, fallback |
-| `version_manager` | `manager: pyenv, version: 3.11` | Query pyenv/nvm/rbenv/asdf |
+| Type | Config Keys | Resolution Strategy |
+|------|-------------|---------------------|
+| `local_binary` | `binary`, `candidates`, `search_paths`, `search_roots` | Search for binary in configured local directories (e.g., `.venv/bin`, `node_modules/.bin`), fallback to `fallback` |
+| `system_binary` | `binary` | Run `which <binary>` / `where <binary>`, fallback |
+| `command` | `resolve_cmd` | Run a resolve command, use stdout as path |
 
 All types resolve to an absolute path stored in the env var named by `var`. If resolution fails, `fallback` is used.
 

@@ -38,7 +38,7 @@ _resolve_input_refs = _mod._resolve_input_refs
 
 PARSER_PATH = (
     PROJECT_ROOT
-    / "rye" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown_xml.py"
+    / "rye" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
 )
 _pspec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 _parser_mod = importlib.util.module_from_spec(_pspec)

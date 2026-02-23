@@ -137,7 +137,7 @@ rye_execute(
    ```python
    __version__ = "1.0.0"
    __tool_type__ = "python"
-   __executor_id__ = "rye/core/runtimes/python_script_runtime"
+   __executor_id__ = "rye/core/runtimes/python/script"
    __category__ = "utilities"
    __tool_description__ = "What the tool does"
 

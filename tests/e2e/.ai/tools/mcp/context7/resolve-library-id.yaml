@@ -1,6 +1,6 @@
 # rye:validated:2026-02-05T00:15:01Z:placeholder
 tool_type: mcp
-executor_id: rye/core/runtimes/mcp_http_runtime
+executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
 version: 1.0.0
 description: 'Resolves a package/product name to a Context7-compatible library ID

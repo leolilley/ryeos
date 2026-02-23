@@ -39,7 +39,7 @@ Markdown content that the AI agent reads for context.
 
 Pure YAML files (`.yaml`/`.yml`) are also supported — the entire file is parsed as YAML metadata with no fences needed.
 
-The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML metadata from the code fence and returns the markdown body.
+The file is parsed by the `markdown/frontmatter` parser, which extracts the YAML metadata from the code fence and returns the markdown body.
 
 ## Frontmatter Fields
 
