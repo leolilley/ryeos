@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:371f964d8316e7ef43df647686ef4ea437291651c03a3e7f9c2b84a60911baaf:MvaJX4XfQqGf86ztSZ0OpoWeXLfSBG5HvfS0ZP9zZ5tAT28G2bRhRTRRqvK36nWVZC9ZMSaF8qtmzdOZDNDvBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:42:15Z:05c174815e69024322baa17e4b327d3c4b6bcd3314ab7e6b716c91dd63b8a05b:8yVJk5_19YeYjmVekUpI01bivX9e453Xw7ZtL5geQSywsjUaBdU1lZwlZ6VZLcyFEynM8y9LWgVw0s6d8OgEDg==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: thread-lifecycle
@@ -71,6 +71,15 @@ Insert into SQLite registry (`registry.db`) with status `created`, directive nam
 
 - **Normal execution:** `ExecuteTool` handles input validation and interpolation
 - **Resume/handoff:** `LoadTool` used instead (no input validation)
+
+### Step 3.5: Reconstruct resume messages (continuation only)
+
+If `previous_thread_id` is set and no `resume_messages` provided, the thread is a continuation:
+
+1. **Verify transcript integrity** — signed checkpoint verification (strict or lenient per config)
+2. **Reconstruct messages** — read previous thread's `transcript.jsonl`, rebuild trailing messages within `resume_ceiling_tokens` budget, trim to start with a `user` message
+3. **Resolve continuation directive** — `directive.get("continuation_directive")` or default `rye/agent/continuation`. The directive is loaded and interpolated with `original_directive`, `original_directive_body`, `previous_thread_id`, and `continuation_message`. Its rendered body becomes the trailing user message in `resume_messages`
+4. **Fallback** — if the continuation directive fails to load, the raw `continuation_message` string is used directly
 
 ### Step 4: Resolve limits
 

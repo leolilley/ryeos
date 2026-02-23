@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:96e5bb8c20e65323c2cbc6c9a6d230a2bba3fa5745a1104bf18cfde95cd57ac3:wT8mI5KXgyWFfDqrYwnC9wM_-fkn9FWhpKkZDQvf5A6e8rTlwLdUZOKPLdrsi4VbAckC40MoEE8xdQ_ZqhrkBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T07:42:15Z:3da742ef92bb5ac2af16d7181648503e2254032e72cbbdb20b50f243ee9d9439:fdfBbfw_YQ-dy2hoxpMlX1EdFfbpJmHn58OH70rA3ZTU2ARz-ch5diGcCruFtE2achIbiMqxn4BtMoLprjRpBQ==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -387,13 +387,32 @@ async def execute(params: Dict, project_path: str) -> Dict:
         while trailing and trailing[0].get("role") != "user":
             trailing.pop(0)
 
-        if continuation_message:
-            trailing.append({"role": "user", "content": continuation_message})
+        # Resolve continuation directive — per-directive override or system default
+        cont_directive_id = directive.get("continuation_directive", "rye/agent/continuation")
+        cont_message = continuation_message or (
+            "Pick up where the previous thread left off. "
+            "Continue executing the directive's instructions."
+        )
+
+        from rye.tools.execute import ExecuteTool
+        cont_exec_tool = ExecuteTool(user_space=user_space)
+        cont_result = await cont_exec_tool.handle(
+            item_type="directive",
+            item_id=cont_directive_id,
+            project_path=project_path,
+            parameters={
+                "original_directive": directive_name,
+                "original_directive_body": directive.get("body", ""),
+                "previous_thread_id": prev_tid,
+                "continuation_message": cont_message,
+            },
+        )
+        if cont_result.get("status") == "success":
+            cont_prompt = cont_result["data"].get("body", cont_message)
         else:
-            trailing.append({
-                "role": "user",
-                "content": "Continue executing the directive. Pick up where the previous thread left off.",
-            })
+            cont_prompt = cont_message
+
+        trailing.append({"role": "user", "content": cont_prompt})
 
         params["resume_messages"] = trailing
 

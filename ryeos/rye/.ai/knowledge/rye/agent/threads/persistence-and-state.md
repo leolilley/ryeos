@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-23T07:42:15Z:8712f3713c746c38f59d98476508a95bad4ff4f0cd97033822455f98bfb7b5f4:EPY6MY1vMoUT8JmUlo8EWIYOSyA-0jP0k2i4Rc1ecuv55quNvlIhdmrlDyCKqKyT1X6vJrzUjwLRjkagXiVRDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: persistence-and-state
@@ -172,14 +173,13 @@ Trimmed to start with `user` message (provider requirement).
 
 ### Phase 2: Spawn New Thread
 
-New thread spawned with `previous_thread_id` and a `_continuation_message`:
+New thread spawned with `previous_thread_id`:
 
 ```python
 new_result = await thread_directive.execute({
     "directive_name": directive_name,
     "parent_thread_id": original_parent_id,
     "previous_thread_id": thread_id,
-    "_continuation_message": "Continue executing the directive.",
 })
 ```
 
@@ -189,7 +189,9 @@ Inherits same parent relationship → appears as sibling of original.
 
 ### Phase 3: Reconstruct Messages (in new thread)
 
-The new thread's `execute()` step 3.5 reconstructs `resume_messages` from the previous thread's `transcript.jsonl`. Messages are rebuilt from the JSONL event log with checkpoint signature verification to ensure transcript integrity. This replaces the prior approach of passing `resume_messages` in-memory.
+The new thread's `execute()` step 3.5 reconstructs `resume_messages` from the previous thread's `transcript.jsonl`. Messages are rebuilt from the JSONL event log with checkpoint signature verification to ensure transcript integrity.
+
+Step 3.5 then resolves a **continuation directive** (`directive.get("continuation_directive")` or default `rye/agent/continuation`) to generate the seed user message. The directive is interpolated with the original directive name, body, previous thread ID, and continuation message. Its rendered body replaces the old hardcoded "Continue executing the directive" string. If the continuation directive fails to load, the raw message is used as fallback.
 
 ### Phase 4: Link Continuation Chain
 
