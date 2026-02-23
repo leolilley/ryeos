@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:af38617aad1f1200fd25e1636e0c33388bb6b39f6c08f381d799b3fc958142e3:L1l5ydQwW_RuvH0GSWroNNZ8W0WRahn8FQEvaqORbf8qAk0vBBxsq1CPuZdHytsCDEJYHr7T6ZYJbSrRyEygBQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T01:12:00Z:56f3dba6f88c72b76a4bff1f834c8663060da32d1e36ff8b1b77f4100bac4f42:tKo9-Yk3cJlna_fJpr7enYEhVhjUz_5OqcHqTG8viSHMjgWbkY90aanKSWe1xOWh2IT4iX9ztYO9BpCzElGiBw==:9fbfabe975fa5a7f
 """Fetch URL content with optional format conversion."""
 
 import argparse
@@ -11,7 +11,7 @@ from pathlib import Path
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
-__category__ = "rye/web"
+__category__ = "rye/web/fetch"
 __tool_description__ = "Fetch URL content"
 
 CONFIG_SCHEMA = {

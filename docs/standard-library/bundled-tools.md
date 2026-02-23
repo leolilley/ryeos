@@ -61,13 +61,13 @@ rye_execute(item_type="tool", item_id="rye/bash/bash",
 
 ### Web (`rye/web/`)
 
-| Tool      | Item ID             | Description                              |
-| --------- | ------------------- | ---------------------------------------- |
-| webfetch  | `rye/web/webfetch`  | Fetch and extract content from web pages |
-| websearch | `rye/web/websearch` | Search the web                           |
+| Tool   | Item ID                | Description                              |
+| ------ | ---------------------- | ---------------------------------------- |
+| fetch  | `rye/web/fetch/fetch`  | Fetch and extract content from web pages |
+| search | `rye/web/search/search` | Search the web                           |
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/webfetch",
+rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": "https://docs.example.com/api"})
 ```
 

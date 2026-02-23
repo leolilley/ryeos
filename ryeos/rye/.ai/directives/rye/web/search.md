@@ -1,10 +1,11 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:c05d15ef2fd6b78886a3412cff7a009f3d27a917692c5254f8e5d7758fc9000b:XSuGroVKgPbYgUPIwuxmVNF8O72zJ8Q5CRUryM_VXDckypao_oqqQevai-qnkP2wLI-9PefJoUkv3YzRKMcgAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T01:12:00Z:1f8e17f934c53d9d6e7ae542e31ebe5fe26d795dcf066748f12993839d611aef:VfwDR3ks7yWKTrJ3GoYzyFA_H41jja_Q_sQMZ5-0vedGvxm-yd5J0aGIUAGXmDOunXmoyj9CDiXCOnmHPYmrAg==:9fbfabe975fa5a7f -->
+<!-- rye:unsigned -->
 # Web Search
 
 Search the web using DuckDuckGo or Exa and return results.
 
 ```xml
-<directive name="websearch" version="1.0.0">
+<directive name="search" version="1.0.0">
   <metadata>
     <description>Search the web using configurable provider and return ranked results.</description>
     <category>rye/web</category>
@@ -13,7 +14,7 @@ Search the web using DuckDuckGo or Exa and return results.
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>
-        <tool>rye.web.websearch</tool>
+        <tool>rye.web.search.*</tool>
       </execute>
     </permissions>
   </metadata>
@@ -37,7 +38,7 @@ Search the web using DuckDuckGo or Exa and return results.
 
   <step name="execute_search">
     Call the web search tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/web/websearch", parameters={"query": "{input:query}", "num_results": "{input:num_results}", "provider": "{input:provider}"})`
+    `rye_execute(item_type="tool", item_id="rye/web/search/search", parameters={"query": "{input:query}", "num_results": "{input:num_results}", "provider": "{input:provider}"})`
   </step>
 
   <step name="return_results">

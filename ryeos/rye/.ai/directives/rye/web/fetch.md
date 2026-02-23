@@ -1,10 +1,11 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:5aa7c3b6bb16adb4ab4d40a5bfa868ad185bd9860cdb5bc446ae5cf652a7b358:a9Q6I2F02l2coB7VVWXNyizv2DYbthgUQhY7rgXyRELvmaUIDSvdo4ZyjVbCnESInbwSpUmVNhKY_TzABsbtCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T01:12:00Z:357b043ecd307b0543b0e6828dde9ee73d3c34aa83ad1494ab3e6fe348712d83:fsC0PQsTRvSonQmbbSPw4hssewPD71mHFxbCzOM0bbgi9pxLv2-vYfIMurVkD8BCufk80KcBLV9iRzJaf_VLDg==:9fbfabe975fa5a7f -->
+<!-- rye:unsigned -->
 # Web Fetch
 
 Fetch the content of a web page and return it in the specified format.
 
 ```xml
-<directive name="webfetch" version="1.0.0">
+<directive name="fetch" version="1.0.0">
   <metadata>
     <description>Fetch web page content and return it as text, markdown, or HTML.</description>
     <category>rye/web</category>
@@ -13,7 +14,7 @@ Fetch the content of a web page and return it in the specified format.
     <limits max_turns="3" max_tokens="4096" />
     <permissions>
       <execute>
-        <tool>rye.web.webfetch</tool>
+        <tool>rye.web.fetch.*</tool>
       </execute>
     </permissions>
   </metadata>
@@ -37,7 +38,7 @@ Fetch the content of a web page and return it in the specified format.
 
   <step name="fetch_content">
     Call the web fetch tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/web/webfetch", parameters={"url": "{input:url}", "format": "{input:format}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_type="tool", item_id="rye/web/fetch/fetch", parameters={"url": "{input:url}", "format": "{input:format}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_content">

@@ -16,9 +16,9 @@ Two tools for web interaction — search and fetch. Both use `urllib` from the s
 
 ---
 
-## `websearch`
+## `search`
 
-**Item ID:** `rye/web/websearch`
+**Item ID:** `rye/web/search/search`
 
 Search the web using a configurable provider. Defaults to **DuckDuckGo** (no API key required). Optionally supports **Exa** for higher-quality results.
 
@@ -61,15 +61,15 @@ providers:
 ### Example
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/websearch",
+rye_execute(item_type="tool", item_id="rye/web/search/search",
     parameters={"query": "python asyncio tutorial", "num_results": 5})
 ```
 
 ---
 
-## `webfetch`
+## `fetch`
 
-**Item ID:** `rye/web/webfetch`
+**Item ID:** `rye/web/fetch/fetch`
 
 Fetch a web page and convert it to a readable format. Includes a built-in HTML-to-Markdown converter that strips scripts, styles, and comments while preserving headings, links, lists, and code blocks.
 
@@ -110,6 +110,6 @@ Fetch a web page and convert it to a readable format. Includes a built-in HTML-t
 ### Example
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/webfetch",
+rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": "https://docs.example.com/api", "format": "markdown"})
 ```

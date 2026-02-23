@@ -156,7 +156,7 @@ System-space items include:
 - `rye/core/create_tool` — directive for creating new tools
 - `rye/core/create_knowledge` — directive for creating new knowledge entries
 - `rye/bash/bash` — shell command execution tool
-- `rye/web/websearch`, `rye/web/webfetch` — web interaction tools
+- `rye/web/search/search`, `rye/web/fetch/fetch` — web interaction tools
 - `rye/core/directive-metadata-reference` — knowledge entry documenting directive format
 
 ## Resolution order

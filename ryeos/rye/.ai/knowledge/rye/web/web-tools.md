@@ -1,4 +1,5 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:0c586e865c83328299e586b4e15854ac87d39d9be7cd20d7e3a7069eb5349f00:cQArs0Bbh2f2KfkYZVnCZLRdIZxZvsaPrmeYAJVrbi3PUp4cfVC8k1s1WtyHzNJqLI4PmW1JMN8Ra-RnAHVLAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T01:12:00Z:91e6e1601f8b50b6718da8643934c3cfe0c7a994b24d490037dde20f6e7142c2:KN-_uM91YIfA-zcrOmLBMZu4qFlhAjEfwxn9JxP0yJrDn1TPUaedMZSq1LqGihLl7cdIIXyTrgiTOV557qi4Dg==:9fbfabe975fa5a7f -->
+<!-- rye:unsigned -->
 
 ```yaml
 id: web-tools
@@ -31,9 +32,9 @@ Two tools for web interaction — search and fetch. Both use `urllib` from the s
 
 ---
 
-## `websearch`
+## `search`
 
-**Item ID:** `rye/web/websearch`
+**Item ID:** `rye/web/search/search`
 
 Search the web via configurable provider. Defaults to DuckDuckGo (no API key needed).
 
@@ -47,7 +48,7 @@ Search the web via configurable provider. Defaults to DuckDuckGo (no API key nee
 
 ### Provider Configuration
 
-YAML config at `.ai/config/web/websearch.yaml` (project or user). Project takes precedence.
+YAML config at `.ai/config/web/search.yaml` (project or user). Project takes precedence.
 
 ```yaml
 default_provider:
@@ -83,18 +84,18 @@ providers:
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/websearch",
+rye_execute(item_type="tool", item_id="rye/web/search/search",
     parameters={"query": "python asyncio tutorial", "num_results": 5})
 
-rye_execute(item_type="tool", item_id="rye/web/websearch",
+rye_execute(item_type="tool", item_id="rye/web/search/search",
     parameters={"query": "next.js routing", "provider": "exa"})
 ```
 
 ---
 
-## `webfetch`
+## `fetch`
 
-**Item ID:** `rye/web/webfetch`
+**Item ID:** `rye/web/fetch/fetch`
 
 Fetch a web page and convert to readable format. Built-in HTML-to-Markdown converter.
 
@@ -156,10 +157,10 @@ The built-in converter handles:
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/webfetch",
+rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": "https://docs.example.com/api", "format": "markdown"})
 
-rye_execute(item_type="tool", item_id="rye/web/webfetch",
+rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": "https://example.com/data.json", "format": "text"})
 ```
 
@@ -169,19 +170,19 @@ rye_execute(item_type="tool", item_id="rye/web/webfetch",
 
 | Error                     | Tool       | Cause                              |
 | ------------------------- | ---------- | ---------------------------------- |
-| Invalid URL scheme        | webfetch   | URL doesn't start with http(s)://  |
-| HTTP error (4xx/5xx)      | webfetch   | Server returned error status       |
-| URL error                 | webfetch   | DNS failure, connection refused    |
-| Search failed             | websearch  | Provider request failed            |
-| Exa API key missing       | websearch  | Exa provider without configured key|
+| Invalid URL scheme        | fetch      | URL doesn't start with http(s)://  |
+| HTTP error (4xx/5xx)      | fetch      | Server returned error status       |
+| URL error                 | fetch      | DNS failure, connection refused    |
+| Search failed             | search     | Provider request failed            |
+| Exa API key missing       | search     | Exa provider without configured key|
 
 ## Usage Patterns
 
 ```python
 # Search then fetch — common two-step pattern
-search = rye_execute(item_type="tool", item_id="rye/web/websearch",
+search = rye_execute(item_type="tool", item_id="rye/web/search/search",
     parameters={"query": "python dataclasses docs"})
 
-fetch = rye_execute(item_type="tool", item_id="rye/web/webfetch",
+fetch = rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
     parameters={"url": search["results"][0]["url"]})
 ```
