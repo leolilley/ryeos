@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:ff8400ed0811055174c6e88f6a06d1b9e1a0c87a23056b610f1a0bf059188f59:TNcX1J0w-VBz-GUMbZiMCEDOuQX97NcASfXSGM7xx_zkIsqnTSIT9y82FOG7oUGlV6vLt8vwTKn1GhxPVQBZDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T04:22:29Z:7f2fedf84868c8525220bff7a03f18f936c722c548a6c6d903f4e4e867bbab4b:AiNwm6CWL-1cV87rskSuOYlnPA8rmnIlnvoo047hE-dfhlc0SlQ1PsRjmGGu4fxU2MP3qZWkKWsptX23EE3kCw==:9fbfabe975fa5a7f
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/events"
@@ -84,7 +84,24 @@ class TranscriptSink:
 
         delta_type = delta.get("type", "")
 
-        if delta_type == "text":
+        if delta_type == "thinking":
+            self._ensure_knowledge_open()
+            text = delta.get("text", "").strip()
+            if text:
+                lines = text.splitlines()
+                collapsed = []
+                prev_blank = False
+                for line in lines:
+                    blank = not line.strip()
+                    if blank and prev_blank:
+                        continue
+                    collapsed.append(line)
+                    prev_blank = blank
+                quoted = "\n".join(f"> *{line}*" if line.strip() else ">" for line in collapsed)
+                self._kfh.write(f"\n{quoted}\n\n")
+                self._kfh.flush()
+
+        elif delta_type == "text":
             self._ensure_knowledge_open()
             if not self._wrote_turn_header:
                 self._kfh.write(f"\n### Response — Turn {self._turn}\n\n")
@@ -105,6 +122,8 @@ class TranscriptSink:
         """Extract text/tool delta from a parsed SSE event."""
         if self._response_format == "chat_completion":
             return self._extract_openai_delta(data)
+        if self._response_format == "complete_chunks":
+            return self._extract_gemini_delta(data)
         return self._extract_anthropic_delta(data)
 
     def _extract_openai_delta(self, data: dict) -> Optional[dict]:
@@ -117,6 +136,21 @@ class TranscriptSink:
         if "tool_calls" in delta:
             tc = delta["tool_calls"]
             return {"type": "tool_call_delta", "tool_calls": tc}
+        return None
+
+    def _extract_gemini_delta(self, data: dict) -> Optional[dict]:
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return None
+        parts = (candidates[0].get("content") or {}).get("parts", [])
+        for part in parts:
+            if "functionCall" in part:
+                fc = part["functionCall"]
+                return {"type": "tool_call_start", "id": "", "name": fc.get("name", "")}
+            if "text" in part:
+                if part.get("thought"):
+                    return {"type": "thinking", "text": part["text"]}
+                return {"type": "text", "text": part["text"]}
         return None
 
     def _extract_anthropic_delta(self, data: dict) -> Optional[dict]:

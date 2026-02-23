@@ -58,7 +58,7 @@ tail -f .ai/agent/threads/<thread_id>/transcript.jsonl \
 
 ## Async Execution
 
-Use `async_exec: true` to fire a thread in the background, then tail its output:
+Use `async: true` to fire a thread in the background, then tail its output:
 
 ```python
 result = rye_execute(
@@ -66,7 +66,7 @@ result = rye_execute(
     parameters={
         "operation": "execute_directive",
         "directive_name": "my-directive",
-        "async_exec": True,
+        "async": True,
     },
 )
 thread_id = result["thread_id"]

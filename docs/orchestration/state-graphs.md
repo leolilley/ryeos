@@ -112,7 +112,7 @@ fan_out:
 - **`as`** — Variable name bound to each item during iteration
 - **`action`** — Standard action dict executed per item
 - **`collect`** — Optional state key to store collected results as a list
-- **Parallel mode** — When the action has `async_exec: true` in params, iterations dispatch concurrently via `asyncio.gather`
+- **Parallel mode** — When the action has `async: true` in params, iterations dispatch concurrently via `asyncio.gather`
 
 Items in `over` can be dicts, enabling dotted access: if `task` is `{text: "...", path: "..."}`, then `${task.text}` resolves correctly.
 
@@ -428,7 +428,7 @@ Result: `{"file_count": "42", "line_count": "1337", "_status": "completed"}`.
 
 ## Async Graph Execution
 
-Graphs support `async_exec: true` — same pattern as `thread_directive`. The caller returns immediately with a `graph_run_id` while the graph runs in the background.
+Graphs support `async: true` — same pattern as `thread_directive`. The caller returns immediately with a `graph_run_id` while the graph runs in the background.
 
 ```python
 rye_execute(
@@ -436,7 +436,7 @@ rye_execute(
     item_id="my-project/workflows/my_graph",
     parameters={
         "directory": ".",
-        "async_exec": True,
+        "async": True,
         "capabilities": ["rye.execute.tool.*"],
         "depth": 5
     }

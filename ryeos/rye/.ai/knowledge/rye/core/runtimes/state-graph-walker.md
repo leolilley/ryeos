@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:c443789e7261e1c7fc372e79244658f03d324c3c2c488f3338c482b3adaaf839:vzrLtPw_GKdampv15WcBsImuY1RJ7yStxvCoqP-vgOgQDZB_kvE0TPaGzj_WbGZngBnocHtB7v4zhhEUBEwpAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:38:13Z:e984bc10e9f64fad82a20e9d1fce03fb7be43b584e3f49649402c86998285aab:01YXc9rY40t22EW8UX1u0l2UsXxkThzD4FLcjvS5FgXJCoPimrs8wf8E104blpb4Z3tZPS80C2szhWyfpKACBA==:9fbfabe975fa5a7f -->
 ```yaml
 id: state-graph-walker
 title: "State Graph Walker"
@@ -28,7 +28,7 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
 
 | Entry | Used By | Pattern |
 | --- | --- | --- |
-| `run_sync(graph_config, params, project_path)` | Runtime YAML inline `-c` script | Handles `async_exec` fork, then calls `asyncio.run(execute(...))` |
+| `run_sync(graph_config, params, project_path)` | Runtime YAML inline `-c` script | Handles `async` fork, then calls `asyncio.run(execute(...))` |
 | `execute(graph_config, params, project_path)` | `run_sync` or direct async call | Main graph traversal loop |
 | `_load_graph_yaml(graph_path)` | Runtime inline script | Strips `# rye:signed:` lines, parses YAML |
 
@@ -153,7 +153,7 @@ Filtered out events: `context_limit_reached`, `thread_started` (thread-only, not
 - **`as`**: variable name bound to each item (default: `item`)
 - **`collect`**: optional state key to store collected results
 - **Sequential** (default): each iteration completes before next, full state visible
-- **Parallel** (`async_exec: true` in action params): dispatched via `asyncio.gather`, isolated per-item state
+- **Parallel** (`async: true` in action params): dispatched via `asyncio.gather`, isolated per-item state
 
 After iteration, the `as` variable is cleaned up from state.
 
@@ -188,7 +188,7 @@ This handles context-limit handoffs transparently — the walker doesn't impleme
 
 ## Async Execution
 
-`run_sync()` with `async_exec: true`:
+`run_sync()` with `async: true`:
 
 1. Pre-generates `graph_run_id` and pre-registers in thread registry
 2. Forks via `os.fork()`, child calls `os.setsid()` to daemonize

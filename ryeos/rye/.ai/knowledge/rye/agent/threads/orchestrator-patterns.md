@@ -169,7 +169,7 @@ for niche in niches:
             "directive_name": "domain/discover",
             "inputs": {"niche": niche},
             "limit_overrides": {"turns": 10, "spend": 0.10},
-            "async_exec": True
+            "async": True
         })
 # → collect thread_ids
 
@@ -295,4 +295,4 @@ After wait_threads:
 3. **State in files, not memory** — save to `.ai/data/` for resumability
 4. **Budget with margin** — 10–20% above expected total for retries/handoffs
 5. **Fail forward** — handle child failures gracefully, continue with partial results
-6. **Test sync first** — debug with `async_exec: false` before switching to async
+6. **Test sync first** — debug with `async: false` before switching to async

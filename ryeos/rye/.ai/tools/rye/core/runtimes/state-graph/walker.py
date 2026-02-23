@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:43:13Z:40364f4c1b8e54c8288381fcc11d4c971206a8ff8d1a5f0af29431fab1a2a49e:2mwtl_t1VZ116XQWo0TxkgvCRLZa7crdzzXOvqZtmGB1AkCgtyGzetY4kq1dykZM-Ugt_JNa0yAs_2p3lxEEDQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T04:44:21Z:4ad7f6fd5b52c8826ac231db6f2a44042f7b16b4a3f51c8392396ba67bb5d056:j-El4Pbb20eFhYZgFQ9uYu4g5q6mhkFeK4KBPkriH6jluXoYAdj-Jih-M6RxEwb3_bQ09IRBIV8MLl-kfYKwAg==:9fbfabe975fa5a7f
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -798,7 +798,7 @@ async def execute(
 
         # Register + create initial state
         # (skip register if graph_run_id was pre-provided — already registered
-        # by run_sync() for async_exec)
+        # by run_sync() for async)
         registry = thread_registry.get_registry(Path(project_path))
         if not pre_registered:
             registry.register(graph_run_id, graph_id, parent_thread_id)
@@ -1039,7 +1039,7 @@ async def _handle_foreach(
 ) -> tuple:
     """Handle a foreach node — iterate over a list, execute action per item.
 
-    Parallel mode: when the inner action contains async_exec: true (e.g. a
+    Parallel mode: when the inner action contains async: true (e.g. a
     thread_directive call), all iterations are dispatched concurrently via
     asyncio.gather.  Sequential mode (default): each iteration completes
     before the next starts.
@@ -1057,9 +1057,9 @@ async def _handle_foreach(
     as_var = node.get("as", "item")
     collect_var = node.get("collect")
 
-    # Detect parallel mode: check if the raw action template has async_exec
+    # Detect parallel mode: check if the raw action template has async
     raw_params = node.get("action", {}).get("params", {})
-    is_parallel = raw_params.get("async_exec") is True
+    is_parallel = raw_params.get("async") is True
 
     if is_parallel:
         collected = await _foreach_parallel(
@@ -1163,7 +1163,7 @@ async def _foreach_parallel(
 
 
 # ---------------------------------------------------------------------------
-# Sync entry point with async_exec support
+# Sync entry point with async support
 # ---------------------------------------------------------------------------
 
 
@@ -1172,17 +1172,17 @@ def run_sync(
 ) -> Dict:
     """Synchronous entry point for graph execution.
 
-    Supports ``async_exec`` parameter: when True, forks a child process
+    Supports ``async`` parameter: when True, forks a child process
     that runs the graph in the background.  The parent returns immediately
     with ``{success, graph_run_id, status: "running"}``.
 
-    Same pattern as thread_directive.py async_exec.
+    Same pattern as thread_directive.py async.
     """
     thread_registry = load_module(
         "persistence/thread_registry", anchor=_ANCHOR
     )
 
-    is_async = params.pop("async_exec", False)
+    is_async = params.pop("async", False)
 
     if is_async:
         # Pre-generate graph_run_id so parent can return it

@@ -22,7 +22,7 @@ Execute a directive in a managed thread with an LLM loop.
     <input name="directive_id" type="string" required="true">
       Fully qualified directive ID to execute (e.g., "rye/core/create_directive")
     </input>
-    <input name="async_exec" type="boolean" required="false">
+    <input name="async" type="boolean" required="false">
       Run asynchronously (default: false). When true, returns immediately with thread_id.
     </input>
     <input name="inputs" type="object" required="false">
@@ -53,12 +53,12 @@ Execute a directive in a managed thread with an LLM loop.
 
   <step name="execute_thread">
     Execute the directive in a managed thread:
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "{input:directive_id}", "async_exec": {input:async_exec}, "inputs": {input:inputs}, "model": "{input:model}", "limit_overrides": {input:limit_overrides}})`
+    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "{input:directive_id}", "async": {input:async}, "inputs": {input:inputs}, "model": "{input:model}", "limit_overrides": {input:limit_overrides}})`
   </step>
 
   <step name="return_result">
     Return the thread result containing thread_id, status, cost, and result text.
-    If async_exec was true, return immediately with the thread_id and status "running".
+    If async was true, return immediately with the thread_id and status "running".
   </step>
 </process>
 

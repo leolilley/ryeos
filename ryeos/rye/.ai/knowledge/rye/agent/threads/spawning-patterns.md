@@ -35,7 +35,7 @@ rye_execute(
         "directive_name": "agency-kiwi/leads/discover_leads",
         "inputs": {"niche": "plumbers", "city": "Dunedin"},
         "limit_overrides": {"turns": 10, "spend": 0.10},
-        "async_exec": True
+        "async": True
     }
 )
 ```
@@ -53,7 +53,7 @@ Returns:
 
 ## Synchronous vs Asynchronous
 
-| Mode         | `async_exec` | Behavior                                      | Use When                        |
+| Mode         | `async` | Behavior                                      | Use When                        |
 |--------------|-------------|-----------------------------------------------|---------------------------------|
 | Synchronous  | `false`     | Blocks until child completes, returns result  | Need result before proceeding   |
 | Asynchronous | `true`      | Returns `thread_id` immediately, child forks  | Spawning multiple parallel children |
@@ -90,7 +90,7 @@ Additionally, `RYE_PARENT_THREAD_ID` is set in the environment so forked childre
 Standard orchestration pattern for parallel work:
 
 ```
-Phase 1: Spawn children (async_exec: true)
+Phase 1: Spawn children (async: true)
          → collect all thread_ids
 
 Phase 2: Wait for all children

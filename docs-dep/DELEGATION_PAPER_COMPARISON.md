@@ -37,7 +37,7 @@ RYE OS is a working implementation that addresses the majority of these requirem
     For each target, spawn a child thread:
     rye_execute(tool="rye/agent/threads/thread_directive",
       directive_name="execution/scrape_website",
-      inputs={"url": target.url}, async_exec=true)
+      inputs={"url": target.url}, async=true)
   </step>
   <step name="wait">Wait for all child threads to complete</step>
   <step name="aggregate">Collect results and update state</step>

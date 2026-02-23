@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:e7242f629a3a229a7900884706771738c946150dddfe3997bd76236183328f9e:t62nLMycJpcyYOugrZbCurichwn4BtTw6ogBda3-fwOtdR43d158LLOd2fYAsrNNPY63MyvlurCTWz0OrYQxBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T04:20:48Z:34224a18b84ca27905ec2483fb412e1a37936b8f8a16abf2538a4ae0be7e901a:4v8133t772GKN-oo9v1WBLT2FMHneQl3z2cbGM82Q_OAthSWtvAqt1OO5dWzTbcmy-6gsCj-kmQFxqsAekGfBA==:9fbfabe975fa5a7f
 """
 runner.py: Core LLM loop for thread execution
 
@@ -264,6 +264,14 @@ async def run(
                 {"text": response["text"], "model": provider.model},
                 transcript,
             )
+
+            if response.get("thinking"):
+                emitter.emit_critical(
+                    thread_id,
+                    "cognition_reasoning",
+                    {"text": response["thinking"]},
+                    transcript,
+                )
 
             # Process tool calls based on provider's tool_use mode
             tool_calls = response.get("tool_calls", [])

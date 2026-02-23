@@ -23,7 +23,7 @@ rye_execute(
         "directive_name": "agency-kiwi/leads/discover_leads",
         "inputs": {"niche": "plumbers", "city": "Dunedin"},
         "limit_overrides": {"turns": 10, "spend": 0.10},
-        "async_exec": True
+        "async": True
     }
 )
 ```
@@ -77,7 +77,7 @@ result = rye_execute(
         "directive_name": "agency-kiwi/leads/discover_leads",
         "inputs": {"niche": "plumbers", "city": "Dunedin"},
         "limit_overrides": {"turns": 10, "spend": 0.10},
-        "async_exec": True
+        "async": True
     }
 )
 thread_id = result["thread_id"]
@@ -120,7 +120,7 @@ rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
     "directive_name": "agency-kiwi/leads/discover_leads",
     "inputs": {"niche": "<niche>", "city": "Dunedin"},
     "limit_overrides": {"turns": 10, "spend": 0.10},
-    "async_exec": true
+    "async": true
   })
 
 Collect all thread_ids from the spawn results.
@@ -190,7 +190,7 @@ rye_execute(
 
 - **In-process threads:** Each thread has an `asyncio.Event`. `wait_threads` awaits the event with `asyncio.wait_for(event.wait(), timeout)`. When `runner.run()` completes, it calls `complete_thread()` which sets the event.
 
-- **Cross-process threads (async_exec):** The forked child runs in a separate process — no shared event. `wait_threads` falls back to polling the SQLite registry with exponential backoff (starts at 1s, maxes at 10s).
+- **Cross-process threads (async):** The forked child runs in a separate process — no shared event. `wait_threads` falls back to polling the SQLite registry with exponential backoff (starts at 1s, maxes at 10s).
 
 - **Continuation chains:** Before waiting, `resolve_thread_chain()` follows any `continued` → `continued` → ... links to find the terminal thread. This means if a thread was handed off, waiting on the original ID still works correctly.
 

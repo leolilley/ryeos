@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:2c8118dd206c4f4bc4e4233fa480c93d08d344fb29e6699cce87a9239d6830fe:DOLHcCvFeqP77YeFjCup27qYussn6gvfSTaPzCBL3Hyt2dM3P3zaSifuay4FFMB9DyCxtTYk4rgAko1MfhD1AQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T04:14:48Z:a35941682699559c4a11924adeee420027116cc2ae809a0892d7fcbb0d54b381:ujJTSSoQFSo8p6-ZCoGI5uf-JrBQMnRtn3PtzxV8iJ90P7Gw1d_lEcdR01ogys-VtqvZp7pCuyuWPQbH-_jhAw==:9fbfabe975fa5a7f
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -61,6 +61,11 @@ class HttpProvider(ProviderAdapter):
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    @property
+    def _response_format(self) -> str:
+        stream_schema = self._tool_use.get("stream_schema", {})
+        return stream_schema.get("stream_mode", "content_blocks")
 
     # ── Utilities ──────────────────────────────────────────────────────
 
@@ -280,6 +285,7 @@ class HttpProvider(ProviderAdapter):
         mode = schema.get("content_mode", "blocks")
 
         text_parts = []
+        thinking_parts = []
         tool_calls = []
 
         if mode == "blocks":
@@ -288,7 +294,11 @@ class HttpProvider(ProviderAdapter):
             detect = schema.get("block_detect", {})
 
             for block in blocks:
-                if self._detect_block(block, detect.get("text", {})):
+                if self._detect_block(block, detect.get("thinking", {})):
+                    thinking_parts.append(
+                        self._resolve_path(block, schema.get("text_value", "text")) or ""
+                    )
+                elif self._detect_block(block, detect.get("text", {})):
                     text_parts.append(
                         self._resolve_path(block, schema.get("text_value", "text")) or ""
                     )
@@ -352,7 +362,7 @@ class HttpProvider(ProviderAdapter):
             + output_tokens * pricing.get("output", 0.0)
         ) / 1_000_000
 
-        return {
+        result = {
             "text": "\n".join(text_parts)
             if len(text_parts) > 1
             else (text_parts[0] if text_parts else ""),
@@ -362,6 +372,9 @@ class HttpProvider(ProviderAdapter):
             "spend": spend,
             "finish_reason": finish_reason,
         }
+        if thinking_parts:
+            result["thinking"] = "\n".join(thinking_parts)
+        return result
 
     # ── HTTP Execution ────────────────────────────────────────────────
 
@@ -738,6 +751,7 @@ class HttpProvider(ProviderAdapter):
         content_path = resp_schema.get("content_path", "content")
 
         text_parts = []
+        thinking_parts = []
         tool_calls = []
         input_tokens = 0
         output_tokens = 0
@@ -754,7 +768,13 @@ class HttpProvider(ProviderAdapter):
             blocks = self._resolve_path(data, content_path) or []
 
             for block in blocks:
-                if self._detect_block(block, detect.get("text", {})):
+                if self._detect_block(block, detect.get("thinking", {})):
+                    thinking_parts.append(
+                        self._resolve_path(
+                            block, resp_schema.get("text_value", "text")
+                        ) or ""
+                    )
+                elif self._detect_block(block, detect.get("text", {})):
                     text_parts.append(
                         self._resolve_path(
                             block, resp_schema.get("text_value", "text")
@@ -806,7 +826,7 @@ class HttpProvider(ProviderAdapter):
             + output_tokens * pricing.get("output", 0.0)
         ) / 1_000_000
 
-        return {
+        result = {
             "text": "".join(text_parts),
             "tool_calls": tool_calls,
             "input_tokens": input_tokens,
@@ -814,3 +834,6 @@ class HttpProvider(ProviderAdapter):
             "spend": spend,
             "finish_reason": finish_reason,
         }
+        if thinking_parts:
+            result["thinking"] = "".join(thinking_parts)
+        return result

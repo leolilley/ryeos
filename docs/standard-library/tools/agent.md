@@ -62,7 +62,7 @@ Execute a directive in a managed thread with a full LLM loop. This is the primar
 | Name              | Type    | Required | Default | Description                                                                        |
 | ----------------- | ------- | -------- | ------- | ---------------------------------------------------------------------------------- |
 | `directive_name`  | string  | ✅       | —       | Directive item_id to execute                                                       |
-| `async_exec`      | boolean | ❌       | `false` | Return immediately with thread_id (fork to background)                             |
+| `async`      | boolean | ❌       | `false` | Return immediately with thread_id (fork to background)                             |
 | `inputs`          | object  | ❌       | `{}`    | Input parameters for the directive                                                 |
 | `model`           | string  | ❌       | —       | Override the directive's model selection                                           |
 | `limit_overrides` | object  | ❌       | —       | Override limits: `turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth` |
@@ -79,13 +79,13 @@ Execute a directive in a managed thread with a full LLM loop. This is the primar
 8. **Build safety harness** — with limits, hooks, permissions, capability tokens
 9. **Reserve budget** — in the hierarchical budget ledger
 10. **Resolve LLM provider** — maps model name/tier to provider config (Anthropic, OpenAI)
-11. **Run** — either synchronously or fork to background (async_exec)
+11. **Run** — either synchronously or fork to background (async)
 12. **Finalize** — report spend, cascade to parent budget, update registry, write `thread.json`
 
 #### Synchronous vs Async
 
 - **Sync** (default): blocks until the thread completes, returns the full result
-- **Async** (`async_exec: true`): forks a child process via `os.fork()`, returns immediately with `thread_id` and `pid`. The child process daemonizes (`os.setsid()`) and runs to completion independently.
+- **Async** (`async: true`): forks a child process via `os.fork()`, returns immediately with `thread_id` and `pid`. The child process daemonizes (`os.setsid()`) and runs to completion independently.
 
 #### Output
 
@@ -114,7 +114,7 @@ rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
 
 # Run asynchronously (returns immediately)
 rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
-    parameters={"directive_name": "long-running-task", "async_exec": true})
+    parameters={"directive_name": "long-running-task", "async": true})
 
 # With model and limit overrides
 rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",

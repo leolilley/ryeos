@@ -248,7 +248,7 @@ All orchestration flows through one tool: `rye/agent/threads/thread_directive`. 
 
 ### Process Spawning with os.fork()
 
-When `async_exec=true`, the thread forks:
+When `async=true`, the thread forks:
 
 ```python
 child_pid = os.fork()

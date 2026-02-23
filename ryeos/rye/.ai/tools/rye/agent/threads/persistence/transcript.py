@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:8d126818cb2d9ddd32af869c00858fd3663912d7f8f6a46e495a7f9a695df4b0:FRAO3KwR2ZZGZNPb1v07Pc9bWYO7n-bGoCBK-1jBzYTxduliSxEUV0gI2mRxekZO-SUjhbsOWxI0I5AsNoJlDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T04:22:29Z:f42554684046f9499e294553ed0adcd96baf87beaceef3f4b7e120791d92da35:ntdJJ-XCALdCrXf9fia_B85eQohFXaqE28xQJUPaQjbHBM73iiQKcAUaCL6ETAWL9IyjTaanaFVgLp8_wVgICA==:9fbfabe975fa5a7f
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -298,9 +298,28 @@ class Transcript:
                 return ""
             return f"## Input — Turn {turn}\n\n{payload.get('text', '')}\n\n"
 
+        if event_type == "cognition_reasoning":
+            text = payload.get("text", "").strip()
+            if text:
+                # Collapse runs of blank lines into single blank line
+                lines = text.splitlines()
+                collapsed = []
+                prev_blank = False
+                for line in lines:
+                    blank = not line.strip()
+                    if blank and prev_blank:
+                        continue
+                    collapsed.append(line)
+                    prev_blank = blank
+                quoted = "\n".join(f"> *{line}*" if line.strip() else ">" for line in collapsed)
+                return f"\n{quoted}\n\n"
+            return ""
+
         if event_type == "cognition_out":
             text = payload.get("text", "")
-            return f"### Response — Turn {turn}\n\n{text}\n\n"
+            if text.strip():
+                return f"### Response — Turn {turn}\n\n{text}\n\n"
+            return f"### Response — Turn {turn}\n\n"
 
         if event_type == "tool_call_start":
             tool = payload.get("tool", "unknown")

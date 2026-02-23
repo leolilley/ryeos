@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:3d043096dd89dada02a451be94a59c0a614a2348ade7721510e47d6a9a82364d:6Q_S9VkWakJtIw4W5EPWcDwrIX5Afht5jIw1hjGiLug_RIokPRH-88AwdaEnWXoMsl7DJl3sxq-zKBQhzlXxCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T03:57:30Z:11ce363d364e9300218271728d119c23d0ab82174978527b20f539008283110c:j06omG16jVkkPYZkXUoeHsLWBpG8P3AQeUHT286Vb1QJBW2BdOLGeWDANT3dihBMlRoekUVAgZIpITo_SLh8CQ==:9fbfabe975fa5a7f
 tool_id: zen
 tool_type: http
 version: "1.0.0"
@@ -305,6 +305,7 @@ profiles:
         content_mode: blocks
         content_path: "candidates.0.content.parts"
         block_detect:
+          thinking: {key: "thought"}
           text: {key: "text"}
           tool_call: {key: "functionCall"}
         text_value: "text"

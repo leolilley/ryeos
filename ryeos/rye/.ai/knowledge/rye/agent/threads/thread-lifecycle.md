@@ -130,7 +130,7 @@ Written to `.ai/agent/threads/<thread_id>/thread.json`:
 ### Step 12: Fork or run
 
 - **Synchronous** (default): `runner.run()` blocks until completion
-- **Asynchronous** (`async_exec: true`): `os.fork()` → child detaches via `os.setsid()`, redirects stdio to `/dev/null`, runs loop, finalizes, calls `os._exit(0)`. Parent returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): `os.fork()` → child detaches via `os.setsid()`, redirects stdio to `/dev/null`, runs loop, finalizes, calls `os._exit(0)`. Parent returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 13: Run LLM loop
 

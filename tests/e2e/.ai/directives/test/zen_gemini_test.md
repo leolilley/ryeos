@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:d29df107509f1ac1b2fc492cde4104bc58ffa71960b8d576054e29dd56f81f4b:sClrAAOBltZfxSyyOOib72VvAgri1MGjp0HM_raAphd6MIhMR3EBjotUoE9DUvBIiUqHit3_ssTaI-LenES9AA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T04:21:13Z:69935ce0dbc83f43ff6d6db67d06001179bb2de09491b3942b580b234270c75b:58QtdTtzhCMSFgcCE6rE0nGQalD9YRQmRNO1HelFD-E993jqQ_ob_nDLidzGFOnURCHn9-chp5EJqego491vDw==:9fbfabe975fa5a7f -->
 
 # Zen Gemini Test
 
@@ -11,7 +11,7 @@ Test directive that exercises the Zen provider with a Gemini model — verifies 
     <category>test</category>
     <author>rye-os</author>
     <model id="gemini-3-flash" provider="zen/zen" />
-    <limits max_turns="6" max_tokens="4096" max_spend="0.05" />
+    <limits turns="6" tokens="32000" spend="0.10" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>

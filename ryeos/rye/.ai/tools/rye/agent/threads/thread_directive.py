@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:37f5ac6296c62fff74b6bb861acf2642b7c08aa58590a18af52a251348ab8156:_EcahYtJPw1CKhiXXSFCEuqTEaeh0dXKhziRr3k6fA3a6ZHYaEXd39yirJ3hjpd-HAL2CMMAR1_hPwPvjmBpCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T04:27:33Z:7204a92aa55ab07cb9710d4728f76cb09c43a586043477949242d304698f5c4b:T4QlN8um5RN5m5u10c2fCrYpUA6Ve_a1-6kVNlAR08EgT9pFpZ3Y2dDTPBvz_QYRA0Vim5eVQHKMeLQKQ-4EAA==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -28,7 +28,7 @@ CONFIG_SCHEMA = {
             "type": "string",
             "description": "Directive item_id to execute",
         },
-        "async_exec": {
+        "async": {
             "type": "boolean",
             "default": False,
             "description": "Return immediately with thread_id",
@@ -45,6 +45,7 @@ CONFIG_SCHEMA = {
         },
     },
     "required": ["directive_id"],
+    "additionalProperties": False,
 }
 
 
@@ -255,6 +256,11 @@ def _merge_hooks(directive_hooks: list, project_path: str) -> list:
 
 
 async def execute(params: Dict, project_path: str) -> Dict:
+    allowed = set(CONFIG_SCHEMA["properties"].keys())
+    unknown = set(params.keys()) - allowed
+    if unknown:
+        raise ValueError(f"Unknown parameters: {unknown}. Valid: {allowed}")
+
     directive_name = params["directive_id"]
     thread_id = _generate_thread_id(directive_name)
     inputs = params.get("inputs", {})
@@ -452,7 +458,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     # 10. Set env var so children discover this thread as their parent
     os.environ["RYE_PARENT_THREAD_ID"] = thread_id
 
-    if params.get("async_exec"):
+    if params.get("async"):
         # Fork: child process runs the thread, parent returns immediately.
         # os.fork() duplicates the process — child gets pid=0, parent gets child pid.
         # The child daemonizes (new session) so it survives parent exit.

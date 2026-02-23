@@ -454,7 +454,7 @@ config:
           directive_name: "${task.directive}"
           inputs:
             scaffold_thread_id: "${state.scaffold_thread_id}"
-          async_exec: true
+          async: true
       collect: wave_1_thread_ids
       next: wave_1_wait
 

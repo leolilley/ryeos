@@ -86,12 +86,12 @@ rye_execute(
 | Parameter         | Type   | Required | Description |
 |-------------------|--------|----------|-------------|
 | `directive_name`  | string | yes      | Directive item_id to execute |
-| `async_exec`      | bool   | no       | Return immediately with `thread_id` (default: `false`) |
+| `async`      | bool   | no       | Return immediately with `thread_id` (default: `false`) |
 | `inputs`          | object | no       | Input parameters for the directive |
 | `model`           | string | no       | Override LLM model |
 | `limit_overrides` | object | no       | Override limits: `turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth` |
 
-Synchronous execution blocks until the child completes and returns its result. Asynchronous execution (`async_exec: true`) forks the process and returns a `thread_id` immediately — the parent can then continue spawning more children and wait for all of them later.
+Synchronous execution blocks until the child completes and returns its result. Asynchronous execution (`async: true`) forks the process and returns a `thread_id` immediately — the parent can then continue spawning more children and wait for all of them later.
 
 ## The Hierarchy
 
@@ -126,7 +126,7 @@ A single-purpose worker that calls one tool and returns its result. Uses a fast/
 
 **Model selection per task.** Orchestrators use expensive reasoning models. Leaf workers use cheap fast models. A pipeline that spawns 20 leaf workers at $0.05 each costs $1.00 in leaf work instead of $3.00 if everything ran in one big sonnet conversation.
 
-**Parallelism.** Async children run concurrently. The parent spawns multiple children with `async_exec: true`, then waits for all of them with `wait_threads`. Wall-clock time drops to the slowest child instead of the sum of all children.
+**Parallelism.** Async children run concurrently. The parent spawns multiple children with `async: true`, then waits for all of them with `wait_threads`. Wall-clock time drops to the slowest child instead of the sum of all children.
 
 **Auditability.** Every thread writes a `transcript.md` and `thread.json`. You can inspect exactly what each thread did, what it spent, and what tools it called.
 

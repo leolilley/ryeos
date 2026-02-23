@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T00:43:10Z:c8e9dfa31389390e0315aaf5bc351bce2fc48af05ebbb22d2cd3806fcbe8384d:9Go2mAZmxj0eiLu1nNfRf6fUHTLFZk-fbia4RY9NXeNTK8vt0amzAQzL2KzRMbh_socciu_JMfHeey8SlfWaBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-22T23:38:13Z:27d62b1d30c4f097410152a5b492c4fee8b42954601eb22a6b1b3182530a0ac7:M2fswUaxXVsxJYeoH1YVfXzAAS6J6G6lBCDELYuP3qflWgNyw9P8_DkKdCHykNc63TShIoSeWsM01leFdneuAw==:9fbfabe975fa5a7f -->
 ```yaml
 id: state-graph-runtime
 title: "State Graph Runtime"
@@ -37,7 +37,7 @@ The runtime uses `mode: always` (not `auto`) because graph tool YAMLs typically 
 
 3. **Result unwrapping** — The walker lifts the `data` dict from `ExecuteTool` responses to the top level so graph assign expressions like `${result.stdout}` work directly. Error propagation: if the outer envelope has `status: "error"` or the inner data has `success: false`, `status: "error"` is injected into the unwrapped result so `on_error` edges and hooks fire correctly.
 
-4. **Async execution** — `run_sync()` wrapper handles `async_exec: true` via `os.fork()`, same pattern as `thread_directive.py`. Parent returns immediately with `{graph_run_id, status: "running"}`, child daemonizes and runs to completion. The graph_run_id is pre-generated and pre-registered before the fork to avoid duplicate registry entries.
+4. **Async execution** — `run_sync()` wrapper handles `async: true` via `os.fork()`, same pattern as `thread_directive.py`. Parent returns immediately with `{graph_run_id, status: "running"}`, child daemonizes and runs to completion. The graph_run_id is pre-generated and pre-registered before the fork to avoid duplicate registry entries.
 
 5. **List index resolution** — `condition_evaluator.resolve_path()` supports numeric list indices in dotted paths (`state.items.0.name`), enabling foreach patterns where collected results are accessed by position.
 

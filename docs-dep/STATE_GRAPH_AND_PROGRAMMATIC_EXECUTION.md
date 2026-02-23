@@ -887,7 +887,7 @@ walker calls thread_directive.execute(params) [awaited]
 walker receives result with status: "continued"
 ```
 
-**Key insight:** `handoff_thread()` calls `thread_directive.execute()` **without** `async_exec: true`, meaning the continuation thread runs synchronously (awaited in-process). The continuation may itself trigger another handoff, forming a chain — but each link runs to completion before returning. By the time the original `thread_directive.execute()` returns to the walker, **the entire continuation chain has completed**.
+**Key insight:** `handoff_thread()` calls `thread_directive.execute()` **without** `async: true`, meaning the continuation thread runs synchronously (awaited in-process). The continuation may itself trigger another handoff, forming a chain — but each link runs to completion before returning. By the time the original `thread_directive.execute()` returns to the walker, **the entire continuation chain has completed**.
 
 **Result persistence (implemented):**
 
@@ -939,7 +939,7 @@ if (action.get("item_id") == "rye/agent/threads/thread_directive"
 
 Note: This is simpler than the previous approach of calling `orchestrator.wait_threads()` because the chain has already completed synchronously — we just need to read the persisted result, not wait for it.
 
-**When `async_exec: true`:** The caller already expects to wait separately via `orchestrator.wait_threads()`. The `wait_threads` operation calls `_wait_single()`, which calls `resolve_thread_chain()` to follow continuation links. So async LLM nodes handle continuation chains automatically — `wait_threads` follows the chain to the terminal thread. The same `_bounded_result` fix ensures the terminal result is available.
+**When `async: true`:** The caller already expects to wait separately via `orchestrator.wait_threads()`. The `wait_threads` operation calls `_wait_single()`, which calls `resolve_thread_chain()` to follow continuation links. So async LLM nodes handle continuation chains automatically — `wait_threads` follows the chain to the terminal thread. The same `_bounded_result` fix ensures the terminal result is available.
 
 **Design principle:** The walker doesn't implement continuation logic itself. It delegates to the existing `resolve_thread_chain()` infrastructure for chain resolution and reads persisted results from the registry.
 
@@ -1323,7 +1323,7 @@ spawn_reviews:
       directive_name: workflows/code-review/review-single
       inputs:
         file: "${state.current_file}"
-      async_exec: true
+      async: true
       limit_overrides:
         turns: 6
         spend: 0.05
@@ -1368,7 +1368,7 @@ review_each_file:
       directive_name: workflows/review/review-single
       inputs:
         file: "${current_file}"
-      async_exec: true
+      async: true
       limit_overrides:
         turns: 6
         spend: 0.05
@@ -1378,7 +1378,7 @@ review_each_file:
 
 The walker expands this into N `rye_execute` calls, collects results into `state.thread_ids`, then advances to the next node.
 
-**Parallel mode** (`async_exec: true` on the inner action) — all iterations spawn concurrently via `thread_directive`'s fork mechanism. The walker collects `thread_id` values and moves to the next node. Sequential mode (`async_exec` absent or false) — each iteration completes before the next starts.
+**Parallel mode** (`async: true` on the inner action) — all iterations spawn concurrently via `thread_directive`'s fork mechanism. The walker collects `thread_id` values and moves to the next node. Sequential mode (`async` absent or false) — each iteration completes before the next starts.
 
 ---
 
@@ -1658,7 +1658,7 @@ Walker implements all responsibilities described in §6–§14:
 ### Phase 2: Foreach Support ✓
 
 - Sequential mode (default) — each iteration completes before the next
-- Parallel mode (`async_exec: true` in inner action) — all iterations dispatched concurrently via `asyncio.gather()`
+- Parallel mode (`async: true` in inner action) — all iterations dispatched concurrently via `asyncio.gather()`
 - Collects results into `state[collect]` (thread_ids for async, full results for sync)
 - Permission checking and parent context injection per iteration
 
@@ -1833,7 +1833,7 @@ config:
           directive_name: workflows/review/review-single-file
           inputs:
             file: "${current_file}"
-          async_exec: true
+          async: true
           limit_overrides:
             turns: 8
             spend: 0.05
