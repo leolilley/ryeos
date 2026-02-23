@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T07:42:15Z:3da742ef92bb5ac2af16d7181648503e2254032e72cbbdb20b50f243ee9d9439:fdfBbfw_YQ-dy2hoxpMlX1EdFfbpJmHn58OH70rA3ZTU2ARz-ch5diGcCruFtE2achIbiMqxn4BtMoLprjRpBQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T07:51:57Z:9672d3f61154cfdafde1e7037117dfe720dc090b69b6e3b1502a4f8188c1bde2:R4L3XeEaEmCdhhI5PNDwMjOKRJNUDRV3MD9ptn65o0IOwRSFXKd6qqnst3OG5PNc2hhw7aKN08qNajc_xy3nDQ==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -248,17 +248,23 @@ def _resolve_limits(directive_limits: Dict, overrides: Dict, project_path: str, 
 def _merge_hooks(directive_hooks: list, project_path: str) -> list:
     hooks_loader = load_module("loaders/hooks_loader", anchor=_ANCHOR)
     loader = hooks_loader.get_hooks_loader()
+    user = loader.get_user_hooks()
     builtin = loader.get_builtin_hooks(Path(project_path))
+    project = loader.get_project_hooks(Path(project_path))
     infra = loader.get_infra_hooks(Path(project_path))
 
+    for h in user:
+        h.setdefault("layer", 0)
     for h in directive_hooks:
         h.setdefault("layer", 1)
     for h in builtin:
         h.setdefault("layer", 2)
+    for h in project:
+        h.setdefault("layer", 2.5)
     for h in infra:
         h.setdefault("layer", 3)
 
-    return sorted(directive_hooks + builtin + infra, key=lambda h: h.get("layer", 2))
+    return sorted(user + directive_hooks + builtin + project + infra, key=lambda h: h.get("layer", 2))
 
 
 async def execute(params: Dict, project_path: str) -> Dict:

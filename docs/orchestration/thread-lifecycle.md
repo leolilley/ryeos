@@ -84,11 +84,17 @@ If the thread has a parent, the orchestrator checks whether the parent has excee
 
 ### Step 7: Build hooks and harness
 
-Hooks are merged from three sources and sorted by layer:
+Hooks are merged from five sources and sorted by layer:
 
-- **Layer 1** — Directive hooks (from the directive's XML)
-- **Layer 2** — Builtin hooks (project-level, from `.ai/config/agent/`)
-- **Layer 3** — Infra hooks (system-level, always run)
+| Layer | Source | Config Location | Purpose |
+|-------|--------|-----------------|---------|
+| 0 | User hooks | `~/.ai/config/agent/hooks.yaml` | Cross-project personal hooks |
+| 1 | Directive hooks | Directive XML `<hooks>` block | Per-directive hooks |
+| 2 | Builtin hooks | System `hook_conditions.yaml` | Error/limit/compaction defaults |
+| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
+| 3 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
+
+User and project hooks use the same format as directive hooks — `id`, `event`, optional `condition`, and `action`. See [Hooks Configuration](#hooks-configuration) below.
 
 The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities. Tool schemas are loaded from the primary tools directory and attached to the harness.
 
@@ -239,6 +245,76 @@ The `ThreadRegistry` class provides these operations:
 | `set_continuation(thread_id, continuation_thread_id)` | Mark thread as continued |
 | `set_chain_info(thread_id, chain_root_id, continuation_of)` | Set chain metadata |
 | `get_chain(thread_id)` | Get full continuation chain |
+
+## Hooks Configuration
+
+User and project hooks let you inject context, record learnings, or run directives on every thread — without modifying each directive individually.
+
+### Config format
+
+Create `.ai/config/agent/hooks.yaml` at the project level, or `~/.ai/config/agent/hooks.yaml` at the user level:
+
+```yaml
+hooks:
+  - id: "inject_project_conventions"
+    event: "thread_started"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "project/conventions"
+    description: "Inject project conventions into every thread"
+
+  - id: "inject_api_types"
+    event: "thread_started"
+    condition:
+      path: "directive"
+      op: "contains"
+      value: "api"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "project/api-types"
+    description: "Inject API types for API-related directives only"
+
+  - id: "record_learnings"
+    event: "after_complete"
+    condition:
+      path: "cost.turns"
+      op: "gte"
+      value: 3
+    action:
+      primary: "execute"
+      item_type: "directive"
+      item_id: "project/record-learnings"
+    description: "Record learnings after substantial threads"
+```
+
+### Available events
+
+| Event | When it fires | Context available |
+|-------|--------------|-------------------|
+| `thread_started` | Before first LLM turn (fresh threads) | `directive`, `directive_body`, `model`, `limits`, `inputs` |
+| `thread_continued` | Before first LLM turn (continuation threads) | `directive`, `directive_body`, `model`, `limits`, `previous_thread_id`, `inputs` |
+| `after_step` | After each turn in the LLM loop | `cost`, `thread_id` |
+| `after_complete` | In the `finally` block after the loop ends | `thread_id`, `cost`, `project_path` |
+| `error` | When an LLM call or tool execution fails | `error`, `classification` |
+| `limit` | When a limit is exceeded | `limit_code`, `current_value`, `current_max` |
+
+### Hook actions
+
+Actions use the same format as directive hooks:
+
+- `primary: "load"` — Load a knowledge or directive item (for context injection)
+- `primary: "execute"` — Execute a tool or directive
+- `primary: "search"` — Search for items
+
+### Conditions
+
+Conditions use the same operators as the condition evaluator: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `regex`, `exists`. Combine with `any`, `all`, `not` for complex logic.
+
+### Layer ordering
+
+Lower layers run first. Within a layer, hooks run in definition order. A hook at any layer can use conditions to selectively fire based on context (directive name, cost, model, etc.).
 
 ## What's Next
 

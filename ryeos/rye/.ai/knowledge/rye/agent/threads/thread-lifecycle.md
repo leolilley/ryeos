@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T07:42:15Z:05c174815e69024322baa17e4b327d3c4b6bcd3314ab7e6b716c91dd63b8a05b:8yVJk5_19YeYjmVekUpI01bivX9e453Xw7ZtL5geQSywsjUaBdU1lZwlZ6VZLcyFEynM8y9LWgVw0s6d8OgEDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:51:57Z:f56582075b08ed5a52307413f76f3b648a226c1f32f24d2ca27b0c737379a3a5:Muo5trwFTqhuQTmJ4yv2b4stMx5BWyAB5XPkMoACnNQY7-eg6xNsK49osWaIGQS9SytAGtJIs0fASgylpIGGCA==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: thread-lifecycle
@@ -99,10 +99,17 @@ If thread has a parent, check parent's `spawns` limit. If exceeded → error. Ot
 
 ### Step 7: Build hooks and harness
 
-Hooks merged from three sources, sorted by layer:
-- **Layer 1** — Directive hooks (from XML)
-- **Layer 2** — Builtin hooks (project `.ai/config/`)
-- **Layer 3** — Infra hooks (system-level, always run)
+Hooks merged from five sources, sorted by layer:
+
+| Layer | Source | Location |
+|-------|--------|----------|
+| 0 | User hooks | `~/.ai/config/agent/hooks.yaml` |
+| 1 | Directive hooks | Directive XML `<hooks>` block |
+| 2 | Builtin hooks | System `hook_conditions.yaml` |
+| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` |
+| 3 | Infra hooks | System `hook_conditions.yaml` |
+
+User/project hooks use same format as directive hooks: `id`, `event`, optional `condition`, `action`. User hooks are cross-project personal preferences. Project hooks are project-wide context injection and learning.
 
 `SafetyHarness` constructed with resolved limits, merged hooks, directive permissions, parent capabilities. Tool schemas attached.
 

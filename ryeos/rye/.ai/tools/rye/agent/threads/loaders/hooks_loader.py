@@ -1,11 +1,15 @@
-# rye:signed:2026-02-23T00:42:51Z:f8e47d9ed253bf2acb4ea73760324a546d805e9b786e9dfe367605e4afc2aa58:8crVUS455cIqKvYw_23i9LsxvGVNa0v2o4lug3OyRFtLqUYX2VSV-KH-_fCz8tvg1WWBn2cW_hSRU2cJ2QG6Cg==:9fbfabe975fa5a7f
-__version__ = "1.0.0"
+# rye:signed:2026-02-23T07:51:57Z:6a773ec0227358d57ae0887a8f5e56daa9920d6dcac84264d2acf646575c68e3:ZXfyvvwb5BvCnswqvL7jZac_y4l6JjuManrbDpstEkI2K4ispo1oqVqCktZuhNIm01GPju7kkpg2VGZk-2HbBA==:9fbfabe975fa5a7f
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
 __tool_description__ = "Hooks configuration loader"
 
+import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from rye.constants import AI_DIR
+from rye.utils.path_utils import get_user_ai_path
 
 from .config_loader import ConfigLoader
 
@@ -22,6 +26,21 @@ class HooksLoader(ConfigLoader):
         config = self.load(project_path)
         return config.get("infra_hooks", [])
 
+    def get_user_hooks(self) -> List[Dict]:
+        user_hooks_path = get_user_ai_path() / "config" / "agent" / "hooks.yaml"
+        if user_hooks_path.exists():
+            with open(user_hooks_path) as f:
+                config = yaml.safe_load(f) or {}
+            return config.get("hooks", [])
+        return []
+
+    def get_project_hooks(self, project_path: Path) -> List[Dict]:
+        project_hooks_path = project_path / AI_DIR / "config" / "agent" / "hooks.yaml"
+        if project_hooks_path.exists():
+            with open(project_hooks_path) as f:
+                config = yaml.safe_load(f) or {}
+            return config.get("hooks", [])
+        return []
 
 
 _hooks_loader: Optional[HooksLoader] = None
