@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:007698c424ebddb507dfe1ac7dc32fd7677879eec1df0496eb525cc9e3c97c17:neq8fFPMA38vp_wUenfCe4GNWv1PY1rBhBbuD-Ak5k5n0XafW520tXhJa8Io_rUJDhAwws5jgOYj3cPRGh2gAQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:56:23Z:29879ffaba94fdd2fd4533314b34e61318fff882b7941f97c1fd5f289ecd9103:isjRvHNx-NlVa-hU_oQ_biaNLj06mO3AKeTTf90H81IH2DxZmHmhMCmAx6QhcyaEQRqaivwpKRT6SIrRlCQoCA==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: limits-and-safety
@@ -178,11 +178,13 @@ Hooks provide event-driven behavior during thread execution, evaluated by `Safet
 
 ### Hook Layers
 
-| Layer | Source                        | Priority | Behavior            |
-|-------|-------------------------------|----------|---------------------|
-| 1     | Directive hooks (from XML)    | Highest  | First match wins    |
-| 2     | Builtin hooks (`.ai/config/`) | Medium   | First match wins    |
-| 3     | Infra hooks (system-level)    | Lowest   | Always runs         |
+| Layer | Source | Location | Purpose |
+|-------|--------|----------|---------|
+| 0 | User hooks | `~/.ai/config/agent/hooks.yaml` | Cross-project personal hooks |
+| 1 | Directive hooks | Directive XML `<hooks>` block | Per-directive hooks |
+| 2 | Builtin hooks | System `hook_conditions.yaml` | Error/limit/compaction defaults |
+| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
+| 3 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
 
 ### Hook Events
 
@@ -197,7 +199,7 @@ Hooks provide event-driven behavior during thread execution, evaluated by `Safet
 ### Hook Dispatch Types
 
 - **Control hooks** (`run_hooks`): For error/limit/after_step. Returns control action (retry, terminate) or None (continue). First non-None wins (except Layer 3 always runs).
-- **Context hooks** (`run_hooks_context`): For `thread_started` only. Runs ALL matching hooks, concatenates context strings. Injects knowledge into first message.
+- **Context hooks** (`run_hooks_context`): For `thread_started` and `thread_continued` events. Runs ALL matching hooks, concatenates context strings.
 
 ### Control Actions
 

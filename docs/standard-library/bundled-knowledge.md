@@ -108,6 +108,18 @@ Thread hooks can automatically inject knowledge when a thread starts:
 
 This ensures the LLM has the spec loaded before it begins work, without the directive author needing to add explicit load steps.
 
+For project-wide injection, use `.ai/config/agent/hooks.yaml` instead of per-directive hooks:
+
+```yaml
+hooks:
+  - id: "inject_metadata_ref"
+    event: "thread_started"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/core/directive-metadata-reference"
+```
+
 ### Searching Knowledge
 
 All knowledge entries — bundled and user-created — are searchable:

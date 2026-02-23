@@ -122,6 +122,20 @@ Knowledge can also be loaded automatically via thread hooks:
 </hooks>
 ```
 
+For project-wide knowledge injection (without modifying each directive), add hooks to `.ai/config/agent/hooks.yaml`:
+
+```yaml
+hooks:
+  - id: "inject_terminology"
+    event: "thread_started"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/core/terminology"
+```
+
+See [Thread Lifecycle — Hooks Configuration](../orchestration/thread-lifecycle.md#hooks-configuration) for the full hook format and available events.
+
 ## File Resolution
 
 Knowledge entries resolve by item_id to file path:

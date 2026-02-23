@@ -221,13 +221,15 @@ Hooks provide event-driven behavior during thread execution. They are evaluated 
 
 ### Hook Sources and Layers
 
-| Layer | Source | Priority | Behavior |
-|-------|--------|----------|----------|
-| 1     | Directive hooks (from XML) | Highest | First match wins |
-| 2     | Builtin hooks (project `.ai/config/agent/`) | Medium | First match wins |
-| 3     | Infra hooks (system-level) | Lowest | Always runs |
+| Layer | Source | Config Location | Purpose |
+|-------|--------|-----------------|---------|
+| 0 | User hooks | `~/.ai/config/agent/hooks.yaml` | Cross-project personal hooks |
+| 1 | Directive hooks | Directive XML `<hooks>` block | Per-directive hooks |
+| 2 | Builtin hooks | System `hook_conditions.yaml` | Error/limit/compaction defaults |
+| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
+| 3 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
 
-Hooks from all sources are merged and sorted by layer. For control flow events (`error`, `limit`, `after_step`), the first hook that returns a non-None action wins — except layer 3 hooks which always execute regardless.
+Hooks from all five sources are merged and sorted by layer. User and project hooks use the same format as directive hooks — `id`, `event`, optional `condition`, and `action`. For control flow events (`error`, `limit`, `after_step`), the first hook that returns a non-None action wins — except layer 3 hooks which always execute regardless.
 
 ### Hook Events
 
@@ -243,7 +245,7 @@ Hooks from all sources are merged and sorted by layer. For control flow events (
 
 **Control hooks** (`run_hooks`): For error/limit/after_step events. Returns a control action (retry, terminate, etc.) or None (continue).
 
-**Context hooks** (`run_hooks_context`): For `thread_started` only. Runs ALL matching hooks, concatenates their context strings. Used to inject knowledge (agent identity, project rules) into the first message.
+**Context hooks** (`run_hooks_context`): For `thread_started` and `thread_continued` events. Runs ALL matching hooks, concatenates their context strings. Used to inject knowledge (agent identity, project rules) into the first message.
 
 ### Example: Directive with Hooks
 

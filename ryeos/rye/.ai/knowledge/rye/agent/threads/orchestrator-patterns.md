@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:177829b3a19d74689e69f71ebd927ba44f837c5db9b94d9748ada0e2bac2db02:kPncVE1zVimnWOkad59dMlQuwOGvwRkM7GmdSvPnEnXAZaBf7bjvvkuBQp9i6GpixFlxPn03oITpWYG45OJ2Dg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:56:23Z:af29cf8c4e0b699700b44edbdda6b33fa55cf14eafb5f833640ed576bcd8a3ba:nkF8P2x-YPAFMgwvccOivIUV6gsekgHVQt21g3dae1fZfNv66VjuCHkX35j1CjOG5wF022pCjuxoxO5ouQKvCg==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: orchestrator-patterns
@@ -253,6 +253,7 @@ The graph decides **what** runs and **when** (deterministic routing). The direct
 | -------------------------- | -------------- | ------------------- | --------------------------------------------- |
 | Pipeline progress/errors   | Graph hook     | YAML `config.hooks` | `graph_started`, `after_step`, `error`        |
 | Thread knowledge injection | Directive hook | XML `<hooks>`       | `thread_started`, `thread_continued`          |
+| Project-wide context       | Project/user hook | `.ai/config/agent/hooks.yaml` | `thread_started`, `after_complete`, any event |
 | Thread summarization       | Directive hook | XML `<hooks>`       | `after_complete`                              |
 
 ## Sequential Phases

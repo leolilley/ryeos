@@ -320,13 +320,15 @@ rye.<primary>.<item_type>.<item_id_dotted>
 
 ### Hook System
 
-Three layers of hooks, evaluated in order:
+Five layers of hooks, merged and sorted by layer:
 
-| Layer | Source                          | Purpose                     |
-| ----- | ------------------------------- | --------------------------- |
-| 1     | Directive XML `<hooks>`         | Directive-specific behavior |
-| 2     | Built-in hooks (`hooks_loader`) | System defaults             |
-| 3     | Infrastructure hooks            | Always-run monitoring       |
+| Layer | Source | Config Location | Purpose |
+|-------|--------|-----------------|---------|
+| 0 | User hooks | `~/.ai/config/agent/hooks.yaml` | Cross-project personal hooks |
+| 1 | Directive hooks | Directive XML `<hooks>` block | Per-directive hooks |
+| 2 | Builtin hooks | System `hook_conditions.yaml` | Error/limit/compaction defaults |
+| 2.5 | Project hooks | `.ai/config/agent/hooks.yaml` | Project-wide hooks |
+| 3 | Infra hooks | System `hook_conditions.yaml` | Infrastructure (emitter, checkpoint) |
 
 **Two dispatch modes:**
 

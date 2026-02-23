@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:4d4f6512472c63608312c613ae30164113255a47d581863005039e9f2160aba4:B0BQmghT-Fg20gKcIFak5pVQU-7vf108Ufm_YhIIT2FKKM8iyeI5oIFKBAwqE-nbNgy1uPCxXqddiQ5PGlIYDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T07:56:23Z:b14aac53cfde84aa9e6716603d981e452e6789a4b25bccadfa2a47316d2974f3:hMqirak8HpVmb7VnqskEAsYIb8cBP6b8CZLzeQqYP5zG441zVRcyEE7-lFuIyVA_P7OpzET-mNX7xLNHq1uoAg==:9fbfabe975fa5a7f -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -120,7 +120,7 @@ Context resolution (`_resolve_execution_context`):
 
 ## Hooks System
 
-`_merge_graph_hooks()` combines:
+`_merge_graph_hooks()` combines (note: graph hooks are separate from thread hooks — no user/project hooks):
 - Layer 1: graph-defined hooks (from `config.hooks`)
 - Layer 2: builtin hooks (from `hook_conditions.yaml`, filtered)
 - Layer 3: infra hooks (filtered)
