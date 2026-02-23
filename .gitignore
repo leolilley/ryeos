@@ -113,3 +113,6 @@ test_project/
 .repoql
 .ruff_cache
 tests/e2e/.venv
+
+## AI cache (browser snapshots, screenshots, ephemeral data)
+**/.ai/cache/

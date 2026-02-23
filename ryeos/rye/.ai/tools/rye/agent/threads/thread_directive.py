@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T04:27:33Z:7204a92aa55ab07cb9710d4728f76cb09c43a586043477949242d304698f5c4b:T4QlN8um5RN5m5u10c2fCrYpUA6Ve_a1-6kVNlAR08EgT9pFpZ3Y2dDTPBvz_QYRA0Vim5eVQHKMeLQKQ-4EAA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:96e5bb8c20e65323c2cbc6c9a6d230a2bba3fa5745a1104bf18cfde95cd57ac3:wT8mI5KXgyWFfDqrYwnC9wM_-fkn9FWhpKkZDQvf5A6e8rTlwLdUZOKPLdrsi4VbAckC40MoEE8xdQ_ZqhrkBw==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -188,7 +188,13 @@ def _build_prompt(directive: Dict) -> str:
             for o in outputs:
                 oname = o.get("name", "")
                 if oname:
-                    output_fields[oname] = o.get("description", "")
+                    otype = o.get("type", "string")
+                    required = o.get("required", False)
+                    desc = o.get("description", "")
+                    label = f"{desc} ({otype})" if desc else otype
+                    if required:
+                        label += " [required]"
+                    output_fields[oname] = label
         elif isinstance(outputs, dict):
             output_fields = dict(outputs)
 

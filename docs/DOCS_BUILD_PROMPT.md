@@ -140,8 +140,11 @@ rye/core/
 rye/file-system/
   read.py, write.py, edit_lines.py, glob.py, grep.py, ls.py
 
-rye/lsp/
-  lsp.py                            # Language Server Protocol integration
+rye/code/
+  npm/npm.ts                        # NPM/NPX operations
+  diagnostics/diagnostics.py        # Linter/type checker runner
+  typescript/typescript.ts           # TypeScript type checker (tsc --noEmit)
+  lsp/lsp.ts                        # LSP client (goToDefinition, references, hover, etc.)
 
 rye/mcp/
   connect.py, discover.py, manager.py  # MCP client (connect to other MCP servers)
@@ -153,7 +156,9 @@ rye/core/registry/
   registry.py                       # Registry push/pull/search
 
 rye/web/
-  webfetch.py, websearch.py         # Web scraping and search
+  fetch/fetch.py                    # Web page fetching with format conversion
+  search/search.py                  # Web search (DuckDuckGo, Exa)
+  browser/browser.ts                # Browser automation via playwright-cli
 ```
 
 **Bundles** (`rye/rye/.ai/bundles/`):

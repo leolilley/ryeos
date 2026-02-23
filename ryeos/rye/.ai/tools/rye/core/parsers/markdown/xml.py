@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:570388f5e93bb7a4379b0471f2ff9bcecd3f4dc77098b9b47153a3f23dc15e05:pWhYxeO2OCnyNMbDHvmW0ccHU72_tI0ni0y5E6qdGUykPzYc5NMlPbiJhIbIZd8eSaTmF2GIl92EYZ2V35qiAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-22T09:00:56Z:49f21f54b9afed624a878b07125c481b57a129a91d344b6107272744380b8fc2:IhLg2uYtTOV89lJH-uHvkwBXza4i5UVy7AVNdmD0qao9A1DW-rVjAlJsRY8EBpO-UTauQBdrs-ozggvLV1fhCQ==:9fbfabe975fa5a7f
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -307,6 +307,8 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
         for output in outputs_elem.findall("output"):
             output_data = {
                 "name": output.get("name", ""),
+                "type": output.get("type", "string"),
+                "required": output.get("required", "false").lower() == "true",
             }
             if output.text:
                 output_data["description"] = output.text.strip()

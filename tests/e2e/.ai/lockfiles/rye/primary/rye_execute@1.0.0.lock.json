@@ -1,25 +1,25 @@
 {
   "lockfile_version": 1,
-  "generated_at": "2026-02-22T02:48:23.646986+00:00",
+  "generated_at": "2026-02-23T04:31:02.331045+00:00",
   "root": {
     "tool_id": "rye/primary/rye_execute",
     "version": "1.0.0",
-    "integrity": "ca8c7e9dfae691f54cd7634690ecc0b0d776925922397e51b3da6eca9ce939fe"
+    "integrity": "f7301358fddbbbec06bc86957bab3c1e1c44d1e5b572d4ab7ea9e22aaed39862"
   },
   "resolved_chain": [
     {
       "item_id": "rye/primary/rye_execute",
       "space": "system:ryeos",
       "tool_type": "python",
-      "executor_id": "rye/core/runtimes/python_script_runtime",
-      "integrity": "ca8c7e9dfae691f54cd7634690ecc0b0d776925922397e51b3da6eca9ce939fe"
+      "executor_id": "rye/core/runtimes/python/script",
+      "integrity": "f7301358fddbbbec06bc86957bab3c1e1c44d1e5b572d4ab7ea9e22aaed39862"
     },
     {
-      "item_id": "rye/core/runtimes/python_script_runtime",
+      "item_id": "rye/core/runtimes/python/script",
       "space": "system:ryeos",
       "tool_type": "runtime",
       "executor_id": "rye/core/primitives/subprocess",
-      "integrity": "8e27c5f8c129cde37b7f3dab26efdc7f55041e110d395c8ce5cbd40aa0c8c241"
+      "integrity": "11602f07365b438db480fed80041fb3d0ad473b291d5b44bdc9c9bc297579e39"
     },
     {
       "item_id": "rye/core/primitives/subprocess",
