@@ -411,10 +411,21 @@ class SignTool:
         )
 
         if not validation_result["valid"]:
+            issues = validation_result["issues"]
+            all_missing = issues and all(
+                "Missing required field" in i for i in issues
+            )
+            error_msg = "Validation failed"
+            if all_missing:
+                error_msg = (
+                    "No metadata found. Knowledge entries require a "
+                    "```yaml fenced code block with name, title, version, "
+                    "and entry_type fields."
+                )
             return {
                 "status": "error",
-                "error": "Validation failed",
-                "issues": validation_result["issues"],
+                "error": error_msg,
+                "issues": issues,
                 "path": str(file_path),
             }
 

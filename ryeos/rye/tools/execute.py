@@ -33,10 +33,11 @@ logger = logging.getLogger(__name__)
 # {input:key:default}  — fallback to default if missing (colon separator)
 # {input:key|default}  — fallback to default if missing (pipe separator)
 _INPUT_REF = re.compile(r"\{input:(\w+)(\?|[:|][^}]*)?\}")
+_DOLLAR_INPUT_RE = re.compile(r"\$\{inputs\.(\w+)\}")
 
 
 def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
-    """Resolve {input:name} placeholders in a string."""
+    """Resolve {input:name} and ${inputs.name} placeholders in a string."""
 
     def _replace(m: re.Match) -> str:
         key = m.group(1)
@@ -49,7 +50,14 @@ def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
             return modifier[1:]
         return m.group(0)
 
-    return _INPUT_REF.sub(_replace, value)
+    result = _INPUT_REF.sub(_replace, value)
+    # Also resolve ${inputs.name} syntax
+    if "${inputs." in result:
+        result = _DOLLAR_INPUT_RE.sub(
+            lambda m: str(inputs[m.group(1)]) if m.group(1) in inputs else m.group(0),
+            result,
+        )
+    return result
 
 
 def _interpolate_parsed(parsed: Dict[str, Any], inputs: Dict[str, Any]) -> None:

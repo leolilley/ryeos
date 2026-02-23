@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:5d768a785fca528799a8a3d17fef29299a302f462e7148560997556743ca62f3:6Mn9UURdjrgQ-r_T_LkCof7BBR4YvKc4-vFxMB1eky687Rzyd4j8b0O6NGcdLx-kMlthLDe_7mc8XaYVefUbCg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T11:20:59Z:da555d46a7568e3acdaee7e3de17362ec9ea0360125ac5dfc297c5e3fb08e774:OjH1ZRaQp6lB5DVbKg5C7O2-eoycP1qFiIsVPJSpkLkG02bMJ7cP8Nc_UtA6SCWJsxL00M-DtaOFMgWOitcgAg==:9fbfabe975fa5a7f
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -65,9 +65,17 @@ class BudgetLedger:
 
     def register(self, thread_id: str, max_spend: Optional[float] = None,
                  parent_thread_id: Optional[str] = None) -> None:
-        """Register a thread's budget. Called before runner.run()."""
+        """Register a thread's budget. Called before runner.run().
+
+        Root threads (no parent) trigger cleanup of all terminal entries
+        from previous runs so the ledger doesn't accumulate stale data.
+        """
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
+            if not parent_thread_id:
+                conn.execute(
+                    "DELETE FROM budget_ledger WHERE status IN ('completed', 'error', 'cancelled')"
+                )
             conn.execute("""
                 INSERT OR IGNORE INTO budget_ledger
                     (thread_id, parent_thread_id, max_spend, status, created_at, updated_at)
@@ -117,6 +125,11 @@ class BudgetLedger:
                     (thread_id, parent_thread_id, reserved_spend, max_spend,
                      status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, 'active', ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    reserved_spend = excluded.reserved_spend,
+                    max_spend = excluded.max_spend,
+                    status = 'active',
+                    updated_at = excluded.updated_at
             """, (child_thread_id, parent_thread_id, amount,
                   child_max_spend or amount, now, now))
             conn.commit()

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T07:58:34Z:007caea8eb707f788a9ad4291ab89affc2b5625b69cd1ba9ff05d5f9561d0e0b:rj6P2ZhjekS6_tcZj1q1s42Ddwf1WsfQYamY5r4lzomrIyq7VFVmsTW5HnPN7XH5luaA5RXh8poIWdPjd9txCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T11:53:19Z:087d2a7b7840ee42bd0cc8901e024199d9e005552eb0ed003add080e20c4d7a5:hqHF8o5zmm2fP104107iUhUb1v6apQIIplzaAbC36jMPMLcshViJEV4CA0naD1r0Ni-yfhKY9koa9_fNFosmBw==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -19,6 +19,21 @@ from rye.constants import AI_DIR
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
+
+
+def _find_tools_root() -> Path:
+    """Walk up from __file__ to find the .ai/tools boundary for this bundle."""
+    current = Path(__file__).resolve().parent
+    while current != current.parent:
+        if current.name == "tools" and current.parent.name == ".ai":
+            return current
+        current = current.parent
+    raise RuntimeError(
+        f"Cannot find .ai/tools root from {__file__} — "
+        "thread_directive.py must live under a .ai/tools/ directory"
+    )
+
+_TOOLS_ROOT = _find_tools_root()
 
 
 CONFIG_SCHEMA = {
@@ -43,13 +58,16 @@ CONFIG_SCHEMA = {
             "type": "object",
             "description": "Override default limits (turns, tokens, spend, spawns, duration_seconds, depth)",
         },
+        "parent_thread_id": {"type": "string", "description": "Parent thread for hierarchy tracking"},
+        "previous_thread_id": {"type": "string", "description": "Previous thread for resume/continuation"},
+        "resume_messages": {"type": "array", "description": "Messages to resume from (internal)"},
     },
     "required": ["directive_id"],
     "additionalProperties": False,
 }
 
 
-_PRIMARY_TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "primary"
+_PRIMARY_TOOLS_DIR = _TOOLS_ROOT / "rye" / "primary"
 
 
 def _build_tool_schemas() -> list:
@@ -78,10 +96,30 @@ def _build_tool_schemas() -> list:
     return schemas
 
 
+def _spawn_env(thread_id: str) -> Dict[str, str]:
+    """Build env dict for async subprocess spawn.
+
+    rye-proc daemonizes with a clean env — only explicitly passed vars survive.
+    Forward everything the child needs to bootstrap and run.
+    """
+    # Always needed
+    envs = {"RYE_PARENT_THREAD_ID": thread_id}
+    # Forward vars the child needs (PYTHONPATH for imports, USER_SPACE for
+    # key resolution, PATH for finding binaries, API keys, HOME, etc.)
+    for key in os.environ:
+        if key.startswith(("PYTHON", "RYE_", "USER_SPACE", "ZEN_", "ANTHROPIC_",
+                           "OPENAI_", "GOOGLE_", "CONTEXT7_")):
+            envs.setdefault(key, os.environ[key])
+    for key in ("HOME", "PATH", "LANG", "TERM"):
+        if key in os.environ:
+            envs.setdefault(key, os.environ[key])
+    return envs
+
+
 def _generate_thread_id(directive_name: str) -> str:
-    epoch = int(time.time())
+    epoch_ms = int(time.time() * 1000)
     bare_name = directive_name.rsplit("/", 1)[-1]
-    return f"{directive_name}/{bare_name}-{epoch}"
+    return f"{directive_name}/{bare_name}-{epoch_ms}"
 
 
 def _write_thread_meta(
@@ -203,7 +241,13 @@ def _build_prompt(directive: Dict) -> str:
             parts.append(
                 "When you have completed all steps, return structured results:\n"
                 f'`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
-                f"parameters={{{params_obj}}})`"
+                f"parameters={{{params_obj}}})`\n\n"
+                "If you are BLOCKED and cannot complete the directive — missing context, "
+                "permission denied on a required tool, required files not found, or repeated "
+                "failures on the same error — do NOT waste turns working around it. "
+                "Return immediately with an error:\n"
+                '`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
+                'parameters={"status": "error", "error_detail": "<what is missing or broken>"})`'
             )
 
     # Close directive tag if opened
@@ -345,7 +389,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
         prev_tid = params["previous_thread_id"]
 
         # Verify transcript integrity before trusting JSONL content
-        from rye.constants import AI_DIR
         transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
         signer = transcript_signer_mod.TranscriptSigner(
             prev_tid, proj_path / AI_DIR / "agent" / "threads" / prev_tid
@@ -572,6 +615,8 @@ async def execute(params: Dict, project_path: str) -> Dict:
             child_params["parent_thread_id"] = params["parent_thread_id"]
 
         orchestrator_mod = load_module("orchestrator", anchor=_ANCHOR)
+        thread_dir = proj_path / AI_DIR / "agent" / "threads" / thread_id
+        spawn_log = str(thread_dir / "spawn.log")
         spawn_result = await orchestrator_mod.spawn_detached(
             cmd=sys.executable,
             args=[
@@ -581,7 +626,8 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 "--thread-id", thread_id,
                 "--pre-registered",
             ],
-            envs={"RYE_PARENT_THREAD_ID": thread_id},
+            log_path=spawn_log,
+            envs=_spawn_env(thread_id),
         )
 
         if not spawn_result.get("success"):

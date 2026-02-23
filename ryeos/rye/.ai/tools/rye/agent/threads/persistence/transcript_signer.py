@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:dda86409e554f65dc42ab16ee447d9ba736a5a2dc6f33f50ac5e49019edc9310:J2yF0v6DjKKvxr_-mvURSOO3BCdvuPwV3BC_iL00KBXSv8xRjqqIZz5PxdrqJ9T5xKklKmOj69kcVLftdy9uBQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T13:13:50Z:268704b7e2d0a8db359d12ac843e93efa2b2df1a05ffd286c4b04fb639405c28:SZFy4yrJGCmJeK2HQa8QlhLG2Q8SudXmeYI3m-0LdPHCnxkdxJf6Bz6qnivtD5HZwQoq5S96PYNZY7NVU8VRBA==:9fbfabe975fa5a7f
 """Checkpoint signing for transcript integrity and JSON signing utilities.
 
 Signs transcript.jsonl at turn boundaries by appending checkpoint events
@@ -150,13 +150,14 @@ class TranscriptSigner:
                     "byte_offset": byte_offset,
                 }
 
-            public_key_pem = trust_store.get_key(cp["fp"])
-            if public_key_pem is None:
+            key_info = trust_store.get_key(cp["fp"])
+            if key_info is None:
                 return {
                     "valid": False,
                     "error": f"Untrusted signing key {cp['fp']} at turn {cp['turn']}",
                     "failed_at_turn": cp["turn"],
                 }
+            public_key_pem = getattr(key_info, "public_key_pem", key_info)
 
             if not verify_signature(expected_hash, cp["sig"], public_key_pem):
                 return {

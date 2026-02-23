@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:a049b90b83e7edbf855e5dc78b91e11294e294b782ec5b35761cd024147c87b7:wNSrtRdwOYFsAifhHs2i5L_VWZv2rAjR0__3ozpQ_h0RmOnntFEnob0Gg-jLofltaDOi9LCR_rpRsYaEyNzJAA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T12:30:59Z:bc6933754c264d2664c02ae8f69605bf002073e99e095201cd492c3e442d9e16:Wdz4IYdZBZepeA_vjnTxmrRNAXfQc_6vJ8ugSZQfioYj0SkNVUhbX2CwDO-5SNXJ_zJpQs35_kUECy1Nyy_uCQ==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -10,13 +10,31 @@ from typing import Any, Dict
 from .condition_evaluator import resolve_path
 
 _INTERPOLATION_RE = re.compile(r"\$\{([^}]+)\}")
+_INPUT_REF_RE = re.compile(r"\{input:(\w+)(\?|[:|][^}]*)?\}")
 
 
 _WHOLE_EXPR_RE = re.compile(r"^\$\{([^}]+)\}$")
 
 
+def _resolve_input_ref(match, inputs: Dict) -> str:
+    """Resolve a {input:name} reference from inputs dict."""
+    key = match.group(1)
+    modifier = match.group(2)
+    if key in inputs:
+        return str(inputs[key])
+    if modifier == "?":
+        return ""
+    if modifier and modifier[0] in (":", "|"):
+        return modifier[1:]
+    return match.group(0)
+
+
 def interpolate(template: Any, context: Dict) -> Any:
-    """Interpolate ${...} expressions in a value.
+    """Interpolate ${...} and {input:...} expressions in a value.
+
+    Supports both syntaxes:
+      - ${path.to.value} — resolved via resolve_path on context
+      - {input:name} — resolved from context["inputs"] dict
 
     Works on strings, dicts (recursive), and lists (recursive).
     Non-string leaves are returned as-is.
@@ -38,7 +56,12 @@ def interpolate(template: Any, context: Dict) -> Any:
             value = resolve_path(context, path)
             return str(value) if value is not None else ""
 
-        return _INTERPOLATION_RE.sub(_replace, template)
+        result = _INTERPOLATION_RE.sub(_replace, template)
+        # Also resolve {input:name} from context["inputs"]
+        inputs = context.get("inputs", {})
+        if inputs and _INPUT_REF_RE.search(result):
+            result = _INPUT_REF_RE.sub(lambda m: _resolve_input_ref(m, inputs), result)
+        return result
     if isinstance(template, dict):
         return {k: interpolate(v, context) for k, v in template.items()}
     if isinstance(template, list):

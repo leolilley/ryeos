@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:43:13Z:40364f4c1b8e54c8288381fcc11d4c971206a8ff8d1a5f0af29431fab1a2a49e:2mwtl_t1VZ116XQWo0TxkgvCRLZa7crdzzXOvqZtmGB1AkCgtyGzetY4kq1dykZM-Ugt_JNa0yAs_2p3lxEEDQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T12:15:25Z:d0de0b342e5cb88438e09600f030154eb43848d6939c88dadeb5c749f45e8dde:PW45sYMItWQ8rzWNKj7CUoyaC6iJLVl_q9vMYF-oV0VpAfSHLBUXe06FUVkJpusTTg1WdJFonhuj5SVILsqrDg==:9fbfabe975fa5a7f
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -23,6 +23,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,20 @@ from module_loader import load_module
 
 logger = logging.getLogger(__name__)
 
-_ANCHOR = Path(__file__).resolve().parent.parent.parent / "agent" / "threads"
+def _find_tools_root() -> Path:
+    """Walk up from __file__ to find the .ai/tools boundary for this bundle."""
+    current = Path(__file__).resolve().parent
+    while current != current.parent:
+        if current.name == "tools" and current.parent.name == ".ai":
+            return current
+        current = current.parent
+    raise RuntimeError(
+        f"Cannot find .ai/tools root from {__file__} — "
+        "walker.py must live under a .ai/tools/ directory"
+    )
+
+_TOOLS_ROOT = _find_tools_root()
+_ANCHOR = _TOOLS_ROOT / "rye" / "agent" / "threads"
 
 
 # ---------------------------------------------------------------------------
@@ -55,11 +69,11 @@ class GraphTranscript:
     Two outputs, same pattern as thread Transcript:
 
     1. transcript.jsonl — append-only events, ``tail -f`` friendly
-       Path: {project}/.ai/agent/threads/{graph_run_id}/transcript.jsonl
+       Path: {project}/.ai/agent/graphs/{graph_run_id}/transcript.jsonl
 
     2. knowledge markdown — visual node status table + event history,
        re-rendered from JSONL at step boundaries, signed
-       Path: {project}/.ai/knowledge/agent/threads/{graph_id}/{graph_run_id}.md
+       Path: {project}/.ai/knowledge/agent/graphs/{graph_id}/{graph_run_id}.md
 
     No SSE streaming — graphs don't produce tokens.
     """
@@ -73,9 +87,9 @@ class GraphTranscript:
         self._graph_run_id = graph_run_id
         self._nodes_config = nodes_config
 
-        # JSONL directory (same location as thread transcripts)
+        # JSONL directory (graphs live under agent/graphs/, not agent/threads/)
         self._thread_dir = (
-            self._project_path / AI_DIR / "agent" / "threads" / graph_run_id
+            self._project_path / AI_DIR / "agent" / "graphs" / graph_run_id
         )
         self._thread_dir.mkdir(parents=True, exist_ok=True)
         self._jsonl_path = self._thread_dir / "transcript.jsonl"
@@ -94,8 +108,21 @@ class GraphTranscript:
             f.write(json.dumps(entry, default=str) + "\n")
             f.flush()
 
-    def checkpoint(self, step: int) -> None:
-        """Sign transcript JSONL at step boundary via TranscriptSigner."""
+    def checkpoint(
+        self, step: int, *, state: Optional[Dict] = None,
+        current_node: Optional[str] = None,
+    ) -> None:
+        """Sign transcript JSONL at step boundary via TranscriptSigner.
+
+        If state is provided, emits a state_snapshot event before the
+        checkpoint so resume can reconstruct entirely from the jsonl.
+        """
+        if state is not None:
+            self.write_event("state_snapshot", {
+                "step": step,
+                "current_node": current_node,
+                "state": state,
+            })
         transcript_signer = load_module(
             "persistence/transcript_signer", anchor=_ANCHOR
         )
@@ -168,7 +195,7 @@ class GraphTranscript:
         else:
             duration_str = f"{total_elapsed_s:.1f}s"
 
-        category = f"agent/threads/{self._graph_id}"
+        category = f"agent/graphs/{self._graph_id}"
         parts: List[str] = []
 
         # Frontmatter
@@ -243,10 +270,10 @@ class GraphTranscript:
         from rye.constants import ItemType
         knowledge_dir = (
             self._project_path / AI_DIR / "knowledge"
-            / "agent" / "threads" / self._graph_id
+            / "agent" / "graphs" / self._graph_id
         )
         knowledge_dir.mkdir(parents=True, exist_ok=True)
-        knowledge_path = knowledge_dir / f"{self._graph_run_id}.md"
+        knowledge_path = knowledge_dir / f"{self._graph_run_id}-transcript.md"
 
         signature = MetadataManager.create_signature(ItemType.KNOWLEDGE, content)
         signed_content = signature + content
@@ -481,7 +508,7 @@ def _unwrap_result(raw_result: Any) -> Dict:
 
 def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
     """Read a thread's thread.json."""
-    meta_path = Path(project_path) / AI_DIR / "threads" / thread_id / "thread.json"
+    meta_path = Path(project_path) / AI_DIR / "agent" / "threads" / thread_id / "thread.json"
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -604,12 +631,6 @@ def _inject_parent_context(params: Dict, exec_ctx: Dict) -> Dict:
     params = dict(params)
     if exec_ctx.get("parent_thread_id"):
         params.setdefault("parent_thread_id", exec_ctx["parent_thread_id"])
-    if exec_ctx.get("depth") is not None:
-        params.setdefault("parent_depth", exec_ctx["depth"])
-    if exec_ctx.get("limits"):
-        params.setdefault("parent_limits", exec_ctx["limits"])
-    if exec_ctx.get("capabilities"):
-        params.setdefault("parent_capabilities", exec_ctx["capabilities"])
     return params
 
 
@@ -749,7 +770,7 @@ async def _persist_state(
     Atomic write (temp → rename) to prevent corruption.
     """
     proj = Path(project_path)
-    knowledge_dir = proj / AI_DIR / "knowledge" / "graphs" / graph_id
+    knowledge_dir = proj / AI_DIR / "knowledge" / "agent" / "graphs" / graph_id
     knowledge_dir.mkdir(parents=True, exist_ok=True)
     knowledge_path = knowledge_dir / f"{graph_run_id}.md"
 
@@ -924,73 +945,53 @@ def _load_resume_state(
 ) -> Optional[Dict]:
     """Load and verify a persisted graph state for resume.
 
+    Source of truth is the transcript.jsonl in the graph run directory.
+    Integrity is verified via the last checkpoint (same TranscriptSigner
+    used by thread transcripts). State is reconstructed from the last
+    state_snapshot event in the jsonl.
+
     Returns dict with 'state', 'current_node', 'step_count' on success.
-    Returns None if state file not found or signature invalid.
+    Returns None if transcript not found or integrity check fails.
     """
     proj = Path(project_path)
-    knowledge_path = (
-        proj / AI_DIR / "knowledge" / "graphs" / graph_id / f"{graph_run_id}.md"
-    )
-    if not knowledge_path.exists():
+    jsonl_path = proj / AI_DIR / "agent" / "graphs" / graph_run_id / "transcript.jsonl"
+    if not jsonl_path.exists():
+        logger.warning("No transcript.jsonl for %s — cannot resume", graph_run_id)
         return None
 
-    content = knowledge_path.read_text(encoding="utf-8")
-
-    # Verify signature
-    mm = MetadataManager()
-    sig_result = mm.parse_and_verify(content)
-    if sig_result and not sig_result.get("valid", True):
+    # Verify transcript integrity via checkpoint signatures
+    transcript_signer = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+    signer = transcript_signer.TranscriptSigner(graph_run_id, jsonl_path.parent)
+    verify_result = signer.verify(allow_unsigned_trailing=True)
+    if not verify_result.get("valid", False):
         logger.warning(
-            "State signature invalid for %s/%s — cannot resume",
-            graph_id, graph_run_id,
+            "Transcript integrity failed for %s: %s",
+            graph_run_id, verify_result.get("error", "unknown"),
         )
         return None
 
-    # Parse frontmatter for current_node and step_count
-    current_node = None
-    step_count = 0
-    in_frontmatter = False
-    body_lines = []
-    frontmatter_done = False
+    # Find the last state_snapshot event
+    last_snapshot = None
+    with open(jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event_type") == "state_snapshot":
+                last_snapshot = event.get("payload", {})
 
-    for line in content.split("\n"):
-        stripped = line.strip()
-        # Skip signature line
-        if stripped.startswith("# rye:signed:") or stripped.startswith("<!-- rye:signed:"):
-            continue
-        if stripped == "```yaml" and not frontmatter_done:
-            in_frontmatter = True
-            continue
-        if stripped == "```" and in_frontmatter:
-            in_frontmatter = False
-            frontmatter_done = True
-            continue
-        if in_frontmatter:
-            if stripped.startswith("current_node:"):
-                current_node = stripped.split(":", 1)[1].strip() or None
-            elif stripped.startswith("step_count:"):
-                try:
-                    step_count = int(stripped.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-        elif frontmatter_done:
-            body_lines.append(line)
-
-    # Parse body as JSON state
-    body_text = "\n".join(body_lines).strip()
-    if not body_text:
-        return None
-
-    try:
-        state = json.loads(body_text)
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("Cannot parse state JSON for %s/%s", graph_id, graph_run_id)
+    if not last_snapshot or "state" not in last_snapshot:
+        logger.warning("No state_snapshot in transcript for %s", graph_run_id)
         return None
 
     return {
-        "state": state,
-        "current_node": current_node,
-        "step_count": step_count,
+        "state": last_snapshot["state"],
+        "current_node": last_snapshot.get("current_node"),
+        "step_count": last_snapshot.get("step", 0),
     }
 
 
@@ -1016,7 +1017,17 @@ async def execute(
     max_steps = cfg.get("max_steps", 100)
     error_mode = cfg.get("on_error", "fail")
 
-    # Derive IDs
+    # Derive IDs — resolve _item_id from _file_path if not set
+    if not graph_config.get("_item_id") and graph_config.get("_file_path"):
+        fp = Path(graph_config["_file_path"]).resolve()
+        # Walk up to find .ai/tools boundary and derive item_id
+        for parent in fp.parents:
+            if parent.name == "tools" and parent.parent.name == ".ai":
+                try:
+                    graph_config["_item_id"] = str(fp.relative_to(parent).with_suffix(""))
+                except ValueError:
+                    pass
+                break
     graph_id = graph_config.get("_item_id") or graph_config.get("category", "unknown")
     parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID")
     is_resume = params.pop("resume", False)
@@ -1065,7 +1076,9 @@ async def execute(
         # Fresh run
         if not graph_run_id:
             graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
-        state: Dict[str, Any] = {"inputs": params}
+        # Merge initial state from config.state, then overlay inputs
+        initial_state = cfg.get("state", {})
+        state: Dict[str, Any] = {**initial_state, "inputs": params}
         current = cfg.get("start")
         step_count = 0
 
@@ -1116,7 +1129,7 @@ async def execute(
                 "error": f"Node '{current}' not found", "steps": step_count,
                 "elapsed_s": elapsed,
             })
-            graph_transcript.checkpoint(step_count)
+            graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge("error", step_count, elapsed)
             registry.update_status(graph_run_id, "error")
             return {
@@ -1137,7 +1150,7 @@ async def execute(
             graph_transcript.write_event("graph_completed", {
                 "status": "completed", "steps": step_count, "elapsed_s": elapsed,
             })
-            graph_transcript.checkpoint(step_count)
+            graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge("completed", step_count, elapsed)
             await _persist_state(
                 project_path, graph_id, graph_run_id,
@@ -1163,7 +1176,7 @@ async def execute(
             graph_transcript.write_event("foreach_completed", {
                 "step": step_count, "node": executed_node, "next_node": current,
             })
-            graph_transcript.checkpoint(step_count)
+            graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge(
                 "running", step_count, time.monotonic() - graph_start_time,
             )
@@ -1259,7 +1272,7 @@ async def execute(
                     "node": executed_node, "steps": step_count,
                     "elapsed_s": elapsed,
                 })
-                graph_transcript.checkpoint(step_count)
+                graph_transcript.checkpoint(step_count, state=state, current_node=current)
                 graph_transcript.render_knowledge("error", step_count, elapsed)
                 await _persist_state(
                     project_path, graph_id, graph_run_id,
@@ -1301,7 +1314,7 @@ async def execute(
             "thread_id": result.get("thread_id", ""),
             "error": result.get("error", ""),
         })
-        graph_transcript.checkpoint(step_count)
+        graph_transcript.checkpoint(step_count, state=state, current_node=current)
         graph_transcript.render_knowledge(
             "running", step_count, time.monotonic() - graph_start_time,
         )
@@ -1335,7 +1348,7 @@ async def execute(
             graph_transcript.write_event("graph_cancelled", {
                 "steps": step_count, "elapsed_s": elapsed,
             })
-            graph_transcript.checkpoint(step_count)
+            graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge("cancelled", step_count, elapsed)
             await _persist_state(
                 project_path, graph_id, graph_run_id,
@@ -1355,7 +1368,7 @@ async def execute(
         "error": f"max_steps_exceeded ({max_steps})",
         "steps": step_count, "elapsed_s": elapsed,
     })
-    graph_transcript.checkpoint(step_count)
+    graph_transcript.checkpoint(step_count, state=state, current_node=current)
     graph_transcript.render_knowledge("error", step_count, elapsed)
     limit_ctx = {
         "limit_code": "max_steps_exceeded",
@@ -1481,7 +1494,10 @@ async def _foreach_sequential(
             raw_result = await _dispatch_action(action, project_path)
             result = _unwrap_result(raw_result)
 
-        collected.append(result.get("thread_id", result))
+        if result.get("status") == "error" or result.get("success") is False:
+            collected.append(result)
+        else:
+            collected.append(result.get("thread_id", result))
 
     return collected
 
@@ -1560,9 +1576,9 @@ def run_sync(
         registry.update_status(graph_run_id, "running")
 
         # Prepare log file for child process
-        log_dir = Path(project_path) / AI_DIR / "threads" / graph_run_id
+        log_dir = Path(project_path) / AI_DIR / "agent" / "graphs" / graph_run_id
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "async.log"
+        log_path = log_dir / "spawn.log"
 
         # Get path to walker.py for __main__ invocation
         walker_path = Path(__file__).resolve()
@@ -1572,7 +1588,7 @@ def run_sync(
         # We need to add --graph-run-id and --pre-registered to signal
         # the child to call execute() directly instead of run_sync()
         cmd = [
-            "python",
+            sys.executable,
             str(walker_path),
             "--graph-path", graph_config.get("_file_path", ""),
             "--params", json.dumps(params),
@@ -1581,12 +1597,23 @@ def run_sync(
             "--pre-registered",
         ]
 
+        # Forward env vars so child process can find packages and API keys
+        envs = {}
+        for key in os.environ:
+            if key.startswith(("PYTHON", "RYE_", "USER_SPACE", "ZEN_", "ANTHROPIC_",
+                               "OPENAI_", "GOOGLE_", "CONTEXT7_")):
+                envs.setdefault(key, os.environ[key])
+        for key in ("HOME", "PATH", "LANG", "TERM"):
+            if key in os.environ:
+                envs.setdefault(key, os.environ[key])
+
         # Cross-platform detached spawn via orchestrator helper
         orchestrator = load_module("orchestrator", anchor=_ANCHOR)
         spawn_result = asyncio.run(orchestrator.spawn_detached(
             cmd=cmd[0],
             args=cmd[1:],
             log_path=str(log_path),
+            envs=envs,
         ))
 
         if not spawn_result.get("success"):

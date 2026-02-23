@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T04:14:48Z:a35941682699559c4a11924adeee420027116cc2ae809a0892d7fcbb0d54b381:ujJTSSoQFSo8p6-ZCoGI5uf-JrBQMnRtn3PtzxV8iJ90P7Gw1d_lEcdR01ogys-VtqvZp7pCuyuWPQbH-_jhAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T12:28:36Z:ec7353be1818b8cfcfd8dfe84cc8046a1f0489d7af35a611560373fca8183b21:wmV_5CSDWOvdQWU6g4hRvuJeQKfFOGVgW3JQiFXtNAS1xQLz8KperW44GVUMD6vSeZ-EMEI8jqkPm40SxJmpAA==:9fbfabe975fa5a7f
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -201,6 +201,9 @@ class HttpProvider(ProviderAdapter):
                 else:
                     # Block-based: tool calls are content blocks (Anthropic, Gemini)
                     blocks = []
+                    thinking = msg.get("_thinking", "")
+                    if thinking:
+                        blocks.append({"thought": True, "text": thinking})
                     text = msg.get("content", "")
                     if text:
                         blocks.append(self._wrap_text_block(text, content_wrap))
@@ -228,13 +231,14 @@ class HttpProvider(ProviderAdapter):
                     converted.append(out)
                 else:
                     # Different content key (e.g., Gemini "parts")
+                    parts = []
+                    thinking = msg.get("_thinking", "")
+                    if thinking:
+                        parts.append({"thought": True, "text": thinking})
                     content = msg.get("content", "")
-                    converted.append({
-                        "role": mapped_role,
-                        content_key: [self._wrap_text_block(content, content_wrap)]
-                        if content
-                        else [],
-                    })
+                    if content:
+                        parts.append(self._wrap_text_block(content, content_wrap))
+                    converted.append({"role": mapped_role, content_key: parts})
 
         flush_results()
         return converted
@@ -443,7 +447,7 @@ class HttpProvider(ProviderAdapter):
             http_status=http_status,
             request_id=request_id,
             error_type=error_type,
-            retryable=http_status in (429, 500, 502, 503, 529) if http_status else False,
+            retryable=http_status in (0, 429, 500, 502, 503, 529) if http_status is not None else True,
         )
 
     # ── Completion ─────────────────────────────────────────────────────
@@ -456,7 +460,7 @@ class HttpProvider(ProviderAdapter):
         params = {
             "model": self.model,
             "messages": converted_messages,
-            "max_tokens": 4096,
+            "max_tokens": 16384,
         }
         if formatted_tools:
             params["tools"] = formatted_tools
@@ -485,7 +489,7 @@ class HttpProvider(ProviderAdapter):
         params = {
             "model": self.model,
             "messages": converted_messages,
-            "max_tokens": 4096,
+            "max_tokens": 16384,
             "stream": True,
             "mode": "stream",
         }

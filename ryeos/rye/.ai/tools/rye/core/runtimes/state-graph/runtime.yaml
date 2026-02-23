@@ -1,4 +1,5 @@
-# rye:signed:2026-02-23T00:43:13Z:59542de50142e08e2aec3ed916025232774feaccce11b0c8041f15d2c8e6cfc9:uG6sig9FRe96JZtld46P77dKQM6U2akEmcFzO8TSzZ4XuABOJkuZymmZC1ubfgxB1iO2DODIKVS60rJRsWxWDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T09:29:12Z:31d84987072a5c44f1b1667fcb6399bcdd86f9c1a50cc3fc61cb5d7e88992e90:8MIS5CoRXeUHwbrsD-Pv3LG6MjdWcBXRcsxS3vhHNjNSuKdkf-ewC9IXvvZRY3gWKczPVa34O8lL_eNgBlI8Dw==:9fbfabe975fa5a7f
+# rye:unsigned
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -21,10 +22,10 @@ anchor:
   enabled: true
   mode: always
   root: tool_dir
-  lib: ../python/lib
+  lib: .
   env_paths:
     PYTHONPATH:
-      prepend: ["{anchor_path}", "{runtime_lib}"]
+      prepend: ["{anchor_path}", "{runtime_lib}", "{runtime_lib}/../python/lib"]
 
 verify_deps:
   enabled: true
@@ -38,19 +39,14 @@ config:
   args:
     - "-c"
     - |
-      import sys,os,json,importlib.util
-      anchor=sys.argv[4]
-      walker=os.path.join(anchor,"walker.py")
-      if not os.path.isfile(walker):
-          sys.exit("walker not found: "+walker)
-      spec=importlib.util.spec_from_file_location("walker",walker)
-      mod=importlib.util.module_from_spec(spec)
-      spec.loader.exec_module(mod)
-      graph=mod._load_graph_yaml(sys.argv[1])
-      r=mod.run_sync(graph,json.loads(sys.argv[2]),sys.argv[3])
+      import sys,json,os.path
+      from walker import _load_graph_yaml, run_sync
+      graph=_load_graph_yaml(sys.argv[1])
+      graph["_file_path"]=sys.argv[1]
+      graph["_item_id"]=graph.get("category","")+"/"+os.path.splitext(os.path.basename(sys.argv[1]))[0]
+      r=run_sync(graph,json.loads(sys.argv[2]),sys.argv[3])
       print(json.dumps(r,default=str))
     - "{tool_path}"
     - "{params_json}"
     - "{project_path}"
-    - "{anchor_path}"
   timeout: 600

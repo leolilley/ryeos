@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T04:20:48Z:34224a18b84ca27905ec2483fb412e1a37936b8f8a16abf2538a4ae0be7e901a:4v8133t772GKN-oo9v1WBLT2FMHneQl3z2cbGM82Q_OAthSWtvAqt1OO5dWzTbcmy-6gsCj-kmQFxqsAekGfBA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T13:07:09Z:12d267223e949f63dc7ad6e76309fd4d4496f749ca13f40d0ac252862c45afdf:jclK4-EUmeAxPi1kOodS7EEPcb6AGXvI5E7maint2cH7wbgi6CIQCiygNQZk0ZVpFhwpOhx_W42XZegPvjiIBw==:9fbfabe975fa5a7f
 """
 runner.py: Core LLM loop for thread execution
 
@@ -96,7 +96,7 @@ async def run(
         if resume_messages:
             # Continuation mode: fire thread_continued hooks
             messages = list(resume_messages)
-            hook_context = await harness.run_hooks_context(
+            hook_ctx = await harness.run_hooks_context(
                 {
                     "directive": harness.directive_name,
                     "directive_body": directive_body,
@@ -108,7 +108,8 @@ async def run(
                 dispatcher,
                 event="thread_continued",
             )
-            if hook_context and messages:
+            combined = "\n\n".join(filter(None, [hook_ctx["before"], hook_ctx["after"]]))
+            if combined and messages:
                 # Inject context near the last user message, not at position 0.
                 # insert(0) would disrupt the reconstructed conversation chronology
                 # and push context far from the continuation ask.
@@ -118,11 +119,11 @@ async def run(
                         last_user_idx = i
                         break
                 messages[last_user_idx]["content"] = (
-                    hook_context + "\n\n" + messages[last_user_idx]["content"]
+                    combined + "\n\n" + messages[last_user_idx]["content"]
                 )
         else:
             # Fresh thread: fire thread_started hooks (identity, rules, knowledge)
-            hook_context = await harness.run_hooks_context(
+            hook_ctx = await harness.run_hooks_context(
                 {
                     "directive": harness.directive_name,
                     "directive_body": directive_body,
@@ -135,9 +136,11 @@ async def run(
             )
 
             first_message_parts = []
-            if hook_context:
-                first_message_parts.append(hook_context)
+            if hook_ctx["before"]:
+                first_message_parts.append(hook_ctx["before"])
             first_message_parts.append(user_prompt)
+            if hook_ctx["after"]:
+                first_message_parts.append(hook_ctx["after"])
             messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})
 
         while True:
@@ -145,10 +148,14 @@ async def run(
             cost["elapsed_seconds"] = time.monotonic() - start_time
             limit_result = harness.check_limits(cost)
             if limit_result:
+                # Capture error context from recent conversation
+                limit_result["error_context"] = _extract_error_context(messages)
+
                 hook_result = await harness.run_hooks(
                     "limit", limit_result, dispatcher, thread_ctx
                 )
                 if hook_result:
+                    hook_result.setdefault("error_context", limit_result["error_context"])
                     return _finalize(
                         thread_id, cost, hook_result, emitter, transcript, signer
                     )
@@ -162,6 +169,7 @@ async def run(
                     {
                         "success": False,
                         "error": f"Limit exceeded: {limit_code} ({current}/{maximum})",
+                        "error_context": limit_result["error_context"],
                     },
                     emitter,
                     transcript,
@@ -285,18 +293,51 @@ async def run(
                 text_parsed = bool(tool_calls)
 
             if not tool_calls:
-                # Native mode: if this is the first turn and we expected tool use,
-                # nudge the model to use tools rather than terminating
-                if (
+                # Detect empty/stalled responses: if the LLM returned no text
+                # AND no tool calls, it likely stalled (common with Gemini).
+                # Also nudge if the directive expects structured outputs via
+                # directive_return but none was called yet.
+                empty_response = not response["text"].strip()
+                expects_return = bool(getattr(harness, "output_fields", None))
+                nudge_count = getattr(harness, "_nudge_count", 0)
+                max_nudges = 3
+
+                should_nudge = (
                     provider.tool_use_mode == "native"
-                    and cost["turns"] == 1
                     and harness.available_tools
-                ):
-                    messages.append({"role": "assistant", "content": response["text"]})
-                    messages.append({
-                        "role": "user",
-                        "content": "You did not call any tools. Please use the provided tools to complete the directive steps. Call tools using the tool_use mechanism.",
-                    })
+                    and nudge_count < max_nudges
+                    and (
+                        cost["turns"] == 1  # first turn, never produced tools
+                        or empty_response   # stalled: empty text + no tools
+                        or expects_return   # directive expects directive_return
+                    )
+                )
+
+                if should_nudge:
+                    harness._nudge_count = nudge_count + 1
+                    msg = {"role": "assistant", "content": response["text"] or ""}
+                    if response.get("thinking"):
+                        msg["_thinking"] = response["thinking"]
+                    messages.append(msg)
+                    if empty_response:
+                        nudge_text = (
+                            "Your response was empty. You MUST continue working on the directive. "
+                            "Use the provided tools to complete all steps. Do not stop until you "
+                            "have written the required files and called directive_return."
+                        )
+                    elif expects_return:
+                        nudge_text = (
+                            "You have not yet called directive_return. The directive requires "
+                            "structured outputs. Continue working: use tools to complete all steps, "
+                            "then call rye_execute with item_id='rye/agent/threads/directive_return' "
+                            "to return your results."
+                        )
+                    else:
+                        nudge_text = (
+                            "You did not call any tools. Please use the provided tools to "
+                            "complete the directive steps. Call tools using the tool_use mechanism."
+                        )
+                    messages.append({"role": "user", "content": nudge_text})
                     continue
 
                 completion_result = {"success": True, "result": response["text"]}
@@ -310,12 +351,16 @@ async def run(
                 )
 
             # Append assistant message to conversation
+            assistant_msg = {"role": "assistant", "content": response["text"]}
+            if response.get("thinking"):
+                assistant_msg["_thinking"] = response["thinking"]
             if text_parsed:
                 # Text-parsed: assistant message is plain text (no tool_use blocks)
-                messages.append({"role": "assistant", "content": response["text"]})
+                messages.append(assistant_msg)
             else:
                 # API structured: include tool_use blocks for provider reconstruction
-                messages.append({"role": "assistant", "content": response["text"], "tool_calls": tool_calls})
+                assistant_msg["tool_calls"] = tool_calls
+                messages.append(assistant_msg)
 
             for tool_call in tool_calls:
                 emitter.emit(
@@ -651,6 +696,41 @@ def _estimate_context_ratio(messages, provider):
     return tokens_used / context_limit if context_limit > 0 else 0.0
 
 
+def _extract_error_context(messages: List[Dict], max_entries: int = 6) -> Dict:
+    """Extract recent conversation context for error diagnostics.
+
+    Captures the last few messages so the parent/orchestrator can
+    understand what the model was doing when it hit a limit.
+    Returns: {last_assistant, recent_tool_calls, recent_errors}
+    """
+    last_assistant = ""
+    recent_tool_calls = []
+    recent_errors = []
+
+    for msg in reversed(messages[-max_entries * 2:]):
+        role = msg.get("role", "")
+        content = str(msg.get("content", ""))
+
+        if role == "assistant" and not last_assistant:
+            last_assistant = content[:500] if content else ""
+
+        elif role == "tool":
+            snippet = content[:300]
+            if "error" in content.lower() or "denied" in content.lower():
+                recent_errors.append(snippet)
+            else:
+                recent_tool_calls.append(snippet)
+
+            if len(recent_tool_calls) + len(recent_errors) >= max_entries:
+                break
+
+    return {
+        "last_assistant": last_assistant,
+        "recent_tool_calls": recent_tool_calls[:3],
+        "recent_errors": recent_errors[:3],
+    }
+
+
 def _error_to_context(e: Exception) -> Dict:
     """Convert exception to context dict for error classification."""
     ctx = {
@@ -660,6 +740,9 @@ def _error_to_context(e: Exception) -> Dict:
             "code": getattr(e, "code", None),
         }
     }
+    # Surface http_status for classifier pattern matching
+    if hasattr(e, "http_status") and e.http_status is not None:
+        ctx["status_code"] = e.http_status
     if os.environ.get("RYE_DEBUG"):
         import traceback
         ctx["error"]["class_hierarchy"] = [c.__name__ for c in type(e).__mro__]

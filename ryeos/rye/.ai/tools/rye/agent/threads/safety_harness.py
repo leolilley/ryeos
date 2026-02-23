@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:6b21699dcc863df26f34adb558cc4e596b264a2b4eaf006e29ab6173b9b3bf42:WP2WNZy-9cAwVtjl1nnMJu8deX5aCKk8PkcAceV7_zcQamLMiToLVwUkjus8EGUyRbZPbONW3TB-spq0wbmXDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T11:53:19Z:e99f7aad39c7d7305af6fc17b9eb3f2eda56f2d59d9993bc9b04e5b7b32c1904:YZzpCaGeXnsr62j9K5QwpHxJ7araODnfS8eNJl5B8UdWjRPnkSD2qJsRghlYcLoY7XVkRNWKoy-cpjfuBg4MDw==:9fbfabe975fa5a7f
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """
@@ -200,33 +200,59 @@ class SafetyHarness:
         context: Dict,
         dispatcher: Any,
         event: str,
-    ) -> str:
+    ) -> Dict[str, str]:
         """Run context-injection hooks for a given event and collect context blocks.
 
         Unlike run_hooks(), this method:
         - Filters by the specified event (not hardcoded to thread_started)
         - Runs ALL matching hooks (no short-circuit)
-        - Maps LoadTool results: result["data"]["content"] → context block
-        - Returns concatenated context string (empty string if no hooks matched)
+        - Maps LoadTool/ExecuteTool results to XML-wrapped context blocks
+        - Returns {"before": str, "after": str} keyed by hook position
+
+        Hook position is controlled by the `position` field (default: "before"):
+        - "before": injected before the directive prompt (identity, rules)
+        - "after": injected after the directive prompt (supplementary knowledge)
         """
-        context_blocks = []
+        before_blocks = []
+        after_blocks = []
         for hook in self.hooks:
             if hook.get("event") != event:
                 continue
             if not condition_evaluator.matches(context, hook.get("condition", {})):
                 continue
 
-            action = hook.get("action", {})
-            interpolated = interpolation.interpolate_action(action, context)
-            result = await dispatcher.dispatch(interpolated)
+            # Support both single action and multi-action hooks
+            actions = hook.get("actions", [])
+            if not actions:
+                single = hook.get("action", {})
+                if single:
+                    actions = [single]
 
-            if result and result.get("status") == "success":
-                data = result.get("data", {})
-                content = data.get("content") or data.get("body") or data.get("raw", "")
-                if content:
-                    context_blocks.append(content.strip())
+            for action in actions:
+                interpolated = interpolation.interpolate_action(action, context)
+                result = await dispatcher.dispatch(interpolated)
 
-        return "\n\n".join(context_blocks)
+                if result and result.get("status") == "success":
+                    data = result.get("data", {})
+                    content = (
+                        data.get("content") or data.get("body") or data.get("raw", "")
+                        # LoadTool returns content at top level (no data wrapper)
+                        or result.get("content") or result.get("body", "")
+                    )
+                    if content:
+                        item_id = action.get("item_id", "")
+                        item_type = action.get("item_type", "")
+                        tag = item_type or "context"
+                        block = f'<{tag} id="{item_id}">\n{content.strip()}\n</{tag}>'
+                        if hook.get("position", "before") == "after":
+                            after_blocks.append(block)
+                        else:
+                            before_blocks.append(block)
+
+        return {
+            "before": "\n\n".join(before_blocks),
+            "after": "\n\n".join(after_blocks),
+        }
 
     def request_cancel(self):
         self._cancelled = True

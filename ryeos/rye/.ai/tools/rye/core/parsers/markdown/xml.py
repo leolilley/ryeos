@@ -1,4 +1,4 @@
-# rye:signed:2026-02-22T09:00:56Z:49f21f54b9afed624a878b07125c481b57a129a91d344b6107272744380b8fc2:IhLg2uYtTOV89lJH-uHvkwBXza4i5UVy7AVNdmD0qao9A1DW-rVjAlJsRY8EBpO-UTauQBdrs-ozggvLV1fhCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T11:30:37Z:6d2b442832542b462f53ba79f7ab57d2c75677c753257c366c021becb8864a4f:1jbyrQXWHc7MneP6QmIFODYGvGRHVxlv0gUamH7nLRiExFmyZ6hRnPW3TjQhNex95Z26RX7p8x8EsbM5bXDRCQ==:9fbfabe975fa5a7f
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -217,14 +217,31 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                         hook_data["content"] = hook.text.strip()
                     for hook_child in hook:
                         if hook_child.tag == "action":
-                            action = dict(hook_child.attrib)
-                            params = {}
-                            for param in hook_child:
-                                if param.tag == "param" and param.text:
-                                    params[param.get("name", param.tag)] = param.text.strip()
-                            if params:
-                                action["params"] = params
-                            hook_data["action"] = action
+                            # Check for nested primary actions (<execute>, <load>, etc.)
+                            sub_actions = []
+                            for sub in hook_child:
+                                if sub.tag in PRIMARY_ACTIONS:
+                                    sa = dict(sub.attrib)
+                                    sa["primary"] = sub.tag
+                                    sub_params = {}
+                                    for sp in sub:
+                                        if sp.tag == "param" and sp.text:
+                                            sub_params[sp.get("name", sp.tag)] = sp.text.strip()
+                                    if sub_params:
+                                        sa["params"] = sub_params
+                                    sub_actions.append(sa)
+                            if sub_actions:
+                                hook_data["actions"] = sub_actions
+                            else:
+                                # Single action with attributes on <action> itself
+                                action = dict(hook_child.attrib)
+                                params = {}
+                                for param in hook_child:
+                                    if param.tag == "param" and param.text:
+                                        params[param.get("name", param.tag)] = param.text.strip()
+                                if params:
+                                    action["params"] = params
+                                hook_data["action"] = action
                         elif hook_child.tag == "condition":
                             cond = dict(hook_child.attrib)
                             if "value" in cond:
