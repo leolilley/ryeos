@@ -4,7 +4,7 @@ version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
 category: rye/core/runtimes/state-graph
-description: "State graph runtime — walks graph YAML tools, dispatching rye_execute for each node"
+description: "State graph runtime — walks graph YAML tools, dispatching RYE for each node"
 
 env_config:
   interpreter:
