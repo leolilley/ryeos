@@ -19,8 +19,8 @@ enum Command {
         #[arg(long)]
         cmd: String,
 
-        /// Arguments (repeatable)
-        #[arg(long = "arg")]
+        /// Arguments (repeatable, may start with -)
+        #[arg(long = "arg", allow_hyphen_values = true)]
         args: Vec<String>,
 
         /// File to redirect stdout/stderr to (optional)

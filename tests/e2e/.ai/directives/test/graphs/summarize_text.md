@@ -1,4 +1,6 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:1309a0f3fb2ca932821e04c4222c871825a036278bfab51be60f316449c82261:79LQw0GZUDBkP9hAVJRQqIZB1-TrdVd13EoxqE81tFvz8Te_g0OnohZdBcT8mw1Y7bnkyFzlNIJjuz3jlyxQBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T09:36:19Z:0cfde65873b8fec596dcf0f7c52916993e448c60ef9a1311c7b6a144a8d7da5f:XrGIkdJaWVZmRf1sitAQMPNh10YTmSx_U2iLmmlPEZL_0OASebTW_Ts7cGRnYkGKEYMHHQ9bbRmvjEBy8lIcDg==:9fbfabe975fa5a7f -->
+<!-- -->
+
 # Summarize Text
 
 Takes text content and writes a concise summary to a file.
@@ -9,8 +11,8 @@ Takes text content and writes a concise summary to a file.
     <description>Takes text content and writes a concise summary to a file.</description>
     <category>test/graphs</category>
     <author>rye-os</author>
-    <model tier="haiku" />
-    <limits turns="4" tokens="16000" />
+    <model tier="fast" provider="zen" />
+    <limits turns="4" tokens="16000" spend="0.05" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
     </permissions>

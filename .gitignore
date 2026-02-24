@@ -116,3 +116,7 @@ tests/e2e/.venv
 
 ## AI cache (browser snapshots, screenshots, ephemeral data)
 **/.ai/cache/
+
+## E2E test generated knowledge/lockfiles (ephemeral)
+tests/e2e/.ai/knowledge/
+tests/e2e/.ai/lockfiles/

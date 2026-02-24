@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:910642536d19b10f61540078c02c5c63f5f33ac10c3a480112278e4af3e99d99:A5dzNvtmCUHTwSLDVldoI4tQMjkeAcM61dkeomHBhd2hGLmOGe-00IB8APKF4S9x92vLxgETs-l5X-OQ0zUYAA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T08:38:54Z:3f1501b5d312ff78d820eb5e5dbe655e47dc4f9ece10df8408692199f91ab41e:80sV6TAyJ-w-JCmvPj1vt1EWEANDhzXbtt7pZbbomTJQDnTnDxaO26JSieobzu0KwPCujw3djO2q9oachFvrBw==:9fbfabe975fa5a7f
 """Read a file with persistent line IDs for stable editing."""
 
 import argparse
@@ -11,7 +11,11 @@ __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
-__tool_description__ = "Read file content with persistent line IDs"
+__tool_description__ = (
+    "Read file content. Each line is prefixed with LINE_NUM:LID where LID is a "
+    "stable 6-char hex reference. LIDs are NOT part of the file content — they are "
+    "metadata for use with edit_lines (pass as line_id, start_line_id, end_line_id)."
+)
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -132,10 +136,14 @@ def reconcile_line_index(
 
 
 def format_output_with_line_ids(lines: list[str], index: list[dict]) -> str:
-    """Format lines with [LID:xxx] prefixes."""
-    output_lines = []
+    """Format lines with line_num:lid│ prefixes."""
+    output_lines = [
+        "# LINE:LID│ content — LIDs are stable references for edit_lines, not file content"
+    ]
     for line_info, line_content in zip(index, lines):
-        output_lines.append(f"[LID:{line_info['id']}] {line_content}")
+        output_lines.append(
+            f"{line_info['line_num']}:{line_info['id']}│ {line_content}"
+        )
     return "\n".join(output_lines)
 
 

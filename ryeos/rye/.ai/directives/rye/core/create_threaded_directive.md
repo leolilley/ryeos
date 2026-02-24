@@ -103,4 +103,3 @@ Create a directive with full thread execution support — model configuration, c
 <criterion>Process steps present after the XML fence</criterion>
 <criterion>Signature validation passed</criterion>
 </success_criteria>
-

@@ -1,4 +1,5 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:35ba7a39c0abc128f4c5bba30c6ee37375495a0b4c01db5235b83de6de562051:sV_Sppf7s-qaYQ0WtD0TzksdBlhM9fL5d-spYJoWo7_TnSxWw_gI9jCpUNL9lVbpUZy14wBGVFyayxSoofhNDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T09:06:00Z:8f087db0dc93e42fb3e100a99cb0864154397f634bd169d822ffbe3b15f777dd:apGaesEULaKglHURFOZS333fI6TOljpPVoF4HCkomIcItEQikmtLVatd1agi_Cs8HkA_DsYQRczazVIg7-ZWCQ==:9fbfabe975fa5a7f -->
+<!-- -->
 
 # Analyze Code
 
@@ -10,8 +11,8 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
     <description>Analyze a code snippet, write JSON analysis to a file, and return structured results.</description>
     <category>test/graphs</category>
     <author>rye-os</author>
-    <model tier="haiku" />
-    <limits turns="6" tokens="20000" />
+    <model tier="fast" />
+    <limits turns="6" tokens="20000" spend="0.05" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
     </permissions>

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:c32e94418b6ac50feebb19600dccff1a722989009fc1e9b82e05fa01f4c3e1c6:wqIkExGwIqQg6ObZ-BGZBfLUkH7rrLX2e8pMWYYv8xb4ATWYgxvhSH-JW6xOM6mtSLqD1VHmbSz3RsSPDVRpAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T08:38:54Z:844180b3aab9a63904111c72cfd1be9f23938ac6bd0af64a336687a00372fb8b:ybRchZjbd_9rfFGI4X5IPK_4dl3UvbGeQ9n8_RjvBo_56T0TR34b5TucG8CFAqZf7rk0_15nmoDPnB1OzyOEAQ==:9fbfabe975fa5a7f
 """Edit files by line ID (not string matching)."""
 
 import argparse
@@ -12,7 +12,10 @@ __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
-__tool_description__ = "Edit files using line IDs"
+__tool_description__ = (
+    "Edit files using LIDs (stable line references from the read tool). "
+    "Pass LIDs as line_id for single-line edits, or start_line_id/end_line_id for ranges."
+)
 
 CONFIG_SCHEMA = {
     "type": "object",

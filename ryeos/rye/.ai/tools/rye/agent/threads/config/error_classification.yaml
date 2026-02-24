@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:9491f262ed85dd21bfffbf0d4c1a0918c8fb55a0dffe7a5c3179916a383ac000:_jyERNtpUgFh6xrtNq1duyJc1feR01RseV6e801xcZx96XuXoEa66TDrwIwrGhuWSKNo9ruR7yXyQHX377q1BQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T10:58:47Z:807e8a0961e231abca91bc4e22c1e86af749605a23ef5e7ba72362e4603a2668:0WUDvTam6p0OU-nXns3Is0Ig5j8TrKyWvrk1a9F9AiR4VwimgG3xNh56L6KV-HXkjSklMkfwLr8yJw4W-Fb7AA==:9fbfabe975fa5a7f
 # config/error_classification.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"
@@ -63,6 +63,19 @@ patterns:
       type: "exponential"
       base: 2.0
       max: 60.0
+
+  - id: "http_0_connection"
+    name: "transient_connection_dropped"
+    category: "transient"
+    retryable: true
+    match:
+      path: "status_code"
+      op: "eq"
+      value: 0
+    retry_policy:
+      type: "exponential"
+      base: 3.0
+      max: 30.0
 
   - id: "http_5xx"
     name: "transient_server"

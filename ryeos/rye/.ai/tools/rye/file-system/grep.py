@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:0812d1377b3deff31882566662626b8fcf4c8cfbee62db9f33ef76a5ef8851b4:N4kKlEHF5tRnqHmfK6fuAbdZXAnz-XsMFqLzSBEKKICvMTfgOml_EQPiCHHc-vqCINbxCoPaN0mryACb51IKAA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T08:38:54Z:d0619e08dac8504f9a7ccabd98e37cc84fc08412cf0ca20e1bd9526c7a1e68b9:T9qMN-MTqaE-Dx37YRA1h064MJy-V1BAKI7mVWqPj5B2YQpF7bsVx7_iH-1G0apADDFOPDrYwnThdzkSP-UxCQ==:9fbfabe975fa5a7f
 """Search file contents with regex, returning line IDs."""
 
 import argparse
@@ -15,7 +15,10 @@ __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/file-system"
-__tool_description__ = "Search file contents with regex"
+__tool_description__ = (
+    "Search file contents with regex. Results include LIDs (stable line references) "
+    "when available — pass them to edit_lines to edit matched lines."
+)
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -242,10 +245,10 @@ def execute(params: dict, project_path: str) -> dict:
             if line_id:
                 match_info["line_id"] = line_id
                 output_lines.append(
-                    f"{relative_path}:{line_num}:[LID:{line_id}]:{content}"
+                    f"{relative_path}:{line_num}:{line_id}│ {content}"
                 )
             else:
-                output_lines.append(f"{relative_path}:{line_num}:{content}")
+                output_lines.append(f"{relative_path}:{line_num}│ {content}")
 
             matches.append(match_info)
 

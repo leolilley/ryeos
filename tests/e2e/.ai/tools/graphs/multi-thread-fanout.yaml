@@ -1,9 +1,11 @@
-# rye:signed:2026-02-18T09:47:12Z:81126a429eb6476f2b5ccf06608ca6bef80b1f2edb88aaeb21e9b27bc617d094:P8zjE0V4tvI5JBnsPFyeWFAPuX7EbLwChg3BBcm1J8gq8XEG2HsrhmCadgIudxSQKyzDAAxK0vd9EGJtSIE7BA==:440443d0858f0199
+# rye:signed:2026-02-23T09:29:45Z:a2b15564164f2bb943bd1c7fbdf654fdee75f0a8e82e770d79d8d9c4685b68d9:J83-8jlD5Z_evVi90cc9q6-6RCt_pgTMVwTcBi7Zn61CSlZgd8CaBBWxWYzBdiqUj2-tQ3h5vtOApxd0ZywPBw==:9fbfabe975fa5a7f
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
 category: graphs
 description: "Fan out LLM threads to summarize multiple topics in parallel, then collect results"
+permissions:
+  - rye.execute.tool.*
 
 config_schema:
   type: object
@@ -44,7 +46,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/summarize_text
+          directive_id: test/graphs/summarize_text
           inputs:
             text: "${task.text}"
             output_path: "${task.output_path}"

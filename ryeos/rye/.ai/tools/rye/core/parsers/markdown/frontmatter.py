@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:9f3682386415db6a563cae519ae83a02e17472e17354bb93f49d50a2ef3dcae0:9F0YF30TC5RrJim_eT3Nx7HR_wJxz_bGmeyiHO0Eupb0pbTxHP-3KhORvnb-yZEzDeP0_6n18l-7VJexyeJ8Cw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-23T08:24:44Z:f2cee1cd13c83ca09024cff4f764a80cb2c93f9d105df18159c9260893f61603:JLgkESmnm_7dRV09TfP8F_H6cEp75qaRtVpSp41y6zNmFq3F3O0gKdJzueZdNatLMcy_lG-rQ5tNBD-Qm__cCw==:9fbfabe975fa5a7f
 """Markdown YAML parser for knowledge entries.
 
 Extracts YAML metadata from ```yaml code fences (matching how
@@ -50,6 +50,17 @@ def _extract_yaml_block(content: str) -> Tuple[Optional[str], str]:
     return None, ""
 
 
+def _detect_dashes_frontmatter(content: str) -> bool:
+    """Detect unsupported --- YAML frontmatter format."""
+    stripped = content.lstrip()
+    # Skip HTML signature comment
+    if stripped.startswith("<!--"):
+        end = stripped.find("-->")
+        if end != -1:
+            stripped = stripped[end + 3:].lstrip()
+    return stripped.startswith("---")
+
+
 def parse(content: str) -> Dict[str, Any]:
     """Parse knowledge entry content.
 
@@ -69,6 +80,16 @@ def parse(content: str) -> Dict[str, Any]:
             result.update(data)
         result["body"] = body
         return result
+
+    # Reject --- frontmatter with a clear error
+    if _detect_dashes_frontmatter(content):
+        return {
+            "error": (
+                "Found --- YAML frontmatter (unsupported). "
+                "Use a ```yaml fenced code block for metadata instead."
+            ),
+            "raw": content,
+        }
 
     # Pure YAML file — strip signature comment then parse as metadata
     try:

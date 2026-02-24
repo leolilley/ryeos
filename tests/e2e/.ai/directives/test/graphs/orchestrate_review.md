@@ -1,4 +1,6 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:7a04ecd7e14570b3dc877d185838b2fe960714e33e6e32c0538db3d8b8a070e3:z3kTeGTljPspX_yet7jOyBy4kkbgphmlrE5no_7zO8n33hIRE3Vfnt09w84HXAY-yxT1YImQBx_6vFx_s3NiDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-23T09:06:00Z:ef1d32354fc54be67f3f900d9f728ac9b11cef9d26a1eee090bc09f881dc6138:67L_42OF8tGW1gapsbCCocSO8AtXnHOu8WCNAIvcLf2pf-YP2MgHNucPhefrbgqR4pDVJoCbgq6jtJacSnwCCw==:9fbfabe975fa5a7f -->
+<!-- -->
+
 # Orchestrate Review
 
 Orchestrates a multi-step code review by spawning nested LLM threads for analysis and summarization, then writes a combined review.
@@ -9,11 +11,13 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
     <description>Orchestrate a code review by chaining analyze_code and summarize_text directives via nested LLM threads.</description>
     <category>test/graphs</category>
     <author>rye-os</author>
-    <model tier="sonnet" />
-    <limits turns="12" tokens="40000" />
+    <model tier="general" provider="zen/zen" />
+    <limits turns="12" tokens="40000" spend="0.50" />
     <permissions>
-      <execute><tool>rye.file-system.*</tool></execute>
-      <execute><tool>rye.agent.threads.*</tool></execute>
+      <execute>
+        <tool>rye.file-system.*</tool>
+        <tool>rye.agent.threads.*</tool>
+      </execute>
     </permissions>
   </metadata>
 
@@ -44,7 +48,7 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
 
     First, spawn a nested LLM thread to analyze this code by calling:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "test/graphs/analyze_code", "inputs": {"code_snippet": "<paste the code above here>", "output_path": "{input:output_dir}/orchestrated_analysis.json"}, "limit_overrides": {"turns": 6, "spend": 0.05}})`
+    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "test/graphs/analyze_code", "inputs": {"code_snippet": "<paste the code above here>", "output_path": "{input:output_dir}/orchestrated_analysis.json"}, "limit_overrides": {"turns": 6, "spend": 0.05}})`
 
     Wait for the result. Note the thread_id from the response.
   </step>
@@ -58,7 +62,7 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
   <step name="summarize">
     Take the analysis JSON you just read and spawn another nested LLM thread to summarize it:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "test/graphs/summarize_text", "inputs": {"text": "<paste the analysis JSON content here>", "output_path": "{input:output_dir}/orchestrated_summary.md"}, "limit_overrides": {"turns": 4, "spend": 0.03}})`
+    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "test/graphs/summarize_text", "inputs": {"text": "<paste the analysis JSON content here>", "output_path": "{input:output_dir}/orchestrated_summary.md"}, "limit_overrides": {"turns": 4, "spend": 0.03}})`
 
     Wait for the result. Note the thread_id.
   </step>
