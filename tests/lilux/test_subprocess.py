@@ -1,12 +1,27 @@
-"""Tests for subprocess primitive (Phase 3.1)."""
+"""Tests for subprocess primitive."""
 
 import asyncio
-from dataclasses import dataclass
+import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from lilux.primitives.subprocess import SubprocessResult, SubprocessPrimitive
+from lilux.primitives.subprocess import (
+    SubprocessPrimitive,
+    SubprocessResult,
+    SpawnResult,
+    KillResult,
+    StatusResult,
+)
+from lilux.primitives.errors import ConfigurationError
+
+
+# Skip all tests if rye-proc is not on PATH
+pytestmark = pytest.mark.skipif(
+    shutil.which("rye-proc") is None,
+    reason="rye-proc binary not found on PATH",
+)
 
 
 class TestSubprocessResult:
@@ -41,9 +56,60 @@ class TestSubprocessResult:
         assert result.return_code == 1
 
 
+class TestSpawnResult:
+    """Test SpawnResult dataclass."""
+
+    def test_spawn_result_success(self):
+        result = SpawnResult(success=True, pid=12345)
+        assert result.success is True
+        assert result.pid == 12345
+        assert result.error is None
+
+    def test_spawn_result_failure(self):
+        result = SpawnResult(success=False, error="spawn failed")
+        assert result.success is False
+        assert result.pid is None
+        assert result.error == "spawn failed"
+
+
+class TestKillResult:
+    """Test KillResult dataclass."""
+
+    def test_kill_result_terminated(self):
+        result = KillResult(success=True, pid=123, method="terminated")
+        assert result.success is True
+        assert result.method == "terminated"
+
+    def test_kill_result_failure(self):
+        result = KillResult(success=False, pid=123, error="not found")
+        assert result.success is False
+        assert result.error == "not found"
+
+
+class TestStatusResult:
+    """Test StatusResult dataclass."""
+
+    def test_status_alive(self):
+        result = StatusResult(pid=123, alive=True)
+        assert result.alive is True
+
+    def test_status_dead(self):
+        result = StatusResult(pid=123, alive=False)
+        assert result.alive is False
+
+
+class TestConfigurationError:
+    """Test rye-proc hard requirement."""
+
+    def test_raises_when_rye_proc_missing(self):
+        with patch("shutil.which", return_value=None):
+            with pytest.raises(ConfigurationError, match="rye-proc"):
+                SubprocessPrimitive()
+
+
 @pytest.mark.asyncio
 class TestSubprocessPrimitive:
-    """Test SubprocessPrimitive execution."""
+    """Test SubprocessPrimitive execution via rye-proc exec."""
 
     async def test_execute_simple_command(self):
         """Execute simple echo command."""
@@ -168,7 +234,6 @@ class TestSubprocessPrimitive:
             "args": ["-c", "echo $USER"],
             "env": {"CUSTOM_VAR": "value"},
         }
-        # Should merge with os.environ
         result = await primitive.execute(config, {})
 
         assert result.success is True
@@ -176,7 +241,6 @@ class TestSubprocessPrimitive:
     async def test_env_merge_large_count(self):
         """Large env count (>=50) uses directly as resolved env."""
         primitive = SubprocessPrimitive()
-        # Create env with >=50 variables
         large_env = {f"VAR_{i}": f"value_{i}" for i in range(50)}
         large_env["CUSTOM_VAR"] = "custom_value"
 
@@ -187,7 +251,6 @@ class TestSubprocessPrimitive:
         }
         result = await primitive.execute(config, {})
 
-        # Should not raise or fail
         assert result.success is True
 
     async def test_stderr_captured(self):
@@ -238,3 +301,67 @@ class TestSubprocessPrimitive:
         result = await primitive.execute(config, {})
 
         assert result.success is False
+
+    async def test_no_command_specified(self):
+        """Missing command returns error."""
+        primitive = SubprocessPrimitive()
+        result = await primitive.execute({}, {})
+
+        assert result.success is False
+        assert "No command specified" in result.stderr
+
+
+@pytest.mark.asyncio
+class TestSubprocessLifecycle:
+    """Test spawn/kill/status lifecycle methods."""
+
+    async def test_spawn_and_kill(self):
+        """Spawn a process and kill it."""
+        primitive = SubprocessPrimitive()
+        spawn_result = await primitive.spawn("sleep", ["60"])
+        assert spawn_result.success is True
+        assert spawn_result.pid is not None
+        assert spawn_result.pid > 0
+
+        # Verify alive
+        status_result = await primitive.status(spawn_result.pid)
+        assert status_result.alive is True
+
+        # Kill it
+        kill_result = await primitive.kill(spawn_result.pid, grace=1.0)
+        assert kill_result.success is True
+        assert kill_result.method in ("terminated", "killed")
+
+    async def test_kill_nonexistent_pid(self):
+        """Killing a nonexistent PID returns already_dead."""
+        primitive = SubprocessPrimitive()
+        result = await primitive.kill(999999, grace=0.5)
+        assert result.success is True
+        assert result.method == "already_dead"
+
+    async def test_status_nonexistent_pid(self):
+        """Status of nonexistent PID returns not alive."""
+        primitive = SubprocessPrimitive()
+        result = await primitive.status(999999)
+        assert result.alive is False
+
+    async def test_spawn_with_log_file(self):
+        """Spawn with log file redirection."""
+        with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
+            log_path = f.name
+
+        primitive = SubprocessPrimitive()
+        result = await primitive.spawn(
+            "sh", ["-c", "echo hello_log"],
+            log_path=log_path,
+        )
+        assert result.success is True
+
+        # Wait for process to finish writing
+        await asyncio.sleep(0.5)
+
+        log_content = Path(log_path).read_text()
+        assert "hello_log" in log_content
+
+        # Clean up
+        Path(log_path).unlink(missing_ok=True)

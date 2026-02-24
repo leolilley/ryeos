@@ -1,6 +1,7 @@
+use std::io::{Read, Write};
 use std::process;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
@@ -13,6 +14,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a command, wait for completion, capture output
+    Exec {
+        /// Command to execute
+        #[arg(long)]
+        cmd: String,
+
+        /// Arguments (repeatable, may start with -)
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+
+        /// Working directory (optional)
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Data to pipe to stdin (optional)
+        #[arg(long)]
+        stdin: Option<String>,
+
+        /// Environment variable to set (KEY=VALUE, repeatable)
+        #[arg(long = "env")]
+        envs: Vec<String>,
+
+        /// Timeout in seconds (default: 300)
+        #[arg(long, default_value_t = 300.0)]
+        timeout: f64,
+    },
+
     /// Spawn a detached/daemonized child process
     Spawn {
         /// Command to execute
@@ -55,6 +83,14 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
+        Command::Exec {
+            cmd,
+            args,
+            cwd,
+            stdin,
+            envs,
+            timeout,
+        } => do_exec(&cmd, &args, cwd.as_deref(), stdin.as_deref(), &envs, timeout),
         Command::Spawn {
             cmd,
             args,
@@ -66,6 +102,125 @@ fn main() {
     };
 
     println!("{}", result);
+}
+
+// ---------------------------------------------------------------------------
+// Exec
+// ---------------------------------------------------------------------------
+
+fn do_exec(
+    cmd: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    stdin_data: Option<&str>,
+    envs: &[String],
+    timeout: f64,
+) -> serde_json::Value {
+    let start = Instant::now();
+
+    let mut command = process::Command::new(cmd);
+    command.args(args);
+
+    for env in envs {
+        if let Some((key, value)) = env.split_once('=') {
+            command.env(key, value);
+        }
+    }
+
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+
+    if stdin_data.is_some() {
+        command.stdin(process::Stdio::piped());
+    } else {
+        command.stdin(process::Stdio::null());
+    }
+    command.stdout(process::Stdio::piped());
+    command.stderr(process::Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+            return serde_json::json!({
+                "success": false,
+                "stdout": "",
+                "stderr": format!("Failed to spawn: {e}"),
+                "return_code": -1,
+                "duration_ms": duration_ms,
+            });
+        }
+    };
+
+    // Write stdin if provided
+    if let Some(data) = stdin_data {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let _ = child_stdin.write_all(data.as_bytes());
+            // Drop to close stdin
+        }
+    }
+
+    // Wait with timeout using a dedicated thread
+    let timeout_dur = Duration::from_secs_f64(timeout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _timer = thread::spawn(move || {
+        thread::sleep(timeout_dur);
+        let _ = tx.send(());
+    });
+
+    // Try to wait for the child
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Child exited
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut stdout_buf);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_end(&mut stderr_buf);
+                }
+                let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let code = status.code().unwrap_or(-1);
+                return serde_json::json!({
+                    "success": code == 0,
+                    "stdout": String::from_utf8_lossy(&stdout_buf),
+                    "stderr": String::from_utf8_lossy(&stderr_buf),
+                    "return_code": code,
+                    "duration_ms": duration_ms,
+                });
+            }
+            Ok(None) => {
+                // Still running — check timeout
+                if rx.try_recv().is_ok() {
+                    // Timeout reached — kill
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    return serde_json::json!({
+                        "success": false,
+                        "stdout": "",
+                        "stderr": format!("Command timed out after {timeout} seconds"),
+                        "return_code": -1,
+                        "duration_ms": duration_ms,
+                    });
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+                return serde_json::json!({
+                    "success": false,
+                    "stdout": "",
+                    "stderr": format!("Wait failed: {e}"),
+                    "return_code": -1,
+                    "duration_ms": duration_ms,
+                });
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

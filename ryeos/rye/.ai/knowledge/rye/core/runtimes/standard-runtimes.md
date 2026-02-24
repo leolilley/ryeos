@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:1b2a2e04c07995ecacb9eeec876fccb69a826b03466ef052cac6e9867b4dd5c1:XQ-qKa2uUPkXb9XnTf9qsRNeyLpZc2FYeGUelnyi-KxmxkAX-n11JKZ8RQ4BHSfKohiqeph2f9cIjcTRhg6qCQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T06:23:11Z:04c60fc36ff798467d0d2e150043e54756515ed3b15bbdc10ac8111042d2bd38:TaidnEm-OswlQS-CvR7ihlk_WhggqPEvXsmCzfradVzSIbujkrOmNJpl3KOTZMFKzPNq-YIatPUqmahJfp4RDQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: standard-runtimes
@@ -334,7 +334,7 @@ echo "$result"
 Executes compiled Rust binaries via `system_binary` interpreter resolution. Two binaries ship with Rye OS:
 
 - **`rye-watch`** — Push-based file watcher for `registry.db`. Uses OS-native watchers (inotify/FSEvents/ReadDirectoryChangesW). CLI: `rye-watch --db <path> --thread-id <id> --timeout <seconds>`. Prints JSON to stdout.
-- **`rye-proc`** — Cross-platform process lifecycle manager. Subcommands: `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). Prints JSON to stdout.
+- **`rye-proc`** — Cross-platform process lifecycle manager. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin, cwd, env), `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). All output is JSON to stdout. rye-proc is a hard dependency — `SubprocessPrimitive.__init__()` raises `ConfigurationError` if it's not on PATH.
 
 ### Config
 

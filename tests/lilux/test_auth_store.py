@@ -83,7 +83,9 @@ class TestAuthStoreIsAuthenticated:
 
     def test_is_authenticated_true(self):
         """is_authenticated returns True when token exists."""
-        with patch("lilux.runtime.auth.keyring.get_password", return_value="token123"):
+        import json
+        token_json = json.dumps({"access_token": "token123", "expires_at": time.time() + 3600})
+        with patch("lilux.runtime.auth.keyring.get_password", return_value=token_json):
             auth = AuthStore()
             assert auth.is_authenticated("github")
 
@@ -279,8 +281,10 @@ class TestAuthStoreMultiService:
 
     def test_multiple_services(self):
         """Can manage tokens for multiple services."""
+        import json
+        token_json = json.dumps({"access_token": "token", "expires_at": time.time() + 3600})
         with patch("lilux.runtime.auth.keyring.set_password") as mock_set:
-            with patch("lilux.runtime.auth.keyring.get_password", return_value="token"):
+            with patch("lilux.runtime.auth.keyring.get_password", return_value=token_json):
                 auth = AuthStore()
 
                 auth.set_token("github", access_token="github_token")

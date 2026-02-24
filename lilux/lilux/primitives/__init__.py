@@ -15,7 +15,13 @@ from lilux.primitives.integrity import (
     compute_integrity,
 )
 from lilux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
-from lilux.primitives.subprocess import SubprocessPrimitive, SubprocessResult
+from lilux.primitives.subprocess import (
+    SubprocessPrimitive,
+    SubprocessResult,
+    SpawnResult,
+    KillResult,
+    StatusResult,
+)
 
 __all__ = [
     # Errors
@@ -36,6 +42,9 @@ __all__ = [
     # Subprocess
     "SubprocessResult",
     "SubprocessPrimitive",
+    "SpawnResult",
+    "KillResult",
+    "StatusResult",
     # HTTP Client
     "HttpResult",
     "HttpClientPrimitive",

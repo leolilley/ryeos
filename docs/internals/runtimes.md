@@ -745,7 +745,7 @@ config_schema:
 The Rust runtime executes compiled Rust binaries found on `$PATH`. It ships two binaries:
 
 - **`rye-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
-- **`rye-proc`**: Cross-platform process lifecycle manager with subcommands `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). Replaces POSIX-only `os.fork`/`os.kill` in the thread system.
+- **`rye-proc`**: Cross-platform process lifecycle manager with subcommands `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). All process operations in `SubprocessPrimitive` delegate to rye-proc — it is a hard dependency (no POSIX fallbacks).
 
 ```yaml
 # rye/core/runtimes/rust/runtime

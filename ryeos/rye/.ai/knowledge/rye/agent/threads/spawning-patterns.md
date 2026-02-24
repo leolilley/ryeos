@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T05:50:18Z:1097795e5c219defeb1f29a004577667f824e3802bb6746b2807ef18359aab28:Jk_0YP35widhQdlS_QJtQwJ-NIp61pxIefzUPPeR8yKcJ9fZL1KONTvYIYuj1Ay5bvrmkVLBQna_7g6C_Vy2Aw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T06:23:11Z:b8929bf426e0d2134f89818ef8c1cdab102b470ebd6077ea95de86f5a10381ba:Go6Zg-3iHHgXTmxxLU5mZNzuSm0OZ74xS-VZMh41eSQlr-5EUA5bO5Q9l2peHqTkh1I0j-1huEzYjSA67agaBg==:9fbfabe975fa5a7f -->
 ```yaml
 name: spawning-patterns
 title: Spawning Patterns
@@ -56,7 +56,7 @@ Returns:
 
 ### Async Internals
 
-`spawn_detached()` launches a child subprocess. Uses `rye-proc spawn` (cross-platform Rust binary) with POSIX `subprocess.Popen` fallback. Child process:
+`spawn_detached()` delegates to `SubprocessPrimitive.spawn()`, which calls `rye-proc spawn` (cross-platform Rust binary). No POSIX fallbacks — rye-proc is a hard dependency. Child process:
 1. Runs as a detached subprocess (`__main__` with `--thread-id` and `--pre-registered` flags)
 2. Runs LLM loop to completion
 3. Finalizes (report spend, update registry, write `thread.json`)
@@ -191,4 +191,4 @@ rye_execute(
 )
 ```
 
-Uses `rye-proc kill` (graceful→force) with POSIX `os.kill` fallback.
+Delegates to `SubprocessPrimitive.kill()`, which calls `rye-proc kill` (graceful→force). No POSIX fallbacks.

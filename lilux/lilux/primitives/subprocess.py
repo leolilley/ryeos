@@ -1,20 +1,24 @@
-"""Subprocess execution primitive (Phase 3.1).
+"""Subprocess execution primitive.
 
-Stateless, async-first subprocess execution with two-stage templating.
+All process operations go through rye-proc. No POSIX fallbacks.
 """
 
 import asyncio
+import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
+
+from lilux.primitives.errors import ConfigurationError
 
 
 @dataclass
 class SubprocessResult:
     """Result of subprocess execution.
-    
+
     Attributes:
         success: True if return code is 0.
         stdout: Standard output from process.
@@ -30,24 +34,77 @@ class SubprocessResult:
     duration_ms: float
 
 
+@dataclass
+class SpawnResult:
+    """Result of detached process spawn.
+
+    Attributes:
+        success: True if spawn succeeded.
+        pid: PID of spawned process, or None on failure.
+        error: Error message on failure, or None on success.
+    """
+
+    success: bool
+    pid: Optional[int] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class KillResult:
+    """Result of process kill operation.
+
+    Attributes:
+        success: True if kill succeeded.
+        pid: PID that was targeted.
+        method: How the process was stopped ("terminated", "killed", "already_dead").
+        error: Error message on failure, or None on success.
+    """
+
+    success: bool
+    pid: int = 0
+    method: str = ""
+    error: Optional[str] = None
+
+
+@dataclass
+class StatusResult:
+    """Result of process status check.
+
+    Attributes:
+        pid: PID that was checked.
+        alive: True if process is running.
+    """
+
+    pid: int
+    alive: bool
+
+
 class SubprocessPrimitive:
-    """Execute subprocess commands with templating and environment handling."""
+    """All process operations go through rye-proc. No POSIX fallbacks."""
+
+    def __init__(self):
+        self._rye_proc: Optional[str] = shutil.which("rye-proc")
+        if not self._rye_proc:
+            raise ConfigurationError(
+                "rye-proc binary not found on PATH. "
+                "Ensure ryeos is installed correctly."
+            )
 
     async def execute(
         self,
         config: Dict[str, Any],
         params: Dict[str, Any],
     ) -> SubprocessResult:
-        """Execute subprocess command.
-        
+        """Execute subprocess command via rye-proc exec.
+
         Two-stage templating:
         1. Environment variable expansion: ${VAR:-default}
         2. Runtime parameter substitution: {param_name}
-        
+
         Env merge heuristic:
         - <50 vars: merge config env with os.environ
         - >=50 vars: use config env directly (assumed resolved)
-        
+
         Args:
             config: Configuration dict with keys:
                 - command: Command to execute (required)
@@ -57,12 +114,12 @@ class SubprocessPrimitive:
                 - env: Environment variables (optional)
                 - timeout: Timeout in seconds (default: 300)
             params: Runtime parameters for templating {param_name}
-            
+
         Returns:
             SubprocessResult with execution details.
         """
         start_time = time.time()
-        
+
         try:
             # Extract config
             command = config.get("command")
@@ -101,66 +158,80 @@ class SubprocessPrimitive:
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
-            # Build command args
-            cmd: List[str] = [command] + args if args else [command]
+            # Build rye-proc exec command
+            exec_args: List[str] = [self._rye_proc, "exec", "--cmd", command]
+            for arg in args:
+                exec_args.extend(["--arg", arg])
+            if cwd:
+                exec_args.extend(["--cwd", cwd])
+            if input_data:
+                exec_args.extend(["--stdin", input_data])
+            if timeout:
+                exec_args.extend(["--timeout", str(timeout)])
+            for key, value in process_env.items():
+                exec_args.extend(["--env", f"{key}={value}"])
 
             try:
-                # Execute process
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
+                proc = await asyncio.create_subprocess_exec(
+                    *exec_args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=process_env,
-                    stdin=asyncio.subprocess.PIPE if input_data else None,
                 )
 
-                input_bytes = input_data.encode() if input_data else None
-                
-                # Wait with timeout
+                # rye-proc handles its own timeout, add buffer for the wrapper
+                wrapper_timeout = timeout + 10 if timeout else 310
                 try:
-                    stdout, stderr = await asyncio.wait_for(
-                        process.communicate(input=input_bytes),
-                        timeout=timeout,
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=wrapper_timeout,
                     )
                 except asyncio.TimeoutError:
-                    # Kill the process on timeout
-                    process.kill()
-                    await process.wait()
+                    proc.kill()
+                    await proc.wait()
                     duration_ms = (time.time() - start_time) * 1000
                     return SubprocessResult(
                         success=False,
                         stdout="",
-                        stderr=f"Command timed out after {timeout} seconds",
+                        stderr=f"rye-proc wrapper timed out after {wrapper_timeout} seconds",
                         return_code=-1,
                         duration_ms=duration_ms,
                     )
-                
-                return_code = process.returncode or 0
+
+                # Parse rye-proc JSON output
+                if proc.returncode == 0 and stdout_bytes:
+                    try:
+                        data = json.loads(stdout_bytes.strip())
+                        return SubprocessResult(
+                            success=data.get("success", False),
+                            stdout=data.get("stdout", ""),
+                            stderr=data.get("stderr", ""),
+                            return_code=data.get("return_code", -1),
+                            duration_ms=data.get("duration_ms", (time.time() - start_time) * 1000),
+                        )
+                    except json.JSONDecodeError:
+                        pass
+
+                # rye-proc itself failed
+                duration_ms = (time.time() - start_time) * 1000
+                return SubprocessResult(
+                    success=False,
+                    stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
+                    stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
+                    return_code=proc.returncode or -1,
+                    duration_ms=duration_ms,
+                )
 
             except FileNotFoundError:
-                # Command not found
                 duration_ms = (time.time() - start_time) * 1000
                 return SubprocessResult(
                     success=False,
                     stdout="",
-                    stderr=f"Command not found: {command}",
+                    stderr=f"rye-proc not found: {self._rye_proc}",
                     return_code=127,
                     duration_ms=duration_ms,
                 )
 
-            duration_ms = (time.time() - start_time) * 1000
-
-            return SubprocessResult(
-                success=return_code == 0,
-                stdout=stdout.decode("utf-8", errors="replace"),
-                stderr=stderr.decode("utf-8", errors="replace"),
-                return_code=return_code,
-                duration_ms=duration_ms,
-            )
-
         except Exception as e:
-            # Unexpected error
             duration_ms = (time.time() - start_time) * 1000
             return SubprocessResult(
                 success=False,
@@ -170,46 +241,103 @@ class SubprocessPrimitive:
                 duration_ms=duration_ms,
             )
 
+    async def spawn(
+        self,
+        cmd: str,
+        args: List[str],
+        log_path: Optional[str] = None,
+        envs: Optional[Dict[str, str]] = None,
+    ) -> SpawnResult:
+        """Detached spawn via rye-proc spawn."""
+        exec_args = [self._rye_proc, "spawn", "--cmd", cmd]
+        for arg in args:
+            exec_args.extend(["--arg", arg])
+        if log_path:
+            exec_args.extend(["--log", log_path])
+        if envs:
+            for k, v in envs.items():
+                exec_args.extend(["--env", f"{k}={v}"])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *exec_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode == 0 and stdout:
+                data = json.loads(stdout.strip())
+                return SpawnResult(
+                    success=data.get("success", False),
+                    pid=data.get("pid"),
+                    error=data.get("error"),
+                )
+        except (asyncio.TimeoutError, OSError, ValueError) as e:
+            return SpawnResult(success=False, error=str(e))
+
+        return SpawnResult(success=False, error=f"rye-proc exited {proc.returncode}")
+
+    async def kill(self, pid: int, grace: float = 3.0) -> KillResult:
+        """Kill via rye-proc kill."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._rye_proc, "kill", "--pid", str(pid), "--grace", str(grace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=grace + 5)
+            if proc.returncode == 0 and stdout:
+                data = json.loads(stdout.strip())
+                return KillResult(
+                    success=data.get("success", False),
+                    pid=pid,
+                    method=data.get("method", ""),
+                    error=data.get("error"),
+                )
+        except (asyncio.TimeoutError, OSError, ValueError) as e:
+            return KillResult(success=False, pid=pid, error=str(e))
+
+        return KillResult(success=False, pid=pid, error=f"rye-proc exited {proc.returncode}")
+
+    async def status(self, pid: int) -> StatusResult:
+        """Status check via rye-proc status."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._rye_proc, "status", "--pid", str(pid),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            if proc.returncode == 0 and stdout:
+                data = json.loads(stdout.strip())
+                return StatusResult(pid=pid, alive=data.get("alive", False))
+        except (asyncio.TimeoutError, OSError, ValueError):
+            pass
+
+        return StatusResult(pid=pid, alive=False)
+
     def _template_env_vars(self, text: str, env: Dict[str, str]) -> str:
-        """Expand ${VAR:-default} environment variables.
-        
-        Args:
-            text: Text with ${VAR:-default} patterns.
-            env: Environment variables dict.
-            
-        Returns:
-            Text with variables expanded.
-        """
+        """Expand ${VAR:-default} environment variables."""
         if not text:
             return text
 
         def replace_var(match):
             var_with_default = match.group(1)
-            # Handle ${VAR:-default} format
             if ':-' in var_with_default:
                 var_name, default = var_with_default.split(':-', 1)
             else:
                 var_name = var_with_default
                 default = ""
-            
             return env.get(var_name, default)
 
-        # Pattern: ${VAR_NAME:-default_value} or ${VAR_NAME}
-        # Only match uppercase env var names (no dots, no lowercase) to avoid
-        # consuming context interpolation templates like ${state.issues}.
+        # Only match uppercase env var names to avoid consuming
+        # context interpolation templates like ${state.issues}.
         return re.sub(r'\$\{([A-Z_][A-Z0-9_]*(?::-[^}]*)?)\}', replace_var, text)
 
     def _template_params(self, text: str, params: Dict[str, Any]) -> str:
         """Substitute {param_name} with parameter values.
-        
+
         Missing parameters are left unchanged in the text.
-        
-        Args:
-            text: Text with {param_name} patterns.
-            params: Parameter values dict.
-            
-        Returns:
-            Text with parameters substituted (missing ones unchanged).
         """
         if not text:
             return text
@@ -218,28 +346,20 @@ class SubprocessPrimitive:
             param_name = match.group(1)
             if param_name in params:
                 return str(params[param_name])
-            return match.group(0)  # Leave unchanged
+            return match.group(0)
 
         return re.sub(r'\{([^}]+)\}', replace_param, text)
 
     def _prepare_env(self, config_env: Dict[str, str]) -> Dict[str, str]:
         """Prepare process environment.
-        
+
         Heuristic:
         - <50 vars: merge config_env over os.environ
         - >=50 vars: use config_env directly (assumed fully resolved)
-        
-        Args:
-            config_env: Environment from config.
-            
-        Returns:
-            Environment dict for process.
         """
         if len(config_env) < 50:
-            # Merge with os.environ
             result = os.environ.copy()
             result.update(config_env)
             return result
         else:
-            # Use as-is (fully resolved from orchestrator)
             return config_env

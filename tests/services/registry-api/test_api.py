@@ -3,6 +3,9 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytest.importorskip("fastapi")
+pytest.importorskip("supabase")
+
 from fastapi.testclient import TestClient
 
 

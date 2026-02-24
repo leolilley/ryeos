@@ -1,5 +1,8 @@
 """Tests for server-side validation."""
 
+import os
+import tempfile
+from unittest.mock import patch
 import pytest
 
 from registry_api.validation import (
@@ -7,7 +10,14 @@ from registry_api.validation import (
     validate_content,
     sign_with_registry,
     verify_registry_signature,
+    get_registry_public_key,
 )
+
+
+@pytest.fixture(autouse=True)
+def _tmp_registry_key_dir(monkeypatch, tmp_path):
+    """Use a temp directory for registry keys so tests don't need /etc."""
+    monkeypatch.setenv("REGISTRY_KEY_DIR", str(tmp_path / "keys"))
 
 
 class TestStripSignature:
@@ -61,7 +71,7 @@ class TestSignWithRegistry:
         
         signed, sig_info = sign_with_registry(content, "directive", "testuser")
         
-        assert "|registry@testuser" in signed
+        assert "|rye-registry@testuser" in signed
         assert sig_info["registry_username"] == "testuser"
         assert len(sig_info["hash"]) == 64
         assert "T" in sig_info["timestamp"]
@@ -76,8 +86,8 @@ __tool_description__ = "Test tool"
         
         signed, sig_info = sign_with_registry(content, "tool", "leo")
         
-        assert "|registry@leo" in signed
-        assert signed.startswith("# rye:validated:")
+        assert "|rye-registry@leo" in signed
+        assert signed.startswith("# rye:signed:")
         assert sig_info["registry_username"] == "leo"
 
 
@@ -92,12 +102,15 @@ class TestVerifyRegistrySignature:
         # Sign it first
         signed, _ = sign_with_registry(content, "directive", "testuser")
         
-        # Verify
-        is_valid, error, sig_info = verify_registry_signature(
-            signed, "directive", "testuser"
-        )
+        # Pin the registry public key so verify can find it
+        registry_pub_key = get_registry_public_key()
+        with patch("rye.utils.trust_store.TrustStore") as mock_ts_cls:
+            mock_ts_cls.return_value.get_registry_key.return_value = registry_pub_key
+            is_valid, error, sig_info = verify_registry_signature(
+                signed, "directive", "testuser"
+            )
         
-        assert is_valid
+        assert is_valid, f"Expected valid but got error: {error}"
         assert error is None
         assert sig_info["registry_username"] == "testuser"
 

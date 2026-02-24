@@ -9,11 +9,10 @@ from typing import Any, Dict, List, Optional
 
 import asyncio
 import json as _json
-import os
 import shutil
-import signal
 from pathlib import Path
 
+from lilux.primitives.subprocess import SubprocessPrimitive
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
@@ -190,41 +189,13 @@ async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
     return {"status": "timeout", "thread_id": thread_id}
 
 
-async def _kill_pid(pid: int, grace: float = 3.0) -> Dict:
-    """Kill a process by PID using rye-proc (cross-platform) or os.kill fallback."""
-    rye_proc = shutil.which("rye-proc")
-    if rye_proc:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                rye_proc, "kill", "--pid", str(pid), "--grace", str(grace),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=grace + 5)
-            if proc.returncode == 0 and stdout:
-                return _json.loads(stdout.strip())
-        except (asyncio.TimeoutError, OSError, ValueError):
-            pass  # fall through to POSIX fallback
+_subprocess = SubprocessPrimitive()
 
-    # POSIX fallback (will not work on Windows without rye-proc)
-    try:
-        os.kill(pid, signal.SIGTERM)
-        import time
-        for _ in range(int(grace / 0.3)):
-            time.sleep(0.3)
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return {"success": True, "method": "terminated"}
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-        return {"success": True, "method": "killed"}
-    except OSError as e:
-        if e.errno == 3:  # ESRCH — already dead
-            return {"success": True, "method": "already_dead"}
-        return {"success": False, "error": str(e)}
+
+async def _kill_pid(pid: int, grace: float = 3.0) -> Dict:
+    """Kill a process by PID via SubprocessPrimitive."""
+    result = await _subprocess.kill(pid, grace=grace)
+    return {"success": result.success, "pid": pid, "method": result.method, "error": result.error}
 
 
 async def spawn_detached(
@@ -232,58 +203,14 @@ async def spawn_detached(
     log_path: Optional[str] = None,
     envs: Optional[Dict[str, str]] = None,
 ) -> Dict:
-    """Spawn a detached process using rye-proc (cross-platform) or os.fork fallback.
+    """Spawn a detached process via SubprocessPrimitive.
 
     Returns dict with 'success' and 'pid' on success.
     """
-    rye_proc = shutil.which("rye-proc")
-    if rye_proc:
-        try:
-            exec_args = [rye_proc, "spawn", "--cmd", cmd]
-            for arg in args:
-                exec_args.extend(["--arg", arg])
-            if log_path:
-                exec_args.extend(["--log", log_path])
-            if envs:
-                for k, v in envs.items():
-                    exec_args.extend(["--env", f"{k}={v}"])
-            proc = await asyncio.create_subprocess_exec(
-                *exec_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode == 0 and stdout:
-                return _json.loads(stdout.strip())
-        except (asyncio.TimeoutError, OSError, ValueError):
-            pass  # fall through to POSIX fallback
-
-    # POSIX fallback
-    import subprocess
-    child_cmd = [cmd] + list(args)
-    kwargs: Dict[str, Any] = {
-        "stdin": subprocess.DEVNULL,
-    }
-    if log_path:
-        log_file = open(log_path, "w")
-        kwargs["stdout"] = log_file
-        kwargs["stderr"] = subprocess.STDOUT
-    else:
-        kwargs["stdout"] = subprocess.DEVNULL
-        kwargs["stderr"] = subprocess.DEVNULL
-    if envs:
-        env = dict(os.environ)
-        env.update(envs)
-        kwargs["env"] = env
-    try:
-        kwargs["preexec_fn"] = os.setsid
-    except AttributeError:
-        pass  # Windows without rye-proc — best effort
-    try:
-        child = subprocess.Popen(child_cmd, **kwargs)
-        return {"success": True, "pid": child.pid}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    result = await _subprocess.spawn(cmd, args, log_path=log_path, envs=envs)
+    if result.success:
+        return {"success": True, "pid": result.pid}
+    return {"success": False, "error": result.error}
 
 
 async def handoff_thread(

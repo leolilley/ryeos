@@ -161,7 +161,7 @@ class TestEnvResolverInterpreters:
     """Test interpreter resolution."""
 
     def test_resolve_venv_python(self):
-        """venv_python resolver works."""
+        """local_binary resolver finds python in venv."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project_path = Path(tmpdir)
             
@@ -175,9 +175,10 @@ class TestEnvResolverInterpreters:
             resolver = EnvResolver(project_path=project_path)
             env_config = {
                 "interpreter": {
-                    "type": "venv_python",
+                    "type": "local_binary",
                     "var": "PYTHON_PATH",
-                    "venv_path": ".venv"
+                    "binary": "python",
+                    "search_paths": [".venv/bin"]
                 }
             }
             
@@ -188,16 +189,17 @@ class TestEnvResolverInterpreters:
             assert ".venv" in env["PYTHON_PATH"]
 
     def test_resolve_venv_python_with_fallback(self):
-        """venv_python uses fallback if not found."""
+        """local_binary uses fallback if not found."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project_path = Path(tmpdir)
             
             resolver = EnvResolver(project_path=project_path)
             env_config = {
                 "interpreter": {
-                    "type": "venv_python",
+                    "type": "local_binary",
                     "var": "PYTHON_PATH",
-                    "venv_path": ".nonexistent",
+                    "binary": "python",
+                    "search_paths": [".nonexistent/bin"],
                     "fallback": "/usr/bin/python3"
                 }
             }

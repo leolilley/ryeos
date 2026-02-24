@@ -17,14 +17,33 @@ All Lilux code lives in `lilux/lilux/`.
 
 **Location:** `lilux/primitives/subprocess.py`
 
-Runs shell commands with two-stage templating, timeout handling, and stdin piping.
+Unified process management primitive. All process operations — inline execution, detached spawning, killing, and status checks — go through the `rye-proc` Rust binary. No POSIX fallbacks.
+
+### Hard Dependency: rye-proc
+
+`SubprocessPrimitive.__init__()` resolves `rye-proc` via `shutil.which()`. If the binary is not found on `$PATH`, it raises `ConfigurationError`. This is intentional — rye-proc is a hard requirement for all process operations.
+
+```python
+class SubprocessPrimitive:
+    def __init__(self):
+        self._rye_proc = shutil.which("rye-proc")
+        if not self._rye_proc:
+            raise ConfigurationError("rye-proc binary not found on PATH.")
+```
 
 ### Interface
 
 ```python
 class SubprocessPrimitive:
     async def execute(self, config: Dict, params: Dict) -> SubprocessResult
+    async def spawn(self, cmd, args, log_path=None, envs=None) -> SpawnResult
+    async def kill(self, pid, grace=3.0) -> KillResult
+    async def status(self, pid) -> StatusResult
 ```
+
+### execute() — Inline Run-and-Wait
+
+Delegates to `rye-proc exec`. Two-stage templating (env vars then runtime params) stays in Python; the actual process execution is handled by rye-proc.
 
 **Config keys:**
 
@@ -37,12 +56,39 @@ class SubprocessPrimitive:
 | `env`        | dict      | `{}`     | Environment variables |
 | `timeout`    | int       | `300`    | Timeout in seconds    |
 
+### spawn() — Detached Process
+
+Delegates to `rye-proc spawn`. Returns immediately with a PID.
+
+```python
+result = await primitive.spawn("python", ["worker.py"], log_path="/tmp/worker.log")
+# SpawnResult(success=True, pid=12345)
+```
+
+### kill() — Graceful Then Force
+
+Delegates to `rye-proc kill`. Sends SIGTERM, waits `grace` seconds, then SIGKILL.
+
+```python
+result = await primitive.kill(12345, grace=3.0)
+# KillResult(success=True, pid=12345, method="terminated")
+```
+
+### status() — Is Process Alive
+
+Delegates to `rye-proc status`.
+
+```python
+result = await primitive.status(12345)
+# StatusResult(pid=12345, alive=True)
+```
+
 ### Two-Stage Templating
 
 1. **Stage 1 — Environment expansion:** `${VAR:-default}` patterns are replaced with environment values
 2. **Stage 2 — Parameter substitution:** `{param_name}` patterns are replaced with runtime parameter values
 
-Both stages run on `command`, `args`, `cwd`, and `input_data`.
+Both stages run on `command`, `args`, `cwd`, and `input_data` within `execute()`.
 
 ### Environment Merge Heuristic
 
@@ -56,7 +102,7 @@ else:
     result = config_env
 ```
 
-### Result
+### Result Types
 
 ```python
 @dataclass
@@ -66,17 +112,36 @@ class SubprocessResult:
     stderr: str         # Standard error
     return_code: int    # Exit code
     duration_ms: float  # Execution time
+
+@dataclass
+class SpawnResult:
+    success: bool
+    pid: int | None = None
+    error: str | None = None
+
+@dataclass
+class KillResult:
+    success: bool
+    pid: int = 0
+    method: str = ""       # "terminated" | "killed" | "already_dead"
+    error: str | None = None
+
+@dataclass
+class StatusResult:
+    pid: int
+    alive: bool
 ```
 
 ### Timeout Handling
 
-On timeout, the process is killed via `process.kill()` and a `SubprocessResult` is returned with `success=False` and stderr `"Command timed out after {timeout} seconds"`.
+rye-proc handles timeouts natively. On timeout, the child process is killed and a `SubprocessResult` is returned with `success=False` and stderr `"Command timed out after {timeout} seconds"`.
 
 ### Error Cases
 
 | Condition            | Return Code | Stderr                                        |
 | -------------------- | ----------- | --------------------------------------------- |
-| Command not found    | 127         | `"Command not found: {command}"`              |
+| rye-proc not on PATH | N/A         | `ConfigurationError` raised at `__init__`     |
+| Command not found    | -1          | `"Failed to spawn: {error}"`                 |
 | Timeout              | -1          | `"Command timed out after {timeout} seconds"` |
 | No command specified | -1          | `"No command specified"`                      |
 
