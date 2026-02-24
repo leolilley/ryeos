@@ -41,7 +41,7 @@ def _ensure_self_trusted(public_pem: bytes, fingerprint: str) -> None:
 
     trust_store = TrustStore()
     if not trust_store.is_trusted(fingerprint):
-        trust_store.add_key(public_pem, label="self")
+        trust_store.add_key(public_pem, owner="self")
 
 
 class TranscriptSigner:
@@ -260,8 +260,8 @@ def verify_json(data: dict) -> bool:
         return False
 
     trust_store = TrustStore()
-    public_key_pem = trust_store.get_key(parsed["pubkey_fp"])
-    if public_key_pem is None:
+    key_info = trust_store.get_key(parsed["pubkey_fp"])
+    if key_info is None:
         return False
 
-    return verify_signature(parsed["hash"], parsed["ed25519_sig"], public_key_pem)
+    return verify_signature(parsed["hash"], parsed["ed25519_sig"], key_info.public_key_pem)

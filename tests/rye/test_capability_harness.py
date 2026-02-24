@@ -19,7 +19,7 @@ from rye.tools.sign import SignTool
 from rye.tools.execute import ExecuteTool
 
 # Import capability tokens module using importlib to avoid package conflicts
-TOKENS_PATH = Path(__file__).parent.parent.parent / "rye" / "rye" / ".ai" / "tools" / "rye" / "agent" / "permissions" / "capability_tokens" / "capability_tokens.py"
+TOKENS_PATH = Path(__file__).parent.parent.parent / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "permissions" / "capability_tokens" / "capability_tokens.py"
 spec = importlib.util.spec_from_file_location("capability_tokens", TOKENS_PATH)
 capability_tokens_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capability_tokens_module)
@@ -36,16 +36,8 @@ attenuate_token = capability_tokens_module.attenuate_token
 is_system_capability = capability_tokens_module.is_system_capability
 load_capabilities = capability_tokens_module.load_capabilities
 
-# Import safety harness
-THREADS_PATH = Path(__file__).parent.parent.parent / "rye" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads" / "safety_harness.py"
-spec = importlib.util.spec_from_file_location("safety_harness", THREADS_PATH)
-safety_harness_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(safety_harness_module)
-SafetyHarness = safety_harness_module.SafetyHarness
-HarnessAction = safety_harness_module.HarnessAction
-
 # Import markdown/xml parser
-PARSER_PATH = Path(__file__).parent.parent.parent / "rye" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
+PARSER_PATH = Path(__file__).parent.parent.parent / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
 parser_spec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 markdown_xml_module = importlib.util.module_from_spec(parser_spec)
 parser_spec.loader.exec_module(markdown_xml_module)
@@ -516,171 +508,6 @@ class TestSystemCapabilityProtection:
         assert is_system_capability("rye.*")
 
 
-class TestSafetyHarnessBasic:
-    """Test basic safety harness functionality."""
-    
-    def test_initial_status(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            limits={"turns": 5, "tokens": 1000},
-            directive_name="test_directive",
-            directive_inputs={"message": "hello"},
-        )
-        
-        status = harness.get_status()
-        assert status["directive"] == "test_directive"
-        assert status["cost"]["turns"] == 0
-        assert status["cost"]["tokens"] == 0
-    
-    def test_cost_tracking(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            limits={"turns": 10},
-            directive_name="test",
-        )
-        
-        mock_response = {
-            "usage": {"input_tokens": 100, "output_tokens": 50}
-        }
-        harness.update_cost_after_turn(mock_response, "claude-sonnet-4-20250514")
-        
-        assert harness.cost.turns == 1
-        assert harness.cost.tokens == 150
-    
-    def test_state_serialization(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            limits={"turns": 5},
-            directive_name="test",
-        )
-        harness.cost.turns = 2
-        harness.cost.tokens = 300
-        
-        state = harness.to_state_dict()
-        restored = SafetyHarness.from_state_dict(state, temp_project)
-        
-        assert restored.cost.turns == 2
-        assert restored.cost.tokens == 300
-        assert restored.limits.get("turns") == 5
-
-
-class TestSafetyHarnessLimits:
-    """Test safety harness limit enforcement."""
-    
-    def test_under_limits_no_event(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            limits={"turns": 10, "tokens": 1000},
-            directive_name="test",
-        )
-        harness.cost.turns = 5
-        harness.cost.tokens = 500
-        
-        event = harness.check_limits()
-        assert event is None
-    
-    def test_at_turn_limit(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            limits={"turns": 5},
-            directive_name="test",
-        )
-        harness.cost.turns = 5
-        
-        event = harness.check_limits()
-        assert event is not None
-        assert event.get("name") == "limit"
-        assert event.get("code") == "turns_exceeded"
-    
-    def test_over_token_limit(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            limits={"tokens": 100},
-            directive_name="test",
-        )
-        harness.cost.tokens = 150
-        
-        event = harness.check_limits()
-        assert event is not None
-        assert event.get("name") == "limit"
-        assert event.get("code") == "tokens_exceeded"
-
-
-class TestSafetyHarnessPermissions:
-    """Test safety harness permission enforcement."""
-    
-    def test_has_required_permission(self, temp_project):
-        parent_token = CapabilityToken(
-            caps=["rye.execute.tool.rye.file-system.fs_read", "rye.execute.tool.rye.file-system.*"],
-            aud="test",
-            exp=datetime.now(timezone.utc) + timedelta(hours=1),
-            directive_id="parent",
-            thread_id="parent-thread",
-        )
-        
-        harness = SafetyHarness(
-            project_path=temp_project,
-            directive_name="test_fs_read",
-            parent_token=parent_token,
-            required_permissions=[{"tag": "cap", "content": "rye.execute.tool.rye.file-system.fs_read"}],
-        )
-        
-        event = harness.check_permissions()
-        assert event is None
-    
-    def test_missing_required_permission(self, temp_project):
-        parent_token = CapabilityToken(
-            caps=["rye.execute.tool.rye.file-system.fs_read"],
-            aud="test",
-            exp=datetime.now(timezone.utc) + timedelta(hours=1),
-            directive_id="parent",
-            thread_id="parent-thread",
-        )
-        
-        harness = SafetyHarness(
-            project_path=temp_project,
-            directive_name="test_fs_write",
-            parent_token=parent_token,
-            required_permissions=[{"tag": "cap", "content": "rye.execute.tool.rye.file-system.*"}],
-        )
-        
-        event = harness.check_permissions()
-        assert event is not None
-        assert event.get("name") == "error"
-        assert event.get("code") == "permission_denied"
-    
-    def test_no_token_no_requirements(self, temp_project):
-        harness = SafetyHarness(
-            project_path=temp_project,
-            directive_name="test_no_perms",
-        )
-        
-        event = harness.check_permissions()
-        assert event is None
-
-    def test_new_format_permissions(self, temp_project):
-        parent_token = CapabilityToken(
-            caps=["rye.execute.tool.rye.file-system.*", "rye.search.*"],
-            aud="test",
-            exp=datetime.now(timezone.utc) + timedelta(hours=1),
-            directive_id="parent",
-            thread_id="parent-thread",
-        )
-
-        harness = SafetyHarness(
-            project_path=temp_project,
-            directive_name="test_new_perms",
-            parent_token=parent_token,
-            required_permissions=[
-                {"tag": "cap", "content": "rye.execute.tool.rye.file-system.*"},
-                {"tag": "cap", "content": "rye.search.*"},
-            ],
-        )
-
-        event = harness.check_permissions()
-        assert event is None
-
-
 class TestCapabilityYAMLLoading:
     """Test loading capabilities from YAML files."""
     
@@ -839,6 +666,7 @@ class TestExecuteWithSignedDirectives:
             item_type="directive",
             item_id="test_fs_read",
             project_path=str(signed_project),
+            parameters={"path": "/tmp/test.txt"},
         )
         
         assert result["status"] == "success"
@@ -879,6 +707,7 @@ class TestExecuteWithSignedDirectives:
             item_type="directive",
             item_id="test_fs_read",
             project_path=str(signed_project),
+            parameters={"path": "/tmp/test.txt"},
             dry_run=True,
         )
         

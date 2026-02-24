@@ -126,21 +126,55 @@ Directives can declare additional knowledge items to inject using the `<context>
       <system>project/deploy/system-rules</system>
       <before>project/deploy/environment-rules</before>
       <after>project/deploy/completion-checklist</after>
+      <suppress>tool-protocol</suppress>
     </context>
     ...
   </metadata>
 </directive>
 ```
 
-These items are loaded at thread startup and placed into the same three positions as hook-injected context:
+These items are loaded at thread startup and merged with hook-injected context:
 
-| Tag        | Destination                              |
-| ---------- | ---------------------------------------- |
-| `<system>` | Appended to the system message           |
-| `<before>` | Prepended before the directive body      |
-| `<after>`  | Appended after the directive body        |
+| Tag           | Destination                                           |
+| ------------- | ----------------------------------------------------- |
+| `<system>`    | Appended to the system message (after hook layers)    |
+| `<before>`    | Injected between hook before-context and directive body |
+| `<after>`     | Injected between directive body and hook after-context |
+| `<suppress>`  | Skips a named hook-driven context layer               |
 
 Directive-declared context items are resolved via the `load` tool (same as knowledge items loaded by hooks), so they follow the standard three-tier resolution: project → user → system.
+
+### Suppressing Context Layers
+
+The `<suppress>` tag skips a specific hook-driven context layer. It matches against:
+
+- The hook's `id` field (e.g. `system_tool_protocol`)
+- The action's full knowledge `item_id` (e.g. `rye/agent/core/tool-protocol`)
+
+Basename matching (e.g. just `tool-protocol`) is intentionally not supported to avoid ambiguous clashes across namespaces.
+
+This is useful when a directive needs to replace a default layer with something custom:
+
+```xml
+<context>
+  <suppress>system_tool_protocol</suppress>
+  <before>project/custom-tool-protocol</before>
+</context>
+```
+
+Suppressions apply to both `build_system_prompt` and `thread_started` hooks. They are also composed through `extends` chains — if any directive in the chain suppresses a layer, it stays suppressed.
+
+### Message Assembly Order
+
+With both hook context and directive context, the first user message is assembled as:
+
+```
+hook before-context (environment)     ← from thread_started hooks
+directive before-context              ← from <before> knowledge items
+directive prompt (body + outputs)     ← from _build_prompt()
+directive after-context               ← from <after> knowledge items
+hook after-context (completion)       ← from thread_started hooks
+```
 
 ## The `extends` Chain
 
@@ -178,19 +212,115 @@ Duplicates are deduplicated — if both parent and child declare the same knowle
 
 See [Authoring Directives — Directive Inheritance](../authoring/directives.md#directive-inheritance-with-extends) for the directive-side syntax.
 
+## Project-Level Context Customization
+
+Projects can customize what context threads receive without modifying system files or individual directives.
+
+### Override via Knowledge Items
+
+The simplest approach: create a project-level knowledge item that shadows the system default. `LoadTool` cascades project → user → system, so a project file wins:
+
+```
+.ai/knowledge/rye/agent/core/identity.md    ← project override
+```
+
+All threads in the project will load this instead of the system identity. No hook changes needed.
+
+### Additive Hooks via `hooks.yaml`
+
+Add extra context for specific directive categories using `.ai/config/agent/hooks.yaml`:
+
+```yaml
+hooks:
+  - id: "project_deploy_rules"
+    event: "thread_started"
+    layer: 2
+    position: "before"
+    condition:
+      path: "directive"
+      op: "contains"
+      value: "deploy"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "project/deploy/rules"
+```
+
+This adds deploy-specific context alongside the default layers — it doesn't replace anything.
+
+### Conditional Context via `hook_conditions.yaml`
+
+For dynamic identity switching — different contexts for different directive types — override the system hooks in `.ai/config/hook_conditions.yaml`. The `ConfigLoader` merge-by-id system replaces hooks with the same ID:
+
+```yaml
+context_hooks:
+  # Replace default identity with a conditional version
+  - id: "system_identity"
+    event: "build_system_prompt"
+    layer: 2
+    position: "before"
+    condition:
+      not:
+        path: "directive"
+        op: "contains"
+        value: "web"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/agent/core/identity"
+
+  # Add: web directives get a different identity
+  - id: "project_web_identity"
+    event: "build_system_prompt"
+    layer: 2
+    position: "before"
+    condition:
+      path: "directive"
+      op: "contains"
+      value: "web"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "project/identities/web-agent"
+```
+
+This gives web directives a specialized identity while all other directives keep the default. The condition evaluator supports:
+
+| Operator   | Example                                           | Matches when                    |
+| ---------- | ------------------------------------------------- | ------------------------------- |
+| `eq`       | `{path: "directive", op: "eq", value: "init"}`    | Exact match                     |
+| `contains` | `{path: "directive", op: "contains", value: "web"}` | Substring match               |
+| `regex`    | `{path: "directive", op: "regex", value: "^project/deploy/"}`  | Regex match        |
+| `in`       | `{path: "model", op: "in", value: ["gemini", "claude"]}`      | Value in list      |
+| `not`      | `{not: {path: "directive", op: "contains", value: "web"}}`    | Inverts child      |
+| `any`      | `{any: [{...}, {...}]}`                           | Any child matches               |
+| `all`      | `{all: [{...}, {...}]}`                           | All children match              |
+
+The context dict available to conditions includes: `directive`, `directive_body`, `model`, `limits`, `inputs`.
+
+### Precedence Summary
+
+| Mechanism | Scope | Effect |
+| --------- | ----- | ------ |
+| Project knowledge item override | All threads in project | Shadows system knowledge via LoadTool cascade |
+| Project `hooks.yaml` | All threads matching condition | Adds extra context hooks |
+| Project `hook_conditions.yaml` | All threads matching condition | Replaces/adds system hooks by ID |
+| Directive `<suppress>` | Single directive | Skips specific hook layers |
+| Directive `<before>`/`<after>`/`<system>` | Single directive | Adds extra knowledge items |
+
 ## Hooks vs `<context>`
 
 Both hooks and `<context>` inject knowledge, but they serve different purposes:
 
 | Aspect          | Hooks                                      | `<context>`                              |
 | --------------- | ------------------------------------------ | ---------------------------------------- |
-| **Definition**  | `hook_conditions.yaml` or directive `<hooks>` | Directive `<context>` metadata section   |
-| **When**        | Dynamic — evaluated at runtime by event    | Static — declared at authoring time      |
-| **Conditional** | Yes — hooks can have conditions            | No — always loaded if declared           |
+| **Definition**  | `hook_conditions.yaml` or `hooks.yaml`     | Directive `<context>` metadata section   |
+| **When**        | Dynamic — evaluated at runtime with conditions | Static — declared at authoring time   |
+| **Conditional** | Yes — `condition` field with full evaluator | No — always loaded if declared           |
 | **Scope**       | System-wide, project-wide, or per-directive | Per-directive (composed through `extends`) |
-| **Use case**    | Infrastructure concerns (identity, environment, error handling) | Domain knowledge specific to a directive's task |
+| **Use case**    | Infrastructure concerns, dynamic identity switching | Domain knowledge specific to a directive's task |
 
-In practice, hooks handle the "always-on" foundational context (identity, behavior, tool protocol, environment), while `<context>` handles directive-specific domain knowledge that varies by task.
+In practice, hooks handle foundational context (identity, behavior, tool protocol, environment) and dynamic switching (different identity per directive category), while `<context>` handles directive-specific domain knowledge that varies by task.
 
 ## Transcript Rendering
 
@@ -234,6 +364,7 @@ For a haiku-tier thread at ~$0.001/turn, the context overhead costs less than $0
 
 ## What's Next
 
-- [Authoring Directives — Context Injection](../authoring/directives.md#context-injection-with-context) — How to declare `<context>` in directives
+- [Authoring Directives — Context Injection](../authoring/directives.md#context-injection-with-context) — How to declare `<context>` and `<suppress>` in directives
+- [Authoring Knowledge](../authoring/knowledge.md) — How to create knowledge items for context injection
 - [Permissions and Capabilities](./permissions-and-capabilities.md) — How capabilities control thread access
 - [Safety and Limits](./safety-and-limits.md) — Cost controls and the SafetyHarness

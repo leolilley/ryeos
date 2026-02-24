@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T11:30:37Z:6d2b442832542b462f53ba79f7ab57d2c75677c753257c366c021becb8864a4f:1jbyrQXWHc7MneP6QmIFODYGvGRHVxlv0gUamH7nLRiExFmyZ6hRnPW3TjQhNex95Z26RX7p8x8EsbM5bXDRCQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-24T04:54:45Z:5b38acf804a88881e1961055e84ebe4c0639477bd755fc1087bf5e5bb27c2c53:lBxi6zfAELdWWvumPJ-jZ4ym1xt7wwI8MGxXAkr_rWpp8wC_lQekJtn6VAvvqvncmfsgZVgQ8gUem4CgzY6uCw==:9fbfabe975fa5a7f
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -271,10 +271,12 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                 result["hooks"] = hooks
 
             elif tag == "context":
-                context = {"system": [], "before": [], "after": []}
+                context = {"system": [], "before": [], "after": [], "suppress": []}
                 for ctx_child in child:
-                    position = ctx_child.tag  # "system", "before", or "after"
-                    if position in context and ctx_child.text and ctx_child.text.strip():
+                    position = ctx_child.tag
+                    if position == "suppress" and ctx_child.text and ctx_child.text.strip():
+                        context["suppress"].append(ctx_child.text.strip())
+                    elif position in ("system", "before", "after") and ctx_child.text and ctx_child.text.strip():
                         context[position].append(ctx_child.text.strip())
                 result["context"] = context
 

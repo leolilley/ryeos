@@ -559,7 +559,7 @@ Circular extends chain: rye/agent/core/base (chain: deploy_staging → base_depl
 
 ## Context Injection with `<context>`
 
-The `<context>` metadata section declares knowledge items to inject into the LLM prompt. Items are loaded at thread startup and placed into one of three positions:
+The `<context>` metadata section declares knowledge items to inject into the LLM prompt, or suppresses hook-driven context layers. Items are loaded at thread startup and merged with hook-injected context:
 
 ```xml
 <directive name="deploy_staging" version="1.0.0" extends="rye/agent/core/base">
@@ -569,6 +569,7 @@ The `<context>` metadata section declares knowledge items to inject into the LLM
       <system>rye/agent/core/behavior</system>
       <before>project/deploy/environment-rules</before>
       <after>project/deploy/completion-checklist</after>
+      <suppress>tool-protocol</suppress>
     </context>
     ...
   </metadata>
@@ -578,15 +579,29 @@ The `<context>` metadata section declares knowledge items to inject into the LLM
 
 ### Positions
 
-| Position    | Where it goes                          | Use case                              |
-| ----------- | -------------------------------------- | ------------------------------------- |
-| `<system>`  | LLM's system message (API-level)       | Identity, behavior rules, tool protocol |
-| `<before>`  | Before the directive body in the user message | Environment info, project rules      |
-| `<after>`   | After the directive body in the user message  | Completion protocol, checklists      |
+| Position      | Where it goes                                           | Use case                                |
+| ------------- | ------------------------------------------------------- | --------------------------------------- |
+| `<system>`    | Appended to the system message (after hook layers)      | Extra system-level instructions         |
+| `<before>`    | Between hook before-context and directive body           | Domain rules, project conventions       |
+| `<after>`     | Between directive body and hook after-context             | Checklists, extra completion rules      |
+| `<suppress>`  | Skips the named hook-driven context layer                | Replace default layers with custom ones |
+
+### Suppressing Context Layers
+
+`<suppress>` skips a hook-driven context layer by matching against the hook's `id` field or the action's full knowledge `item_id`:
+
+```xml
+<context>
+  <suppress>system_tool_protocol</suppress>
+  <before>project/custom-tool-protocol</before>
+</context>
+```
+
+This removes the default tool-protocol from the system message and injects a custom one in the user message instead. Suppressions compose through `extends` — if any directive in the chain suppresses a layer, it stays suppressed.
 
 ### Composition through `extends`
 
-When a directive extends a parent, context items from the entire chain are merged root-first. Duplicates are deduplicated — if both the base and the leaf declare the same knowledge item, it appears only once.
+When a directive extends a parent, context items from the entire chain are merged root-first. Duplicates are deduplicated — if both the base and the leaf declare the same knowledge item, it appears only once. Suppressions are unioned across the chain.
 
 ```
 Chain: rye/agent/core/base → project/deploy/base → deploy_staging
@@ -594,9 +609,10 @@ Chain: rye/agent/core/base → project/deploy/base → deploy_staging
 System items:  [identity, behavior]          ← from rye/agent/core/base
 Before items:  [environment-rules]           ← from project/deploy/base
 After items:   [completion-checklist]        ← from deploy_staging
+Suppressions:  [tool-protocol]              ← from deploy_staging
 ```
 
-See [Context Injection](../orchestration/context-injection.md) for the full system overview.
+See [Context Injection](../orchestration/context-injection.md) for the full system overview including project-level customization via conditional hooks.
 
 ## Acknowledging Capability Risks
 

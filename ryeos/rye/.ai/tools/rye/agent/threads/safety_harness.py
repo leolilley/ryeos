@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T11:53:19Z:e99f7aad39c7d7305af6fc17b9eb3f2eda56f2d59d9993bc9b04e5b7b32c1904:YZzpCaGeXnsr62j9K5QwpHxJ7araODnfS8eNJl5B8UdWjRPnkSD2qJsRghlYcLoY7XVkRNWKoy-cpjfuBg4MDw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-24T04:54:45Z:55e2e6f92aa23f5ebe794f4b329f5411499c0f2241c27b68e5381a03c58a8068:73IWT8xx8E8A8bRdvf3Lr7QmIc7x8PADZ6FzezP2XRaWAFffl4HKxBPYIIBYk8qzf6FUmn9f6kFumSPUOtBIBg==:9fbfabe975fa5a7f
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """
@@ -19,6 +19,28 @@ _ANCHOR = Path(__file__).parent
 
 condition_evaluator = load_module("loaders/condition_evaluator", anchor=_ANCHOR)
 interpolation = load_module("loaders/interpolation", anchor=_ANCHOR)
+
+
+def _is_suppressed(hook: Dict, suppress: List[str]) -> bool:
+    """Check if a hook should be suppressed by directive context.
+
+    Matches suppress values against:
+      - The hook's `id` field (e.g. "system_tool_protocol")
+      - The action's full `item_id` (e.g. "rye/agent/core/tool-protocol")
+
+    Does NOT match on basename to avoid ambiguous clashes
+    (e.g. "identity" matching both "rye/agent/core/identity"
+    and "project/auth/identity").
+    """
+    hook_id = hook.get("id", "")
+    action = hook.get("action", {})
+    item_id = action.get("item_id", "")
+    for s in suppress:
+        if s == hook_id:
+            return True
+        if item_id and s == item_id:
+            return True
+    return False
 
 
 class SafetyHarness:
@@ -200,6 +222,7 @@ class SafetyHarness:
         context: Dict,
         dispatcher: Any,
         event: str,
+        suppress: Optional[List[str]] = None,
     ) -> Dict[str, str]:
         """Run context-injection hooks for a given event and collect context blocks.
 
@@ -219,6 +242,8 @@ class SafetyHarness:
         after_raw = []
         for hook in self.hooks:
             if hook.get("event") != event:
+                continue
+            if suppress and _is_suppressed(hook, suppress):
                 continue
             if not condition_evaluator.matches(context, hook.get("condition", {})):
                 continue

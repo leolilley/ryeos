@@ -54,7 +54,9 @@ def temp_project():
         knowledge_dir = ai_dir / "knowledge"
         knowledge_dir.mkdir(parents=True)
         (knowledge_dir / "entry.md").write_text(
-            '---\ntitle: Test\nname: entry\nversion: "1.0.0"\nentry_type: note\n---\n\nContent'
+            '<!-- rye:unsigned -->\n\n'
+            '```yaml\nname: entry\ntitle: Test\nentry_type: note\n'
+            'version: "1.0.0"\nauthor: test\ncreated_at: 2026-01-01T00:00:00Z\n```\n\nContent'
         )
 
         yield project_root

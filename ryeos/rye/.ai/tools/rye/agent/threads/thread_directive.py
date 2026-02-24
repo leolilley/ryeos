@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T11:53:19Z:087d2a7b7840ee42bd0cc8901e024199d9e005552eb0ed003add080e20c4d7a5:hqHF8o5zmm2fP104107iUhUb1v6apQIIplzaAbC36jMPMLcshViJEV4CA0naD1r0Ni-yfhKY9koa9_fNFosmBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-24T04:54:45Z:a8f1b72423fbcfd16944d221e4969113bf02b9d2e3122b27eac146c76d380364:bPEjj9cXjJSs6F9-V61YC72rJbXJ888nfPf9hW8GMsvvKZQPKPLhI810D4bwuzYiUcmTWpC-oN-MxE_vC4K9Cg==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -370,7 +370,7 @@ async def _resolve_directive_chain(
     chain_names.reverse()
 
     # Compose context: root layers first, then overlays
-    context = {"system": [], "before": [], "after": []}
+    context = {"system": [], "before": [], "after": [], "suppress": []}
     for d in chain:
         d_ctx = d.get("context", {})
         for position in ("system", "before", "after"):
@@ -380,6 +380,9 @@ async def _resolve_directive_chain(
             for item in items:
                 if item not in context[position]:
                     context[position].append(item)
+        for s in d_ctx.get("suppress", []):
+            if s not in context["suppress"]:
+                context["suppress"].append(s)
 
     return {"context": context, "chain": chain_names, "chain_directives": chain}
 
@@ -536,26 +539,32 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
     # 3.6. Resolve extends chain and compose context
     system_prompt = ""
+    directive_context = {"before": "", "after": "", "suppress": []}
     if directive.get("extends") or directive.get("context"):
         try:
             chain_result = await _resolve_directive_chain(
                 directive_name, directive, project_path
             )
-            # Load knowledge items for system prompt
+            # Load knowledge items for all context positions
             from rye.tools.load import LoadTool
             from rye.utils.resolvers import get_user_space
             load_tool = LoadTool(user_space=str(get_user_space()))
-            system_parts = []
-            for kid in chain_result["context"].get("system", []):
-                kr = await load_tool.handle(
-                    item_type="knowledge", item_id=kid, project_path=project_path,
-                )
-                if kr.get("status") == "success":
-                    content = kr.get("content", "")
-                    if content:
-                        system_parts.append(content.strip())
-            if system_parts:
-                system_prompt = "\n\n".join(system_parts)
+            for position in ("system", "before", "after"):
+                parts = []
+                for kid in chain_result["context"].get(position, []):
+                    kr = await load_tool.handle(
+                        item_type="knowledge", item_id=kid, project_path=project_path,
+                    )
+                    if kr.get("status") == "success":
+                        content = kr.get("content", "")
+                        if content:
+                            parts.append(content.strip())
+                if parts:
+                    if position == "system":
+                        system_prompt = "\n\n".join(parts)
+                    else:
+                        directive_context[position] = "\n\n".join(parts)
+            directive_context["suppress"] = chain_result["context"].get("suppress", [])
 
             # Merge parent capabilities from extends chain.
             # The root directive provides the broadest capabilities;
@@ -872,6 +881,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         previous_thread_id=params.get("previous_thread_id"),
         inputs=inputs,
         system_prompt=system_prompt,
+        directive_context=directive_context,
     )
 
     # Ensure non-empty error message on failure

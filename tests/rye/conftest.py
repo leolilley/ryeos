@@ -1,5 +1,16 @@
 """Shared fixtures for rye tool tests with Ed25519 signing."""
 
+import sys
+from pathlib import Path
+
+# Add module_loader to path so importlib-loaded tool modules can resolve their imports
+_MODULE_LOADER_DIR = (
+    Path(__file__).parent.parent.parent
+    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "core" / "runtimes" / "python" / "lib"
+)
+if str(_MODULE_LOADER_DIR) not in sys.path:
+    sys.path.insert(0, str(_MODULE_LOADER_DIR))
+
 import pytest
 
 from lilux.primitives.signing import (
@@ -20,12 +31,13 @@ def _setup_user_space(tmp_path, monkeypatch):
     from rye.utils.signature_formats import clear_signature_formats_cache
     clear_signature_formats_cache()
 
-    key_dir = user_space / "keys"
+    from rye.constants import AI_DIR
+    key_dir = user_space / AI_DIR / "keys"
     private_pem, public_pem = generate_keypair()
     save_keypair(private_pem, public_pem, key_dir)
 
     # Write trusted key as TOML identity document
-    trust_dir = user_space / "trusted_keys"
+    trust_dir = user_space / AI_DIR / "trusted_keys"
     trust_dir.mkdir(parents=True)
     fp = compute_key_fingerprint(public_pem)
 

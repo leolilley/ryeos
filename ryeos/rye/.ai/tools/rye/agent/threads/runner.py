@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T13:07:09Z:12d267223e949f63dc7ad6e76309fd4d4496f749ca13f40d0ac252862c45afdf:jclK4-EUmeAxPi1kOodS7EEPcb6AGXvI5E7maint2cH7wbgi6CIQCiygNQZk0ZVpFhwpOhx_W42XZegPvjiIBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-24T04:54:45Z:0ff3e596c16fc22f1a9d9350a4a1d9696e5d0b4ce100cc59c846a8f6737012b8:9yRzgBVO6i2I57O-35PZ3q_xpEnZDo24nL3ia3-JH3r1RgHZwAqp_jKNXaktDXQ9sGSu7ea7Iw9NgOJ_EXQBAQ==:9fbfabe975fa5a7f
 """
 runner.py: Core LLM loop for thread execution
 
@@ -49,6 +49,7 @@ async def run(
     previous_thread_id: Optional[str] = None,
     inputs: Optional[Dict] = None,
     system_prompt: str = "",
+    directive_context: Optional[Dict] = None,
 ) -> Dict:
     """Execute the LLM loop until completion, error, or limit.
 
@@ -95,6 +96,9 @@ async def run(
         thread_id, project_path / ".ai" / "agent" / "threads" / thread_id
     )
 
+    # Directive-level context suppressions (e.g. <suppress>tool-protocol</suppress>)
+    suppress = (directive_context or {}).get("suppress", [])
+
     # Assemble system prompt from build_system_prompt hooks + caller override
     system_ctx = await harness.run_hooks_context(
         {
@@ -106,6 +110,7 @@ async def run(
         },
         dispatcher,
         event="build_system_prompt",
+        suppress=suppress,
     )
     hook_system = "\n\n".join(filter(None, [system_ctx["before"], system_ctx["after"]]))
     if hook_system and system_prompt:
@@ -139,6 +144,7 @@ async def run(
                 },
                 dispatcher,
                 event="thread_continued",
+                suppress=suppress,
             )
             combined = "\n\n".join(filter(None, [hook_ctx["before"], hook_ctx["after"]]))
             if combined and messages:
@@ -166,12 +172,22 @@ async def run(
                 },
                 dispatcher,
                 event="thread_started",
+                suppress=suppress,
             )
+
+            # Merge hook context with directive-level before/after content.
+            # Order: hook_before → directive_before → prompt → directive_after → hook_after
+            dir_before = (directive_context or {}).get("before", "")
+            dir_after = (directive_context or {}).get("after", "")
 
             first_message_parts = []
             if hook_ctx["before"]:
                 first_message_parts.append(hook_ctx["before"])
+            if dir_before:
+                first_message_parts.append(dir_before)
             first_message_parts.append(user_prompt)
+            if dir_after:
+                first_message_parts.append(dir_after)
             if hook_ctx["after"]:
                 first_message_parts.append(hook_ctx["after"])
             messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})

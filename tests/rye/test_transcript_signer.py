@@ -6,15 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from lilux.primitives.signing import ensure_keypair, compute_key_fingerprint
-from rye.utils.trust_store import TrustStore
+from lilux.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 SIGNER_PATH = (
     PROJECT_ROOT
-    / "rye" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads"
+    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads"
     / "persistence" / "transcript_signer.py"
 )
 _spec = importlib.util.spec_from_file_location("transcript_signer", SIGNER_PATH)
@@ -26,18 +25,16 @@ verify_json = _signer_mod.verify_json
 
 
 @pytest.fixture
-def temp_env(tmp_path, monkeypatch):
-    """Set up temp key dir, trust store, and thread dir."""
-    user_space = tmp_path / "user"
-    user_space.mkdir()
-    monkeypatch.setenv("USER_SPACE", str(user_space))
+def temp_env(tmp_path, _setup_user_space):
+    """Set up thread dir for transcript signing tests.
 
+    Keys and trust store are provided by conftest's _setup_user_space fixture.
+    """
+    user_space = _setup_user_space
     key_dir = user_space / AI_DIR / "keys"
-    private_pem, public_pem = ensure_keypair(key_dir)
-
-    trust_store = TrustStore(user_space / AI_DIR / "trusted_keys")
-    fp = compute_key_fingerprint(public_pem)
-    trust_store.add_key(public_pem, label="self")
+    private_pem = (key_dir / "private_key.pem").read_text()
+    public_pem = (key_dir / "public_key.pem").read_text()
+    fp = compute_key_fingerprint(public_pem.encode() if isinstance(public_pem, str) else public_pem)
 
     thread_dir = tmp_path / "project" / AI_DIR / "agent" / "threads" / "test-thread"
     thread_dir.mkdir(parents=True)

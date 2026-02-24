@@ -56,7 +56,7 @@ def temp_user_space(_setup_user_space):
         user_space = Path(tmpdir)
 
         # Create user tool
-        tools_dir = user_space / "tools"
+        tools_dir = user_space / ".ai" / "tools"
         tools_dir.mkdir(parents=True)
         (tools_dir / "shared.py").write_text("# Shared tool\nversion=1.0.0")
 
@@ -146,7 +146,7 @@ class TestLoadTool:
         assert result["copied_to"] == "user"
         
         # Verify file was copied (use glob since extension may vary)
-        tools_dir = temp_user_space / "tools"
+        tools_dir = temp_user_space / ".ai" / "tools"
         assert tools_dir.exists()
         files = list(tools_dir.glob("myscript*"))
         assert len(files) > 0, f"No myscript file found in {tools_dir}"

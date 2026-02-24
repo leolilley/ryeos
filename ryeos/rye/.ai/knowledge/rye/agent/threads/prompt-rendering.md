@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-24T04:54:45Z:694f0521a758eecfeddbd848fe206bedc268a9d3602404b0e6ab16ee9fc795a6:WbazjlIEQHDNkmDHejcsgscxRkVv-L7nXL8ZOX70VPCdZI6K6YUqR0QPuVdIo-TeGNde9ZWZk0AUzNwyMtI2Bg==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -208,30 +209,59 @@ This ensures each provider receives the system prompt in its idiomatic format.
 
 ## Context Injection from `<context>` Directive Metadata
 
-Directives can declare a `<context>` metadata section that specifies static content to inject at specific positions in the prompt. This is parsed during directive loading and injected during prompt assembly.
+Directives can declare a `<context>` metadata section that specifies knowledge items to load and inject at specific positions in the prompt, or suppress hook-driven context layers.
 
 ### Positions
 
-| Position   | Where Injected                                    |
-|------------|---------------------------------------------------|
-| `<system>` | Appended to the system message (before the loop)  |
-| `<before>` | Prepended before the directive body               |
-| `<after>`  | Appended after the directive body                 |
+| Position      | Where Injected                                           |
+|---------------|----------------------------------------------------------|
+| `<system>`    | Appended to the system message (after hook-driven layers)|
+| `<before>`    | Injected between hook before-context and directive body  |
+| `<after>`     | Injected between directive body and hook after-context   |
+| `<suppress>`  | Skips the named hook-driven context layer                |
 
 ### Knowledge Item Loading
 
-Context blocks can reference knowledge items by ID. These are resolved and loaded at directive parse time, and their content is injected at the declared position.
+Context entries reference knowledge items by ID. These are loaded via `LoadTool` (which cascades project → user → system) and injected at the declared position.
 
 ```xml
 <context>
-  <system>You are a senior engineer. Follow project conventions.</system>
-  <before>
-    <knowledge>rye/core/capability-strings</knowledge>
-    <knowledge>project/coding-standards</knowledge>
-  </before>
-  <after>Remember to run tests before returning results.</after>
+  <system>project/custom-identity</system>
+  <before>project/coding-standards</before>
+  <after>project/completion-rules</after>
 </context>
 ```
+
+### Suppressing Hook-Driven Layers
+
+Directives can suppress specific hook-driven context layers using `<suppress>`. The value matches against:
+- The hook's `id` field (e.g. `system_tool_protocol`)
+- The action's full knowledge `item_id` (e.g. `rye/agent/core/tool-protocol`)
+
+Basename matching is intentionally not supported to avoid ambiguous clashes (e.g. `identity` matching both `rye/agent/core/identity` and `project/auth/identity`).
+
+```xml
+<context>
+  <suppress>system_tool_protocol</suppress>
+  <before>project/custom-tool-protocol</before>
+</context>
+```
+
+This replaces the standard tool-protocol layer with a project-specific one.
+
+### Message Assembly Order
+
+The first user message is assembled in this order:
+
+```
+hook before-context (environment)     ← from thread_started hooks
+directive before-context              ← from <before> knowledge items
+directive prompt (body + outputs)     ← from _build_prompt()
+directive after-context               ← from <after> knowledge items
+hook after-context (completion)       ← from thread_started hooks
+```
+
+Suppressions apply to both `build_system_prompt` and `thread_started` hooks.
 
 ## Directive Extends and Context Composition
 
@@ -250,6 +280,40 @@ base directive context (root)
 - Duplicate knowledge items are deduplicated (first occurrence wins)
 
 See the `directive-extends` knowledge item for the full inheritance model.
+
+## Per-Project Context Customization
+
+Projects can customize the thread context without modifying system-level knowledge items.
+
+### Override via Knowledge Items
+
+`LoadTool` cascades project → user → system. To override the default identity:
+
+1. Create `.ai/knowledge/rye/agent/core/identity.md` in your project
+2. The project-level file will be loaded instead of the system default
+3. No directive changes needed — hooks automatically pick up the override
+
+This works for any core knowledge item: `identity`, `behavior`, `tool-protocol`, `environment`, `completion`.
+
+### Override via Directive `<context>`
+
+For per-directive customization (not project-wide), use `<context>` metadata:
+
+```xml
+<context>
+  <suppress>tool-protocol</suppress>
+  <before>project/my-custom-protocol</before>
+</context>
+```
+
+### Precedence
+
+| Mechanism | Scope | Applies To |
+|-----------|-------|------------|
+| Project knowledge item override | All threads in project | Hooks loading that item |
+| Directive `<suppress>` | Single directive | Named hook layers |
+| Directive `<before>`/`<after>` | Single directive | Additional context items |
+| Directive `<system>` | Single directive | System message extensions |
 
 ## Transcript Events
 
