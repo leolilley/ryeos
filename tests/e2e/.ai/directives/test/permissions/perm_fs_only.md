@@ -9,29 +9,30 @@ Has file-system execute permission only. Write should succeed, search should be 
     <description>Test: has fs write permission, then tries search (should be denied).</description>
     <category>test/permissions</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="5" tokens="2048" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
     </permissions>
   </metadata>
-  <process>
-    <step name="write_allowed">
-      <description>Write a test file — this should succeed.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="perm_test_allowed.txt" />
-        <param name="content" value="Permission allowed write" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-    <step name="search_denied">
-      <description>Search for knowledge — this should be denied by permissions.</description>
-      <search item_type="knowledge" query="test">
-      </search>
-    </step>
-  </process>
   <outputs>
     <success>First call should succeed, second should show permission denied.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_allowed">
+    <description>Write a test file — this should succeed.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="perm_test_allowed.txt" />
+      <param name="content" value="Permission allowed write" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+  <step name="search_denied">
+    <description>Search for knowledge — this should be denied by permissions.</description>
+    <search item_type="knowledge" query="test">
+    </search>
+  </step>
+</process>

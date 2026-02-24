@@ -9,25 +9,26 @@ Test that the default_escalate_limit hook fires when turns limit is exceeded.
     <description>Test: exceed turns limit — should trigger escalation hook.</description>
     <category>test/limits</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="1" tokens="4096" spend="1.0" />
   </metadata>
   <permissions>
     <execute><tool>rye.file-system.*</tool></execute>
     <execute><tool>rye.primary-tools.*</tool></execute>
   </permissions>
-  <process>
-    <step name="search_tools">
-      <description>Search for available tools — this will use the 1 turn, next iteration should hit limit.</description>
-      <search item_type="tool" query="file system" />
-    </step>
-    <step name="search_again">
-      <description>Search again — should never reach this due to limit.</description>
-      <search item_type="tool" query="knowledge" />
-    </step>
-  </process>
   <outputs>
     <success>Should be escalated due to turns limit.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="search_tools">
+    <description>Search for available tools — this will use the 1 turn, next iteration should hit limit.</description>
+    <search item_type="tool" query="file system" />
+  </step>
+  <step name="search_again">
+    <description>Search again — should never reach this due to limit.</description>
+    <search item_type="tool" query="knowledge" />
+  </step>
+</process>

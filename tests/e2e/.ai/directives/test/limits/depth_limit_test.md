@@ -9,7 +9,7 @@ Test that depth limit enforcement prevents infinitely recursive thread spawning.
     <description>Test: spawn a child that tries to spawn a grandchild. With depth=1, the grandchild should be rejected (depth exhausted).</description>
     <category>test/limits</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.50" depth="1" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
@@ -17,27 +17,27 @@ Test that depth limit enforcement prevents infinitely recursive thread spawning.
     </permissions>
   </metadata>
 
-  <process>
-    <step name="write_root_marker">
-      <description>Write a marker file to confirm root thread ran.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="depth_root.txt" />
-        <param name="content" value="Root thread at depth 0" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-
-    <step name="spawn_depth_child">
-      <description>Spawn test/limits/depth_child which will try to spawn its own child. Pass parent_depth=0 so child is depth 1.</description>
-      <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-        <param name="directive_name" value="test/limits/depth_child" />
-        <param name="inputs" value='{"level": "1"}' />
-      </execute>
-    </step>
-  </process>
-
   <outputs>
     <success>Root spawned child at depth 1. Child's attempt to spawn grandchild at depth 2 should be rejected by depth limit.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_root_marker">
+    <description>Write a marker file to confirm root thread ran.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="depth_root.txt" />
+      <param name="content" value="Root thread at depth 0" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+
+  <step name="spawn_depth_child">
+    <description>Spawn test/limits/depth_child which will try to spawn its own child. Pass parent_depth=0 so child is depth 1.</description>
+    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
+      <param name="directive_name" value="test/limits/depth_child" />
+      <param name="inputs" value='{"level": "1"}' />
+    </execute>
+  </step>
+</process>

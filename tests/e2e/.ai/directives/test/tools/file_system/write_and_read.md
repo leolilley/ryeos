@@ -10,7 +10,7 @@ Two-step directive that writes content to a file, then reads it back to verify t
     <description>Write content to a file then read it back to verify correctness.</description>
     <category>test/tools/file_system</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022" />
+    <model tier="fast" id="claude-3-5-haiku-20241022" />
     <limits turns="5" tokens="2048" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
@@ -26,27 +26,27 @@ Two-step directive that writes content to a file, then reads it back to verify t
     </input>
   </inputs>
 
-  <process>
-    <step name="write_content">
-      <description>Write the provided content to the target file.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="{input:file_path}" />
-        <param name="content" value="{input:content}" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-
-    <step name="read_and_verify">
-      <description>Read the file back and confirm the contents match the original input.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_read">
-        <param name="path" value="{input:file_path}" />
-      </execute>
-    </step>
-  </process>
-
   <outputs>
     <success>Content written to {input:file_path} and verified successfully.</success>
     <failure>Content mismatch detected after write — file contents do not match input.</failure>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_content">
+    <description>Write the provided content to the target file.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="{input:file_path}" />
+      <param name="content" value="{input:content}" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+
+  <step name="read_and_verify">
+    <description>Read the file back and confirm the contents match the original input.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_read">
+      <param name="path" value="{input:file_path}" />
+    </execute>
+  </step>
+</process>

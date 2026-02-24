@@ -9,7 +9,7 @@ Parent directive that writes its own file, then spawns a child thread to write a
     <description>Write a parent log file, then spawn a child thread (test/tools/file_system/child_write) to write a second file. Verifies both files exist.</description>
     <category>test/tools/threads</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="8" tokens="32000" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>

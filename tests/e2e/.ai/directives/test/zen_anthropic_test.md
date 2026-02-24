@@ -11,7 +11,7 @@ Test directive that exercises the Zen provider with a Claude model — verifies 
     <category>test</category>
     <author>rye-os</author>
     <model tier="fast" provider="zen/zen" />
-    <limits max_turns="6" max_tokens="4096" max_spend="0.05" />
+    <limits turns="6" tokens="4096" spend="0.05" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>
@@ -53,8 +53,3 @@ Test directive that exercises the Zen provider with a Claude model — verifies 
   <criterion>File read-back matches written content</criterion>
   <criterion>Append operation succeeds</criterion>
 </success_criteria>
-
-<results>
-  <success>Zen Anthropic profile test passed. File written, read, and appended successfully.</success>
-  <failure>Zen Anthropic profile test failed. Check provider resolution and API format.</failure>
-</results>

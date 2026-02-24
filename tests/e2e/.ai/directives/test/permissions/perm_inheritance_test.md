@@ -9,7 +9,7 @@ Test that child threads inherit parent capabilities when child declares none. Pa
     <description>Test: parent caps propagate to child. Parent has fs+thread caps. Spawns child that has its own caps (should use child's own).</description>
     <category>test/permissions</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>
       <cap>rye.execute.tool.rye.file-system.*</cap>
@@ -17,19 +17,18 @@ Test that child threads inherit parent capabilities when child declares none. Pa
       <cap>rye.search.*</cap>
     </permissions>
   </metadata>
-
-  <process>
-    <step name="spawn_child_with_own_caps">
-      <description>Spawn write_file — it has its own caps (fs only). Child should use its own caps, not inherit parent's.</description>
-      <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-        <param name="directive_name" value="test/tools/file_system/write_file" />
-        <param name="inputs" value='{"message": "Perm inheritance test", "output_path": "perm_inherited.txt"}' />
-      </execute>
-    </step>
-  </process>
-
   <outputs>
     <success>Child used its own caps (fs only). Parent caps were available as fallback but not needed.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="spawn_child_with_own_caps">
+    <description>Spawn write_file — it has its own caps (fs only). Child should use its own caps, not inherit parent's.</description>
+    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
+      <param name="directive_name" value="test/tools/file_system/write_file" />
+      <param name="inputs" value='{"message": "Perm inheritance test", "output_path": "perm_inherited.txt"}' />
+    </execute>
+  </step>
+</process>

@@ -9,7 +9,7 @@ Test that child thread spend cascades back to parent budget. Parent has $0.50 bu
     <description>Test: parent spawns child, child's spend cascades back to parent budget. Check budget_ledger.db after run.</description>
     <category>test/limits</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.50" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
@@ -17,27 +17,27 @@ Test that child thread spend cascades back to parent budget. Parent has $0.50 bu
     </permissions>
   </metadata>
 
-  <process>
-    <step name="write_parent">
-      <description>Write a parent marker file.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="budget_parent.txt" />
-        <param name="content" value="Parent budget test" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-
-    <step name="spawn_budget_child">
-      <description>Spawn a child that writes a file. Child's spend should cascade back.</description>
-      <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-        <param name="directive_name" value="test/tools/file_system/write_file" />
-        <param name="inputs" value='{"message": "Budget child output", "output_path": "budget_child.txt"}' />
-      </execute>
-    </step>
-  </process>
-
   <outputs>
     <success>Both files written. Check budget_ledger.db — parent actual_spend should include child's spend.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_parent">
+    <description>Write a parent marker file.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="budget_parent.txt" />
+      <param name="content" value="Parent budget test" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+
+  <step name="spawn_budget_child">
+    <description>Spawn a child that writes a file. Child's spend should cascade back.</description>
+    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
+      <param name="directive_name" value="test/tools/file_system/write_file" />
+      <param name="inputs" value='{"message": "Budget child output", "output_path": "budget_child.txt"}' />
+    </execute>
+  </step>
+</process>

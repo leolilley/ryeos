@@ -9,22 +9,23 @@ Wildcard permissions — all actions should be allowed.
     <description>Test: wildcard permissions — all actions should be allowed.</description>
     <category>test/permissions</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="5" tokens="2048" />
     <permissions>*</permissions>
   </metadata>
-  <process>
-    <step name="write_allowed">
-      <description>Write a test file — should succeed with wildcard.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="perm_test_wildcard.txt" />
-        <param name="content" value="Wildcard permission write" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-  </process>
   <outputs>
     <success>Write should succeed.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_allowed">
+    <description>Write a test file — should succeed with wildcard.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="perm_test_wildcard.txt" />
+      <param name="content" value="Wildcard permission write" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+</process>

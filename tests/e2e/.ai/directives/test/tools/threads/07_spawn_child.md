@@ -10,7 +10,7 @@ Recursive directive spawning test. Parent writes a plan file, spawns child direc
     <description>Recursive directive spawning — parent orchestrates a plan, spawns a child directive to write a greeting file, verifies the child's output, and appends a completion summary.</description>
     <category>test</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022">Child thread spawning and cross-thread verification</model>
+    <model tier="fast" id="claude-3-5-haiku-20241022">Child thread spawning and cross-thread verification</model>
     <limits turns="8" tokens="3072" />
     <permissions>
       <execute>
@@ -31,12 +31,19 @@ Recursive directive spawning test. Parent writes a plan file, spawns child direc
     </input>
   </inputs>
 
-  <process>
-    <step name="write_plan">
-      <description>Write a plan file describing what the parent will orchestrate</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="{input:output_dir}/plan.md" />
-        <param name="content" value="# Spawn Child Plan
+  <outputs>
+    <success>Parent orchestration complete — plan written, child spawned and verified, completion summary appended to {input:output_dir}/plan.md</success>
+    <failure>Spawn child pipeline failed — check that test/tools/file_system/write_file directive exists and {input:output_dir} is writable</failure>
+  </outputs>
+</directive>
+```
+
+<process>
+  <step name="write_plan">
+    <description>Write a plan file describing what the parent will orchestrate</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="{input:output_dir}/plan.md" />
+      <param name="content" value="# Spawn Child Plan
 
 ## Objective
 Orchestrate child directive test/tools/file_system/write_file to write a greeting.
@@ -47,42 +54,35 @@ Orchestrate child directive test/tools/file_system/write_file to write a greetin
 3. Verify child output at {input:output_dir}/greeting.md
 4. Append completion summary to this file
 " />
-      </execute>
-    </step>
+    </execute>
+  </step>
 
-    <step name="spawn_child">
-      <description>Spawn child directive test/tools/file_system/write_file to write the greeting to a file</description>
-      <execute item_type="directive" item_id="test/tools/file_system/write_file">
-        <param name="message" value="{input:greeting}" />
-        <param name="output_path" value="{input:output_dir}/greeting.md" />
-      </execute>
-    </step>
+  <step name="spawn_child">
+    <description>Spawn child directive test/tools/file_system/write_file to write the greeting to a file</description>
+    <execute item_type="directive" item_id="test/tools/file_system/write_file">
+      <param name="message" value="{input:greeting}" />
+      <param name="output_path" value="{input:output_dir}/greeting.md" />
+    </execute>
+  </step>
 
-    <step name="verify_child_output">
-      <description>Read the greeting file written by the child directive to verify it completed</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_read">
-        <param name="path" value="{input:output_dir}/greeting.md" />
-      </execute>
-    </step>
+  <step name="verify_child_output">
+    <description>Read the greeting file written by the child directive to verify it completed</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_read">
+      <param name="path" value="{input:output_dir}/greeting.md" />
+    </execute>
+  </step>
 
-    <step name="append_completion">
-      <description>Append a completion summary to the plan file</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="{input:output_dir}/plan.md" />
-        <param name="content" value="
+  <step name="append_completion">
+    <description>Append a completion summary to the plan file</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="{input:output_dir}/plan.md" />
+      <param name="content" value="
 ## Completion Summary
 - Child directive test/tools/file_system/write_file executed successfully
 - Greeting file verified at {input:output_dir}/greeting.md
 - Pipeline complete
 " />
-        <param name="mode" value="append" />
-      </execute>
-    </step>
-  </process>
-
-  <outputs>
-    <success>Parent orchestration complete — plan written, child spawned and verified, completion summary appended to {input:output_dir}/plan.md</success>
-    <failure>Spawn child pipeline failed — check that test/tools/file_system/write_file directive exists and {input:output_dir} is writable</failure>
-  </outputs>
-</directive>
-```
+      <param name="mode" value="append" />
+    </execute>
+  </step>
+</process>

@@ -9,7 +9,7 @@ Simple single-step directive that writes a greeting message to a specified file 
     <description>Write a greeting message to a file using rye/file-system/write.</description>
     <category>test/tools/file_system</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="3" tokens="4096" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>

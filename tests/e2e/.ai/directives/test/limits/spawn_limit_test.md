@@ -9,20 +9,21 @@ Test that spawn limit enforcement works. This directive has a low spawns limit.
     <description>Test: verify spawn limit enforcement prevents excessive child threads.</description>
     <category>test/limits</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="3" tokens="4096" spend="0.10" spawns="2" />
   </metadata>
   <permissions>
     <execute><tool>rye.file-system.*</tool></execute>
     <execute><tool>rye.primary-tools.*</tool></execute>
   </permissions>
-  <process>
-    <step name="report">
-      <description>Report the spawn limit configuration.</description>
-    </step>
-  </process>
   <outputs>
     <success>Directive should complete. Spawn limit is tested programmatically.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="report">
+    <description>Report the spawn limit configuration.</description>
+  </step>
+</process>

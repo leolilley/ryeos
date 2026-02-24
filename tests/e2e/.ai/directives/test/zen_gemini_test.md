@@ -54,7 +54,3 @@ Test directive that exercises the Zen provider with a Gemini model — verifies 
   <criterion>Append operation succeeds</criterion>
 </success_criteria>
 
-<results>
-  <success>Zen Gemini profile test passed. File written, read, and appended successfully.</success>
-  <failure>Zen Gemini profile test failed. Check provider resolution and API format.</failure>
-</results>

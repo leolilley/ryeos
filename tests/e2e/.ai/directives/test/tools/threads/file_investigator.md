@@ -9,7 +9,7 @@ Creates a mystery file, then investigates it — reads it back, lists the direct
     <description>Write a mystery file, investigate it with reads and directory listing, then write a report.</description>
     <category>test/tools/threads</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="10" tokens="40000" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>

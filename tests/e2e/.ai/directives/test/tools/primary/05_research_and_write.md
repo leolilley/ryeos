@@ -10,7 +10,7 @@ Research a topic by searching knowledge, loading the best match, then writing a 
     <description>Research a topic by searching the knowledge base, loading a known reference entry for context, then writing a detailed report combining search results and loaded knowledge.</description>
     <category>test/tools/primary</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022">Multi-tool research and report generation</model>
+    <model tier="fast" id="claude-3-5-haiku-20241022">Multi-tool research and report generation</model>
     <limits turns="6" tokens="3072" />
     <permissions>
       <search>
@@ -34,22 +34,29 @@ Research a topic by searching knowledge, loading the best match, then writing a 
     </input>
   </inputs>
 
-  <process>
-    <step name="search_knowledge">
-      <description>Search the knowledge base for entries relevant to the topic</description>
-      <search item_type="knowledge" query="{input:topic}" />
-    </step>
+  <outputs>
+    <success>Researched topic "{input:topic}" and wrote report to {input:report_path}</success>
+    <failure>Failed to research topic "{input:topic}" or write report</failure>
+  </outputs>
+</directive>
+```
 
-    <step name="load_reference">
-      <description>Load the rye-architecture knowledge entry as reference context</description>
-      <load item_type="knowledge" item_id="rye-architecture" />
-    </step>
+<process>
+  <step name="search_knowledge">
+    <description>Search the knowledge base for entries relevant to the topic</description>
+    <search item_type="knowledge" query="{input:topic}" />
+  </step>
 
-    <step name="write_report">
-      <description>Write a research report combining search results and loaded knowledge to the report path</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="{input:report_path}" />
-        <param name="content" value="# Research Report: {input:topic}
+  <step name="load_reference">
+    <description>Load the rye-architecture knowledge entry as reference context</description>
+    <load item_type="knowledge" item_id="rye-architecture" />
+  </step>
+
+  <step name="write_report">
+    <description>Write a research report combining search results and loaded knowledge to the report path</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="{input:report_path}" />
+      <param name="content" value="# Research Report: {input:topic}
 
 ## Overview
 Research findings on: {input:topic}
@@ -66,14 +73,7 @@ Research findings on: {input:topic}
 ## Recommendations
 (actionable recommendations based on research)
 " />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-  </process>
-
-  <outputs>
-    <success>Researched topic "{input:topic}" and wrote report to {input:report_path}</success>
-    <failure>Failed to research topic "{input:topic}" or write report</failure>
-  </outputs>
-</directive>
-```
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+</process>

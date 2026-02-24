@@ -9,7 +9,7 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
     <description>Chain child: writes marker at current level, spawns next level if below max_level.</description>
     <category>test/tools/threads</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>
       <cap>rye.execute.tool.*</cap>
@@ -26,27 +26,27 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
     </input>
   </inputs>
 
-  <process>
-    <step name="write_level_marker">
-      <description>Write marker file for this level.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="chain_L{input:level}.txt" />
-        <param name="content" value="Level {input:level} — child thread" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-
-    <step name="maybe_spawn_next">
-      <description>If level &lt; max_level, spawn the next level child. Pass level+1 and max_level through. If level >= max_level, just report completion.</description>
-      <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-        <param name="directive_name" value="test/tools/threads/spawn_chain_child" />
-        <param name="inputs" value='{"level": "NEXT_LEVEL", "max_level": "{input:max_level}"}' />
-      </execute>
-    </step>
-  </process>
-
   <outputs>
     <success>Level {input:level} marker written. Next level spawned if below max.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_level_marker">
+    <description>Write marker file for this level.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="chain_L{input:level}.txt" />
+      <param name="content" value="Level {input:level} — child thread" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+
+  <step name="maybe_spawn_next">
+    <description>If level &lt; max_level, spawn the next level child. Pass level+1 and max_level through. If level >= max_level, just report completion.</description>
+    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
+      <param name="directive_name" value="test/tools/threads/spawn_chain_child" />
+      <param name="inputs" value='{"level": "NEXT_LEVEL", "max_level": "{input:max_level}"}' />
+    </execute>
+  </step>
+</process>

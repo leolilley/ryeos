@@ -9,7 +9,7 @@ Test that the spend limit triggers escalation. Set spend=$0.001 — even a singl
     <description>Test: exceed spend limit ($0.001) — should trigger escalation hook after first LLM call.</description>
     <category>test/limits</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
     <limits turns="10" tokens="100000" spend="0.001" />
     <permissions>
       <cap>rye.execute.tool.rye.file-system.*</cap>
@@ -17,19 +17,19 @@ Test that the spend limit triggers escalation. Set spend=$0.001 — even a singl
     </permissions>
   </metadata>
 
-  <process>
-    <step name="write_file">
-      <description>Write a file. The LLM call cost will exceed $0.001.</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value="spend_test.txt" />
-        <param name="content" value="Should hit spend limit" />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
-  </process>
-
   <outputs>
     <success>Should be escalated due to spend limit.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="write_file">
+    <description>Write a file. The LLM call cost will exceed $0.001.</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value="spend_test.txt" />
+      <param name="content" value="Should hit spend limit" />
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
+</process>

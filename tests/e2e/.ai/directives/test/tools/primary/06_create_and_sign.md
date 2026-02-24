@@ -10,7 +10,7 @@ Create a new knowledge entry file with YAML frontmatter, then sign it for valida
     <description>Create a new knowledge entry file with YAML frontmatter and markdown body, then validate and sign it.</description>
     <category>test/tools/primary</category>
     <author>rye-os</author>
-    <model tier="haiku" id="claude-3-5-haiku-20241022">Knowledge creation and signing</model>
+    <model tier="fast" id="claude-3-5-haiku-20241022">Knowledge creation and signing</model>
     <limits turns="5" tokens="2048" />
     <permissions>
       <execute>
@@ -34,12 +34,19 @@ Create a new knowledge entry file with YAML frontmatter, then sign it for valida
     </input>
   </inputs>
 
-  <process>
-    <step name="write_entry">
-      <description>Create the knowledge entry file with YAML frontmatter and content body</description>
-      <execute item_type="tool" item_id="rye/file-system/fs_write">
-        <param name="path" value=".ai/knowledge/{input:entry_id}.md" />
-        <param name="content" value="---
+  <outputs>
+    <success>Created and signed knowledge entry: {input:entry_id} at .ai/knowledge/{input:entry_id}.md</success>
+    <failure>Failed to create or sign knowledge entry: {input:entry_id}</failure>
+  </outputs>
+</directive>
+```
+
+<process>
+  <step name="write_entry">
+    <description>Create the knowledge entry file with YAML frontmatter and content body</description>
+    <execute item_type="tool" item_id="rye/file-system/fs_write">
+      <param name="path" value=".ai/knowledge/{input:entry_id}.md" />
+      <param name="content" value="---
 id: {input:entry_id}
 title: {input:title}
 version: '1.0.0'
@@ -49,19 +56,12 @@ version: '1.0.0'
 
 {input:content}
 " />
-        <param name="mode" value="overwrite" />
-      </execute>
-    </step>
+      <param name="mode" value="overwrite" />
+    </execute>
+  </step>
 
-    <step name="sign_entry">
-      <description>Validate and sign the newly created knowledge entry</description>
-      <sign item_type="knowledge" item_id="{input:entry_id}" />
-    </step>
-  </process>
-
-  <outputs>
-    <success>Created and signed knowledge entry: {input:entry_id} at .ai/knowledge/{input:entry_id}.md</success>
-    <failure>Failed to create or sign knowledge entry: {input:entry_id}</failure>
-  </outputs>
-</directive>
-```
+  <step name="sign_entry">
+    <description>Validate and sign the newly created knowledge entry</description>
+    <sign item_type="knowledge" item_id="{input:entry_id}" />
+  </step>
+</process>

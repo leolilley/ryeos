@@ -11,7 +11,7 @@ Test directive that exercises the Zen provider with an OpenAI-compatible model â
     <category>test</category>
     <author>rye-os</author>
     <model id="minimax-m2.5-free" provider="zen/zen" />
-    <limits max_turns="6" max_tokens="4096" max_spend="0.05" />
+    <limits turns="6" tokens="4096" spend="0.05" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>
@@ -53,8 +53,3 @@ Test directive that exercises the Zen provider with an OpenAI-compatible model â
   <criterion>File read-back matches written content</criterion>
   <criterion>Append operation succeeds</criterion>
 </success_criteria>
-
-<results>
-  <success>Zen OpenAI-compat profile test passed. File written, read, and appended successfully.</success>
-  <failure>Zen OpenAI-compat profile test failed. Check provider resolution and API format.</failure>
-</results>

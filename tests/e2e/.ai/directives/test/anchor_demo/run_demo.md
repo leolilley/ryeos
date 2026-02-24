@@ -9,18 +9,19 @@ Execute the anchor_demo tool to verify the anchor system works.
     <description>Run the anchor demo tool with a greeting</description>
     <category>test/anchor_demo</category>
     <author>rye-os</author>
-    <model tier="haiku" />
+    <model tier="fast" />
   </metadata>
   <permissions>
     <execute><tool>test.anchor_demo.*</tool></execute>
   </permissions>
-  <process>
-    <step name="greet">
-      <description>Call anchor_demo tool with a name parameter</description>
-    </step>
-  </process>
   <outputs>
     <success>Greeting returned successfully from anchor demo tool.</success>
   </outputs>
 </directive>
 ```
+
+<process>
+  <step name="greet">
+    <description>Call anchor_demo tool with a name parameter</description>
+  </step>
+</process>
