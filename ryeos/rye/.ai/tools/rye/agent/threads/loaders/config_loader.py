@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T08:17:58Z:f4671e9ecea10f2a35fbcfd0c5107a30b628463b5975fce240788fce0cdf9ba2:WgQYWXET2gxeSq3jLPLMR2sFxdIiUiU2zb3vM2z-73cZoqLL8FiivRsnE1aA0quVmdrb0YOSUiqrZl6C58lkDw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-24T04:59:07Z:7c2f5e09f3b14e314ae171fb8cca2f31adc950d5185be8ea22b4471b414d810d:_HMhmB5oQzuKK5vo99mp4PGzKtTV6LfQbPuZVcq-QiJuwnvWcsiOGSjuhR6jiBTt26sUrEzzk-94B1U7tSjLAw==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from rye.constants import AI_DIR
+from rye.utils.path_utils import get_user_ai_path
 
 
 class ConfigLoader:
@@ -20,13 +21,18 @@ class ConfigLoader:
         self._cache: Dict[str, Any] = {}
 
     def load(self, project_path: Path) -> Dict[str, Any]:
-        """Load config with project overrides."""
+        """Load config with system → user → project cascade."""
         cache_key = str(project_path)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
         system_path = Path(__file__).parent.parent / "config" / self.config_name
         config = self._load_yaml(system_path)
+
+        user_config_path = get_user_ai_path() / "config" / self.config_name
+        if user_config_path.exists():
+            user_config = self._load_yaml(user_config_path)
+            config = self._merge(config, user_config)
 
         project_config_path = project_path / AI_DIR / "config" / self.config_name
         if project_config_path.exists():
