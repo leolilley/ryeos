@@ -1,0 +1,53 @@
+# config/capability_risk.yaml
+category: "rye/agent/threads/config"
+tool_type: "config"
+version: "1.0.0"
+description: "Capability risk classifications and safety policies"
+schema_version: "1.0.0"
+
+risk_levels:
+  safe:
+    description: "Read-only operations with no side effects"
+    policy: allow
+  write:
+    description: "Can modify files within the project scope"
+    policy: allow
+  elevated:
+    description: "Can execute arbitrary commands or access external systems"
+    policy: acknowledge_required
+  unrestricted:
+    description: "Full system access — equivalent to running as the user"
+    policy: block
+
+classifications:
+  - risk: unrestricted
+    patterns:
+      - "rye.*"
+    description: "Wildcard grants full system access"
+
+  - risk: elevated
+    patterns:
+      - "rye.execute.tool.rye.bash.*"
+      - "rye.execute.tool.rye.shell.*"
+    description: "Shell execution grants arbitrary command access"
+
+  - risk: elevated
+    patterns:
+      - "rye.execute.tool.rye.web.*"
+    description: "Web access can exfiltrate data or fetch untrusted content"
+
+  - risk: elevated
+    patterns:
+      - "rye.execute.*"
+    description: "Broad execute grants access to all tools and directives"
+
+  - risk: write
+    patterns:
+      - "rye.execute.tool.rye.file-system.*"
+    description: "File system write access within project scope"
+
+  - risk: safe
+    patterns:
+      - "rye.search.*"
+      - "rye.load.*"
+    description: "Read-only discovery and inspection"

@@ -58,6 +58,34 @@ event_types:
       properties:
         reason: { type: string }
 
+  system_prompt:
+    category: cognition
+    criticality: critical
+    description: "System prompt assembled from context layers (identity, behavior, protocol)"
+    payload_schema:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        layers: { type: array, items: { type: string } }
+
+  context_injected:
+    category: cognition
+    criticality: critical
+    description: "Hook-injected context blocks (environment, completion) added to user message"
+    payload_schema:
+      type: object
+      required: [position, blocks]
+      properties:
+        position: { type: string, enum: [before, after] }
+        blocks:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              content: { type: string }
+
   cognition_in:
     category: cognition
     criticality: critical

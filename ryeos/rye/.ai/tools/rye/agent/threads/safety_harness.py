@@ -215,6 +215,8 @@ class SafetyHarness:
         """
         before_blocks = []
         after_blocks = []
+        before_raw = []
+        after_raw = []
         for hook in self.hooks:
             if hook.get("event") != event:
                 continue
@@ -244,14 +246,19 @@ class SafetyHarness:
                         item_type = action.get("item_type", "")
                         tag = item_type or "context"
                         block = f'<{tag} id="{item_id}">\n{content.strip()}\n</{tag}>'
+                        raw_entry = {"id": item_id, "content": content.strip()}
                         if hook.get("position", "before") == "after":
                             after_blocks.append(block)
+                            after_raw.append(raw_entry)
                         else:
                             before_blocks.append(block)
+                            before_raw.append(raw_entry)
 
         return {
             "before": "\n\n".join(before_blocks),
             "after": "\n\n".join(after_blocks),
+            "before_raw": before_raw,
+            "after_raw": after_raw,
         }
 
     def request_cancel(self):

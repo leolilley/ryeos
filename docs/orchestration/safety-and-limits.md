@@ -4,7 +4,7 @@ title: "Safety and Limits"
 description: Cost controls, turn limits, and the SafetyHarness
 category: orchestration
 tags: [safety, limits, budget, cost, harness]
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Safety and Limits
@@ -296,6 +296,44 @@ A `qualify_leads` sub-orchestrator needs more turns to spawn children, wait for 
 Spawned with: `limit_overrides: {"turns": 30, "spend": 3.00}`
 
 The root `run_lead_pipeline` needs the most turns for multi-phase coordination and the largest budget to cover the entire tree of children and grandchildren.
+
+## Capability Risk Enforcement
+
+In addition to turns, tokens, and spend limits, threads are subject to **capability risk classification** at setup time. This is a separate safety layer — risk classification is orthogonal to the limit system above.
+
+### How It Works
+
+The `_assess_capability_risk` function runs once during thread setup (in `thread_directive.py`), after the `SafetyHarness` is initialized and capabilities are resolved. It checks every granted capability against `capability_risk.yaml`:
+
+1. For each capability, find the most-specific matching classification pattern
+2. Look up the risk tier (`safe`, `write`, `elevated`, `unrestricted`)
+3. Apply the tier's policy (`allow`, `acknowledge_required`, `block`)
+
+If any capability is classified as `block` and not acknowledged, the thread fails immediately — before the first LLM turn. This is a hard stop at setup time, not a per-turn check like limits.
+
+### Broad Capability Warnings
+
+When capabilities use broad patterns like `rye.*` or `rye.execute.*`, the risk classifier logs warnings even if the policy allows execution:
+
+```
+WARNING: Thread abc123: capability 'rye.execute.*' classified as 'elevated' —
+Broad execute grants access to all tools and directives.
+Consider adding <acknowledge risk="elevated"> to the directive.
+```
+
+These warnings help authors notice when a directive has more access than intended. They don't block execution (unless the policy is `block`).
+
+### Relationship to Limits
+
+| Safety Layer | When It Runs | What It Controls | Failure Mode |
+| ------------ | ------------ | ---------------- | ------------ |
+| Limits (turns, tokens, spend) | Every turn | Resource consumption | Thread terminates after exhaustion |
+| Capability permissions | Every tool call | Which tools/knowledge are accessible | Tool call denied, LLM sees error |
+| Capability risk | Thread setup (once) | Whether dangerous capabilities are acknowledged | Thread refuses to start |
+
+Risk classification and limits serve different purposes and don't interact — a thread can pass risk checks but hit a spend limit, or have safe capabilities but exhaust its turns. Both systems enforce independently.
+
+See [Permissions and Capabilities — Capability Risk Classification](./permissions-and-capabilities.md#capability-risk-classification) for the full risk model and `<acknowledge>` syntax.
 
 ## What's Next
 

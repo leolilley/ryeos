@@ -4,7 +4,7 @@ title: "Permissions and Capabilities"
 description: How capability tokens control what threads can do
 category: orchestration
 tags: [permissions, capabilities, security, fail-closed]
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Permissions and Capabilities
@@ -291,6 +291,155 @@ Design permissions from the bottom up:
 4. **Never use `<permissions>*</permissions>`** in production — it defeats the purpose
 
 If a thread tries something it shouldn't, the LLM gets a clear error message explaining exactly which capability is missing. This makes debugging permission issues straightforward.
+
+## Capability Risk Classification
+
+Every capability is classified into a risk tier based on pattern matching against `capability_risk.yaml`. Risk classification determines what happens when a thread requests a capability.
+
+### Risk Tiers
+
+| Tier           | Description                                          | Default Policy         |
+| -------------- | ---------------------------------------------------- | ---------------------- |
+| `safe`         | Read-only operations with no side effects            | `allow`                |
+| `write`        | Can modify files within the project scope            | `allow`                |
+| `elevated`     | Can execute arbitrary commands or access external systems | `acknowledge_required` |
+| `unrestricted` | Full system access — equivalent to running as the user | `block`               |
+
+### Risk Policies
+
+| Policy                 | Behavior                                                                 |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `allow`                | Capability is granted silently                                           |
+| `acknowledge_required` | Capability is granted, but a warning is logged unless explicitly acknowledged |
+| `block`                | Thread **fails** unless the directive includes an `<acknowledge>` tag    |
+
+### Classification Rules in `capability_risk.yaml`
+
+Classifications are defined in `.ai/tools/rye/agent/threads/config/capability_risk.yaml`. Each entry maps a set of fnmatch patterns to a risk tier:
+
+```yaml
+classifications:
+  - risk: unrestricted
+    patterns:
+      - "rye.*"
+    description: "Wildcard grants full system access"
+
+  - risk: elevated
+    patterns:
+      - "rye.execute.tool.rye.bash.*"
+      - "rye.execute.tool.rye.shell.*"
+    description: "Shell execution grants arbitrary command access"
+
+  - risk: elevated
+    patterns:
+      - "rye.execute.tool.rye.web.*"
+    description: "Web access can exfiltrate data or fetch untrusted content"
+
+  - risk: elevated
+    patterns:
+      - "rye.execute.*"
+    description: "Broad execute grants access to all tools and directives"
+
+  - risk: write
+    patterns:
+      - "rye.execute.tool.rye.file-system.*"
+    description: "File system write access within project scope"
+
+  - risk: safe
+    patterns:
+      - "rye.search.*"
+      - "rye.load.*"
+    description: "Read-only discovery and inspection"
+```
+
+Projects can customize by placing their own `capability_risk.yaml` in `.ai/config/agent/` — the loader resolves project config first before falling back to the system default.
+
+### Most-Specific Matching
+
+When a capability matches multiple classification patterns, the **most specific** pattern wins (determined by the number of `.` segments in the pattern). This prevents broad patterns from overriding narrow ones:
+
+```
+Capability: rye.execute.tool.rye.bash.bash
+
+Matches:
+  "rye.*"                          → unrestricted (1 dot)
+  "rye.execute.*"                  → elevated     (2 dots)
+  "rye.execute.tool.rye.bash.*"    → elevated     (5 dots)  ← WINS
+
+Result: elevated (most specific match)
+```
+
+This means `rye.execute.tool.rye.bash.*` (elevated, 5 dots) takes priority over `rye.*` (unrestricted, 1 dot) — the more specific classification always prevails.
+
+### The `<acknowledge>` Opt-In
+
+To explicitly accept a risk, add `<acknowledge>` inside the directive's `<permissions>` block:
+
+```xml
+<permissions>
+  <execute>
+    <tool>rye.bash.*</tool>
+  </execute>
+  <acknowledge risk="elevated">
+    This directive runs build scripts via shell commands.
+  </acknowledge>
+</permissions>
+```
+
+The `risk` attribute value must match a tier name. When acknowledged:
+- **`acknowledge_required`** policies stop logging warnings
+- **`block`** policies are downgraded to allow — the thread starts successfully
+
+Without acknowledgment:
+- `acknowledge_required` → warning logged, execution continues
+- `block` → thread fails immediately with an error:
+
+```
+Capability 'rye.*' classified as 'unrestricted' (Wildcard grants full system access).
+Add <acknowledge risk="unrestricted"> to the directive's <permissions> to explicitly allow this.
+```
+
+### Examples
+
+**Bash tool requiring acknowledgment:**
+
+```xml
+<permissions>
+  <execute>
+    <tool>rye.bash.*</tool>
+  </execute>
+  <acknowledge risk="elevated">
+    Needs shell access to execute deployment scripts.
+  </acknowledge>
+</permissions>
+```
+
+The capability `rye.execute.tool.rye.bash.*` matches the `elevated` tier. With `<acknowledge risk="elevated">`, no warning is logged.
+
+**Wildcard being blocked:**
+
+```xml
+<!-- This will FAIL at thread setup -->
+<permissions>*</permissions>
+```
+
+The wildcard `rye.*` matches the `unrestricted` tier with a `block` policy. The thread refuses to start:
+
+```
+Capability 'rye.*' classified as 'unrestricted' (Wildcard grants full system access).
+Add <acknowledge risk="unrestricted"> to the directive's <permissions> to explicitly allow this.
+```
+
+To allow it (rarely appropriate):
+
+```xml
+<permissions>
+  *
+  <acknowledge risk="unrestricted">
+    Root orchestrator needs full access to manage the entire pipeline.
+  </acknowledge>
+</permissions>
+```
 
 ## What's Next
 

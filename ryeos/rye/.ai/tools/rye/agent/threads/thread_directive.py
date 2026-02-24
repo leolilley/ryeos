@@ -294,6 +294,7 @@ def _merge_hooks(directive_hooks: list, project_path: str) -> list:
     loader = hooks_loader.get_hooks_loader()
     user = loader.get_user_hooks()
     builtin = loader.get_builtin_hooks(Path(project_path))
+    context = loader.get_context_hooks(Path(project_path))
     project = loader.get_project_hooks(Path(project_path))
     infra = loader.get_infra_hooks(Path(project_path))
 
@@ -303,12 +304,161 @@ def _merge_hooks(directive_hooks: list, project_path: str) -> list:
         h.setdefault("layer", 1)
     for h in builtin:
         h.setdefault("layer", 2)
+    for h in context:
+        h.setdefault("layer", 2)
     for h in project:
         h.setdefault("layer", 3)
     for h in infra:
         h.setdefault("layer", 4)
 
-    return sorted(user + directive_hooks + builtin + project + infra, key=lambda h: h.get("layer", 2))
+    return sorted(user + directive_hooks + builtin + context + project + infra, key=lambda h: h.get("layer", 2))
+
+
+async def _resolve_directive_chain(
+    directive_name: str,
+    directive: Dict,
+    project_path: str,
+) -> Dict:
+    """Walk the extends chain and compose context + capabilities.
+
+    Resolution order: leaf → parent → ... → root.
+    Context is collected root-first (base layers, then overlays).
+    Capabilities are collected from the leaf (most restrictive).
+
+    Returns:
+        {
+            "context": {"system": [], "before": [], "after": []},
+            "chain": [root_name, ..., leaf_name],
+        }
+    """
+    from rye.tools.load import LoadTool
+    from rye.utils.parser_router import ParserRouter
+    from rye.utils.resolvers import get_user_space
+
+    chain = [directive]
+    chain_names = [directive.get("name", directive_name)]
+    seen = {directive_name}
+    current = directive
+
+    while current.get("extends"):
+        parent_id = current["extends"]
+        if parent_id in seen:
+            raise ValueError(
+                f"Circular extends chain: {parent_id} "
+                f"(chain: {' → '.join(chain_names)})"
+            )
+        seen.add(parent_id)
+
+        load_tool = LoadTool(user_space=str(get_user_space()))
+        result = await load_tool.handle(
+            item_type="directive",
+            item_id=parent_id,
+            project_path=project_path,
+        )
+        if result["status"] != "success":
+            raise ValueError(
+                f"Failed to load parent directive '{parent_id}': "
+                f"{result.get('error', 'unknown error')}"
+            )
+        parent = ParserRouter().parse("markdown_xml", result["content"])
+        chain.append(parent)
+        chain_names.append(parent.get("name", parent_id))
+        current = parent
+
+    # Reverse: root first for context composition
+    chain.reverse()
+    chain_names.reverse()
+
+    # Compose context: root layers first, then overlays
+    context = {"system": [], "before": [], "after": []}
+    for d in chain:
+        d_ctx = d.get("context", {})
+        for position in ("system", "before", "after"):
+            items = d_ctx.get(position, [])
+            if isinstance(items, str):
+                items = [items]
+            for item in items:
+                if item not in context[position]:
+                    context[position].append(item)
+
+    return {"context": context, "chain": chain_names, "chain_directives": chain}
+
+
+def _assess_capability_risk(
+    capabilities: list,
+    acknowledged_risks: list,
+    thread_id: str,
+    project_path: Path,
+) -> Optional[Dict]:
+    """Check granted capabilities against risk classifications.
+
+    Uses most-specific-first matching: for each capability, the classification
+    with the longest matching pattern wins. This prevents broad patterns like
+    "rye.*" from overriding specific ones like "rye.search.*".
+
+    Returns an error dict if a blocked risk is detected, else None.
+    Logs warnings for elevated capabilities.
+    """
+    import fnmatch as _fnmatch
+
+    risk_loader = load_module("loaders/config_loader", anchor=_ANCHOR)
+
+    class CapRiskLoader(risk_loader.ConfigLoader):
+        def __init__(self):
+            super().__init__("capability_risk.yaml")
+
+    loader = CapRiskLoader()
+    try:
+        config = loader.load(project_path)
+    except Exception:
+        return None
+
+    risk_levels = config.get("risk_levels", {})
+    classifications = config.get("classifications", [])
+    ack_set = {a.get("risk", "") for a in (acknowledged_risks or [])}
+
+    for cap in capabilities:
+        # Find the most specific matching classification (longest pattern wins)
+        best_match = None
+        best_specificity = -1
+        for classification in classifications:
+            for pattern in classification.get("patterns", []):
+                if _fnmatch.fnmatch(cap, pattern):
+                    specificity = pattern.count(".")
+                    if specificity > best_specificity:
+                        best_specificity = specificity
+                        best_match = classification
+
+        if best_match is None:
+            continue
+
+        risk = best_match.get("risk", "safe")
+        level_config = risk_levels.get(risk, {})
+        policy = level_config.get("policy", "allow")
+
+        if policy == "block" and risk not in ack_set:
+            return {
+                "error": (
+                    f"Capability '{cap}' classified as '{risk}' "
+                    f"({best_match.get('description', '')}). "
+                    f"Add <acknowledge risk=\"{risk}\"> to the directive's "
+                    f"<permissions> to explicitly allow this."
+                ),
+                "risk": risk,
+                "capability": cap,
+            }
+
+        if policy == "acknowledge_required" and risk not in ack_set:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Thread %s: capability '%s' classified as '%s' — %s. "
+                "Consider adding <acknowledge risk=\"%s\"> to the directive.",
+                thread_id, cap, risk,
+                best_match.get("description", ""),
+                risk,
+            )
+
+    return None
 
 
 async def execute(params: Dict, project_path: str) -> Dict:
@@ -383,6 +533,43 @@ async def execute(params: Dict, project_path: str) -> Dict:
             registry.update_status(thread_id, "error")
             return result
         directive = result["data"]
+
+    # 3.6. Resolve extends chain and compose context
+    system_prompt = ""
+    if directive.get("extends") or directive.get("context"):
+        try:
+            chain_result = await _resolve_directive_chain(
+                directive_name, directive, project_path
+            )
+            # Load knowledge items for system prompt
+            from rye.tools.load import LoadTool
+            from rye.utils.resolvers import get_user_space
+            load_tool = LoadTool(user_space=str(get_user_space()))
+            system_parts = []
+            for kid in chain_result["context"].get("system", []):
+                kr = await load_tool.handle(
+                    item_type="knowledge", item_id=kid, project_path=project_path,
+                )
+                if kr.get("status") == "success":
+                    content = kr.get("content", "")
+                    if content:
+                        system_parts.append(content.strip())
+            if system_parts:
+                system_prompt = "\n\n".join(system_parts)
+
+            # Merge parent capabilities from extends chain.
+            # The root directive provides the broadest capabilities;
+            # each child narrows via the existing SafetyHarness attenuation.
+            # If the leaf has no permissions, inherit from the nearest parent.
+            chain_dirs = chain_result.get("chain_directives", [])
+            if not directive.get("permissions") and len(chain_dirs) > 1:
+                for parent_d in chain_dirs[:-1]:  # root → ... → parent (exclude leaf)
+                    if parent_d.get("permissions"):
+                        directive["permissions"] = parent_d["permissions"]
+                        break
+        except ValueError as e:
+            registry.update_status(thread_id, "error")
+            return {"success": False, "error": str(e), "thread_id": thread_id}
 
     # 3.5. Reconstruct resume_messages from previous thread's transcript JSONL
     if params.get("previous_thread_id") and not params.get("resume_messages"):
@@ -516,6 +703,29 @@ async def execute(params: Dict, project_path: str) -> Dict:
             harness.output_fields = [o["name"] for o in directive_outputs if o.get("name")]
         elif isinstance(directive_outputs, dict):
             harness.output_fields = list(directive_outputs.keys())
+
+    # Assess capability risk
+    acknowledged_risks = directive.get("acknowledged_risks", [])
+    risk_result = _assess_capability_risk(
+        harness._capabilities, acknowledged_risks, thread_id, proj_path
+    )
+    if risk_result:
+        registry.update_status(thread_id, "error")
+        return {
+            "success": False,
+            "error": risk_result["error"],
+            "thread_id": thread_id,
+            "risk": risk_result.get("risk"),
+        }
+
+    # Broad capability warning
+    broad_caps = [c for c in harness._capabilities if c.endswith(".*") and c.count(".") <= 2]
+    if broad_caps:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Thread %s has broad capabilities: %s — consider narrowing permissions",
+            thread_id, broad_caps,
+        )
 
     if not harness.available_tools:
         registry.update_status(thread_id, "error")
@@ -661,6 +871,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         directive_body=clean_directive_text,
         previous_thread_id=params.get("previous_thread_id"),
         inputs=inputs,
+        system_prompt=system_prompt,
     )
 
     # Ensure non-empty error message on failure

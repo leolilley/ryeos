@@ -22,6 +22,10 @@ class HooksLoader(ConfigLoader):
         config = self.load(project_path)
         return config.get("builtin_hooks", [])
 
+    def get_context_hooks(self, project_path: Path) -> List[Dict]:
+        config = self.load(project_path)
+        return config.get("context_hooks", [])
+
     def get_infra_hooks(self, project_path: Path) -> List[Dict]:
         config = self.load(project_path)
         return config.get("infra_hooks", [])

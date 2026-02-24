@@ -128,6 +128,57 @@ infra_hooks:
         payload:
           cost: "${cost}"
 
+context_hooks:
+  - id: "system_identity"
+    event: "build_system_prompt"
+    layer: 2
+    position: "before"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/agent/core/identity"
+    description: "Load agent identity into system prompt"
+
+  - id: "system_behavior"
+    event: "build_system_prompt"
+    layer: 2
+    position: "before"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/agent/core/behavior"
+    description: "Load behavioral rules into system prompt"
+
+  - id: "system_tool_protocol"
+    event: "build_system_prompt"
+    layer: 2
+    position: "before"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/agent/core/tool-protocol"
+    description: "Load tool usage protocol into system prompt"
+
+  - id: "ctx_environment"
+    event: "thread_started"
+    layer: 2
+    position: "before"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/agent/core/environment"
+    description: "Inject runtime environment context into first user message"
+
+  - id: "ctx_completion"
+    event: "thread_started"
+    layer: 2
+    position: "after"
+    action:
+      primary: "load"
+      item_type: "knowledge"
+      item_id: "rye/agent/core/completion"
+    description: "Inject completion protocol into first user message"
+
 action_primaries: ["execute", "search", "load", "sign"]
 
 action_item_types: ["directive", "tool", "knowledge"]

@@ -1,11 +1,11 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:3651f554fe8627477be69ba58de1e740fc69f6b4dcf710ab07b8964826e74595:oTwllHvg7c2ml7jWWx5avuGkZ3m-31Q17kxlG-qq6bzubzHldXnALZsGDxYwCIqw7ymkaiUUTnGthH95GmwHAA==:9fbfabe975fa5a7f -->
+<!-- rye:unsigned -->
 
 ```yaml
 name: capability-strings
 title: Capability Strings & Permissions
 entry_type: reference
 category: rye/core
-version: "1.0.0"
+version: "1.1.0"
 author: rye-os
 created_at: 2026-02-18T00:00:00Z
 tags:
@@ -16,7 +16,10 @@ tags:
   - authorization
   - access-control
   - thread-permissions
+  - risk-classification
+  - acknowledge
 references:
+  - permissions-in-threads
   - "docs/orchestration/permissions-and-capabilities.md"
 ```
 
@@ -166,3 +169,37 @@ if denied:
 ```
 
 The LLM receives a clear error message explaining exactly which capability is missing.
+
+## Risk Classification
+
+Capability strings are classified by risk level to enforce graduated access control. Classifications are defined in `capability_risk.yaml`.
+
+### Risk Tiers
+
+| Tier           | Policy                 | Description                                         |
+|----------------|------------------------|-----------------------------------------------------|
+| `safe`         | `allow`                | Read-only operations (search, load)                 |
+| `write`        | `allow`                | State-modifying but routine (file-system tools)     |
+| `elevated`     | `acknowledge_required` | High-impact — requires `<acknowledge>` opt-in       |
+| `unrestricted` | `block`                | Full access — blocked by default                    |
+
+Matching uses most-specific-first: `rye.search.*` (safe, 3 segments) wins over `rye.*` (unrestricted, 2 segments) for a search capability.
+
+See `rye/agent/threads/permissions-in-threads` for the full risk classification model, policies, and matching algorithm.
+
+## The `<acknowledge>` Tag
+
+Directives requesting capabilities classified as `elevated` must include an `<acknowledge>` tag in their `<permissions>` block:
+
+```xml
+<permissions>
+  <acknowledge>elevated</acknowledge>
+  <execute>
+    <directive>*</directive>
+  </execute>
+</permissions>
+```
+
+Without `<acknowledge>`, elevated capabilities are denied even if the capability string pattern matches. This prevents accidental use of high-impact operations.
+
+See `rye/agent/threads/permissions-in-threads` for details on risk levels, policies, and broad capability warnings.

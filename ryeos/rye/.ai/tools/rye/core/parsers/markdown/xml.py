@@ -51,6 +51,10 @@ def parse(content: str) -> Dict[str, Any]:
             version_match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', attrs_str)
             if version_match:
                 result["version"] = version_match.group(1)
+            # Extract extends
+            extends_match = re.search(r'extends\s*=\s*["\']([^"\']+)["\']', attrs_str)
+            if extends_match:
+                result["extends"] = extends_match.group(1)
 
         # Mask opaque sections before parsing
         masked_xml, opaque_content = _mask_opaque_sections(xml_str)
@@ -195,6 +199,14 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                                     permissions.append({"tag": "cap", "content": f"rye.{perm.tag}.{item.tag}.{item_text}"})
                         elif inner_text:
                             permissions.append({"tag": "cap", "content": f"rye.{perm.tag}.{inner_text}"})
+                acknowledgments = []
+                for ack in child.findall("acknowledge"):
+                    risk = ack.get("risk", "")
+                    reason = (ack.text or "").strip()
+                    if risk:
+                        acknowledgments.append({"risk": risk, "reason": reason})
+                if acknowledgments:
+                    result["acknowledged_risks"] = acknowledgments
                 result["permissions"] = permissions
 
             elif tag == "limits":
@@ -257,6 +269,14 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                             hook_data[hook_child.tag] = hook_child.text.strip()
                     hooks.append(hook_data)
                 result["hooks"] = hooks
+
+            elif tag == "context":
+                context = {"system": [], "before": [], "after": []}
+                for ctx_child in child:
+                    position = ctx_child.tag  # "system", "before", or "after"
+                    if position in context and ctx_child.text and ctx_child.text.strip():
+                        context[position].append(ctx_child.text.strip())
+                result["context"] = context
 
             # Simple text fields - include empty strings for category
             elif tag == "category":

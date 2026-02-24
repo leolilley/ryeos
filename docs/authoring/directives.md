@@ -4,7 +4,7 @@ title: "Authoring Directives"
 description: How to write directive files — the workflow instructions that AI agents follow
 category: authoring
 tags: [directives, authoring, format, metadata]
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Authoring Directives
@@ -534,6 +534,156 @@ Create a directive with full thread execution support — model configuration, c
 - The `load_reference` step loads itself as a structural template
 - `complexity` input maps to different limit configurations
 - `permissions_needed` is parsed from comma-separated strings into hierarchical XML
+
+## Directive Inheritance with `extends`
+
+Directives can inherit from a parent directive using the `extends` attribute on the `<directive>` element:
+
+```xml
+<directive name="deploy_staging" version="1.0.0" extends="rye/agent/core/base">
+  ...
+</directive>
+```
+
+When a directive extends a parent, the thread setup walks the `extends` chain (leaf → parent → … → root) and composes:
+
+- **Context** — `<context>` items from the entire chain are merged, root-first. Base layers come first, overlays from the leaf are appended.
+- **Capabilities** — taken from the leaf directive (most restrictive). The parent's capabilities are not automatically inherited unless the leaf omits its own `<permissions>` block.
+- **Hooks** — hooks from parent directives participate in the merge alongside project and system hooks.
+
+Circular chains are detected and rejected at startup:
+
+```
+Circular extends chain: rye/agent/core/base (chain: deploy_staging → base_deploy → rye/agent/core/base)
+```
+
+## Context Injection with `<context>`
+
+The `<context>` metadata section declares knowledge items to inject into the LLM prompt. Items are loaded at thread startup and placed into one of three positions:
+
+```xml
+<directive name="deploy_staging" version="1.0.0" extends="rye/agent/core/base">
+  <metadata>
+    <context>
+      <system>rye/agent/core/identity</system>
+      <system>rye/agent/core/behavior</system>
+      <before>project/deploy/environment-rules</before>
+      <after>project/deploy/completion-checklist</after>
+    </context>
+    ...
+  </metadata>
+  ...
+</directive>
+```
+
+### Positions
+
+| Position    | Where it goes                          | Use case                              |
+| ----------- | -------------------------------------- | ------------------------------------- |
+| `<system>`  | LLM's system message (API-level)       | Identity, behavior rules, tool protocol |
+| `<before>`  | Before the directive body in the user message | Environment info, project rules      |
+| `<after>`   | After the directive body in the user message  | Completion protocol, checklists      |
+
+### Composition through `extends`
+
+When a directive extends a parent, context items from the entire chain are merged root-first. Duplicates are deduplicated — if both the base and the leaf declare the same knowledge item, it appears only once.
+
+```
+Chain: rye/agent/core/base → project/deploy/base → deploy_staging
+
+System items:  [identity, behavior]          ← from rye/agent/core/base
+Before items:  [environment-rules]           ← from project/deploy/base
+After items:   [completion-checklist]        ← from deploy_staging
+```
+
+See [Context Injection](../orchestration/context-injection.md) for the full system overview.
+
+## Acknowledging Capability Risks
+
+When a directive requires capabilities classified as `elevated` or `unrestricted`, you must explicitly acknowledge the risk in the `<permissions>` block using `<acknowledge>`:
+
+```xml
+<permissions>
+  <execute>
+    <tool>rye.bash.*</tool>
+  </execute>
+  <acknowledge risk="elevated">
+    This directive executes shell commands to run the build pipeline.
+  </acknowledge>
+</permissions>
+```
+
+Without the `<acknowledge>` tag:
+- **`elevated`** capabilities log a warning but still execute (`acknowledge_required` policy)
+- **`unrestricted`** capabilities are **blocked** and the thread fails with an error suggesting you add the acknowledgment
+
+The `risk` attribute must match one of the risk tiers defined in `capability_risk.yaml`: `safe`, `write`, `elevated`, or `unrestricted`.
+
+See [Permissions and Capabilities — Capability Risk Classification](../orchestration/permissions-and-capabilities.md#capability-risk-classification) for the full risk model.
+
+## Example: Extending a Base with Context and Risk Acknowledgment
+
+````markdown
+<!-- rye:signed:2026-02-24T00:00:00Z:placeholder:unsigned:unsigned -->
+
+# Deploy Staging
+
+Deploy the current build to the staging environment.
+
+```xml
+<directive name="deploy_staging" version="1.0.0" extends="rye/agent/core/base">
+  <metadata>
+    <description>Deploy the current build to staging</description>
+    <category>project/deploy</category>
+    <author>team</author>
+    <model tier="sonnet" />
+    <limits max_turns="15" max_tokens="200000" />
+    <context>
+      <system>rye/agent/core/identity</system>
+      <before>project/deploy/environment-rules</before>
+      <after>project/deploy/completion-checklist</after>
+    </context>
+    <permissions>
+      <execute>
+        <tool>rye.bash.*</tool>
+        <tool>rye.file-system.*</tool>
+      </execute>
+      <load>
+        <knowledge>project/deploy/*</knowledge>
+      </load>
+      <acknowledge risk="elevated">
+        Needs shell access to run deploy scripts and health checks.
+      </acknowledge>
+    </permissions>
+  </metadata>
+
+  <inputs>
+    <input name="target" type="string" required="true">
+      Deployment target (e.g., "staging-us-east-1")
+    </input>
+  </inputs>
+</directive>
+```
+
+<process>
+  <step name="load_config">
+    Load the deployment configuration for {input:target}.
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": ".ai/config/deploy/{input:target}.yaml"})`
+  </step>
+
+  <step name="run_deploy">
+    Execute the deployment script.
+    `rye_execute(item_type="tool", item_id="rye/bash/bash", parameters={"command": "./scripts/deploy.sh {input:target}"})`
+  </step>
+</process>
+````
+
+**What to notice:**
+
+- `extends="rye/agent/core/base"` — inherits base context (identity, behavior) from the parent
+- `<context>` — adds project-specific knowledge in `before` and `after` positions
+- `<acknowledge risk="elevated">` — explicitly allows shell execution
+- Capabilities are tightly scoped to bash and file-system tools
 
 ## Best Practices
 

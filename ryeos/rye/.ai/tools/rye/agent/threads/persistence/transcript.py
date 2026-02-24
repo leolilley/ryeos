@@ -292,6 +292,22 @@ class Transcript:
         event_type = event.get("event_type", "")
         payload = event.get("payload", {})
 
+        if event_type == "system_prompt":
+            text = payload.get("text", "")
+            layers = payload.get("layers", [])
+            layer_str = ", ".join(layers) if layers else "custom"
+            return f"## System Prompt ({layer_str})\n\n{text}\n\n"
+
+        if event_type == "context_injected":
+            position = payload.get("position", "before")
+            blocks = payload.get("blocks", [])
+            parts = []
+            for block in blocks:
+                bid = block.get("id", "unknown")
+                content = block.get("content", "")
+                parts.append(f"### Context: {bid} (position: {position})\n\n{content}\n\n")
+            return "".join(parts)
+
         if event_type == "cognition_in":
             role = payload.get("role", "user")
             if role == "tool":

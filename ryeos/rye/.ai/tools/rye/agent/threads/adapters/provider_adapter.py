@@ -23,12 +23,15 @@ class ProviderAdapter:
         """Whether to use native API tool_use or text-parsed tool calls."""
         return self.config.get("tool_use", {}).get("mode", "native")
 
-    async def create_completion(self, messages: List[Dict], tools: List[Dict]) -> Dict:
+    async def create_completion(
+        self, messages: List[Dict], tools: List[Dict], system_prompt: str = ""
+    ) -> Dict:
         """Send messages to LLM and return structured response.
 
         Args:
             messages: List of {"role": str, "content": str} message dicts
             tools: List of tool schemas the LLM can call
+            system_prompt: Optional system-level instructions (identity, behavior, protocol)
 
         Returns:
             {
@@ -57,7 +60,8 @@ class ProviderAdapter:
         return False
 
     async def create_streaming_completion(
-        self, messages: List[Dict], tools: List[Dict], sinks: Any = None
+        self, messages: List[Dict], tools: List[Dict], sinks: Any = None,
+        system_prompt: str = "",
     ) -> Dict:
         """Streaming variant with sink fan-out.
 

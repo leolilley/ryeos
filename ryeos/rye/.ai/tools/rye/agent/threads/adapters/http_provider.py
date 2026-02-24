@@ -116,13 +116,14 @@ class HttpProvider(ProviderAdapter):
 
     # ── Message Conversion ─────────────────────────────────────────────
 
-    def _convert_messages(self, messages: List[Dict]) -> List[Dict]:
+    def _convert_messages(self, messages: List[Dict], system_prompt: str = "") -> List[Dict]:
         """Convert runner message format to provider format using message_schema.
 
         Handles three concerns driven by YAML config:
         1. Tool result messages → provider-specific format (grouped or individual)
         2. Assistant messages with tool_calls → reconstructed with provider block format
         3. Regular messages → role-mapped and content-wrapped if needed
+        4. System prompt → prepended as system role message (when system_mode is "message")
         """
         schema = self._tool_use.get("message_schema", {})
         role_map = schema.get("role_map", {"user": "user", "assistant": "assistant"})
@@ -241,6 +242,12 @@ class HttpProvider(ProviderAdapter):
                     converted.append({"role": mapped_role, content_key: parts})
 
         flush_results()
+
+        # Prepend system message for providers that use message-role system prompts
+        sys_config = self._tool_use.get("system_message", {})
+        if system_prompt and sys_config.get("mode") == "message_role":
+            converted.insert(0, {"role": "system", "content": system_prompt})
+
         return converted
 
     # ── Tool Formatting ────────────────────────────────────────────────
@@ -394,6 +401,25 @@ class HttpProvider(ProviderAdapter):
             self._http_client = HttpClientPrimitive()
         return self._http_client
 
+    def _inject_system_prompt(self, body: Dict, system: str) -> None:
+        """Inject system prompt into the request body using profile config.
+
+        Uses the system_message config from the profile's tool_use section:
+        - mode "body_field": sets body[field] = system (Anthropic)
+        - mode "body_inject": deep-merges a template structure (Gemini)
+        - mode "message_role": handled in _convert_messages, not here
+        """
+        sys_config = self._tool_use.get("system_message", {})
+        mode = sys_config.get("mode", "body_field")
+
+        if mode == "body_field":
+            field = sys_config.get("field", "system")
+            body[field] = system
+        elif mode == "body_inject":
+            template = sys_config.get("template", {})
+            if template:
+                body.update(self._apply_template(template, {"system": system}))
+
     async def _execute_http(self, params: Dict) -> Dict:
         """Execute HTTP request directly using merged provider config.
 
@@ -403,11 +429,16 @@ class HttpProvider(ProviderAdapter):
         """
         config = dict(self._http_config)
         mode = params.pop("mode", "sync")
+        system = params.pop("system", "")
 
         # Use stream_url when streaming if the provider defines one (e.g., Gemini)
         url_key = "stream_url" if mode == "stream" and "stream_url" in config else "url"
         config["url"] = config.get(url_key, config.get("url", "")).format(**params)
         config["body"] = self._build_body(params)
+
+        # Inject system prompt into request body if provided
+        if system:
+            self._inject_system_prompt(config["body"], system)
 
         client = await self._get_http_client()
 
@@ -452,9 +483,11 @@ class HttpProvider(ProviderAdapter):
 
     # ── Completion ─────────────────────────────────────────────────────
 
-    async def create_completion(self, messages: List[Dict], tools: List[Dict]) -> Dict:
+    async def create_completion(
+        self, messages: List[Dict], tools: List[Dict], system_prompt: str = ""
+    ) -> Dict:
         """Send messages to LLM via direct HTTP call using merged provider config."""
-        converted_messages = self._convert_messages(messages)
+        converted_messages = self._convert_messages(messages, system_prompt=system_prompt)
         formatted_tools = self._format_tools(tools) if tools else []
 
         params = {
@@ -464,6 +497,8 @@ class HttpProvider(ProviderAdapter):
         }
         if formatted_tools:
             params["tools"] = formatted_tools
+        if system_prompt:
+            params["system"] = system_prompt
 
         result = await self._execute_http(params)
         self._raise_on_error(result)
@@ -472,7 +507,8 @@ class HttpProvider(ProviderAdapter):
         return self._parse_response(response_body)
 
     async def create_streaming_completion(
-        self, messages: List[Dict], tools: List[Dict], sinks: Optional[List] = None
+        self, messages: List[Dict], tools: List[Dict], sinks: Optional[List] = None,
+        system_prompt: str = "",
     ) -> Dict:
         """Send messages to LLM via streaming, with real-time sink fan-out.
 
@@ -483,7 +519,7 @@ class HttpProvider(ProviderAdapter):
         """
         from lilux.primitives.http_client import ReturnSink
 
-        converted_messages = self._convert_messages(messages)
+        converted_messages = self._convert_messages(messages, system_prompt=system_prompt)
         formatted_tools = self._format_tools(tools) if tools else []
 
         params = {
@@ -495,6 +531,8 @@ class HttpProvider(ProviderAdapter):
         }
         if formatted_tools:
             params["tools"] = formatted_tools
+        if system_prompt:
+            params["system"] = system_prompt
 
         return_sink = ReturnSink()
         all_sinks = [return_sink] + (sinks or [])

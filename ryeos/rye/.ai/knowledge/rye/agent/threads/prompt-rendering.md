@@ -1,11 +1,11 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:20bca13d7142a7cf500dbd5ec9fd95fe542f100753a718cfaf49481fdae2079f:QDA74ZjMPIViDqLMD-yKfrH7ubZh2RbbWs3i_auvs2AH5O22rfK8YRv-rIHFqVEIopdiuFW0Q5FF64iwN7lfAw==:9fbfabe975fa5a7f -->
+<!-- rye:unsigned -->
 
 ```yaml
 name: prompt-rendering
 title: Prompt Rendering
 entry_type: reference
 category: rye/agent/threads
-version: "1.1.0"
+version: "1.2.0"
 author: rye-os
 created_at: 2026-02-18T00:00:00Z
 tags:
@@ -14,8 +14,12 @@ tags:
   - threads
   - returns
   - outputs
+  - system-message
+  - context-injection
+  - extends
 references:
   - thread-lifecycle
+  - directive-extends
   - "docs/authoring/directives.md"
 ```
 
@@ -180,3 +184,80 @@ def _build_prompt(directive: Dict) -> str:
 
     return "\n\n".join(parts)
 ```
+
+## System Message Assembly
+
+Before the main loop begins, `build_system_prompt` hooks fire to produce the system message. This content is delivered via the provider's native system message field — it is **not** stuffed into a user message.
+
+### How It Works
+
+1. Hooks registered with `build_system_prompt` are invoked in order
+2. Each hook returns a string fragment (or `None`)
+3. Non-empty fragments are concatenated to form the final system prompt
+4. The assembled prompt is sent as the API's system message
+
+### Provider-Specific Delivery
+
+| Provider        | Delivery Mechanism                                    |
+|-----------------|-------------------------------------------------------|
+| Anthropic       | Top-level `system` field in the API request           |
+| Gemini          | `systemInstruction` field                             |
+| OpenAI-compat   | Message with `role: "system"` at the start of messages|
+
+This ensures each provider receives the system prompt in its idiomatic format.
+
+## Context Injection from `<context>` Directive Metadata
+
+Directives can declare a `<context>` metadata section that specifies static content to inject at specific positions in the prompt. This is parsed during directive loading and injected during prompt assembly.
+
+### Positions
+
+| Position   | Where Injected                                    |
+|------------|---------------------------------------------------|
+| `<system>` | Appended to the system message (before the loop)  |
+| `<before>` | Prepended before the directive body               |
+| `<after>`  | Appended after the directive body                 |
+
+### Knowledge Item Loading
+
+Context blocks can reference knowledge items by ID. These are resolved and loaded at directive parse time, and their content is injected at the declared position.
+
+```xml
+<context>
+  <system>You are a senior engineer. Follow project conventions.</system>
+  <before>
+    <knowledge>rye/core/capability-strings</knowledge>
+    <knowledge>project/coding-standards</knowledge>
+  </before>
+  <after>Remember to run tests before returning results.</after>
+</context>
+```
+
+## Directive Extends and Context Composition
+
+When a directive uses `extends`, the context is composed **root-first** along the inheritance chain. This means the base directive's context appears first, then each child's context layers on top.
+
+### Composition Order
+
+```
+base directive context (root)
+  → parent directive context
+    → leaf directive context (current)
+```
+
+- System-position content is concatenated root-first into the system message
+- Before/after content follows the same root-first ordering
+- Duplicate knowledge items are deduplicated (first occurrence wins)
+
+See the `directive-extends` knowledge item for the full inheritance model.
+
+## Transcript Events
+
+The rendering pipeline records events for observability:
+
+| Event               | When Recorded                                          |
+|---------------------|--------------------------------------------------------|
+| `system_prompt`     | After system message assembly completes                |
+| `context_injected`  | After each context layer is injected into the prompt   |
+
+These events appear in the thread transcript and can be used for debugging prompt construction.

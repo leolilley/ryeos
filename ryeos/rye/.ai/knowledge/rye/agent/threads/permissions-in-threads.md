@@ -1,11 +1,11 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:405c35f4bf5d8d60a03e9d03f308c932f2c490aa98207ba73fe42bc0cde4d9ca:afdLh8dLonST5-nAlVpTs_dkxg63L3xDT4e1l85vLbYjSF27YdDes3dATqwdHf-IvFF6ZGtwmJ55E9dTodVHAw==:9fbfabe975fa5a7f -->
+<!-- rye:unsigned -->
 
 ```yaml
 name: permissions-in-threads
 title: Permissions in Threads
 entry_type: reference
 category: rye/agent/threads
-version: "1.0.0"
+version: "1.1.0"
 author: rye-os
 created_at: 2026-02-18T00:00:00Z
 tags:
@@ -13,8 +13,12 @@ tags:
   - capabilities
   - threads
   - security
+  - risk-classification
+  - acknowledge
 references:
   - limits-and-safety
+  - capability-strings
+  - directive-extends
   - "docs/orchestration/permissions-and-capabilities.md"
 ```
 
@@ -189,3 +193,95 @@ Root orchestrator:
 3. **Root orchestrators** need `thread_directive`, `orchestrator` (wait/aggregate), search/load
 4. **Never use `<permissions>*</permissions>` in production** — defeats the purpose
 5. **LLM gets clear error** — denied permissions produce explicit messages for debugging
+
+## Capability Risk Classification
+
+Every capability string is assigned a **risk level** that determines how it's handled at runtime. Risk classifications are defined in `capability_risk.yaml`.
+
+### Risk Levels
+
+| Risk Level     | Description                                              | Example Capabilities               |
+|----------------|----------------------------------------------------------|--------------------------------------|
+| `safe`         | Read-only, no side effects                               | `rye.search.*`, `rye.load.*`        |
+| `write`        | Modifies state but within normal operation               | `rye.execute.tool.rye.file-system.*`|
+| `elevated`     | High-impact actions requiring explicit opt-in            | `rye.sign.*`, `rye.execute.directive.*` |
+| `unrestricted` | Full access, no guardrails                               | `rye.*`                              |
+
+### Policies
+
+Each risk level maps to a **policy** that controls enforcement:
+
+| Policy                 | Behavior                                                    |
+|------------------------|-------------------------------------------------------------|
+| `allow`                | Permitted without additional checks                         |
+| `acknowledge_required` | Directive must include `<acknowledge>` tag to opt in        |
+| `block`                | Denied unconditionally                                      |
+
+### `capability_risk.yaml` Configuration
+
+Risk classifications live in `capability_risk.yaml`. Custom classifications can be added for project-specific capabilities:
+
+```yaml
+risk_levels:
+  safe:
+    policy: allow
+    patterns:
+      - "rye.search.*"
+      - "rye.load.*"
+  write:
+    policy: allow
+    patterns:
+      - "rye.execute.tool.rye.file-system.*"
+  elevated:
+    policy: acknowledge_required
+    patterns:
+      - "rye.sign.*"
+      - "rye.execute.directive.*"
+  unrestricted:
+    policy: block
+    patterns:
+      - "rye.*"
+```
+
+## The `<acknowledge>` Tag
+
+Directives that need elevated capabilities must explicitly opt in using the `<acknowledge>` tag inside `<permissions>`:
+
+```xml
+<permissions>
+  <acknowledge>elevated</acknowledge>
+  <execute>
+    <directive>*</directive>
+  </execute>
+  <sign>
+    <directive>*</directive>
+  </sign>
+</permissions>
+```
+
+Without the `<acknowledge>` tag, capabilities classified as `acknowledge_required` are denied even if the capability string matches.
+
+## Most-Specific-First Matching
+
+When a capability string matches multiple risk patterns, the **most specific** pattern wins. Specificity is determined by the number of segments in the pattern.
+
+```
+rye.search.directive.*     → matches "safe" (4 segments)
+rye.*                      → matches "unrestricted" (2 segments)
+
+Request: rye.search.directive.my-project.workflows
+→ "rye.search.directive.*" is more specific → risk = safe
+```
+
+This ensures that granting broad patterns like `rye.*` doesn't accidentally classify fine-grained safe operations as unrestricted.
+
+## Broad Capability Warnings
+
+When broad capability patterns are granted, warnings are logged at thread startup:
+
+| Pattern             | Warning                                                   |
+|---------------------|-----------------------------------------------------------|
+| `rye.*`             | "Broad capability granted: rye.* covers all operations"   |
+| `rye.execute.*`     | "Broad execute capability: rye.execute.* covers all tool/directive execution" |
+
+These warnings appear in thread logs and help identify directives with overly permissive capability grants during development and review.

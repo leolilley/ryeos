@@ -160,6 +160,9 @@ profiles:
         tools: "{tools}"
         stream: "{stream}"
     tool_use:
+      system_message:
+        mode: body_field
+        field: system
       tool_definition:
         name: "{name}"
         description: "{description}"
@@ -225,6 +228,8 @@ profiles:
         tools: "{tools}"
         stream: "{stream}"
     tool_use:
+      system_message:
+        mode: message_role
       tool_definition:
         type: function
         function:
@@ -296,6 +301,12 @@ profiles:
             includeThoughts: true
             thinkingLevel: "high"
     tool_use:
+      system_message:
+        mode: body_inject
+        template:
+          systemInstruction:
+            parts:
+              - text: "{system}"
       tool_list_wrap: "functionDeclarations"
       tool_definition:
         name: "{name}"

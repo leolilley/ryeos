@@ -48,11 +48,14 @@ async def run(
     directive_body: str = "",
     previous_thread_id: Optional[str] = None,
     inputs: Optional[Dict] = None,
+    system_prompt: str = "",
 ) -> Dict:
     """Execute the LLM loop until completion, error, or limit.
 
-    No system prompt. Tools are passed via API tool definitions.
-    Context framing (identity, rules, etc.) injected via thread_started hooks.
+    System prompt is assembled from build_system_prompt hooks (identity,
+    behavior, tool protocol) and passed to the provider for each LLM call.
+    Tools are passed via API tool definitions.
+    Context framing injected via thread_started hooks into the first user message.
 
     First message construction:
       1. run_hooks_context() dispatches thread_started hooks
@@ -92,6 +95,35 @@ async def run(
         thread_id, project_path / ".ai" / "agent" / "threads" / thread_id
     )
 
+    # Assemble system prompt from build_system_prompt hooks + caller override
+    system_ctx = await harness.run_hooks_context(
+        {
+            "directive": harness.directive_name,
+            "directive_body": directive_body,
+            "model": provider.model,
+            "limits": harness.limits,
+            "inputs": inputs or {},
+        },
+        dispatcher,
+        event="build_system_prompt",
+    )
+    hook_system = "\n\n".join(filter(None, [system_ctx["before"], system_ctx["after"]]))
+    if hook_system and system_prompt:
+        system_prompt = hook_system + "\n\n" + system_prompt
+    elif hook_system:
+        system_prompt = hook_system
+
+    if system_prompt:
+        emitter.emit(
+            thread_id,
+            "system_prompt",
+            {
+                "text": system_prompt,
+                "layers": [b["id"] for b in system_ctx.get("before_raw", []) + system_ctx.get("after_raw", [])],
+            },
+            transcript,
+        )
+
     try:
         if resume_messages:
             # Continuation mode: fire thread_continued hooks
@@ -121,6 +153,7 @@ async def run(
                 messages[last_user_idx]["content"] = (
                     combined + "\n\n" + messages[last_user_idx]["content"]
                 )
+            _emit_context_injected(hook_ctx, emitter, thread_id, transcript)
         else:
             # Fresh thread: fire thread_started hooks (identity, rules, knowledge)
             hook_ctx = await harness.run_hooks_context(
@@ -142,6 +175,7 @@ async def run(
             if hook_ctx["after"]:
                 first_message_parts.append(hook_ctx["after"])
             messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})
+            _emit_context_injected(hook_ctx, emitter, thread_id, transcript)
 
         while True:
             # Pre-turn limit check
@@ -217,11 +251,13 @@ async def run(
                         turn=cost["turns"],
                     )
                     response = await provider.create_streaming_completion(
-                        messages, harness.available_tools, sinks=[stream_sink]
+                        messages, harness.available_tools, sinks=[stream_sink],
+                        system_prompt=system_prompt,
                     )
                 else:
                     response = await provider.create_completion(
-                        messages, harness.available_tools
+                        messages, harness.available_tools,
+                        system_prompt=system_prompt,
                     )
             except Exception as e:
                 if os.environ.get("RYE_DEBUG"):
@@ -729,6 +765,20 @@ def _extract_error_context(messages: List[Dict], max_entries: int = 6) -> Dict:
         "recent_tool_calls": recent_tool_calls[:3],
         "recent_errors": recent_errors[:3],
     }
+
+
+def _emit_context_injected(hook_ctx, emitter, thread_id, transcript):
+    """Emit context_injected events for transcript observability."""
+    for position in ("before", "after"):
+        raw_key = f"{position}_raw"
+        blocks = hook_ctx.get(raw_key, [])
+        if blocks:
+            emitter.emit(
+                thread_id,
+                "context_injected",
+                {"position": position, "blocks": blocks},
+                transcript,
+            )
 
 
 def _error_to_context(e: Exception) -> Dict:
