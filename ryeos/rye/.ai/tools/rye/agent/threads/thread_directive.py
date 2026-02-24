@@ -1,4 +1,4 @@
-# rye:signed:2026-02-24T04:54:45Z:a8f1b72423fbcfd16944d221e4969113bf02b9d2e3122b27eac146c76d380364:bPEjj9cXjJSs6F9-V61YC72rJbXJ888nfPf9hW8GMsvvKZQPKPLhI810D4bwuzYiUcmTWpC-oN-MxE_vC4K9Cg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-24T05:39:11Z:107472873cc8730803b56bdf4144a8a8b0c5678946b2aca1d2abc908a9538f40:O8VbSp7ll9D_L6VczNkKJkaXQJ5sl2od_K8wnCTV_hb2iQE18X6ym2cJ0pfvNm_eX4m8kEgOsaODnixkQgQKAw==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -524,18 +524,28 @@ async def execute(params: Dict, project_path: str) -> Dict:
             return result
         directive = ParserRouter().parse("markdown_xml", result["content"])
     else:
+        # Use shared directive parser (avoids circular import with ExecuteTool
+        # now that execute directive spawns threads via this tool)
+        from rye.directive_parser import parse_and_validate_directive
         from rye.tools.execute import ExecuteTool
+
+        # Find the directive file using ExecuteTool's resolver
         exec_tool = ExecuteTool(user_space=user_space)
-        result = await exec_tool.handle(
-            item_type="directive",
+        file_path = exec_tool._find_item(project_path, "directive", directive_name)
+        if not file_path:
+            registry.update_status(thread_id, "error")
+            return {"success": False, "error": f"Directive not found: {directive_name}", "thread_id": thread_id}
+
+        result = parse_and_validate_directive(
+            file_path=file_path,
             item_id=directive_name,
-            project_path=project_path,
             parameters=inputs,
+            project_path=Path(project_path) if project_path else None,
         )
         if result["status"] != "success":
             registry.update_status(thread_id, "error")
-            return result
-        directive = result["data"]
+            return {"success": False, "error": result.get("error", "Directive validation failed"), "thread_id": thread_id}
+        directive = result["parsed"]
 
     # 3.6. Resolve extends chain and compose context
     system_prompt = ""
@@ -639,21 +649,26 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "Continue executing the directive's instructions."
         )
 
+        # Parse continuation directive (just parse + interpolate, don't spawn a thread)
+        from rye.directive_parser import parse_and_validate_directive
         from rye.tools.execute import ExecuteTool
         cont_exec_tool = ExecuteTool(user_space=user_space)
-        cont_result = await cont_exec_tool.handle(
-            item_type="directive",
-            item_id=cont_directive_id,
-            project_path=project_path,
-            parameters={
-                "original_directive": directive_name,
-                "original_directive_body": directive.get("body", ""),
-                "previous_thread_id": prev_tid,
-                "continuation_message": cont_message,
-            },
-        )
+        cont_file = cont_exec_tool._find_item(project_path, "directive", cont_directive_id)
+        cont_result = {}
+        if cont_file:
+            cont_result = parse_and_validate_directive(
+                file_path=cont_file,
+                item_id=cont_directive_id,
+                parameters={
+                    "original_directive": directive_name,
+                    "original_directive_body": directive.get("body", ""),
+                    "previous_thread_id": prev_tid,
+                    "continuation_message": cont_message,
+                },
+                project_path=Path(project_path) if project_path else None,
+            )
         if cont_result.get("status") == "success":
-            cont_prompt = cont_result["data"].get("body", cont_message)
+            cont_prompt = cont_result["parsed"].get("body", cont_message)
         else:
             cont_prompt = cont_message
 

@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Spawning Child Threads
 
-An orchestrator directive spawns children by calling `thread_directive` — the same tool used to start any thread. The orchestrator's LLM decides when to spawn, what inputs to pass, and how much budget to allocate.
+An orchestrator directive spawns children by calling `rye_execute` with `item_type="directive"`. The orchestrator's LLM decides when to spawn, what inputs to pass, and how much budget to allocate.
 
 ## Spawning a Child
 
@@ -17,20 +17,17 @@ From inside a directive's process steps, the LLM calls:
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/leads/discover_leads",
-        "inputs": {"niche": "plumbers", "city": "Dunedin"},
-        "limit_overrides": {"turns": 10, "spend": 0.10},
-        "async": True
-    }
+    item_type="directive",
+    item_id="agency-kiwi/leads/discover_leads",
+    parameters={"niche": "plumbers", "city": "Dunedin"},
+    limit_overrides={"turns": 10, "spend": 0.10},
+    async=True
 )
 ```
 
 This spawns a child thread that:
 - Runs the `discover_leads` directive
-- Gets `niche` and `city` as interpolated inputs
+- Gets `niche` and `city` as input parameters
 - Is capped at 10 turns and $0.10 spend
 - Runs asynchronously (parent continues immediately)
 
@@ -53,13 +50,10 @@ The response includes the `thread_id` that the parent uses to wait for and colle
 ```python
 # Blocks until child completes — result is returned directly
 result = rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/leads/score_lead",
-        "inputs": {"lead_id": "lead_001", "lead_data": "..."},
-        "limit_overrides": {"turns": 4, "spend": 0.05}
-    }
+    item_type="directive",
+    item_id="agency-kiwi/leads/score_lead",
+    parameters={"lead_id": "lead_001", "lead_data": "..."},
+    limit_overrides={"turns": 4, "spend": 0.05}
 )
 # result contains the child's full output
 ```
@@ -71,25 +65,22 @@ Use synchronous execution when the parent needs the result before proceeding —
 ```python
 # Returns immediately with thread_id
 result = rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/leads/discover_leads",
-        "inputs": {"niche": "plumbers", "city": "Dunedin"},
-        "limit_overrides": {"turns": 10, "spend": 0.10},
-        "async": True
-    }
+    item_type="directive",
+    item_id="agency-kiwi/leads/discover_leads",
+    parameters={"niche": "plumbers", "city": "Dunedin"},
+    limit_overrides={"turns": 10, "spend": 0.10},
+    async=True
 )
 thread_id = result["thread_id"]
 ```
 
 Use asynchronous execution when spawning multiple children that can run in parallel. The parent collects all `thread_id`s and waits for them in batch.
 
-**How async works internally:** `spawn_detached()` launches the child as a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch (no inherited in-process state). Detached spawning uses the `rye-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with the `thread_id` and `pid`.
+**How async works internally:** When `execute directive` is called with `async: true`, it delegates to `thread_directive` internally, which calls `spawn_detached()` to launch the child as a subprocess. The child re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags, rebuilding all state from scratch (no inherited in-process state). Detached spawning uses the `rye-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with the `thread_id` and `pid`.
 
 ## Parent Context Auto-Injection
 
-When the runner dispatches a `thread_directive` tool call, it automatically injects parent context into the call parameters:
+When `execute directive` delegates to `thread_directive` internally, the runner automatically injects parent context into the call parameters:
 
 ```python
 # runner.py — auto-injection for child spawns
@@ -100,7 +91,7 @@ if resolved_id == "rye/agent/threads/thread_directive":
     dispatch_params.setdefault("parent_capabilities", harness._capabilities)
 ```
 
-This means the LLM never needs to manually pass parent context — it just calls `thread_directive` with the directive name, inputs, and limit overrides. The runner handles the rest.
+This means the LLM never needs to manually pass parent context — it just calls `execute directive` with the directive name, parameters, and limit overrides. The runner handles the rest.
 
 Additionally, the parent thread sets `RYE_PARENT_THREAD_ID` in the environment before execution, so child subprocesses inherit the parent relationship automatically.
 
@@ -115,13 +106,10 @@ This is the standard orchestration pattern for parallel work:
 
 For each niche in the selected batch, spawn a discover_leads child thread:
 
-rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
-  parameters={
-    "directive_name": "agency-kiwi/leads/discover_leads",
-    "inputs": {"niche": "<niche>", "city": "Dunedin"},
-    "limit_overrides": {"turns": 10, "spend": 0.10},
-    "async": true
-  })
+rye_execute(item_type="directive", item_id="agency-kiwi/leads/discover_leads",
+  parameters={"niche": "<niche>", "city": "Dunedin"},
+  limit_overrides={"turns": 10, "spend": 0.10},
+  async=true)
 
 Collect all thread_ids from the spawn results.
 

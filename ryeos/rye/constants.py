@@ -42,6 +42,6 @@ class Action:
     ALL = [SEARCH, SIGN, LOAD, EXECUTE]
 
 
-# Instruction returned to the LLM when executing a directive.
-# Single source of truth — used by execute.py and thread_directive.py.
+# Instruction injected into the thread runner's prompt when executing a directive.
+# Used by thread_directive._build_prompt() to instruct the LLM.
 DIRECTIVE_INSTRUCTION = "Execute the directive as specified now."

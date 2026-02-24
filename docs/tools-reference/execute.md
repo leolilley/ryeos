@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # rye_execute
 
-Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are parsed and returned with interpolated inputs, tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context.
+Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are validated and executed in a managed thread, tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context.
 
 ## Parameters
 
@@ -20,6 +20,9 @@ Execute directives, tools, or knowledge items. Routes execution based on `item_t
 | `project_path` | string | yes      | —       | Absolute path to the project root                                                        |
 | `parameters`   | dict   | no       | `{}`    | Parameters to pass to the item                                                           |
 | `dry_run`      | bool   | no       | `false` | Validate without executing                                                               |
+| `async`        | bool   | no       | `false` | For directives: return immediately with `thread_id` instead of waiting for completion     |
+| `model`        | string | no       | —       | For directives: override LLM model for thread execution                                  |
+| `limit_overrides` | object | no    | —       | For directives: override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
 
 ## Item Resolution
 
@@ -37,7 +40,7 @@ File extensions are tried automatically based on item type. Directives and knowl
 
 ### Directives
 
-Parses the markdown+XML directive file, validates required inputs, applies defaults, interpolates `{input:name}` placeholders throughout the body and actions, and returns the parsed directive with an instruction key `DIRECTIVE_INSTRUCTION` to initiate the directive execution.
+Validates inputs, then spawns a managed thread to execute the directive. The thread runs with its own LLM loop, safety harness, and budgets.
 
 **Input validation:**
 
@@ -54,23 +57,44 @@ Parses the markdown+XML directive file, validates required inputs, applies defau
 | `{input:key:default}` | Fallback — uses `default` if key is missing |
 | `{input:key\|default}` | Fallback — uses `default` if key is missing (pipe syntax) |
 
+**Execution flow:**
+
+1. Parse and validate inputs (same validation as above)
+2. Spawn a managed thread via `thread_directive` infrastructure
+3. Block until the thread completes and return thread metadata
+
+If `async: true`, returns immediately with `thread_id` and `pid` instead of blocking until completion.
+
 **Response fields:**
 
 ```json
 {
   "status": "success",
   "type": "directive",
-  "item_id": "rye/core/create_directive",
-  "data": { "...parsed directive..." },
-  "inputs": { "name": "deploy_app" },
-  "instructions": "Execute the directive as specified now.",
-  "metadata": { "duration_ms": 12 }
+  "item_id": "my-project/run_pipeline",
+  "thread_id": "my-project/run_pipeline/run_pipeline-1739820456",
+  "directive": "my-project/run_pipeline",
+  "metadata": { "duration_ms": 45200 }
 }
 ```
 
-**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without sending the directive instruction.
+**Async response:**
 
-**`<returns>` injection (threaded execution):** When a directive is executed through `thread_directive` (not plain `execute`), the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the end of the rendered prompt. This tells the LLM what structured output keys to produce. The LLM never sees the raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps. See [Authoring Directives — How Outputs Become `<returns>`](../authoring/directives.md#how-outputs-become-returns-in-the-prompt) for details.
+```json
+{
+  "status": "success",
+  "type": "directive",
+  "item_id": "my-project/run_pipeline",
+  "thread_id": "my-project/run_pipeline/run_pipeline-1739820456",
+  "directive": "my-project/run_pipeline",
+  "status": "running",
+  "pid": 42857
+}
+```
+
+**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without spawning a thread.
+
+**`<returns>` injection:** When a directive is executed, the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the end of the rendered prompt. This tells the LLM what structured output keys to produce. The LLM never sees the raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps. See [Authoring Directives — How Outputs Become `<returns>`](../authoring/directives.md#how-outputs-become-returns-in-the-prompt) for details.
 
 ### Tools
 
@@ -166,6 +190,7 @@ Tool chain failures include the partial chain and metadata:
 ### Execute a directive with inputs
 
 ```python
+# Spawns a managed thread and blocks until completion
 rye_execute(
     item_type="directive",
     item_id="rye/core/create_directive",
@@ -175,6 +200,20 @@ rye_execute(
         "category": "workflows",
         "description": "Deploy the application to production"
     }
+)
+```
+
+### Execute a directive asynchronously
+
+```python
+# Returns immediately with thread_id
+rye_execute(
+    item_type="directive",
+    item_id="my-project/run_pipeline",
+    project_path="/home/user/my-project",
+    parameters={"location": "Dunedin", "batch_size": 5},
+    limit_overrides={"turns": 30, "spend": 3.00},
+    async=True
 )
 ```
 
@@ -214,17 +253,4 @@ rye_execute(
 )
 ```
 
-### Execute a threaded directive (orchestration)
 
-```python
-rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    project_path="/home/user/my-project",
-    parameters={
-        "directive_name": "my-project/orchestrator/run_pipeline",
-        "inputs": {"location": "Dunedin", "batch_size": 5},
-        "limit_overrides": {"turns": 30, "spend": 3.00}
-    }
-)
-```

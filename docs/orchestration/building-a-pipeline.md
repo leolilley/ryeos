@@ -82,7 +82,7 @@ Each directive gets the minimum capabilities it needs.
 ```
 
 The root needs:
-- `thread_directive` — to spawn children
+- `thread_directive` capability — required internally when `execute directive` spawns child threads
 - `orchestrator` — to wait for children, aggregate results, read transcripts
 - `search/load` agency-kiwi — to find and load state/knowledge
 
@@ -100,7 +100,7 @@ The root needs:
 </permissions>
 ```
 
-Sub-orchestrators need the same spawn/wait tools. They load knowledge but don't need to search for directives (the root tells them what to do).
+Sub-orchestrators need the same spawn/wait capabilities. They load knowledge but don't need to search for directives (the root tells them what to do).
 
 ### Execution Leaf Permissions
 
@@ -350,7 +350,7 @@ Take raw discovered leads, scrape their websites, score each one, and produce a 
   <step name="scrape_websites">
     For each lead WITH a website URL, spawn a scrape_website child thread:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "agency-kiwi/leads/scrape_website", "inputs": {"url": "<lead_website_url>", "lead_id": "<lead_id>"}, "limit_overrides": {"turns": 8, "spend": 0.05}, "async": true})`
+    `rye_execute(item_type="directive", item_id="agency-kiwi/leads/scrape_website", parameters={"url": "<lead_website_url>", "lead_id": "<lead_id>"}, async=True, limit_overrides={"turns": 8, "spend": 0.05})`
 
     Collect all thread_ids. Then wait for all:
 
@@ -364,7 +364,7 @@ Take raw discovered leads, scrape their websites, score each one, and produce a 
   <step name="score_leads">
     For each lead (with or without website data), spawn a score_lead child thread:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "agency-kiwi/leads/score_lead", "inputs": {"lead_data": "<lead_json_with_website_data>"}, "limit_overrides": {"turns": 6, "spend": 0.05}, "async": true})`
+    `rye_execute(item_type="directive", item_id="agency-kiwi/leads/score_lead", parameters={"lead_data": "<lead_json_with_website_data>"}, async=True, limit_overrides={"turns": 6, "spend": 0.05})`
 
     Wait for all scoring threads, aggregate results.
   </step>
@@ -471,7 +471,7 @@ Execute the full lead generation pipeline for a city: discover leads across nich
   <step name="discover">
     For each selected niche, spawn a discover_leads child thread:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "agency-kiwi/leads/discover_leads", "inputs": {"niche": "<niche>", "city": "{input:city}"}, "limit_overrides": {"turns": 10, "spend": 0.10}, "async": true})`
+    `rye_execute(item_type="directive", item_id="agency-kiwi/leads/discover_leads", parameters={"niche": "<niche>", "city": "{input:city}"}, async=True, limit_overrides={"turns": 10, "spend": 0.10})`
 
     Collect all thread_ids.
 
@@ -484,7 +484,7 @@ Execute the full lead generation pipeline for a city: discover leads across nich
   <step name="qualify">
     Spawn the qualify_leads sub-orchestrator with the combined leads files:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "agency-kiwi/leads/qualify_leads", "inputs": {"leads_file": "<combined_leads_path>", "output_file": ".ai/data/agency-kiwi/qualified/{input:city}_qualified.json"}, "limit_overrides": {"turns": 20, "spend": 1.00}})`
+    `rye_execute(item_type="directive", item_id="agency-kiwi/leads/qualify_leads", parameters={"leads_file": "<combined_leads_path>", "output_file": ".ai/data/agency-kiwi/qualified/{input:city}_qualified.json"}, limit_overrides={"turns": 20, "spend": 1.00})`
 
     This runs synchronously — wait for qualification to complete before outreach.
   </step>
@@ -492,13 +492,13 @@ Execute the full lead generation pipeline for a city: discover leads across nich
   <step name="outreach">
     Spawn the prepare_outreach sub-orchestrator:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "agency-kiwi/outreach/prepare_outreach", "inputs": {"qualified_file": ".ai/data/agency-kiwi/qualified/{input:city}_qualified.json", "output_dir": ".ai/data/agency-kiwi/outreach/{input:city}/"}, "limit_overrides": {"turns": 15, "spend": 0.80}})`
+    `rye_execute(item_type="directive", item_id="agency-kiwi/outreach/prepare_outreach", parameters={"qualified_file": ".ai/data/agency-kiwi/qualified/{input:city}_qualified.json", "output_dir": ".ai/data/agency-kiwi/outreach/{input:city}/"}, limit_overrides={"turns": 15, "spend": 0.80})`
   </step>
 
   <step name="update_state">
     Spawn update_pipeline_state to persist results:
 
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "agency-kiwi/state/update_pipeline_state", "inputs": {"city": "{input:city}", "niches_processed": "<list>", "leads_discovered": "<count>", "leads_qualified": "<count>"}, "limit_overrides": {"turns": 4, "spend": 0.05}})`
+    `rye_execute(item_type="directive", item_id="agency-kiwi/state/update_pipeline_state", parameters={"city": "{input:city}", "niches_processed": "<list>", "leads_discovered": "<count>", "leads_qualified": "<count>"}, limit_overrides={"turns": 4, "spend": 0.05})`
   </step>
 
   <step name="report">
@@ -536,13 +536,10 @@ Execute the full lead generation pipeline for a city: discover leads across nich
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/orchestrator/run_lead_pipeline",
-        "inputs": {"city": "Dunedin", "batch_size": 5},
-        "limit_overrides": {"turns": 30, "spend": 3.00}
-    }
+    item_type="directive",
+    item_id="agency-kiwi/orchestrator/run_lead_pipeline",
+    parameters={"city": "Dunedin", "batch_size": 5},
+    limit_overrides={"turns": 30, "spend": 3.00}
 )
 ```
 
@@ -552,14 +549,11 @@ This starts the root orchestrator synchronously. It will spawn children as neede
 
 ```python
 result = rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/orchestrator/run_lead_pipeline",
-        "inputs": {"city": "Dunedin", "batch_size": 5},
-        "limit_overrides": {"turns": 30, "spend": 3.00},
-        "async": True
-    }
+    item_type="directive",
+    item_id="agency-kiwi/orchestrator/run_lead_pipeline",
+    parameters={"city": "Dunedin", "batch_size": 5},
+    async=True,
+    limit_overrides={"turns": 30, "spend": 3.00}
 )
 # result = {"thread_id": "agency-kiwi/orchestrator/run_lead_pipeline-1739820456", "status": "running"}
 ```
@@ -619,4 +613,4 @@ rye_execute(
 
 5. **Fail forward.** Orchestrators should handle child failures gracefully — log them and continue with partial results rather than failing the entire pipeline.
 
-6. **Test with `async: false` first.** Debug the pipeline synchronously before switching to async. Synchronous execution gives you the full result inline.
+6. **Test with `async: False` first.** Debug the pipeline synchronously before switching to async. Synchronous execution gives you the full result inline.

@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:b5e6015273a1e94fb01701e9dd218c75828f624d748503c276d0781b1cb5753b:pMI6Jc8sSEKzrOyYqBTOH15ggGX_r8icZBAwgvFMlWCc_4JMIZ5k2i-wuEjvv30E7KHajXlTI64dVR_7uQz1Aw==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:c9b3304de2119286f2fca3e396bd671c6388f169971bd9fe1d790def0d1d15a3:kBPOtLa3x5dw5P365E5ktclPvsZYjwhZagXL6nA6xwyBzlB6CGie4z1jClgRddYBX1QWlz7LDQ15MaxvZRRnCQ==:9fbfabe975fa5a7f -->
 ```yaml
 name: execute-semantics
 title: "rye_execute — MCP Tool Semantics"
@@ -32,6 +31,9 @@ Execute directives, tools, or knowledge items. Routes execution by `item_type`.
 | `project_path` | string | yes      | —       | Absolute path to the project root                                        |
 | `parameters`   | dict   | no       | `{}`    | Parameters to pass to the item                                           |
 | `dry_run`      | bool   | no       | `false` | Validate without executing                                               |
+| `async`        | bool   | no       | `false` | For directives: return immediately with `thread_id` instead of waiting for completion |
+| `model`        | string | no       | —       | For directives: override LLM model for thread execution                  |
+| `limit_overrides` | object | no    | —       | For directives: override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
 
 ## Item Resolution Order
 
@@ -58,7 +60,10 @@ All items are verified against their signature before execution. Modified or mov
 1. Parse markdown+XML directive file
 2. Validate required inputs; apply defaults
 3. Interpolate `{input:name}` placeholders in body, content, raw, and all actions
-4. Return parsed directive with `DIRECTIVE_INSTRUCTION` to initiate execution
+4. Spawn a managed thread to execute the directive (LLM loop, safety harness, budgets)
+5. Block until thread completes and return thread metadata
+
+If `async: true`, returns immediately with `thread_id` and `pid` instead of blocking.
 
 **Input interpolation syntax:**
 
@@ -80,15 +85,28 @@ All items are verified against their signature before execution. Modified or mov
 {
   "status": "success",
   "type": "directive",
-  "item_id": "rye/core/create_directive",
-  "data": { "...parsed directive..." },
-  "inputs": { "name": "deploy_app" },
-  "instructions": "Execute the directive as specified now.",
-  "metadata": { "duration_ms": 12 }
+  "item_id": "my-project/run_pipeline",
+  "thread_id": "my-project/run_pipeline/run_pipeline-1739820456",
+  "directive": "my-project/run_pipeline",
+  "metadata": { "duration_ms": 45200 }
 }
 ```
 
-**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation only.
+**Async response:**
+
+```json
+{
+  "status": "success",
+  "type": "directive",
+  "item_id": "my-project/run_pipeline",
+  "thread_id": "my-project/run_pipeline/run_pipeline-1739820456",
+  "directive": "my-project/run_pipeline",
+  "status": "running",
+  "pid": 42857
+}
+```
+
+**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without spawning a thread.
 
 ### Tools
 
@@ -145,9 +163,9 @@ Parses markdown with YAML frontmatter and returns content as agent context.
 }
 ```
 
-## `<returns>` Injection (Threaded Execution)
+## `<returns>` Injection
 
-When a directive is executed through `thread_directive` (not plain `execute`), the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the rendered prompt. The LLM never sees raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps, specifying what structured output keys to produce.
+When a directive is executed, the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the rendered prompt. The LLM never sees raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps, specifying what structured output keys to produce.
 
 ## Error Response Format
 
@@ -221,15 +239,13 @@ rye_execute(
     project_path="/home/user/my-project"
 )
 
-# Threaded directive (via thread_directive tool)
+# Async directive execution
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
+    item_type="directive",
+    item_id="my-project/run_pipeline",
     project_path="/home/user/my-project",
-    parameters={
-        "directive_name": "my-project/orchestrator/run_pipeline",
-        "inputs": {"location": "Dunedin", "batch_size": 5},
-        "limit_overrides": {"turns": 30, "spend": 3.00}
-    }
+    parameters={"location": "Dunedin", "batch_size": 5},
+    limit_overrides={"turns": 30, "spend": 3.00},
+    async=True
 )
 ```

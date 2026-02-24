@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:f17a882a642a6fa34ef6a7ce17be4c62e3ced6f7bc0ef32aaf0d568c74e4d24a:FE989eQUBpPEKQ1H-v6l2SPVGaxoMBS0fSM8xoPNpxKvgwvyWPL1St_i4ctvzQr9K_z-gkNgj9WZCY-0MO4XCA==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:1286ba708ff9aa5d57a7306b3f51c2d52a42c2e627c741c0c7243dcc3aa5992b:qLtBBZHOpY1R39Y9dhvqA_AtmiulAgpXJ9ur4Am3x3c8_070wy6NgGEAhM3HN1bdFurRuwKK12brXSRWOlG3Cw==:9fbfabe975fa5a7f -->
 ```yaml
 name: load-semantics
 title: "rye_load — MCP Tool Semantics"
@@ -38,9 +37,9 @@ Load the raw content and metadata of a directive, tool, or knowledge item. Optio
 | Aspect       | `rye_load`                               | `rye_execute`                                  |
 | ------------ | ---------------------------------------- | ---------------------------------------------- |
 | **Returns**  | Raw file content + metadata              | Parsed/interpolated data + execution results   |
-| **Purpose**  | Inspect, read, or copy items             | Run directives, execute tools, parse knowledge |
+| **Purpose**  | Inspect, read, or copy items             | Spawn threads for directives, execute tools, parse knowledge |
 | **Parsing**  | None — returns content as-is             | Full parsing, validation, and interpolation    |
-| **Use case** | "Show me the source" / "Copy to project" | "Run this directive" / "Execute this tool"     |
+| **Use case** | "Show me the source" / "Copy to project" | "Run this directive as a thread" / "Execute this tool" |
 
 ## Integrity Verification
 

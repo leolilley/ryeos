@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Orchestration Overview
 
-Rye OS orchestration lets AI agents coordinate multi-step workflows by spawning child threads — each running its own LLM loop with independent limits, budget, model selection, and transcript. A parent directive spawns children via a single tool (`thread_directive`), waits for results, and coordinates the next phase.
+Rye OS orchestration lets AI agents coordinate multi-step workflows by spawning child threads — each running its own LLM loop with independent limits, budget, model selection, and transcript. A parent directive spawns children via `execute directive`, waits for results, and coordinates the next phase.
 
 ## The Core Pattern
 
@@ -65,29 +65,28 @@ Every orchestrated workflow follows the same structure:
     └──────────────┘  └──────────────┘
 ```
 
-## Single Entry Point: `thread_directive`
+## Single Entry Point: `execute directive`
 
-All orchestration happens through one tool — `rye/agent/threads/thread_directive`. An agent spawns a child by calling:
+All orchestration happens through `rye_execute` with `item_type="directive"`. An agent spawns a child by calling:
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "my-project/orchestrator/run_pipeline",
-        "inputs": {"location": "Dunedin", "batch_size": 5},
-        "limit_overrides": {"turns": 30, "spend": 3.00}
-    }
+    item_type="directive",
+    item_id="my-project/orchestrator/run_pipeline",
+    parameters={"location": "Dunedin", "batch_size": 5},
+    limit_overrides={"turns": 30, "spend": 3.00}
 )
 ```
+
+Internally, this delegates to `thread_directive` — but the LLM never calls that tool directly.
 
 **Parameters:**
 
 | Parameter         | Type   | Required | Description |
 |-------------------|--------|----------|-------------|
-| `directive_name`  | string | yes      | Directive item_id to execute |
-| `async`      | bool   | no       | Return immediately with `thread_id` (default: `false`) |
-| `inputs`          | object | no       | Input parameters for the directive |
+| `item_id`         | string | yes      | Directive item_id to execute |
+| `parameters`      | object | no       | Input parameters for the directive |
+| `async`           | bool   | no       | Return immediately with `thread_id` (default: `false`) |
 | `model`           | string | no       | Override LLM model |
 | `limit_overrides` | object | no       | Override limits: `turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth` |
 

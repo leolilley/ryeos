@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:156c200c32a52c151eab7e8e89b6fe635085f99032582bf87f7f11da2bfdc259:y2Y-0tumXGkMCh6OSyJThuOO5L0_IoN9ZgcjnqfuRSnfBlr_dcCJL-dKSz4T6e5VQt3ykpbya0TujhInDx_dCw==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:73bcdb3809b5482ebcee0299bb86b58e749e306d37277a0412d8ec4c94ff5622:fr98q14xnlhnLl6u9rUgLvL_GgjxoFxYj5-vrH-zJTrH2JLgwTjEiqj120AUkzNKulROSI6AdKEz0WC0DsBxCA==:9fbfabe975fa5a7f -->
 ```yaml
 name: provider-configuration
 title: Provider Configuration
@@ -52,13 +51,13 @@ The `fallback` attribute specifies the tier to try if the primary tier's model i
 
 ## Model Resolution Order
 
-When `thread_directive` creates a thread, the model is resolved in this priority:
+When `execute directive` creates a thread, the model is resolved in this priority:
 
 ```
 params.model → directive.model.id → directive.model.tier → default
 ```
 
-1. **`params.model`** — explicit model passed in `thread_directive` parameters
+1. **`params.model`** — explicit model passed in `execute directive` parameters
 2. **`directive.model.id`** — specific model ID in the directive XML (`id="claude-3-5-haiku-20241022"`)
 3. **`directive.model.tier`** — tier string resolved via provider_resolver
 4. **Default** — falls back to the project's default model

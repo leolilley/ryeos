@@ -134,7 +134,7 @@ This is the same dollar-brace syntax as System 1, but System 1's tightened regex
 **Where it runs:**
 
 - `execute.py._resolve_input_refs()` and `_interpolate_parsed()`
-- During directive execution via `ExecuteTool._run_directive()`
+- During directive execution via `directive_parser.parse_and_validate_directive()`
 
 **Operates on:** directive `body`, `content`, `raw`, and `actions` fields.
 

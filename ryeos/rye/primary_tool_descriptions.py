@@ -32,7 +32,7 @@ EXECUTE_TOOL_DESC = (
     "<description>"
     "Run a Rye item. item_id is a slash-separated path without extension. "
     "Resolved project → user → system. If you don't know the ID, call search first. "
-    "Executing a directive returns parsed steps with an instructions field — follow them. "
+    "Executing a directive spawns a managed thread and returns thread_id and status. "
     "Executing a tool runs it. Executing knowledge returns context."
     "</description>"
     "<rules>"

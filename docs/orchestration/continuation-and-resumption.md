@@ -334,12 +334,9 @@ Summarization is opt-in. A directive that wants its continuation thread to recei
 The orchestrator passes dependency thread IDs as `inputs` at spawn time:
 
 ```python
-rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
+rye_execute(item_type="directive", item_id="implement_dashboard",
     parameters={
-        "directive_id": "implement_dashboard",
-        "inputs": {
-            "api_thread_id": "implement_api/implement_api-1740200200",
-        },
+        "api_thread_id": "implement_api/implement_api-1740200200",
     })
 ```
 

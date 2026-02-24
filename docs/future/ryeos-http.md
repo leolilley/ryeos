@@ -153,12 +153,9 @@ ryeos-http
   ├── Input extraction: body.content → message, body.author.username → username
   └── Thread spawn:
       rye_execute(
-          item_type="tool",
-          item_id="rye/agent/threads/thread_directive",
-          parameters={
-              "directive": "my-bot/discord-respond",
-              "inputs": {"message": "what does this error mean?", "username": "leo"},
-          }
+          item_type="directive",
+          item_id="my-bot/discord-respond",
+          parameters={"message": "what does this error mean?", "username": "leo"},
       )
     │
     ▼
@@ -184,7 +181,7 @@ The alternative design — expose `search`, `load`, `execute`, `sign` as REST en
 | Any tool callable                | Only declared tools accessible       |
 | Generic API surface              | Purpose-built endpoints              |
 
-A Discord bot shouldn't need to know about `rye_execute` or `thread_directive`. It sends a message and gets a response. The directive author controls what happens in between — model selection, budget, permissions, tone, available tools. The HTTP layer is invisible.
+A Discord bot shouldn't need to know about `rye_execute` internals. It sends a message and gets a response. The directive author controls what happens in between — model selection, budget, permissions, tone, available tools. The HTTP layer is invisible.
 
 This also means you can audit and version the behavior of each endpoint as a standard RYE item. The directive is signed, overridable at any space level, and its permissions attenuate down the thread hierarchy. Changing how the bot responds is a directive edit, not a server config change.
 
@@ -199,7 +196,7 @@ HTTP request
 ryeos-http (ASGI server — route matching, input extraction, auth)
     │
     ▼
-thread_directive (spawns thread with the matched front-end directive)
+execute directive (spawns thread with the matched front-end directive)
     │
     ▼
 ryeos (executor, resolver, signing — the full stack)
@@ -300,7 +297,7 @@ A `/health` endpoint for load balancers. Thread-level observability comes free f
 
 | Existing Component                          | How ryeos-http Uses It                                |
 | ------------------------------------------- | ----------------------------------------------------- |
-| `thread_directive` tool                     | Every request spawns a thread through this tool       |
+| `execute directive`                         | Every request spawns a thread via execute directive   |
 | Front-end directives (standard `.md` files) | Define behavior, model, budget, permissions per route |
 | Executor chain (tool → runtime → primitive) | Same chain, invoked per-request                       |
 | Three-tier spaces (project → user → system) | Same resolution from the server's working directory   |

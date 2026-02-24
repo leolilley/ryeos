@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T04:54:45Z:694f0521a758eecfeddbd848fe206bedc268a9d3602404b0e6ab16ee9fc795a6:WbazjlIEQHDNkmDHejcsgscxRkVv-L7nXL8ZOX70VPCdZI6K6YUqR0QPuVdIo-TeGNde9ZWZk0AUzNwyMtI2Bg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T05:50:18Z:79d98a8d0e04db8b70f5e82532ac19215867b52fabee834a04933ea8c1e790c5:1cXtaqQ3iA4C6BfgWBRMTjS3CYex_lgLO5SGZz90RslVD4wzgNaV62iS4jvWsCvm7ElHD1XT3RD0QLNrGwqvAQ==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -26,7 +26,7 @@ references:
 
 # Prompt Rendering
 
-How `_build_prompt()` transforms a directive into the LLM prompt. Located in `thread_directive.py`.
+How `_build_prompt()` transforms a directive into the LLM prompt. Located in `thread_directive.py` (invoked internally by `execute directive`).
 
 ## Prompt Structure
 

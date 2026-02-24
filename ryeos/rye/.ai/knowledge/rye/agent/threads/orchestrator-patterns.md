@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T07:56:23Z:af29cf8c4e0b699700b44edbdda6b33fa55cf14eafb5f833640ed576bcd8a3ba:nkF8P2x-YPAFMgwvccOivIUV6gsekgHVQt21g3dae1fZfNv66VjuCHkX35j1CjOG5wF022pCjuxoxO5ouQKvCg==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:0958cfc9ba71b53e19521b669757af52627d1a862151befe711669b3293db362:ybJjKU_WU6HJUF7rjiO_fapuR-bYI7JbPw4qejQey7GS5BH-xDN9BCHRbrdW_-G6Xraw57Buyq4gI9hmf6FiCA==:9fbfabe975fa5a7f -->
 ```yaml
 name: orchestrator-patterns
 title: Orchestrator Patterns
@@ -120,8 +119,9 @@ load knowledge → read input → spawn children → wait → aggregate → proc
 <limits max_turns="15–20" />
 <permissions>
   <execute>
-    <tool>rye.agent.threads.thread_directive</tool>
+    <tool>rye.agent.threads.thread_directive</tool>  <!-- internal capability needed by execute directive -->
     <tool>rye.agent.threads.orchestrator</tool>
+    <directive>domain.*</directive>
   </execute>
   <load><knowledge>domain.*</knowledge></load>
 </permissions>
@@ -130,7 +130,7 @@ load knowledge → read input → spawn children → wait → aggregate → proc
 Process steps:
 1. Load domain knowledge and scoring frameworks
 2. Read input data file
-3. Spawn children (async) for each item
+3. Spawn children via `execute directive` (async) for each item
 4. Wait for all children
 5. Aggregate and process results
 6. Save qualified/enriched output
@@ -146,8 +146,9 @@ load state → select targets → spawn discovery → qualify → outreach → u
 <limits max_turns="30" />
 <permissions>
   <execute>
-    <tool>rye.agent.threads.thread_directive</tool>
+    <tool>rye.agent.threads.thread_directive</tool>  <!-- internal capability needed by execute directive -->
     <tool>rye.agent.threads.orchestrator</tool>
+    <directive>domain.*</directive>
   </execute>
   <search>
     <directive>domain.*</directive>
@@ -164,21 +165,18 @@ Spawn N children async, wait, collect:
 ```python
 # Spawn phase
 for niche in niches:
-    rye_execute(item_id="rye/agent/threads/thread_directive",
-        parameters={
-            "directive_name": "domain/discover",
-            "inputs": {"niche": niche},
-            "limit_overrides": {"turns": 10, "spend": 0.10},
-            "async": True
-        })
+    rye_execute(item_type="directive", item_id="domain/discover",
+        parameters={"niche": niche},
+        async=True,
+        limit_overrides={"turns": 10, "spend": 0.10})
 # → collect thread_ids
 
 # Wait phase
-rye_execute(item_id="rye/agent/threads/orchestrator",
+rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
     parameters={"operation": "wait_threads", "thread_ids": [...], "timeout": 300})
 
 # Collect phase
-rye_execute(item_id="rye/agent/threads/orchestrator",
+rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
     parameters={"operation": "aggregate_results", "thread_ids": [...]})
 ```
 
@@ -189,11 +187,8 @@ Orchestrators pass dependency thread IDs as `inputs` when spawning child directi
 **Example:** Orchestrator completes Wave 0 (scaffold), gets `thread_id` back, then spawns Wave 1:
 
 ```python
-rye_execute(item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "project/implement_feature",
-        "inputs": {"scaffold_thread_id": "scaffold_project/scaffold_project-1740200000"}
-    })
+rye_execute(item_type="directive", item_id="project/implement_feature",
+    parameters={"scaffold_thread_id": "scaffold_project/scaffold_project-1740200000"})
 ```
 
 In the child directive's `thread_started` hook:
@@ -216,20 +211,19 @@ When combining state graphs with thread orchestration, two hook systems operate 
 
 **Directive hooks** (XML in each directive's `<metadata>`) handle thread-level events — knowledge injection at startup (`thread_started`), summarization on completion (`after_complete`), context re-injection after handoff (`thread_continued`).
 
-Example — a graph node spawns a thread directive, and the directive's hooks wire in knowledge:
+Example — a graph node spawns a thread via `execute directive`, and the directive's hooks wire in knowledge:
 
 ```yaml
 # Graph node (YAML) — spawns the thread
 implement_api:
   action:
     primary: execute
-    item_type: tool
-    item_id: rye/agent/threads/thread_directive
+    item_type: directive
+    item_id: project/implement_api
     params:
-      directive_name: project/implement_api
-      inputs:
-        scaffold_thread_id: "${state.scaffold_thread_id}"
-        database_thread_id: "${state.database_thread_id}"
+      scaffold_thread_id: "${state.scaffold_thread_id}"
+      database_thread_id: "${state.database_thread_id}"
+    async: true
   assign:
     api_thread_id: "${result.thread_id}"
   next: implement_dashboard
@@ -262,20 +256,14 @@ Some phases must run in order (qualification before outreach):
 
 ```python
 # Phase 1: qualify (synchronous — blocks until done)
-qualify_result = rye_execute(item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "domain/qualify",
-        "inputs": {"leads_file": "..."},
-        "limit_overrides": {"turns": 20, "spend": 1.00}
-    })
+qualify_result = rye_execute(item_type="directive", item_id="domain/qualify",
+    parameters={"leads_file": "..."},
+    limit_overrides={"turns": 20, "spend": 1.00})
 
 # Phase 2: outreach (only after qualification completes)
-outreach_result = rye_execute(item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "domain/outreach",
-        "inputs": {"qualified_file": qualify_result["output_file"]},
-        "limit_overrides": {"turns": 15, "spend": 0.80}
-    })
+outreach_result = rye_execute(item_type="directive", item_id="domain/outreach",
+    parameters={"qualified_file": qualify_result["output_file"]},
+    limit_overrides={"turns": 15, "spend": 0.80})
 ```
 
 ## Error Handling in Orchestrators

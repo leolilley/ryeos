@@ -211,26 +211,23 @@ This is the most important system to document well.
 
 ### How It's Invoked
 
-All orchestration happens through ONE tool: `rye/agent/threads/thread_directive`. The agent calls:
+Orchestration happens through `execute directive`, which internally delegates to the `thread_directive` tool. The agent calls:
 
 ```
 rye_execute(
-  item_type="tool",
-  item_id="rye/agent/threads/thread_directive",
-  parameters={
-    "directive_name": "my-project/orchestrator/run_pipeline",
-    "inputs": {"location": "Dunedin", "batch_size": 5},
-    "limit_overrides": {"turns": 30, "spend": 3.00}
-  }
+  item_type="directive",
+  item_id="my-project/orchestrator/run_pipeline",
+  parameters={"location": "Dunedin", "batch_size": 5},
+  limit_overrides={"turns": 30, "spend": 3.00}
 )
 ```
 
-The thread_directive tool:
+`execute directive` spawns a thread that:
 1. Loads the directive, parses XML metadata
 2. Creates a SafetyHarness with limits from metadata + overrides
 3. Starts an LLM loop — the model reads the directive and follows its steps
 4. Each step calls rye_execute/rye_load/rye_search via the primary tools
-5. Steps that spawn children call thread_directive recursively
+5. Steps that spawn children call `execute directive` recursively
 6. Transcript records everything; state persists for resumption
 
 ### Directive Format (what the agent reads)

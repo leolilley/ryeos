@@ -55,16 +55,13 @@ The directive's XML `<limits>` element overrides defaults:
 
 ### Layer 3: `limit_overrides` parameter
 
-The spawning parent can override limits when calling `thread_directive`:
+The spawning parent can override limits when calling `execute directive`:
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/leads/discover_leads",
-        "limit_overrides": {"turns": 10, "spend": 0.10}
-    }
+    item_type="directive",
+    item_id="agency-kiwi/leads/discover_leads",
+    limit_overrides={"turns": 10, "spend": 0.10}
 )
 ```
 

@@ -149,17 +149,17 @@ The thread system is the largest subsystem. It enables AI agents to run directiv
 
 ### Entry Points
 
-These are the two tools you call to orchestrate work:
-
 | Tool             | Item ID                              | Description                                                 |
 | ---------------- | ------------------------------------ | ----------------------------------------------------------- |
-| thread_directive | `rye/agent/threads/thread_directive` | Execute a directive in a managed thread with an LLM loop    |
+| thread_directive | `rye/agent/threads/thread_directive` | **Internal** — used by `execute directive` to spawn managed threads. Not called directly by agents. |
 | orchestrator     | `rye/agent/threads/orchestrator`     | Thread coordination: wait, cancel, status, chain resolution |
+
+Agents spawn threads via `execute directive`, which internally delegates to `thread_directive`:
 
 ```python
 # Spawn a directive in a managed thread
-rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive",
-    parameters={"directive": "my-workflow", "inputs": {"target": "staging"}})
+rye_execute(item_type="directive", item_id="my-workflow",
+    parameters={"target": "staging"})
 
 # Check thread status
 rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",

@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:f8c5799da85fef9b68669bade217bb5f9c17240c3302b37e8a56889868dc2c35:OAHtwNqJVgpyT-Ck7WA3Dl7zfYQBcr-CXXg4HOoU-OMb_nIhXgNBVRWFRA8vpcAgjActV19rWhvWhCO_wNH3AQ==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:4a9e4d8e07876abc342d68718484997fa839e707a7ec5036f335b69f9e66b2ab:8jBwsGmrABqqpohbwmD7eLK6HTsbatiaC8NdrgZZelLk-Cnv3FxVdBcLon9AxMxM12A8MysUPqI7s-5JRrxxDg==:9fbfabe975fa5a7f -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems
@@ -149,7 +148,7 @@ config:
 **Where it runs:**
 
 - `execute.py._resolve_input_refs()` and `_interpolate_parsed()`
-- During directive execution via `ExecuteTool._run_directive()`
+- During directive execution via `directive_parser.parse_and_validate_directive()`
 
 **Operates on:** directive `body`, `content`, `raw`, and `actions` fields.
 

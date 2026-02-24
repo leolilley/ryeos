@@ -1,5 +1,4 @@
-<!-- rye:unsigned -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:7a0913ea901a85185616a04126281e1f77e9cbde5e0e3a682f3b0eb903c18b7c:ILGzRL4MvPbUFLF5WEN8WNQ9OEDblomqglDOKnVF6eVzDPcuuV9w-OzjIqWsA6DP6_k4uUPaY1rnTc7o-goQBw==:9fbfabe975fa5a7f -->
 ```yaml
 name: capability-strings
 title: Capability Strings & Permissions
@@ -45,7 +44,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | Capability String                                      | Allows                                    |
 | ------------------------------------------------------ | ----------------------------------------- |
 | `rye.execute.tool.rye.file-system.*`                   | Execute any tool under `rye/file-system/` |
-| `rye.execute.tool.rye.agent.threads.thread_directive`  | Execute thread_directive specifically     |
+| `rye.execute.tool.rye.agent.threads.thread_directive`  | Execute thread_directive (internal, used by `execute directive`) |
+| `rye.execute.directive.domain.*`                       | Spawn threads for any directive under `domain/` |
 | `rye.search.directive.*`                               | Search any directive                      |
 | `rye.load.knowledge.agency-kiwi.*`                     | Load any knowledge under `agency-kiwi/`   |
 | `rye.sign.directive.*`                                 | Sign any directive                        |
@@ -100,7 +100,7 @@ Tag under the action (`<tool>`, `<directive>`, `<knowledge>`) specifies the item
 
 | Action    | What It Gates                                       |
 | --------- | --------------------------------------------------- |
-| `execute` | Running tools, directives, knowledge via `rye_execute` |
+| `execute` | Running tools, spawning threads for directives, parsing knowledge via `rye_execute` |
 | `search`  | Searching items via `rye_search`                    |
 | `load`    | Loading/inspecting items via `rye_load`             |
 | `sign`    | Signing items via `rye_sign`                        |
@@ -148,9 +148,11 @@ Capabilities flow down the thread hierarchy. Children can have the same or fewer
 Design permissions bottom-up:
 
 1. **Execution leaves** — exactly the tools they call
-2. **Sub-orchestrators** — `thread_directive` + knowledge they load
-3. **Root orchestrators** — `thread_directive` + `orchestrator` + domain search/load
+2. **Sub-orchestrators** — `thread_directive` (internal) + `directive` patterns for children + knowledge they load
+3. **Root orchestrators** — `thread_directive` (internal) + `orchestrator` + `directive` patterns + domain search/load
 4. **Never `*` in production** — defeats the purpose
+
+> **Note:** The primary way to spawn threads is `execute directive`. This internally requires the `rye.execute.tool.rye.agent.threads.thread_directive` capability, so orchestrators still need that tool permission declared.
 
 ## Permission Check Flow
 

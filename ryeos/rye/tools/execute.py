@@ -6,15 +6,20 @@ Routes execution through PrimitiveExecutor for tools, which handles:
     - Recursive executor chain resolution via __executor_id__
     - ENV_CONFIG resolution for runtimes
     - Space compatibility validation
+
+Directives are executed by spawning a managed thread via the
+``rye/agent/threads/thread_directive`` tool (LLM loop with safety
+harness, budgets, and registry tracking).
 """
 
 import logging
-import re
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import AI_DIR, DIRECTIVE_INSTRUCTION, ItemType
+from rye.constants import AI_DIR, ItemType
+from rye.directive_parser import parse_and_validate_directive
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
@@ -28,51 +33,8 @@ from rye.utils.resolvers import get_user_space
 
 logger = logging.getLogger(__name__)
 
-# {input:key}          — required, kept as-is if missing
-# {input:key?}         — optional, empty string if missing
-# {input:key:default}  — fallback to default if missing (colon separator)
-# {input:key|default}  — fallback to default if missing (pipe separator)
-_INPUT_REF = re.compile(r"\{input:(\w+)(\?|[:|][^}]*)?\}")
-_DOLLAR_INPUT_RE = re.compile(r"\$\{inputs\.(\w+)\}")
-
-
-def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
-    """Resolve {input:name} and ${inputs.name} placeholders in a string."""
-
-    def _replace(m: re.Match) -> str:
-        key = m.group(1)
-        modifier = m.group(2)
-        if key in inputs:
-            return str(inputs[key])
-        if modifier == "?":
-            return ""
-        if modifier and modifier[0] in (":", "|"):
-            return modifier[1:]
-        return m.group(0)
-
-    result = _INPUT_REF.sub(_replace, value)
-    # Also resolve ${inputs.name} syntax
-    if "${inputs." in result:
-        result = _DOLLAR_INPUT_RE.sub(
-            lambda m: str(inputs[m.group(1)]) if m.group(1) in inputs else m.group(0),
-            result,
-        )
-    return result
-
-
-def _interpolate_parsed(parsed: Dict[str, Any], inputs: Dict[str, Any]) -> None:
-    """Interpolate {input:name} refs in body, actions, and content fields."""
-    for key in ("body", "content", "raw"):
-        if isinstance(parsed.get(key), str):
-            parsed[key] = _resolve_input_refs(parsed[key], inputs)
-
-    for action in parsed.get("actions", []):
-        for k, v in list(action.items()):
-            if isinstance(v, str):
-                action[k] = _resolve_input_refs(v, inputs)
-        for pk, pv in list(action.get("params", {}).items()):
-            if isinstance(pv, str):
-                action["params"][pk] = _resolve_input_refs(pv, inputs)
+# Re-export for backwards compatibility (used by tests)
+from rye.directive_parser import _resolve_input_refs, _interpolate_parsed  # noqa: F401
 
 
 class ExecuteTool:
@@ -108,6 +70,11 @@ class ExecuteTool:
         parameters: Dict[str, Any] = kwargs.get("parameters", {})
         dry_run = kwargs.get("dry_run", False)
 
+        # Thread control params (directives only)
+        async_exec = kwargs.get("async", False)
+        model = kwargs.get("model")
+        limit_overrides = kwargs.get("limit_overrides")
+
         logger.debug(f"Execute: {item_type} item_id={item_id}")
 
         try:
@@ -115,7 +82,9 @@ class ExecuteTool:
 
             if item_type == ItemType.DIRECTIVE:
                 result = await self._run_directive(
-                    item_id, project_path, parameters, dry_run
+                    item_id, project_path, parameters, dry_run,
+                    async_exec=async_exec, model=model,
+                    limit_overrides=limit_overrides,
                 )
             elif item_type == ItemType.TOOL:
                 result = await self._run_tool(
@@ -141,70 +110,93 @@ class ExecuteTool:
             return {"status": "error", "error": str(e), "item_id": item_id}
 
     async def _run_directive(
-        self, item_id: str, project_path: str, parameters: Dict[str, Any], dry_run: bool
+        self,
+        item_id: str,
+        project_path: str,
+        parameters: Dict[str, Any],
+        dry_run: bool,
+        *,
+        async_exec: bool = False,
+        model: Optional[str] = None,
+        limit_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Run a directive - parse, validate inputs, interpolate, and return."""
+        """Run a directive — validate inputs then spawn a managed thread.
+
+        Validation (parse, input defaults, required checks, interpolation)
+        is done eagerly so callers get fast feedback on bad inputs.  The
+        actual execution is delegated to ``rye/agent/threads/thread_directive``
+        via ``_run_tool``.
+        """
+        # 1. Find the directive file
         file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
         if not file_path:
             return {"status": "error", "error": f"Directive not found: {item_id}"}
 
-        verify_item(file_path, ItemType.DIRECTIVE, project_path=Path(project_path) if project_path else None)
+        # 2. Parse and validate inputs (fast feedback)
+        proj_path = Path(project_path) if project_path else None
+        validation = parse_and_validate_directive(
+            file_path=file_path,
+            item_id=item_id,
+            parameters=parameters,
+            project_path=proj_path,
+        )
+        if validation["status"] != "success":
+            return validation
 
-        content = file_path.read_text(encoding="utf-8")
-        parsed = self.parser_router.parse("markdown/xml", content)
-
-        if "error" in parsed:
-            return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
-
-        # Apply defaults then validate required inputs
-        inputs = dict(parameters)
-        declared_inputs: List[Dict] = parsed.get("inputs", [])
-        declared_names = {inp["name"] for inp in declared_inputs}
-
-        # Reject unknown parameters early so the caller can correct
-        unknown = [k for k in parameters if k not in declared_names]
-        if unknown and declared_inputs:
-            return {
-                "status": "error",
-                "error": f"Unknown parameters: {', '.join(unknown)}. "
-                         f"Valid inputs: {', '.join(declared_names)}",
-                "item_id": item_id,
-                "declared_inputs": declared_inputs,
-            }
-
-        for inp in declared_inputs:
-            if inp["name"] not in inputs and "default" in inp:
-                inputs[inp["name"]] = inp["default"]
-        missing = [
-            inp["name"]
-            for inp in declared_inputs
-            if inp.get("required") and inp["name"] not in inputs
-        ]
-        if missing:
-            return {
-                "status": "error",
-                "error": f"Missing required inputs: {', '.join(missing)}",
-                "item_id": item_id,
-                "declared_inputs": declared_inputs,
-            }
-
-        # Interpolate {input:name} placeholders in body and actions
-        _interpolate_parsed(parsed, inputs)
-
-        result = {
-            "status": "success",
-            "type": ItemType.DIRECTIVE,
-            "item_id": item_id,
-            "data": parsed,
-            "inputs": inputs,
-            "instructions": DIRECTIVE_INSTRUCTION,
-        }
-
+        # 3. Dry run stops here
         if dry_run:
-            result["status"] = "validation_passed"
-            result["message"] = "Directive validation passed (dry run)"
+            return {
+                "status": "validation_passed",
+                "type": ItemType.DIRECTIVE,
+                "item_id": item_id,
+                "data": validation["parsed"],
+                "inputs": validation["inputs"],
+                "message": "Directive validation passed (dry run)",
+            }
 
-        return result
+        # 4. Spawn managed thread via thread_directive tool
+        td_params: Dict[str, Any] = {
+            "directive_id": item_id,
+            "inputs": validation["inputs"],
+        }
+        if async_exec:
+            td_params["async"] = True
+        if model:
+            td_params["model"] = model
+        if limit_overrides:
+            td_params["limit_overrides"] = limit_overrides
+
+        # Forward parent thread context if present
+        parent_tid = os.environ.get("RYE_PARENT_THREAD_ID")
+        if parent_tid:
+            td_params["parent_thread_id"] = parent_tid
+
+        thread_result = await self._run_tool(
+            "rye/agent/threads/thread_directive",
+            project_path,
+            td_params,
+            dry_run=False,
+        )
+
+        # Normalise the response — thread_directive returns its own format
+        if thread_result.get("status") == "success" and thread_result.get("data"):
+            data = thread_result["data"]
+            # Unwrap: PrimitiveExecutor wraps stdout JSON in data.stdout
+            if isinstance(data, dict) and "stdout" in data:
+                import json as _json
+                try:
+                    data = _json.loads(data["stdout"])
+                except (ValueError, TypeError):
+                    data = {"raw": data["stdout"]}
+            return {
+                "status": "success" if data.get("success", True) else "error",
+                "type": ItemType.DIRECTIVE,
+                "item_id": item_id,
+                **{k: v for k, v in data.items() if k != "success"},
+                "metadata": thread_result.get("metadata", {}),
+            }
+
+        return thread_result
 
     async def _run_tool(
         self, item_id: str, project_path: str, parameters: Dict[str, Any], dry_run: bool

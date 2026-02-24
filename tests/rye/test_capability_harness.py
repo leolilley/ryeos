@@ -661,15 +661,21 @@ class TestExecuteWithSignedDirectives:
     """Test execute tool with signed directives."""
     
     async def test_execute_signed_directive(self, signed_project):
+        """Execute directive validates inputs then delegates to thread_directive.
+
+        In test environment, thread_directive tool isn't available so
+        dry_run is used to verify validation passes for signed directives.
+        """
         execute_tool = ExecuteTool("")
         result = await execute_tool.handle(
             item_type="directive",
             item_id="test_fs_read",
             project_path=str(signed_project),
             parameters={"path": "/tmp/test.txt"},
+            dry_run=True,
         )
         
-        assert result["status"] == "success"
+        assert result["status"] == "validation_passed"
         assert result["type"] == "directive"
     
     async def test_execute_unsigned_directive_fails(self, temp_project):

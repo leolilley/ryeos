@@ -1,5 +1,4 @@
-<!-- rye:unsigned -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:58eb480536a60d7d9f7941a9b2ce711008e0dae31e6523995655f5dcd7f36dd5:0oGepw3B_84eBZPcNcLxsRmZeopNkUNyfxzPxcSVnCtwiItw_10vtpwTiy39aBkoASMy6FPnypC6NDD-kxkMDA==:9fbfabe975fa5a7f -->
 ```yaml
 name: permissions-in-threads
 title: Permissions in Threads
@@ -43,7 +42,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | Capability String                                    | Allows                                    |
 |------------------------------------------------------|-------------------------------------------|
 | `rye.execute.tool.rye.file-system.*`                 | Execute any tool under `rye/file-system/` |
-| `rye.execute.tool.rye.agent.threads.thread_directive`| Execute thread_directive specifically     |
+| `rye.execute.tool.rye.agent.threads.thread_directive`| Execute thread_directive (internal, used by `execute directive`) |
+| `rye.execute.directive.domain.*`                     | Spawn threads for any directive under `domain/` |
 | `rye.search.directive.*`                             | Search all directives                     |
 | `rye.load.knowledge.agency-kiwi.*`                   | Load any knowledge under `agency-kiwi/`   |
 | `rye.sign.directive.*`                               | Sign any directive                        |
@@ -53,8 +53,9 @@ rye.<primary>.<item_type>.<item_id_dotted>
 ```xml
 <permissions>
   <execute>
-    <tool>rye.agent.threads.thread_directive</tool>
+    <tool>rye.agent.threads.thread_directive</tool>  <!-- internal capability needed by execute directive -->
     <tool>rye.agent.threads.orchestrator</tool>
+    <directive>agency-kiwi.*</directive>  <!-- allows spawning threads for these directives -->
   </execute>
   <search>
     <directive>agency-kiwi.*</directive>
@@ -65,6 +66,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
   </load>
 </permissions>
 ```
+
+> **Note:** Users call `execute directive` to spawn threads. This internally requires the `<tool>rye.agent.threads.thread_directive</tool>` capability, so it must still be declared in permissions.
 
 ### XML → Capability String Mapping
 
@@ -172,25 +175,26 @@ else:
 
 ```
 Root orchestrator:
-  ✓ thread_directive, orchestrator, search agency-kiwi.*, load agency-kiwi.*
+  ✓ thread_directive (internal), orchestrator, directive agency-kiwi.*, search agency-kiwi.*, load agency-kiwi.*
+  (spawns threads via: execute directive)
 
   └── qualify_leads (declares own permissions):
-      ✓ thread_directive, load agency-kiwi.*
+      ✓ thread_directive (internal), directive agency-kiwi.*, load agency-kiwi.*
       ✗ orchestrator (dropped), search (dropped)
 
       └── score_lead (declares own permissions):
           ✓ analysis.score_ghl_opportunity
-          ✗ thread_directive (dropped), knowledge loading (dropped)
+          ✗ thread_directive (dropped), directive (dropped), knowledge loading (dropped)
 
       └── leaf_without_permissions (no <permissions> block):
-          ✓ Inherits qualify_leads: thread_directive, load agency-kiwi.*
+          ✓ Inherits qualify_leads: thread_directive, directive agency-kiwi.*, load agency-kiwi.*
 ```
 
 ## Design Principles
 
 1. **Start with execution leaves** — each needs exactly the tools it calls
-2. **Sub-orchestrators** need `thread_directive` + domain knowledge loading
-3. **Root orchestrators** need `thread_directive`, `orchestrator` (wait/aggregate), search/load
+2. **Sub-orchestrators** need `thread_directive` (internal) + `directive` patterns for children + domain knowledge loading
+3. **Root orchestrators** need `thread_directive` (internal), `orchestrator` (wait/aggregate), `directive` patterns, search/load
 4. **Never use `<permissions>*</permissions>` in production** — defeats the purpose
 5. **LLM gets clear error** — denied permissions produce explicit messages for debugging
 

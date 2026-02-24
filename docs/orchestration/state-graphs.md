@@ -424,11 +424,11 @@ Result: `{"file_count": "42", "line_count": "1337", "_status": "completed"}`.
 | **Flexibility** | Fixed graph structure                                    | Fully dynamic — model can change course                |
 | **Debugging**   | Read the YAML, follow the edges                          | Read the transcript                                    |
 
-**Combining them:** Graph nodes can spawn `thread_directive` children for steps that need LLM reasoning. Use graphs for the deterministic scaffold and threads for the intelligent steps.
+**Combining them:** Graph nodes can spawn directive threads (via `execute directive`) for steps that need LLM reasoning. Use graphs for the deterministic scaffold and threads for the intelligent steps.
 
 ## Async Graph Execution
 
-Graphs support `async: true` — same pattern as `thread_directive`. The caller returns immediately with a `graph_run_id` while the graph runs in the background.
+Graphs support `async: true` — same pattern as `execute directive`. The caller returns immediately with a `graph_run_id` while the graph runs in the background.
 
 ```python
 rye_execute(

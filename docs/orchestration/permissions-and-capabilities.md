@@ -29,7 +29,7 @@ Examples:
 | Capability | Allows |
 |-----------|--------|
 | `rye.execute.tool.rye.file-system.*` | Execute any tool under `rye/file-system/` |
-| `rye.execute.tool.rye.agent.threads.thread_directive` | Execute the thread_directive tool specifically |
+| `rye.execute.tool.rye.agent.threads.thread_directive` | Required internally when `execute directive` spawns threads |
 | `rye.search.directive` | Search directives (search has no item_id) |
 | `rye.load.knowledge.agency-kiwi.*` | Load any knowledge under `agency-kiwi/` |
 | `rye.sign.directive.*` | Sign any directive |
@@ -212,7 +212,7 @@ Capabilities: can spawn threads, search agency-kiwi directives, load agency-kiwi
 </permissions>
 ```
 
-Capabilities: can spawn threads and load knowledge. **Cannot** use `orchestrator` operations or search directives — those capabilities were dropped.
+Capabilities: can spawn threads (via `execute directive`) and load knowledge. **Cannot** use `orchestrator` operations or search directives — those capabilities were dropped.
 
 **Execution leaf `score_lead`** declares:
 ```xml
@@ -223,14 +223,14 @@ Capabilities: can spawn threads and load knowledge. **Cannot** use `orchestrator
 </permissions>
 ```
 
-Capabilities: can execute exactly one tool. **Cannot** spawn threads, load knowledge, or search anything. Minimal privilege for a leaf that does one thing.
+Capabilities: can execute exactly one tool. **Cannot** spawn threads (no `thread_directive` capability), load knowledge, or search anything. Minimal privilege for a leaf that does one thing.
 
 **Execution leaf without permissions:**
 ```xml
 <!-- No <permissions> block -->
 ```
 
-Inherits parent's capabilities. If spawned by `qualify_leads`, it can spawn threads and load knowledge. This is the inheritance fallback — useful when you want children to have the same access as their parent.
+Inherits parent's capabilities. If spawned by `qualify_leads`, it can spawn threads (via `execute directive`) and load knowledge. This is the inheritance fallback — useful when you want children to have the same access as their parent.
 
 ## Real Permission Declarations
 
@@ -252,7 +252,7 @@ Inherits parent's capabilities. If spawned by `qualify_leads`, it can spawn thre
 </permissions>
 ```
 
-Needs `thread_directive` to spawn children, `orchestrator` to wait/aggregate, and search/load for its domain knowledge.
+Needs `thread_directive` capability (used internally by `execute directive` to spawn child threads), `orchestrator` to wait/aggregate, and search/load for its domain knowledge.
 
 ### Discovery Leaf
 
@@ -286,8 +286,8 @@ The tightest possible scope: one tool, no knowledge loading, no searching. The L
 Design permissions from the bottom up:
 
 1. **Start with execution leaves** — each needs exactly the tools it calls
-2. **Sub-orchestrators** need `thread_directive` plus whatever knowledge they load
-3. **Root orchestrators** need `thread_directive`, `orchestrator` (for wait/aggregate), and their domain's search/load
+2. **Sub-orchestrators** need the `thread_directive` capability (for `execute directive` to spawn children) plus whatever knowledge they load
+3. **Root orchestrators** need `thread_directive` capability, `orchestrator` (for wait/aggregate), and their domain's search/load
 4. **Never use `<permissions>*</permissions>`** in production — it defeats the purpose
 
 If a thread tries something it shouldn't, the LLM gets a clear error message explaining exactly which capability is missing. This makes debugging permission issues straightforward.

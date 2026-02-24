@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:a47a50a8533f2ebdfb9eba330e88d888162291f56dbc50dfc75bef9217f71fe0:ltSTqiDAsQiKKyLZ6RC_TLtOduSpgObYwzhz7kA_7yWNewxeZQ758en10fMYt6eAzi3q72dROxZDBx9DfYJ2BA==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:300b35599e534a5faa82e920a800dcb8bc95648d1e5897b4c6e310ead1e5d10c:xnhmSQWU4R_34B8HfF17UvSI41P5PXDrhQzLgCvMp1AFKCO8dvS9UTznKCep7wDXvzZ0SFEjeH4d3zfeAypCDw==:9fbfabe975fa5a7f -->
 ```yaml
 name: input-interpolation
 title: Input Interpolation
@@ -38,7 +37,7 @@ How `{input:name}` placeholders are resolved in directives during execution.
 
 ## Where Interpolation Runs
 
-When `rye_execute` processes a directive, `_interpolate_parsed()` replaces placeholders in:
+When `rye_execute` processes a directive, `_interpolate_parsed()` replaces placeholders during the validation step before thread spawning:
 
 | Field     | Description                                                   |
 | --------- | ------------------------------------------------------------- |

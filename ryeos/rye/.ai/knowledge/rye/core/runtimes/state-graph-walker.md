@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T07:56:23Z:b14aac53cfde84aa9e6716603d981e452e6789a4b25bccadfa2a47316d2974f3:hMqirak8HpVmb7VnqskEAsYIb8cBP6b8CZLzeQqYP5zG441zVRcyEE7-lFuIyVA_P7OpzET-mNX7xLNHq1uoAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T05:50:18Z:28b0c6990e3efe9c065220a513c1fccb2f243321329b65967b19e9d08335ba71:F_-N82WdI_NVvFeXNnubLrYwEDOjWlr80ev9JujXpG21xYUNAeQF6Wo8I3MJJhTJG687GUOg8q5NEouOKOY2AQ==:9fbfabe975fa5a7f -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -43,7 +43,7 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
    - "foreach" → delegate to _handle_foreach(), persist, continue
    - default  → proceed to action dispatch
 3. Interpolate action via interpolation.interpolate_action(node["action"], ctx)
-4. If thread_directive call → inject parent context (_inject_parent_context)
+4. If execute directive / thread_directive call → inject parent context (_inject_parent_context)
 5. Check capabilities via _check_permission()
 6. Dispatch action via _dispatch_action() → _unwrap_result()
 7. Handle continuation chains for LLM nodes (status: "continued")

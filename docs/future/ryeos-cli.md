@@ -22,7 +22,7 @@ The core mapping:
 rye {verb} {item_type} {item_id} [params...]
 ```
 
-But the interesting problem is that RYE's execution model has a distinction the CLI needs to collapse. `execute directive` loads and returns a directive's content — it doesn't run it. Actually running a directive means `execute tool rye/agent/threads/thread_directive` with the directive name as a parameter. The CLI needs a shortcut that makes this natural.
+Now that `execute directive` spawns threads directly (internally delegating to `thread_directive`), the CLI verb mapping is straightforward. The `thread` verb remains as a convenience alias with explicit thread-level flags.
 
 ---
 
@@ -34,24 +34,20 @@ The CLI exposes verbs that map to the four primitives, plus a `thread` verb that
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `rye search <scope> <query>`                 | `rye_search(scope=..., query=...)`                                                                                | Registry search                                     |
 | `rye load <item_type> <item_id>`             | `rye_load(item_type=..., item_id=...)`                                                                            | Read item content to stdout                         |
-| `rye execute <item_type> <item_id> [params]` | `rye_execute(item_type=..., item_id=..., parameters=...)`                                                         | Execute a tool or return directive content          |
+| `rye execute <item_type> <item_id> [params]` | `rye_execute(item_type=..., item_id=..., parameters=...)`                                                         | Execute a tool or spawn a directive thread          |
 | `rye sign <item_type> <item_id>`             | `rye_sign(item_type=..., item_id=...)`                                                                            | Ed25519 sign an item                                |
-| `rye thread <directive_id> [params]`         | `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive": ..., ...})` | **Shortcut** — spawn a thread that runs a directive |
+| `rye thread <directive_id> [params]`         | `rye_execute(item_type="directive", item_id=..., parameters={...}, async=True)` | **Alias** — spawn a directive thread with explicit thread flags |
 
 ### The `thread` Verb
 
-This is the key shortcut. In an MCP client, running a directive autonomously requires:
+This is an alias for `execute directive` with explicit thread-level flags. In an MCP client:
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive": "rye/outreach/email_campaign",
-        "inputs": {"target": "tech companies", "limit": 50},
-        "model": "sonnet",
-        "max_spend": 1.00
-    }
+    item_type="directive",
+    item_id="rye/outreach/email_campaign",
+    parameters={"target": "tech companies", "limit": 50},
+    limit_overrides={"spend": 1.00}
 )
 ```
 
@@ -75,7 +71,7 @@ This is the hard part. RYE tool calls take a `parameters` dict with arbitrary ke
 
 ### The Problem
 
-Different tools and directives expect different parameter shapes. A bash tool expects `{"command": "..."}`. A directive expects `{"inputs": {"key": "value"}}`. The thread verb needs to separate its own flags from directive inputs. The CLI parser needs to construct the right call without ambiguity.
+Different tools and directives expect different parameter shapes. A bash tool expects `{"command": "..."}`. A directive expects `{"key": "value"}` in parameters. The thread verb needs to separate its own flags from directive inputs. The CLI parser needs to construct the right call without ambiguity.
 
 ### Approach: Schema-Driven Parsing
 
@@ -85,25 +81,22 @@ Every RYE tool and directive already has a parseable schema — tools declare th
 rye thread rye/outreach/email_campaign --target "tech" --limit 50 --model sonnet
     │
     ▼
-1. Parse verb: "thread" → execute tool thread_directive
+1. Parse verb: "thread" → execute directive
 2. Resolve item: rye/outreach/email_campaign → load directive metadata
 3. Extract input schema: {target: string, limit: integer}
 4. Separate params:
-   - Thread params (known set): --model sonnet → model: "sonnet"
-   - Directive inputs (from schema): --target "tech", --limit 50 → inputs: {target: "tech", limit: 50}
+   - Thread params (known set): --model sonnet → limit_overrides
+   - Directive inputs (from schema): --target "tech", --limit 50 → parameters: {target: "tech", limit: 50}
 5. Construct call:
    rye_execute(
-       item_type="tool",
-       item_id="rye/agent/threads/thread_directive",
-       parameters={
-           "directive": "rye/outreach/email_campaign",
-           "inputs": {"target": "tech", "limit": 50},
-           "model": "sonnet"
-       }
+       item_type="directive",
+       item_id="rye/outreach/email_campaign",
+       parameters={"target": "tech", "limit": 50},
+       limit_overrides={"model": "sonnet"}
    )
 ```
 
-Thread-level params are a known fixed set (`--model`, `--max-spend`, `--max-turns`, `--async`, `--budget`). Everything else gets routed to `inputs` based on the directive's declared schema. Unknown flags are rejected with a clear error.
+Thread-level params are a known fixed set (`--model`, `--max-spend`, `--max-turns`, `--async`, `--budget`). Everything else gets routed to `parameters` based on the directive's declared schema. Unknown flags are rejected with a clear error.
 
 ### Direct Tool Execution
 
@@ -180,9 +173,9 @@ rye load tool rye/bash/bash
 rye load knowledge my-project/api-docs
 rye load tool rye/bash/bash --destination project   # copy to project space
 
-# Execute (stateless — returns content for directives, runs tools)
+# Execute (runs tools, spawns directive threads, loads knowledge)
 rye execute tool rye/bash/bash --command "pytest tests/"
-rye execute directive my-project/onboarding         # returns parsed directive content
+rye execute directive my-project/onboarding         # spawns a thread running the directive
 rye execute knowledge my-project/api-docs            # returns parsed knowledge content
 
 # Thread (autonomous directive execution — the shortcut)
@@ -296,7 +289,7 @@ If the function-calling format (Option B) turns out to be better for the small m
 | Existing Component                                   | How ryeos-cli Uses It                        |
 | ---------------------------------------------------- | -------------------------------------------- |
 | Four MCP tools (`search`, `load`, `execute`, `sign`) | Direct invocation without MCP transport      |
-| `thread_directive` tool                              | The `thread` verb is a shortcut to this tool |
+| `execute directive` (delegates to `thread_directive`) | The `thread` verb is an alias with explicit thread flags |
 | `rye_search` (BM25 + fuzzy)                          | Powers `rye search` and completion           |
 | Executor chain (tool → runtime → primitive)          | Same chain, invoked synchronously            |
 | Three-tier spaces (project → user → system)          | Same resolution, same precedence             |

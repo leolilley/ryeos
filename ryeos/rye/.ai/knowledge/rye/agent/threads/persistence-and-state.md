@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T07:42:15Z:8712f3713c746c38f59d98476508a95bad4ff4f0cd97033822455f98bfb7b5f4:EPY6MY1vMoUT8JmUlo8EWIYOSyA-0jP0k2i4Rc1ecuv55quNvlIhdmrlDyCKqKyT1X6vJrzUjwLRjkagXiVRDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T05:50:18Z:d825542ebe2d6d44ca71eb8b98f2050d3b93bcd4df0c2463c143f83b721025f0:uZ2KjK7O-5nZTr6edPqoqhVmIEDEtHgQUk5IWjyIZo5FLyflSexHnTPtF1rWlLIXLWVRLLKpn7qaMwKFm1ZfDA==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: persistence-and-state
@@ -176,7 +176,7 @@ Trimmed to start with `user` message (provider requirement).
 New thread spawned with `previous_thread_id`:
 
 ```python
-new_result = await thread_directive.execute({
+new_result = await thread_directive.execute({  # internal: execute directive delegates here
     "directive_name": directive_name,
     "parent_thread_id": original_parent_id,
     "previous_thread_id": thread_id,

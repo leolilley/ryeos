@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:de6d682f2a4561109796374a77289500a6d64df4d54c002079eb1530282d939b:uezD5EGEV3HGrxXKLj0qIWBMQDHs4JYGAsyX3rESMTCO5FFJkM5UZFneSF_WaArzTNWZFeGrPcQolzFx1REeBQ==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-24T05:50:18Z:1097795e5c219defeb1f29a004577667f824e3802bb6746b2807ef18359aab28:Jk_0YP35widhQdlS_QJtQwJ-NIp61pxIefzUPPeR8yKcJ9fZL1KONTvYIYuj1Ay5bvrmkVLBQna_7g6C_Vy2Aw==:9fbfabe975fa5a7f -->
 ```yaml
 name: spawning-patterns
 title: Spawning Patterns
@@ -25,18 +24,15 @@ How orchestrators spawn, coordinate, and collect results from child threads.
 
 ## Spawning a Child
 
-All spawning goes through `thread_directive`:
+All spawning goes through `execute directive`:
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/agent/threads/thread_directive",
-    parameters={
-        "directive_name": "agency-kiwi/leads/discover_leads",
-        "inputs": {"niche": "plumbers", "city": "Dunedin"},
-        "limit_overrides": {"turns": 10, "spend": 0.10},
-        "async": True
-    }
+    item_type="directive",
+    item_id="agency-kiwi/leads/discover_leads",
+    parameters={"niche": "plumbers", "city": "Dunedin"},
+    async=True,
+    limit_overrides={"turns": 10, "spend": 0.10}
 )
 ```
 
@@ -70,7 +66,7 @@ Parent returns immediately with `thread_id` and `pid`.
 
 ## Parent Context Auto-Injection
 
-The runner auto-injects parent context when dispatching `thread_directive` calls:
+When `execute directive` spawns a thread, the runner internally delegates to `thread_directive` and auto-injects parent context:
 
 ```python
 if resolved_id == "rye/agent/threads/thread_directive":
@@ -80,7 +76,7 @@ if resolved_id == "rye/agent/threads/thread_directive":
     dispatch_params.setdefault("parent_capabilities", harness._capabilities)
 ```
 
-**The LLM never manually passes parent context** — it just calls `thread_directive` with directive name, inputs, and limit overrides.
+**The LLM never manually passes parent context** — it just calls `execute directive` with the directive ID, inputs, and limit overrides. The internal delegation to `thread_directive` is transparent.
 
 Additionally, `RYE_PARENT_THREAD_ID` is set in the environment so spawned children inherit the parent relationship.
 
@@ -89,16 +85,18 @@ Additionally, `RYE_PARENT_THREAD_ID` is set in the environment so spawned childr
 Standard orchestration pattern for parallel work:
 
 ```
-Phase 1: Spawn children (async: true)
+Phase 1: Spawn children (async=True)
+         rye_execute(item_type="directive", item_id="domain/discover",
+           parameters={...}, async=True, limit_overrides={...})
          → collect all thread_ids
 
 Phase 2: Wait for all children
-         rye_execute(item_id="rye/agent/threads/orchestrator",
+         rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
            parameters={"operation": "wait_threads",
                         "thread_ids": [...], "timeout": 300})
 
 Phase 3: Aggregate results
-         rye_execute(item_id="rye/agent/threads/orchestrator",
+         rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
            parameters={"operation": "aggregate_results",
                         "thread_ids": [...]})
 ```

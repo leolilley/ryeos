@@ -98,6 +98,19 @@ class RYEServer:
                                 "default": False,
                                 "description": EXECUTE_DRY_RUN_DESC,
                             },
+                            "async": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "For directives: return immediately with thread_id instead of waiting for completion.",
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "For directives: override the LLM model used for thread execution.",
+                            },
+                            "limit_overrides": {
+                                "type": "object",
+                                "description": "For directives: override default limits (turns, tokens, spend, spawns, duration_seconds, depth).",
+                            },
                         },
                         "required": ["item_type", "item_id", "project_path"],
                     },

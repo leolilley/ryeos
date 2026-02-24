@@ -62,7 +62,7 @@ The thread is registered in the SQLite registry (`registry.db`) with status `cre
 
 The directive is loaded via `DirectiveResolver`, searching project → user → system spaces. The `markdown/xml` parser extracts metadata (limits, permissions, model, inputs) from the XML fence and preserves the raw content for the LLM prompt.
 
-For normal execution, `ExecuteTool` handles input validation and interpolation. For resume/handoff, `LoadTool` is used instead (no input validation needed since the directive ran before).
+For normal execution, `directive_parser.parse_and_validate_directive()` handles input validation and interpolation. For resume/handoff, `LoadTool` is used instead (no input validation needed since the directive ran before).
 
 ### Step 4: Resolve limits
 
@@ -146,7 +146,7 @@ The `thread.json` file is signed using canonical JSON serialization with a `_sig
 ### Step 12: Spawn or run
 
 - **Synchronous** (default): Calls `runner.run()` directly and blocks until completion
-- **Asynchronous** (`async: true`): `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `rye-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): Triggered by `execute directive` with `async: true`, which delegates to `thread_directive` internally. `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `rye-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 13: Run LLM loop
 
