@@ -7,9 +7,14 @@ Routes execution through PrimitiveExecutor for tools, which handles:
     - ENV_CONFIG resolution for runtimes
     - Space compatibility validation
 
-Directives are executed by spawning a managed thread via the
-``rye/agent/threads/thread_directive`` tool (LLM loop with safety
-harness, budgets, and registry tracking).
+Directives support two execution modes controlled by the ``thread`` param:
+    - **In-thread** (default, ``thread=False``): Parse, validate inputs,
+      interpolate placeholders, and return the directive content with an
+      ``instructions`` field for the calling agent to follow in-context.
+    - **Threaded** (``thread=True``): Spawn a managed thread via
+      ``rye/agent/threads/thread_directive`` (LLM loop, safety harness,
+      budgets, registry tracking).  Supports ``async``, ``model``, and
+      ``limit_overrides`` sub-parameters.
 """
 
 import logging
@@ -18,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import AI_DIR, ItemType
+from rye.constants import AI_DIR, DIRECTIVE_INSTRUCTION, ItemType
 from rye.directive_parser import parse_and_validate_directive
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
@@ -71,6 +76,7 @@ class ExecuteTool:
         dry_run = kwargs.get("dry_run", False)
 
         # Thread control params (directives only)
+        thread = kwargs.get("thread", False)
         async_exec = kwargs.get("async", False)
         model = kwargs.get("model")
         limit_overrides = kwargs.get("limit_overrides")
@@ -83,8 +89,8 @@ class ExecuteTool:
             if item_type == ItemType.DIRECTIVE:
                 result = await self._run_directive(
                     item_id, project_path, parameters, dry_run,
-                    async_exec=async_exec, model=model,
-                    limit_overrides=limit_overrides,
+                    thread=thread, async_exec=async_exec,
+                    model=model, limit_overrides=limit_overrides,
                 )
             elif item_type == ItemType.TOOL:
                 result = await self._run_tool(
@@ -116,16 +122,26 @@ class ExecuteTool:
         parameters: Dict[str, Any],
         dry_run: bool,
         *,
+        thread: bool = False,
         async_exec: bool = False,
         model: Optional[str] = None,
         limit_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Run a directive — validate inputs then spawn a managed thread.
+        """Run a directive — parse, validate, and either return or spawn thread.
 
-        Validation (parse, input defaults, required checks, interpolation)
-        is done eagerly so callers get fast feedback on bad inputs.  The
-        actual execution is delegated to ``rye/agent/threads/thread_directive``
-        via ``_run_tool``.
+        Two modes controlled by ``thread``:
+
+        - **In-thread** (default): Parse, validate inputs, interpolate
+          placeholders, and return the directive content with an
+          ``instructions`` field.  The calling agent follows the steps
+          in its own context.  No LLM infrastructure required.
+
+        - **Threaded** (``thread=True``): After validation, spawn a
+          managed thread via ``rye/agent/threads/thread_directive``
+          (LLM loop, safety harness, budgets).  Supports ``async``,
+          ``model``, and ``limit_overrides``.
+
+        Validation is always done eagerly for fast feedback on bad inputs.
         """
         # 1. Find the directive file
         file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
@@ -154,7 +170,41 @@ class ExecuteTool:
                 "message": "Directive validation passed (dry run)",
             }
 
-        # 4. Spawn managed thread via thread_directive tool
+        # 4a. In-thread mode (default): return lean actionable content
+        #     Only what the caller needs to follow the directive:
+        #     - instructions: the "go do it" nudge
+        #     - body: interpolated process steps (not parsed beyond interpolation)
+        #     - outputs: what the directive expects back
+        #     No permissions (can't enforce without harness), no parser internals.
+        if not thread:
+            parsed = validation["parsed"]
+            result: Dict[str, Any] = {
+                "status": "success",
+                "type": ItemType.DIRECTIVE,
+                "item_id": item_id,
+                "instructions": DIRECTIVE_INSTRUCTION,
+                "body": parsed.get("body", ""),
+            }
+            outputs = parsed.get("outputs")
+            if outputs:
+                result["outputs"] = outputs
+            return result
+
+        # 4b. Threaded mode: spawn managed thread via thread_directive tool
+        #     Requires rye/agent infrastructure (thread_directive tool + LLM config)
+        td_tool = "rye/agent/threads/thread_directive"
+        if not self._find_item(project_path, ItemType.TOOL, td_tool):
+            return {
+                "status": "error",
+                "error": (
+                    "thread=true requires the rye/agent thread infrastructure "
+                    f"(tool '{td_tool}' not found). "
+                    "Either install the rye-agent package or omit thread=true "
+                    "to execute the directive in-thread."
+                ),
+                "item_id": item_id,
+            }
+
         td_params: Dict[str, Any] = {
             "directive_id": item_id,
             "inputs": validation["inputs"],

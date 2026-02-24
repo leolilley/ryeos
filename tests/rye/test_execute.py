@@ -78,13 +78,7 @@ class TestExecuteTool:
     """Test execute tool."""
 
     async def test_execute_directive(self, temp_project):
-        """Execute directive — spawns thread via thread_directive tool.
-
-        In a test environment without the full thread infrastructure,
-        this errors because thread_directive can't be found / run.
-        Verify that validation passes (dry_run) and that non-dry-run
-        attempts to delegate to thread_directive.
-        """
+        """Execute directive — returns parsed content in-thread by default."""
         tool = ExecuteTool("")
         result = await tool.handle(
             item_type="directive",
@@ -92,8 +86,27 @@ class TestExecuteTool:
             project_path=str(temp_project),
         )
 
-        # thread_directive tool won't exist in the temp project,
-        # so we expect an error about the tool not being found
+        assert result["status"] == "success"
+        assert result["type"] == "directive"
+        assert "instructions" in result
+        assert "body" in result
+        assert "data" not in result  # lean response, no parsed internals
+
+    async def test_execute_directive_threaded(self, temp_project):
+        """Execute directive with thread=True — attempts to spawn thread.
+
+        In a test environment without the full thread infrastructure,
+        this errors because thread_directive tool can't be found.
+        """
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="directive",
+            item_id="workflow",
+            project_path=str(temp_project),
+            thread=True,
+        )
+
+        # thread_directive tool won't exist in the temp project
         assert result["status"] == "error"
 
     async def test_execute_tool(self, temp_project):

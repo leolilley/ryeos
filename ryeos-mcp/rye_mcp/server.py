@@ -98,18 +98,23 @@ class RYEServer:
                                 "default": False,
                                 "description": EXECUTE_DRY_RUN_DESC,
                             },
+                            "thread": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "For directives: spawn a managed thread (LLM loop, safety harness, budgets) instead of returning content in-thread. Default is false (return content for the calling agent to follow).",
+                            },
                             "async": {
                                 "type": "boolean",
                                 "default": False,
-                                "description": "For directives: return immediately with thread_id instead of waiting for completion.",
+                                "description": "For directives (requires thread=true): return immediately with thread_id instead of waiting for completion.",
                             },
                             "model": {
                                 "type": "string",
-                                "description": "For directives: override the LLM model used for thread execution.",
+                                "description": "For directives (requires thread=true): override the LLM model used for thread execution.",
                             },
                             "limit_overrides": {
                                 "type": "object",
-                                "description": "For directives: override default limits (turns, tokens, spend, spawns, duration_seconds, depth).",
+                                "description": "For directives (requires thread=true): override default limits (turns, tokens, spend, spawns, duration_seconds, depth).",
                             },
                         },
                         "required": ["item_type", "item_id", "project_path"],

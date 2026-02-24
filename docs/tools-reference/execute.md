@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # rye_execute
 
-Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are validated and executed in a managed thread, tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context.
+Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are validated and returned in-thread by default (set `thread=true` to spawn a managed thread), tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context.
 
 ## Parameters
 
@@ -20,9 +20,10 @@ Execute directives, tools, or knowledge items. Routes execution based on `item_t
 | `project_path` | string | yes      | —       | Absolute path to the project root                                                        |
 | `parameters`   | dict   | no       | `{}`    | Parameters to pass to the item                                                           |
 | `dry_run`      | bool   | no       | `false` | Validate without executing                                                               |
-| `async`        | bool   | no       | `false` | For directives: return immediately with `thread_id` instead of waiting for completion     |
-| `model`        | string | no       | —       | For directives: override LLM model for thread execution                                  |
-| `limit_overrides` | object | no    | —       | For directives: override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
+| `thread`       | bool   | no       | `false` | For directives: spawn a managed thread instead of returning content in-thread             |
+| `async`        | bool   | no       | `false` | For directives (requires `thread=true`): return immediately with `thread_id` instead of waiting |
+| `model`        | string | no       | —       | For directives (requires `thread=true`): override LLM model for thread execution         |
+| `limit_overrides` | object | no    | —       | For directives (requires `thread=true`): override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
 
 ## Item Resolution
 
@@ -40,9 +41,17 @@ File extensions are tried automatically based on item type. Directives and knowl
 
 ### Directives
 
-Validates inputs, then spawns a managed thread to execute the directive. The thread runs with its own LLM loop, safety harness, and budgets.
+Two execution modes controlled by the `thread` parameter:
 
-**Input validation:**
+#### In-thread mode (default, `thread=false`)
+
+Validates inputs, interpolates placeholders, and returns the parsed directive content with an `instructions` field. The calling agent follows the steps in its own context. No LLM infrastructure required.
+
+#### Threaded mode (`thread=true`)
+
+Validates inputs, then spawns a managed thread to execute the directive. The thread runs with its own LLM loop, safety harness, and budgets. If `async: true`, returns immediately with `thread_id` and `pid` instead of blocking.
+
+**Input validation (both modes):**
 
 1. Declared inputs with `default` values are applied first
 2. Required inputs without values produce an error with the full `declared_inputs` list
@@ -57,15 +66,20 @@ Validates inputs, then spawns a managed thread to execute the directive. The thr
 | `{input:key:default}` | Fallback — uses `default` if key is missing |
 | `{input:key\|default}` | Fallback — uses `default` if key is missing (pipe syntax) |
 
-**Execution flow:**
+**In-thread response (default):**
 
-1. Parse and validate inputs (same validation as above)
-2. Spawn a managed thread via `thread_directive` infrastructure
-3. Block until the thread completes and return thread metadata
+```json
+{
+  "status": "success",
+  "type": "directive",
+  "item_id": "rye/core/create_directive",
+  "instructions": "<DIRECTIVE_INSTRUCTION constant>",
+  "body": "<interpolated directive body>",
+  "outputs": [{ "name": "result", "type": "string" }]
+}
+```
 
-If `async: true`, returns immediately with `thread_id` and `pid` instead of blocking until completion.
-
-**Response fields:**
+**Threaded response (`thread=true`):**
 
 ```json
 {
@@ -78,7 +92,7 @@ If `async: true`, returns immediately with `thread_id` and `pid` instead of bloc
 }
 ```
 
-**Async response:**
+**Threaded async response (`thread=true, async=true`):**
 
 ```json
 {
@@ -92,9 +106,9 @@ If `async: true`, returns immediately with `thread_id` and `pid` instead of bloc
 }
 ```
 
-**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without spawning a thread.
+**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without executing or spawning a thread.
 
-**`<returns>` injection:** When a directive is executed, the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the end of the rendered prompt. This tells the LLM what structured output keys to produce. The LLM never sees the raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps. See [Authoring Directives — How Outputs Become `<returns>`](../authoring/directives.md#how-outputs-become-returns-in-the-prompt) for details.
+**`<returns>` injection:** When a directive is executed in threaded mode, the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the end of the rendered prompt. This tells the LLM what structured output keys to produce. The LLM never sees the raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps. See [Authoring Directives — How Outputs Become `<returns>`](../authoring/directives.md#how-outputs-become-returns-in-the-prompt) for details.
 
 ### Tools
 
@@ -187,10 +201,10 @@ Tool chain failures include the partial chain and metadata:
 
 ## Examples
 
-### Execute a directive with inputs
+### Execute a directive (in-thread, default)
 
 ```python
-# Spawns a managed thread and blocks until completion
+# Returns parsed content for the calling agent to follow
 rye_execute(
     item_type="directive",
     item_id="rye/core/create_directive",
@@ -203,7 +217,20 @@ rye_execute(
 )
 ```
 
-### Execute a directive asynchronously
+### Execute a directive in a managed thread
+
+```python
+# Spawns a managed thread and blocks until completion
+rye_execute(
+    item_type="directive",
+    item_id="my-project/run_pipeline",
+    project_path="/home/user/my-project",
+    parameters={"location": "Dunedin", "batch_size": 5},
+    thread=True
+)
+```
+
+### Execute a directive asynchronously in a managed thread
 
 ```python
 # Returns immediately with thread_id
@@ -212,6 +239,7 @@ rye_execute(
     item_id="my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
+    thread=True,
     limit_overrides={"turns": 30, "spend": 3.00},
     async=True
 )
@@ -252,5 +280,3 @@ rye_execute(
     project_path="/home/user/my-project"
 )
 ```
-
-

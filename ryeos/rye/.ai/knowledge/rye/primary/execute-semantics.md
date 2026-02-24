@@ -31,9 +31,10 @@ Execute directives, tools, or knowledge items. Routes execution by `item_type`.
 | `project_path` | string | yes      | —       | Absolute path to the project root                                        |
 | `parameters`   | dict   | no       | `{}`    | Parameters to pass to the item                                           |
 | `dry_run`      | bool   | no       | `false` | Validate without executing                                               |
-| `async`        | bool   | no       | `false` | For directives: return immediately with `thread_id` instead of waiting for completion |
-| `model`        | string | no       | —       | For directives: override LLM model for thread execution                  |
-| `limit_overrides` | object | no    | —       | For directives: override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
+| `thread`       | bool   | no       | `false` | For directives: spawn a managed thread instead of returning content in-thread |
+| `async`        | bool   | no       | `false` | For directives (requires `thread=true`): return immediately with `thread_id` instead of waiting |
+| `model`        | string | no       | —       | For directives (requires `thread=true`): override LLM model for thread execution |
+| `limit_overrides` | object | no    | —       | For directives (requires `thread=true`): override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
 
 ## Item Resolution Order
 
@@ -57,6 +58,19 @@ All items are verified against their signature before execution. Modified or mov
 
 ### Directives
 
+Two execution modes controlled by the `thread` parameter:
+
+#### In-thread mode (default, `thread=false`)
+
+1. Parse markdown+XML directive file
+2. Validate required inputs; apply defaults
+3. Interpolate `{input:name}` placeholders in body, content, raw, and all actions
+4. Return parsed directive content with `instructions` field
+
+The calling agent follows the directive steps in its own context. No LLM infrastructure required.
+
+#### Threaded mode (`thread=true`)
+
 1. Parse markdown+XML directive file
 2. Validate required inputs; apply defaults
 3. Interpolate `{input:name}` placeholders in body, content, raw, and all actions
@@ -79,7 +93,20 @@ If `async: true`, returns immediately with `thread_id` and `pid` instead of bloc
 2. Required inputs without values → error with `declared_inputs` list
 3. Placeholders interpolated in body, content, raw, and all actions
 
-**Response:**
+**In-thread response (default):**
+
+```json
+{
+  "status": "success",
+  "type": "directive",
+  "item_id": "rye/core/create_directive",
+  "instructions": "<DIRECTIVE_INSTRUCTION constant>",
+  "body": "<interpolated directive body>",
+  "outputs": [{ "name": "result", "type": "string" }]
+}
+```
+
+**Threaded response (`thread=true`):**
 
 ```json
 {
@@ -92,7 +119,7 @@ If `async: true`, returns immediately with `thread_id` and `pid` instead of bloc
 }
 ```
 
-**Async response:**
+**Threaded async response (`thread=true, async=true`):**
 
 ```json
 {
@@ -106,7 +133,7 @@ If `async: true`, returns immediately with `thread_id` and `pid` instead of bloc
 }
 ```
 
-**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without spawning a thread.
+**Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without executing or spawning a thread.
 
 ### Tools
 
@@ -207,12 +234,32 @@ Tool chain failures include partial chain and metadata:
 ## Usage Examples
 
 ```python
-# Directive with inputs
+# Directive with inputs (default: returns content in-thread)
 rye_execute(
     item_type="directive",
     item_id="rye/core/create_directive",
     project_path="/home/user/my-project",
     parameters={"name": "deploy_app", "category": "workflows"}
+)
+
+# Directive in a managed thread
+rye_execute(
+    item_type="directive",
+    item_id="my-project/run_pipeline",
+    project_path="/home/user/my-project",
+    parameters={"location": "Dunedin", "batch_size": 5},
+    thread=True
+)
+
+# Async directive in a managed thread
+rye_execute(
+    item_type="directive",
+    item_id="my-project/run_pipeline",
+    project_path="/home/user/my-project",
+    parameters={"location": "Dunedin", "batch_size": 5},
+    thread=True,
+    limit_overrides={"turns": 30, "spend": 3.00},
+    async=True
 )
 
 # Tool execution
@@ -237,15 +284,5 @@ rye_execute(
     item_type="knowledge",
     item_id="rye/core/directive-metadata-reference",
     project_path="/home/user/my-project"
-)
-
-# Async directive execution
-rye_execute(
-    item_type="directive",
-    item_id="my-project/run_pipeline",
-    project_path="/home/user/my-project",
-    parameters={"location": "Dunedin", "batch_size": 5},
-    limit_overrides={"turns": 30, "spend": 3.00},
-    async=True
 )
 ```
