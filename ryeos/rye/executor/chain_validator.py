@@ -256,7 +256,7 @@ class ChainValidator:
         
         # Find transitions from system back to mutable
         for i in range(len(spaces) - 1):
-            if spaces[i] == "system" and spaces[i + 1] in ("project", "user"):
+            if (spaces[i] or "").startswith("system") and spaces[i + 1] in ("project", "user"):
                 result.issues.append(
                     f"Invalid chain: system tool '{chain[i].get('item_id')}' "
                     f"cannot delegate to mutable {spaces[i + 1]} tool "

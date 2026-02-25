@@ -4,7 +4,11 @@ Path Resolution Utilities
 Finds directives, tools, and knowledge entries across 3-tier space system:
   1. Project space: {project}/.ai/ (highest priority)
   2. User space: {$USER_SPACE or ~}/.ai/
-  3. System space: site-packages/rye/.ai/ (lowest priority, immutable)
+  3. System space: all installed bundles via rye.bundles entry points (lowest priority)
+
+System space supports multiple bundles — each installed package (ryeos, ryeos-web,
+ryeos-code, etc.) registers its own bundle with categories that scope which .ai/
+subdirectories it contributes. All bundles are discovered and searched.
 
 USER_SPACE env var sets the base path (home dir), not the .ai folder itself.
 """
@@ -17,9 +21,9 @@ from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.path_utils import (
     get_user_space,
     get_system_space,
+    get_system_spaces,
     get_project_type_path,
     get_user_type_path,
-    get_system_type_path,
 )
 from rye.constants import ItemType
 
@@ -48,10 +52,11 @@ class DirectiveResolver:
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
-        # System space (lowest priority)
-        system_dir = get_system_type_path(ItemType.DIRECTIVE)
-        if system_dir.exists():
-            paths.append((system_dir, "system"))
+        # System space — all installed bundles (lowest priority)
+        for bundle in get_system_spaces():
+            for type_path in bundle.get_type_paths(ItemType.DIRECTIVE):
+                if type_path.exists():
+                    paths.append((type_path, f"system:{bundle.bundle_id}"))
 
         return paths
 
@@ -99,10 +104,11 @@ class ToolResolver:
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
-        # System space (lowest priority)
-        system_dir = get_system_type_path(ItemType.TOOL)
-        if system_dir.exists():
-            paths.append((system_dir, "system"))
+        # System space — all installed bundles (lowest priority)
+        for bundle in get_system_spaces():
+            for type_path in bundle.get_type_paths(ItemType.TOOL):
+                if type_path.exists():
+                    paths.append((type_path, f"system:{bundle.bundle_id}"))
 
         return paths
 
@@ -156,10 +162,11 @@ class KnowledgeResolver:
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
-        # System space (lowest priority)
-        system_dir = get_system_type_path(ItemType.KNOWLEDGE)
-        if system_dir.exists():
-            paths.append((system_dir, "system"))
+        # System space — all installed bundles (lowest priority)
+        for bundle in get_system_spaces():
+            for type_path in bundle.get_type_paths(ItemType.KNOWLEDGE):
+                if type_path.exists():
+                    paths.append((type_path, f"system:{bundle.bundle_id}"))
 
         return paths
 
