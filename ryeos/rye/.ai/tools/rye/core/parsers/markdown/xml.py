@@ -1,4 +1,4 @@
-# rye:signed:2026-02-24T04:54:45Z:5b38acf804a88881e1961055e84ebe4c0639477bd755fc1087bf5e5bb27c2c53:lBxi6zfAELdWWvumPJ-jZ4ym1xt7wwI8MGxXAkr_rWpp8wC_lQekJtn6VAvvqvncmfsgZVgQ8gUem4CgzY6uCw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T00:02:14Z:9c042b21d10c761c08d208dd61a72233052e56c7151dac60f30590e3a3d734c2:XJfWFvmbiyaZuJ-xLwfrplaArgSyZzPkU9Xyyvfa-9JAq-ZDc7R1hV_jHUqTQgk1rw48xJaAH3ATUvrltnifAQ==:9fbfabe975fa5a7f
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -186,7 +186,13 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                 if perm_text == "*" and len(child) == 0:
                     permissions.append({"tag": "cap", "content": "rye.*"})
                 else:
+                    _ALLOWED_PERM_TAGS = PRIMARY_ACTIONS | {"acknowledge"}
                     for perm in child:
+                        if perm.tag not in _ALLOWED_PERM_TAGS:
+                            raise ValueError(
+                                f"Unknown tag <{perm.tag}> inside <permissions>. "
+                                f"Valid tags: {', '.join(sorted(_ALLOWED_PERM_TAGS))}"
+                            )
                         if perm.tag not in PRIMARY_ACTIONS:
                             continue
                         inner_text = (perm.text or "").strip()

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T08:17:58Z:752852983a0ce0134c940c05b417ea044d5481f4b109d5454f64b8e186816cf9:FjM3CIuiBX_4W12k7QdLU_TBek31muWKlsSQbr0toppidtmrnf_Td2vCltCs3mVacuknjlZ-lFVh_rrxRrmvBw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T00:02:14Z:752852983a0ce0134c940c05b417ea044d5481f4b109d5454f64b8e186816cf9:FjM3CIuiBX_4W12k7QdLU_TBek31muWKlsSQbr0toppidtmrnf_Td2vCltCs3mVacuknjlZ-lFVh_rrxRrmvBw==:9fbfabe975fa5a7f
 """
 persistence/artifact_store.py: Filesystem-backed artifact store
 

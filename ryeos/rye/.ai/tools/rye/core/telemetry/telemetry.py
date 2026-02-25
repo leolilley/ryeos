@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T00:42:51Z:288bea602f593d6fd59de7a311476e9ae36408d19ed3751e0e646bd412ddeb15:gmz5lXM5ci2WnWAMSxOI5EYKbi2PkRxNBZRGMyjG0vXiY6_4hjZuZJLcylW0TrMjyJcGz6xWkz8DAQCOtc2iAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T00:02:14Z:288bea602f593d6fd59de7a311476e9ae36408d19ed3751e0e646bd412ddeb15:gmz5lXM5ci2WnWAMSxOI5EYKbi2PkRxNBZRGMyjG0vXiY6_4hjZuZJLcylW0TrMjyJcGz6xWkz8DAQCOtc2iAw==:9fbfabe975fa5a7f
 """Telemetry tool - exposes MCP server log reading and diagnostics.
 
 Builtin tool that runs in-process to provide log inspection
