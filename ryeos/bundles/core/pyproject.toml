@@ -36,4 +36,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
-"../rye/rye/.ai" = "rye/.ai"
+"../rye/rye/.ai/tools/rye/core" = "rye/.ai/tools/rye/core"
+"../rye/rye/.ai/directives/rye/core" = "rye/.ai/directives/rye/core"
+"../rye/rye/.ai/knowledge/rye/core" = "rye/.ai/knowledge/rye/core"
+"../rye/rye/.ai/bundles" = "rye/.ai/bundles"
