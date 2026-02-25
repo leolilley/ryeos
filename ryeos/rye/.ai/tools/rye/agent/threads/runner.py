@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:0ff3e596c16fc22f1a9d9350a4a1d9696e5d0b4ce100cc59c846a8f6737012b8:9yRzgBVO6i2I57O-35PZ3q_xpEnZDo24nL3ia3-JH3r1RgHZwAqp_jKNXaktDXQ9sGSu7ea7Iw9NgOJ_EXQBAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T09:11:32Z:e47e07a696f6c3bc8ff7b37a1ce2956c5c4fdd54c2b01629a9544e9625dcac05:tDbJuZ3GCvPr1QzZFp7dpo5IrSeUqjRT_GieBWMAdWwsEQvytnP5jQ_Y6qMpzLQLIn6hWVZ7em4JLz0TUl6RBA==:9fbfabe975fa5a7f
 """
 runner.py: Core LLM loop for thread execution
 
@@ -162,6 +162,8 @@ async def run(
             _emit_context_injected(hook_ctx, emitter, thread_id, transcript)
         else:
             # Fresh thread: fire thread_started hooks (identity, rules, knowledge)
+            depth = orchestrator.get_depth(thread_id)
+            caps = harness._capabilities
             hook_ctx = await harness.run_hooks_context(
                 {
                     "directive": harness.directive_name,
@@ -169,6 +171,12 @@ async def run(
                     "model": provider.model,
                     "limits": harness.limits,
                     "inputs": inputs or {},
+                    "project_path": str(project_path),
+                    "depth": depth,
+                    "parent_thread_id": previous_thread_id or "none",
+                    "spend_limit": harness.limits.get("spend", "unlimited"),
+                    "max_turns": harness.limits.get("turns", "unlimited"),
+                    "capabilities_summary": ", ".join(caps) if caps else "unrestricted",
                 },
                 dispatcher,
                 event="thread_started",
@@ -622,7 +630,7 @@ async def run(
         cost["elapsed_seconds"] = time.monotonic() - start_time
         final = {
             **cost,
-            "status": "completed" if cost.get("turns") else "error",
+            "status": cost.get("_status", "completed" if cost.get("turns") else "error"),
         }
         orchestrator.complete_thread(thread_id, final)
 
@@ -663,6 +671,8 @@ def _finalize(thread_id, cost, result, emitter, transcript, signer=None) -> Dict
     emitter.emit(
         thread_id, f"thread_{status}", emit_payload, transcript, criticality="critical"
     )
+    # Record status in cost so the finally block uses the authoritative value
+    cost["_status"] = status
     return {**result, "thread_id": thread_id, "cost": cost, "status": status}
 
 

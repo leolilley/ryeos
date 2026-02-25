@@ -1,4 +1,5 @@
-# rye:signed:2026-02-25T00:02:14Z:2df63a4619391d5bacda9a33260998764688ac28b5571e0405567cdd9fe192dc:x6Gv0IWp3H9sKUWnQuwcvAQELJo_igSejckDzOOrCSYLSvpURq4j1yfLx2JYlVU7RoRH_KfUUoZkR-FMSStMDQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T08:12:00Z:5ce28a1e3989d0e70cd9ff1a79596f115d49c9c6fa5e77e23e00dac51781e365:B8jgmAF1OG9VHr92ySfaC2aVSpEQp821kGlTcZOXv6jhrwLyqD3YhdGtkks81BRFYpeGrQulaVrnq9DwNUYaBg==:9fbfabe975fa5a7f
+
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
 
@@ -245,14 +246,15 @@ def _load_collect_config(project_path: Path) -> Dict[str, Any]:
     The collect.yaml is a signed tool YAML like any other, user-extendable
     by placing an override at the same path in user or project space.
     """
-    from rye.utils.path_utils import get_user_space, get_system_space
+    from rye.utils.path_utils import get_user_space, get_system_spaces
 
     config_name = "rye/core/bundler/collect.yaml"
     search_order = [
         project_path / AI_DIR / "tools" / config_name,
         get_user_space() / AI_DIR / "tools" / config_name,
-        get_system_space() / AI_DIR / "tools" / config_name,
     ]
+    for bundle in get_system_spaces():
+        search_order.append(bundle.root_path / AI_DIR / "tools" / config_name)
 
     for path in search_order:
         if path.exists():

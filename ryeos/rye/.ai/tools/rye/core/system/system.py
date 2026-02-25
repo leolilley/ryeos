@@ -1,4 +1,5 @@
-# rye:signed:2026-02-25T00:02:14Z:71927107d2ccec34ddfdd51384196366113b2105d4220db0039e80df851bb84b:IechhYscRsdxtXW5ALT3L5JhlRB_0njoN9SovLPzlDToqECmziN4euEnBdFizOxr3tczBPspp5ABbEo8tiIZBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T08:12:00Z:107125b11bd21dd5ed62f2e9d32fa963dc99f5a35ddba1b0e32a535c71233c96:ktXocNkTu9L_usomrAAhbKIQK-4lnTldPVGlEWbjQKQG6HZq6JYffqVyeo10_TKcijsJvmDjVpHKewbpevkYDQ==:9fbfabe975fa5a7f
+
 """System information tool - exposes MCP runtime paths, time, and environment.
 
 Builtin tool that runs in-process to provide system information
@@ -11,7 +12,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from rye.constants import AI_DIR
 
@@ -68,14 +69,13 @@ def _get_paths(config: Dict[str, Any]) -> Dict[str, Any]:
     user_space = config.get(
         "user_space", os.environ.get("USER_SPACE", str(Path.home()))
     )
-    system_space = config.get("system_space", _get_system_space())
+    system_spaces = _get_system_spaces()
 
     return {
         "project_path": project_path,
         "user_space": user_space,
         "user_space_exists": Path(user_space).exists(),
-        "system_space": system_space,
-        "system_space_exists": Path(system_space).exists() if system_space else False,
+        "system_spaces": system_spaces,
         "home_dir": str(Path.home()),
         "cwd": os.getcwd(),
     }
@@ -102,18 +102,18 @@ def _get_runtime() -> Dict[str, Any]:
     }
 
 
-def _get_system_space() -> str:
-    """Get system space base path (where rye is installed)."""
+def _get_system_spaces() -> List[Dict[str, Any]]:
+    """Get all system bundle paths."""
     try:
-        import rye
+        from rye.utils.path_utils import get_system_spaces
 
-        if rye.__file__:
-            return str(Path(rye.__file__).parent)
-        import importlib.util
-
-        spec = importlib.util.find_spec("rye")
-        if spec and spec.origin:
-            return str(Path(spec.origin).parent)
-        return ""
+        return [
+            {
+                "bundle_id": b.bundle_id,
+                "root_path": str(b.root_path),
+                "exists": b.root_path.exists(),
+            }
+            for b in get_system_spaces()
+        ]
     except ImportError:
-        return ""
+        return []

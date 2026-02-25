@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T05:50:18Z:79d98a8d0e04db8b70f5e82532ac19215867b52fabee834a04933ea8c1e790c5:1cXtaqQ3iA4C6BfgWBRMTjS3CYex_lgLO5SGZz90RslVD4wzgNaV62iS4jvWsCvm7ElHD1XT3RD0QLNrGwqvAQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-25T09:20:03Z:022c6725167509ec14f624ce15ce21f30e9b0481d202826aa1ded5258348acd4:pQ2uEswT2QlbdACTxIqB61k6GhAol1K0Orz-tELd94v_UeWqDZL1moziAOTRRDZ6N2QB6iKq7xVG530IeTtuDw==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -258,7 +258,6 @@ hook before-context (environment)     ← from thread_started hooks
 directive before-context              ← from <before> knowledge items
 directive prompt (body + outputs)     ← from _build_prompt()
 directive after-context               ← from <after> knowledge items
-hook after-context (completion)       ← from thread_started hooks
 ```
 
 Suppressions apply to both `build_system_prompt` and `thread_started` hooks.
@@ -293,7 +292,7 @@ Projects can customize the thread context without modifying system-level knowled
 2. The project-level file will be loaded instead of the system default
 3. No directive changes needed — hooks automatically pick up the override
 
-This works for any core knowledge item: `identity`, `behavior`, `tool-protocol`, `environment`, `completion`.
+This works for any core knowledge item: `identity`, `behavior`, `tool-protocol`, `environment`.
 
 ### Override via Directive `<context>`
 

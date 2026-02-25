@@ -4,7 +4,6 @@ from rye.utils.metadata_manager import MetadataManager
 from rye.utils.path_utils import get_user_ai_path
 from rye.utils.resolvers import (
     get_user_space,
-    get_system_space,
     DirectiveResolver,
     ToolResolver,
     KnowledgeResolver,
@@ -22,7 +21,7 @@ __all__ = [
     "MetadataManager",
     "get_user_space",
     "get_user_ai_path",
-    "get_system_space",
+
     "DirectiveResolver",
     "ToolResolver",
     "KnowledgeResolver",

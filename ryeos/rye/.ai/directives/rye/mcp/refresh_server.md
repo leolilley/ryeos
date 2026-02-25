@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:49a9d5bbe8f01c6e3eca91a2a3c3179a665b099338f02837a10ab7d5fd76b7af:UBJqFOtWdNrcCa4w6hG1bdgPxx_Yp-z8aL5uwGbAUAYU48O83WFbGABu_zm0aAbNRIzk39WDVdFPdHNuGJfmCA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:590fd949ac363194fba8cc5133fa45c170dbedc11741a6e2f7a1c790348a3c7e:d85N-9QmCYsZaB82HtPuFPNQIlzykO9VaL-Y6fjQl54DKgq35wWjy5237qpVXSEDzlkqhpugHE8JC2BCffFGBQ==:9fbfabe975fa5a7f -->
 # MCP Refresh Server
 
@@ -10,7 +11,7 @@ Refresh a registered MCP server's tool discovery.
     <category>rye/mcp</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.mcp.manager</tool>

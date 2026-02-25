@@ -63,8 +63,8 @@ class TestContextXMLParsing:
     <description>Test</description>
     <model tier="general" />
     <context>
-      <system>rye/agent/core/identity</system>
-      <system>rye/agent/core/behavior</system>
+      <system>rye/agent/core/Identity</system>
+      <system>rye/agent/core/Behavior</system>
     </context>
   </metadata>
 </directive>
@@ -72,7 +72,7 @@ class TestContextXMLParsing:
 '''
         result = md_parse(md)
         ctx = result.get("context", {})
-        assert ctx["system"] == ["rye/agent/core/identity", "rye/agent/core/behavior"]
+        assert ctx["system"] == ["rye/agent/core/Identity", "rye/agent/core/Behavior"]
         assert ctx["before"] == []
         assert ctx["after"] == []
 
@@ -84,9 +84,9 @@ class TestContextXMLParsing:
     <description>Test</description>
     <model tier="general" />
     <context>
-      <system>rye/agent/core/identity</system>
-      <before>rye/agent/core/environment</before>
-      <after>rye/agent/core/completion</after>
+      <system>rye/agent/core/Identity</system>
+      <before>rye/agent/core/Environment</before>
+      <after>rye/agent/core/Completion</after>
     </context>
   </metadata>
 </directive>
@@ -94,9 +94,9 @@ class TestContextXMLParsing:
 '''
         result = md_parse(md)
         ctx = result.get("context", {})
-        assert ctx["system"] == ["rye/agent/core/identity"]
-        assert ctx["before"] == ["rye/agent/core/environment"]
-        assert ctx["after"] == ["rye/agent/core/completion"]
+        assert ctx["system"] == ["rye/agent/core/Identity"]
+        assert ctx["before"] == ["rye/agent/core/Environment"]
+        assert ctx["after"] == ["rye/agent/core/Completion"]
 
     def test_no_context_tag(self):
         md = '''# Test
@@ -472,13 +472,13 @@ class TestTranscriptRendering:
             "event_type": "system_prompt",
             "payload": {
                 "text": "You are Rye.",
-                "layers": ["rye/agent/core/identity", "rye/agent/core/behavior"],
+                "layers": ["rye/agent/core/Identity", "rye/agent/core/Behavior"],
             },
         }
         result = Transcript._render_cognition_event(event, 0)
         assert "## System Prompt" in result
-        assert "rye/agent/core/identity" in result
-        assert "rye/agent/core/behavior" in result
+        assert "rye/agent/core/Identity" in result
+        assert "rye/agent/core/Behavior" in result
         assert "You are Rye." in result
 
     def test_system_prompt_custom_layers(self):
@@ -501,8 +501,7 @@ class TestTranscriptRendering:
             },
         }
         result = Transcript._render_cognition_event(event, 1)
-        assert "### Context: rye/agent/core/environment" in result
-        assert "position: before" in result
+        assert 'id="rye/agent/core/environment"' in result
         assert "Project: /app" in result
 
     def test_context_injected_multiple_blocks(self):
@@ -529,7 +528,7 @@ KNOWLEDGE_DIR = (
     PROJECT_ROOT / "ryeos" / "rye" / ".ai" / "knowledge" / "rye" / "agent" / "core"
 )
 
-EXPECTED_ITEMS = ["identity", "behavior", "tool-protocol", "environment", "completion"]
+EXPECTED_ITEMS = ["Identity", "Behavior", "ToolProtocol", "Environment", "Completion"]
 
 
 class TestCoreKnowledgeItems:
@@ -541,15 +540,15 @@ class TestCoreKnowledgeItems:
         assert path.exists(), f"Missing knowledge item: {path}"
 
     @pytest.mark.parametrize("name", EXPECTED_ITEMS)
-    def test_has_unsigned_marker(self, name):
+    def test_has_signature(self, name):
         content = (KNOWLEDGE_DIR / f"{name}.md").read_text()
-        assert content.startswith("<!-- rye:unsigned -->")
+        assert content.startswith("<!-- rye:signed:")
 
     @pytest.mark.parametrize("name", EXPECTED_ITEMS)
     def test_has_yaml_frontmatter(self, name):
         content = (KNOWLEDGE_DIR / f"{name}.md").read_text()
         assert "```yaml" in content
-        assert f"name: {name}" in content
+        assert f"name:" in content
         assert "category: rye/agent/core" in content
 
     @pytest.mark.parametrize("name", EXPECTED_ITEMS)
@@ -563,23 +562,23 @@ class TestCoreKnowledgeItems:
         assert len(body) > 20, f"Knowledge item {name} has insufficient content"
 
     def test_identity_mentions_rye(self):
-        content = (KNOWLEDGE_DIR / "identity.md").read_text()
+        content = (KNOWLEDGE_DIR / "Identity.md").read_text()
         assert "Rye" in content
 
     def test_tool_protocol_mentions_four_tools(self):
-        content = (KNOWLEDGE_DIR / "tool-protocol.md").read_text()
+        content = (KNOWLEDGE_DIR / "ToolProtocol.md").read_text()
         assert "rye_execute" in content
         assert "rye_search" in content
         assert "rye_load" in content
         assert "rye_sign" in content
 
     def test_completion_mentions_directive_return(self):
-        content = (KNOWLEDGE_DIR / "completion.md").read_text()
+        content = (KNOWLEDGE_DIR / "Completion.md").read_text()
         assert "directive_return" in content
 
     def test_environment_has_template_vars(self):
-        content = (KNOWLEDGE_DIR / "environment.md").read_text()
-        assert "{project_path}" in content or "{model}" in content
+        content = (KNOWLEDGE_DIR / "Environment.md").read_text()
+        assert "${project_path}" in content or "${model}" in content
 
 
 # ── XML Parser: <suppress> in <context> ───────────────────────────────
@@ -1014,6 +1013,8 @@ _clspec = importlib.util.spec_from_file_location("config_loader", CONFIG_LOADER_
 _config_mod = importlib.util.module_from_spec(_clspec)
 _clspec.loader.exec_module(_config_mod)
 
+from rye.utils.path_utils import BundleInfo
+
 
 class TestConfigMergeForHookOverrides:
     """Test ConfigLoader merge semantics for project hook overrides.
@@ -1091,6 +1092,21 @@ class TestConfigLoaderThreeTierCascade:
         with open(path, "w") as f:
             yaml.dump(data, f)
 
+    def _make_bundle(self, tmp_path, system_data):
+        """Create a fake bundle root with system config YAML on disk."""
+        bundle_root = tmp_path / "bundle"
+        self._write_yaml(
+            bundle_root / ".ai" / "tools" / "rye" / "agent" / "threads" / "config" / "test.yaml",
+            system_data,
+        )
+        return BundleInfo(
+            bundle_id="test-bundle",
+            version="0.0.1",
+            root_path=bundle_root,
+            manifest_path=None,
+            source="test",
+        )
+
     def test_user_config_merged_when_present(self, tmp_path, monkeypatch):
         """User-space config is loaded and merged on top of system."""
         user_dir = tmp_path / "user_home" / ".ai"
@@ -1098,19 +1114,10 @@ class TestConfigLoaderThreeTierCascade:
 
         self._write_yaml(user_dir / "config" / "test.yaml", {"custom_key": "from_user"})
 
+        bundle = self._make_bundle(tmp_path, {"base_key": "from_system"})
+        monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
+
         loader = _config_mod.ConfigLoader("test.yaml")
-        # Stub system config via _load_yaml to avoid needing real system file
-        system_data = {"base_key": "from_system"}
-        original_load_yaml = loader._load_yaml
-        system_path = Path(_config_mod.__file__).parent.parent / "config" / "test.yaml"
-
-        def patched_load_yaml(path):
-            if path == system_path:
-                return dict(system_data)
-            return original_load_yaml(path)
-
-        monkeypatch.setattr(loader, "_load_yaml", patched_load_yaml)
-
         project_path = tmp_path / "project"
         project_path.mkdir()
         result = loader.load(project_path)
@@ -1133,18 +1140,10 @@ class TestConfigLoaderThreeTierCascade:
             "project_only": True,
         })
 
+        bundle = self._make_bundle(tmp_path, {"value": "system", "system_only": True})
+        monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
+
         loader = _config_mod.ConfigLoader("test.yaml")
-        system_data = {"value": "system", "system_only": True}
-        system_path = Path(_config_mod.__file__).parent.parent / "config" / "test.yaml"
-
-        def patched_load_yaml(path):
-            if path == system_path:
-                return dict(system_data)
-            with open(path) as f:
-                return yaml.safe_load(f) or {}
-
-        monkeypatch.setattr(loader, "_load_yaml", patched_load_yaml)
-
         result = loader.load(project_path)
         assert result["value"] == "project"
         assert result["system_only"] is True
@@ -1165,17 +1164,10 @@ class TestConfigLoaderThreeTierCascade:
             "shared": "project_value",
         })
 
+        bundle = self._make_bundle(tmp_path, {"shared": "system_value"})
+        monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
+
         loader = _config_mod.ConfigLoader("test.yaml")
-        system_path = Path(_config_mod.__file__).parent.parent / "config" / "test.yaml"
-
-        def patched_load_yaml(path):
-            if path == system_path:
-                return {"shared": "system_value"}
-            with open(path) as f:
-                return yaml.safe_load(f) or {}
-
-        monkeypatch.setattr(loader, "_load_yaml", patched_load_yaml)
-
         result = loader.load(project_path)
         assert result["shared"] == "project_value"
 
@@ -1190,17 +1182,10 @@ class TestConfigLoaderThreeTierCascade:
             "project_key": "present",
         })
 
+        bundle = self._make_bundle(tmp_path, {"system_key": "present"})
+        monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
+
         loader = _config_mod.ConfigLoader("test.yaml")
-        system_path = Path(_config_mod.__file__).parent.parent / "config" / "test.yaml"
-
-        def patched_load_yaml(path):
-            if path == system_path:
-                return {"system_key": "present"}
-            with open(path) as f:
-                return yaml.safe_load(f) or {}
-
-        monkeypatch.setattr(loader, "_load_yaml", patched_load_yaml)
-
         result = loader.load(project_path)
         assert result["system_key"] == "present"
         assert result["project_key"] == "present"

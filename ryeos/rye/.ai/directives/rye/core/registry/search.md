@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:415fd8b5e5f57a66dbc29808b38614736a63b3201e086da24ea4692325849ff8:4XLkCrni_iY_kQeyWampBBUQeTu1uLiNBxGItsAUqC705VS-gVkKvCuPdrfBMjj57k6X6LvJ7tNFxA1nf8a0Aw==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:4215daf85b978a921a48bbdca35b64b1a28379dcf52193d68c10a9092e312a6f:6dznx1w36n7K4s-LciWgLt3z9QzK6_5pcQ4cMZWc_AHEJetuebb2s8zw60y_cw4rxwujps0OKbeH8p-VP3cwDg==:9fbfabe975fa5a7f -->
 # Registry Search
 
@@ -10,7 +11,7 @@ Search the registry for items.
     <category>rye/core/registry</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.core.registry.*</tool>

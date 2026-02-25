@@ -73,7 +73,7 @@ Validates inputs, then spawns a managed thread to execute the directive. The thr
   "status": "success",
   "type": "directive",
   "item_id": "rye/core/create_directive",
-  "instructions": "<DIRECTIVE_INSTRUCTION constant>",
+  "your_directions": "<DIRECTIVE_INSTRUCTION constant>",
   "body": "<interpolated directive body>",
   "outputs": [{ "name": "result", "type": "string" }]
 }

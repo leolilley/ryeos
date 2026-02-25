@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:55e2e6f92aa23f5ebe794f4b329f5411499c0f2241c27b68e5381a03c58a8068:73IWT8xx8E8A8bRdvf3Lr7QmIc7x8PADZ6FzezP2XRaWAFffl4HKxBPYIIBYk8qzf6FUmn9f6kFumSPUOtBIBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T09:06:17Z:f7a7fb9fcd6c7570e25f358766c58400cadccce517be49307b47c0632b8c138c:1c0dG1erKTd08Pn7wry3mNN8uMvHuLt2Rdh7i5PhSaw4qwd51wF0eC33tYYYz9C7zoyWecFUeltw0FNyxuHHDA==:9fbfabe975fa5a7f
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """
@@ -9,9 +9,12 @@ __category__ = "rye/agent/threads"
 __tool_description__ = "Thread safety harness — limits, hooks, cancellation, permissions"
 
 import fnmatch
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from module_loader import load_module
 
@@ -259,25 +262,48 @@ class SafetyHarness:
                 interpolated = interpolation.interpolate_action(action, context)
                 result = await dispatcher.dispatch(interpolated)
 
-                if result and result.get("status") == "success":
-                    data = result.get("data", {})
-                    content = (
-                        data.get("content") or data.get("body") or data.get("raw", "")
-                        # LoadTool returns content at top level (no data wrapper)
-                        or result.get("content") or result.get("body", "")
+                if not result or result.get("status") != "success":
+                    item_id = action.get("item_id", "unknown")
+                    error = result.get("error", "unknown error") if result else "no result"
+                    logger.warning(
+                        "Context hook '%s' failed to load %s: %s",
+                        hook.get("id", "?"), item_id, error,
                     )
-                    if content:
-                        item_id = action.get("item_id", "")
-                        item_type = action.get("item_type", "")
-                        tag = item_type or "context"
-                        block = f'<{tag} id="{item_id}">\n{content.strip()}\n</{tag}>'
-                        raw_entry = {"id": item_id, "content": content.strip()}
-                        if hook.get("position", "before") == "after":
-                            after_blocks.append(block)
-                            after_raw.append(raw_entry)
-                        else:
-                            before_blocks.append(block)
-                            before_raw.append(raw_entry)
+                    continue
+
+                data = result.get("data", {})
+                content = (
+                    data.get("content") or data.get("body") or data.get("raw", "")
+                    # LoadTool returns content at top level (no data wrapper)
+                    or result.get("content") or result.get("body", "")
+                )
+                if content:
+                    # Interpolate ${...} placeholders in content with hook context
+                    content = interpolation.interpolate(content, context)
+
+                    item_id = action.get("item_id", "")
+                    item_type = action.get("item_type", "")
+                    # Hook-level wrap control (default: true)
+                    wrap = hook.get("wrap", True)
+
+                    if wrap:
+                        # Use the item's name from parsed metadata as the XML tag
+                        tag = data.get("name", "") if isinstance(data, dict) else ""
+                        if not tag:
+                            tag = result.get("name", "") or item_id.rsplit("/", 1)[-1] or "context"
+                        type_attr = f' type="{item_type}"' if item_type else ""
+                        block = f'<{tag} id="{item_id}"{type_attr}>\n{content.strip()}\n</{tag}>'
+                    else:
+                        tag = data.get("name", "") if isinstance(data, dict) else item_id.rsplit("/", 1)[-1]
+                        block = content.strip()
+
+                    raw_entry = {"id": item_id, "content": content.strip(), "role": tag}
+                    if hook.get("position", "before") == "after":
+                        after_blocks.append(block)
+                        after_raw.append(raw_entry)
+                    else:
+                        before_blocks.append(block)
+                        before_raw.append(raw_entry)
 
         return {
             "before": "\n\n".join(before_blocks),

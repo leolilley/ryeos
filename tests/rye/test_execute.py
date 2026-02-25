@@ -88,7 +88,7 @@ class TestExecuteTool:
 
         assert result["status"] == "success"
         assert result["type"] == "directive"
-        assert "instructions" in result
+        assert "your_directions" in result
         assert "body" in result
         assert "data" not in result  # lean response, no parsed internals
 
@@ -103,7 +103,7 @@ class TestExecuteTool:
             item_type="directive",
             item_id="workflow",
             project_path=str(temp_project),
-            thread=True,
+            parameters={"thread": True},
         )
 
         # thread_directive tool won't exist in the temp project

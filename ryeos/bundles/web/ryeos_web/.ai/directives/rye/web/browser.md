@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:d1e956d15ed30bb6b977a02e595047a8b5fd29daa673da3b07ebb56f4ba8c580:XJwU9xSI86y6EkHwK4p7ze3v6YdPZ_6xEJscjCMLZv1Em_n0nxQy6gcTia17qjKO1cLliArNd0yCz47R3aOoBA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-23T02:07:54Z:ab5702ff15cbe3d0fc0580877015354630925502ec1225328b6fe00f32601d5b:dMrxeIk7Ao3Pgs1h6giwD_-ngdXH86oFIzM7uJlVtA8LuJaif5kPS9GqogbDRYZrI5wBaGa7sqw3B9ekPhRUDA==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 # Web Browser
@@ -11,7 +12,7 @@ Control a browser via playwright-cli — open pages, take screenshots, interact 
     <category>rye/web</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="6" max_tokens="4096" />
+    <limits turns="6" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.web.browser.*</tool>

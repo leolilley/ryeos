@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:ea9c674c2c0a6527151770b4302cb206bbca50974ed2f2eae425dbf7fd2b14e1:L2LeQXTdBMSVZUxBwc9CcvZVLoJ3Jx50lL6azOr6lXIa2x2MEdWTHudiN-Af6XhFcOEIcfy2DDzGHjaAx_JHAA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:d2124cffe0da5e985d642d3ae773010d4d8665f32f3515914485e43db5bc5424:YRudlVJKJv4e1xYJnM7-EaoYe7wBFlP0aqZAcEoFYpIz45UPDpgBhfhueQb7bKzOZzKloDrk0KpEpUP5HvYsDA==:9fbfabe975fa5a7f -->
 # MCP Discovery
 
@@ -10,7 +11,7 @@ Guide 6 in the Rye OS onboarding sequence. Teaches MCP client integration — di
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="12" max_tokens="8192" />
+    <limits turns="12" tokens="8192" />
     <permissions>
       <execute>
         <tool>rye.mcp.*</tool>

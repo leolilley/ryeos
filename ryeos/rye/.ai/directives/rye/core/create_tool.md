@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:ea4c0c674f05939d7aaf6e3ddf61e96c6c896fbe8344407d9e8fdec3c98b9782:Yd3zBhRY3PYU_YpmJmhOxkfcP9TzAhNG0jWOmFDM3WfOWUsXzFyg1CUEfIQyGADTYAE9ShkY70Y-ZHcNGAbJDw==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:48ea9ed65e72f60e04a1863b72797e41161488c942e106c7aaaf281d23ecd570:BY7Ee0IMM7XtH7e28j61Iq5FLdiLHBXI0gy23OUk0bN96IXjWfFxemRh-Iu9WQx2mkfRBWdvydqS1Zh3RyzbDg==:9fbfabe975fa5a7f -->
 # Create Tool
 
@@ -10,7 +11,7 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
     <category>rye/core</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="8" max_tokens="4096" />
+    <limits turns="8" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>

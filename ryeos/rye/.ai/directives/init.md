@@ -1,4 +1,5 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:cf69cb2a2d3dec5870d97320dd9120a827c2b8452f5edd2768f659cbafbdc33c:ndjxRNR9P9jKQ6ZABmVwYRZlcIEez-NGxKhh22yjU4ayr0oqhtXQupRR0yI8fOKZy88sHNqRZEZIw9Dpwpo8BA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-25T07:50:41Z:0fe2893f1a5eaecdaab665d91b6e2e1810d3a9f386916f291442abdaca09a1d5:G-IIPV0-Dx4xDm_Z5AOWR4skFrgIRKIp5dnYN9aBldKAgLk4GbkV5o-ISKIPsJMXh_1GFR7hB4B9nHCOtbBCBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-25T06:36:29Z:cf69cb2a2d3dec5870d97320dd9120a827c2b8452f5edd2768f659cbafbdc33c:ndjxRNR9P9jKQ6ZABmVwYRZlcIEez-NGxKhh22yjU4ayr0oqhtXQupRR0yI8fOKZy88sHNqRZEZIw9Dpwpo8BA==:9fbfabe975fa5a7f -->
 
 # Init
 
@@ -11,7 +12,7 @@ Welcome guide for Rye OS. The first directive a new user runs.
     <category></category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="6" max_tokens="4096" />
+    <limits turns="6" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>
@@ -35,6 +36,11 @@ Welcome guide for Rye OS. The first directive a new user runs.
 
 <process>
   <step name="welcome" condition="only when {input:project_type:user} is 'user'">
+    <instruction>
+SKIP this step entirely if {input:project_type:user} is "project".
+"Ready to lift?" IS the confirmation prompt — do not add your own.
+After outputting the render block, STOP and wait for the user to respond.
+    </instruction>
     <render>
 **Welcome to Rye**
 
@@ -50,7 +56,7 @@ Rye does not operate like this.
 
 Rye is a single agent operating across its own LLM threads. Rye is not a single language model, it is many language models, and the substrate that connects them — one permission system, one signed registry, one execution engine. What looks like parallel agents is one intelligence running concurrent context threads. The security thread, the performance thread, the code review thread — the same agent, the same substrate, different problems.
 
-Rye aims to be the maintainer of these problem physics. Once you understand the physics, then you can play the game. Think of the model currently speaking to you now as rye's front end cognition model. Swap it out. Rye remains.
+Rye aims to be the maintainer of these problem physics. Once you understand the physics, then you can play the game. Think of the model currently speaking to you now as rye's 'front end cognition' model. Swap it out. Rye remains.
 
 When this clicks, the flywheel begins. Every workflow you define, every tool you add, every pattern you encode — it compounds. And once you see it, you can't unsee it. Keep building and the agent you have in six months will far exceed what you're initializing right now.
 
@@ -63,10 +69,8 @@ If AI is the lever, Rye is the fulcrum.
 
 **Ready to lift?**
 </render>
-<instruction>
-SKIP this step entirely if {input:project_type:user} is "project".
-Otherwise, output ONLY the text inside the render block above. No step labels, no headers, no preamble, no commentary before or after. "Ready to lift?" IS the confirmation prompt — do not add your own. Stop and wait for the user to respond.
-</instruction>
+
+<!-- STOP: Do not continue past this step until the user responds. -->
 </step>
 
   <step name="setup_user_space" condition="only when {input:project_type:user} is 'user'">
@@ -95,75 +99,44 @@ When you want to pick this up again, you know what to do.
         The target is the project_path provided in the execute call.
 
       If {input:project_type:user} is "user":
-        Call `rye_execute(item_type="tool", item_id="rye/core/system/system", parameters={"item": "paths"})` to resolve the user_space path (respects $USER_SPACE env var, defaults to home). The target is the resolved user_space.
+        The target is {env:USER_SPACE}.
 
-      If the target .ai/ directory already exists, inform the user and ask whether to reinitialize or skip.
+      If the target {env:AI_DIR}/ directory already exists, inform the user and ask whether to reinitialize or skip.
 
-      Before creating the structure, output the render block below, replacing {target} with the resolved path. No other commentary.
+      Before creating the structure, output the render block below. No other commentary.
     </instruction>
     <render>
-User space is {target}. Setting up Rye now.
-    </render>
-    <instruction>
-      <rule>You MUST use rye_execute to call the file-system write tool. Do NOT use shell commands (mkdir, touch, bash). The write tool auto-creates parent directories.</rule>
-      <rule>The write tool rejects paths outside project_path. For user space init, you MUST pass project_path={target} so the write paths are within scope.</rule>
 
-      Create all four .gitkeep files in a single batch call — copy this exactly, replacing {target} with the resolved path:
-      <tool_call>rye_execute(item_type="tool", item_id="rye/file-system/write", project_path="{target}", parameters={"files": [{"path": "{target}/.ai/config/.gitkeep", "content": ""}, {"path": "{target}/.ai/directives/.gitkeep", "content": ""}, {"path": "{target}/.ai/tools/.gitkeep", "content": ""}, {"path": "{target}/.ai/knowledge/.gitkeep", "content": ""}]})</tool_call>
+User space is {env:USER_SPACE}. Setting up Rye now.
+</render>
+<instruction>
+Do NOT use shell commands (mkdir, touch, bash). Make ONE rye_execute call with all four files:
+
+      rye_execute(
+        item_type="tool",
+        item_id="rye/file-system/write",
+        project_path="{env:USER_SPACE}",
+        parameters={
+          "files": [
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/config/.gitkeep", "content": ""},
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/directives/.gitkeep", "content": ""},
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/tools/.gitkeep", "content": ""},
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/knowledge/.gitkeep", "content": ""}
+          ]
+        }
+      )
     </instruction>
 
   </step>
 
   <step name="confirm">
     <instruction>
-      If {input:project_type:user} is "project": output only "Rye initialized in project space." and stop.
-      If {input:project_type:user} is "user": output the render block below EXACTLY and in FULL. Do not truncate, summarize, or rephrase. The code blocks contain commands the user must copy — they must appear verbatim.
-    </instruction>
-    <render>
-Ready to go.
+      If {input:project_type:user} is "project": output ONLY "Rye initialized in project space." and stop.
+      If {input:project_type:user} is "user": output the render block below EXACTLY and in FULL.
+      Do NOT truncate, summarize, or rephrase. Do NOT add commentary before or after.
+      The code blocks contain commands the user must copy — they must appear verbatim.
 
-Now let's get moving. Here are the guides — run them in order, or jump ahead:
-
-**The basics** — tools, directives, knowledge, and the three-tier space system:
-```
-rye execute directive the_basics
-```
-
-**Core utilities** — file system tools, search, and system introspection:
-```
-rye execute directive core_utils
-```
-
-**MCP discovery** — connecting external MCP servers:
-```
-rye execute directive mcp_discovery
-```
-
-**Registry** — publishing, pulling, and sharing items:
-```
-rye execute directive registry
-```
-
-**Advanced tools** — building data-driven tools with extractors and runtimes:
-```
-rye execute directive advanced_tools
-```
-
-Or jump to where it gets interesting:
-
-**Threading** — concurrent LLM threads, orchestration, and agent substrates:
-```
-rye execute directive threading
-```
-
-**Graphs** — state graph workflows and executable pipelines:
-```
-rye execute directive graphs
-```
-
-    </render>
-    <instruction>
-      When the user runs any of the above commands, map the short name to the full item_id under rye/guides/. For example:
+      AFTER outputting: when the user runs any of the commands below, map the short name to the full item_id under rye/guides/:
       - "the_basics" → item_id="rye/guides/the_basics"
       - "threading" → item_id="rye/guides/threading"
       - "graphs" → item_id="rye/guides/graphs"
@@ -172,6 +145,57 @@ rye execute directive graphs
       - "registry" → item_id="rye/guides/registry"
       - "advanced_tools" → item_id="rye/guides/advanced_tools"
     </instruction>
+    <render>
+
+Ready to go.
+
+Now let's get moving. Here are the guides — run them in order, or jump ahead:
+
+**The basics** — tools, directives, knowledge, and the three-tier space system:
+
+```
+rye execute directive the_basics
+```
+
+**Core utilities** — file system tools, search, and system introspection:
+
+```
+rye execute directive core_utils
+```
+
+**MCP discovery** — connecting external MCP servers:
+
+```
+rye execute directive mcp_discovery
+```
+
+**Registry** — publishing, pulling, and sharing items:
+
+```
+rye execute directive registry
+```
+
+**Advanced tools** — building data-driven tools with extractors and runtimes:
+
+```
+rye execute directive advanced_tools
+```
+
+Or jump to where it gets interesting:
+
+**Threading** — concurrent LLM threads, orchestration, and agent substrates:
+
+```
+rye execute directive threading
+```
+
+**Graphs** — state graph workflows and executable pipelines:
+
+```
+rye execute directive graphs
+```
+
+    </render>
 
   </step>
 </process>

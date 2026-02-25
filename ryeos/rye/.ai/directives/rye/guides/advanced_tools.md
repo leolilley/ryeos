@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:f773a958ec5ede98df99996b5d547015e6293fab3046a73a4aec3fb3e285b5b7:aBLoCif0C740DSezuDw3yNlVqwyMKnx2KVripAs02QN2X-oIV3ie2N7Yj8ZAceBarle8L81H8Hqkix6nQZktDg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:6563ef8fb3f3d77bc8434cd668d850d0746712ea4d00180e6b0538fee8639e18:BnwnqNpU_gv9Gp_6m4_uDBmzTEFbFKiv5SMpS_aHvPQEBCoGZE3mHtz3YVBCgfwbnjBODm2L_K-EB3V3Rq3XDg==:9fbfabe975fa5a7f -->
 # Advanced Tools
 
@@ -10,7 +11,7 @@ Multi-file tools, the anchor system, bundles, and dependency management.
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="12" max_tokens="8192" />
+    <limits turns="12" tokens="8192" />
     <permissions>
       <execute>
         <tool>rye.core.bundler.*</tool>

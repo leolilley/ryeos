@@ -76,11 +76,11 @@ The assembled system prompt is emitted as a `system_prompt` transcript event wit
 
 System messages are passed to the LLM via each provider's native system message mechanism:
 
-| Provider   | How system messages are sent                     |
-| ---------- | ------------------------------------------------ |
-| Anthropic  | `system` parameter on the messages API call      |
-| OpenAI     | `{"role": "system", "content": "..."}` message   |
-| Gemini     | `system_instruction` parameter                   |
+| Provider  | How system messages are sent                   |
+| --------- | ---------------------------------------------- |
+| Anthropic | `system` parameter on the messages API call    |
+| OpenAI    | `{"role": "system", "content": "..."}` message |
+| Gemini    | `system_instruction` parameter                 |
 
 The runner passes the assembled string to the provider — each provider adapter maps it to the correct API field.
 
@@ -88,10 +88,10 @@ The runner passes the assembled string to the provider — each provider adapter
 
 User message context is injected into the first user message via `thread_started` hooks (or `thread_continued` for resumed threads). Two positions are available:
 
-| Position | Built-in Hook         | Knowledge Item                    | Purpose                        |
-| -------- | --------------------- | --------------------------------- | ------------------------------ |
-| `before` | `ctx_environment`     | `rye/agent/core/environment`      | Runtime environment, project info |
-| `after`  | `ctx_completion`      | `rye/agent/core/completion`       | How to signal completion        |
+| Position | Built-in Hook     | Knowledge Item               | Purpose                           |
+| -------- | ----------------- | ---------------------------- | --------------------------------- |
+| `before` | `ctx_environment` | `rye/agent/core/environment` | Runtime environment, project info |
+| `after`  | `ctx_completion`  | `rye/agent/core/completion`  | How to signal completion          |
 
 The runner constructs the first message by sandwiching the directive body:
 
@@ -135,12 +135,12 @@ Directives can declare additional knowledge items to inject using the `<context>
 
 These items are loaded at thread startup and merged with hook-injected context:
 
-| Tag           | Destination                                           |
-| ------------- | ----------------------------------------------------- |
-| `<system>`    | Appended to the system message (after hook layers)    |
-| `<before>`    | Injected between hook before-context and directive body |
-| `<after>`     | Injected between directive body and hook after-context |
-| `<suppress>`  | Skips a named hook-driven context layer               |
+| Tag          | Destination                                             |
+| ------------ | ------------------------------------------------------- |
+| `<system>`   | Appended to the system message (after hook layers)      |
+| `<before>`   | Injected between hook before-context and directive body |
+| `<after>`    | Injected between directive body and hook after-context  |
+| `<suppress>` | Skips a named hook-driven context layer                 |
 
 Directive-declared context items are resolved via the `load` tool (same as knowledge items loaded by hooks), so they follow the standard three-tier resolution: project → user → system.
 
@@ -286,38 +286,38 @@ context_hooks:
 
 This gives web directives a specialized identity while all other directives keep the default. The condition evaluator supports:
 
-| Operator   | Example                                           | Matches when                    |
-| ---------- | ------------------------------------------------- | ------------------------------- |
-| `eq`       | `{path: "directive", op: "eq", value: "init"}`    | Exact match                     |
-| `contains` | `{path: "directive", op: "contains", value: "web"}` | Substring match               |
-| `regex`    | `{path: "directive", op: "regex", value: "^project/deploy/"}`  | Regex match        |
+| Operator   | Example                                                       | Matches when       |
+| ---------- | ------------------------------------------------------------- | ------------------ |
+| `eq`       | `{path: "directive", op: "eq", value: "init"}`                | Exact match        |
+| `contains` | `{path: "directive", op: "contains", value: "web"}`           | Substring match    |
+| `regex`    | `{path: "directive", op: "regex", value: "^project/deploy/"}` | Regex match        |
 | `in`       | `{path: "model", op: "in", value: ["gemini", "claude"]}`      | Value in list      |
 | `not`      | `{not: {path: "directive", op: "contains", value: "web"}}`    | Inverts child      |
-| `any`      | `{any: [{...}, {...}]}`                           | Any child matches               |
-| `all`      | `{all: [{...}, {...}]}`                           | All children match              |
+| `any`      | `{any: [{...}, {...}]}`                                       | Any child matches  |
+| `all`      | `{all: [{...}, {...}]}`                                       | All children match |
 
 The context dict available to conditions includes: `directive`, `directive_body`, `model`, `limits`, `inputs`.
 
 ### Precedence Summary
 
-| Mechanism | Scope | Effect |
-| --------- | ----- | ------ |
-| Project knowledge item override | All threads in project | Shadows system knowledge via LoadTool cascade |
-| Project `hooks.yaml` | All threads matching condition | Adds extra context hooks |
-| Project `hook_conditions.yaml` | All threads matching condition | Replaces/adds system hooks by ID |
-| Directive `<suppress>` | Single directive | Skips specific hook layers |
-| Directive `<before>`/`<after>`/`<system>` | Single directive | Adds extra knowledge items |
+| Mechanism                                 | Scope                          | Effect                                        |
+| ----------------------------------------- | ------------------------------ | --------------------------------------------- |
+| Project knowledge item override           | All threads in project         | Shadows system knowledge via LoadTool cascade |
+| Project `hooks.yaml`                      | All threads matching condition | Adds extra context hooks                      |
+| Project `hook_conditions.yaml`            | All threads matching condition | Replaces/adds system hooks by ID              |
+| Directive `<suppress>`                    | Single directive               | Skips specific hook layers                    |
+| Directive `<before>`/`<after>`/`<system>` | Single directive               | Adds extra knowledge items                    |
 
 ## Hooks vs `<context>`
 
 Both hooks and `<context>` inject knowledge, but they serve different purposes:
 
-| Aspect          | Hooks                                      | `<context>`                              |
-| --------------- | ------------------------------------------ | ---------------------------------------- |
-| **Definition**  | `hook_conditions.yaml` or `hooks.yaml`     | Directive `<context>` metadata section   |
-| **When**        | Dynamic — evaluated at runtime with conditions | Static — declared at authoring time   |
-| **Conditional** | Yes — `condition` field with full evaluator | No — always loaded if declared           |
-| **Scope**       | System-wide, project-wide, or per-directive | Per-directive (composed through `extends`) |
+| Aspect          | Hooks                                               | `<context>`                                     |
+| --------------- | --------------------------------------------------- | ----------------------------------------------- |
+| **Definition**  | `hook_conditions.yaml` or `hooks.yaml`              | Directive `<context>` metadata section          |
+| **When**        | Dynamic — evaluated at runtime with conditions      | Static — declared at authoring time             |
+| **Conditional** | Yes — `condition` field with full evaluator         | No — always loaded if declared                  |
+| **Scope**       | System-wide, project-wide, or per-directive         | Per-directive (composed through `extends`)      |
 | **Use case**    | Infrastructure concerns, dynamic identity switching | Domain knowledge specific to a directive's task |
 
 In practice, hooks handle foundational context (identity, behavior, tool protocol, environment) and dynamic switching (different identity per directive category), while `<context>` handles directive-specific domain knowledge that varies by task.

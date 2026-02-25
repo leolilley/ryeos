@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:7c2f5e09f3b14e314ae171fb8cca2f31adc950d5185be8ea22b4471b414d810d:_HMhmB5oQzuKK5vo99mp4PGzKtTV6LfQbPuZVcq-QiJuwnvWcsiOGSjuhR6jiBTt26sUrEzzk-94B1U7tSjLAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T08:25:04Z:8b7481ebb9ad0899972120afe8b91cc184d6a1c676a6112e080b298b74932480:ba928_203OoRSLuY-WErygfYRFGP1MBG_uydBx7MEWbMs7zpdx1cW5zagsxJMOcaMwgJTe2xsihmJOFPwDBsCg==:9fbfabe975fa5a7f
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from rye.constants import AI_DIR
-from rye.utils.path_utils import get_user_ai_path
+from rye.utils.path_utils import get_user_ai_path, get_system_spaces
 
 
 class ConfigLoader:
@@ -21,13 +21,18 @@ class ConfigLoader:
         self._cache: Dict[str, Any] = {}
 
     def load(self, project_path: Path) -> Dict[str, Any]:
-        """Load config with system → user → project cascade."""
+        """Load config with system (all bundles) → user → project cascade."""
         cache_key = str(project_path)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        system_path = Path(__file__).parent.parent / "config" / self.config_name
-        config = self._load_yaml(system_path)
+        # System defaults — merge from all bundles
+        config: Dict[str, Any] = {}
+        for bundle in get_system_spaces():
+            system_path = bundle.root_path / AI_DIR / "tools" / "rye" / "agent" / "threads" / "config" / self.config_name
+            if system_path.exists():
+                bundle_config = self._load_yaml(system_path)
+                config = self._merge(config, bundle_config)
 
         user_config_path = get_user_ai_path() / "config" / self.config_name
         if user_config_path.exists():

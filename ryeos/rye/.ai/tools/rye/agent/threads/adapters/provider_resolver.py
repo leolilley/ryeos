@@ -1,4 +1,8 @@
-# rye:signed:2026-02-25T00:02:14Z:0e215b754fb18b5583cf8670f4bd462f68b9d21ad7667f2c0af744b19b8f2306:1Avv0rj6qLfTkQvAxkkAUKbD9wa-W4xmgmjhiIIJWPTV1JdWVwCU79LRGFf7Pki66PHe-lR_Sj-omOzBJaHjCg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T08:12:00Z:c4a8d2a776e6485073c7e6f08b7ccb371a14e50a55a08d5003ae2f7716d24a12:Sg7gvz0vRdZTUAegK9F45EOZr4yatChYQy0OBQgnHWrvICu9Rp2olDB56utt7naVZIx7d2Kv_K80kil6w7UdCg==:9fbfabe975fa5a7f
+
+# # rye:signed:2026-02-25T08:10:44Z:0d965e6faa7916fa1958c1a0bc2523075bfbe0c32f4513475a0b5841296a335f:wN-agmztF7QYrpCM1J8REfAY1SemuAWtu0Ere1sB-IfKUVTK3hZSS4rUwvMDvfOg0FieSDirlOYrEL5DH4WGCg==:9fbfabe975fa5a7f
+
+
 """
 provider_resolver.py: Resolve model/tier to a concrete provider adapter.
 
@@ -24,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 
 from rye.constants import AI_DIR
-from rye.utils.path_utils import get_user_space, get_system_space
+from rye.utils.path_utils import get_user_space, get_system_spaces
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +55,13 @@ def _load_agent_config(project_path: Optional[Path] = None) -> Dict:
 
     config: Dict = {}
 
-    # System defaults (shipped with rye)
-    system_config = get_system_space() / AI_DIR / "config" / "agent" / "agent.yaml"
-    if system_config.exists():
-        with open(system_config) as f:
-            config = yaml.safe_load(f) or {}
+    # System defaults — merge from all bundles (core first, then extensions)
+    for bundle in get_system_spaces():
+        system_config = bundle.root_path / AI_DIR / "config" / "agent" / "agent.yaml"
+        if system_config.exists():
+            with open(system_config) as f:
+                bundle_config = yaml.safe_load(f) or {}
+            config = _deep_merge(config, bundle_config)
 
     # User overrides
     user_config = get_user_space() / AI_DIR / "config" / "agent" / "agent.yaml"
@@ -139,15 +145,17 @@ def _get_provider_dirs(project_path: Optional[Path] = None) -> List[Path]:
     user = get_user_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"
     if user.exists():
         dirs.append(user)
-    system = get_system_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"
-    if system.exists():
-        dirs.append(system)
+    for bundle in get_system_spaces():
+        system = bundle.root_path / AI_DIR / "tools" / "rye" / "agent" / "providers"
+        if system.exists():
+            dirs.append(system)
     if os.environ.get("RYE_DEBUG"):
         all_searched = []
         if project_path:
             all_searched.append(str(project_path / AI_DIR / "tools" / "rye" / "agent" / "providers"))
         all_searched.append(str(get_user_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"))
-        all_searched.append(str(get_system_space() / AI_DIR / "tools" / "rye" / "agent" / "providers"))
+        for bundle in get_system_spaces():
+            all_searched.append(str(bundle.root_path / AI_DIR / "tools" / "rye" / "agent" / "providers"))
         logger.debug("Provider dirs searched: %s → found: %s", all_searched, [str(d) for d in dirs])
     return dirs
 

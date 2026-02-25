@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:f6b13dde7b50f0c424feb547422b410ef39f92c168c345446256919cac25749f:ppyKk-SmehIlWHXa4Bvz0qIZbE4C8EC6NJ_DLMmNFX12JTCy1G34ON5vwgOS85-AGzLBcsxnV9SQlhyXG73yDw==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:4b59b87de5bcef04a06e87844bea10f11fb022adb88542ed4de81a916455c60e:MABOAW6Bglh00oltA86t1kRSDoYFmY1crmOBFRHQLt0z5e4M7w7l_9u85iy3Aaef_9nj9EK4cMfe250FUZsUDg==:9fbfabe975fa5a7f -->
 
 # Create Threaded Directive
@@ -11,7 +12,7 @@ Create a directive with full thread execution support — model configuration, c
     <category>rye/agent/threads</category>
     <author>rye</author>
     <model tier="fast" />
-    <limits max_turns="8" max_tokens="4096" />
+    <limits turns="8" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>
@@ -69,9 +70,9 @@ Create a directive with full thread execution support — model configuration, c
 
   <step name="determine_limits">
     Map {input:complexity} to default limits:
-    - simple: max_turns=6, max_tokens=4096, spend=0.05
-    - moderate: max_turns=15, max_tokens=200000, spend=0.50
-    - complex: max_turns=30, max_tokens=200000, spend=1.00
+    - simple: turns=6, tokens=4096, spend=0.05
+    - moderate: turns=15, tokens=200000, spend=0.50
+    - complex: turns=30, tokens=200000, spend=1.00
   </step>
 
   <step name="write_directive">

@@ -4,6 +4,7 @@ Extracted from ExecuteTool._run_directive() so that both execute.py and
 thread_directive.py can reuse the same logic without circular imports.
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,6 +19,25 @@ from rye.utils.parser_router import ParserRouter
 # {input:key|default}  — fallback to default if missing (pipe separator)
 _INPUT_REF = re.compile(r"\{input:(\w+)(\?|[:|][^}]*)?\}")
 _DOLLAR_INPUT_RE = re.compile(r"\$\{inputs\.(\w+)\}")
+
+# {env:VAR}            — required, kept as-is if missing
+# {env:VAR:default}    — fallback to default if env var not set
+_ENV_REF = re.compile(r"\{env:(\w+)(?::([^}]*))?\}")
+
+def _resolve_env_refs(value: str) -> str:
+    """Resolve {env:VAR} and {env:VAR:default} placeholders from os.environ."""
+
+    def _replace(m: re.Match) -> str:
+        var = m.group(1)
+        default = m.group(2)
+        env_val = os.environ.get(var)
+        if env_val is not None:
+            return env_val
+        if default is not None:
+            return default
+        return m.group(0)
+
+    return _ENV_REF.sub(_replace, value)
 
 
 def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
@@ -45,9 +65,10 @@ def _resolve_input_refs(value: str, inputs: Dict[str, Any]) -> str:
 
 
 def _interpolate_parsed(parsed: Dict[str, Any], inputs: Dict[str, Any]) -> None:
-    """Interpolate {input:name} refs in body, actions, and content fields."""
+    """Interpolate {input:name} and {env:VAR} refs in body, actions, and content fields."""
     for key in ("body", "content", "raw"):
         if isinstance(parsed.get(key), str):
+            parsed[key] = _resolve_env_refs(parsed[key])
             parsed[key] = _resolve_input_refs(parsed[key], inputs)
 
     for action in parsed.get("actions", []):

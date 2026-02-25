@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:bca467142c9a28332d7c8c8e81dcc3ea177452497137e1cc666b5d5c61fe814b:bTQ5NQU827mUXPT_-wZ-ToSEIBmqeSa8fBT7DJXv-A-UoC8DkpiYRtlOxlOT7hrLguhokuhXzXAeJymlPwK2Bg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T08:27:07Z:039ff536780ef616b1643ffa44144719b912a00f22c593f6ca299196830d9637:5_pLupZ9Oby-HisJTuuAxY5jbY1VRlkhvlx3PNz5zVNyM_Vu_N5qb-VZCRJhoeVb2Lh-JH2k6aO7aQdSYsrBCA==:9fbfabe975fa5a7f
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
@@ -102,7 +102,7 @@ class ToolDispatcher:
                     item_type=item_type,
                     item_id=item_id,
                     project_path=project_path_str,
-                    source=self._get(action, params, "source", "project"),
+                    source=self._get(action, params, "source", None),
                 )
             elif primary == Action.SIGN:
                 return await tool.handle(

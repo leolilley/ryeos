@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:b1569f1d53127f25326f90ef2ad2db5bd9c453586c6ab9d044384832df726cdb:d8CBsgRKGP2AsYuxdIVm7DUI9pEf9PmcqeQYiOJH9TGCd85Ql3CGh1CPTUjnsvwE9r5EQQAC7ykCYgXuVY0CCQ==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-23T02:07:54Z:4a32dce853e06aad7d8af84027e4935c019c401f2a537d722b4967289a481117:PmaczLSBVv9ds-zejogoGGcCq1oEGhAhnaX9HojDA0bQdtK877RxdpYR-ZGhnjxta75nR7cI8DxpJ9IKpmS3Dw==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 # Code Diagnostics
@@ -11,7 +12,7 @@ Run linters and type checkers on a file — ruff, mypy, eslint, tsc, and more.
     <category>rye/code</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="4096" />
+    <limits turns="3" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.code.diagnostics.*</tool>

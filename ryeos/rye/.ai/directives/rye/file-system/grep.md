@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:aead5d7280c16264e8dcbb486cde7b29a312b89222602120e3b57e7bf45b9391:-hTVT7zMBj5OHT8D9cvjK3ayu01UlgSWGJxR4wJT5OGdiWWAsdkV871UjnQ_eFTGsEl2w2qQ54KVDaHIPmMyCg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:7d84f010f0fdf6b6ee41285aed3b86aae11aac80ba88686a56d2949a4e7a1c1c:wcAi8yKewNUCMv7avgJJOpa1dzk_we6DiK1tVmioRDu0ejh1s9RFz_A1XarDIbLgOuO0PMOk9U3u5o0sBrIYCw==:9fbfabe975fa5a7f -->
 # Grep
 
@@ -10,7 +11,7 @@ Search file contents for a text or regex pattern.
     <category>rye/file-system</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.file-system.grep</tool>

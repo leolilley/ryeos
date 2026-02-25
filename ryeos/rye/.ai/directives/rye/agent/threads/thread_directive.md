@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:5690976a2346861f377798c2e4429d0df3c92037b20d5ebaab2fd9b8db0da1e8:U7UrUbcp0qSIh2RMDfJkZFAqLVKGnFTqZYZB6qsM01GbYmIRi_hKUD16KSToakjD1QkpcjB-JLXjmUGH7LtXDA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:b596181f60885e1e7e9e00a4d0fe1f753343215c47ac3fb7f4935c0ef98fc450:yVQHXx-9JNgHonX1Lrxj6eIWmWF_-fEBt_MAMtlCczT1k-bSTwPxwNyIwHsgzd4F2XyOxSSZB1Hpxayy6h8wAg==:9fbfabe975fa5a7f -->
 # Thread Directive
 
@@ -10,7 +11,7 @@ Execute a directive in a managed thread with an LLM loop.
     <category>rye/agent/threads</category>
     <author>rye-os</author>
     <model tier="general" />
-    <limits max_turns="4" max_tokens="4096" />
+    <limits turns="4" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.agent.threads.thread_directive</tool>
@@ -32,7 +33,7 @@ Execute a directive in a managed thread with an LLM loop.
       Override the model used for thread execution
     </input>
     <input name="limit_overrides" type="object" required="false">
-      Override default limits (max_turns, max_tokens, max_spend)
+      Override default limits (turns, tokens, spend)
     </input>
   </inputs>
 

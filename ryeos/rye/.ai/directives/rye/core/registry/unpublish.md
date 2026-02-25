@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:a36fddc037bd6c63cc28c5ac06c97e13d7fc309a87c6c82df2dbde0e2fb7c70f:k9s21mqXv-cQx7rtTcoA_jDs8TPp-keraoHpkBKrRXcLGTrEF35SGgxtz4fePBcmttHcxEZAIezc_bXlOjx6AQ==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:3a18137035b4ed30fbc50e0d8c2e83324f0c042113d12f108c9daf6eaab8c599:HNnVliIWSVu9SpyukcDkzesztqlBAhIT7yc21qVX2DOlKzV6peVpm40DkwAVqzjyAw_UWoQ6f3xtn3iqexfWAw==:9fbfabe975fa5a7f -->
 # Registry Unpublish
 
@@ -10,7 +11,7 @@ Make an item private in the registry.
     <category>rye/core/registry</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.core.registry.*</tool>

@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:e01bf80300ac7d614551eb19e0ade1c0f8cdafde41156073133018bc5df2fe28:0BR8iJU6ovqjE2TEa8og7xdb11w3l8kgsltmTo_hn5WUyw5_I_Nz2vELaVix9QBIrOCS_zWv3Atd6AcFK63YBw==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:71244b3930bd72ceb6b0cb447220595e451412b331cdece70b04bb7cb4b15333:ceVzb0TalRKdq9LcoQVcjGNWU2dVfLpy0hkumBN7AYrtre7KRf2NizKBPuJ_kmbKT3ksJiraHUEda_vTXgEFCw==:9fbfabe975fa5a7f -->
 # Graphs
 
@@ -10,7 +11,7 @@ Guide 8 in the Rye OS onboarding sequence. Declarative state graphs — nodes, e
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="15" max_tokens="8192" />
+    <limits turns="15" tokens="8192" />
     <permissions>
       <execute>
         <tool>rye.core.runtimes.*</tool>

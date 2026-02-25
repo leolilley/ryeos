@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:13Z:7fc8c520e7180ff00b1ba52ae9f7d7212b45002f42b0cba336cccc679364dd7e:1FzG0VdmzIpcH6qWYcIHz0VXNYbuJoTRxfTe-7AJD4zfk8UezzbfBOAjDvutdGUGBXEe_5MTxlsiZWJifxVWDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T09:20:03Z:05ff36f61a8f7b7572f72f18d36777cd58f73f446202c7ce0a81306531200da0:aG4GnqJKujUVE8N0qACdgYFWFEycIFSBV7ietJBWZ2wMUHuUy05usNX7Wr6l8XgfU9CAUdn_ZeZOy4LBUu--Bw==:9fbfabe975fa5a7f
 # config/hook_conditions.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"
@@ -134,9 +134,9 @@ context_hooks:
     layer: 2
     position: "before"
     action:
-      primary: "load"
+      primary: "execute"
       item_type: "knowledge"
-      item_id: "rye/agent/core/identity"
+      item_id: "rye/agent/core/Identity"
     description: "Load agent identity into system prompt"
 
   - id: "system_behavior"
@@ -144,9 +144,9 @@ context_hooks:
     layer: 2
     position: "before"
     action:
-      primary: "load"
+      primary: "execute"
       item_type: "knowledge"
-      item_id: "rye/agent/core/behavior"
+      item_id: "rye/agent/core/Behavior"
     description: "Load behavioral rules into system prompt"
 
   - id: "system_tool_protocol"
@@ -154,9 +154,9 @@ context_hooks:
     layer: 2
     position: "before"
     action:
-      primary: "load"
+      primary: "execute"
       item_type: "knowledge"
-      item_id: "rye/agent/core/tool-protocol"
+      item_id: "rye/agent/core/ToolProtocol"
     description: "Load tool usage protocol into system prompt"
 
   - id: "ctx_environment"
@@ -164,20 +164,21 @@ context_hooks:
     layer: 2
     position: "before"
     action:
-      primary: "load"
+      primary: "execute"
       item_type: "knowledge"
-      item_id: "rye/agent/core/environment"
+      item_id: "rye/agent/core/Environment"
     description: "Inject runtime environment context into first user message"
 
-  - id: "ctx_completion"
+  - id: "ctx_directive_instruction"
     event: "thread_started"
     layer: 2
-    position: "after"
+    position: "before"
+    wrap: false
     action:
-      primary: "load"
+      primary: "execute"
       item_type: "knowledge"
-      item_id: "rye/agent/core/completion"
-    description: "Inject completion protocol into first user message"
+      item_id: "rye/agent/core/DirectiveInstruction"
+    description: "Inject directive execution instruction before directive body"
 
 action_primaries: ["execute", "search", "load", "sign"]
 

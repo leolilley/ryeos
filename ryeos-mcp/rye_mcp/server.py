@@ -52,6 +52,13 @@ class RYEServer:
         self.user_space = str(get_user_space())
         self.debug = os.getenv("RYE_DEBUG", "false").lower() == "true"
         self.server = Server("rye")
+
+        # Export resolved system values as env vars so directives can
+        # reference them via {env:USER_SPACE}, {env:AI_DIR} interpolation.
+        from rye.constants import AI_DIR
+        os.environ.setdefault("USER_SPACE", self.user_space)
+        os.environ.setdefault("AI_DIR", AI_DIR)
+
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -97,24 +104,6 @@ class RYEServer:
                                 "type": "boolean",
                                 "default": False,
                                 "description": EXECUTE_DRY_RUN_DESC,
-                            },
-                            "thread": {
-                                "type": "boolean",
-                                "default": False,
-                                "description": "For directives: spawn a managed thread (LLM loop, safety harness, budgets) instead of returning content in-thread. Default is false (return content for the calling agent to follow).",
-                            },
-                            "async": {
-                                "type": "boolean",
-                                "default": False,
-                                "description": "For directives (requires thread=true): return immediately with thread_id instead of waiting for completion.",
-                            },
-                            "model": {
-                                "type": "string",
-                                "description": "For directives (requires thread=true): override the LLM model used for thread execution.",
-                            },
-                            "limit_overrides": {
-                                "type": "object",
-                                "description": "For directives (requires thread=true): override default limits (turns, tokens, spend, spawns, duration_seconds, depth).",
                             },
                         },
                         "required": ["item_type", "item_id", "project_path"],

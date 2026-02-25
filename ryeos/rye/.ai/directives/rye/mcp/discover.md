@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:24b6f97bed95c261fa031375d1b730fd1391b3b695a0081f6f3b31b0279f4a87:MWB5PpyRvo8PSi9pebiulYkSg2M8C1fCPv9hhkKRUhfLP4a4Ql6SERYL7NeR8INiIer7DKavhDvoy-mH1-DXBA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:811c201dcde19330837d6803df856f33df9ed90ec69ee6916d7a912fae6d6eb0:BiD6yPaBVRo1AULkXz0uqn3WZKBs9dfFQwjS9isR_alYs5xwBYhp3oZ9Grr7rxpeqPnvpLZ74654LwG-9OzlAA==:9fbfabe975fa5a7f -->
 # MCP Discover
 
@@ -10,7 +11,7 @@ Discover available tools on an MCP server.
     <category>rye/mcp</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="4096" />
+    <limits turns="3" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.mcp.discover</tool>

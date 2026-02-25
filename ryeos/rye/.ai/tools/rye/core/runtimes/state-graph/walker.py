@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:d0de0b342e5cb88438e09600f030154eb43848d6939c88dadeb5c749f45e8dde:PW45sYMItWQ8rzWNKj7CUoyaC6iJLVl_q9vMYF-oV0VpAfSHLBUXe06FUVkJpusTTg1WdJFonhuj5SVILsqrDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T08:02:00Z:4a566e7a12b4753753c6af614d174155dd14648135cbae1a579d477fe1847a09:ZwESWiwnO_VRXEV88PW8jw9L-qViRmuZt12ZGs9Knw4zLjV2aD66d1HsVh8utvgzLdq75orVmLmixu_VT9EDDA==:9fbfabe975fa5a7f
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -1662,16 +1662,19 @@ if __name__ == "__main__":
 
     # If called from subprocess with --graph-run-id and --pre-registered,
     # call execute() directly (child process behavior)
-    if args.graph_run_id and args.pre_registered:
-        result = asyncio.run(execute(
-            graph_config,
-            params,
-            args.project_path,
-            graph_run_id=args.graph_run_id,
-            pre_registered=True,
-        ))
-    else:
-        # Normal entry (possibly with async=True for fork/subprocess)
-        result = run_sync(graph_config, params, args.project_path)
+    try:
+        if args.graph_run_id and args.pre_registered:
+            result = asyncio.run(execute(
+                graph_config,
+                params,
+                args.project_path,
+                graph_run_id=args.graph_run_id,
+                pre_registered=True,
+            ))
+        else:
+            # Normal entry (possibly with async=True for fork/subprocess)
+            result = run_sync(graph_config, params, args.project_path)
+    except Exception as exc:
+        result = {"success": False, "error": str(exc)}
 
     print(json.dumps(result, default=str))

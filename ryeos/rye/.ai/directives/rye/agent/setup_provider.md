@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:364691f26d54128763f5394b978fcdc312a033c4d6fedb25db85ca177954a01b:8MlDFCMN4GIzNSYa6IaP_-cpGCY3zlD-lbpQh4Weca0bOphyJvTICo6jdx7_UmsiYs2hPwnrcfN7jPTz2YsoDg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:8e9647fcd231f3aa04428a71275a68457bed4327da0c652843a7f5c68d68a822:r6PSJuqSIZgtyO6eaHmYtmlxeUN9KgMT58RHPLrAsFZtldaIgioYqsjEdFB8c41eUjnX9dc0UCiW5BTJ2YaSBw==:9fbfabe975fa5a7f -->
 
 # Setup Provider
@@ -11,7 +12,7 @@ Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider
     <category>rye/agent</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="6" max_tokens="4096" />
+    <limits turns="6" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>

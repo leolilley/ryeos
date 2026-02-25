@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:cf1eb75bf45bdf65f8b47323294e9f6f4c013cb3d4f8c5a63bf0b54239362ad3:CJJ0INLXFXa8QuGBLq7YjdrTDqz-i2OHyiv-ib7MW1OHPaUw3nTdQ3iViekmsuuT9f_v0JIHm_Alfu9Vd0rdDA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:794b02b5c99916b032e5959fa908a73a6b6f64694e61cf9e7775c25479184f00:5OFRFx5m4KHdI8Dvb1fmtZhUDOeG_wyImkBX_zP7_i9jp7jpMIargQYP4x4dl7lXwV_ENU6kQhZQFOgDwUniCw==:9fbfabe975fa5a7f -->
 
 # The Basics
@@ -15,7 +16,7 @@ This guide introduces you to the primary items and tools that power Rye.
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="20" max_tokens="8192" />
+    <limits turns="20" tokens="8192" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>

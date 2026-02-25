@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:f2e9e8465c9128f0970edc8e84ec5e6220aec8a799edcef21b54f5e79142b7fc:ApW1He9JBhECSgEpxpX8-0x3jbzjsLoSG8WOYudNtqw_msupGksgKk4_rMJNbI4m75D5V6-VLtsc9_fkyjRfDQ==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:1cb0df8f189ab077c85d49861e5ccf32a435914f2c5e78f1c9fe2ae506c1b19b:qgFkePvD39lqTFXPIag7jBCVTFnC3Epu2JexZWx1Q1aUkXvSxySwnTICzgixG66BtgZ_-iz1Ze2fnDLDxyUyAQ==:9fbfabe975fa5a7f -->
 # Registry Login Poll
 
@@ -10,7 +11,7 @@ Poll for device authentication completion.
     <category>rye/core/registry</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.core.registry.*</tool>

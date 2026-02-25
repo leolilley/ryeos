@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:f3489a1fb145940d3ac7ac726f495de5c2e6eb1fb9a1236d72912a4d364c8135:HIalsIK00Ge4Ip52c73thOEnmQf5JYKrTBTkbsskEFZpKSW0e0d4w1sHMCegt8yrRxs32Nb89PKid3Mzxh0qBQ==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:ccf484ba1052f84fc55e07fcf69224f711744a7b385c3cf5c7e38c90aae67dec:hRfRpQ3_cn6dBDcUVgpI1utzIYS1FLcRIkz_39XfAkrFC3JXHtdn9ak2Eg2xpdP8WGwfOJKwlC0HDfIxZ3fsAQ==:9fbfabe975fa5a7f -->
 # Edit Lines
 
@@ -10,7 +11,7 @@ Edit specific lines in a file using line IDs from a prior read.
     <category>rye/file-system</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.file-system.edit_lines</tool>

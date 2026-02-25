@@ -1154,12 +1154,6 @@ class PrimitiveExecutor:
 
         return get_user_space()
 
-    def _get_system_space(self) -> Path:
-        """Get system space path (bundled with rye)."""
-        from rye.utils.path_utils import get_system_space
-
-        return get_system_space()
-
     def _get_system_spaces(self) -> List[BundleInfo]:
         """Get all system space roots (core + addon bundles)."""
         from rye.utils.path_utils import get_system_spaces

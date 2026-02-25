@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:052a33a242a16cd30ae9b89d5b0717cf4d392e962ecd7a3b7d7d713d8f564671:CXufHIxUA9QPs1cuzC9KugTqlORg9VEotybd9wUaXfl0htCpXfxMWhaMMv4rT4LOKHaDZQzbLQvNKkm5pFJdBw==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:22d4c2b20dd873e1dea13d73a927294b5b96b2c1b660a7ff652d8f4b3777e73e:lB7WTPj0X1eSt5qPYsK8A0SFSNtsgpylp7qUo32--RmkurkXPJoTbioxZh9DytHFZfwQe1VK6PpEqbVrCW7ADA==:9fbfabe975fa5a7f -->
 # Sign
 
@@ -10,7 +11,7 @@ Validate and sign a directive, tool, or knowledge item.
     <category>rye/primary</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <sign>
         <directive>*</directive>

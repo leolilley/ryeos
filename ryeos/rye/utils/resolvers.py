@@ -20,7 +20,6 @@ import logging
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.path_utils import (
     get_user_space,
-    get_system_space,
     get_system_spaces,
     get_project_type_path,
     get_user_type_path,
@@ -36,7 +35,6 @@ class DirectiveResolver:
     def __init__(self, project_path: Optional[Path] = None):
         self.project_path = project_path or Path.cwd()
         self.user_space = get_user_space()
-        self.system_space = get_system_space()
 
     def get_search_paths(self) -> List[Tuple[Path, str]]:
         """Get search paths in precedence order with space labels."""
@@ -88,7 +86,6 @@ class ToolResolver:
     def __init__(self, project_path: Optional[Path] = None):
         self.project_path = project_path or Path.cwd()
         self.user_space = get_user_space()
-        self.system_space = get_system_space()
 
     def get_search_paths(self) -> List[Tuple[Path, str]]:
         """Get search paths in precedence order with space labels."""
@@ -146,7 +143,6 @@ class KnowledgeResolver:
     def __init__(self, project_path: Optional[Path] = None):
         self.project_path = project_path or Path.cwd()
         self.user_space = get_user_space()
-        self.system_space = get_system_space()
 
     def get_search_paths(self) -> List[Tuple[Path, str]]:
         """Get search paths in precedence order with space labels."""

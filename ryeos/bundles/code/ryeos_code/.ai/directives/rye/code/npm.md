@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:5b690a6704b241e12076949b9049a1f1b08a7c966dabc2421667691b47e180fc:t6gKVLx_lhQBwkTVIlbLfuHlq_lXIN6llRUzjC6KIpkVtm7PYzU_vdYOkt8YeaTi29IzhDqdmUcCPFuPV8oWAQ==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-23T02:07:54Z:52571eb2ca276d9ebbaffd1e708c54ef0dc2d965f73232a2f0846ce36d27342a:Ao0lr3qqRbf7zszo1CC8RrUi9Fs17-ysd6HnBTvbJ2D08lzA9HY_H_5hLYpKbvD3i6r0ncbOWlISPUnJEqu6DQ==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 # NPM
@@ -11,7 +12,7 @@ Run NPM operations — install packages, run scripts, build, test, init, and exe
     <category>rye/code</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="4096" />
+    <limits turns="3" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.code.npm.*</tool>

@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:1d7b49bef84cc21979cb5098241cd439995f50675368ad8a993e9717ac3587de:psk1DyMLf_cdN4CWuM9NZq4QkxS0ckjBqiB7wzizfx902iAw7qb7tg7gkojckNHq8j-23XlzDaVwZ2jvF08rBg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:d5d67d88e60529021f8666aefb844e6daf2de0687b856e34b212ddef95f7605f:fDT5Qwnl9DhB_1noIfWStLs_6LhEhZiPMRsLi8mQNDE56gOd4nWhYUn0PUfCcKVd3aJ0cm7sfI0TRysl60P5CQ==:9fbfabe975fa5a7f -->
 # Load
 
@@ -10,7 +11,7 @@ Load or copy a directive, tool, or knowledge item by id and source.
     <category>rye/primary</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="4096" />
+    <limits turns="3" tokens="4096" />
     <permissions>
       <load>
         <directive>*</directive>

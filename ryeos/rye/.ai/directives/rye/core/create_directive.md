@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:608d138b16a4d74bb9d9a4ed1eab349a3e894b0f59b6145367ae970e2bb1ab68:ayiMV3L-rDsgH3_ARK8nbNY_BaEMkMIhBMRlKx0SP1owMYqfrpZ-Agh2C6RtFkefvudHtwOA4ePGDa3dNEKSBg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:8d15ddc37c6eb56f29bd93c3e0539610050e3d90cf1a749f2fb0cb4aafa7880c:gdJ5e-ACq5QkQZKte4VJmDPUcW0cYC_omT2oXbEu_m3uP017djzy3E1zjGycjatc6HctnKJaXL5CGw7dxuOeAg==:9fbfabe975fa5a7f -->
 
 # Create Directive
@@ -11,7 +12,7 @@ Create a new directive file with proper metadata, validate, and sign it.
     <category>rye/core</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="6" max_tokens="4096" />
+    <limits turns="6" tokens="4096" />
     <permissions>
       <search>
         <directive>*</directive>

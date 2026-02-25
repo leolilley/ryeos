@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:97f592b911ae423728a4cb91bb1a93d5ae513951dfa1e0474e16bb0aca063851:43xOl04lABl8jvqpr-7xMHGDjsDk6kaMyHVAatMkHcAmV08v0RGt87J1nUl2yLO3fc66x6pS0nFP7CkWiPIPCw==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:b4279811cf896bdf374ab2856d0316b362737c74005752634555db0611f4f06b:XnEKtB9ls2IwPi4vqmA2MvR3VmApOqnYeeQ1Tplira3S92NtF1Co1t6njUeoQwemLyWuO9o_FdXNzqb8qajeAg==:9fbfabe975fa5a7f -->
 # Read
 
@@ -10,7 +11,7 @@ Read file contents with optional offset and line limit.
     <category>rye/file-system</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.file-system.read</tool>

@@ -116,15 +116,6 @@ def get_user_ai_path() -> Path:
     return get_user_space() / AI_DIR
 
 
-def get_system_space() -> Path:
-    """Get system space base directory (bundled with rye package).
-
-    Returns the BASE path (the rye package root), not the AI_DIR folder.
-    Consistent with get_user_space() and project_path — all return the base.
-    """
-    return Path(__file__).parent.parent
-
-
 def _parse_bundle_entry_point(ep_name: str, result: Any) -> Optional[BundleInfo]:
     """Parse entry point result into BundleInfo.
 
@@ -222,15 +213,6 @@ def get_user_type_path(item_type: str) -> Path:
     """Get item type directory in user space (e.g., ~/.ai/tools/)."""
     folder_name = get_type_folder(item_type)
     return get_user_space() / AI_DIR / folder_name
-
-
-def get_system_type_path(item_type: str) -> Path:
-    """Get item type directory in system space (e.g., site-packages/rye/.ai/tools/).
-
-    Returns the core ryeos path only. For all roots use get_system_type_paths().
-    """
-    folder_name = get_type_folder(item_type)
-    return get_system_space() / AI_DIR / folder_name
 
 
 def get_system_type_paths(item_type: str) -> List[Tuple[str, Path]]:

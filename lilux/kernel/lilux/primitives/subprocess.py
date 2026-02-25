@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -83,12 +84,22 @@ class SubprocessPrimitive:
     """All process operations go through lilux-proc. No POSIX fallbacks."""
 
     def __init__(self):
-        self._lilux_proc: Optional[str] = shutil.which("lilux-proc")
+        self._lilux_proc: Optional[str] = self._find_lilux_proc()
         if not self._lilux_proc:
             raise ConfigurationError(
                 "lilux-proc binary not found on PATH. "
                 "Ensure ryeos is installed correctly."
             )
+
+    @staticmethod
+    def _find_lilux_proc() -> Optional[str]:
+        """Find lilux-proc, checking the running interpreter's bin dir first."""
+        import sys
+        bin_dir = Path(sys.executable).parent
+        candidate = bin_dir / "lilux-proc"
+        if candidate.is_file():
+            return str(candidate)
+        return shutil.which("lilux-proc")
 
     async def execute(
         self,

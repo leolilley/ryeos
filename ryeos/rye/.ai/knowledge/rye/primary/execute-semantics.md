@@ -65,7 +65,7 @@ Two execution modes controlled by the `thread` parameter:
 1. Parse markdown+XML directive file
 2. Validate required inputs; apply defaults
 3. Interpolate `{input:name}` placeholders in body, content, raw, and all actions
-4. Return parsed directive content with `instructions` field
+4. Return parsed directive content with `your_directions` field
 
 The calling agent follows the directive steps in its own context. No LLM infrastructure required.
 
@@ -100,7 +100,7 @@ If `async: true`, returns immediately with `thread_id` and `pid` instead of bloc
   "status": "success",
   "type": "directive",
   "item_id": "rye/core/create_directive",
-  "instructions": "<DIRECTIVE_INSTRUCTION constant>",
+  "your_directions": "<DIRECTIVE_INSTRUCTION constant>",
   "body": "<interpolated directive body>",
   "outputs": [{ "name": "result", "type": "string" }]
 }
@@ -185,7 +185,7 @@ Parses markdown with YAML frontmatter and returns content as agent context.
   "type": "knowledge",
   "item_id": "rye/core/directive-metadata-reference",
   "data": { "...parsed frontmatter + content..." },
-  "instructions": "Use this knowledge to inform your decisions.",
+  "your_directions": "Use this knowledge to inform your decisions.",
   "metadata": { "duration_ms": 3 }
 }
 ```

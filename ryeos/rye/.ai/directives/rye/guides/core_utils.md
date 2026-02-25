@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:2586bd9e6fb357e53e7e2f6e65b01f17a0dbb91e7bae0c3df627ad67f74a3b5d:jdg3um1357HLxH7SuJhhbYLhxkKVD6ds4OgABQMBdXARSbuElQPqBEee24EIrEou7M5wHBvCeRJ2jNf4DaElCQ==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:8ebc16197b8fe2d13d19bc007669a69406c9baccaf8fa91c2b9f062a7d09b8ad:AT3l6SyWBKx8SdSkBv6PwlW_gxhwoqDRFKYlQJiYuihsvWxyB6-L4dx9XA29u6WI7cH1u9gtI5YilPZB0kGWCw==:9fbfabe975fa5a7f -->
 # Core Utils
 
@@ -10,7 +11,7 @@ Guide 3 in the Rye OS onboarding sequence. Walks through the infrastructure laye
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="15" max_tokens="8192" />
+    <limits turns="15" tokens="8192" />
     <permissions>
       <execute>
         <tool>rye.core.system.*</tool>

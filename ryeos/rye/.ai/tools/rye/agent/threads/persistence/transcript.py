@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:8371a4130aa7ee715a4ac9569ea06f85f07c21adc761d5a4b427235acb9db494:CU4Snj5ERdX6IqC9BNJYZ4rN9YtejdkkxQkP_9_w6KikzCzy14jJ17vlE07FesEHGQ2g5sbdl0s-p4vPPc_PCw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T09:12:48Z:3d42d8c0a64aa57b6ea1acbd5234866e93f4e373815e08712ca8d1ef979ce4ba:AYASSfkHmphKteNOSNquxSWcLrz4qVLLXWr1w5QigdVGuiTY9xSJh35G6gOzfRX2CGzO2v-xQ9-MrpvJZvJQDg==:9fbfabe975fa5a7f
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -239,9 +239,9 @@ class Transcript:
             et = event.get("event_type", "")
             if et == "cognition_in":
                 turn += 1
-            # Skip completion/error events — we regenerate the footer from
+            # Skip completion event — we regenerate the footer from
             # the authoritative cost dict so elapsed time is accurate.
-            if et in ("thread_completed", "thread_error"):
+            if et == "thread_completed":
                 continue
             chunk = self._render_cognition_event(event, turn)
             if chunk:
@@ -299,13 +299,13 @@ class Transcript:
             return f"## System Prompt ({layer_str})\n\n{text}\n\n"
 
         if event_type == "context_injected":
-            position = payload.get("position", "before")
             blocks = payload.get("blocks", [])
             parts = []
             for block in blocks:
                 bid = block.get("id", "unknown")
+                tag = block.get("role", bid.rsplit("/", 1)[-1] if "/" in bid else bid)
                 content = block.get("content", "")
-                parts.append(f"### Context: {bid} (position: {position})\n\n{content}\n\n")
+                parts.append(f'<{tag} id="{bid}">\n{content}\n</{tag}>\n\n')
             return "".join(parts)
 
         if event_type == "cognition_in":
@@ -371,7 +371,7 @@ class Transcript:
             )
 
         if event_type == "thread_error":
-            return f"---\n\n**Error** -- {payload.get('error', 'unknown')}\n"
+            return f"\n> **Error**: {payload.get('error', 'unknown')}\n\n"
 
         return ""
 

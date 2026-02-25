@@ -18,7 +18,7 @@ from lilux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
 from rye.constants import AI_DIR
 from rye.utils.path_utils import (
     ensure_parent_directory,
-    get_system_space,
+    get_system_spaces,
     get_user_space,
 )
 
@@ -41,7 +41,7 @@ class LockfileResolver:
         Args:
             project_path: Project root directory
             user_space: User space base path (~ or $USER_SPACE)
-            system_space: System space base path (site-packages/rye/)
+            system_space: System space base path (site-packages/rye/) — legacy, ignored if None
         """
         self.project_path = Path(project_path) if project_path else None
 
@@ -51,19 +51,28 @@ class LockfileResolver:
         else:
             self.user_space = get_user_space()
 
-        # Resolve system space (bundled with package)
+        # Resolve system spaces (all bundles)
         if system_space:
-            self.system_space = Path(system_space)
+            from rye.utils.path_utils import BundleInfo
+            self.system_spaces = [
+                BundleInfo(
+                    bundle_id="ryeos",
+                    version="0.0.0",
+                    root_path=Path(system_space),
+                    manifest_path=None,
+                    source="legacy",
+                )
+            ]
         else:
-            self.system_space = get_system_space()
+            self.system_spaces = get_system_spaces()
 
         # Lilux lockfile manager (pure I/O)
         self.manager = LockfileManager()
 
     @property
-    def system_dir(self) -> Path:
-        """Get system lockfile directory (bundled, read-only)."""
-        return self.system_space / AI_DIR / "lockfiles"
+    def system_dirs(self) -> List[Path]:
+        """Get system lockfile directories across all bundles (read-only)."""
+        return [b.root_path / AI_DIR / "lockfiles" for b in self.system_spaces]
 
     @property
     def user_dir(self) -> Path:
@@ -211,7 +220,8 @@ class LockfileResolver:
         if space in ("all", "user"):
             dirs_to_check.append((self.user_dir, "user"))
         if space in ("all", "system"):
-            dirs_to_check.append((self.system_dir, "system"))
+            for sd in self.system_dirs:
+                dirs_to_check.append((sd, "system"))
 
         for dir_path, space_name in dirs_to_check:
             if not dir_path.exists():
@@ -244,8 +254,9 @@ class LockfileResolver:
         candidates = [
             self.project_dir,  # Highest precedence
             self.user_dir,
-            self.system_dir,  # Lowest precedence
         ]
+        # System bundles (lowest precedence)
+        candidates.extend(self.system_dirs)
 
         for dir_path in candidates:
             if dir_path and (dir_path / name).exists():

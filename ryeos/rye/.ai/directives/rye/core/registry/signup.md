@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:a570264aa44efb5985d8c675d0dce81416f7b51a268595c53bcb25e965622c54:fXy938XP2DLJu4d5Dn_3vc10nruMoB6NXMIfK9T0vunQ55SIpC5Mm5wzvVeWItXhBY1dGl8TYP5iVw_fXg9RAA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:d1d8b203c87e3e51222e90ec6eee0f3d57ae1467f592ccac7b92f9363077ee77:4ANDWitB9_EmG14skGyxVseQNlVL3he1E47AQ8YPojJrOUoSgdFa7F_MpyEjqsN6I4jeEdh-DNYHwpbyQrdUBg==:9fbfabe975fa5a7f -->
 # Registry Signup
 
@@ -10,7 +11,7 @@ Create a new registry account.
     <category>rye/core/registry</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="2048" />
+    <limits turns="3" tokens="2048" />
     <permissions>
       <execute>
         <tool>rye.core.registry.*</tool>

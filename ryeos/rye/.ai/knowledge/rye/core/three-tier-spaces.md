@@ -1,5 +1,5 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:8686374604dd710cb0ed34046361e8bf39953478f4bd9ba0a437c8267d0f4823:xt1drqQpLSTJtDWPdPIV0V3YuYRQDyOTrhPlvrSLU7LDtKQBzVBgX2AN7DglkBcSaSZoIMllADQype61E5cmDw==:9fbfabe975fa5a7f -->
-
+<!-- rye:signed:2026-02-25T08:12:00Z:4ec96950148a895d57cff9b86dae0118a0f6c4fec65058a46c648c43a651fdcb:_5chogV0pN_k93fWe6bNG2acHLNUZBx3-RVoUAvk2M0uBYDvFcugQfcf0ExOdNj2CWE2E6Xi2LAsyAr-_6WcCg==:9fbfabe975fa5a7f -->
+ -->
 ```yaml
 name: three-tier-spaces
 title: Three-Tier Space System
@@ -96,11 +96,9 @@ paths = resolver.get_search_paths()
 | Function                                      | Returns                                        |
 | --------------------------------------------- | ---------------------------------------------- |
 | `get_user_space()`                            | User base path (`$USER_SPACE` or `~`)          |
-| `get_system_space()`                          | System base path (`site-packages/rye/`)        |
 | `get_system_spaces()`                         | All bundle `BundleInfo` objects                |
 | `get_project_type_path(project, type)`        | `{project}/.ai/{type_dir}/`                    |
 | `get_user_type_path(type)`                    | `{USER_SPACE}/.ai/{type_dir}/`                 |
-| `get_system_type_path(type)`                  | Core system type path                          |
 | `get_system_type_paths(type)`                 | Type paths across all bundles                  |
 | `extract_category_path(file, type, location)` | Category from file path                        |
 | `validate_path_structure(...)`                | Validates filename and category match metadata |
@@ -114,7 +112,7 @@ paths = resolver.get_search_paths()
 export USER_SPACE=/custom/home   # → /custom/home/.ai/
 ```
 
-Consistent across all three spaces: `project_path / AI_DIR`, `get_user_space() / AI_DIR`, `get_system_space() / AI_DIR`.
+Consistent across all three spaces: `project_path / AI_DIR`, `get_user_space() / AI_DIR`, `bundle.root_path / AI_DIR` (for each bundle in `get_system_spaces()`).
 
 ## Configuration Overrides
 

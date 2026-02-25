@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:dd03255660ee4da621e55c6381615eb649c1705ab9fe6c2689aff329af8eea84:HUmeLD-1N3r0TVrKN3hOsnskUCbjeVXL4JfiQSR1fjcwaGL43xiAMRyQtaEYKZ3XKkrPCA2bvOSm4egEZFGJCg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:6e1c47f51dbcc084d6809799c1214d9cd7519363ed52dbd349cfc5ec1049294a:oniwYDe9TKb3CIurXG7pKjStCOTzKzdvO2oRegRJCmeuJ5lmwVk-rRztyThOIFMbHebjNYVxUA14HGa_5FeoDw==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 # Graph Orchestrator
@@ -11,7 +12,7 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
     <category>rye/agent/graphs</category>
     <author>rye-os</author>
     <model tier="general" />
-    <limits max_turns="6" max_tokens="4096" />
+    <limits turns="6" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.execute.tool.*</tool>

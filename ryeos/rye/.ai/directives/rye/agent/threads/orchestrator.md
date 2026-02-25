@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:8a7cbab48d1d8f84f708cc43a3772673c8bd5f932e6d48e492e5751da2242f17:2k-1MMc0VN3K_GJ-LuUepHp61PWDZ2oD39U0vGMC5FpYZqHcYUjyxbjo39uCXtmhHT1AZpUA1AFCMLRtL9FPAg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:b44e07fe54c9f16c845e9b64c88658b25ace7cda78be4b96f9ca9d0d1628ec2a:sRoshOZXU8FNWNzjwA87zLR_juPI00rmZF-g441k_fPdaMYKn-tbBaen-dI-6xFcPunj_WnH3W5raPTD8MpJAw==:9fbfabe975fa5a7f -->
 # Orchestrator
 
@@ -10,7 +11,7 @@ Multi-thread orchestration — wait, cancel, status, resume, handoff.
     <category>rye/agent/threads</category>
     <author>rye-os</author>
     <model tier="general" />
-    <limits max_turns="4" max_tokens="4096" />
+    <limits turns="4" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.agent.threads.orchestrator</tool>

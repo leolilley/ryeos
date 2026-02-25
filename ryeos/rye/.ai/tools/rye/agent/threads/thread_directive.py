@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:07:26Z:5d1c817da50827532f7702405eaed942ff5ff2ccda746427711324722fb2c288:lWMg6RohRRt7D7Byxq8xhCYm-055LgQvMy-rBjdVirWk43iF158VXl3reDzreSX7NRb8lQaaSMEeNAKgrweCCA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T09:25:00Z:c8ac0b8a80dbce399baa712e286d26f4c30a5874b8a8c7c6d9b647950a44c1f7:v6-oX8CPAQOrsUZur29VD4pN8rWiFJu7OVbdZ6Dg_kVmVqJ3j7471ScXXjokpiiHcZLXJu5AKSLAw9WeuLvyBg==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -185,15 +185,18 @@ def _build_prompt(directive: Dict) -> str:
     """Build the LLM prompt from the directive content.
 
     Only sends what the LLM needs to execute the directive:
-      1. Execute instruction
-      2. Directive name + description
-      3. Permissions (raw XML from directive metadata)
-      4. Body (process steps with resolved input values)
-      5. Returns section (from <outputs>)
+      1. Directive name + description
+      2. Permissions (raw XML from directive metadata)
+      3. Body (process steps with resolved input values)
+      4. Returns section (from <outputs>)
+
+    Note: DirectiveInstruction is primarily injected via thread_started
+    context hook (see hook_conditions.yaml ctx_directive_instruction).
+    The hardcoded backup lives in constants.DIRECTIVE_INSTRUCTION and is
+    returned via execute.py's your_directions for in-thread mode.
     """
     import re as _re
-    from rye.constants import DIRECTIVE_INSTRUCTION
-    parts = [DIRECTIVE_INSTRUCTION]
+    parts = []
 
     # Directive name + description
     name = directive.get("name", "")
@@ -797,9 +800,13 @@ async def execute(params: Dict, project_path: str) -> Dict:
     )
     provider_hint = directive.get("model", {}).get("provider")
     provider_resolver = load_module("adapters/provider_resolver", anchor=_ANCHOR)
-    resolved_model, provider_item_id, provider_config = provider_resolver.resolve_provider(
-        model, project_path=proj_path, provider=provider_hint
-    )
+    try:
+        resolved_model, provider_item_id, provider_config = provider_resolver.resolve_provider(
+            model, project_path=proj_path, provider=provider_hint
+        )
+    except Exception as e:
+        registry.update_status(thread_id, "error")
+        return {"success": False, "error": str(e), "thread_id": thread_id}
     provider_type = provider_config.get("tool_type", "http")
     if provider_type == "http":
         HttpProvider = load_module("adapters/http_provider", anchor=_ANCHOR).HttpProvider
@@ -983,5 +990,8 @@ if __name__ == "__main__":
     if args.pre_registered:
         params["_pre_registered"] = True
 
-    result = asyncio.run(execute(params, args.project_path))
+    try:
+        result = asyncio.run(execute(params, args.project_path))
+    except Exception as exc:
+        result = {"success": False, "error": str(exc)}
     print(json.dumps(result))

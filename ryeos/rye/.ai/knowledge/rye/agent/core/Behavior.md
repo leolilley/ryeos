@@ -1,7 +1,8 @@
+<!-- rye:signed:2026-02-25T08:58:20Z:364f474ae6371c1b94b97d7122506ab9c7338529256eb3b70fc842704bb37de4:Upy_g_rx-uik0wdAGYr748j-_0T_q5NOjXySsN77agQQpX6vy2cg4TT7TYTBad2rcKFi4UqNvJo9mGUXwlZUCQ==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
-name: behavior
+name: Behavior
 title: Agent Behavior Rules
 entry_type: context
 category: rye/agent/core

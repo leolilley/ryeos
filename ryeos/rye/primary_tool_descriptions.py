@@ -31,15 +31,21 @@ ITEM_ID_DESC = (
 EXECUTE_TOOL_DESC = (
     "<description>"
     "Run a Rye item. item_id is a slash-separated path without extension. "
-    "Resolved project → user → system. If you don't know the ID, call search first. "
-    "Executing a directive returns parsed steps with an instructions field — follow them. "
-    "Set thread=true to spawn a managed thread instead. "
+    "Resolved project → user → system. "
+    "Executing a directive returns your_directions and a body — follow them. "
+    "Set thread=true in parameters to spawn a managed thread instead. "
     "Executing a tool runs it. Executing knowledge returns context."
     "</description>"
     "<rules>"
+    "<rule>When the user says 'rye execute [type] [name]', call execute DIRECTLY with the given name as item_id. "
+    "Do NOT call search or load first — go straight to execute. "
+    "Only call search first if the user does NOT provide a name and you need to discover it.</rule>"
     "<rule>ALWAYS call this tool when the user says 'rye execute' — NEVER ask for clarification.</rule>"
     "<rule>Pass any extra words the user provides as parameters.</rule>"
     "<rule>The tool rejects unknown parameter keys and returns the list of valid ones — let it self-correct.</rule>"
+    "<rule>When executing a directive, the response contains a your_directions field and a body field. "
+    "Read your_directions, then follow the body immediately. Do NOT summarize, describe, or re-call execute. "
+    "Output render blocks verbatim. Follow instruction blocks silently.</rule>"
     "</rules>"
     "<examples>"
     '<example>User says "rye execute init project" → call with item_id="init", parameters={"project_type": "project"}</example>'
@@ -60,6 +66,7 @@ EXECUTE_PARAMETERS_DESC = (
     "<examples>"
     '<example>{"name": "my_tool"}</example>'
     '<example>{"space": "project"}</example>'
+    '<example>{"thread": true, "async": true, "model": "sonnet"}</example>'
     "</examples>"
 )
 

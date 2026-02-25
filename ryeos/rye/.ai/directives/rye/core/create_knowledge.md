@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:7c49cfe252c89dca0dad7ab6d85ec1de8d1c7f10e33252aee4dd573ce619526b:N8KWHm7k2Gf4e6MYpqvsAO-oBwm-8-pn4QmBvYZoTy-wYhYXDn0MvIR_QFs0xNmSfXPT59enUVtYD-sJZ7EdDA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-23T05:29:51Z:919e3e1bdfcd64b0af90558741e666c771d8be5bf90b71637b6af7f5a48a7369:EW9SHcgGv_F5m5oj_A4neiFZ0NDmhsxprJKoZLzrs8fbuOyVJ8CF5akIxSnKlwb7jvbmNUR1JV06ifNxyoTMAg==:9fbfabe975fa5a7f -->
 # Create Knowledge Entry
 
@@ -10,7 +11,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
     <category>rye/core</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="6" max_tokens="4096" />
+    <limits turns="6" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.file-system.*</tool>

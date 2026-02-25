@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:1867ae278c4e189dd2316575368b46eadceed62479407f36bc4d2d6c786ca94e:EdEsTYwwCce--oZCvXRPeYqtokULUkbtPmhbhqQxWb6T0dNamWMuMM_PeZFL2AyGslQJY32bQTr3pRRqTE0CBg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:bf23ad40fd0ab2989bcabc2e88c7d63a1d1013354ced235139e5bc61ac8a907b:XPwpNGbJrkQXj8Uvb-pVbstrynlJKN_Y87HVkN57bzoO7ysI9a8pzXwavnjMWrin7tuzsLvDqhR7i2l7TTLLCw==:9fbfabe975fa5a7f -->
 # Bash
 
@@ -10,7 +11,7 @@ Execute a shell command via subprocess.
     <category>rye/bash</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="3" max_tokens="4096" />
+    <limits turns="3" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.bash.*</tool>

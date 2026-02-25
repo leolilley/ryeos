@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:25918551edea0abbc0b701d436fa89363e34a9e144ca48fe20930a3ea8d97a08:TS_AmdaUm4bVfI_nmd8--lP0oITslINJK6X0aRjDAwZITDPOAjoPb6nFE7G7bRzGSTXTr-RoVtubNbetOIFFAg==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:5d5c48fc03ba322613a7e8dbd044e7cba022789d8ef728fbaa04c9341d4193b8:Oxcwy1m8ubg-eCukqXWlfnXAh3k1d7g7WVCMTE3eHiTHalkrCKGFjppVrWkk1pvnVmCPgRuPpPh2ewvkpHzxCQ==:9fbfabe975fa5a7f -->
 # Execute
 
@@ -10,7 +11,7 @@ Execute a directive, tool, or knowledge item by id with optional parameters.
     <category>rye/primary</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits max_turns="4" max_tokens="4096" />
+    <limits turns="4" tokens="4096" />
     <permissions>
       <execute>
         <tool>*</tool>

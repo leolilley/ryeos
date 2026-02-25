@@ -7,14 +7,14 @@ Routes execution through PrimitiveExecutor for tools, which handles:
     - ENV_CONFIG resolution for runtimes
     - Space compatibility validation
 
-Directives support two execution modes controlled by the ``thread`` param:
-    - **In-thread** (default, ``thread=False``): Parse, validate inputs,
-      interpolate placeholders, and return the directive content with an
-      ``instructions`` field for the calling agent to follow in-context.
-    - **Threaded** (``thread=True``): Spawn a managed thread via
-      ``rye/agent/threads/thread_directive`` (LLM loop, safety harness,
-      budgets, registry tracking).  Supports ``async``, ``model``, and
-      ``limit_overrides`` sub-parameters.
+Directives support two execution modes controlled by ``parameters.thread``:
+    - **In-thread** (default): Parse, validate inputs, interpolate
+      placeholders, and return the directive content with an
+      ``your_directions`` field for the calling agent to follow in-context.
+    - **Threaded** (``thread=True`` in parameters): Spawn a managed thread
+      via ``rye/agent/threads/thread_directive`` (LLM loop, safety harness,
+      budgets, registry tracking).  ``async``, ``model``, and
+      ``limit_overrides`` are also passed through parameters.
 """
 
 import logging
@@ -75,12 +75,6 @@ class ExecuteTool:
         parameters: Dict[str, Any] = kwargs.get("parameters", {})
         dry_run = kwargs.get("dry_run", False)
 
-        # Thread control params (directives only)
-        thread = kwargs.get("thread", False)
-        async_exec = kwargs.get("async", False)
-        model = kwargs.get("model")
-        limit_overrides = kwargs.get("limit_overrides")
-
         logger.debug(f"Execute: {item_type} item_id={item_id}")
 
         try:
@@ -89,8 +83,6 @@ class ExecuteTool:
             if item_type == ItemType.DIRECTIVE:
                 result = await self._run_directive(
                     item_id, project_path, parameters, dry_run,
-                    thread=thread, async_exec=async_exec,
-                    model=model, limit_overrides=limit_overrides,
                 )
             elif item_type == ItemType.TOOL:
                 result = await self._run_tool(
@@ -121,28 +113,29 @@ class ExecuteTool:
         project_path: str,
         parameters: Dict[str, Any],
         dry_run: bool,
-        *,
-        thread: bool = False,
-        async_exec: bool = False,
-        model: Optional[str] = None,
-        limit_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run a directive — parse, validate, and either return or spawn thread.
 
-        Two modes controlled by ``thread``:
+        Two modes controlled by ``parameters["thread"]``:
 
         - **In-thread** (default): Parse, validate inputs, interpolate
           placeholders, and return the directive content with an
-          ``instructions`` field.  The calling agent follows the steps
+          ``your_directions`` field.  The calling agent follows the steps
           in its own context.  No LLM infrastructure required.
 
-        - **Threaded** (``thread=True``): After validation, spawn a
-          managed thread via ``rye/agent/threads/thread_directive``
-          (LLM loop, safety harness, budgets).  Supports ``async``,
-          ``model``, and ``limit_overrides``.
+        - **Threaded** (``thread=True`` in parameters): After validation,
+          spawn a managed thread via ``rye/agent/threads/thread_directive``
+          (LLM loop, safety harness, budgets).  ``async``, ``model``, and
+          ``limit_overrides`` are also read from parameters.
 
         Validation is always done eagerly for fast feedback on bad inputs.
         """
+        # Extract execution flags from parameters (consumed, not forwarded
+        # to directive inputs — they control how the directive is executed)
+        thread = parameters.pop("thread", False)
+        async_exec = parameters.pop("async", False)
+        model = parameters.pop("model", None)
+        limit_overrides = parameters.pop("limit_overrides", None)
         # 1. Find the directive file
         file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
         if not file_path:
@@ -172,7 +165,7 @@ class ExecuteTool:
 
         # 4a. In-thread mode (default): return lean actionable content
         #     Only what the caller needs to follow the directive:
-        #     - instructions: the "go do it" nudge
+        #     - your_directions: the "go do it" nudge
         #     - body: interpolated process steps (not parsed beyond interpolation)
         #     - outputs: what the directive expects back
         #     No permissions (can't enforce without harness), no parser internals.
@@ -182,7 +175,7 @@ class ExecuteTool:
                 "status": "success",
                 "type": ItemType.DIRECTIVE,
                 "item_id": item_id,
-                "instructions": DIRECTIVE_INSTRUCTION,
+                "your_directions": DIRECTIVE_INSTRUCTION,
                 "body": parsed.get("body", ""),
             }
             outputs = parsed.get("outputs")
@@ -354,7 +347,7 @@ class ExecuteTool:
             "type": ItemType.KNOWLEDGE,
             "item_id": item_id,
             "data": parsed,
-            "instructions": "Use this knowledge to inform your decisions.",
+            "your_directions": "Use this knowledge to inform your decisions.",
         }
 
     def _find_item(

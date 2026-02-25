@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-02-25T07:50:41Z:3d5275887f71f95e94f758b87740aa6370d29b080254ff25b09e80801bc6922e:3q7-CSeX6QBhPq_Cua-ohCanXNlfAQxSEQSkcZJ9dmvIjFPhShj4T8705Hzb5lIqDqdkRv8KRKz60eA6jR-yBA==:9fbfabe975fa5a7f -->
 <!-- rye:signed:2026-02-22T02:31:19Z:05960899d3f3764cfa225484650ba1e949cbd0b8fb122a332e5509cea21dc29a:uq_y3OmGyO-oeklv0zlsdtz1IwuibUXgkE8zE6bVMCvxoUQVXqNHUvdbhY94Xs-D4dGa8ghOJFVMO5OM8Q4YAA==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 # State Graph
@@ -11,7 +12,7 @@ Execute a declarative state graph tool — walks graph YAML nodes, dispatching a
     <category>rye/agent/graphs</category>
     <author>rye-os</author>
     <model tier="general" />
-    <limits max_turns="4" max_tokens="4096" />
+    <limits turns="4" tokens="4096" />
     <permissions>
       <execute>
         <tool>rye.execute.tool.*</tool>
