@@ -36,6 +36,10 @@ build/
 # Ruff/linting
 .ruff_cache/
 
+# Heavy deps (not needed in Docker)
+node_modules/
+target/
+
 # Local development
 *.env
 !.env.example

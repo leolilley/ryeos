@@ -3,8 +3,9 @@
 dockerfilePath = "services/registry-api/Dockerfile"
 watchPatterns = [
     "services/registry-api/**",
-    "rye/**",
-    "lilux/**"
+    "ryeos/rye/**",
+    "ryeos-bare/**",
+    "lilux/kernel/**"
 ]
 
 [deploy]

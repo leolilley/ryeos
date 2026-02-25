@@ -17,9 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy lilux and rye packages
-COPY lilux /app/lilux
-COPY rye /app/rye
+# Copy lilux kernel
+COPY lilux/kernel /app/lilux
+
+# Copy ryeos-bare and the rye Python module it references (../rye/rye)
+# ryeos-bare/pyproject.toml uses packages = ["../rye/rye"], so the rye
+# module must be at the expected relative path.
+COPY ryeos-bare /app/ryeos-bare
+COPY ryeos/rye /app/rye/rye
 
 # Copy registry-api
 COPY services/registry-api/pyproject.toml services/registry-api/README.md /app/registry-api/
@@ -29,7 +34,7 @@ COPY services/registry-api/registry_api /app/registry-api/registry_api
 # rye/core/ bundle items (parsers, extractors) for validation. It does not
 # execute any bundled tools. Uses ryeos-bare (no bundles).
 WORKDIR /app/registry-api
-RUN pip install --no-cache-dir /app/lilux/ /app/rye/ -e .
+RUN pip install --no-cache-dir /app/lilux/ /app/ryeos-bare/ -e .
 
 # Expose port
 EXPOSE 8000

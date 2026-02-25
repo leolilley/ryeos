@@ -73,10 +73,12 @@ logs/
 .env.*.local
 
 ## User AI spaces (these are user-specific, not part of the system)
-# Note: /rye/rye/.ai/ is INCLUDED (system bundle)
+# System bundle .ai/ dirs are INCLUDED
 /.ai/
 */.ai/
-!rye/rye/.ai/
+!ryeos/rye/.ai/
+!ryeos/bundles/web/ryeos_web/.ai/
+!ryeos/bundles/code/ryeos_code/.ai/
 
 ## Build artifacts
 *.whl
