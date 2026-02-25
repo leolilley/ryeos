@@ -37,9 +37,12 @@ Canonical vocabulary and naming rules for the Rye OS project.
 | **Rye OS** | The full product name (two words, capital R, capital OS)               |
 | **RYE**    | Acronym form — used in env vars (`RYE_PYTHON`, `RYE_PARENT_THREAD_ID`) |
 | **rye**    | Lowercase — Python package name (`import rye`), CLI, pip install name |
-| **rye-os** | Hyphenated — GitHub repo name, PyPI package, bundle IDs               |
-| **rye-core** | The core Python package containing the standard library             |
-| **rye-mcp** | The MCP server package                                               |
+| **ryeos**  | PyPI package — standard bundle (`pip install ryeos`)                  |
+| **ryeos-core** | Minimal install — rye/core only (`pip install ryeos-core`)        |
+| **ryeos-bare** | Engine only — no .ai/ items (`pip install ryeos-bare`)            |
+| **ryeos-web** | Opt-in web bundle — rye/web/* (`pip install ryeos-web`)            |
+| **ryeos-code** | Opt-in code bundle — rye/code/* (`pip install ryeos-code`)        |
+| **ryeos-mcp** | The MCP server package                                              |
 | **Lilux**  | The low-level primitives layer (subprocess, HTTP, integrity, signing) |
 
 ## The Three Item Types
@@ -72,7 +75,7 @@ The item ID is the **relative path** from `.ai/<type>/` to the file, **without t
 | Knowledge IDs          | `kebab-case`   | `directive-metadata-reference`   |
 | Directive names (XML)  | `snake_case`   | `<directive name="create_directive">` |
 | Namespace directories  | `kebab-case`   | `rye/file-system/`, `rye/core/` |
-| Bundle IDs             | `kebab-case`   | `rye-core`, `rye-os`            |
+| Bundle IDs             | `kebab-case`   | `ryeos-core`, `ryeos`           |
 | Env vars               | `UPPER_SNAKE`  | `USER_SPACE`, `RYE_PYTHON`      |
 | Capability strings     | `dot.separated`| `rye.execute.tool.rye.bash.bash` |
 | Python packages        | `snake_case`   | `rye_core`, `rye_mcp`           |

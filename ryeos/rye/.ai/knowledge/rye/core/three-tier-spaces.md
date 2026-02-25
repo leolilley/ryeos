@@ -207,4 +207,4 @@ Bundle registration in `pyproject.toml`:
 my_bundle = "my_package:get_bundle_info"
 ```
 
-Multi-bundle resolution labels each bundle: `system:rye-core`, `system:my-tools`.
+Multi-bundle resolution labels each bundle: `system:ryeos-core`, `system:my-tools`.

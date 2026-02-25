@@ -25,47 +25,68 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 
 ```
 ┌───────────────────────────────────────────────────┐
-│  rye-mcp           (MCP transport)                │
-│  deps: rye-os, mcp                                │
-│  bundle: none (inherits from rye-os)              │
+│  ryeos-mcp         (MCP transport)                │
+│  deps: ryeos, mcp                                 │
+│  bundle: none (inherits from ryeos)               │
 ├───────────────────────────────────────────────────┤
-│  rye-os            (full standard library)        │
+│  ryeos             (standard bundle)              │
 │  deps: lilux, pyyaml, cryptography, packaging     │
-│  bundle: rye-os → all rye/* items                 │
+│  bundle: ryeos → all rye/* items                  │
 ├───────────────────────────────────────────────────┤
-│  rye-core          (minimal install)              │
+│  ryeos-core        (minimal install)              │
 │  deps: lilux, pyyaml, cryptography, packaging     │
-│  bundle: rye-core → rye/core/* items only         │
+│  bundle: ryeos-core → rye/core/* items only       │
+├───────────────────────────────────────────────────┤
+│  ryeos-bare        (engine only)                  │
+│  deps: lilux                                      │
+│  bundle: none (engine only, no .ai/ items)        │
+├───────────────────────────────────────────────────┤
+│  ryeos-web         (opt-in web bundle)            │
+│  deps: ryeos                                      │
+│  bundle: ryeos-web → rye/web/* items              │
+├───────────────────────────────────────────────────┤
+│  ryeos-code        (opt-in code bundle)           │
+│  deps: ryeos                                      │
+│  bundle: ryeos-code → rye/code/* items            │
 ├───────────────────────────────────────────────────┤
 │  lilux             (stateless microkernel)        │
-│  deps: cryptography, httpx                        │
+│  deps: cryptography, httpx, lilux-proc            │
 │  bundle: none (pure library, no .ai/ items)       │
 └───────────────────────────────────────────────────┘
 ```
 
-**Mutual exclusion:** `rye-core` and `rye-os` both install the `rye` Python module. Install one or the other, never both.
+**Mutual exclusion:** `ryeos-core` and `ryeos` both install the `rye` Python module. Install one or the other, never both.
+
+**lilux-proc dependency:** lilux depends on `lilux-proc` (hard dep, no fallbacks). The Rust binaries `lilux-proc` and `lilux-watch` live in `lilux/proc/` and `lilux/watch/` at the monorepo top level.
+
+**node_modules not shipped:** Web and code bundles do not ship `node_modules`. Dependencies are installed on first use via the anchor system.
 
 ## What Each Install Provides
 
 ```
-pip install rye-core        → system space: rye/core/* only
-pip install rye-os          → system space: rye/* (everything)
-pip install rye-mcp         → system space: rye/* (via rye-os dep)
-pip install rye-os my-tools → system space: rye/* + my-tools/*
+pip install ryeos-core      → system space: rye/core/* only
+pip install ryeos            → system space: rye/* (standard items)
+pip install ryeos-mcp        → system space: rye/* (via ryeos dep)
+pip install ryeos-bare       → engine only (no .ai/ items)
+pip install ryeos-web        → system space: rye/web/* (opt-in)
+pip install ryeos-code       → system space: rye/code/* (opt-in)
+pip install ryeos my-tools   → system space: rye/* + my-tools/*
 ```
+
+Web tools (`rye/web/*`) are in `ryeos/bundles/web/`, code tools (`rye/code/*`) are in `ryeos/bundles/code/`.
 
 ## Entry Point Registration
 
 Bundles are registered in `pyproject.toml` under the `rye.bundles` entry point group:
 
 ```toml
-# rye-os — full bundle
+# ryeos — standard bundle
 [project.entry-points."rye.bundles"]
-rye-os = "rye.bundle_entrypoints:get_rye_os_bundle"
+ryeos = "rye.bundle_entrypoints:get_ryeos_bundle"
 
-# rye-core — core-only bundle
+# ryeos-core — core-only bundle
 [project.entry-points."rye.bundles"]
-rye-core = "rye.bundle_entrypoints:get_rye_core_bundle"
+ryeos-core = "rye.bundle_entrypoints:get_ryeos_core_bundle"
 ```
 
 Both entry point functions live in `rye/bundle_entrypoints.py`.
@@ -104,10 +125,12 @@ The author's signing key is shipped as a TOML identity document at `rye/.ai/trus
 
 Categories control which `.ai/` items are visible from a bundle:
 
-| Bundle     | `categories`  | Visible Items                                                       |
-| ---------- | ------------- | ------------------------------------------------------------------- |
-| `rye-os`   | `["rye"]`     | Everything: `rye/core/*`, `rye/mcp/*`, `rye/agent/*`, etc.          |
-| `rye-core` | `["rye/core"]`| Only core: `rye/core/runtimes/*`, `rye/core/registry/*`, etc.       |
+| Bundle       | `categories`  | Visible Items                                                       |
+| ------------ | ------------- | ------------------------------------------------------------------- |
+| `ryeos`      | `["rye"]`     | Standard items: `rye/core/*`, `rye/agent/*`, etc.                   |
+| `ryeos-core` | `["rye/core"]`| Only core: `rye/core/runtimes/*`, `rye/core/registry/*`, etc.       |
+| `ryeos-web`  | `["rye/web"]` | Web tools: `rye/web/*`                                              |
+| `ryeos-code` | `["rye/code"]`| Code tools: `rye/code/*`                                            |
 
 The resolver uses prefix matching — an item with category `rye/core/registry` is included by both `["rye"]` and `["rye/core"]`.
 
