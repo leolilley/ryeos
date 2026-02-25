@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T09:12:48Z:3d42d8c0a64aa57b6ea1acbd5234866e93f4e373815e08712ca8d1ef979ce4ba:AYASSfkHmphKteNOSNquxSWcLrz4qVLLXWr1w5QigdVGuiTY9xSJh35G6gOzfRX2CGzO2v-xQ9-MrpvJZvJQDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T09:38:18Z:4157ae5e508afa58aa204c0212f1b3f9a819701e4816660f97c4eeeff5ae5e4b:oaoHAv4b8onxganrRXrSUMG1XP8Q98bK3tXR_M4GwPqIaAy2JPKF_n55YuvfGjX70g7VJWbo32Vam2PZVtHYCA==:9fbfabe975fa5a7f
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -312,7 +312,8 @@ class Transcript:
             role = payload.get("role", "user")
             if role == "tool":
                 return ""
-            return f"## Input — Turn {turn}\n\n{payload.get('text', '')}\n\n"
+            prefix = "---\n\n" if turn == 1 else ""
+            return f"{prefix}## Input — Turn {turn}\n\n{payload.get('text', '')}\n\n"
 
         if event_type == "cognition_reasoning":
             text = payload.get("text", "").strip()
