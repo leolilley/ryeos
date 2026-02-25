@@ -565,8 +565,8 @@ The `<context>` metadata section declares knowledge items to inject into the LLM
 <directive name="deploy_staging" version="1.0.0" extends="rye/agent/core/base">
   <metadata>
     <context>
-      <system>rye/agent/core/identity</system>
-      <system>rye/agent/core/behavior</system>
+      <system>rye/agent/core/Identity</system>
+      <system>rye/agent/core/Behavior</system>
       <before>project/deploy/environment-rules</before>
       <after>project/deploy/completion-checklist</after>
       <suppress>tool-protocol</suppress>
@@ -606,7 +606,7 @@ When a directive extends a parent, context items from the entire chain are merge
 ```
 Chain: rye/agent/core/base → project/deploy/base → deploy_staging
 
-System items:  [identity, behavior]          ← from rye/agent/core/base
+System items:  [Identity, Behavior]          ← from rye/agent/core/base
 Before items:  [environment-rules]           ← from project/deploy/base
 After items:   [completion-checklist]        ← from deploy_staging
 Suppressions:  [tool-protocol]              ← from deploy_staging
@@ -655,7 +655,7 @@ Deploy the current build to the staging environment.
     <model tier="sonnet" />
     <limits max_turns="15" max_tokens="200000" />
     <context>
-      <system>rye/agent/core/identity</system>
+      <system>rye/agent/core/Identity</system>
       <before>project/deploy/environment-rules</before>
       <after>project/deploy/completion-checklist</after>
     </context>

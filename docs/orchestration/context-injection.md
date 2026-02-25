@@ -16,7 +16,7 @@ Context injection is the system that loads knowledge into threads before the LLM
 Every thread receives injected context through two channels:
 
 1. **System messages** — delivered via the LLM provider's system message field (identity, behavior rules, tool protocol)
-2. **User message context** — injected into the first user message before and after the directive body (environment info, completion protocol, directive-declared knowledge)
+2. **User message context** — injected into the first user message before and after the directive body (environment info, directive instruction, directive-declared knowledge)
 
 Together, these give the agent a complete working context on its first turn — no discovery required.
 
@@ -24,9 +24,9 @@ Together, these give the agent a complete working context on its first turn — 
 
 System messages are assembled from `build_system_prompt` hooks and delivered via the API's system message parameter. They contain foundational instructions that apply to every turn:
 
-- **Identity** (`rye/agent/core/identity`) — who the agent is, its role
-- **Behavior** (`rye/agent/core/behavior`) — operational rules, safety constraints
-- **Tool protocol** (`rye/agent/core/tool-protocol`) — how to call Rye tools
+- **Identity** (`rye/agent/core/Identity`) — who the agent is, its role
+- **Behavior** (`rye/agent/core/Behavior`) — operational rules, safety constraints
+- **Tool protocol** (`rye/agent/core/ToolProtocol`) — how to call Rye tools
 
 These are loaded by built-in hooks defined in `hook_conditions.yaml`:
 
@@ -38,7 +38,7 @@ These are loaded by built-in hooks defined in `hook_conditions.yaml`:
   action:
     primary: "load"
     item_type: "knowledge"
-    item_id: "rye/agent/core/identity"
+    item_id: "rye/agent/core/Identity"
 
 - id: "system_behavior"
   event: "build_system_prompt"
@@ -47,7 +47,7 @@ These are loaded by built-in hooks defined in `hook_conditions.yaml`:
   action:
     primary: "load"
     item_type: "knowledge"
-    item_id: "rye/agent/core/behavior"
+    item_id: "rye/agent/core/Behavior"
 
 - id: "system_tool_protocol"
   event: "build_system_prompt"
@@ -56,7 +56,7 @@ These are loaded by built-in hooks defined in `hook_conditions.yaml`:
   action:
     primary: "load"
     item_type: "knowledge"
-    item_id: "rye/agent/core/tool-protocol"
+    item_id: "rye/agent/core/ToolProtocol"
 ```
 
 The runner assembles system messages by calling `harness.run_hooks_context()` with `event="build_system_prompt"`, then concatenates the `before` and `after` blocks:
@@ -86,12 +86,14 @@ The runner passes the assembled string to the provider — each provider adapter
 
 ## User Message Context
 
-User message context is injected into the first user message via `thread_started` hooks (or `thread_continued` for resumed threads). Two positions are available:
+User message context is injected into the first user message via `thread_started` hooks (or `thread_continued` for resumed threads). Two built-in hooks inject before the directive body:
 
-| Position | Built-in Hook     | Knowledge Item               | Purpose                           |
-| -------- | ----------------- | ---------------------------- | --------------------------------- |
-| `before` | `ctx_environment` | `rye/agent/core/environment` | Runtime environment, project info |
-| `after`  | `ctx_completion`  | `rye/agent/core/completion`  | How to signal completion          |
+| Position | Built-in Hook              | Knowledge Item                        | `wrap` | Purpose                           |
+| -------- | -------------------------- | ------------------------------------- | ------ | --------------------------------- |
+| `before` | `ctx_environment`          | `rye/agent/core/Environment`          | `true` | Runtime environment, project info |
+| `before` | `ctx_directive_instruction`| `rye/agent/core/DirectiveInstruction` | `false`| How to interpret directive bodies  |
+
+Hooks can set `wrap: false` to inject content without XML wrapping. By default, injected knowledge is wrapped in an XML tag derived from the knowledge item's `name` field (e.g. `<Environment id="rye/agent/core/Environment" type="knowledge">...</Environment>`). With `wrap: false`, the raw content is injected directly — this is used for `DirectiveInstruction` which needs to appear as plain instructions before the directive body, not as a tagged context block.
 
 The runner constructs the first message by sandwiching the directive body:
 
@@ -108,9 +110,10 @@ messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})
 This produces a first message structured as:
 
 ```
-[environment context]        ← before
-[directive body + inputs]    ← the actual task
-[completion protocol]        ← after
+[environment context]            ← before (wrapped)
+[directive instruction]          ← before (raw, wrap: false)
+[directive body + inputs]        ← the actual task
+[directive after-context]        ← after (if any)
 ```
 
 A `context_injected` event is emitted to the transcript recording which hooks contributed.
@@ -135,12 +138,12 @@ Directives can declare additional knowledge items to inject using the `<context>
 
 These items are loaded at thread startup and merged with hook-injected context:
 
-| Tag          | Destination                                             |
-| ------------ | ------------------------------------------------------- |
-| `<system>`   | Appended to the system message (after hook layers)      |
-| `<before>`   | Injected between hook before-context and directive body |
-| `<after>`    | Injected between directive body and hook after-context  |
-| `<suppress>` | Skips a named hook-driven context layer                 |
+| Tag          | Destination                                              |
+| ------------ | -------------------------------------------------------- |
+| `<system>`   | Appended to the system message (after hook layers)       |
+| `<before>`   | Injected between hook before-context and directive body  |
+| `<after>`    | Injected after directive body                            |
+| `<suppress>` | Skips a named hook-driven context layer                  |
 
 Directive-declared context items are resolved via the `load` tool (same as knowledge items loaded by hooks), so they follow the standard three-tier resolution: project → user → system.
 
@@ -149,7 +152,7 @@ Directive-declared context items are resolved via the `load` tool (same as knowl
 The `<suppress>` tag skips a specific hook-driven context layer. It matches against:
 
 - The hook's `id` field (e.g. `system_tool_protocol`)
-- The action's full knowledge `item_id` (e.g. `rye/agent/core/tool-protocol`)
+- The action's full knowledge `item_id` (e.g. `rye/agent/core/ToolProtocol`)
 
 Basename matching (e.g. just `tool-protocol`) is intentionally not supported to avoid ambiguous clashes across namespaces.
 
@@ -169,11 +172,11 @@ Suppressions apply to both `build_system_prompt` and `thread_started` hooks. The
 With both hook context and directive context, the first user message is assembled as:
 
 ```
-hook before-context (environment)     ← from thread_started hooks
+hook before-context (environment)     ← from thread_started hooks (wrapped)
+hook before-context (directive instr) ← from thread_started hooks (raw, wrap: false)
 directive before-context              ← from <before> knowledge items
 directive prompt (body + outputs)     ← from _build_prompt()
 directive after-context               ← from <after> knowledge items
-hook after-context (completion)       ← from thread_started hooks
 ```
 
 ## The `extends` Chain
@@ -183,8 +186,8 @@ When a directive uses `extends`, context items from the entire inheritance chain
 ```xml
 <!-- rye/agent/core/base declares: -->
 <context>
-  <system>rye/agent/core/identity</system>
-  <system>rye/agent/core/behavior</system>
+  <system>rye/agent/core/Identity</system>
+  <system>rye/agent/core/Behavior</system>
 </context>
 
 <!-- project/deploy/base declares: -->
@@ -221,7 +224,7 @@ Projects can customize what context threads receive without modifying system fil
 The simplest approach: create a project-level knowledge item that shadows the system default. `LoadTool` cascades project → user → system, so a project file wins:
 
 ```
-.ai/knowledge/rye/agent/core/identity.md    ← project override
+.ai/knowledge/rye/agent/core/Identity.md    ← project override
 ```
 
 All threads in the project will load this instead of the system identity. No hook changes needed.
@@ -267,7 +270,7 @@ context_hooks:
     action:
       primary: "load"
       item_type: "knowledge"
-      item_id: "rye/agent/core/identity"
+      item_id: "rye/agent/core/Identity"
 
   # Add: web directives get a different identity
   - id: "project_web_identity"
@@ -345,8 +348,8 @@ Emitted after user message context is assembled. Records which hooks contributed
 ```json
 {
   "event": "context_injected",
-  "before": ["ctx_environment"],
-  "after": ["ctx_completion"]
+  "before": ["ctx_environment", "ctx_directive_instruction"],
+  "after": []
 }
 ```
 
@@ -354,11 +357,11 @@ These events are useful for debugging — they show exactly what the LLM receive
 
 ## Token Budget
 
-Context injection adds approximately **~1,150 tokens** of overhead to the first turn (identity + behavior + tool protocol + environment + completion). This is a fixed cost that pays for itself on the first turn by:
+Context injection adds approximately **~1,100 tokens** of overhead to the first turn (identity + behavior + tool protocol + environment + directive instruction). This is a fixed cost that pays for itself on the first turn by:
 
 - Eliminating "what tools do I have?" discovery loops (saves 2–3 turns)
 - Preventing tool call format errors (saves retry turns)
-- Providing completion protocol so the agent knows when and how to finish
+- Providing directive instruction so the agent knows how to interpret directive bodies
 
 For a haiku-tier thread at ~$0.001/turn, the context overhead costs less than $0.001 and saves $0.002–0.003 in avoided discovery turns.
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-25T09:20:03Z:022c6725167509ec14f624ce15ce21f30e9b0481d202826aa1ded5258348acd4:pQ2uEswT2QlbdACTxIqB61k6GhAol1K0Orz-tELd94v_UeWqDZL1moziAOTRRDZ6N2QB6iKq7xVG530IeTtuDw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-25T09:32:09Z:3f4212e56e9b1286d1b915585d5a585a63d13c7bbbe50726a57dc1dfeb55600e:gtzhKZNZVQVWE4lwtECiz7P1o_BG2xORPI9clf0CbnRMZXZizXDV2ceTarZzBFKgnbDHNMfRxQal5TZOm7NABw==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -30,25 +30,25 @@ How `_build_prompt()` transforms a directive into the LLM prompt. Located in `th
 
 ## Prompt Structure
 
-The prompt is built by concatenating these parts with `\n\n`:
+The prompt is built by `_build_prompt()` concatenating these parts with `\n`:
 
 ```
-1. DIRECTIVE_INSTRUCTION        (constant from rye.constants)
-2. <directive name="..." >      (name + description tag)
-3. Preamble                     (cleaned markdown before XML fence)
-4. Body                         (process steps — the actual instructions)
-5. directive_return instruction  (from <outputs>, via rye_execute)
-6. </directive>                 (closing tag)
+1. <directive name="..." >      (name + description tag)
+2. <permissions>...</permissions> (raw XML from directive metadata)
+3. Body                         (process steps — the actual instructions)
+4. directive_return instruction  (from <outputs>, via rye_execute)
+5. </directive>                 (closing tag)
 ```
+
+`DirectiveInstruction` (the "STOP. You are now the executor…" preamble) is **not** part of `_build_prompt()`. It is injected via the `ctx_directive_instruction` context hook at `thread_started` time (see hook_conditions.yaml). The hook uses `wrap: false` to inject raw text without XML wrapping. For in-thread mode (non-threaded `execute`), the constant `DIRECTIVE_INSTRUCTION` is returned via `your_directions` in `execute.py`.
 
 ## What's INCLUDED in the Prompt
 
 | Component             | Source                           | Purpose                                    |
 |-----------------------|----------------------------------|--------------------------------------------|
-| `DIRECTIVE_INSTRUCTION` | `rye.constants`                | System-level execution instruction         |
 | Directive name        | `directive["name"]`              | Context: which directive is running        |
 | Description           | `directive["description"]`       | Context: what this directive does          |
-| Preamble              | `directive["preamble"]`          | Summary text (markdown before XML fence)   |
+| Permissions           | `directive["content"]` (regex)   | Raw `<permissions>` XML block              |
 | Body                  | `directive["body"]`              | Process steps — the actual LLM instructions|
 | Returns               | `directive["outputs"]` → `directive_return` call | Instructs the LLM to call `directive_return` via `rye_execute` |
 
@@ -65,23 +65,6 @@ The LLM does **not** receive:
 - Hook definitions
 
 These are consumed by infrastructure (`thread_directive.py`, `SafetyHarness`, `provider_resolver`).
-
-## Preamble Cleaning
-
-The preamble (markdown text before the XML fence) is cleaned:
-
-```python
-preamble_lines = [
-    l for l in preamble.split("\n")
-    if not l.strip().startswith(("<!-- rye:signed:", "# "))
-]
-```
-
-Removes:
-- Signature comments (`<!-- rye:signed:...`)
-- Markdown headings (`# Title`)
-
-Keeps: description paragraphs and context text.
 
 ## The `<outputs>` → `directive_return` Transformation
 
@@ -132,10 +115,10 @@ When you have completed all steps, return structured results:
 
 ```python
 def _build_prompt(directive: Dict) -> str:
-    from rye.constants import DIRECTIVE_INSTRUCTION
-    parts = [DIRECTIVE_INSTRUCTION]
+    import re as _re
+    parts = []
 
-    # Name + description (handles partial presence)
+    # Directive name + description
     name = directive.get("name", "")
     desc = directive.get("description", "")
     if name and desc:
@@ -145,16 +128,14 @@ def _build_prompt(directive: Dict) -> str:
     elif desc:
         parts.append(f'<directive>\n<description>{desc}</description>')
 
-    # Preamble (cleaned)
-    preamble = directive.get("preamble", "").strip()
-    if preamble:
-        preamble_lines = [l for l in preamble.split("\n")
-                          if not l.strip().startswith(("<!-- rye:signed:", "# "))]
-        preamble_clean = "\n".join(preamble_lines).strip()
-        if preamble_clean:
-            parts.append(preamble_clean)
+    # Permissions — extract raw XML from directive content as-is
+    content = directive.get("content", "")
+    if content:
+        m = _re.search(r"(<permissions>.*?</permissions>)", content, _re.DOTALL)
+        if m:
+            parts.append(m.group(1))
 
-    # Body (process steps)
+    # Body (process steps — the actual instructions, already pseudo-XML)
     body = directive.get("body", "").strip()
     if body:
         parts.append(body)
@@ -167,7 +148,13 @@ def _build_prompt(directive: Dict) -> str:
             for o in outputs:
                 oname = o.get("name", "")
                 if oname:
-                    output_fields[oname] = o.get("description", "")
+                    otype = o.get("type", "string")
+                    required = o.get("required", False)
+                    desc = o.get("description", "")
+                    label = f"{desc} ({otype})" if desc else otype
+                    if required:
+                        label += " [required]"
+                    output_fields[oname] = label
         elif isinstance(outputs, dict):
             output_fields = dict(outputs)
 
@@ -179,11 +166,11 @@ def _build_prompt(directive: Dict) -> str:
                 f"parameters={{{params_obj}}})`"
             )
 
-    # Close directive tag (if any opening tag was emitted)
+    # Close directive tag if opened
     if name or desc:
         parts.append("</directive>")
 
-    return "\n\n".join(parts)
+    return "\n".join(parts)
 ```
 
 ## System Message Assembly
@@ -206,6 +193,36 @@ Before the main loop begins, `build_system_prompt` hooks fire to produce the sys
 | OpenAI-compat   | Message with `role: "system"` at the start of messages|
 
 This ensures each provider receives the system prompt in its idiomatic format.
+
+## Context Hook XML Wrapping
+
+By default, context hooks wrap their loaded content in PascalCase XML tags with a `type` attribute derived from the knowledge item's name and type:
+
+```xml
+<Identity id="rye/agent/core/Identity" type="knowledge">
+...content...
+</Identity>
+```
+
+The tag name comes from the item's `name` field in its YAML frontmatter (PascalCase). The `type` attribute reflects the `item_type` from the hook action.
+
+### The `wrap: false` Option
+
+Hooks can set `wrap: false` to inject raw content without XML wrapping. This is used by the `ctx_directive_instruction` hook so `DirectiveInstruction` content appears as bare text (not inside XML tags):
+
+```yaml
+- id: "ctx_directive_instruction"
+  event: "thread_started"
+  layer: 2
+  position: "before"
+  wrap: false
+  action:
+    primary: "execute"
+    item_type: "knowledge"
+    item_id: "rye/agent/core/DirectiveInstruction"
+```
+
+When `wrap: false`, the content string is injected as-is into the prompt position.
 
 ## Context Injection from `<context>` Directive Metadata
 
@@ -236,9 +253,9 @@ Context entries reference knowledge items by ID. These are loaded via `LoadTool`
 
 Directives can suppress specific hook-driven context layers using `<suppress>`. The value matches against:
 - The hook's `id` field (e.g. `system_tool_protocol`)
-- The action's full knowledge `item_id` (e.g. `rye/agent/core/tool-protocol`)
+- The action's full knowledge `item_id` (e.g. `rye/agent/core/ToolProtocol`)
 
-Basename matching is intentionally not supported to avoid ambiguous clashes (e.g. `identity` matching both `rye/agent/core/identity` and `project/auth/identity`).
+Basename matching is intentionally not supported to avoid ambiguous clashes (e.g. `Identity` matching both `rye/agent/core/Identity` and `project/auth/Identity`).
 
 ```xml
 <context>
@@ -288,11 +305,11 @@ Projects can customize the thread context without modifying system-level knowled
 
 `LoadTool` cascades project → user → system. To override the default identity:
 
-1. Create `.ai/knowledge/rye/agent/core/identity.md` in your project
+1. Create `.ai/knowledge/rye/agent/core/Identity.md` in your project
 2. The project-level file will be loaded instead of the system default
 3. No directive changes needed — hooks automatically pick up the override
 
-This works for any core knowledge item: `identity`, `behavior`, `tool-protocol`, `environment`.
+This works for any core knowledge item: `Identity`, `Behavior`, `ToolProtocol`, `Environment`.
 
 ### Override via Directive `<context>`
 
@@ -300,7 +317,7 @@ For per-directive customization (not project-wide), use `<context>` metadata:
 
 ```xml
 <context>
-  <suppress>tool-protocol</suppress>
+  <suppress>system_tool_protocol</suppress>
   <before>project/my-custom-protocol</before>
 </context>
 ```
