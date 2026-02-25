@@ -129,7 +129,7 @@ rye execute directive rye/core/registry/search  # find tools
 
 A package manager for agent cognition.
 
-### ⚡ Everything Is Data
+### Everything Is Data
 
 Runtimes, error classification, retry policies, provider configs — all YAML/Python files, not hardcoded. Adding a new language runtime is a single YAML file:
 
