@@ -1,4 +1,4 @@
-// rye:signed:2026-02-23T01:28:08Z:86f089cf310d3ff22be3f65d2768cea1e3c568955b4276605c3911d67bdd8b9e:U6Mjpa8FTWO519-6nqdILwMJIlNu_D6gKS2Uu3AgJmS4mWgI_DWOH-jtNWW8A_WSpRJbXqRiH88cA9CVaeXrAQ==:9fbfabe975fa5a7f
+// rye:signed:2026-02-25T00:02:14Z:86f089cf310d3ff22be3f65d2768cea1e3c568955b4276605c3911d67bdd8b9e:U6Mjpa8FTWO519-6nqdILwMJIlNu_D6gKS2Uu3AgJmS4mWgI_DWOH-jtNWW8A_WSpRJbXqRiH88cA9CVaeXrAQ==:9fbfabe975fa5a7f
 // rye:unsigned
 import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";

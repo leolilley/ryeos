@@ -1,0 +1,14 @@
+[project]
+name = "ryeos-full"
+version = "0.1.0"
+description = "RYE Full Bundle — all standard, web, and code tools"
+
+dependencies = [
+    "ryeos",
+    "ryeos-web",
+    "ryeos-code",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
