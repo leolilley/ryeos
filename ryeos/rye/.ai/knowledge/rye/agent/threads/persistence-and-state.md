@@ -136,7 +136,7 @@ Key differences from thread transcripts:
 - **Overwrite, not append** — knowledge markdown is fully re-rendered from JSONL at each step
 - **State file separate** — resumable graph state lives at `.ai/knowledge/graphs/{graph_id}/{graph_run_id}.md` (signed JSON), unchanged from before
 
-Cross-process watching in `orchestrator.py` (`_poll_registry`) uses `rye-watch` (push-based, OS-native file watcher on `registry.db`) with 500ms polling fallback.
+Cross-process watching in `orchestrator.py` (`_poll_registry`) uses `lilux-watch` (push-based, OS-native file watcher on `registry.db`) with 500ms polling fallback.
 
 ## Context Limit Detection
 

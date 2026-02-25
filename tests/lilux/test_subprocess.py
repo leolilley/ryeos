@@ -17,10 +17,10 @@ from lilux.primitives.subprocess import (
 from lilux.primitives.errors import ConfigurationError
 
 
-# Skip all tests if rye-proc is not on PATH
+# Skip all tests if lilux-proc is not on PATH
 pytestmark = pytest.mark.skipif(
-    shutil.which("rye-proc") is None,
-    reason="rye-proc binary not found on PATH",
+    shutil.which("lilux-proc") is None,
+    reason="lilux-proc binary not found on PATH",
 )
 
 
@@ -99,17 +99,17 @@ class TestStatusResult:
 
 
 class TestConfigurationError:
-    """Test rye-proc hard requirement."""
+    """Test lilux-proc hard requirement."""
 
-    def test_raises_when_rye_proc_missing(self):
+    def test_raises_when_lilux_proc_missing(self):
         with patch("shutil.which", return_value=None):
-            with pytest.raises(ConfigurationError, match="rye-proc"):
+            with pytest.raises(ConfigurationError, match="lilux-proc"):
                 SubprocessPrimitive()
 
 
 @pytest.mark.asyncio
 class TestSubprocessPrimitive:
-    """Test SubprocessPrimitive execution via rye-proc exec."""
+    """Test SubprocessPrimitive execution via lilux-proc exec."""
 
     async def test_execute_simple_command(self):
         """Execute simple echo command."""

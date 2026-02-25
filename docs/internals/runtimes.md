@@ -28,8 +28,8 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` (system space). You ca
 │   └── lib/                             # Shared Python runtime libraries
 ├── rust/
 │   ├── runtime.yaml                     # Rust binary runtime
-│   ├── rye-proc/                        # Process lifecycle manager
-│   └── rye-watch/                       # Push-based registry watcher (src/)
+│   ├── lilux-proc/                      # Process lifecycle manager
+│   └── lilux-watch/                     # Push-based registry watcher (src/)
 └── state-graph/
     ├── runtime.yaml                     # Walk declarative graph YAML
     └── walker.py                        # Graph walking engine
@@ -251,7 +251,7 @@ args:
 | `{tool_path}` | Absolute path to tool file | `/project/.ai/tools/rye/bash/bash.py` |
 | `{params_json}` | Tool parameters as JSON | `{"command":"ls -la"}` |
 | `{project_path}` | Project root | `/project` |
-| `{system_space}` | System space root | `/usr/local/lib/python3.11/site-packages/rye/rye/.ai` |
+| `{system_space}` | System space root | `/usr/local/lib/python3.11/site-packages/ryeos/rye/.ai` |
 | `{server_config_path}` | MCP server config path | `/project/.ai/tools/mcp/servers/context7.yaml` |
 | `{anchor_path}` | Anchored root | `/project/.ai/tools/rye/bash` |
 | `{runtime_lib}` | Runtime lib directory | `/project/.ai/tools/rye/bash/lib` |
@@ -744,8 +744,8 @@ config_schema:
 
 The Rust runtime executes compiled Rust binaries found on `$PATH`. It ships two binaries:
 
-- **`rye-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
-- **`rye-proc`**: Cross-platform process lifecycle manager with subcommands `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). All process operations in `SubprocessPrimitive` delegate to rye-proc — it is a hard dependency (no POSIX fallbacks).
+- **`lilux-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
+- **`lilux-proc`**: Cross-platform process lifecycle manager with subcommands `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). All process operations in `SubprocessPrimitive` delegate to lilux-proc — it is a hard dependency (no POSIX fallbacks).
 
 ```yaml
 # rye/core/runtimes/rust/runtime
@@ -762,13 +762,13 @@ description: "Rust runtime — executes compiled Rust binaries found on PATH"
 env_config:
   interpreter:
     type: system_binary
-    binary: rye-watch
-    var: RYE_RUST_WATCH
+    binary: lilux-watch
+    var: LILUX_WATCH
   env:
     RUST_BACKTRACE: "0"
 
 config:
-  command: "${RYE_RUST_WATCH}"
+  command: "${LILUX_WATCH}"
   args:
     - "--db"
     - "{db_path}"

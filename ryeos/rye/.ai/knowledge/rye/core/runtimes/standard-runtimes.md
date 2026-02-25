@@ -72,7 +72,7 @@ Lilux execution layer
 | **python/function** | Python | In-process | local_binary (same as script) | Pure functions, fast execution |
 | **node/node** | JavaScript/TypeScript | Subprocess | local_binary (`node_modules/.bin/tsx`) | Node.js tools, npm packages |
 | **bash/bash** | Bash/Shell | Subprocess | System binary (`which bash`) | Shell scripts, CLI tools |
-| **rust/runtime** | Rust | Subprocess | system_binary (`rye-watch`, `rye-proc`) | Native performance, OS-level operations |
+| **rust/runtime** | Rust | Subprocess | system_binary (`lilux-watch`, `lilux-proc`) | Native performance, OS-level operations |
 | **mcp/stdio** | MCP (stdio protocol) | Subprocess + stdio | N/A (launches MCP server) | MCP servers via stdio |
 | **mcp/http** | MCP (HTTP protocol) | HTTP client | N/A (connects via HTTP) | Remote MCP servers, APIs |
 | **state-graph/runtime** | State graphs | In-process state machine | N/A (orchestration) | Multi-step workflows, graphs |
@@ -333,8 +333,8 @@ echo "$result"
 
 Executes compiled Rust binaries via `system_binary` interpreter resolution. Two binaries ship with Rye OS:
 
-- **`rye-watch`** — Push-based file watcher for `registry.db`. Uses OS-native watchers (inotify/FSEvents/ReadDirectoryChangesW). CLI: `rye-watch --db <path> --thread-id <id> --timeout <seconds>`. Prints JSON to stdout.
-- **`rye-proc`** — Cross-platform process lifecycle manager. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin, cwd, env), `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). All output is JSON to stdout. rye-proc is a hard dependency — `SubprocessPrimitive.__init__()` raises `ConfigurationError` if it's not on PATH.
+- **`lilux-watch`** — Push-based file watcher for `registry.db`. Uses OS-native watchers (inotify/FSEvents/ReadDirectoryChangesW). CLI: `lilux-watch --db <path> --thread-id <id> --timeout <seconds>`. Prints JSON to stdout.
+- **`lilux-proc`** — Cross-platform process lifecycle manager. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin, cwd, env), `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). All output is JSON to stdout. lilux-proc is a hard dependency — `SubprocessPrimitive.__init__()` raises `ConfigurationError` if it's not on PATH.
 
 ### Config
 
@@ -342,8 +342,8 @@ Executes compiled Rust binaries via `system_binary` interpreter resolution. Two 
 env_config:
   interpreter:
     type: system_binary
-    binary: rye-watch  # or rye-proc
-    var: RYE_RUST_BINARY
+    binary: lilux-watch  # or lilux-proc
+    var: LILUX_WATCH
 ```
 
 ### When to Use

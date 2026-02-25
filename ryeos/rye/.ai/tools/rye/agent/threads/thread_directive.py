@@ -1,4 +1,4 @@
-# rye:signed:2026-02-24T05:39:11Z:107472873cc8730803b56bdf4144a8a8b0c5678946b2aca1d2abc908a9538f40:O8VbSp7ll9D_L6VczNkKJkaXQJ5sl2od_K8wnCTV_hb2iQE18X6ym2cJ0pfvNm_eX4m8kEgOsaODnixkQgQKAw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-25T00:07:26Z:5d1c817da50827532f7702405eaed942ff5ff2ccda746427711324722fb2c288:lWMg6RohRRt7D7Byxq8xhCYm-055LgQvMy-rBjdVirWk43iF158VXl3reDzreSX7NRb8lQaaSMEeNAKgrweCCA==:9fbfabe975fa5a7f
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -99,7 +99,7 @@ def _build_tool_schemas() -> list:
 def _spawn_env(thread_id: str) -> Dict[str, str]:
     """Build env dict for async subprocess spawn.
 
-    rye-proc daemonizes with a clean env — only explicitly passed vars survive.
+    lilux-proc daemonizes with a clean env — only explicitly passed vars survive.
     Forward everything the child needs to bootstrap and run.
     """
     # Always needed
@@ -360,7 +360,7 @@ async def _resolve_directive_chain(
                 f"Failed to load parent directive '{parent_id}': "
                 f"{result.get('error', 'unknown error')}"
             )
-        parent = ParserRouter().parse("markdown_xml", result["content"])
+        parent = ParserRouter().parse("markdown/xml", result["content"])
         chain.append(parent)
         chain_names.append(parent.get("name", parent_id))
         current = parent

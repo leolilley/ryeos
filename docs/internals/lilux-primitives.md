@@ -11,24 +11,24 @@ version: "1.0.0"
 
 Lilux is the microkernel layer of Rye OS. It provides stateless, async-first primitives for interacting with the operating system. Lilux has **no knowledge** of Rye, `.ai/` directories, tool metadata, or space resolution — it receives fully-resolved configuration and executes it.
 
-All Lilux code lives in `lilux/lilux/`.
+All Lilux code lives in `lilux/kernel/`.
 
 ## SubprocessPrimitive
 
 **Location:** `lilux/primitives/subprocess.py`
 
-Unified process management primitive. All process operations — inline execution, detached spawning, killing, and status checks — go through the `rye-proc` Rust binary. No POSIX fallbacks.
+Unified process management primitive. All process operations — inline execution, detached spawning, killing, and status checks — go through the `lilux-proc` Rust binary. No POSIX fallbacks.
 
-### Hard Dependency: rye-proc
+### Hard Dependency: lilux-proc
 
-`SubprocessPrimitive.__init__()` resolves `rye-proc` via `shutil.which()`. If the binary is not found on `$PATH`, it raises `ConfigurationError`. This is intentional — rye-proc is a hard requirement for all process operations.
+`SubprocessPrimitive.__init__()` resolves `lilux-proc` via `shutil.which()`. If the binary is not found on `$PATH`, it raises `ConfigurationError`. This is intentional — lilux-proc is a hard requirement for all process operations.
 
 ```python
 class SubprocessPrimitive:
     def __init__(self):
-        self._rye_proc = shutil.which("rye-proc")
-        if not self._rye_proc:
-            raise ConfigurationError("rye-proc binary not found on PATH.")
+        self._lilux_proc = shutil.which("lilux-proc")
+        if not self._lilux_proc:
+            raise ConfigurationError("lilux-proc binary not found on PATH.")
 ```
 
 ### Interface
@@ -43,7 +43,7 @@ class SubprocessPrimitive:
 
 ### execute() — Inline Run-and-Wait
 
-Delegates to `rye-proc exec`. Two-stage templating (env vars then runtime params) stays in Python; the actual process execution is handled by rye-proc.
+Delegates to `lilux-proc exec`. Two-stage templating (env vars then runtime params) stays in Python; the actual process execution is handled by lilux-proc.
 
 **Config keys:**
 
@@ -58,7 +58,7 @@ Delegates to `rye-proc exec`. Two-stage templating (env vars then runtime params
 
 ### spawn() — Detached Process
 
-Delegates to `rye-proc spawn`. Returns immediately with a PID.
+Delegates to `lilux-proc spawn`. Returns immediately with a PID.
 
 ```python
 result = await primitive.spawn("python", ["worker.py"], log_path="/tmp/worker.log")
@@ -67,7 +67,7 @@ result = await primitive.spawn("python", ["worker.py"], log_path="/tmp/worker.lo
 
 ### kill() — Graceful Then Force
 
-Delegates to `rye-proc kill`. Sends SIGTERM, waits `grace` seconds, then SIGKILL.
+Delegates to `lilux-proc kill`. Sends SIGTERM, waits `grace` seconds, then SIGKILL.
 
 ```python
 result = await primitive.kill(12345, grace=3.0)
@@ -76,7 +76,7 @@ result = await primitive.kill(12345, grace=3.0)
 
 ### status() — Is Process Alive
 
-Delegates to `rye-proc status`.
+Delegates to `lilux-proc status`.
 
 ```python
 result = await primitive.status(12345)
@@ -134,13 +134,13 @@ class StatusResult:
 
 ### Timeout Handling
 
-rye-proc handles timeouts natively. On timeout, the child process is killed and a `SubprocessResult` is returned with `success=False` and stderr `"Command timed out after {timeout} seconds"`.
+lilux-proc handles timeouts natively. On timeout, the child process is killed and a `SubprocessResult` is returned with `success=False` and stderr `"Command timed out after {timeout} seconds"`.
 
 ### Error Cases
 
 | Condition            | Return Code | Stderr                                        |
 | -------------------- | ----------- | --------------------------------------------- |
-| rye-proc not on PATH | N/A         | `ConfigurationError` raised at `__init__`     |
+| lilux-proc not on PATH | N/A         | `ConfigurationError` raised at `__init__`     |
 | Command not found    | -1          | `"Failed to spawn: {error}"`                 |
 | Timeout              | -1          | `"Command timed out after {timeout} seconds"` |
 | No command specified | -1          | `"No command specified"`                      |
