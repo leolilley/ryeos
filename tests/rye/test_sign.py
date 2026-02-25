@@ -29,7 +29,7 @@ def temp_project():
             "    <author>test</author>\n"
             '    <model tier="general" />\n'
             "    <permissions>\n"
-            '      <read resource="filesystem" />\n'
+            '      <execute tool="rye/bash/bash" />\n'
             "    </permissions>\n"
             "  </metadata>\n"
             "</directive>\n"
