@@ -28,18 +28,18 @@ MCP gave us a universal tool protocol. But MCP is a pipe — it doesn't answer w
 
 **RYE is the policy and orchestration layer that MCP is missing.**
 
-|                         | Codex / Claude Code          | LangChain / CrewAI        | **RYE**                                   |
-| ----------------------- | ---------------------------- | ------------------------- | ----------------------------------------- |
-| **Portable workflows**  | ✗ Platform-locked            | ✗ Code, not data          | ✓ Declarative data files                  |
-| **Model agnostic**      | ✗ Single vendor              | ✓                         | ✓ Any LLM via MCP                         |
-| **Cryptographic trust** | ✗                            | ✗                         | ✓ Ed25519 signed, chain-verified          |
-| **Permission model**    | Human-in-the-loop            | None                      | ✓ Declarative capability attenuation      |
-| **Cross-client**        | ✗ One client only            | ✗ One framework           | ✓ Any MCP client                          |
-| **Community registry**  | ✗                            | ✗ Unsigned                | ✓ Signed, TOFU-pinned, author-attributed  |
+|                         | Codex / Claude Code | LangChain / CrewAI | **RYE**                                  |
+| ----------------------- | ------------------- | ------------------ | ---------------------------------------- |
+| **Portable workflows**  | ✗ Platform-locked   | ✗ Code, not data   | ✓ Declarative data files                 |
+| **Model agnostic**      | ✗ Single vendor     | ✓                  | ✓ Any LLM via MCP                        |
+| **Cryptographic trust** | ✗                   | ✗                  | ✓ Ed25519 signed, chain-verified         |
+| **Permission model**    | Human-in-the-loop   | None               | ✓ Declarative capability attenuation     |
+| **Cross-client**        | ✗ One client only   | ✗ One framework    | ✓ Any MCP client                         |
+| **Community registry**  | ✗                   | ✗ Unsigned         | ✓ Signed, TOFU-pinned, author-attributed |
 
 ## Features
 
-### 🔐 Cryptographic Trust — No Exceptions
+### Cryptographic Trust — No Exceptions
 
 Every item is Ed25519-signed. Every chain element is verified before execution. Lockfiles pin exact versions with SHA256 hashes. **Unsigned or tampered items are rejected — including RYE's own system tools.**
 
@@ -47,7 +47,7 @@ Every item is Ed25519-signed. Every chain element is verified before execution. 
 # rye:signed:2026-02-14T00:27:54Z:8e27c5f8...:WOclUqjr...:440443d0
 ```
 
-### 🧬 Multi-Agent Orchestration
+### Multi-Agent Orchestration
 
 Spawn autonomous child threads as separate OS processes. Each gets its own LLM, budget, and transcript:
 
@@ -65,7 +65,7 @@ Root Orchestrator (sonnet, $3.00 budget)
 - **Adaptive coordination** — cancel, kill, resume, cascade policies. All via YAML
 - **Lossless context chains** — threads hand off with summaries; full history is searchable
 
-### 🛡️ Fail-Closed Capability System
+### Fail-Closed Capability System
 
 No capabilities declared = all actions denied. Permissions use fnmatch patterns with full attenuation down delegation chains:
 
@@ -77,7 +77,7 @@ rye.load.knowledge.my-project.*      — project knowledge only
 
 Capabilities are Ed25519-signed tokens with audience binding and expiry. Children can only subset parent permissions.
 
-### 📊 Declarative State Graphs
+### Declarative State Graphs
 
 Deterministic workflows as YAML — no LLM calls for routing:
 
@@ -101,23 +101,23 @@ config:
 
 Resumable, auditable, parallelizable. Foreach nodes fan out work. Error edges route to recovery. Hooks fire on graph events.
 
-### 🔍 White-Box Observability
+### White-Box Observability
 
 Every thread is fully transparent. Parents read child transcripts — full reasoning traces, tool calls, results. Regex search across entire delegation trees. Per-token streaming to JSONL and knowledge markdown in real-time.
 
-### 📦 Three-Tier Space System
+### Three-Tier Space System
 
 Items resolve `project → user → system` with shadow-override semantics:
 
-| Space       | Path                     | Purpose                   |
-| ----------- | ------------------------ | ------------------------- |
-| **Project** | `.ai/`                   | Your project's items      |
-| **User**    | `~/.ai/`                 | Personal cross-project    |
+| Space       | Path                     | Purpose                    |
+| ----------- | ------------------------ | -------------------------- |
+| **Project** | `.ai/`                   | Your project's items       |
+| **User**    | `~/.ai/`                 | Personal cross-project     |
 | **System**  | `site-packages/rye/.ai/` | Immutable standard library |
 
 Override any system behavior by placing a file with the same ID in your project. RYE's own orchestrator, safety harness, and agent system are all overridable `.ai/` items.
 
-### 🌐 Community Registry
+### Community Registry
 
 Push signed items. Pull with TOFU key pinning. Every item carries author provenance — trust is cryptographically provable, not implicit.
 
@@ -152,12 +152,12 @@ No code changes. No recompilation. Just a file.
 
 Four tools are the entire agent-facing surface:
 
-| Tool      | Purpose                                   |
-| --------- | ----------------------------------------- |
-| `search`  | Find items across all spaces              |
-| `load`    | Read content or copy between spaces       |
-| `execute` | Run directives, tools, or knowledge       |
-| `sign`    | Cryptographically sign items              |
+| Tool      | Purpose                             |
+| --------- | ----------------------------------- |
+| `search`  | Find items across all spaces        |
+| `load`    | Read content or copy between spaces |
+| `execute` | Run directives, tools, or knowledge |
+| `sign`    | Cryptographically sign items        |
 
 ## Install
 
@@ -210,7 +210,7 @@ ryeos-mcp/       → pip: ryeos-mcp      MCP server transport (stdio/SSE)
 
 ## Platform Support
 
-Linux and macOS. Multi-agent orchestration uses `lilux-proc` for cross-platform process management. Windows support is planned.
+Linux and macOS. Multi-agent orchestration uses `lilux-proc` for cross-platform process management. Windows support is untested.
 
 ## Documentation
 
