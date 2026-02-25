@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:c791445ba3954e9409856b707f6e778a8ad6de09a21e847e4d5ee2ee0b51904a:HvcV3ahA856p1Qhwghbn21DiVWzF94FkJNcnbwjK9cMYhpZ35KI6MP_3BX16volVqLwh8Niq1-7qXZv4mZpyDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T23:52:30Z:b8c9a185ed19ac2522a181803b978305e42dd532023e3e4727591f310caf9eaa:woUbnOa0-XTZkY7gxjogyM_JifT92_b6_TaJ8e13Q-jibajnbum0m1yE3A1yyaboUlnN9B8lZC36Fputqn7TDw==:9fbfabe975fa5a7f -->
 # Permission Inheritance Test
 
 Test that child threads inherit parent capabilities when child declares none. Parent has fs+thread permissions. Child (write_file) has its own fs caps — those should be used. But a child with NO caps should inherit parent's.
@@ -12,9 +12,11 @@ Test that child threads inherit parent capabilities when child declares none. Pa
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>
-      <cap>rye.execute.tool.rye.file-system.*</cap>
-      <cap>rye.execute.tool.rye.agent.threads.*</cap>
-      <cap>rye.search.*</cap>
+      <execute>
+        <tool>rye.file-system.*</tool>
+        <tool>rye.agent.threads.*</tool>
+      </execute>
+      <search>*</search>
     </permissions>
   </metadata>
   <outputs>

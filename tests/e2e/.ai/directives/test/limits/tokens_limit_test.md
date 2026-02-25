@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:f31c06a5a6b81317e0257e906553073766df418f60564f0c7a5e841706f462e1:RtQwvnYk-ahDlWB_bwLVZWqLWECanjigiKE4b3TfQMM4t4okQhPfa0kbCp7M7_u3571OPw1ynlj6NR0KFf-wCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T23:52:30Z:25c332af547bd9b20bc005b007fe17fd34cd27cfffdd18efd17fad0957c225f3:k0Bz-y4Hkpl7dfZ5rMDdbMihIWClF8nqsOxUH_s3l4gGwPoa2Zg-_lQLU9EqZAMVIi-UVtLtQfAiLc5pum-sAA==:9fbfabe975fa5a7f -->
 # Tokens Limit Test
 
 Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM response exceeds it.
@@ -12,8 +12,8 @@ Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM 
     <model tier="fast" />
     <limits turns="10" tokens="500" spend="1.0" />
     <permissions>
-      <cap>rye.execute.tool.rye.file-system.*</cap>
-      <cap>rye.search.*</cap>
+      <execute><tool>rye.file-system.*</tool></execute>
+      <search>*</search>
     </permissions>
   </metadata>
 

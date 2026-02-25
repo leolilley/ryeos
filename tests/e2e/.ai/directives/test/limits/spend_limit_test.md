@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:2301333b029fc812202637f24b0307f9981a32c061274223e246b800e6b5cbbc:NNktllXVUYavjkMjtXGjyj7bB_CogsO6c2TCuBpkF2u-ZGA_OKt-7QOK0EU0I1TFEhVp-HlU2RLz2Yqf94sFDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T23:52:30Z:2907a3c2d43f3425a914ac3ea8969985ade508e14693f0eb614e9282c06bf87e:krX190SpEuo8pwFe3YBZHpF5lNMWnislLuxYT6EtfrivpFHMVfTeV_hbeEfZ5eFBeGGzkm31T09t-C8TjQ1YDQ==:9fbfabe975fa5a7f -->
 # Spend Limit Test
 
 Test that the spend limit triggers escalation. Set spend=$0.001 — even a single haiku turn costs more than that.
@@ -12,8 +12,8 @@ Test that the spend limit triggers escalation. Set spend=$0.001 — even a singl
     <model tier="fast" />
     <limits turns="10" tokens="100000" spend="0.001" />
     <permissions>
-      <cap>rye.execute.tool.rye.file-system.*</cap>
-      <cap>rye.search.*</cap>
+      <execute><tool>rye.file-system.*</tool></execute>
+      <search>*</search>
     </permissions>
   </metadata>
 

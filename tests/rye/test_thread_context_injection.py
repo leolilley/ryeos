@@ -211,6 +211,70 @@ class TestExtendsAttribute:
         assert "extends" not in result
 
 
+# ── XML Parser: invalid permission tags ───────────────────────────────
+
+class TestInvalidPermissionTags:
+    """Test that unknown tags inside <permissions> raise ValueError."""
+
+    def test_cap_tag_rejected(self):
+        md = '''# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+    <permissions>
+      <cap>rye.execute.tool.*</cap>
+    </permissions>
+  </metadata>
+</directive>
+```
+'''
+        result = md_parse(md)
+        assert "error" in result
+        assert "Unknown tag <cap> inside <permissions>" in result["error"]
+
+    def test_arbitrary_tag_rejected(self):
+        md = '''# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+    <permissions>
+      <allow>rye.execute.tool.*</allow>
+    </permissions>
+  </metadata>
+</directive>
+```
+'''
+        result = md_parse(md)
+        assert "error" in result
+        assert "Unknown tag <allow> inside <permissions>" in result["error"]
+
+    def test_valid_tags_accepted(self):
+        md = '''# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+    <permissions>
+      <execute><tool>rye.file-system.*</tool></execute>
+      <search>*</search>
+      <load>*</load>
+      <sign>*</sign>
+      <acknowledge risk="elevated">Reason</acknowledge>
+    </permissions>
+  </metadata>
+</directive>
+```
+'''
+        result = md_parse(md)
+        assert len(result["permissions"]) == 4
+        assert result["acknowledged_risks"][0]["risk"] == "elevated"
+
+
 # ── SafetyHarness: check_permission() ─────────────────────────────────
 
 class TestSafetyHarnessPermissions:

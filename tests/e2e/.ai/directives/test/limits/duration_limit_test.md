@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:08c5145c8127f3c0c695d2b1c1d04307de3e19192621b170407c45866495636a:_F6RsnkPDc13ZGkVAbAhmtjI0_1r6DHPZ04xbNvdZ4EU5gE5e-TgmJeq3QI56-XZNQU_uEVLBpklozuPK1XnBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T23:52:30Z:8c2f436cdc2416826fb17ad5313f11a6f9ecfea4915a27061f02eb3ceae42f28:fgriEvHzH8493K1x2TmsrbsCgpcGoESZNPPUvLEe8IC8IiQZdQqR--blTLwen-GZpyzk5rofK5ihxOo_vM9dBA==:9fbfabe975fa5a7f -->
 # Duration Limit Test
 
 Test that the duration_seconds limit triggers escalation. Set duration_seconds=1 so the thread exceeds it during its first LLM call.
@@ -12,8 +12,8 @@ Test that the duration_seconds limit triggers escalation. Set duration_seconds=1
     <model tier="fast" />
     <limits turns="10" tokens="100000" spend="1.0" duration_seconds="1" />
     <permissions>
-      <cap>rye.execute.tool.rye.file-system.*</cap>
-      <cap>rye.search.*</cap>
+      <execute><tool>rye.file-system.*</tool></execute>
+      <search>*</search>
     </permissions>
   </metadata>
 

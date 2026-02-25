@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:4881331fd7cfcb25e90cf09ab54524740d55a49bacdf2e87faf32d9ef2f26db6:m3z_WtILK9JWvdo6QwhXJ6JCPXubfCGeRD_IhkEJgiYoQ0uGZlSC3iK9LKX5ScKJohtwdVMYSWey82fcfq_wAw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T23:52:30Z:e8b1cd2d8a65ebd51518c05ad5cd4e351089d01e0eb9c278e67e6ce5de43ea1d:o3JE5rKWHj1seShWzRMAh3ajew_yTiln8derG8qROjrRxY2uX1JJMdWcljzf41MYoaixKrk5zxpsmjlV9Ko7Dw==:9fbfabe975fa5a7f -->
 # Spawn Chain 4 Levels Deep
 
 End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tests budget cascading, limit inheritance, permission inheritance, and depth tracking across 4 levels.
@@ -12,8 +12,8 @@ End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tes
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="1.00" depth="5" spawns="3" />
     <permissions>
-      <cap>rye.execute.tool.*</cap>
-      <cap>rye.search.*</cap>
+      <execute><tool>*</tool></execute>
+      <search>*</search>
     </permissions>
   </metadata>
 

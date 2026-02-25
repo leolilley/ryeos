@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:f37ca3767a19eee2ca5cdfdad310e9e85d3d5af124d50b9dbc9cb585b97b8605:uzIHkOyvg167GR-yvZGEd-IuH25HB3ZTj99lWwYR3ryLnVIn7NhtwQeaY0BD6pXvMS6p2MKfjBamXU3b6p0mBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-24T23:52:30Z:c6c19f29be39554fcb1ac78dbc517728dc6ae5b5f3808e060cfd157d66621d89:UBRwtjaJnO_yPVdQQq8z8sqpn6IYwQdLQxQIzgwXSlLDCS6hpc-tYmewIiWB-RPwkuVRz6zx9xhSxksySVbbDA==:9fbfabe975fa5a7f -->
 # Spawn Chain Child
 
 Recursive child for spawn chain test. Writes a marker at its level, then spawns the next level if not at max.
@@ -12,8 +12,8 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>
-      <cap>rye.execute.tool.*</cap>
-      <cap>rye.search.*</cap>
+      <execute><tool>*</tool></execute>
+      <search>*</search>
     </permissions>
   </metadata>
 
