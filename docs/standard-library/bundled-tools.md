@@ -9,7 +9,12 @@ version: "1.0.0"
 
 # Bundled Tools
 
-Rye OS ships a standard library of tools inside the Python package at `rye/rye/.ai/tools/rye/`. These live in the **system space** and are always available — no installation required. Tools are organized into two tiers: **agent-facing tools** that users interact with directly, and **infrastructure tools** that power the system internally.
+Rye OS ships a standard library of tools inside the `ryeos` package at `ryeos/rye/.ai/tools/rye/`. These live in the **system space** and are always available — no installation required. Tools are organized into two tiers: **agent-facing tools** that users interact with directly, and **infrastructure tools** that power the system internally.
+
+Tools are distributed across multiple bundles:
+- **Standard bundle** (`ryeos`) — file-system, bash, MCP, primary tools, agent system, infrastructure
+- **Web bundle** (`ryeos-web`, or `pip install ryeos[web]`) — browser automation, fetch, search
+- **Code bundle** (`ryeos-code`, or `pip install ryeos[code]`) — npm, diagnostics, typescript, LSP
 
 All tools are invoked via `rye_execute(item_type="tool", item_id="<item_id>", parameters={...})`.
 
@@ -59,7 +64,7 @@ rye_execute(item_type="tool", item_id="rye/bash/bash",
     parameters={"command": "git status --short"})
 ```
 
-### Web (`rye/web/`)
+### Web (`rye/web/`) — requires `ryeos-web` or `ryeos[web]`
 
 | Tool    | Item ID                      | Description                              |
 | ------- | ---------------------------- | ---------------------------------------- |
@@ -108,9 +113,9 @@ rye_execute(item_type="tool", item_id="rye/core/registry/registry",
     parameters={"action": "search", "query": "deployment"})
 ```
 
-### Code Tools (`rye/code/`)
+### Code Tools (`rye/code/`) — requires `ryeos-code` or `ryeos[code]`
 
-Development tools for package management, type checking, diagnostics, and LSP code intelligence.
+Development tools for package management, type checking, diagnostics, and LSP code intelligence. Node.js dependencies (`node_modules`) are NOT shipped — they are installed on first use via the node runtime's anchor system.
 
 | Tool        | Item ID                              | Description                                         |
 | ----------- | ------------------------------------ | --------------------------------------------------- |

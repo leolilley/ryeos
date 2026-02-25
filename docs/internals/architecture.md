@@ -51,7 +51,7 @@ This layer implements all policy: which spaces to search, how to validate chains
 
 ## Layer 3: `.ai/` Data Bundle
 
-The "standard library" that ships inside the `rye` package at `rye/rye/.ai/`. This is what agents actually interact with — it contains the tools, runtimes, directives, and knowledge entries that define system capabilities.
+The "standard library" that ships inside the `ryeos` package at `ryeos/rye/.ai/`. This is what agents actually interact with — it contains the tools, runtimes, directives, and knowledge entries that define system capabilities. Additional bundles (`ryeos-web`, `ryeos-code`) extend the standard library with web and code tools.
 
 ### Runtimes (YAML configs)
 
@@ -145,4 +145,4 @@ The only hardcoded knowledge in the system is the mapping from primitive IDs to 
 
 ## Package and Bundle Distribution
 
-The system is distributed as pip packages (`lilux`, `ryeos-core`, `ryeos`, `ryeos-mcp`), each with a clear role. `ryeos` and `ryeos-core` share the same Python code but register different bundles — `ryeos` exposes all `rye/*` items, while `ryeos-core` exposes only `rye/core/*`. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.
+The system is distributed as pip packages organized in a monorepo. `lilux` provides the microkernel (with `lilux-proc` as a hard dependency for process management and `lilux-watch` for file watching). `ryeos` provides the engine plus the standard `.ai/` bundle. `ryeos-web` and `ryeos-code` add optional data bundles for web and code tools respectively — installable via `pip install ryeos[web]` or `pip install ryeos[code]`. `ryeos-core` is a minimal alternative to `ryeos` with only `rye/core/*` items. `ryeos-bare` provides the engine with no bundles. `ryeos-mcp` adds MCP transport. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.

@@ -201,7 +201,7 @@ for Rye OS documentation and code.
 
 ### Specification Entry: `directive-format`
 
-From `rye/rye/.ai/knowledge/rye/authoring/directive-format.md`:
+From `ryeos/rye/.ai/knowledge/rye/authoring/directive-format.md`:
 
 ```yaml
 name: directive-format
@@ -256,5 +256,5 @@ This handles file creation, metadata generation, and signing.
 
 ## References
 
-- [Knowledge Format Specification](../../rye/rye/.ai/knowledge/rye/authoring/knowledge-format.md)
-- [Terminology](../../rye/rye/.ai/knowledge/rye/core/terminology.md)
+- [Knowledge Format Specification](../../ryeos/rye/.ai/knowledge/rye/authoring/knowledge-format.md)
+- [Terminology](../../ryeos/rye/.ai/knowledge/rye/core/terminology.md)

@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Bundled Knowledge
 
-Rye OS ships three knowledge entries in the system space at `rye/rye/.ai/knowledge/rye/core/`. These are **metadata references** — specifications that AI agents load at runtime to understand how to write valid directives, tools, and knowledge entries.
+Rye OS ships three knowledge entries in the system space at `ryeos/rye/.ai/knowledge/rye/core/`. These are **metadata references** — specifications that AI agents load at runtime to understand how to write valid directives, tools, and knowledge entries.
 
 ---
 

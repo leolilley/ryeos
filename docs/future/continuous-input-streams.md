@@ -29,7 +29,7 @@ The foundation for continuous input streams is already built:
 **Thread continuation** — `coordination.yaml` defines the handoff pipeline:
 
 ```yaml
-# rye/rye/.ai/tools/rye/agent/threads/config/coordination.yaml
+# ryeos/rye/.ai/tools/rye/agent/threads/config/coordination.yaml
 coordination:
   continuation:
     trigger_threshold: 0.9
@@ -119,7 +119,7 @@ Events stream into the context window — page state, actions taken, results obs
 The `browser_summarizer` would be a standard Rye directive — same XML metadata structure as `thread_summary`:
 
 ```xml
-<!-- Proposed: rye/rye/.ai/directives/rye/agent/streams/browser_summarizer.md -->
+<!-- Proposed: ryeos/rye/.ai/directives/rye/agent/streams/browser_summarizer.md -->
 <directive name="browser_summarizer" version="1.0.0">
   <metadata>
     <description>Summarize a browser automation session for thread handoff.
@@ -194,7 +194,7 @@ Images are processed within the context window — described, compared, state tr
 The `image_summarizer` follows the same directive pattern:
 
 ```xml
-<!-- Proposed: rye/rye/.ai/directives/rye/agent/streams/image_summarizer.md -->
+<!-- Proposed: ryeos/rye/.ai/directives/rye/agent/streams/image_summarizer.md -->
 <directive name="image_summarizer" version="1.0.0">
   <metadata>
     <description>Summarize visual state from image-heavy sessions.
@@ -371,9 +371,9 @@ These are **proposed additions** — they do not exist in the codebase today.
 
 | Directive            | Proposed Location                                                | Purpose                                                                                    |
 | -------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `browser_summarizer` | `rye/rye/.ai/directives/rye/agent/streams/browser_summarizer.md` | Browser session summaries — state-oriented, captures page state, actions tried, hypotheses |
-| `image_summarizer`   | `rye/rye/.ai/directives/rye/agent/streams/image_summarizer.md`   | Visual state summaries — converts frame observations to structured text                    |
-| `stream_summarizer`  | `rye/rye/.ai/directives/rye/agent/streams/stream_summarizer.md`  | Data stream summaries — supports both cursor-based (sequential) and stateful (live) modes  |
+| `browser_summarizer` | `ryeos/rye/.ai/directives/rye/agent/streams/browser_summarizer.md` | Browser session summaries — state-oriented, captures page state, actions tried, hypotheses |
+| `image_summarizer`   | `ryeos/rye/.ai/directives/rye/agent/streams/image_summarizer.md`   | Visual state summaries — converts frame observations to structured text                    |
+| `stream_summarizer`  | `ryeos/rye/.ai/directives/rye/agent/streams/stream_summarizer.md`  | Data stream summaries — supports both cursor-based (sequential) and stateful (live) modes  |
 
 All three follow the same pattern as the existing `thread_summary` directive: XML metadata block, same input interface (`transcript_content`, `directive_name`, `max_summary_tokens`), same integration point (`handoff_thread` calls them via `thread_directive.execute()`). They're thin domain-specific wrappers — they produce summaries in the right schema for their input type, then the existing `handoff_thread` pipeline handles injection into the continuation thread.
 

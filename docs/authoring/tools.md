@@ -479,7 +479,7 @@ The category determines the directory path within `.ai/tools/`.
 
 ### File Write Tool
 
-From `rye/rye/.ai/tools/rye/file-system/write.py`:
+From `ryeos/rye/.ai/tools/rye/file-system/write.py`:
 
 ```python
 # rye:signed:2026-02-15T07:11:41Z:e972...:S2FT...==:440443d0858f0199
@@ -550,7 +550,7 @@ if __name__ == "__main__":
 
 ### Bash Tool
 
-From `rye/rye/.ai/tools/rye/bash/bash.py`:
+From `ryeos/rye/.ai/tools/rye/bash/bash.py`:
 
 ```python
 # rye:signed:2026-02-15T07:32:49Z:5d4a...
@@ -648,5 +648,5 @@ input_schema:
 
 ## References
 
-- [Tool Metadata Reference](../../rye/rye/.ai/knowledge/rye/core/tool-metadata-reference.md)
-- [Terminology](../../rye/rye/.ai/knowledge/rye/core/terminology.md)
+- [Tool Metadata Reference](../../ryeos/rye/.ai/knowledge/rye/core/tool-metadata-reference.md)
+- [Terminology](../../ryeos/rye/.ai/knowledge/rye/core/terminology.md)

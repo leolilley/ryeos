@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Standard Library Overview
 
-Rye OS ships a **standard library** of directives, tools, and knowledge entries inside the Python package at `rye/rye/.ai/`. These items live in the **system space** — the lowest-priority tier — and are available to every project automatically, without any setup or installation.
+Rye OS ships a **standard library** of directives, tools, and knowledge entries inside the `ryeos` package at `ryeos/rye/.ai/`. These items live in the **system space** — the lowest-priority tier — and are available to every project automatically, without any setup or installation. Additional bundles (`ryeos-web`, `ryeos-code`) extend the standard library with web and code tools.
 
 When you install Rye OS, every project immediately has access to file-system tools, shell execution, item creation directives, thread orchestration, and more. You never need to copy these files into your project.
 
@@ -21,7 +21,7 @@ System space items can be overridden by placing a file with the same `item_id` i
 | ----------- | ------------------------------- | -------- |
 | **Project** | `.ai/` (project root)           | Highest  |
 | **User**    | `~/.ai/` (home directory)       | Middle   |
-| **System**  | `rye/rye/.ai/` (Python package) | Lowest   |
+| **System**  | `ryeos/rye/.ai/` (Python package) | Lowest   |
 
 Resolution order: **project → user → system**. The first match wins.
 
@@ -51,15 +51,16 @@ See [Bundled Directives](bundled-directives.md) for detailed documentation of ea
 
 Tools are organized by namespace under `.ai/tools/rye/`. For detailed documentation of every tool, see the [Tools Reference](tools/index.md).
 
-| Section | Namespace | Tools | Description |
-| --- | --- | --- | --- |
-| [File System](tools/file-system.md) | `rye/file-system/` | 6 | Read, write, edit (via line IDs), glob, grep, ls |
-| [Bash](tools/bash.md) | `rye/bash/` | 1 | Shell command execution |
-| [Web](tools/web.md) | `rye/web/` | 2 | Web search and page fetching |
-| [MCP Client](tools/mcp.md) | `rye/mcp/` | 3 | Connect to external MCP servers |
-| [Primary Tools](tools/primary.md) | `rye/primary/` | 4 | Search, load, execute, sign items |
-| [Agent System](tools/agent.md) | `rye/agent/` | 40+ | Thread orchestration, LLM loops, budgets, permissions |
-| [Infrastructure](tools/infrastructure.md) | `rye/core/` | 20+ | Parsers, runtimes, extractors, sinks, bundler, registry |
+| Section | Namespace | Tools | Bundle | Description |
+| --- | --- | --- | --- | --- |
+| [File System](tools/file-system.md) | `rye/file-system/` | 6 | `ryeos` | Read, write, edit (via line IDs), glob, grep, ls |
+| [Bash](tools/bash.md) | `rye/bash/` | 1 | `ryeos` | Shell command execution |
+| [Web](tools/web.md) | `rye/web/` | 3 | `ryeos-web` | Web search, page fetching, browser automation |
+| [Code](tools/code.md) | `rye/code/` | 4 | `ryeos-code` | NPM, diagnostics, TypeScript, LSP |
+| [MCP Client](tools/mcp.md) | `rye/mcp/` | 3 | `ryeos` | Connect to external MCP servers |
+| [Primary Tools](tools/primary.md) | `rye/primary/` | 4 | `ryeos` | Search, load, execute, sign items |
+| [Agent System](tools/agent.md) | `rye/agent/` | 40+ | `ryeos` | Thread orchestration, LLM loops, budgets, permissions |
+| [Infrastructure](tools/infrastructure.md) | `rye/core/` | 20+ | `ryeos` | Parsers, runtimes, extractors, sinks, bundler, registry |
 
 ### Knowledge
 

@@ -140,7 +140,7 @@ This doesn't need a separate query mechanism. **It lives in the thread summary a
 
 ### Existing Thread Summary Format
 
-The `thread_summary` directive (`rye/rye/.ai/directives/rye/agent/threads/thread_summary.md`) currently produces summaries with these sections:
+The `thread_summary` directive (`ryeos/rye/.ai/directives/rye/agent/threads/thread_summary.md`) currently produces summaries with these sections:
 
 ```
 ## Thread Summary
@@ -201,7 +201,7 @@ The static personality document approach can never get here because it doesn't a
 
 ### Existing Hook Infrastructure
 
-Rye's hook system is defined in `hook_conditions.yaml` (`rye/rye/.ai/tools/rye/agent/threads/config/hook_conditions.yaml`). The currently supported hook events are:
+Rye's hook system is defined in `hook_conditions.yaml` (`ryeos/rye/.ai/tools/rye/agent/threads/config/hook_conditions.yaml`). The currently supported hook events are:
 
 - `error` — error classification and retry/fail/abort
 - `limit` — spend/turns/tokens/duration limits
@@ -212,7 +212,7 @@ Rye's hook system is defined in `hook_conditions.yaml` (`rye/rye/.ai/tools/rye/a
 
 ### Proposed New Hook Events
 
-Personality injection would require **new hook events** beyond what currently exists. These would need to be added to `hook_conditions.yaml` and the event system in `events.yaml` (`rye/rye/.ai/tools/rye/agent/threads/config/events.yaml`):
+Personality injection would require **new hook events** beyond what currently exists. These would need to be added to `hook_conditions.yaml` and the event system in `events.yaml` (`ryeos/rye/.ai/tools/rye/agent/threads/config/events.yaml`):
 
 ```yaml
 # PROPOSED additions to hook_conditions.yaml
@@ -252,7 +252,7 @@ The token budget for personality injection would be configurable and separate fr
 
 ## New Lilux Primitive
 
-The existing Lilux primitives (`lilux/lilux/primitives/`) are:
+The existing Lilux primitives (`lilux/kernel/lilux/primitives/`) are:
 
 | Primitive      | Purpose                           |
 | -------------- | --------------------------------- |

@@ -13,7 +13,7 @@ Rye OS uses Ed25519 digital signatures to guarantee that every item (directive, 
 
 ## Ed25519 Signing
 
-All cryptographic primitives live in `lilux/lilux/primitives/signing.py`. Rye uses the `cryptography` library's Ed25519 implementation — no custom crypto.
+All cryptographic primitives live in `lilux/kernel/lilux/primitives/signing.py`. Rye uses the `cryptography` library's Ed25519 implementation — no custom crypto.
 
 ### Keypair Generation
 
@@ -59,7 +59,7 @@ The signature is placed as a comment on line 1, using the file type's comment sy
 5. The formatted signature comment is inserted at line 1 of the file
 
 ```python
-# From lilux/lilux/primitives/signing.py
+# From lilux/kernel/lilux/primitives/signing.py
 def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
     private_key = serialization.load_pem_private_key(private_key_pem, password=None)
     signature = private_key.sign(content_hash.encode("utf-8"))
@@ -68,7 +68,7 @@ def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
 
 ## Trust Store
 
-**Implementation:** `rye/rye/utils/trust_store.py`
+**Implementation:** `ryeos/rye/utils/trust_store.py`
 
 The trust store manages which Ed25519 public keys are trusted for signature verification. Every item in Rye — including Rye's own system tools — must pass signature verification against a trusted key. There are no exceptions.
 
@@ -190,7 +190,7 @@ The registry server maintains its own Ed25519 keypair at `REGISTRY_KEY_DIR`. The
 
 ## Integrity Verification on Execute
 
-**Implementation:** `rye/rye/utils/integrity.py`
+**Implementation:** `ryeos/rye/utils/integrity.py`
 
 Before any tool is executed, the integrity system performs four checks:
 
@@ -229,7 +229,7 @@ If any check fails, an `IntegrityError` is raised and execution is denied. There
 
 ## Chain Integrity
 
-**Implementation:** `rye/rye/executor/primitive_executor.py`
+**Implementation:** `ryeos/rye/executor/primitive_executor.py`
 
 The `PrimitiveExecutor` verifies **every element** in the execution chain before running any code:
 
@@ -266,7 +266,7 @@ The `_verify_tool_dependencies` method can walk a tool's anchor directory tree, 
 
 ## Bundle Integrity
 
-**Implementation:** `rye/rye/.ai/tools/rye/core/bundler/bundler.py`
+**Implementation:** `ryeos/rye/.ai/tools/rye/core/bundler/bundler.py`
 
 Bundles group multiple items under a single signed manifest. The manifest itself is a YAML file with an inline `rye:signed:` signature on line 1.
 

@@ -338,7 +338,7 @@ Steps can also use XML action elements for richer structure:
 
 ### Simple Directive: `create_directive`
 
-From `rye/rye/.ai/directives/rye/core/create_directive.md`:
+From `ryeos/rye/.ai/directives/rye/core/create_directive.md`:
 
 ````markdown
 # Create Directive
@@ -430,7 +430,7 @@ Create minimal directives with essential fields only.
 
 ### Threaded Directive: `create_threaded_directive`
 
-From `rye/rye/.ai/directives/rye/core/create_threaded_directive.md`:
+From `ryeos/rye/.ai/directives/rye/core/create_threaded_directive.md`:
 
 ````markdown
 <!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
@@ -711,5 +711,5 @@ Deploy the current build to the staging environment.
 
 ## References
 
-- [Directive Metadata Reference](../../rye/rye/.ai/knowledge/rye/core/directive-metadata-reference.md)
-- [Terminology](../../rye/rye/.ai/knowledge/rye/core/terminology.md)
+- [Directive Metadata Reference](../../ryeos/rye/.ai/knowledge/rye/core/directive-metadata-reference.md)
+- [Terminology](../../ryeos/rye/.ai/knowledge/rye/core/terminology.md)

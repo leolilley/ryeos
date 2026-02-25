@@ -11,10 +11,10 @@ The key idea: **everything is data**. Directives are markdown files with XML met
 ## The Codebase — What Actually Exists
 
 ### Layer 1: Lilux (microkernel)
-`lilux/lilux/` — the lowest layer. Provides primitives that everything else builds on.
+`lilux/kernel/lilux/` — the lowest layer. Provides primitives that everything else builds on.
 
 ```
-lilux/lilux/
+lilux/kernel/lilux/
 ├── primitives/
 │   ├── subprocess.py      # Run shell commands
 │   ├── http_client.py     # Make HTTP requests
@@ -30,10 +30,10 @@ lilux/lilux/
 ```
 
 ### Layer 2: Rye (MCP server)
-`rye/rye/` — the MCP server that agents talk to.
+`ryeos/rye/` — the MCP server that agents talk to.
 
 ```
-rye/rye/
+ryeos/rye/
 ├── tools/                    # The 4 MCP tools (agent-facing surface)
 │   ├── execute.py            # rye_execute — run tools and directives
 │   ├── load.py               # rye_load — read item content
@@ -65,9 +65,9 @@ rye/rye/
 ```
 
 ### Layer 3: The `.ai/` Data Bundle
-`rye/rye/.ai/` — ships inside the rye package. This is the "standard library" of items available to every agent.
+`ryeos/rye/.ai/` — ships inside the ryeos package. This is the "standard library" of items available to every agent. Additional bundles (`ryeos-web`, `ryeos-code`) extend the standard library with web and code tools.
 
-**Directives** (`rye/rye/.ai/directives/`):
+**Directives** (`ryeos/rye/.ai/directives/`):
 ```
 rye/core/create_directive.md
 rye/core/create_knowledge.md
@@ -76,14 +76,14 @@ rye/core/create_tool.md
 rye/agent/threads/thread_summary.md
 ```
 
-**Knowledge** (`rye/rye/.ai/knowledge/`):
+**Knowledge** (`ryeos/rye/.ai/knowledge/`):
 ```
 rye/core/directive-metadata-reference.md
 rye/core/knowledge-metadata-reference.md
 rye/core/tool-metadata-reference.md
 ```
 
-**Tools** (`rye/rye/.ai/tools/`) — organized by category:
+**Tools** (`ryeos/rye/.ai/tools/`) — organized by category:
 ```
 rye/agent/
   permissions/capability_tokens/    # Capability token system
@@ -161,12 +161,12 @@ rye/web/
   browser/browser.ts                # Browser automation via playwright-cli
 ```
 
-**Bundles** (`rye/rye/.ai/bundles/`):
+**Bundles** (`ryeos/rye/.ai/bundles/`):
 ```
 ryeos-core/manifest.yaml           # Bundle manifest for the core bundle
 ```
 
-**Lockfiles** (`rye/rye/.ai/lockfiles/`): integrity pinning files.
+**Lockfiles** (`ryeos/rye/.ai/lockfiles/`): integrity pinning files.
 
 ### Layer 4: Registry API
 `services/registry-api/` — a separate service for sharing items.
@@ -286,27 +286,27 @@ Think about THREE distinct audiences:
 These are the key source files. Read them before designing the structure:
 
 **MCP tools (the agent-facing surface):**
-- `rye/rye/tools/execute.py`
-- `rye/rye/tools/load.py`
-- `rye/rye/tools/search.py`
-- `rye/rye/tools/sign.py`
+- `ryeos/rye/tools/execute.py`
+- `ryeos/rye/tools/load.py`
+- `ryeos/rye/tools/search.py`
+- `ryeos/rye/tools/sign.py`
 
 **Thread system (orchestration engine):**
-- `rye/rye/.ai/tools/rye/agent/threads/thread_directive.py`
-- `rye/rye/.ai/tools/rye/agent/threads/orchestrator.py`
-- `rye/rye/.ai/tools/rye/agent/threads/safety_harness.py`
-- `rye/rye/.ai/tools/rye/agent/threads/runner.py`
+- `ryeos/rye/.ai/tools/rye/agent/threads/thread_directive.py`
+- `ryeos/rye/.ai/tools/rye/agent/threads/orchestrator.py`
+- `ryeos/rye/.ai/tools/rye/agent/threads/safety_harness.py`
+- `ryeos/rye/.ai/tools/rye/agent/threads/runner.py`
 
 **Bundled directives (the "stdlib"):**
-- `rye/rye/.ai/directives/rye/core/create_directive.md`
-- `rye/rye/.ai/directives/rye/core/create_tool.md`
-- `rye/rye/.ai/directives/rye/core/create_threaded_directive.md`
-- `rye/rye/.ai/directives/rye/agent/threads/thread_summary.md`
+- `ryeos/rye/.ai/directives/rye/core/create_directive.md`
+- `ryeos/rye/.ai/directives/rye/core/create_tool.md`
+- `ryeos/rye/.ai/directives/rye/core/create_threaded_directive.md`
+- `ryeos/rye/.ai/directives/rye/agent/threads/thread_summary.md`
 
 **Executor (how items are resolved and run):**
-- `rye/rye/executor/primitive_executor.py`
-- `rye/rye/executor/chain_validator.py`
-- `rye/rye/utils/resolvers.py`
+- `ryeos/rye/executor/primitive_executor.py`
+- `ryeos/rye/executor/chain_validator.py`
+- `ryeos/rye/utils/resolvers.py`
 
 **Real orchestration example (separate project, for understanding the pattern):**
 - `/home/leo/projects/agency-kiwi/.ai/directives/agency-kiwi/orchestrator/run_lead_pipeline.md`

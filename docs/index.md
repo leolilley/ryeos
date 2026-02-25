@@ -51,7 +51,7 @@ Thread-based orchestration is the flagship capability — AI agents coordinating
 
 ## Standard Library
 
-Everything that ships with Rye OS out of the box:
+Everything that ships with Rye OS — the standard bundle, plus optional web and code bundles:
 
 - [Overview](standard-library/overview.md) — Full catalog of bundled items
 - [Bundled Directives](standard-library/bundled-directives.md) — Item creation and thread management directives

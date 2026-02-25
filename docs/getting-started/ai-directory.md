@@ -87,8 +87,10 @@ Items are organized into **namespaces** using directory nesting. The first path 
 
 Common namespace prefixes:
 
-- **`rye/core/`** — core items that ship with the `ryeos-core` package.
-- **`rye/bash/`**, **`rye/web/`**, **`rye/file-system/`** — built-in tool categories.
+- **`rye/core/`** — core items that ship with the `ryeos-core` package (or the standard `ryeos` bundle).
+- **`rye/bash/`**, **`rye/file-system/`** — built-in tool categories in the standard `ryeos` bundle.
+- **`rye/web/`** — web tools (browser, fetch, search) from the `ryeos-web` bundle.
+- **`rye/code/`** — code tools (npm, diagnostics, typescript, LSP) from the `ryeos-code` bundle.
 - **`<your-project>/`** — your project-specific items.
 
 Namespaces also work with search scopes. To search only within a namespace:
@@ -203,7 +205,7 @@ files:
 
 The manifest enables integrity verification — Rye OS can confirm that no bundled file has been tampered with by comparing its SHA-256 hash against the manifest.
 
-Multiple bundles can coexist in the system space. The `ryeos-core` package ships the `ryeos-core` bundle, the `ryeos` and `ryeos-mcp` packages ship the `ryeos` bundle. Third-party packages can register their own bundles by declaring a `rye.bundles` entry point in their `pyproject.toml`:
+Multiple bundles can coexist in the system space and compose automatically via `get_system_spaces()`. The `ryeos` package ships the standard bundle, `ryeos-web` and `ryeos-code` ship additional data bundles, and `ryeos-core` ships a minimal bundle. Third-party packages can register their own bundles by declaring a `rye.bundles` entry point in their `pyproject.toml`:
 
 ```toml
 [project.entry-points."rye.bundles"]

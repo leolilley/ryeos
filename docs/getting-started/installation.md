@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Installation
 
-Rye OS is distributed as three pip packages. Install to give your AI agent access to the `.ai/` directory system.
+Rye OS is distributed as pip packages. Install to give your AI agent access to the `.ai/` directory system.
 
 ## Install the packages
 
@@ -20,12 +20,27 @@ pip install ryeos-mcp
 This pulls in the full dependency chain:
 
 - **`ryeos-mcp`** — the MCP server that exposes Rye OS to any MCP-compatible AI agent.
-- **`ryeos`** — the orchestration layer with the resolver, executor, signing, and metadata. Registers the `ryeos` bundle (all `rye/*` items).
-- **`lilux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing).
+- **`ryeos`** — the orchestration layer with the resolver, executor, signing, and metadata. Registers the standard bundle (~3MB) with agent, bash, file-system, MCP, primary, core, authoring, and guide items.
+- **`lilux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing). Depends on `lilux-proc` (Rust binary for process lifecycle management).
+
+### Optional extras
+
+```bash
+# Add web tools (browser automation, fetch, search)
+pip install ryeos[web]    # or: pip install ryeos-web
+
+# Add code tools (git, npm, typescript, LSP, diagnostics)
+pip install ryeos[code]   # or: pip install ryeos-code
+
+# Everything
+pip install ryeos[all]
+```
 
 > **Without MCP:** Install just `ryeos` to call the executor directly from Python — useful for scripting, CI, or wrapping in a CLI.
 >
-> **Minimal install:** Install `ryeos-core` instead of `ryeos` for only the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. Note: `ryeos-core` and `ryeos` are mutually exclusive — install one or the other.
+> **Minimal install:** Install `ryeos-core` for only the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. Note: `ryeos-core` and `ryeos` are mutually exclusive — install one or the other.
+>
+> **Engine only:** Install `ryeos-bare` for the engine with no `.ai/` data bundles at all.
 >
 > See [Packages and Bundles](../internals/packages-and-bundles.md) for the full breakdown.
 
