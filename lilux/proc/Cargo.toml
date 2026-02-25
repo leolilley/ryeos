@@ -1,11 +1,11 @@
 [package]
-name = "rye-proc"
+name = "lilux-proc"
 version = "0.1.0"
 edition = "2021"
 description = "Cross-platform process lifecycle manager for rye threads"
 
 [[bin]]
-name = "rye-proc"
+name = "lilux-proc"
 path = "src/main.rs"
 
 [dependencies]

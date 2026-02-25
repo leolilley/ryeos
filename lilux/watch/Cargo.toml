@@ -1,12 +1,12 @@
 [package]
-name = "rye-watch"
+name = "lilux-watch"
 version = "0.1.0"
 edition = "2021"
 description = "Push-based file watcher for rye thread registry"
 
 [[bin]]
-name = "rye-watch"
-path = "main.rs"
+name = "lilux-watch"
+path = "src/main.rs"
 
 [dependencies]
 notify = { version = "7", features = ["macos_kqueue"] }

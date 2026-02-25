@@ -7,7 +7,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use rusqlite::Connection;
 
 #[derive(Parser)]
-#[command(name = "rye-watch", about = "Watch thread registry for status changes")]
+#[command(name = "lilux-watch", about = "Watch thread registry for status changes")]
 struct Args {
     /// Path to registry.db
     #[arg(long)]

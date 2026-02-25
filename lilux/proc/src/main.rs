@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "rye-proc", about = "Cross-platform process lifecycle manager")]
+#[command(name = "lilux-proc", about = "Cross-platform process lifecycle manager")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

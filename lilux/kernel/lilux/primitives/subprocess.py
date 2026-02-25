@@ -1,6 +1,6 @@
 """Subprocess execution primitive.
 
-All process operations go through rye-proc. No POSIX fallbacks.
+All process operations go through lilux-proc. No POSIX fallbacks.
 """
 
 import asyncio
@@ -80,13 +80,13 @@ class StatusResult:
 
 
 class SubprocessPrimitive:
-    """All process operations go through rye-proc. No POSIX fallbacks."""
+    """All process operations go through lilux-proc. No POSIX fallbacks."""
 
     def __init__(self):
-        self._rye_proc: Optional[str] = shutil.which("rye-proc")
-        if not self._rye_proc:
+        self._lilux_proc: Optional[str] = shutil.which("lilux-proc")
+        if not self._lilux_proc:
             raise ConfigurationError(
-                "rye-proc binary not found on PATH. "
+                "lilux-proc binary not found on PATH. "
                 "Ensure ryeos is installed correctly."
             )
 
@@ -95,7 +95,7 @@ class SubprocessPrimitive:
         config: Dict[str, Any],
         params: Dict[str, Any],
     ) -> SubprocessResult:
-        """Execute subprocess command via rye-proc exec.
+        """Execute subprocess command via lilux-proc exec.
 
         Two-stage templating:
         1. Environment variable expansion: ${VAR:-default}
@@ -158,8 +158,8 @@ class SubprocessPrimitive:
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
-            # Build rye-proc exec command
-            exec_args: List[str] = [self._rye_proc, "exec", "--cmd", command]
+            # Build lilux-proc exec command
+            exec_args: List[str] = [self._lilux_proc, "exec", "--cmd", command]
             for arg in args:
                 exec_args.extend(["--arg", arg])
             if cwd:
@@ -178,7 +178,7 @@ class SubprocessPrimitive:
                     stderr=asyncio.subprocess.PIPE,
                 )
 
-                # rye-proc handles its own timeout, add buffer for the wrapper
+                # lilux-proc handles its own timeout, add buffer for the wrapper
                 wrapper_timeout = timeout + 10 if timeout else 310
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -192,12 +192,12 @@ class SubprocessPrimitive:
                     return SubprocessResult(
                         success=False,
                         stdout="",
-                        stderr=f"rye-proc wrapper timed out after {wrapper_timeout} seconds",
+                        stderr=f"lilux-proc wrapper timed out after {wrapper_timeout} seconds",
                         return_code=-1,
                         duration_ms=duration_ms,
                     )
 
-                # Parse rye-proc JSON output
+                # Parse lilux-proc JSON output
                 if proc.returncode == 0 and stdout_bytes:
                     try:
                         data = json.loads(stdout_bytes.strip())
@@ -211,7 +211,7 @@ class SubprocessPrimitive:
                     except json.JSONDecodeError:
                         pass
 
-                # rye-proc itself failed
+                # lilux-proc itself failed
                 duration_ms = (time.time() - start_time) * 1000
                 return SubprocessResult(
                     success=False,
@@ -226,7 +226,7 @@ class SubprocessPrimitive:
                 return SubprocessResult(
                     success=False,
                     stdout="",
-                    stderr=f"rye-proc not found: {self._rye_proc}",
+                    stderr=f"lilux-proc not found: {self._lilux_proc}",
                     return_code=127,
                     duration_ms=duration_ms,
                 )
@@ -248,8 +248,8 @@ class SubprocessPrimitive:
         log_path: Optional[str] = None,
         envs: Optional[Dict[str, str]] = None,
     ) -> SpawnResult:
-        """Detached spawn via rye-proc spawn."""
-        exec_args = [self._rye_proc, "spawn", "--cmd", cmd]
+        """Detached spawn via lilux-proc spawn."""
+        exec_args = [self._lilux_proc, "spawn", "--cmd", cmd]
         for arg in args:
             exec_args.extend(["--arg", arg])
         if log_path:
@@ -275,13 +275,13 @@ class SubprocessPrimitive:
         except (asyncio.TimeoutError, OSError, ValueError) as e:
             return SpawnResult(success=False, error=str(e))
 
-        return SpawnResult(success=False, error=f"rye-proc exited {proc.returncode}")
+        return SpawnResult(success=False, error=f"lilux-proc exited {proc.returncode}")
 
     async def kill(self, pid: int, grace: float = 3.0) -> KillResult:
-        """Kill via rye-proc kill."""
+        """Kill via lilux-proc kill."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._rye_proc, "kill", "--pid", str(pid), "--grace", str(grace),
+                self._lilux_proc, "kill", "--pid", str(pid), "--grace", str(grace),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -297,13 +297,13 @@ class SubprocessPrimitive:
         except (asyncio.TimeoutError, OSError, ValueError) as e:
             return KillResult(success=False, pid=pid, error=str(e))
 
-        return KillResult(success=False, pid=pid, error=f"rye-proc exited {proc.returncode}")
+        return KillResult(success=False, pid=pid, error=f"lilux-proc exited {proc.returncode}")
 
     async def status(self, pid: int) -> StatusResult:
-        """Status check via rye-proc status."""
+        """Status check via lilux-proc status."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._rye_proc, "status", "--pid", str(pid),
+                self._lilux_proc, "status", "--pid", str(pid),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
