@@ -6,15 +6,23 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      packages:
-        description: "Comma-separated packages to publish (or 'all')"
+      package:
+        description: "Package to publish (or 'all')"
         required: true
         default: "all"
-      dry_run:
-        description: "Dry run (build only, no upload)"
-        required: false
-        type: boolean
-        default: false
+        type: choice
+        options:
+          - all
+          - lillux
+          - lillux-proc
+          - lillux-watch
+          - ryeos
+          - ryeos-bare
+          - ryeos-core
+          - ryeos-web
+          - ryeos-code
+          - ryeos-full
+          - ryeos-mcp
 
 permissions:
   contents: read
@@ -23,94 +31,37 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  # ── Layer 1: Rust binaries (no Python deps) ──────────────────────
-  rust-binaries:
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.inputs.packages, 'all') ||
-      contains(github.event.inputs.packages, 'lillux-proc') ||
-      contains(github.event.inputs.packages, 'lillux-watch')
+  # ── Build & publish each Python package individually ─────────────
+  publish-python:
     strategy:
+      fail-fast: false
+      max-parallel: 1
       matrix:
         include:
-          - package: lillux-proc
-            manifest: lillux/proc
-          - package: lillux-watch
-            manifest: lillux/watch
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build wheels (maturin)
-        uses: PyO3/maturin-action@v1
-        with:
-          working-directory: ${{ matrix.manifest }}
-          args: --release --out dist
-          manylinux: auto
-
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheel-${{ matrix.package }}-${{ matrix.os }}
-          path: ${{ matrix.manifest }}/dist/*.whl
-
-  rust-sdist:
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.inputs.packages, 'all') ||
-      contains(github.event.inputs.packages, 'lillux-proc') ||
-      contains(github.event.inputs.packages, 'lillux-watch')
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - package: lillux-proc
-            manifest: lillux/proc
-          - package: lillux-watch
-            manifest: lillux/watch
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build sdist (maturin)
-        uses: PyO3/maturin-action@v1
-        with:
-          working-directory: ${{ matrix.manifest }}
-          command: sdist
-          args: --out dist
-
-      - name: Upload sdist artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sdist-${{ matrix.package }}
-          path: ${{ matrix.manifest }}/dist/*.tar.gz
-
-  # ── Layer 2–5: Pure Python packages ──────────────────────────────
-  python-packages:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          # Layer 2 — microkernel
           - package: lillux
             path: lillux/kernel
-          # Layer 3 — engine variants
           - package: ryeos-bare
             path: ryeos-bare
           - package: ryeos
             path: ryeos
           - package: ryeos-core
             path: ryeos/bundles/core
-          # Layer 4 — extensions
           - package: ryeos-web
             path: ryeos/bundles/web
           - package: ryeos-code
             path: ryeos/bundles/code
           - package: ryeos-mcp
             path: ryeos-mcp
-          # Layer 5 — meta
           - package: ryeos-full
             path: ryeos/bundles/full
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.package == 'all' ||
+      github.event.inputs.package == matrix.package
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -121,44 +72,52 @@ jobs:
       - name: Install build tools
         run: pip install build
 
-      - name: Build package
+      - name: Build wheel
         run: python -m build --wheel
         working-directory: ${{ matrix.path }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-${{ matrix.package }}
-          path: ${{ matrix.path }}/dist/*
-
-  # ── Publish all packages to PyPI ─────────────────────────────────
-  publish:
-    needs: [rust-binaries, rust-sdist, python-packages]
-    if: >-
-      always() &&
-      (needs.python-packages.result == 'success') &&
-      (needs.rust-binaries.result == 'success' || needs.rust-binaries.result == 'skipped') &&
-      (needs.rust-sdist.result == 'success' || needs.rust-sdist.result == 'skipped') &&
-      (github.event.inputs.dry_run != 'true')
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # trusted publishing
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all-dists
-          merge-multiple: false
-
-      - name: Collect all dists
-        run: |
-          mkdir -p dist
-          find all-dists -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} dist/ \;
-          echo "== Packages to publish =="
-          ls -la dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/
+          packages-dir: ${{ matrix.path }}/dist/
+
+  # ── Build & publish Rust packages individually ───────────────────
+  publish-rust:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - package: lillux-proc
+            manifest: lillux/proc
+          - package: lillux-watch
+            manifest: lillux/watch
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.package == 'all' ||
+      github.event.inputs.package == matrix.package
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: ${{ matrix.manifest }}
+          args: --release --out dist
+          manylinux: auto
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: ${{ matrix.manifest }}
+          command: sdist
+          args: --out dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: ${{ matrix.manifest }}/dist/
