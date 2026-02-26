@@ -25,7 +25,7 @@ share/python-wheels/
 MANIFEST
 
 ## Virtual Environments
-.venv/
+**/.venv/
 venv/
 ENV/
 env/
@@ -77,8 +77,12 @@ logs/
 /.ai/
 */.ai/
 !ryeos/rye/.ai/
+!ryeos/bundles/core/ryeos_core/.ai/
 !ryeos/bundles/web/ryeos_web/.ai/
 !ryeos/bundles/code/ryeos_code/.ai/
+
+## Allow lib/ directories inside .ai/ (not Python build artifacts)
+!**/.ai/**/lib/
 
 ## Build artifacts
 *.whl
@@ -119,6 +123,8 @@ tests/e2e/.venv
 ## AI cache (browser snapshots, screenshots, ephemeral data)
 **/.ai/cache/
 
-## E2E test generated knowledge/lockfiles (ephemeral)
+## Lockfiles (generated per-execution, not source-controlled)
+**/.ai/lockfiles/
+
+## E2E test generated knowledge (ephemeral)
 tests/e2e/.ai/knowledge/
-tests/e2e/.ai/lockfiles/
