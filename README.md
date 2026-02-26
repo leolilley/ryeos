@@ -1,228 +1,95 @@
+> **EXPERIMENTAL**: Under active development. Features may be unstable and subject to change.
+
 # RYE OS
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-**RYE is a portable operating system for AI agents.** It gives any LLM — through any MCP client — a `.ai/` directory with signed workflows, scoped permissions, and a community registry. Four tools. Any model. The agent is the interpreter.
+RYE is a portable operating system for AI agents. It gives any LLM a persistent, signed workspace — directives, tools, and knowledge — that travels with you across projects, machines, and models. Four MCP tools. RYE is the interpreter.
 
-There is no other system that combines cryptographic trust, capability-scoped multi-agent orchestration, and portable declarative workflows in a single, model-agnostic package.
+| Tool      | Purpose                                  |
+| --------- | ---------------------------------------- |
+| `search`  | Find items across all spaces             |
+| `load`    | Read or copy items between spaces        |
+| `execute` | Run a directive, tool, or knowledge item |
+| `sign`    | Cryptographically sign items             |
 
-```bash
-pip install ryeos-mcp
+---
+
+Most agent frameworks treat the model as something you call. RYE treats it as something you _are_.
+
+RYE gives you a signing key — your identity inside the system. Every item that flows through RYE carries a signature — yours, or from authors you trust. When you hand that off to a thread, push it to the registry, or run it six months from now in a different project, the chain of custody is intact. RYE knows who built it, and it knows it hasn't been touched.
+
+That's not just a security feature. It's a framing: you're not configuring a tool, you're establishing an identity inside a system that multiple models — Claude, GPT, Gemini, whatever comes next — will operate within. Swap the model. The substrate remains. Your signed tools remain. The capabilities you've defined remain. The intelligence compounds.
+
+RYE is the policy and orchestration layer that MCP is missing.
+
+---
+
+## How It Works
+
+RYE inverts the relationship between code and data. Runtimes, retry logic, error classification, provider configs — all swappable YAML files, not hardcoded behavior. Adding a new language runtime is a YAML file. No code changes, no recompilation.
+
+At the base is Lilux, a microkernel that handles OS-level primitive execution. Every tool call follows a signed chain: your tool → a runtime that defines how to run it → a Lillux primitive that executes. Each element verified before anything runs. Tampered items are rejected. No fallback. No bypass. RYE never sees your environment variables or secrets — that happens at the Lillux and OS level, below RYE entirely.
+
+Orchestration follows the same philosophy. Spawn child RYE threads as separate processes. Budgets cascade — children can never spend more than the parent allocated. Capabilities attenuate — each level can only have equal or fewer permissions than its parent. Full transcripts are readable by the orchestrator in real time.
+
+Workflows can be defined as declarative YAML state graphs — deterministic steps and LLM reasoning are routed through the same execution layer.
+
+---
+
+## Install
+
 ```
+pip install rye-mcp
+```
+
+> **From source:**
+>
+> ```
+> git clone https://github.com/leolilley/rye-os.git
+> cd rye-os
+> pip install -e lillux -e rye -e rye-mcp
+> ```
 
 ```json
 {
   "mcpServers": {
-    "rye": { "command": "ryeos-mcp" }
+    "rye": {
+      "command": "rye-mcp"
+    }
   }
 }
 ```
 
-Works in Claude Desktop, Cursor, Windsurf, Amp, or any MCP client. Same workflows, same trust, same permissions — regardless of which LLM runs them.
+**Then direct RYE to initialise through your MCP client:**
 
-## Why RYE
+> _"rye execute directive init"_
 
-Every agent framework solves pieces of the puzzle in isolation. Codex, Claude Code, LangChain — each a walled garden with no way to share solutions between them.
+RYE directives are interpreted by your model — if it can't action the baseline init, it's incompatible.
 
-MCP gave us a universal tool protocol. But MCP is a pipe — it doesn't answer who can do what, how far trust extends, or whether what you're running has been tampered with.
-
-**RYE is the policy and orchestration layer that MCP is missing.**
-
-|                         | Codex / Claude Code | LangChain / CrewAI | **RYE**                                  |
-| ----------------------- | ------------------- | ------------------ | ---------------------------------------- |
-| **Portable workflows**  | ✗ Platform-locked   | ✗ Code, not data   | ✓ Declarative data files                 |
-| **Model agnostic**      | ✗ Single vendor     | ✓                  | ✓ Any LLM via MCP                        |
-| **Cryptographic trust** | ✗                   | ✗                  | ✓ Ed25519 signed, chain-verified         |
-| **Permission model**    | Human-in-the-loop   | None               | ✓ Declarative capability attenuation     |
-| **Cross-client**        | ✗ One client only   | ✗ One framework    | ✓ Any MCP client                         |
-| **Community registry**  | ✗                   | ✗ Unsigned         | ✓ Signed, TOFU-pinned, author-attributed |
-
-## Features
-
-### Cryptographic Trust — No Exceptions
-
-Every item is Ed25519-signed. Every chain element is verified before execution. Lockfiles pin exact versions with SHA256 hashes. **Unsigned or tampered items are rejected — including RYE's own system tools.**
-
-```
-# rye:signed:2026-02-14T00:27:54Z:8e27c5f8...:WOclUqjr...:440443d0
-```
-
-### Multi-Agent Orchestration
-
-Spawn autonomous child threads as separate OS processes. Each gets its own LLM, budget, and transcript:
-
-```
-Root Orchestrator (sonnet, $3.00 budget)
-  ├── discover_leads × 5  (haiku, $0.10 each, parallel)
-  ├── qualify_leads        (sonnet, $1.00)
-  │   ├── scrape_website × N  (haiku, $0.05 each)
-  │   └── score_lead × N      (haiku, $0.05 each)
-  └── prepare_outreach     (haiku, $0.20)
-```
-
-- **Budget cascades** — children can never exceed parent allocation
-- **Capabilities attenuate** — each level can only narrow permissions, never escalate
-- **Adaptive coordination** — cancel, kill, resume, cascade policies. All via YAML
-- **Lossless context chains** — threads hand off with summaries; full history is searchable
-
-### Fail-Closed Capability System
-
-No capabilities declared = all actions denied. Permissions use fnmatch patterns with full attenuation down delegation chains:
-
-```
-rye.execute.tool.rye.bash.bash       — one specific tool
-rye.execute.tool.rye.file-system.*   — any file-system tool
-rye.load.knowledge.my-project.*      — project knowledge only
-```
-
-Capabilities are Ed25519-signed tokens with audience binding and expiry. Children can only subset parent permissions.
-
-### Declarative State Graphs
-
-Deterministic workflows as YAML — no LLM calls for routing:
-
-```yaml
-config:
-  start: count_files
-  nodes:
-    count_files:
-      action:
-        primary: execute
-        item_type: tool
-        item_id: rye/bash/bash
-        params:
-          command: "find . -name '*.py' | wc -l"
-      assign:
-        file_count: "${result.stdout}"
-      next: done
-    done:
-      type: return
-```
-
-Resumable, auditable, parallelizable. Foreach nodes fan out work. Error edges route to recovery. Hooks fire on graph events.
-
-### White-Box Observability
-
-Every thread is fully transparent. Parents read child transcripts — full reasoning traces, tool calls, results. Regex search across entire delegation trees. Per-token streaming to JSONL and knowledge markdown in real-time.
-
-### Three-Tier Space System
-
-Items resolve `project → user → system` with shadow-override semantics:
-
-| Space       | Path                     | Purpose                    |
-| ----------- | ------------------------ | -------------------------- |
-| **Project** | `.ai/`                   | Your project's items       |
-| **User**    | `~/.ai/`                 | Personal cross-project     |
-| **System**  | `site-packages/rye/.ai/` | Immutable standard library |
-
-Override any system behavior by placing a file with the same ID in your project. RYE's own orchestrator, safety harness, and agent system are all overridable `.ai/` items.
-
-### Community Registry
-
-Push signed items. Pull with TOFU key pinning. Every item carries author provenance — trust is cryptographically provable, not implicit.
-
-```bash
-rye execute directive rye/core/registry/push    # publish a tool
-rye execute directive rye/core/registry/pull    # install a tool
-rye execute directive rye/core/registry/search  # find tools
-```
-
-A package manager for agent cognition.
-
-### Everything Is Data
-
-Runtimes, error classification, retry policies, provider configs — all YAML/Python files, not hardcoded. Adding a new language runtime is a single YAML file:
-
-```yaml
-tool_type: runtime
-executor_id: rye/core/primitives/subprocess
-env_config:
-  interpreter:
-    type: venv_python
-    var: RYE_PYTHON
-    fallback: python3
-config:
-  command: "${RYE_PYTHON}"
-  args: ["{tool_path}", "--params", "{params_json}"]
-```
-
-No code changes. No recompilation. Just a file.
-
-## MCP Interface
-
-Four tools are the entire agent-facing surface:
-
-| Tool      | Purpose                             |
-| --------- | ----------------------------------- |
-| `search`  | Find items across all spaces        |
-| `load`    | Read content or copy between spaces |
-| `execute` | Run directives, tools, or knowledge |
-| `sign`    | Cryptographically sign items        |
-
-## Install
-
-```bash
-pip install ryeos-mcp          # full stack with MCP transport
-```
-
-### Optional bundles
-
-```bash
-pip install ryeos[web]         # + browser automation, fetch, search
-pip install ryeos[code]        # + git, npm, typescript, LSP, diagnostics
-pip install ryeos[all]         # everything
-```
-
-### Minimal installs
-
-```bash
-pip install ryeos              # standard bundle (no MCP transport)
-pip install ryeos-core         # engine + core only (runtimes, primitives)
-pip install ryeos-engine       # engine only, no .ai/ data (for embedding)
-```
-
-### From source
-
-```bash
-git clone https://github.com/leolilley/ryeos.git
-cd ryeos
-pip install -e lillux/kernel -e ryeos -e ryeos-mcp
-```
+---
 
 ## Packages
 
-```
-lillux/
-  kernel/        → pip: lillux          Microkernel (subprocess, signing, HTTP)
-  proc/          → pip: lillux-proc     Process lifecycle manager (Rust)
-  watch/         → pip: lillux-watch    Push-based file watcher (Rust)
-
-ryeos/           → pip: ryeos-engine   Execution engine, no .ai/ data
-  bundles/
-    core/        → pip: ryeos-core     Minimal: rye/core only
-    standard/    → pip: ryeos          Standard .ai/ data bundle
-    web/         → pip: ryeos-web      Browser, fetch, search tools
-    code/        → pip: ryeos-code     Git, npm, typescript, LSP tools
-ryeos-mcp/       → pip: ryeos-mcp      MCP server transport (stdio/SSE)
-```
-
-## Platform Support
-
-Linux and macOS. Multi-agent orchestration uses `lillux-proc` for cross-platform process management. Windows support is untested.
+| Package    | What it provides                                              |
+| ---------- | ------------------------------------------------------------- |
+| `Lillux`   | Microkernel — subprocess, HTTP, signing, integrity primitives |
+| `rye-os`   | Executor, resolver, signing, metadata + full standard library |
+| `rye-core` | Same engine, minimal bundle (`rye/core/*` items only)         |
+| `rye-mcp`  | MCP server transport (stdio/SSE)                              |
 
 ## Documentation
 
-Full docs at [`docs/`](docs/index.md):
+Full documentation at [`docs/`](docs/index.md):
 
-- **[Getting Started](docs/getting-started/installation.md)** — Install, quickstart, `.ai/` directory
+- **[Getting Started](docs/getting-started/installation.md)** — Installation, quickstart, workspace structure
 - **[Authoring](docs/authoring/directives.md)** — Writing directives, tools, and knowledge
 - **[MCP Tools Reference](docs/tools-reference/execute.md)** — The four agent-facing tools
-- **[Orchestration](docs/orchestration/overview.md)** — Multi-agent workflows and threading
+- **[Orchestration](docs/orchestration/overview.md)** — Thread-based multi-agent workflows
 - **[State Graphs](docs/orchestration/state-graphs.md)** — Declarative YAML workflow graphs
-- **[Registry](docs/registry/sharing-items.md)** — Sharing, trust model, agent integration
+- **[Registry](docs/registry/sharing-items.md)** — Sharing items, trust model, agent integration
 - **[Internals](docs/internals/architecture.md)** — Architecture, executor chain, spaces, signing
-- **[Future Work](docs/future/index.md)** — Encrypted shared intelligence, continuous streams, CLI, HTTP server
 
-## License
+---
 
-MIT
+MIT License
