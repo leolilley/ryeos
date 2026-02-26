@@ -1,5 +1,3 @@
-> **EXPERIMENTAL**: Under active development. Features may be unstable and subject to change.
-
 # RYE OS
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
@@ -65,7 +63,7 @@ pip install ryeos-mcp
 
 > _"rye execute directive init"_
 
-RYE operates through your model of choice — if it can't action the baseline init, it's incompatible.
+RYE operates through your model of choice — if it can't action the baseline init, it's incompatible with RYE.
 
 ---
 
