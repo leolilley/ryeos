@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:19b5910b1b88ea8801cbd0af07f01f00e4b8c2f264cdf3dc30579fdecd0d0f02:WlT8dmTU7LtFsljoPkZxvcoPllPVPMQ_Gl7XoFplpIfdRQL8HAtOm5VrYRmiBjrZsQeF5R_vnvJwqCez-W29Cg==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:42:42Z:19b5910b1b88ea8801cbd0af07f01f00e4b8c2f264cdf3dc30579fdecd0d0f02:WlT8dmTU7LtFsljoPkZxvcoPllPVPMQ_Gl7XoFplpIfdRQL8HAtOm5VrYRmiBjrZsQeF5R_vnvJwqCez-W29Cg==:4b987fd4e40303ac
 """Create or overwrite a file, invalidating line ID cache."""
 
 import argparse

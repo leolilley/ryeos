@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-code"
-version = "0.1.4"
+version = "0.1.5"
 description = "RYE Code Bundle — git, npm, typescript, LSP, and diagnostics tools"
 requires-python = ">=3.10"
 license = "MIT"

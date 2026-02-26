@@ -1,10 +1,10 @@
-# rye:signed:2026-02-26T05:54:57Z:9bfeb1571a12d5df21b902e3648a0eddbab791d4c4676388e66b14af08326c16:Ux64yH1HLi45mPGsmiE_6DVzQIF45ZWeXpDNeTot3nqUk44kSuee0XLTpfjpNJE3HfRjrvbkMhQbK_l9qCEcAQ==:ee43c0e6d83579df
+# rye:signed:2026-02-26T06:08:35Z:c01421e7af108408f75cd413627b67fa3d4419867692b3d0ff641bc811463d3c:xDr6cBhL8HcCep0eVzAqdi6aAhWyHhPUmsikK8HJnHlh3uD9LFIj_XBw9hXTBD5iZ_W-rRH3aHcPvvV_fcrjCw==:ee43c0e6d83579df
 bundle:
   id: ryeos
   version: 0.1.0
   entrypoint: ''
   description: ''
-  created_at: '2026-02-26T05:54:56Z'
+  created_at: '2026-02-26T06:08:35Z'
   type: package
 files:
   .ai/directives/init.md:
@@ -443,7 +443,7 @@ files:
     sha256: 7e8a45580cf42fd5b26df3651b4e76f8fe2716be408c3247fde67366e7e2c974
     inline_signed: true
   .ai/knowledge/rye/primary/sign-semantics.md:
-    sha256: 5d71833b1fc1a5808c1ce5d670805f2fb82c2701264c430060f4e014365c0060
+    sha256: c90e028cdd91bd44363a4379dc24e398454ddd6d59b0b05865a8bb29c025f3b7
     inline_signed: true
   .ai/config/keys/trusted/4b987fd4e40303ac.toml:
     sha256: 2cbb00b6ccfb8510ece8627bd8c5be600f0ce921b200871a5952e426ce806154

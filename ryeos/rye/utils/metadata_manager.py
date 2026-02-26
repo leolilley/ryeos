@@ -333,7 +333,7 @@ class MetadataManager:
             compute_key_fingerprint,
         )
 
-        key_dir = get_user_space() / AI_DIR / "keys"
+        key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
         try:
             private_pem, public_pem = load_keypair(key_dir)
         except FileNotFoundError:
@@ -368,7 +368,7 @@ class MetadataManager:
             sign_hash,
             compute_key_fingerprint,
         )
-        key_dir = get_user_space() / AI_DIR / "keys"
+        key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
         try:
             private_pem, public_pem = load_keypair(key_dir)
         except FileNotFoundError:

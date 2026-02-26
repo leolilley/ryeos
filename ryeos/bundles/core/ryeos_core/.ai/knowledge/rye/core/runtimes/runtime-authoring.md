@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:24Z:b632de2da88d3826a466fe8dabdfd265bb774e9025ca63b49a6d0cf1005e1e8e:-EkFtSFbNS2e39wC_oVdfnm8QyVuEFa7m4EAbmE-qb6zHtWJqALx3wCieA1HogF5RvtWZbGaMsL6pMJKMgyNBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:42:50Z:b632de2da88d3826a466fe8dabdfd265bb774e9025ca63b49a6d0cf1005e1e8e:-EkFtSFbNS2e39wC_oVdfnm8QyVuEFa7m4EAbmE-qb6zHtWJqALx3wCieA1HogF5RvtWZbGaMsL6pMJKMgyNBQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: runtime-authoring

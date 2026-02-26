@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:4a566e7a12b4753753c6af614d174155dd14648135cbae1a579d477fe1847a09:SdVkU4T2oNnJkV1F0XJZGeProlzTwG9YEJq4zgiNXOeOM9VF4dCs3udUOFy13jrOBuuiCGiSPvdkvczPLRktAA==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:42:42Z:6a8eb94c64c449ba7ac4e34b3b0cccf01005dc0dbc6750912b445cedbea1b52f:7vVAHvbUDOvJKACZRQTxl8jW0Hk5IhJKr6mTlFh-gh5mrHHk1d9CEzMaui3fJFFh-3GjbW3PKPD0xyiTy9tpAQ==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -40,6 +40,8 @@ from rye.tools.load import LoadTool
 from rye.tools.sign import SignTool
 
 from module_loader import load_module
+import condition_evaluator
+import interpolation
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +57,41 @@ def _find_tools_root() -> Path:
         "walker.py must live under a .ai/tools/ directory"
     )
 
+
+def _find_agent_threads_anchor() -> Optional[Path]:
+    """Resolve rye/agent/threads across system bundles.
+
+    The walker lives in core but rye/agent/threads is in the standard bundle.
+    Returns None when the standard bundle is not installed (serverless/core-only).
+    """
+    # Check own bundle first
+    own = _find_tools_root() / "rye" / "agent" / "threads"
+    if own.is_dir():
+        return own
+    # Search across installed system bundles
+    try:
+        from rye.utils.path_utils import get_system_spaces
+        for bundle in get_system_spaces():
+            candidate = bundle.root_path / AI_DIR / "tools" / "rye" / "agent" / "threads"
+            if candidate.is_dir():
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _try_load_module(relative_path: str) -> Optional[Any]:
+    """Load a module from _ANCHOR, returning None if agent bundle unavailable."""
+    if _ANCHOR is None:
+        return None
+    try:
+        return load_module(relative_path, anchor=_ANCHOR)
+    except FileNotFoundError:
+        return None
+
+
 _TOOLS_ROOT = _find_tools_root()
-_ANCHOR = _TOOLS_ROOT / "rye" / "agent" / "threads"
+_ANCHOR = _find_agent_threads_anchor()
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +158,9 @@ class GraphTranscript:
                 "current_node": current_node,
                 "state": state,
             })
-        transcript_signer = load_module(
-            "persistence/transcript_signer", anchor=_ANCHOR
-        )
+        transcript_signer = _try_load_module("persistence/transcript_signer")
+        if transcript_signer is None:
+            return
         signer = transcript_signer.TranscriptSigner(
             self._graph_run_id, self._thread_dir
         )
@@ -531,9 +566,13 @@ def _resolve_execution_context(
     if parent_thread_id:
         meta = _read_thread_meta(project_path, parent_thread_id)
         if meta:
-            transcript_signer = load_module(
-                "persistence/transcript_signer", anchor=_ANCHOR
-            )
+            transcript_signer = _try_load_module("persistence/transcript_signer")
+            if transcript_signer is None:
+                return {
+                    "parent_thread_id": None,
+                    "capabilities": [],
+                    "limits": {},
+                }
             if not transcript_signer.verify_json(meta):
                 logger.warning(
                     "thread.json signature invalid for %s — fail-closed",
@@ -647,7 +686,9 @@ def _merge_graph_hooks(
     Same pattern as thread_directive._merge_hooks().
     Filters out inapplicable thread-only events.
     """
-    hooks_loader = load_module("loaders/hooks_loader", anchor=_ANCHOR)
+    hooks_loader = _try_load_module("loaders/hooks_loader")
+    if hooks_loader is None:
+        return []
     loader = hooks_loader.get_hooks_loader()
     proj = Path(project_path)
     builtin = loader.get_builtin_hooks(proj)
@@ -685,11 +726,6 @@ async def _run_hooks(
     - Layer 1-2: first non-None result wins (control flow)
     - Layer 3: always runs (infra telemetry)
     """
-    condition_evaluator = load_module(
-        "loaders/condition_evaluator", anchor=_ANCHOR
-    )
-    interpolation = load_module("loaders/interpolation", anchor=_ANCHOR)
-
     control_result = None
     for hook in hooks:
         if hook.get("event") != event:
@@ -727,10 +763,6 @@ def _evaluate_edges(
     - list: conditional edges, first match wins
     - None: terminal (graph ends)
     """
-    condition_evaluator = load_module(
-        "loaders/condition_evaluator", anchor=_ANCHOR
-    )
-
     if next_spec is None:
         return None
     if isinstance(next_spec, str):
@@ -908,10 +940,10 @@ def _follow_continuation_chain(
     continuation_id: str, project_path: str
 ) -> Dict:
     """Follow a continuation chain to the terminal thread's persisted result."""
-    orchestrator = load_module("orchestrator", anchor=_ANCHOR)
-    thread_registry = load_module(
-        "persistence/thread_registry", anchor=_ANCHOR
-    )
+    orchestrator = _try_load_module("orchestrator")
+    thread_registry = _try_load_module("persistence/thread_registry")
+    if orchestrator is None or thread_registry is None:
+        return {"success": False, "error": "Agent bundle required for continuation chain resolution"}
 
     terminal_id = orchestrator.resolve_thread_chain(
         continuation_id, Path(project_path)
@@ -960,7 +992,9 @@ def _load_resume_state(
         return None
 
     # Verify transcript integrity via checkpoint signatures
-    transcript_signer = load_module("persistence/transcript_signer", anchor=_ANCHOR)
+    transcript_signer = _try_load_module("persistence/transcript_signer")
+    if transcript_signer is None:
+        return None
     signer = transcript_signer.TranscriptSigner(graph_run_id, jsonl_path.parent)
     verify_result = signer.verify(allow_unsigned_trailing=True)
     if not verify_result.get("valid", False):
@@ -1006,11 +1040,8 @@ async def execute(
     pre_registered: bool = False,
 ) -> Dict:
     """Walk a state graph, dispatching actions for each node."""
-    interpolation = load_module("loaders/interpolation", anchor=_ANCHOR)
-    error_loader = load_module("loaders/error_loader", anchor=_ANCHOR)
-    thread_registry = load_module(
-        "persistence/thread_registry", anchor=_ANCHOR
-    )
+    error_loader = _try_load_module("loaders/error_loader")
+    thread_registry = _try_load_module("persistence/thread_registry")
 
     cfg = graph_config.get("config", {})
     nodes = cfg.get("nodes", {})
@@ -1047,6 +1078,8 @@ async def execute(
             "error": f"Graph validation failed: {validation_errors}",
         }
 
+    registry = None
+
     # Resume: reload state from signed knowledge item
     if is_resume and resume_run_id:
         graph_run_id = resume_run_id
@@ -1066,8 +1099,9 @@ async def execute(
                 "error": f"Cannot resume: no current_node in state for {graph_run_id}",
             }
 
-        registry = thread_registry.get_registry(Path(project_path))
-        registry.update_status(graph_run_id, "running")
+        if thread_registry is not None:
+            registry = thread_registry.get_registry(Path(project_path))
+            registry.update_status(graph_run_id, "running")
         await _persist_state(
             project_path, graph_id, graph_run_id,
             state, current, "running", step_count,
@@ -1094,10 +1128,11 @@ async def execute(
         # Register + create initial state
         # (skip register if graph_run_id was pre-provided — already registered
         # by run_sync() for async)
-        registry = thread_registry.get_registry(Path(project_path))
-        if not pre_registered:
-            registry.register(graph_run_id, graph_id, parent_thread_id)
-            registry.update_status(graph_run_id, "running")
+        if thread_registry is not None:
+            registry = thread_registry.get_registry(Path(project_path))
+            if not pre_registered:
+                registry.register(graph_run_id, graph_id, parent_thread_id)
+                registry.update_status(graph_run_id, "running")
         await _persist_state(
             project_path, graph_id, graph_run_id,
             state, current, "running", step_count,
@@ -1131,7 +1166,8 @@ async def execute(
             })
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge("error", step_count, elapsed)
-            registry.update_status(graph_run_id, "error")
+            if registry is not None:
+                registry.update_status(graph_run_id, "error")
             return {
                 "success": False,
                 "error": f"Node '{current}' not found in graph",
@@ -1156,7 +1192,8 @@ async def execute(
                 project_path, graph_id, graph_run_id,
                 state, current, "completed", step_count,
             )
-            registry.update_status(graph_run_id, "completed")
+            if registry is not None:
+                registry.update_status(graph_run_id, "completed")
             await _run_hooks(
                 "graph_completed",
                 {"graph_id": graph_id, "state": state, "steps": step_count},
@@ -1232,9 +1269,12 @@ async def execute(
 
         # Check for errors — hooks get first chance
         if result.get("status") == "error":
-            classification = error_loader.classify(
-                Path(project_path), _error_to_context(result)
-            )
+            if error_loader is not None:
+                classification = error_loader.classify(
+                    Path(project_path), _error_to_context(result)
+                )
+            else:
+                classification = {"retryable": False, "category": "permanent"}
             error_ctx = {
                 "error": result,
                 "classification": classification,
@@ -1278,7 +1318,8 @@ async def execute(
                     project_path, graph_id, graph_run_id,
                     state, current, "error", step_count,
                 )
-                registry.update_status(graph_run_id, "error")
+                if registry is not None:
+                    registry.update_status(graph_run_id, "error")
                 return {
                     "success": False,
                     "error": result.get("error"),
@@ -1422,8 +1463,6 @@ async def _handle_foreach(
 
     Returns (next_node, updated_state).
     """
-    interpolation = load_module("loaders/interpolation", anchor=_ANCHOR)
-
     interp_ctx: Dict[str, Any] = {"state": state, "inputs": inputs}
     over_expr = node.get("over", "")
     items = interpolation.interpolate(over_expr, interp_ctx)
@@ -1466,7 +1505,6 @@ async def _foreach_sequential(
     project_path: str,
 ) -> List:
     """Execute foreach items one at a time."""
-    interpolation = load_module("loaders/interpolation", anchor=_ANCHOR)
     collected: List[Any] = []
 
     for item in items:
@@ -1511,7 +1549,6 @@ async def _foreach_parallel(
     project_path: str,
 ) -> List:
     """Dispatch all foreach items concurrently via asyncio.gather."""
-    interpolation = load_module("loaders/interpolation", anchor=_ANCHOR)
 
     async def _run_one(item: Any) -> Any:
         interp_ctx: Dict[str, Any] = {
@@ -1557,13 +1594,13 @@ def run_sync(
 
     Same pattern as thread_directive.py async.
     """
-    thread_registry = load_module(
-        "persistence/thread_registry", anchor=_ANCHOR
-    )
-
     is_async = params.pop("async", False)
 
     if is_async:
+        thread_registry = _try_load_module("persistence/thread_registry")
+        if thread_registry is None:
+            return {"success": False, "error": "Agent bundle required for async mode"}
+
         # Pre-generate graph_run_id so parent can return it
         cfg = graph_config.get("config", {})
         graph_id = graph_config.get("_item_id") or graph_config.get("category", "unknown")
@@ -1608,7 +1645,10 @@ def run_sync(
                 envs.setdefault(key, os.environ[key])
 
         # Cross-platform detached spawn via orchestrator helper
-        orchestrator = load_module("orchestrator", anchor=_ANCHOR)
+        orchestrator = _try_load_module("orchestrator")
+        if orchestrator is None:
+            registry.update_status(graph_run_id, "error")
+            return {"success": False, "error": "Agent bundle required for async mode"}
         spawn_result = asyncio.run(orchestrator.spawn_detached(
             cmd=cmd[0],
             args=cmd[1:],

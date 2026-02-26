@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:5be2282842d6e826076874cec73b6e751fcf7dbf4402931bdb9d811fc8bdc313:AlXsZTMos0cVOjggnymVdKGKHoKCezl7HjmMTaGbz_lo0Zn6R31R7LOKGDWwCZP9DGobPnnVJB8ohMeugGrUCw==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:42:42Z:5be2282842d6e826076874cec73b6e751fcf7dbf4402931bdb9d811fc8bdc313:AlXsZTMos0cVOjggnymVdKGKHoKCezl7HjmMTaGbz_lo0Zn6R31R7LOKGDWwCZP9DGobPnnVJB8ohMeugGrUCw==:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"

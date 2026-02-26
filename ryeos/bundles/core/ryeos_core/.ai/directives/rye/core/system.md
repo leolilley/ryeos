@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:23Z:4a69e6391587a2f9d993edc3440317cf1d42b93a0022b7c8c507f28a7edde235:HENv278cEeNrHIxQgaHM4IyqFzjnDWtxxQrBV5rdFVnsXF3nsjc0YNuj3tXZKOPdtKrvpRf0Wi6bMzyBGZNvDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:42:50Z:4a69e6391587a2f9d993edc3440317cf1d42b93a0022b7c8c507f28a7edde235:HENv278cEeNrHIxQgaHM4IyqFzjnDWtxxQrBV5rdFVnsXF3nsjc0YNuj3tXZKOPdtKrvpRf0Wi6bMzyBGZNvDQ==:4b987fd4e40303ac -->
 # System
 
 Retrieve system information such as paths, time, and runtime details.

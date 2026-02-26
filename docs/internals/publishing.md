@@ -146,17 +146,6 @@ lillux/watch/Cargo.toml                       → lillux-watch (Rust binary vers
 
 > **Important:** Maturin reads the version from `pyproject.toml`, not `Cargo.toml`. If you only bump `Cargo.toml`, the wheel will still have the old version.
 
-### Bundle entry points (bundle.py)
-
-Each bundle's `get_bundle()` function returns a `version` field. Keep these in sync:
-
-```
-ryeos/bundles/core/ryeos_core/bundle.py       → ryeos-core bundle version
-ryeos/bundles/standard/ryeos_std/bundle.py    → ryeos bundle version
-ryeos/bundles/web/ryeos_web/bundle.py         → ryeos-web bundle version
-ryeos/bundles/code/ryeos_code/bundle.py       → ryeos-code bundle version
-```
-
 ### Bump workflow
 
 ```bash

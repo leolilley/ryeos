@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:24Z:d46d88ef3fb425de6fbfe225dbf753dd0d0872120011425942244fd06cc6ca32:flGtB5OKviMXvnVpIa5Mgz_YqGzmQzXDB3MtFvqp-S_PZcUG5T95eQTz1cOcypN3BJHntPNg5ieCMIgNLtWABg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:42:50Z:d46d88ef3fb425de6fbfe225dbf753dd0d0872120011425942244fd06cc6ca32:flGtB5OKviMXvnVpIa5Mgz_YqGzmQzXDB3MtFvqp-S_PZcUG5T95eQTz1cOcypN3BJHntPNg5ieCMIgNLtWABg==:4b987fd4e40303ac -->
 
 ```yaml
 name: bundle-format

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:a23a1a0375614da586cad7d7dcaa6e27ebe4ddb16efad18e250643bd760bbf66:T3nOWnXiQGrJ01dYvkT5WAn2Nua2lrvgU-HsZissNpVkj4vasWwNC-wYc_3HGGxCgNSSU4_tin1UA-eQ2ooRCg==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:42:43Z:a23a1a0375614da586cad7d7dcaa6e27ebe4ddb16efad18e250643bd760bbf66:T3nOWnXiQGrJ01dYvkT5WAn2Nua2lrvgU-HsZissNpVkj4vasWwNC-wYc_3HGGxCgNSSU4_tin1UA-eQ2ooRCg==:4b987fd4e40303ac
 
 """Git operations - status, add, commit, diff, log, branch, checkout, stash, reset, tag."""
 

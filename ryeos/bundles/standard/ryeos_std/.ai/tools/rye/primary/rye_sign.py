@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:9f41d887e2c1cba71b27257e86fc9169f63f851409a288159fdd8437cb1f5389:AxfaM2WDG_318wOFsXeZQqSmC8d4IRe1wMvQs35ouaDNoEBeyrKz4dpm-IqFKLBVWYusi9qqq0P2fxz4sm56CA==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:42:42Z:9f41d887e2c1cba71b27257e86fc9169f63f851409a288159fdd8437cb1f5389:AxfaM2WDG_318wOFsXeZQqSmC8d4IRe1wMvQs35ouaDNoEBeyrKz4dpm-IqFKLBVWYusi9qqq0P2fxz4sm56CA==:4b987fd4e40303ac
 """Validate and sign a directive, tool, or knowledge item."""
 
 import argparse

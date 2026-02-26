@@ -3,7 +3,7 @@
 Trusted keys are TOML identity documents that bind a key to a registry account.
 They follow the standard 3-tier resolution: project > user > system.
 
-Each trusted key file lives at .ai/trusted_keys/{fingerprint}.toml:
+Each trusted key file lives at .ai/config/keys/trusted/{fingerprint}.toml:
 
     # rye:signed:TIMESTAMP:HASH:SIG:FP
     fingerprint = "16e73c5829f69d6f"
@@ -34,7 +34,7 @@ _key_strategy = ToolMetadataStrategy()
 
 logger = logging.getLogger(__name__)
 
-TRUSTED_KEYS_DIR = "trusted_keys"
+TRUSTED_KEYS_DIR = str(Path("config") / "keys" / "trusted")
 
 
 @dataclass
@@ -91,7 +91,7 @@ class TrustedKeyInfo:
 class TrustStore:
     """Manages trusted Ed25519 public keys with 3-tier resolution.
 
-    Resolution order: project > user > system .ai/trusted_keys/{fp}.toml
+    Resolution order: project > user > system .ai/config/keys/trusted/{fp}.toml
     """
 
     def __init__(
@@ -136,7 +136,7 @@ class TrustStore:
         content_hash = compute_content_hash(content_for_hash)
         timestamp = generate_timestamp()
 
-        key_dir = get_user_space() / AI_DIR / "keys"
+        key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
         private_pem, public_pem = ensure_keypair(key_dir)
         ed25519_sig = sign_hash(content_hash, private_pem)
         pubkey_fp = _fp(public_pem)
@@ -218,7 +218,7 @@ class TrustStore:
     ) -> Optional[TrustedKeyInfo]:
         """Get trusted key by fingerprint.
 
-        Searches project > user > system .ai/trusted_keys/{fingerprint}.toml
+        Searches project > user > system .ai/config/keys/trusted/{fingerprint}.toml
         Verifies file integrity when a signature is present.
         """
         for source, trust_dir in self._search_dirs():

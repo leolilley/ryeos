@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:23Z:8beb7eca280dfe5957389abcba55270282d4e10971eb50650be199cf153cfc8a:DJoR7qSxZBI1QEh41evSthzp5wvgolanGOZ-wU7hCRdm2aPlcNU2Y7nl9M1CINiZROvHj8s4uoEgbRJLPUJwDA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:42:50Z:8beb7eca280dfe5957389abcba55270282d4e10971eb50650be199cf153cfc8a:DJoR7qSxZBI1QEh41evSthzp5wvgolanGOZ-wU7hCRdm2aPlcNU2Y7nl9M1CINiZROvHj8s4uoEgbRJLPUJwDA==:4b987fd4e40303ac -->
 # Registry Pull
 
 Download an item from the registry.

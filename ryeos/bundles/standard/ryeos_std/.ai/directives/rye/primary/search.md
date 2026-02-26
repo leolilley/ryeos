@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:24Z:5216cd4371dcd481c2bf658327ac789b8375f11f8f3b22fbaafed57eb6db486f:Lry20CIGTaoGaU0eUWcnvasK0X5BEink2_BM3aLZDAAPRPSkuCgFQWNOne1S21T_TMc_ivMjirF1wdzoXhCzCQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:42:50Z:5216cd4371dcd481c2bf658327ac789b8375f11f8f3b22fbaafed57eb6db486f:Lry20CIGTaoGaU0eUWcnvasK0X5BEink2_BM3aLZDAAPRPSkuCgFQWNOne1S21T_TMc_ivMjirF1wdzoXhCzCQ==:4b987fd4e40303ac -->
 # Search
 
 Search for directives, tools, or knowledge by scope and query.

@@ -1,3 +1,5 @@
 """RYE OS - AI operating system on Lillux microkernel."""
 
-__version__ = "0.1.4"
+from importlib.metadata import version
+
+__version__ = version("ryeos-engine")

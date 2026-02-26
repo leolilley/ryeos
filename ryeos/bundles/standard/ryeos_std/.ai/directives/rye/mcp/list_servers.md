@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:24Z:0bef47bf9764f6670cdc39eae9c0e9502e0f07bad21c24b8a09feec9998b1272:RDUTB97o_h0CVZMtk8wxi1uS8GWhkBg7abugR9GIeHAhSEsUPxSXx9q0r15ADK33L5gMbDxFzhdzlGWd1z9ZCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:42:50Z:0bef47bf9764f6670cdc39eae9c0e9502e0f07bad21c24b8a09feec9998b1272:RDUTB97o_h0CVZMtk8wxi1uS8GWhkBg7abugR9GIeHAhSEsUPxSXx9q0r15ADK33L5gMbDxFzhdzlGWd1z9ZCw==:4b987fd4e40303ac -->
 # MCP List Servers
 
 List all registered MCP servers.

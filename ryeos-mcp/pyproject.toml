@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-mcp"
-version = "0.1.4"
+version = "0.1.5"
 description = "MCP server transport for RYE OS"
 requires-python = ">=3.10"
 license = "MIT"
