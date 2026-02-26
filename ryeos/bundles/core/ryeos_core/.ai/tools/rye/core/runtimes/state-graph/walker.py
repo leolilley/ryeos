@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:6a8eb94c64c449ba7ac4e34b3b0cccf01005dc0dbc6750912b445cedbea1b52f:7vVAHvbUDOvJKACZRQTxl8jW0Hk5IhJKr6mTlFh-gh5mrHHk1d9CEzMaui3fJFFh-3GjbW3PKPD0xyiTy9tpAQ==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:52:24Z:4a566e7a12b4753753c6af614d174155dd14648135cbae1a579d477fe1847a09:SdVkU4T2oNnJkV1F0XJZGeProlzTwG9YEJq4zgiNXOeOM9VF4dCs3udUOFy13jrOBuuiCGiSPvdkvczPLRktAA==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -1225,6 +1225,48 @@ async def execute(
 
         # Build interpolation context
         interp_ctx: Dict[str, Any] = {"state": state, "inputs": params}
+
+        # Gate node — explicit routing/assign, no action execution
+        if node.get("type") == "gate":
+            graph_transcript.write_event("step_started", {
+                "step": step_count, "node": executed_node, "node_type": "gate",
+            })
+            if "assign" in node:
+                for key, expr in node["assign"].items():
+                    resolved = interpolation.interpolate(expr, interp_ctx)
+                    if resolved is None and expr:
+                        logger.warning(
+                            "assign '%s' resolved to None for expr '%s'",
+                            key, expr,
+                        )
+                    state[key] = resolved
+            next_spec = node.get("next")
+            current = _evaluate_edges(next_spec, state, {})
+            graph_transcript.write_event("step_completed", {
+                "step": step_count, "node": executed_node,
+                "action_id": "",
+                "status": "ok",
+                "elapsed_s": 0,
+                "next_node": current,
+            })
+            graph_transcript.checkpoint(step_count, state=state, current_node=current)
+            graph_transcript.render_knowledge(
+                "running", step_count, time.monotonic() - graph_start_time,
+            )
+            await _persist_state(
+                project_path, graph_id, graph_run_id,
+                state, current, "running", step_count,
+            )
+            continue
+
+        # Validate action exists on non-typed nodes
+        if "action" not in node:
+            node_type = node.get("type", "(none)")
+            raise KeyError(
+                f"Node '{executed_node}' has no 'action' field. "
+                f"Nodes must either define 'action', or use an explicit type: "
+                f"'return', 'foreach', or 'gate'. Got type={node_type!r}"
+            )
 
         # Interpolate action params from state
         action = interpolation.interpolate_action(node["action"], interp_ctx)
