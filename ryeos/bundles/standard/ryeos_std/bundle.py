@@ -7,7 +7,7 @@ def get_bundle() -> dict:
     """Return ryeos bundle — standard rye/* items (agent, bash, file-system, mcp, primary, authoring, guides)."""
     return {
         "bundle_id": "ryeos",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "root_path": Path(__file__).parent,
         "categories": ["rye"],
     }
