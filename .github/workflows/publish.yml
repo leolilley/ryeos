@@ -16,12 +16,11 @@ on:
           - lillux
           - lillux-proc
           - lillux-watch
-          - ryeos
-          - ryeos-bare
+          - ryeos-engine
           - ryeos-core
+          - ryeos
           - ryeos-web
           - ryeos-code
-          - ryeos-full
           - ryeos-mcp
 
 permissions:
@@ -40,20 +39,18 @@ jobs:
         include:
           - package: lillux
             path: lillux/kernel
-          - package: ryeos-bare
-            path: ryeos-bare
-          - package: ryeos
+          - package: ryeos-engine
             path: ryeos
           - package: ryeos-core
             path: ryeos/bundles/core
+          - package: ryeos
+            path: ryeos/bundles/standard
           - package: ryeos-web
             path: ryeos/bundles/web
           - package: ryeos-code
             path: ryeos/bundles/code
           - package: ryeos-mcp
             path: ryeos-mcp
-          - package: ryeos-full
-            path: ryeos/bundles/full
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
