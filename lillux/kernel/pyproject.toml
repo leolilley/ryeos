@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "lillux"
-version = "0.1.2"
+version = "0.1.3"
 description = "Lillux - Microkernel for RYE OS"
 requires-python = ">=3.10"
 license = "MIT"
