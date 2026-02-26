@@ -12,7 +12,7 @@ dependencies = [
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "httpx>=0.26.0",
-    # ryeos-bare is installed separately in Docker or via: pip install ../../rye
+    # ryeos-engine is installed separately in Docker or via: pip install ../../ryeos
 ]
 
 [project.optional-dependencies]
