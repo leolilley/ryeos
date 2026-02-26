@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:24Z:e365a1fe46c6e9ecdf8346f43d6f1643b66e03acda354b1b21fc3bba335606e9:wQftaymnmKGPs8cTUzXD7ROduHuTP5TLI51cOtOxe7WqAWuyBbycG-2P4EoHXcuwXIEdvwCRDr8njDuPJ_KQDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:04:44Z:6758f0ba7e068e3b72b341ad3dffb6f669c8e46a48cbfb562cbe08f95ad454c3:LemsJSvzN4Mz1N1x81sxlq3XbFYWBTujqEeINIWOkXH_avUbslQh5LCkUNIMwuCjyNIn0CVrro3I1q-cYoBqAg==:4b987fd4e40303ac -->
 
 ```yaml
 name: sign-semantics
@@ -73,7 +73,7 @@ Each file type uses its own comment syntax:
 | `knowledge`    | `.md`          | `<!-- rye:signed:<timestamp>:<hash>:<signature> -->` |
 | `trusted_key`  | `.toml`        | `# rye:signed:<timestamp>:<hash>:<signature>`        |
 
-Trusted key identity documents (`.ai/trusted_keys/{fingerprint}.toml`) are also signed using the same `# rye:signed:` format with TOML `#` comment syntax. These are signed automatically by `TrustStore.add_key()` on write and verified by `TrustStore.get_key()` on load. This is handled internally by the trust store rather than the `rye_sign` MCP tool.
+Trusted key identity documents (`.ai/config/keys/trusted/{fingerprint}.toml`) are also signed using the same `# rye:signed:` format with TOML `#` comment syntax. These are signed automatically by `TrustStore.add_key()` on write and verified by `TrustStore.get_key()` on load. This is handled internally by the trust store rather than the `rye_sign` MCP tool.
 
 ### Signature components
 

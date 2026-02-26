@@ -247,7 +247,7 @@ Pure Ed25519 cryptographic operations. No policy, no I/O beyond key material.
 | `compute_key_fingerprint(public_key_pem)`                 | SHA256 of public key PEM → first 16 hex chars               |
 | `save_keypair(private_pem, public_pem, key_dir)`          | Save to disk with restricted permissions                    |
 | `load_keypair(key_dir)`                                   | Load from `private_key.pem` and `public_key.pem`            |
-| `ensure_keypair(key_dir)`                                 | Load or generate if missing                                 |
+| `ensure_keypair(key_dir)`                                 | *Deprecated* — use `load_keypair()` and handle missing keys explicitly |
 
 ### Key Storage
 

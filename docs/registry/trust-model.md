@@ -32,7 +32,7 @@ The `init` directive handles both steps automatically — it generates the keypa
 Keys are stored at:
 
 ```
-~/.ai/keys/
+~/.ai/config/keys/signing/
 ├── private_key.pem   # Ed25519 private key (mode 0600)
 └── public_key.pem    # Ed25519 public key (mode 0644)
 ```
@@ -88,7 +88,7 @@ The trust store manages which Ed25519 public keys are trusted for signature veri
 
 ### Zero Exceptions
 
-Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`, and every system item is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key — the same key used for registry publishing. There is no bypass for system items. The verification flow is identical regardless of which space the item lives in.
+Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/config/keys/trusted/{fingerprint}.toml`, and every system item is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key — the same key used for registry publishing. There is no bypass for system items. The verification flow is identical regardless of which space the item lives in.
 
 ### Identity Document Format
 
@@ -120,21 +120,21 @@ MCowBQYDK2VwAyEA...
 The trust store uses the same 3-tier resolution as directives, tools, and knowledge:
 
 ```
-project/.ai/trusted_keys/{fingerprint}.toml  →  (highest priority)
-user/.ai/trusted_keys/{fingerprint}.toml     →
-system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
+project/.ai/config/keys/trusted/{fingerprint}.toml  →  (highest priority)
+user/.ai/config/keys/trusted/{fingerprint}.toml     →
+system/.ai/config/keys/trusted/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
 ```
 
-First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
+First match wins. The system bundle ships the author's key at `rye/.ai/config/keys/trusted/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
 
 ### Key Operations
 
 | Operation             | Method                        | Behavior                                                                    |
 | --------------------- | ----------------------------- | --------------------------------------------------------------------------- |
 | **Check trust**       | `is_trusted(fingerprint)`     | Delegates to `get_key()`, returns True if key found                         |
-| **Get key**           | `get_key(fingerprint)`        | 3-tier search with integrity verification: project → user → system `.ai/trusted_keys/{fp}.toml` |
+| **Get key**           | `get_key(fingerprint)`        | 3-tier search with integrity verification: project → user → system `.ai/config/keys/trusted/{fp}.toml` |
 | **Add key**           | `add_key(public_key_pem)`     | Writes and signs `{fingerprint}.toml` identity document, returns fingerprint |
-| **Remove key**        | `remove_key(fingerprint)`     | Deletes `{fingerprint}.toml` from user store                               |
+| **Remove key**        | `remove_key(fingerprint)`     | Deletes `{fingerprint}.toml` from user trusted keys store                  |
 | **Pin registry**      | `pin_registry_key(pem)`       | Adds key with `owner="rye-registry"` (no-op if already exists)             |
 | **Get registry key**  | `get_registry_key()`          | Scans all keys for `owner=="rye-registry"`                                  |
 | **List keys**         | `list_keys()`                 | Returns all `.toml` identity documents across all spaces                    |
@@ -151,7 +151,39 @@ Trusted key TOML files are themselves signed with a `# rye:signed:...` comment o
 
 The user's own public key is added to the trust store when trusted via the keys tool (`rye execute tool rye/core/keys/keys --action trust`), with `owner="local"`.
 
-Trusted keys in bundle project spaces are provisioned via the keys tool with `action: trust, space: project` — this is how bundle authors distribute their signing key into each bundle's `.ai/trusted_keys/`.
+Trusted keys in bundle project spaces are provisioned via the keys tool with `action: trust, space: project` — this is how bundle authors distribute their signing key into each bundle's `.ai/config/keys/trusted/`.
+
+## Registry Authentication
+
+### API Key Model
+
+Registry authentication uses long-lived API keys rather than session JWTs. The flow:
+
+1. **Bootstrap:** Run `action: login` on the registry tool — this opens the OAuth device flow (GitHub), which issues a temporary JWT
+2. **Create API key:** Run `action: create_api_key` — this exchanges the bootstrap JWT for a persistent API key (format: `rye_sk_{secrets.token_urlsafe(32)}`)
+3. **Store locally:** The API key is stored in the local auth session and used for all subsequent registry operations
+4. **JWT is discarded:** The temporary JWT is only used once to create the initial API key
+
+All registry API requests authenticate via the `RYE_REGISTRY_API_KEY` header or stored local key.
+
+### API Key Management Actions
+
+| Action            | Description                                      |
+| ----------------- | ------------------------------------------------ |
+| `create_api_key`  | Create a new API key (requires bootstrap JWT)    |
+| `list_api_keys`   | List all API keys for the authenticated user     |
+| `revoke_api_key`  | Revoke an existing API key                       |
+
+### Serverless / CI Environments
+
+For non-interactive environments, set two environment variables:
+
+| Variable               | Description                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `RYE_REGISTRY_API_KEY` | API key for registry authentication (`rye_sk_...`)   |
+| `RYE_SIGNING_KEY`      | Ed25519 private key PEM for signing operations       |
+
+Use the keys tool `import` action to hydrate the signing identity from the `RYE_SIGNING_KEY` env var.
 
 ## TOFU (Trust On First Use)
 

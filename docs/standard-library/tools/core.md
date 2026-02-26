@@ -40,15 +40,16 @@ MCP request/response logging. Read server logs, stats, and errors.
 
 Manage Ed25519 signing keys — generate, inspect, trust, list, and remove.
 
-| Action     | Description                                                    |
-| ---------- | -------------------------------------------------------------- |
-| `generate` | Generate a new Ed25519 keypair in `~/.ai/keys/`                |
-| `info`     | Show fingerprint and details for the current keypair           |
-| `trust`    | Add the public key to the trust store (default: user space)    |
-| `list`     | List all trusted keys across all spaces                        |
-| `remove`   | Remove a trusted key by fingerprint                            |
+| Action     | Description                                                             |
+| ---------- | ----------------------------------------------------------------------- |
+| `generate` | Generate a new Ed25519 keypair in `~/.ai/config/keys/signing/`          |
+| `info`     | Show fingerprint and details for the current keypair                    |
+| `trust`    | Add the public key to the trust store (default: user space)             |
+| `list`     | List all trusted keys across all spaces                                 |
+| `remove`   | Remove a trusted key by fingerprint                                     |
+| `import`   | Import a keypair from environment variables (for serverless environments)|
 
-Use `space: project` with `trust` to provision a signing key into a bundle's `.ai/trusted_keys/` for distribution.
+Use `space: project` with `trust` to provision a signing key into a bundle's `.ai/config/keys/trusted/` for distribution.
 
 ---
 
@@ -67,8 +68,11 @@ Push, pull, search, and manage items in the Rye OS registry. Supports these acti
 | `pull`       | Download item from registry |
 | `push`       | Upload item to registry     |
 | `delete`     | Remove item from registry   |
-| `publish`    | Make item public            |
-| `unpublish`  | Make item private           |
+| `publish`        | Make item public                |
+| `unpublish`      | Make item private               |
+| `create_api_key` | Create an API key (`rye_sk_` prefix) |
+| `list_api_keys`  | List all API keys for the user  |
+| `revoke_api_key` | Revoke an API key               |
 
 ---
 

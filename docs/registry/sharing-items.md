@@ -52,15 +52,18 @@ __executor_id__ = "rye/core/runtimes/python/script"
 
 ### Authentication Actions
 
-| Action        | Description                                                                        |
-| ------------- | ---------------------------------------------------------------------------------- |
-| `signup`      | Create account with email/password                                                 |
-| `login`       | Start device auth flow (opens browser, polls for completion, supports OAuth via GitHub) |
-| `login_email` | Login via email/password                                                           |
-| `logout`      | Clear local auth session                                                           |
-| `whoami`      | Show current authenticated user                                                    |
+| Action            | Description                                                                        |
+| ----------------- | ---------------------------------------------------------------------------------- |
+| `signup`          | Create account with email/password                                                 |
+| `login`           | Start device auth flow (opens browser, polls for completion, supports OAuth via GitHub) |
+| `login_email`     | Login via email/password                                                           |
+| `logout`          | Clear local auth session                                                           |
+| `whoami`          | Show current authenticated user                                                    |
+| `create_api_key`  | Create a persistent API key (`rye_sk_...`) from a bootstrap JWT                    |
+| `list_api_keys`   | List all API keys for the authenticated user                                       |
+| `revoke_api_key`  | Revoke an existing API key                                                         |
 
-Authentication uses OAuth PKCE flow with GitHub as the primary provider. The device auth flow opens a browser for login and polls for completion.
+Authentication uses an API key model. The initial setup uses OAuth PKCE flow with GitHub to obtain a temporary bootstrap JWT, which is then exchanged for a persistent API key via `create_api_key`. The JWT is used only once — all subsequent requests use the API key. For CI/serverless, set the `RYE_REGISTRY_API_KEY` environment variable directly.
 
 ### Item Operations
 
@@ -224,7 +227,7 @@ The registry uses Supabase tables:
 
 ### Authentication
 
-The registry API uses JWT-based authentication. The `get_current_user` dependency extracts and validates the user from the Authorization header. Some endpoints (search, public key) allow unauthenticated access.
+The registry API authenticates via API keys (format: `rye_sk_...`). The `get_current_user` dependency extracts and validates the API key from the Authorization header. JWTs are used only during the initial bootstrap flow to create the first API key. Some endpoints (search, public key) allow unauthenticated access.
 
 ### Configuration
 
@@ -253,10 +256,11 @@ The registry exposes its Ed25519 public key at `GET /v1/public-key` (PEM format)
 2. Sign it:
    sign(item_type="tool", item_id="utilities/web-scraper")
 
-3. Login to registry:
+3. Login and create API key:
    execute(tool="rye/core/registry/registry", action="login")
+   execute(tool="rye/core/registry/registry", action="create_api_key")
 
-4. Push to registry:
+4. Push to registry (authenticates with API key):
    execute(tool="rye/core/registry/registry", action="push",
            item_type="tool",
            item_id="myuser/utilities/web-scraper",

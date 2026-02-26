@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:52:24Z:7ab41fd349a15c1802d9d9ba09c410034b4cc5ea4555f72d332bf5dd1404755f:_CDn6jnU58V5Di3vwJgKfzL5uhV1zkg_50cwQAx_zpDtClesbn9HKbNOC2yIxsFqBZ2efZXyVDN2DMkhLl0aDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T06:04:44Z:4fa7a49a558ae129a915c8f94e8505e20e22e41e279bf3f465fe9db4bf143b26:Qfu0aVoENcjNtBqO8OoQN-ME3oyPOLIdrsuyJ8l7knu6Os_a-CVU4REdsB37E-1rIH2auR6ljpaNHQ8SXJPdBw==:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api
@@ -215,6 +215,30 @@ Pull endpoints increment a download counter per item/bundle version on each succ
 | `knowledge_versions` | Knowledge version history                      |
 | `bundles`            | Bundle metadata                                |
 | `bundle_versions`    | Bundle version history (manifest + files)      |
+
+## API Key Authentication
+
+In addition to JWT (OAuth), the registry supports API key authentication for programmatic access and CI/CD pipelines.
+
+### API Key Endpoints
+
+| Method | Path                  | Description              | Auth     |
+| ------ | --------------------- | ------------------------ | -------- |
+| POST   | `/v1/api-keys`        | Create a new API key     | Required |
+| GET    | `/v1/api-keys`        | List user's API keys     | Required |
+| DELETE | `/v1/api-keys/{id}`   | Revoke an API key        | Required |
+
+### API Key Format
+
+API keys use the `rye_sk_` prefix (e.g., `rye_sk_a1b2c3d4...`). Pass via the `Authorization: Bearer rye_sk_...` header. API keys replace the deprecated `RYE_REGISTRY_TOKEN` environment variable — use `RYE_REGISTRY_API_KEY` instead.
+
+### Client API Key Actions
+
+| Action           | Description                              |
+| ---------------- | ---------------------------------------- |
+| `create_api_key` | Create a new API key (`rye_sk_` prefix)  |
+| `list_api_keys`  | List all API keys for the current user   |
+| `revoke_api_key` | Revoke an API key by ID                  |
 
 ## Server Configuration
 

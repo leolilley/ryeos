@@ -104,7 +104,7 @@ The `init` directive handles this automatically — it includes a `generate_key`
 Keys are stored at:
 
 ```
-~/.ai/keys/
+~/.ai/config/keys/signing/
 ├── private_key.pem   # Ed25519 private key (mode 0600)
 └── public_key.pem    # Ed25519 public key (mode 0644)
 ```
@@ -188,11 +188,11 @@ def verify_item(file_path, item_type, project_path=None):
 
 ## Trust Store
 
-The `TrustStore` manages which Ed25519 public keys are trusted for signature verification. Trusted keys are TOML identity documents at `.ai/trusted_keys/{fingerprint}.toml`. There are no exceptions — every item that executes must pass signature verification against a trusted key, including Rye's own system tools.
+The `TrustStore` manages which Ed25519 public keys are trusted for signature verification. Trusted keys are TOML identity documents at `.ai/config/keys/trusted/{fingerprint}.toml`. There are no exceptions — every item that executes must pass signature verification against a trusted key, including Rye's own system tools.
 
 ### Zero Exceptions
 
-Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`, and every system item — every directive, tool, runtime, parser, extractor, and knowledge entry — is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key. The same key is used for registry publishing.
+Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/config/keys/trusted/{fingerprint}.toml`, and every system item — every directive, tool, runtime, parser, extractor, and knowledge entry — is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key. The same key is used for registry publishing.
 
 There is no bypass for system items. The verification flow is identical whether the item lives in project space, user space, or system space.
 
@@ -217,12 +217,12 @@ MCowBQYDK2VwAyEA...
 The trust store uses the same 3-tier resolution as directives, tools, and knowledge:
 
 ```
-project/.ai/trusted_keys/{fingerprint}.toml  →  (highest priority)
-user/.ai/trusted_keys/{fingerprint}.toml     →
-system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
+project/.ai/config/keys/trusted/{fingerprint}.toml  →  (highest priority)
+user/.ai/config/keys/trusted/{fingerprint}.toml     →
+system/.ai/config/keys/trusted/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
 ```
 
-First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
+First match wins. The system bundle ships the author's key at `rye/.ai/config/keys/trusted/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
 
 ### Trusted Key Integrity
 
@@ -242,7 +242,7 @@ This ensures the trust store cannot be silently tampered with.
 
 **Cross-signed keys:** When the signing fingerprint differs from the file's fingerprint, `TrustStore` performs a bounded recursive lookup to resolve the signing key. A recursion guard prevents infinite loops (e.g., two keys that each claim to be signed by the other).
 
-**Bundler integration:** The bundler collects `trusted_keys/` files into bundle manifests alongside directives, tools, and knowledge entries. Each key file's SHA256 hash is recorded in the manifest for independent verification during bundle extraction.
+**Bundler integration:** The bundler collects `config/keys/trusted/` files into bundle manifests alongside directives, tools, and knowledge entries. Each key file's SHA256 hash is recorded in the manifest for independent verification during bundle extraction.
 
 ### Key Sources
 
@@ -408,6 +408,12 @@ sign(item_type="tool", glob_pattern="rye/**/*.py")
 ```
 
 This re-signs all matching files with the current Ed25519 key, updating the signature line with fresh timestamp and hash. Used after bulk edits or when onboarding a new signing key.
+
+In serverless or CI environments where key files cannot persist on disk, use the keys tool's `import` action to hydrate signing keys from environment variables before signing:
+
+```bash
+rye execute tool rye/core/keys/keys --action import
+```
 
 ## Dependency Verification
 

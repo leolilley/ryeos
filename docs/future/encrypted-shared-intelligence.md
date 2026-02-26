@@ -203,13 +203,13 @@ The content hash covers the ciphertext, so **integrity verification works withou
 
 ### Trust Store → Trust Store + Keyring
 
-The existing `~/.ai/trusted_keys/` stores Ed25519 public keys by fingerprint (identity). A new `~/.ai/keyring/` stores group symmetric keys wrapped per-user (access):
+The existing `~/.ai/config/keys/trusted/` stores Ed25519 public keys by fingerprint (identity). A new `~/.ai/keyring/` stores group symmetric keys wrapped per-user (access):
 
-| Component               | Purpose                            | Existing? |
-| ------------------------ | ---------------------------------- | --------- |
-| `~/.ai/trusted_keys/`   | "I trust this key belongs to X"    | ✅ Yes    |
-| `~/.ai/keyring/groups/` | "I have access to group Y's items" | New       |
-| `~/.ai/keyring/grants/` | "I've granted access to Z"         | New       |
+| Component                      | Purpose                            | Existing? |
+| ------------------------------ | ---------------------------------- | --------- |
+| `~/.ai/config/keys/trusted/`   | "I trust this key belongs to X"    | ✅ Yes    |
+| `~/.ai/keyring/groups/`        | "I have access to group Y's items" | New       |
+| `~/.ai/keyring/grants/`        | "I've granted access to Z"         | New       |
 
 Combined: "I trust this key belongs to Alice (trust store) AND Alice has access to team-alpha's intelligence (keyring)."
 

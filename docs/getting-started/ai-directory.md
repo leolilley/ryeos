@@ -15,13 +15,17 @@ The `.ai/` directory is a portable data bundle that gives AI agents structured a
 
 ```
 .ai/
-├── directives/    # Workflow instructions (.md files)
-├── tools/         # Executable items (.py, .yaml, .sh, .js)
-├── knowledge/     # Domain information (.md files)
-├── bundles/       # Bundle manifests
-├── lockfiles/     # Integrity pinning
-├── threads/       # Thread execution state (auto-generated at runtime)
-└── outputs/       # Tool output artifacts (auto-generated at runtime)
+├── directives/           # Workflow instructions (.md files)
+├── tools/                # Executable items (.py, .yaml, .sh, .js)
+├── knowledge/            # Domain information (.md files)
+├── config/
+│   └── keys/
+│       ├── signing/      # Ed25519 signing keypairs
+│       └── trusted/      # Trusted public keys
+├── bundles/              # Bundle manifests
+├── lockfiles/            # Integrity pinning
+├── threads/              # Thread execution state (auto-generated at runtime)
+└── outputs/              # Tool output artifacts (auto-generated at runtime)
 ```
 
 ### Core directories

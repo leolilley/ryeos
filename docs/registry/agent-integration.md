@@ -202,7 +202,7 @@ When a pulled item is later executed, the integrity system verifies it the same 
 1. **Signature check** — `verify_item()` finds the `rye:signed:...|rye-registry@leolilley` comment
 2. **Hash check** — Recomputes SHA256 of content and compares to the embedded hash
 3. **Ed25519 check** — Verifies the signature using the public key matching the fingerprint
-4. **Trust store check** — Looks up the fingerprint via 3-tier resolution (project → user → system `.ai/trusted_keys/{fp}.toml`). The registry's key was pinned during the first pull (TOFU)
+4. **Trust store check** — Looks up the fingerprint via 3-tier resolution (project → user → system `.ai/config/keys/trusted/{fp}.toml`). The registry's key was pinned during the first pull (TOFU)
 
 If the registry key has not been pinned (e.g., the agent has never pulled before), `verify_item()` raises `IntegrityError("Untrusted key ...")`. The fix is to pull any item from the registry, which triggers TOFU pinning.
 
@@ -217,7 +217,7 @@ rye_sign(
 )
 ```
 
-This writes the key to `~/.ai/trusted_keys/{fingerprint}.pem`.
+This writes the key to `~/.ai/config/keys/trusted/{fingerprint}.toml`.
 
 ## Bundle Pull Flow
 
@@ -292,7 +292,7 @@ This means even non-signable assets (images, data files) are covered by the mani
 | ----------------------------------- | ----------------------------------------------------------------------------------------------- |
 | **No automatic registry search**    | `rye_search` only searches the local filesystem. The agent must explicitly call the registry tool to discover remote items. |
 | **Agent must know the registry tool** | The agent needs to know that `rye/core/registry/registry` exists and how to call it with the right action/parameters. |
-| **Authentication required for pull** | Most registry operations require authentication. The agent must have logged in via `action: login` before pulling. |
+| **Authentication required for pull** | Most registry operations require authentication. The agent must have an API key (created via `action: create_api_key` after OAuth login) or the `RYE_REGISTRY_API_KEY` env var set. |
 | **No dependency resolution**        | Pulling an item does not automatically pull its dependencies. If a tool depends on other tools, they must be pulled separately. |
 | **No auto-update**                  | Pulled items are static snapshots. There is no mechanism to check for or apply updates to previously pulled items. |
 | **Namespace stripped on pull**       | The namespace is removed from the local path, so `leolilley/utils/tool` and `otheruser/utils/tool` would conflict at `.ai/tools/utils/tool.py`. |
