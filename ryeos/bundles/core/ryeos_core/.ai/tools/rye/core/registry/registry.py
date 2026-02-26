@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:4699303fdd116671ce57005bbebc806805ea27c9bd009af3aeccab021f669744:pKkkTFexnq_JYS8MT8j8ZIVvZpWaUNo6NR_ZpYo_iKs6Z7sEt-kgg4KcAkP5OLjpCxEe9ncYYp3t71aC6N32Dg==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:00:59Z:ee122ff3c13a9ac96433cd97c523672143163d258cc505c7457c5b3910e97d90:kQS8PnVFgHtSxdeb4abKGUACagdKukFbwuiqqZ36QCH4oCJK9QSDR7ObIHE8VvQ6kxyn0DFT5r5uNCipG9OuBA==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -1035,7 +1035,7 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
                             service=REGISTRY_SERVICE,
                             access_token=api_key,
                             refresh_token=None,
-                            expires_in=None,
+                            expires_in=365 * 24 * 3600,  # API keys don't expire; use 1 year
                             scopes=["registry:read", "registry:write"],
                         )
 
