@@ -54,29 +54,41 @@ jobs:
             path: ryeos-mcp
           - package: ryeos-full
             path: ryeos/bundles/full
-    if: >-
-      github.event_name == 'push' ||
-      github.event.inputs.package == 'all' ||
-      github.event.inputs.package == matrix.package
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
+      - name: Check if this package should run
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "all" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "${{ matrix.package }}" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.skip == 'false'
 
       - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip == 'false'
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install build tools
+        if: steps.check.outputs.skip == 'false'
         run: pip install build
 
       - name: Build wheel
+        if: steps.check.outputs.skip == 'false'
         run: python -m build --wheel
         working-directory: ${{ matrix.path }}
 
       - name: Publish to PyPI
+        if: steps.check.outputs.skip == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: ${{ matrix.path }}/dist/
@@ -92,18 +104,27 @@ jobs:
             manifest: lillux/proc
           - package: lillux-watch
             manifest: lillux/watch
-    if: >-
-      github.event_name == 'push' ||
-      github.event.inputs.package == 'all' ||
-      github.event.inputs.package == matrix.package
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
+      - name: Check if this package should run
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "all" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "${{ matrix.package }}" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.skip == 'false'
 
       - name: Build wheels (maturin)
+        if: steps.check.outputs.skip == 'false'
         uses: PyO3/maturin-action@v1
         with:
           working-directory: ${{ matrix.manifest }}
@@ -111,6 +132,7 @@ jobs:
           manylinux: auto
 
       - name: Build sdist
+        if: steps.check.outputs.skip == 'false'
         uses: PyO3/maturin-action@v1
         with:
           working-directory: ${{ matrix.manifest }}
@@ -118,6 +140,7 @@ jobs:
           args: --out dist
 
       - name: Publish to PyPI
+        if: steps.check.outputs.skip == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: ${{ matrix.manifest }}/dist/
