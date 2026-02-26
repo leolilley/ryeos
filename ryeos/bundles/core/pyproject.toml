@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-core"
-version = "0.1.8"
+version = "0.1.9"
 description = "RYE Core Bundle — runtimes, primitives, extractors, and bundler"
 requires-python = ">=3.10"
 license = "MIT"
@@ -42,4 +42,8 @@ exclude = [
     "__pycache__",
     "*.pyc",
 ]
-
+# Include all files from source tree, don't filter by .gitignore
+# (the root .gitignore has rules like lib/ and */.ai/ that would
+# incorrectly exclude bundled .ai/ content from the wheel)
+only-packages = false
+ignore-vcs = true
