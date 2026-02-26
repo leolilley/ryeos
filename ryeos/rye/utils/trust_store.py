@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from lilux.primitives.signing import compute_key_fingerprint
+from lillux.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 from rye.utils.path_utils import get_user_space
 

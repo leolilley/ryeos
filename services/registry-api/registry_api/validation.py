@@ -118,7 +118,7 @@ def sign_with_registry(
     """
     import os
 
-    from lilux.primitives.signing import (
+    from lillux.primitives.signing import (
         ensure_keypair,
         sign_hash,
         compute_key_fingerprint,
@@ -174,7 +174,7 @@ def get_registry_public_key() -> Optional[bytes]:
         Public key PEM bytes, or None
     """
     import os
-    from lilux.primitives.signing import ensure_keypair
+    from lillux.primitives.signing import ensure_keypair
 
     registry_key_dir = Path(os.environ.get(
         "REGISTRY_KEY_DIR", "/etc/rye-registry/keys"
@@ -230,7 +230,7 @@ def verify_registry_signature(
     if not ed25519_sig or not pubkey_fp:
         return False, "Missing Ed25519 signature fields", sig_info
 
-    from lilux.primitives.signing import verify_signature
+    from lillux.primitives.signing import verify_signature
     from rye.utils.trust_store import TrustStore
 
     trust_store = TrustStore()
@@ -239,7 +239,7 @@ def verify_registry_signature(
     if public_key_pem is None:
         return False, "Registry key not pinned. Pull again to TOFU-pin.", sig_info
 
-    from lilux.primitives.signing import compute_key_fingerprint
+    from lillux.primitives.signing import compute_key_fingerprint
     if compute_key_fingerprint(public_key_pem) != pubkey_fp:
         return False, "Registry key fingerprint mismatch", sig_info
 

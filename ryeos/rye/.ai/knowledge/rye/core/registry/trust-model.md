@@ -25,7 +25,7 @@ Ed25519 signing, key pinning, TOFU bootstrap, and verification for Rye OS items.
 
 ## Ed25519 Signing Primitives
 
-**Implementation:** `lilux/lilux/primitives/signing.py` (uses `cryptography` library — no custom crypto).
+**Implementation:** `lillux/lillux/primitives/signing.py` (uses `cryptography` library — no custom crypto).
 
 ### Keypair Storage
 

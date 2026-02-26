@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Runtimes
 
-A **runtime** is a YAML configuration that describes how to invoke a tool. It bridges tools (Python scripts, JavaScript, YAML configs) and [primitives](lilux-primitives.md) (subprocess, HTTP). Every tool declares an `executor_id` pointing to a runtime, which then points to a primitive.
+A **runtime** is a YAML configuration that describes how to invoke a tool. It bridges tools (Python scripts, JavaScript, YAML configs) and [primitives](lillux-primitives.md) (subprocess, HTTP). Every tool declares an `executor_id` pointing to a runtime, which then points to a primitive.
 
 ## Where Runtimes Live
 
@@ -28,8 +28,8 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` (system space). You ca
 │   └── lib/                             # Shared Python runtime libraries
 ├── rust/
 │   ├── runtime.yaml                     # Rust binary runtime
-│   ├── lilux-proc/                      # Process lifecycle manager
-│   └── lilux-watch/                     # Push-based registry watcher (src/)
+│   ├── lillux-proc/                      # Process lifecycle manager
+│   └── lillux-watch/                     # Push-based registry watcher (src/)
 └── state-graph/
     ├── runtime.yaml                     # Walk declarative graph YAML
     └── walker.py                        # Graph walking engine
@@ -744,8 +744,8 @@ config_schema:
 
 The Rust runtime executes compiled Rust binaries found on `$PATH`. It ships two binaries:
 
-- **`lilux-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
-- **`lilux-proc`**: Cross-platform process lifecycle manager with subcommands `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). All process operations in `SubprocessPrimitive` delegate to lilux-proc — it is a hard dependency (no POSIX fallbacks).
+- **`lillux-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
+- **`lillux-proc`**: Cross-platform process lifecycle manager with subcommands `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). All process operations in `SubprocessPrimitive` delegate to lillux-proc — it is a hard dependency (no POSIX fallbacks).
 
 ```yaml
 # rye/core/runtimes/rust/runtime
@@ -762,13 +762,13 @@ description: "Rust runtime — executes compiled Rust binaries found on PATH"
 env_config:
   interpreter:
     type: system_binary
-    binary: lilux-watch
-    var: LILUX_WATCH
+    binary: lillux-watch
+    var: LILLUX_WATCH
   env:
     RUST_BACKTRACE: "0"
 
 config:
-  command: "${LILUX_WATCH}"
+  command: "${LILLUX_WATCH}"
   args:
     - "--db"
     - "{db_path}"
@@ -856,7 +856,7 @@ config_schema:
 
 ## See Also
 
-- [Lilux Primitives](lilux-primitives.md) — The subprocess and HTTP primitives runtimes delegate to
+- [Lillux Primitives](lillux-primitives.md) — The subprocess and HTTP primitives runtimes delegate to
 - [Executor Chain](executor-chain.md) — How tools resolve to runtimes to primitives
 - [Authoring Tools](../authoring/tools.md) — Write tools that use runtimes
 - [Custom Runtimes](../authoring/custom-runtimes.md) — Create runtimes for new languages

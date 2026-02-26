@@ -1,0 +1,30 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "lillux"
+version = "0.1.0"
+description = "Lillux - Microkernel for RYE OS"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Leo Lilley", email = "leo.lml.lilley@gmail.com"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "lillux-proc",
+    "cryptography>=41.0",
+    "httpx>=0.26.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/leolilley/ryeos"
+Repository = "https://github.com/leolilley/ryeos"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]

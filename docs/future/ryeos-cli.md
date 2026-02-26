@@ -143,7 +143,7 @@ ryeos-cli
 ryeos (executor, resolver, signing — the full stack)
     │
     ▼
-lilux (subprocess, HTTP, signing, integrity primitives)
+lillux (subprocess, HTTP, signing, integrity primitives)
 ```
 
 `ryeos-cli` imports `ryeos` directly as a Python library — no MCP transport. It's a synchronous call into the same executor chain that MCP clients use, minus the protocol overhead.
@@ -154,7 +154,7 @@ lilux (subprocess, HTTP, signing, integrity primitives)
 pip install ryeos-cli
 ```
 
-Dependencies: `ryeos` (which brings `lilux`). No MCP dependency.
+Dependencies: `ryeos` (which brings `lillux`). No MCP dependency.
 
 ---
 

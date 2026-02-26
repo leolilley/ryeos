@@ -13,7 +13,7 @@ if str(_MODULE_LOADER_DIR) not in sys.path:
 
 import pytest
 
-from lilux.primitives.signing import (
+from lillux.primitives.signing import (
     generate_keypair,
     save_keypair,
     compute_key_fingerprint,

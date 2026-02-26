@@ -396,7 +396,7 @@ class HttpProvider(ProviderAdapter):
 
     async def _get_http_client(self):
         """Lazily import and return the http_client primitive."""
-        from lilux.primitives.http_client import HttpClientPrimitive
+        from lillux.primitives.http_client import HttpClientPrimitive
         if not hasattr(self, "_http_client"):
             self._http_client = HttpClientPrimitive()
         return self._http_client
@@ -517,7 +517,7 @@ class HttpProvider(ProviderAdapter):
 
         Returns the same response dict as create_completion().
         """
-        from lilux.primitives.http_client import ReturnSink
+        from lillux.primitives.http_client import ReturnSink
 
         converted_messages = self._convert_messages(messages, system_prompt=system_prompt)
         formatted_tools = self._format_tools(tools) if tools else []

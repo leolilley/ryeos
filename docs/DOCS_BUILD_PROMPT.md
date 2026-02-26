@@ -10,11 +10,11 @@ The key idea: **everything is data**. Directives are markdown files with XML met
 
 ## The Codebase — What Actually Exists
 
-### Layer 1: Lilux (microkernel)
-`lilux/kernel/lilux/` — the lowest layer. Provides primitives that everything else builds on.
+### Layer 1: Lillux (microkernel)
+`lillux/kernel/lillux/` — the lowest layer. Provides primitives that everything else builds on.
 
 ```
-lilux/kernel/lilux/
+lillux/kernel/lillux/
 ├── primitives/
 │   ├── subprocess.py      # Run shell commands
 │   ├── http_client.py     # Make HTTP requests
@@ -267,7 +267,7 @@ Think about THREE distinct audiences:
 
 ### Audience 3: Contributors working on the codebase
 - Rye MCP server internals (executor, handlers, utils)
-- Lilux primitives
+- Lillux primitives
 - Registry API
 - How to add new tool types, parsers, runtimes
 - Testing

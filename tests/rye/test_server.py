@@ -56,7 +56,7 @@ class TestRYEServer:
             server = RYEServer()
 
             # Get registered tools from server
-            # Note: This depends on Lilux MCP server implementation
+            # Note: This depends on Lillux MCP server implementation
             # For now, just verify server has the tool instances
             assert server.search is not None
             assert server.load is not None

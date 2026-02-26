@@ -2,6 +2,14 @@
 name = "ryeos-mcp"
 version = "0.1.0"
 description = "MCP server transport for RYE OS"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Leo Lilley", email = "leo.lml.lilley@gmail.com"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
 
 dependencies = [
     "ryeos",
@@ -16,6 +24,10 @@ dev = [
 
 [project.scripts]
 ryeos-mcp = "rye_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/leolilley/ryeos"
+Repository = "https://github.com/leolilley/ryeos"
 
 [build-system]
 requires = ["hatchling"]

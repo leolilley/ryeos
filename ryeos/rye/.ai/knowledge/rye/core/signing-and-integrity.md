@@ -74,7 +74,7 @@ Canonical JSON serialization (sorted keys, no whitespace) ensures deterministic 
 ## Ed25519 Signing Flow
 
 ```python
-from lilux.primitives.signing import generate_keypair, sign_hash, verify_signature
+from lillux.primitives.signing import generate_keypair, sign_hash, verify_signature
 
 # 1. Generate keypair (one-time)
 private_pem, public_pem = generate_keypair()

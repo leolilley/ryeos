@@ -41,7 +41,7 @@ Before describing what this proposal adds, here's the infrastructure it builds o
 | Four MCP tools             | `search`, `load`, `execute`, `sign`                             | The entire agent-facing interface                                                                                                                                                                                                                                                                                                |
 | Capability attenuation     | fnmatch patterns (e.g., `rye.execute.tool.rye.bash.bash`)       | Granular permission control                                                                                                                                                                                                                                                                                                      |
 | Three-tier spaces          | project → user → system with shadow-override                    | Resolution precedence for all items                                                                                                                                                                                                                                                                                              |
-| Lilux primitives           | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — no embedding primitive exists today                                                                                                                                                                                                                                                        |
+| Lillux primitives           | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — no embedding primitive exists today                                                                                                                                                                                                                                                        |
 
 ---
 
@@ -164,11 +164,11 @@ These are **new tools** — none of these exist in the codebase today:
 
 Both retrieval tools are standard Rye data-driven Python tools — signed, versioned, overridable at project or user space.
 
-#### New Lilux Primitive Required
+#### New Lillux Primitive Required
 
-Lilux currently has five primitives: `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`. This proposal requires a sixth:
+Lillux currently has five primitives: `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`. This proposal requires a sixth:
 
-- **`embedding`** — a new Lilux primitive for computing embeddings, following the same pattern as `http_client` (stateless, configurable, OS-level capability)
+- **`embedding`** — a new Lillux primitive for computing embeddings, following the same pattern as `http_client` (stateless, configurable, OS-level capability)
 
 #### What Gets Indexed
 
@@ -207,7 +207,7 @@ def query_thread_memory(
     filter: dict = None
 ) -> list[MemoryResult]:
     query_text = (prior_summary + "\n\n" if prior_summary else "") + turns_to_text(thread_context[-last_n_turns])
-    query_embedding = embed(query_text)  # via proposed Lilux embedding primitive
+    query_embedding = embed(query_text)  # via proposed Lillux embedding primitive
     results = vector_store.search(query_embedding, top_k=top_k, filter=filter)
     return truncate_to_token_budget(results, max_tokens=max_tokens)
 ```
@@ -487,7 +487,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 
 | Component                         | What It Requires                                                                                       |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Embedding primitive               | New Lilux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
+| Embedding primitive               | New Lillux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
 | Shared thread embedding store     | New persistent store under `.ai/tools/rye/memory/thread_store/`                                        |
 | Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_search`                          |
 | ryeos-cli parser                  | **Conditional** — if the small model targets CLI strings ([Option A](#output-format--open-question)), the [ryeos-cli](ryeos-cli.md) parser becomes a prerequisite. If it targets structured JSON (Option B), the parser is not in the critical path. |
@@ -518,14 +518,14 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 | Four MCP tools (`search`, `load`, `execute`, `sign`) | Agent-facing interface                              | Same interface, no changes                                     |
 | Capability attenuation (fnmatch patterns)            | Thread memory permissions use the same model        | No new permission concepts                                     |
 | Space resolution (project → user → system)           | Three-tier shadow-override                          | Unchanged                                                      |
-| Ed25519 signing, lockfiles, chain verification       | Lilux `signing`, `integrity`, `lockfile` primitives | Unchanged                                                      |
+| Ed25519 signing, lockfiles, chain verification       | Lillux `signing`, `integrity`, `lockfile` primitives | Unchanged                                                      |
 | Thread orchestration and budget cascading            | `orchestrator.py`, `coordination.yaml`              | Unchanged                                                      |
 | `thread_chain_search`                                | `rye/agent/threads/internal/thread_chain_search.py` | Unchanged — new `thread_search` extends it, doesn't replace it |
 | `rye_search` (BM25 + fuzzy)                          | `ryeos/rye/tools/search.py`                         | Unchanged — RAG index complements it, doesn't replace it       |
 | Thread registry (SQLite)                             | `thread_registry.py`                                | Unchanged — embedding store reads from it                      |
 | Existing hook events                                 | `hook_conditions.yaml`                              | Unchanged — new hooks are additions, not modifications         |
 | Existing lifecycle events                            | `events.yaml`                                       | Unchanged — new events are additions                           |
-| Lilux microkernel                                    | `lilux/`                                            | Unchanged except proposed new `embedding` primitive            |
+| Lillux microkernel                                    | `lillux/`                                            | Unchanged except proposed new `embedding` primitive            |
 
 ---
 

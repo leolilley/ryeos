@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lilux.primitives.signing import compute_key_fingerprint
+from lillux.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent

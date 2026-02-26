@@ -18,12 +18,12 @@ Layer 3: Tool          __executor_id__ = "rye/core/runtimes/python/script"
                                 │
 Layer 2: Runtime       __executor_id__ = "rye/core/primitives/subprocess"
                                 │
-Layer 1: Primitive     __executor_id__ = None  →  direct Lilux execution
+Layer 1: Primitive     __executor_id__ = None  →  direct Lillux execution
 ```
 
 ### Layer 1: Primitives
 
-Primitives are the terminal nodes. They have `__executor_id__ = None` and map directly to Lilux classes via `PrimitiveExecutor.PRIMITIVE_MAP`:
+Primitives are the terminal nodes. They have `__executor_id__ = None` and map directly to Lillux classes via `PrimitiveExecutor.PRIMITIVE_MAP`:
 
 ```python
 PRIMITIVE_MAP = {
@@ -149,7 +149,7 @@ After chain validation, `_resolve_chain_env()` merges environment variables from
    - Apply static env vars with `${VAR:-default}` expansion
 3. Merge into the accumulated environment (later elements override)
 
-The result is a fully-resolved environment dict passed to the Lilux primitive.
+The result is a fully-resolved environment dict passed to the Lillux primitive.
 
 ## Anchor System
 

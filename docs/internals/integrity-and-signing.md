@@ -64,10 +64,10 @@ def compute_hash(item_type, content, file_path=None, project_path=None):
     return hashlib.sha256(content.encode()).hexdigest()
 ```
 
-For Lilux-level integrity (used in lockfiles and bundle manifests), `lilux/primitives/integrity.py` provides a generic `compute_integrity(data)` function. Lilux is type-agnostic — callers construct the data dict with whatever fields are relevant:
+For Lillux-level integrity (used in lockfiles and bundle manifests), `lillux/primitives/integrity.py` provides a generic `compute_integrity(data)` function. Lillux is type-agnostic — callers construct the data dict with whatever fields are relevant:
 
 ```python
-from lilux.primitives.integrity import compute_integrity
+from lillux.primitives.integrity import compute_integrity
 
 # Caller structures the dict for their item type:
 tool_hash = compute_integrity({
@@ -85,12 +85,12 @@ Canonical JSON serialization (sorted keys, no whitespace) ensures the same input
 
 ## Ed25519 Signing
 
-Signing uses the Ed25519 algorithm via `lilux/primitives/signing.py`:
+Signing uses the Ed25519 algorithm via `lillux/primitives/signing.py`:
 
 ### Key Generation
 
 ```python
-from lilux.primitives.signing import generate_keypair, save_keypair
+from lillux.primitives.signing import generate_keypair, save_keypair
 from rye.utils.path_utils import get_user_space, AI_DIR
 
 private_pem, public_pem = generate_keypair()
@@ -104,7 +104,7 @@ save_keypair(private_pem, public_pem, key_dir=key_dir)
 ### Signing Flow
 
 ```python
-from lilux.primitives.signing import sign_hash, compute_key_fingerprint
+from lillux.primitives.signing import sign_hash, compute_key_fingerprint
 
 # 1. Compute content hash
 content_hash = MetadataManager.compute_hash(item_type, content)
@@ -124,7 +124,7 @@ fingerprint = compute_key_fingerprint(public_key_pem)
 ### Verification Flow
 
 ```python
-from lilux.primitives.signing import verify_signature
+from lillux.primitives.signing import verify_signature
 
 # Verify Ed25519 signature
 is_valid = verify_signature(content_hash, signature_b64, public_key_pem)

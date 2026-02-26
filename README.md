@@ -186,16 +186,16 @@ pip install ryeos-bare         # engine only, no .ai/ data (for embedding)
 ```bash
 git clone https://github.com/leolilley/ryeos.git
 cd ryeos
-pip install -e lilux/kernel -e ryeos -e ryeos-mcp
+pip install -e lillux/kernel -e ryeos -e ryeos-mcp
 ```
 
 ## Packages
 
 ```
-lilux/
-  kernel/        → pip: lilux          Microkernel (subprocess, signing, HTTP)
-  proc/          → pip: lilux-proc     Process lifecycle manager (Rust)
-  watch/         → pip: lilux-watch    Push-based file watcher (Rust)
+lillux/
+  kernel/        → pip: lillux          Microkernel (subprocess, signing, HTTP)
+  proc/          → pip: lillux-proc     Process lifecycle manager (Rust)
+  watch/         → pip: lillux-watch    Push-based file watcher (Rust)
 
 ryeos/           → pip: ryeos          Engine + standard .ai/ bundle
   bundles/
@@ -210,7 +210,7 @@ ryeos-mcp/       → pip: ryeos-mcp      MCP server transport (stdio/SSE)
 
 ## Platform Support
 
-Linux and macOS. Multi-agent orchestration uses `lilux-proc` for cross-platform process management. Windows support is untested.
+Linux and macOS. Multi-agent orchestration uses `lillux-proc` for cross-platform process management. Windows support is untested.
 
 ## Documentation
 

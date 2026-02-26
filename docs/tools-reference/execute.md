@@ -117,7 +117,7 @@ Executes through the PrimitiveExecutor with recursive chain resolution:
 1. **Build chain** — Resolves the tool's `__executor_id__` to find the runtime, then the runtime's executor to find the primitive. Produces a chain like: `tool → runtime → primitive`.
 2. **Validate chain** — Checks space compatibility and I/O matching between chain elements.
 3. **Resolve ENV_CONFIG** — Environment variables and secrets are resolved through the chain.
-4. **Execute** — The root Lilux primitive (e.g., `subprocess`, `http_client`) runs the tool.
+4. **Execute** — The root Lillux primitive (e.g., `subprocess`, `http_client`) runs the tool.
 
 **Response fields:**
 

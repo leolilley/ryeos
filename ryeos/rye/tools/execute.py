@@ -251,7 +251,7 @@ class ExecuteTool:
             2. Build executor chain (tool → runtime → primitive)
             3. Validate chain (space compatibility, I/O matching)
             4. Resolve ENV_CONFIG through chain
-            5. Execute via root Lilux primitive
+            5. Execute via root Lillux primitive
         """
         # Get executor for this project
         executor = self._get_executor(project_path)

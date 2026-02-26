@@ -11,27 +11,27 @@ version: "1.0.0"
 
 Rye OS is a four-layer system that turns AI agent tool calls into OS-level operations. Every layer has a single responsibility and communicates with adjacent layers through well-defined interfaces.
 
-## Layer 1: Lilux Microkernel
+## Layer 1: Lillux Microkernel
 
-The bottom layer. Lilux provides stateless, async-first primitives for interacting with the operating system. It has **no knowledge** of Rye, `.ai/` directories, or tool metadata.
+The bottom layer. Lillux provides stateless, async-first primitives for interacting with the operating system. It has **no knowledge** of Rye, `.ai/` directories, or tool metadata.
 
 | Primitive             | Location                            | Purpose                                                                          |
 | --------------------- | ----------------------------------- | -------------------------------------------------------------------------------- |
-| `SubprocessPrimitive` | `lilux/primitives/subprocess.py`    | Run shell commands with two-stage templating, timeout handling, and stdin piping |
-| `HttpClientPrimitive` | `lilux/primitives/http_client.py`   | Make HTTP requests with retry logic, auth headers, and SSE streaming             |
-| `signing`             | `lilux/primitives/signing.py`       | Ed25519 key generation, sign, verify — pure crypto, no policy                    |
-| `integrity`           | `lilux/primitives/integrity.py`     | Generic deterministic SHA256 hashing via `compute_integrity(data)`               |
-| `lockfile`            | `lilux/primitives/lockfile.py`      | Lockfile I/O — load/save JSON lockfiles with explicit paths                      |
-| `EnvResolver`         | `lilux/runtime/env_resolver.py`     | Resolve environment variables from `.env` files, venvs, version managers         |
-| `SchemaValidator`     | `lilux/schemas/schema_validator.py` | JSON Schema validation                                                           |
+| `SubprocessPrimitive` | `lillux/primitives/subprocess.py`    | Run shell commands with two-stage templating, timeout handling, and stdin piping |
+| `HttpClientPrimitive` | `lillux/primitives/http_client.py`   | Make HTTP requests with retry logic, auth headers, and SSE streaming             |
+| `signing`             | `lillux/primitives/signing.py`       | Ed25519 key generation, sign, verify — pure crypto, no policy                    |
+| `integrity`           | `lillux/primitives/integrity.py`     | Generic deterministic SHA256 hashing via `compute_integrity(data)`               |
+| `lockfile`            | `lillux/primitives/lockfile.py`      | Lockfile I/O — load/save JSON lockfiles with explicit paths                      |
+| `EnvResolver`         | `lillux/runtime/env_resolver.py`     | Resolve environment variables from `.env` files, venvs, version managers         |
+| `SchemaValidator`     | `lillux/schemas/schema_validator.py` | JSON Schema validation                                                           |
 
-Lilux primitives are pure I/O. They receive fully-resolved configuration and execute it. No path discovery, no precedence logic, no policy decisions.
+Lillux primitives are pure I/O. They receive fully-resolved configuration and execute it. No path discovery, no precedence logic, no policy decisions.
 
 ## Layer 2: Rye MCP Server
 
 The orchestration layer. Rye implements the MCP (Model Context Protocol) server that AI agents interact with. It provides four MCP tools:
 
-- **execute** — Run a tool by item ID (resolves chain, verifies integrity, delegates to Lilux)
+- **execute** — Run a tool by item ID (resolves chain, verifies integrity, delegates to Lillux)
 - **load** — Read a directive, tool, or knowledge entry (with metadata parsing)
 - **search** — Find items across all spaces by keyword
 - **sign** — Sign items with Ed25519 (batch signing via glob patterns)
@@ -47,7 +47,7 @@ Key components in this layer:
 | Resolvers           | `rye/utils/resolvers.py`             | `DirectiveResolver`, `ToolResolver`, `KnowledgeResolver` — three-tier path resolution |
 | `path_utils`        | `rye/utils/path_utils.py`            | Space paths, bundle discovery, category extraction                                    |
 
-This layer implements all policy: which spaces to search, how to validate chains, when to reject unsigned items. Lilux never makes these decisions.
+This layer implements all policy: which spaces to search, how to validate chains, when to reject unsigned items. Lillux never makes these decisions.
 
 ## Layer 3: `.ai/` Data Bundle
 
@@ -123,7 +123,7 @@ Environment Resolution
   │  .env files, venv detection, interpreter paths, static vars
   │
   ▼  _execute_chain() → SubprocessPrimitive.execute() or HttpClientPrimitive.execute()
-Lilux Primitive
+Lillux Primitive
   │  Two-stage templating: ${ENV_VAR} then {param}
   │
   ▼  asyncio.create_subprocess_exec() or httpx request
@@ -139,10 +139,10 @@ This means:
 - Adding a new runtime = creating a YAML file (no code changes to Rye)
 - Adding a new tool = creating a Python/JS/shell script with metadata headers
 - Overriding system behavior = placing a file in project space (shadows system space)
-- No hardcoded executor IDs in `PrimitiveExecutor` — only the two Lilux primitive mappings (`subprocess` and `http_client`) are registered in `PRIMITIVE_MAP`
+- No hardcoded executor IDs in `PrimitiveExecutor` — only the two Lillux primitive mappings (`subprocess` and `http_client`) are registered in `PRIMITIVE_MAP`
 
-The only hardcoded knowledge in the system is the mapping from primitive IDs to Lilux classes. Everything above that is resolved from the filesystem at runtime.
+The only hardcoded knowledge in the system is the mapping from primitive IDs to Lillux classes. Everything above that is resolved from the filesystem at runtime.
 
 ## Package and Bundle Distribution
 
-The system is distributed as pip packages organized in a monorepo. `lilux` provides the microkernel (with `lilux-proc` as a hard dependency for process management and `lilux-watch` for file watching). `ryeos` provides the engine plus the standard `.ai/` bundle. `ryeos-web` and `ryeos-code` add optional data bundles for web and code tools respectively — installable via `pip install ryeos[web]` or `pip install ryeos[code]`. `ryeos-core` is a minimal alternative to `ryeos` with only `rye/core/*` items. `ryeos-bare` provides the engine with no bundles. `ryeos-mcp` adds MCP transport. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.
+The system is distributed as pip packages organized in a monorepo. `lillux` provides the microkernel (with `lillux-proc` as a hard dependency for process management and `lillux-watch` for file watching). `ryeos` provides the engine plus the standard `.ai/` bundle. `ryeos-web` and `ryeos-code` add optional data bundles for web and code tools respectively — installable via `pip install ryeos[web]` or `pip install ryeos[code]`. `ryeos-core` is a minimal alternative to `ryeos` with only `rye/core/*` items. `ryeos-bare` provides the engine with no bundles. `ryeos-mcp` adds MCP transport. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.

@@ -202,7 +202,7 @@ execute directive (spawns thread with the matched front-end directive)
 ryeos (executor, resolver, signing — the full stack)
     │
     ▼
-lilux (subprocess, HTTP, signing, integrity primitives)
+lillux (subprocess, HTTP, signing, integrity primitives)
 ```
 
 `ryeos-http` imports `ryeos` directly — same as `ryeos-mcp` imports it for MCP transport. The HTTP layer handles routing and input extraction. Everything else is standard RYE execution.
@@ -213,7 +213,7 @@ lilux (subprocess, HTTP, signing, integrity primitives)
 pip install ryeos-http
 ```
 
-Dependencies: `ryeos` (which brings `lilux`) + an ASGI framework. No MCP dependency.
+Dependencies: `ryeos` (which brings `lillux`) + an ASGI framework. No MCP dependency.
 
 ### Deployment
 

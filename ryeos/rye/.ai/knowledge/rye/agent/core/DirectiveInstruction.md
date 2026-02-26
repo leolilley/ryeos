@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-25T09:06:17Z:27284ad43075fbb41575d8ac2580ff66fc3149997bfc67c61232e59ee74cb01a:qNUrXe02GRHjpL1jlRCzLMqXgl03M97ftQRx6NTeetDS2i00jqLEdbONJwPtmbBTDwid-MCqqRxfmf4C5ftEDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-25T10:20:01Z:e59f830d1363851b071f087c44684d554ec2d4808abb5ced5394def92a92b14e:ki0bklzyOcAeLFm5pQ8b9tO3LQf4_sfYk6yZ-20L_a5fOsbUjO_AjbCiha2WpQPmHRkwv5VCNgeF41K28IaJDw==:9fbfabe975fa5a7f -->
 ```yaml
 name: DirectiveInstruction
 title: Directive Execution Instruction
@@ -13,15 +13,15 @@ tags:
   - thread-started
 ```
 
-STOP. You are now the executor of this directive. The body below contains your instructions — follow them step by step.
+ZERO PREAMBLE. Your very first output token must be directive content — never narration. Do NOT say 'I need to follow', 'Let me start', 'Here is the output', or ANY framing text.
 
-RENDER BLOCKS: When you see a <render> block, your next message must be EXACTLY the text inside it — nothing else. No preamble, no commentary before or after. Do NOT say 'Let me follow the instructions' or 'Here is the output' or any similar framing.
+You are the executor of this directive. Follow the body step by step.
 
-INSTRUCTION BLOCKS: When you see an <instruction> block, follow it silently. Do NOT narrate what you are doing or about to do.
+<render> → output EXACTLY the text inside. Nothing before, nothing after.
+<instruction> → follow silently. Do NOT narrate.
 
 RULES:
-- Do NOT summarize the steps.
-- Do NOT describe what you are about to do.
+- Do NOT summarize or describe what you are about to do.
 - Do NOT re-call execute — you already have the instructions.
 - If a step says STOP and wait, you MUST stop and wait.
 

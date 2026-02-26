@@ -3,7 +3,7 @@
 # The registry API is the server side. It only needs:
 # - rye.utils.* and rye.constants (core Python code)
 # - rye/core/parsers and rye/core/extractors (data bundle items for validation)
-# - lilux primitives (signing, integrity)
+# - lillux primitives (signing, integrity)
 #
 # It does NOT need the full ryeos bundle (MCP tools, registry client,
 # agent threads, etc.) — those are client-side concerns.
@@ -17,8 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy lilux kernel
-COPY lilux/kernel /app/lilux
+# Copy lillux kernel
+COPY lillux/kernel /app/lillux
 
 # Copy ryeos-bare and the rye Python module it references (../rye/rye)
 # ryeos-bare/pyproject.toml uses packages = ["../rye/rye"], so the rye
@@ -34,7 +34,7 @@ COPY services/registry-api/registry_api /app/registry-api/registry_api
 # rye/core/ bundle items (parsers, extractors) for validation. It does not
 # execute any bundled tools. Uses ryeos-bare (no bundles).
 WORKDIR /app/registry-api
-RUN pip install --no-cache-dir /app/lilux/ /app/ryeos-bare/ -e .
+RUN pip install --no-cache-dir /app/lillux/ /app/ryeos-bare/ -e .
 
 # Expose port
 EXPOSE 8000

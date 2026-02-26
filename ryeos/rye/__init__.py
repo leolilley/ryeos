@@ -1,3 +1,3 @@
-"""RYE OS - AI operating system on Lilux microkernel."""
+"""RYE OS - AI operating system on Lillux microkernel."""
 
 __version__ = "0.1.0"

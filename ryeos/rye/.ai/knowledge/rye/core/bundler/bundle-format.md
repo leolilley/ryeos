@@ -30,15 +30,15 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 │  bundle: none (inherits from ryeos)               │
 ├───────────────────────────────────────────────────┤
 │  ryeos             (standard bundle)              │
-│  deps: lilux, pyyaml, cryptography, packaging     │
+│  deps: lillux, pyyaml, cryptography, packaging     │
 │  bundle: ryeos → all rye/* items                  │
 ├───────────────────────────────────────────────────┤
 │  ryeos-core        (minimal install)              │
-│  deps: lilux, pyyaml, cryptography, packaging     │
+│  deps: lillux, pyyaml, cryptography, packaging     │
 │  bundle: ryeos-core → rye/core/* items only       │
 ├───────────────────────────────────────────────────┤
 │  ryeos-bare        (engine only)                  │
-│  deps: lilux                                      │
+│  deps: lillux                                      │
 │  bundle: none (engine only, no .ai/ items)        │
 ├───────────────────────────────────────────────────┤
 │  ryeos-web         (opt-in web bundle)            │
@@ -49,15 +49,15 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 │  deps: ryeos                                      │
 │  bundle: ryeos-code → rye/code/* items            │
 ├───────────────────────────────────────────────────┤
-│  lilux             (stateless microkernel)        │
-│  deps: cryptography, httpx, lilux-proc            │
+│  lillux             (stateless microkernel)        │
+│  deps: cryptography, httpx, lillux-proc            │
 │  bundle: none (pure library, no .ai/ items)       │
 └───────────────────────────────────────────────────┘
 ```
 
 **Mutual exclusion:** `ryeos-core` and `ryeos` both install the `rye` Python module. Install one or the other, never both.
 
-**lilux-proc dependency:** lilux depends on `lilux-proc` (hard dep, no fallbacks). The Rust binaries `lilux-proc` and `lilux-watch` live in `lilux/proc/` and `lilux/watch/` at the monorepo top level.
+**lillux-proc dependency:** lillux depends on `lillux-proc` (hard dep, no fallbacks). The Rust binaries `lillux-proc` and `lillux-watch` live in `lillux/proc/` and `lillux/watch/` at the monorepo top level.
 
 **node_modules not shipped:** Web and code bundles do not ship `node_modules`. Dependencies are installed on first use via the anchor system.
 

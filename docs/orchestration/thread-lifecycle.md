@@ -146,7 +146,7 @@ The `thread.json` file is signed using canonical JSON serialization with a `_sig
 ### Step 12: Spawn or run
 
 - **Synchronous** (default): Calls `runner.run()` directly and blocks until completion
-- **Asynchronous** (`async: true`): Triggered by `execute directive` with `async: true`, which delegates to `thread_directive` internally. `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `lilux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): Triggered by `execute directive` with `async: true`, which delegates to `thread_directive` internally. `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `lillux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 13: Run LLM loop
 

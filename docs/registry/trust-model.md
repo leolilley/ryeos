@@ -13,7 +13,7 @@ Rye OS uses Ed25519 digital signatures to guarantee that every item (directive, 
 
 ## Ed25519 Signing
 
-All cryptographic primitives live in `lilux/kernel/lilux/primitives/signing.py`. Rye uses the `cryptography` library's Ed25519 implementation — no custom crypto.
+All cryptographic primitives live in `lillux/kernel/lillux/primitives/signing.py`. Rye uses the `cryptography` library's Ed25519 implementation — no custom crypto.
 
 ### Keypair Generation
 
@@ -59,7 +59,7 @@ The signature is placed as a comment on line 1, using the file type's comment sy
 5. The formatted signature comment is inserted at line 1 of the file
 
 ```python
-# From lilux/kernel/lilux/primitives/signing.py
+# From lillux/kernel/lillux/primitives/signing.py
 def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
     private_key = serialization.load_pem_private_key(private_key_pem, password=None)
     signature = private_key.sign(content_hash.encode("utf-8"))

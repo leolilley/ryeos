@@ -21,7 +21,7 @@ This pulls in the full dependency chain:
 
 - **`ryeos-mcp`** — the MCP server that exposes Rye OS to any MCP-compatible AI agent.
 - **`ryeos`** — the orchestration layer with the resolver, executor, signing, and metadata. Registers the standard bundle (~3MB) with agent, bash, file-system, MCP, primary, core, authoring, and guide items.
-- **`lilux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing). Depends on `lilux-proc` (Rust binary for process lifecycle management).
+- **`lillux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing). Depends on `lillux-proc` (Rust binary for process lifecycle management).
 
 ### Optional extras
 

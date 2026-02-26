@@ -76,7 +76,7 @@ thread_id = result["thread_id"]
 
 Use asynchronous execution when spawning multiple children that can run in parallel. The parent collects all `thread_id`s and waits for them in batch.
 
-**How async works internally:** When `execute directive` is called with `async: true`, it delegates to `thread_directive` internally, which calls `spawn_detached()` to launch the child as a subprocess. The child re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags, rebuilding all state from scratch (no inherited in-process state). Detached spawning uses the `lilux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with the `thread_id` and `pid`.
+**How async works internally:** When `execute directive` is called with `async: true`, it delegates to `thread_directive` internally, which calls `spawn_detached()` to launch the child as a subprocess. The child re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags, rebuilding all state from scratch (no inherited in-process state). Detached spawning uses the `lillux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with the `thread_id` and `pid`.
 
 ## Parent Context Auto-Injection
 
@@ -178,7 +178,7 @@ rye_execute(
 
 - **In-process threads:** Each thread has an `asyncio.Event`. `wait_threads` awaits the event with `asyncio.wait_for(event.wait(), timeout)`. When `runner.run()` completes, it calls `complete_thread()` which sets the event.
 
-- **Cross-process threads (async):** The child runs in a separate process — no shared event. `wait_threads` uses the `lilux-watch` Rust binary for push-based file watching (inotify/FSEvents/ReadDirectoryChangesW) on the registry, with a 500ms polling fallback.
+- **Cross-process threads (async):** The child runs in a separate process — no shared event. `wait_threads` uses the `lillux-watch` Rust binary for push-based file watching (inotify/FSEvents/ReadDirectoryChangesW) on the registry, with a 500ms polling fallback.
 
 - **Continuation chains:** Before waiting, `resolve_thread_chain()` follows any `continued` → `continued` → ... links to find the terminal thread. This means if a thread was handed off, waiting on the original ID still works correctly.
 
@@ -293,7 +293,7 @@ rye_execute(
 )
 ```
 
-Uses `lilux-proc kill` (cross-platform Rust binary) to terminate the process, with a POSIX `os.kill` fallback. Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then escalates to `SIGKILL` if the process is still alive.
+Uses `lillux-proc kill` (cross-platform Rust binary) to terminate the process, with a POSIX `os.kill` fallback. Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then escalates to `SIGKILL` if the process is still alive.
 
 ## What's Next
 

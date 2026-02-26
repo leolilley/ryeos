@@ -1,17 +1,17 @@
 """PrimitiveExecutor - Data-driven tool execution with recursive chain resolution.
 
-Routes tools to Lilux primitives based on __executor_id__ metadata.
+Routes tools to Lillux primitives based on __executor_id__ metadata.
 Loads tools on-demand from .ai/tools/ with 3-tier space precedence.
 
 Architecture:
-    Layer 1: Primitives (__executor_id__ = None) - Execute directly via Lilux
+    Layer 1: Primitives (__executor_id__ = None) - Execute directly via Lillux
     Layer 2: Runtimes (__executor_id__ = "subprocess") - Resolve ENV_CONFIG first
     Layer 3: Tools (__executor_id__ = "python_runtime") - Delegate to runtimes
 
 Caching:
     - Chain cache: Caches resolved execution chains with hash-based invalidation
     - Metadata cache: Caches tool metadata with hash-based invalidation
-    - Automatic invalidation when file content changes (via Lilux hash functions)
+    - Automatic invalidation when file content changes (via Lillux hash functions)
 """
 
 import hashlib
@@ -21,9 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from lilux.primitives.subprocess import SubprocessPrimitive, SubprocessResult
-from lilux.primitives.http_client import HttpClientPrimitive, HttpResult
-from lilux.runtime.env_resolver import EnvResolver
+from lillux.primitives.subprocess import SubprocessPrimitive, SubprocessResult
+from lillux.primitives.http_client import HttpClientPrimitive, HttpResult
+from lillux.runtime.env_resolver import EnvResolver
 
 from rye.executor.chain_validator import ChainValidator, ChainValidationResult
 from rye.executor.lockfile_resolver import LockfileResolver
@@ -77,18 +77,18 @@ class ChainElement:
 
 
 class PrimitiveExecutor:
-    """Data-driven executor that routes tools to Lilux primitives.
+    """Data-driven executor that routes tools to Lillux primitives.
 
     No hardcoded executor IDs - all resolved from .ai/tools/ filesystem.
 
     Multi-layer routing (up to MAX_CHAIN_DEPTH=10):
-        1. Primitive (__executor_id__ = None): Direct Lilux execution
+        1. Primitive (__executor_id__ = None): Direct Lillux execution
         2. Runtime (__executor_id__ = "subprocess"): ENV_CONFIG resolution + primitive
         3. Tool (__executor_id__ = "python_runtime"): Delegate to runtime
     Three layers is the common case, but chains can be deeper.
     """
 
-    # Primitive ID to Lilux primitive class mapping (full path IDs)
+    # Primitive ID to Lillux primitive class mapping (full path IDs)
     PRIMITIVE_MAP = {
         "rye/core/primitives/subprocess": SubprocessPrimitive,
         "rye/core/primitives/http_client": HttpClientPrimitive,
@@ -676,7 +676,7 @@ class PrimitiveExecutor:
     ) -> Dict[str, Any]:
         """Execute via the root element in the chain.
 
-        Routes to Lilux primitive classes (tool_type="primitive").
+        Routes to Lillux primitive classes (tool_type="primitive").
 
         Args:
             chain: Executor chain (last element is primitive)
@@ -706,7 +706,7 @@ class PrimitiveExecutor:
         config["user_space"] = str(self.user_space)
         config["system_space"] = str(self.system_space)
 
-        # Handle primitives (Lilux primitive classes)
+        # Handle primitives (Lillux primitive classes)
         primitive_name = root_element.item_id
         primitive = self._get_primitive(primitive_name)
 

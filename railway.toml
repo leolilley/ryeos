@@ -1,11 +1,11 @@
 [build]
-# Build registry-api from project root to include rye/lilux packages
+# Build registry-api from project root to include rye/lillux packages
 dockerfilePath = "services/registry-api/Dockerfile"
 watchPatterns = [
     "services/registry-api/**",
     "ryeos/rye/**",
     "ryeos-bare/**",
-    "lilux/kernel/**"
+    "lillux/kernel/**"
 ]
 
 [deploy]

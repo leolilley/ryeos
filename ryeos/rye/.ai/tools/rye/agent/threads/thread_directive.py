@@ -99,7 +99,7 @@ def _build_tool_schemas() -> list:
 def _spawn_env(thread_id: str) -> Dict[str, str]:
     """Build env dict for async subprocess spawn.
 
-    lilux-proc daemonizes with a clean env — only explicitly passed vars survive.
+    lillux-proc daemonizes with a clean env — only explicitly passed vars survive.
     Forward everything the child needs to bootstrap and run.
     """
     # Always needed

@@ -12,7 +12,7 @@ import json as _json
 import shutil
 from pathlib import Path
 
-from lilux.primitives.subprocess import SubprocessPrimitive
+from lillux.primitives.subprocess import SubprocessPrimitive
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
@@ -154,13 +154,13 @@ async def _wait_single(thread_id: str, timeout: float, project_path: Path) -> Di
 
 
 async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
-    """Wait for thread completion using lilux-watch (push) or polling (fallback)."""
+    """Wait for thread completion using lillux-watch (push) or polling (fallback)."""
     # Try push-based watcher first
-    lilux_watch = shutil.which("lilux-watch")
-    if lilux_watch and hasattr(registry, "db_path"):
+    lillux_watch = shutil.which("lillux-watch")
+    if lillux_watch and hasattr(registry, "db_path"):
         try:
             proc = await asyncio.create_subprocess_exec(
-                lilux_watch,
+                lillux_watch,
                 "--db", str(registry.db_path),
                 "--thread-id", thread_id,
                 "--timeout", str(timeout),

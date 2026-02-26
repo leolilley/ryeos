@@ -127,7 +127,7 @@ REGISTRY_ANON_KEY = os.environ.get(
 )
 
 # Auth configuration
-# Service key for keyring storage (kernel uses service_name="lilux" by default)
+# Service key for keyring storage (kernel uses service_name="lillux" by default)
 REGISTRY_SERVICE = "rye_registry"
 # Env var override for CI/headless - checked before keyring
 REGISTRY_TOKEN_ENV = "RYE_REGISTRY_TOKEN"
@@ -251,7 +251,7 @@ class RegistryHttpClient:
     async def _get_http(self):
         """Lazy load http_client primitive."""
         if self._http is None:
-            from lilux.primitives.http_client import HttpClientPrimitive
+            from lillux.primitives.http_client import HttpClientPrimitive
 
             self._http = HttpClientPrimitive()
         return self._http
@@ -719,9 +719,9 @@ async def _signup(params: Dict[str, Any]) -> Dict[str, Any]:
         # If no confirmation required, we have a session
         if body.get("access_token"):
             try:
-                from lilux.runtime.auth import AuthStore
+                from lillux.runtime.auth import AuthStore
 
-                auth_store = AuthStore()  # Uses kernel default service_name="lilux"
+                auth_store = AuthStore()  # Uses kernel default service_name="lillux"
                 auth_store.set_token(
                     service=REGISTRY_SERVICE,
                     access_token=body["access_token"],
@@ -770,7 +770,7 @@ async def _login_email(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from lilux.runtime.auth import AuthStore
+        from lillux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -847,7 +847,7 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from lilux.runtime.auth import AuthStore
+        from lillux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available - auth runtime not installed"}
 
@@ -860,7 +860,7 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # Check if already authenticated via keyring
-    auth_store = AuthStore()  # Uses kernel default service_name="lilux"
+    auth_store = AuthStore()  # Uses kernel default service_name="lillux"
     if auth_store.is_authenticated(REGISTRY_SERVICE):
         return {
             "status": "already_authenticated",
@@ -1012,11 +1012,11 @@ async def _logout() -> Dict[str, Any]:
         }
 
     try:
-        from lilux.runtime.auth import AuthStore
+        from lillux.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
-    auth_store = AuthStore()  # Uses kernel default service_name="lilux"
+    auth_store = AuthStore()  # Uses kernel default service_name="lillux"
     auth_store.clear_token(REGISTRY_SERVICE)
 
     return {
@@ -1038,11 +1038,11 @@ async def _whoami() -> Dict[str, Any]:
         }
 
     try:
-        from lilux.runtime.auth import AuthenticationRequired, AuthStore
+        from lillux.runtime.auth import AuthenticationRequired, AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
-    auth_store = AuthStore()  # Uses kernel default service_name="lilux"
+    auth_store = AuthStore()  # Uses kernel default service_name="lillux"
 
     if not auth_store.is_authenticated(REGISTRY_SERVICE):
         return {
@@ -1105,7 +1105,7 @@ async def _search(
             token = env_token
         else:
             try:
-                from lilux.runtime.auth import AuthStore
+                from lillux.runtime.auth import AuthStore
                 auth_store = AuthStore()
                 if auth_store.is_authenticated(REGISTRY_SERVICE):
                     token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:read")
@@ -1231,7 +1231,7 @@ async def _pull(
         if verify and content:
             try:
                 from rye.utils.metadata_manager import MetadataManager
-                from lilux.primitives.signing import verify_signature, compute_key_fingerprint
+                from lillux.primitives.signing import verify_signature, compute_key_fingerprint
                 from rye.utils.trust_store import TrustStore
 
                 strategy = MetadataManager.get_strategy(item_type)
@@ -1403,9 +1403,9 @@ async def _push(
         token = env_token
     else:
         try:
-            from lilux.runtime.auth import AuthenticationRequired, AuthStore
+            from lillux.runtime.auth import AuthenticationRequired, AuthStore
 
-            auth_store = AuthStore()  # Uses kernel default service_name="lilux"
+            auth_store = AuthStore()  # Uses kernel default service_name="lillux"
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
         except AuthenticationRequired:
             return {
@@ -1578,7 +1578,7 @@ async def _delete(
         token = env_token
     else:
         try:
-            from lilux.runtime.auth import AuthenticationRequired, AuthStore
+            from lillux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1660,7 +1660,7 @@ async def _publish(
         token = env_token
     else:
         try:
-            from lilux.runtime.auth import AuthenticationRequired, AuthStore
+            from lillux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1736,7 +1736,7 @@ async def _unpublish(
         token = env_token
     else:
         try:
-            from lilux.runtime.auth import AuthenticationRequired, AuthStore
+            from lillux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1888,7 +1888,7 @@ async def _push_bundle(
         token = env_token
     else:
         try:
-            from lilux.runtime.auth import AuthenticationRequired, AuthStore
+            from lillux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
@@ -1969,7 +1969,7 @@ async def _pull_bundle(
         token = env_token
     else:
         try:
-            from lilux.runtime.auth import AuthenticationRequired, AuthStore
+            from lillux.runtime.auth import AuthenticationRequired, AuthStore
 
             auth_store = AuthStore()
             token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:read")

@@ -56,7 +56,7 @@ Returns:
 
 ### Async Internals
 
-`spawn_detached()` delegates to `SubprocessPrimitive.spawn()`, which calls `lilux-proc spawn` (cross-platform Rust binary). No POSIX fallbacks — lilux-proc is a hard dependency. Child process:
+`spawn_detached()` delegates to `SubprocessPrimitive.spawn()`, which calls `lillux-proc spawn` (cross-platform Rust binary). No POSIX fallbacks — lillux-proc is a hard dependency. Child process:
 1. Runs as a detached subprocess (`__main__` with `--thread-id` and `--pre-registered` flags)
 2. Runs LLM loop to completion
 3. Finalizes (report spend, update registry, write `thread.json`)
@@ -124,7 +124,7 @@ rye_execute(
 | Thread Type        | Mechanism                                              |
 |--------------------|--------------------------------------------------------|
 | In-process         | `asyncio.Event` — awaits `event.wait()` with timeout   |
-| Cross-process      | Push-based `lilux-watch` on registry.db with 500ms polling fallback |
+| Cross-process      | Push-based `lillux-watch` on registry.db with 500ms polling fallback |
 | Continuation chain | `resolve_thread_chain()` follows links to terminal thread |
 
 Default timeout from `coordination.yaml` (typically 600s). Override with `timeout` parameter.
@@ -191,4 +191,4 @@ rye_execute(
 )
 ```
 
-Delegates to `SubprocessPrimitive.kill()`, which calls `lilux-proc kill` (graceful→force). No POSIX fallbacks.
+Delegates to `SubprocessPrimitive.kill()`, which calls `lillux-proc kill` (graceful→force). No POSIX fallbacks.

@@ -67,7 +67,7 @@ embed(prior_summary + last N turns)
   distilled top-K injected into context
 ```
 
-Option B adds latency from the reranking step but significantly improves precision as the corpus grows. The cross-encoder is a small model — no LLM required. However, both modes require an **embedding primitive that does not currently exist** in Lilux (see [New Lilux Primitive](#new-lilux-primitive) below).
+Option B adds latency from the reranking step but significantly improves precision as the corpus grows. The cross-encoder is a small model — no LLM required. However, both modes require an **embedding primitive that does not currently exist** in Lillux (see [New Lillux Primitive](#new-lillux-primitive) below).
 
 ---
 
@@ -250,9 +250,9 @@ The token budget for personality injection would be configurable and separate fr
 
 ---
 
-## New Lilux Primitive
+## New Lillux Primitive
 
-The existing Lilux primitives (`lilux/kernel/lilux/primitives/`) are:
+The existing Lillux primitives (`lillux/kernel/lillux/primitives/`) are:
 
 | Primitive      | Purpose                           |
 | -------------- | --------------------------------- |
@@ -262,14 +262,14 @@ The existing Lilux primitives (`lilux/kernel/lilux/primitives/`) are:
 | `integrity`    | SHA256 content hashing            |
 | `lockfile`     | File locking                      |
 
-Both retrieval modes require **a new `embedding` primitive** that does not currently exist in Lilux. This primitive would:
+Both retrieval modes require **a new `embedding` primitive** that does not currently exist in Lillux. This primitive would:
 
 - Accept text input, return a vector embedding
 - Support configurable embedding models (local or API-based)
 - For Option B (reranked retrieval), also support cross-encoder scoring of (query, document) pairs
 - Follow the existing primitive pattern: stateless, returns a result object, raises only on unexpected errors
 
-This is a meaningful addition to the Lilux kernel — it introduces a dependency on an embedding model (either a local model or an external API). The design should consider whether this belongs as a true primitive or as a tool built on top of `subprocess` (running a local model) or `http_client` (calling an embedding API).
+This is a meaningful addition to the Lillux kernel — it introduces a dependency on an embedding model (either a local model or an external API). The design should consider whether this belongs as a true primitive or as a tool built on top of `subprocess` (running a local model) or `http_client` (calling an embedding API).
 
 ---
 
@@ -293,7 +293,7 @@ These tools **do not currently exist** in the Rye standard library. They would b
 | `highlight_indexer` | `rye/personality/highlight_indexer` | Indexes notable past interactions into corpus       |
 | `corpus_refiner`    | `rye/personality/corpus_refiner`    | Background job to refine corpus from usage patterns |
 
-`character_rag` would depend on the proposed Lilux embedding primitive. `highlight_indexer` would hook into the thread completion flow (the existing `after_complete` hook event) to identify and index notable interaction moments. `corpus_refiner` would run periodically to consolidate patterns from usage into refined corpus documents.
+`character_rag` would depend on the proposed Lillux embedding primitive. `highlight_indexer` would hook into the thread completion flow (the existing `after_complete` hook event) to identify and index notable interaction moments. `corpus_refiner` would run periodically to consolidate patterns from usage into refined corpus documents.
 
 ---
 
@@ -307,12 +307,12 @@ These tools **do not currently exist** in the Rye standard library. They would b
 | Ed25519 signing                    | **Exists**  | All items signed, verified on load                                          |
 | Hook system                        | **Exists**  | `hook_conditions.yaml` with error/limit/pressure/step/complete/return events|
 | Event system                       | **Exists**  | `events.yaml` defining lifecycle, cognition, tool, error events             |
-| Lilux primitives                   | **Exists**  | subprocess, http_client, signing, integrity, lockfile                       |
+| Lillux primitives                   | **Exists**  | subprocess, http_client, signing, integrity, lockfile                       |
 | `.ai/personality/` directory       | **Proposed**| New top-level category in `.ai/` structure                                  |
 | "How it went" summary section      | **Proposed**| Extension to `thread_summary` directive output format                       |
 | `character_rag` tool               | **Proposed**| RAG retrieval over personality corpus                                       |
 | `highlight_indexer` tool           | **Proposed**| Index notable interactions into corpus                                      |
 | `corpus_refiner` tool              | **Proposed**| Refine corpus from usage patterns                                           |
-| Lilux `embedding` primitive        | **Proposed**| Vector embedding generation for RAG queries                                 |
+| Lillux `embedding` primitive        | **Proposed**| Vector embedding generation for RAG queries                                 |
 | Personality hook events            | **Proposed**| New hooks on `thread_started` and `after_step` for injection                |
 | Embedding index / store            | **Proposed**| Vector storage for corpus similarity search                                 |

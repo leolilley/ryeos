@@ -5,15 +5,15 @@ Three-tier architecture:
     - User: {USER_SPACE}/.ai/lockfiles/ (default, read-write, medium precedence)
     - Project: {project}/.ai/lockfiles/ (opt-in, read-write, highest precedence)
 
-The orchestrator resolves all paths and passes explicit paths to Lilux.
-Lilux never does path discovery or precedence logic.
+The orchestrator resolves all paths and passes explicit paths to Lillux.
+Lillux never does path discovery or precedence logic.
 """
 
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from lilux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
+from lillux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
 
 from rye.constants import AI_DIR
 from rye.utils.path_utils import (
@@ -66,7 +66,7 @@ class LockfileResolver:
         else:
             self.system_spaces = get_system_spaces()
 
-        # Lilux lockfile manager (pure I/O)
+        # Lillux lockfile manager (pure I/O)
         self.manager = LockfileManager()
 
     @property

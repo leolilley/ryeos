@@ -8,13 +8,13 @@ description: "Rust runtime — executes compiled Rust binaries found on PATH"
 env_config:
   interpreter:
     type: system_binary
-    binary: lilux-watch
-    var: LILUX_WATCH
+    binary: lillux-watch
+    var: LILLUX_WATCH
   env:
     RUST_BACKTRACE: "0"
 
 config:
-  command: "${LILUX_WATCH}"
+  command: "${LILLUX_WATCH}"
   args:
     - "--db"
     - "{db_path}"

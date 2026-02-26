@@ -2,6 +2,14 @@
 name = "ryeos-full"
 version = "0.1.0"
 description = "RYE Full Bundle — all standard, web, and code tools"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Leo Lilley", email = "leo.lml.lilley@gmail.com"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
 
 dependencies = [
     "ryeos",
@@ -9,6 +17,13 @@ dependencies = [
     "ryeos-code",
 ]
 
+[project.urls]
+Homepage = "https://github.com/leolilley/ryeos"
+Repository = "https://github.com/leolilley/ryeos"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ryeos_full"]

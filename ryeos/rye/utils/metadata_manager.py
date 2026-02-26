@@ -326,7 +326,7 @@ class MetadataManager:
         timestamp = generate_timestamp()
 
         from rye.utils.path_utils import get_user_space
-        from lilux.primitives.signing import (
+        from lillux.primitives.signing import (
             ensure_keypair,
             sign_hash,
             compute_key_fingerprint,
@@ -360,7 +360,7 @@ class MetadataManager:
         timestamp = generate_timestamp()
 
         from rye.utils.path_utils import get_user_space
-        from lilux.primitives.signing import (
+        from lillux.primitives.signing import (
             ensure_keypair,
             sign_hash,
             compute_key_fingerprint,
