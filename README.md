@@ -47,7 +47,7 @@ pip install ryeos-mcp
 >
 > ```
 > git clone https://github.com/leolilley/ryeos.git
-> cd ryeos
+> cd ryeos/ryeos-mcp
 > pip install -e ryeos-mcp
 > ```
 
