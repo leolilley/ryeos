@@ -31,7 +31,7 @@ RYE inverts the relationship between code and data. Runtimes, retry logic, error
 
 At the base is Lillux, a microkernel that handles OS-level primitive execution. Every tool call follows a signed chain: your tool → a runtime that defines how to run it → a Lillux primitive that executes. Each element verified before anything runs. Tampered items are rejected. No fallback. No bypass. RYE never sees your environment variables or secrets — that happens at the Lillux and OS level, below RYE entirely.
 
-Orchestration follows the same philosophy. Spawn child RYE threads as separate processes. Budgets cascade — children can never spend more than the parent allocated. Capabilities attenuate — each level can only have equal or fewer permissions than its parent. Full transcripts are readable by the orchestrator in real time.
+Orchestration follows the same philosophy. Spawn child RYE threads as separate processes. Budgets cascade — children can never spend more than the parent allocated. Capabilities attenuate — each level can only have equal or fewer permissions than its parent. Full transcripts are readable in real time.
 
 Workflows can be defined as declarative YAML state graphs — deterministic steps and LLM reasoning are routed through the same execution layer.
 
