@@ -1,6 +1,6 @@
 [package]
 name = "lillux-proc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Cross-platform process lifecycle manager for rye threads"
 license = "MIT"

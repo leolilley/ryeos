@@ -1,6 +1,6 @@
 [package]
 name = "lillux-watch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Push-based file watcher for rye thread registry"
 license = "MIT"
