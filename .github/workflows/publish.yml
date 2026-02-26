@@ -123,6 +123,10 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.check.outputs.skip == 'false'
 
+      - name: Create dist directory
+        if: steps.check.outputs.skip == 'false'
+        run: mkdir -p ${{ matrix.manifest }}/dist
+
       - name: Build wheels (maturin)
         if: steps.check.outputs.skip == 'false'
         uses: PyO3/maturin-action@v1

@@ -3,6 +3,8 @@ name = "lillux-proc"
 version = "0.1.0"
 edition = "2021"
 description = "Cross-platform process lifecycle manager for rye threads"
+license = "MIT"
+repository = "https://github.com/leolilley/ryeos"
 
 [[bin]]
 name = "lillux-proc"
