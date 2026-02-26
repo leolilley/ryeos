@@ -9,7 +9,7 @@ version: "2.0.0"
 
 # Packages and Bundles
 
-Rye OS is distributed as pip packages organized in a monorepo. Each package has a clear role, minimal dependencies, and optionally registers a **bundle** of `.ai/` items into the system space. This page explains the full package hierarchy, what each package ships, how bundles compose, and the install tiers.
+Rye OS is distributed as 9 pip packages organized in a monorepo. Each package has a clear role, minimal dependencies, its own Python namespace, and optionally registers a **bundle** of `.ai/` items into the system space. This page explains the full package hierarchy, what each package ships, how bundles compose, and the install tiers.
 
 ## Monorepo Layout
 
@@ -19,14 +19,14 @@ lillux/
   proc/              → pip: lillux-proc   (process lifecycle, Rust binary)
   watch/             → pip: lillux-watch  (file watcher, Rust binary)
 
-ryeos/               → pip: ryeos        (engine + standard .ai/ bundle)
+ryeos/               → pip: ryeos-engine  (ships rye/ module, no .ai/ data)
   bundles/
-    core/            → pip: ryeos-core   (engine + rye/core .ai/ only)
-    web/             → pip: ryeos-web    (rye/web .ai/ data bundle)
-    code/            → pip: ryeos-code   (rye/code .ai/ data bundle)
+    core/            → pip: ryeos-core    (ryeos_core/.ai/rye/core/*)
+    standard/        → pip: ryeos         (ryeos_std/.ai/rye/{agent,bash,...}/*)
+    web/             → pip: ryeos-web     (ryeos_web/.ai/rye/web/*)
+    code/            → pip: ryeos-code    (ryeos_code/.ai/rye/code/*)
 
-ryeos-bare/          → pip: ryeos-bare   (engine, no .ai/)
-ryeos-mcp/           → pip: ryeos-mcp   (MCP server transport)
+ryeos-mcp/           → pip: ryeos-mcp    (rye_mcp/ module)
 ```
 
 ## Install Tiers
@@ -34,39 +34,43 @@ ryeos-mcp/           → pip: ryeos-mcp   (MCP server transport)
 Choose what you need:
 
 ```bash
-# Standard — agent, bash, file-system, mcp, primary, core, authoring, guides (~3MB)
-pip install ryeos
-
-# Add web tools (browser automation, fetch, search)
-pip install ryeos[web]    # or: pip install ryeos-web
-
-# Add code tools (git, npm, typescript, LSP, diagnostics)
-pip install ryeos[code]   # or: pip install ryeos-code
-
-# Everything
-pip install ryeos[all]
+# Engine only — no .ai/ data (for services/embedding)
+pip install ryeos-engine
 
 # Minimal — just rye/core (runtimes, primitives, bundler, extractors)
 pip install ryeos-core
 
-# Engine only — no data bundles at all
-pip install ryeos-bare
+# Standard — engine + core + agent, bash, file-system, mcp, primary, authoring, guides
+pip install ryeos
+
+# Add web tools (browser automation, fetch, search)
+pip install ryeos[web]
+
+# Add code tools (git, npm, typescript, LSP, diagnostics)
+pip install ryeos[code]
+
+# Everything
+pip install ryeos[all]
 
 # MCP server (pulls in ryeos automatically)
 pip install ryeos-mcp
+
+# MCP server + code tools
+pip install ryeos-mcp[code]
 ```
 
 ### What you get with each install
 
 ```
-pip install ryeos-core     → system space has: rye/core/* only
-pip install ryeos          → system space has: standard bundle (rye/agent/*, rye/bash/*, rye/core/*, rye/file-system/*, rye/mcp/*, rye/primary/*)
-pip install ryeos[web]     → system space has: standard bundle + rye/web/*
-pip install ryeos[code]    → system space has: standard bundle + rye/code/*
-pip install ryeos[all]     → system space has: standard bundle + rye/web/* + rye/code/*
-pip install ryeos-bare     → system space has: nothing (engine only)
-pip install ryeos-mcp      → system space has: standard bundle (via ryeos dep)
-pip install ryeos my-tools → system space has: standard bundle + my-tools/*
+pip install ryeos-engine   → engine only, no .ai/ data
+pip install ryeos-core     → engine + rye/core/* only
+pip install ryeos          → engine + core + standard items (rye/agent/*, rye/bash/*, rye/file-system/*, rye/mcp/*, rye/primary/*, rye/authoring/*, rye/guides/*)
+pip install ryeos[web]     → + rye/web/*
+pip install ryeos[code]    → + rye/code/*
+pip install ryeos[all]     → everything
+pip install ryeos-mcp      → ryeos + MCP transport
+pip install ryeos-mcp[code] → ryeos + MCP + rye/code/*
+pip install ryeos my-tools → standard + my-tools/*
 ```
 
 ## Package Details
@@ -102,17 +106,17 @@ Lillux depends on `lillux-proc` as a hard dependency — `SubprocessPrimitive.__
 
 Lillux does **not** contribute a bundle because it has no `.ai/` directory. It's pure library code.
 
-### ryeos (standard bundle)
+### ryeos-engine (execution engine)
 
-**Package name:** `ryeos`
+**Package name:** `ryeos-engine`
 **Source:** `ryeos/`
+**Python module:** `rye/`
 **Dependencies:** `lillux`, `pyyaml`, `cryptography`, `packaging`
-**Extras:** `[web]` → `ryeos-web`, `[code]` → `ryeos-code`, `[all]` → both
-**Bundle:** `ryeos` → standard items under `rye/` (agent, bash, core, file-system, mcp, primary, authoring, guides)
+**Bundle:** none — no `.ai/` data, no entry point
 
-The standard installation. Contains the resolver, executor, signing, metadata manager, and registers the `ryeos` bundle which includes the standard library: bash tool, file-system operations, MCP tools, agent thread system, primary tool wrappers, core runtimes, and creation directives. Approximately 3MB.
+The execution engine. Contains the resolver, executor, signing, metadata manager, and all core Python code in the `rye/` module. Ships **no** `.ai/` items — bundles are delivered by separate packages that depend on `ryeos-engine`.
 
-This is the package to install when you want a fully-featured Rye OS without web or code tools. Web and code tools are available as optional extras (`ryeos[web]`, `ryeos[code]`) or as standalone packages.
+Use `ryeos-engine` when you need the engine but no `.ai/` data at all (e.g., services that embed the engine, or custom deployments that provide their own bundles).
 
 ```python
 # Direct execution without MCP:
@@ -121,25 +125,44 @@ executor = ExecuteTool()
 result = await executor.run(item_type="tool", item_id="rye/bash/bash", parameters={"command": "ls"})
 ```
 
-### ryeos-core (minimal bundle)
+### ryeos-core (core data bundle)
 
 **Package name:** `ryeos-core`
 **Source:** `ryeos/bundles/core/`
-**Dependencies:** `lillux`, `pyyaml`, `cryptography`, `packaging`
+**Python module:** `ryeos_core/`
+**Dependencies:** `ryeos-engine`
 **Bundle:** `ryeos-core` → items under `rye/core/` only
+**Entry point:** `ryeos-core = "ryeos_core.bundle:get_bundle"`
+**Categories:** `["rye/core"]`
 
-The minimal installation. Contains the same Python code as `ryeos` but only registers the `ryeos-core` bundle — core runtimes, primitives, parsers, extractors, and bundler. No agent tools, bash tool, file-system tools, MCP tools, registry client, or web/code tools.
+Data-only bundle that ships core runtimes, primitives, parsers, extractors, bundler, and trusted author keys. Depends on `ryeos-engine` for the execution engine — it's additive, not a variant.
 
-Use `ryeos-core` when you want the execution engine but don't need the full standard library.
+Use `ryeos-core` when you want the engine plus core items but don't need the full standard library.
 
-> **Note:** `ryeos-core` and `ryeos` both install the `rye` Python module and are **mutually exclusive** — install one or the other, not both.
+### ryeos (standard data bundle)
+
+**Package name:** `ryeos`
+**Source:** `ryeos/bundles/standard/`
+**Python module:** `ryeos_std/`
+**Dependencies:** `ryeos-core`
+**Extras:** `[web]` → `ryeos-web`, `[code]` → `ryeos-code`, `[all]` → both
+**Bundle:** `ryeos` → items under `rye/` (agent, bash, file-system, mcp, primary, authoring, guides)
+**Entry point:** `ryeos = "ryeos_std.bundle:get_bundle"`
+**Categories:** `["rye"]`
+
+The standard installation. A data-only bundle that ships the standard library: bash tool, file-system operations, MCP tools, agent thread system, primary tool wrappers, and creation directives. Since it depends on `ryeos-core`, installing `ryeos` gives you the engine + core + standard items.
+
+Web and code tools are available as optional extras (`ryeos[web]`, `ryeos[code]`) or as standalone packages.
 
 ### ryeos-web (web data bundle)
 
 **Package name:** `ryeos-web`
 **Source:** `ryeos/bundles/web/`
+**Python module:** `ryeos_web/`
 **Dependencies:** `ryeos`
 **Bundle:** `ryeos-web` → items under `rye/web/`
+**Entry point:** `ryeos-web = "ryeos_web.bundle:get_bundle"`
+**Categories:** `["rye/web"]`
 
 Adds browser automation, web page fetching, and web search tools. Installs as a standalone package or via `pip install ryeos[web]`.
 
@@ -149,8 +172,11 @@ Tools provided: `rye/web/browser/browser` (Playwright-based browser automation),
 
 **Package name:** `ryeos-code`
 **Source:** `ryeos/bundles/code/`
+**Python module:** `ryeos_code/`
 **Dependencies:** `ryeos`
 **Bundle:** `ryeos-code` → items under `rye/code/`
+**Entry point:** `ryeos-code = "ryeos_code.bundle:get_bundle"`
+**Categories:** `["rye/code"]`
 
 Adds development tools for package management, type checking, diagnostics, and LSP code intelligence. Installs as a standalone package or via `pip install ryeos[code]`.
 
@@ -158,24 +184,16 @@ Tools provided: `rye/code/npm/npm` (NPM/NPX operations), `rye/code/diagnostics/d
 
 > **Note:** `node_modules` are NOT shipped with the package. They are installed on first use via the node runtime's anchor system, which resolves and installs dependencies automatically.
 
-### ryeos-bare (engine only)
-
-**Package name:** `ryeos-bare`
-**Source:** `ryeos-bare/`
-**Dependencies:** `lillux`, `pyyaml`, `cryptography`, `packaging`
-**Bundle:** none
-
-Bare installation with no data-driven tools. Same Python code as `ryeos` but registers no bundle. Used by services like `registry-api` that need the engine but not any `.ai/` items.
-
-> **Note:** `ryeos-bare`, `ryeos`, and `ryeos-core` all install the `rye` Python module and are **mutually exclusive** — install one only.
-
 ### ryeos-mcp (MCP transport)
 
 **Package name:** `ryeos-mcp`
 **Source:** `ryeos-mcp/`
+**Python module:** `rye_mcp/`
 **Dependencies:** `ryeos`, `mcp`
+**Extras:** `[web]` → `ryeos-web`, `[code]` → `ryeos-code`, `[all]` → both
+**Bundle:** none — inherits bundles from its `ryeos` dependency
 
-The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so any MCP-compatible AI agent can use them. Does **not** register its own bundle — it inherits the `ryeos` bundle from its `ryeos` dependency.
+The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so any MCP-compatible AI agent can use them. Does **not** register its own bundle — it inherits bundles from its `ryeos` dependency chain.
 
 ### services/registry-api
 
@@ -191,8 +209,8 @@ A **package** is a pip-installable Python distribution. A **bundle** is a named 
 
 The distinction matters because:
 
-1. **The `.ai/` data lives inside the `rye` Python module**, but different packages control how much of it is visible to the resolver.
-2. **Bundle entry points filter by category.** `ryeos-core` only exposes `rye/core/*` items. `ryeos` exposes the standard set. `ryeos-web` exposes `rye/web/*`. `ryeos-code` exposes `rye/code/*`. `ryeos-bare` exposes nothing.
+1. **Each bundle has its own Python namespace.** `ryeos-engine` ships the `rye/` module. `ryeos-core` ships `ryeos_core/`. `ryeos` (standard) ships `ryeos_std/`. `ryeos-web` ships `ryeos_web/`. `ryeos-code` ships `ryeos_code/`. There is no mutual exclusion — packages are additive.
+2. **Bundle entry points filter by category.** `ryeos-core` only exposes `rye/core/*` items. `ryeos` exposes the standard set. `ryeos-web` exposes `rye/web/*`. `ryeos-code` exposes `rye/code/*`. `ryeos-engine` exposes nothing.
 3. **Multiple bundles compose.** The resolver iterates over all discovered bundles via `get_system_spaces()`, so installing `ryeos` + `ryeos-web` + `ryeos-code` results in all three bundles being available in the system space. Third-party packages can register their own bundles the same way.
 
 ### How Bundles Compose
@@ -201,8 +219,8 @@ When multiple bundle packages are installed, `get_system_spaces()` discovers all
 
 ```
 pip install ryeos ryeos-web ryeos-code
-  → get_system_spaces() returns: [ryeos bundle, ryeos-web bundle, ryeos-code bundle]
-  → system space search checks all three roots
+  → get_system_spaces() returns: [ryeos-core bundle, ryeos bundle, ryeos-web bundle, ryeos-code bundle]
+  → system space search checks all four roots
   → rye/bash/bash found in ryeos, rye/web/fetch/fetch found in ryeos-web, rye/code/npm/npm found in ryeos-code
 ```
 
@@ -214,46 +232,57 @@ There are no exceptions to signature verification: system items go through the s
 
 ### Entry point registration
 
-Each package registers its bundle in `pyproject.toml`:
+Each bundle package registers its own entry point in `pyproject.toml`, pointing to a `bundle.py` in its own module:
 
 ```toml
-# ryeos registers the standard bundle:
+# ryeos-core registers core items:
 [project.entry-points."rye.bundles"]
-ryeos = "rye.bundle_entrypoints:get_ryeos_bundle"
+ryeos-core = "ryeos_core.bundle:get_bundle"
 
-# ryeos-core registers only core:
+# ryeos (standard) registers standard items:
 [project.entry-points."rye.bundles"]
-ryeos-core = "rye.bundle_entrypoints:get_ryeos_core_bundle"
+ryeos = "ryeos_std.bundle:get_bundle"
 
 # ryeos-web registers web tools:
 [project.entry-points."rye.bundles"]
-ryeos-web = "rye.bundle_entrypoints:get_ryeos_web_bundle"
+ryeos-web = "ryeos_web.bundle:get_bundle"
 
 # ryeos-code registers code tools:
 [project.entry-points."rye.bundles"]
-ryeos-code = "rye.bundle_entrypoints:get_ryeos_code_bundle"
+ryeos-code = "ryeos_code.bundle:get_bundle"
 
-# ryeos-bare registers NO entry points (no bundle)
+# ryeos-engine registers NO entry points (no bundle)
 ```
 
 Bundle entrypoint functions return a dict with `bundle_id`, `root_path`, `version`, and `categories`:
 
 ```python
-def get_ryeos_bundle() -> dict:
+# ryeos_core/bundle.py
+def get_bundle() -> dict:
+    return {
+        "bundle_id": "ryeos-core",
+        "root_path": Path(__file__).parent,
+        "categories": ["rye/core"],
+    }
+
+# ryeos_std/bundle.py
+def get_bundle() -> dict:
     return {
         "bundle_id": "ryeos",
         "root_path": Path(__file__).parent,
-        "categories": ["rye/agent", "rye/bash", "rye/core", "rye/file-system", "rye/mcp", "rye/primary"],
+        "categories": ["rye"],
     }
 
-def get_ryeos_web_bundle() -> dict:
+# ryeos_web/bundle.py
+def get_bundle() -> dict:
     return {
         "bundle_id": "ryeos-web",
         "root_path": Path(__file__).parent,
         "categories": ["rye/web"],
     }
 
-def get_ryeos_code_bundle() -> dict:
+# ryeos_code/bundle.py
+def get_bundle() -> dict:
     return {
         "bundle_id": "ryeos-code",
         "root_path": Path(__file__).parent,
@@ -261,29 +290,40 @@ def get_ryeos_code_bundle() -> dict:
     }
 ```
 
-The author's signing key is shipped as a TOML identity document at `rye/.ai/trusted_keys/{fingerprint}.toml` within the bundle root, discovered via standard 3-tier resolution.
+The author's signing key is shipped as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml` within each bundle's module root, discovered via standard 3-tier resolution.
 
-## Dependency Layering
+## Dependency Chain
 
-Dependencies flow upward. Each package declares only what it directly imports:
+Dependencies are strictly additive. Each package depends on the layer below it:
+
+```
+ryeos-engine ← ryeos-core ← ryeos ← ryeos-mcp
+                                   ← ryeos-web
+                                   ← ryeos-code
+```
+
+Full dependency tree:
 
 ```
 ryeos-mcp
-  ├── ryeos (or ryeos-core or ryeos-bare)
-  │     ├── lillux
-  │     │     ├── lillux-proc      (hard dep — process lifecycle manager)
-  │     │     ├── cryptography    (signing, auth encryption)
-  │     │     └── httpx           (HTTP client primitive, OAuth2 refresh)
-  │     ├── pyyaml               (YAML parsing for runtimes, configs)
-  │     ├── cryptography         (also direct — metadata signing in rye)
-  │     └── packaging            (semver parsing in chain validator)
+  ├── ryeos
+  │     ├── ryeos-core
+  │     │     └── ryeos-engine
+  │     │           ├── lillux
+  │     │           │     ├── lillux-proc      (hard dep — process lifecycle manager)
+  │     │           │     ├── cryptography    (signing, auth encryption)
+  │     │           │     └── httpx           (HTTP client primitive, OAuth2 refresh)
+  │     │           ├── pyyaml               (YAML parsing for runtimes, configs)
+  │     │           ├── cryptography         (also direct — metadata signing in rye)
+  │     │           └── packaging            (semver parsing in chain validator)
+  │     └── (standard .ai/ items via ryeos_std)
   └── mcp                       (MCP protocol transport)
 
 ryeos-web
-  └── ryeos                     (inherits full engine)
+  └── ryeos                     (inherits full engine + core + standard)
 
 ryeos-code
-  └── ryeos                     (inherits full engine)
+  └── ryeos                     (inherits full engine + core + standard)
 ```
 
 ### What about bundled tools?
@@ -293,7 +333,7 @@ Bundled tools (Python scripts in `.ai/tools/`) are **not** Python package depend
 | Import location                                | Resolution                                                                                                                    |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | Core package code (`ryeos/rye/*.py`)           | Standard pip dependency — must be in `pyproject.toml`                                                                         |
-| Bundled tools (`ryeos/rye/.ai/tools/**/*.py`)  | Resolved at runtime by the executor. The tool's runtime config handles interpreter selection, PYTHONPATH, and venv resolution |
+| Bundled tools (`.ai/tools/**/*.py`)            | Resolved at runtime by the executor. The tool's runtime config handles interpreter selection, PYTHONPATH, and venv resolution |
 | Tools with `DEPENDENCIES = [...]`              | Installed on-demand by `EnvManager` into the tool's venv at execution time                                                    |
 | Lazy imports inside functions (`import httpx`) | Available if a transitive dependency provides it, but not guaranteed — prefer `DEPENDENCIES` for explicit declaration         |
 
@@ -303,18 +343,18 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 
 ## Package → Bundle Summary
 
-| Package                  | pip name      | Dependencies                                   | Bundle ID    | Bundle scope     | Mutual exclusion                             |
-| ------------------------ | ------------- | ---------------------------------------------- | ------------ | ---------------- | -------------------------------------------- |
-| `lillux/kernel/`          | `lillux`       | `lillux-proc`, `cryptography`, `httpx`          | —            | —                | —                                            |
-| `lillux/proc/`            | `lillux-proc`  | (Rust binary)                                  | —            | —                | —                                            |
-| `lillux/watch/`           | `lillux-watch` | (Rust binary)                                  | —            | —                | —                                            |
-| `ryeos/`                 | `ryeos`       | `lillux`, `pyyaml`, `cryptography`, `packaging` | `ryeos`      | standard `rye/*` | ⚠️ conflicts with `ryeos-core`, `ryeos-bare` |
-| `ryeos/bundles/core/`    | `ryeos-core`  | `lillux`, `pyyaml`, `cryptography`, `packaging` | `ryeos-core` | `rye/core/*`     | ⚠️ conflicts with `ryeos`, `ryeos-bare`      |
-| `ryeos/bundles/web/`     | `ryeos-web`   | `ryeos`                                        | `ryeos-web`  | `rye/web/*`      | —                                            |
-| `ryeos/bundles/code/`    | `ryeos-code`  | `ryeos`                                        | `ryeos-code` | `rye/code/*`     | —                                            |
-| `ryeos-bare/`            | `ryeos-bare`  | `lillux`, `pyyaml`, `cryptography`, `packaging` | —            | —                | ⚠️ conflicts with `ryeos`, `ryeos-core`      |
-| `ryeos-mcp/`             | `ryeos-mcp`   | `ryeos`, `mcp`                                 | —            | —                | —                                            |
-| `services/registry-api/` | —             | `fastapi`, `supabase`, `httpx`, etc.           | —            | —                | —                                            |
+| Package | pip name | Dependencies | Bundle ID | Bundle scope |
+| --- | --- | --- | --- | --- |
+| `lillux/kernel/` | `lillux` | `lillux-proc`, `cryptography`, `httpx` | — | — |
+| `lillux/proc/` | `lillux-proc` | (Rust binary) | — | — |
+| `lillux/watch/` | `lillux-watch` | (Rust binary) | — | — |
+| `ryeos/` | `ryeos-engine` | `lillux`, `pyyaml`, `cryptography`, `packaging` | — | — |
+| `ryeos/bundles/core/` | `ryeos-core` | `ryeos-engine` | `ryeos-core` | `rye/core/*` |
+| `ryeos/bundles/standard/` | `ryeos` | `ryeos-core` | `ryeos` | standard `rye/*` |
+| `ryeos/bundles/web/` | `ryeos-web` | `ryeos` | `ryeos-web` | `rye/web/*` |
+| `ryeos/bundles/code/` | `ryeos-code` | `ryeos` | `ryeos-code` | `rye/code/*` |
+| `ryeos-mcp/` | `ryeos-mcp` | `ryeos`, `mcp` | — | — |
+| `services/registry-api/` | — | `fastapi`, `supabase`, `httpx`, etc. | — | — |
 
 ## Publishing Order
 
@@ -335,25 +375,29 @@ Packages must be published to PyPI in dependency order. The two Rust packages (`
  └──────────────────────┬──────────────────────────────────────────┘
                         │
  ┌──────────────────────▼──────────────────────────────────────────┐
- │  LAYER 3 — Engine variants (mutually exclusive, same rye/ mod) │
+ │  LAYER 3 — Engine                                               │
  │                                                                 │
- │   ryeos-bare   (engine, no .ai/ data)                          │
- │   ryeos        (engine + standard .ai/ bundle)                 │
- │   ryeos-core   (engine + rye/core .ai/ only)                   │
+ │   ryeos-engine  (ships rye/ module, no .ai/ data)               │
  └──────────────────────┬──────────────────────────────────────────┘
                         │
  ┌──────────────────────▼──────────────────────────────────────────┐
- │  LAYER 4 — Extensions (depend on ryeos)                        │
+ │  LAYER 4 — Core bundle                                         │
  │                                                                 │
- │   ryeos-web    (.ai/ data bundle — browser, fetch, search)     │
- │   ryeos-code   (.ai/ data bundle — git, npm, ts, LSP)          │
- │   ryeos-mcp    (code package — MCP server transport)           │
+ │   ryeos-core    (data bundle — rye/core/*)                      │
  └──────────────────────┬──────────────────────────────────────────┘
                         │
  ┌──────────────────────▼──────────────────────────────────────────┐
- │  LAYER 5 — Meta-packages                                       │
+ │  LAYER 5 — Standard bundle                                     │
  │                                                                 │
- │   ryeos-full   (meta: ryeos + ryeos-web + ryeos-code)          │
+ │   ryeos         (data bundle — standard rye/*)                  │
+ └──────────────────────┬──────────────────────────────────────────┘
+                        │
+ ┌──────────────────────▼──────────────────────────────────────────┐
+ │  LAYER 6 — Extensions (depend on ryeos)                        │
+ │                                                                 │
+ │   ryeos-web     (data bundle — rye/web/*)                       │
+ │   ryeos-code    (data bundle — rye/code/*)                      │
+ │   ryeos-mcp     (MCP server transport)                          │
  └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -361,20 +405,19 @@ Packages must be published to PyPI in dependency order. The two Rust packages (`
 
 Code packages contain Python or Rust source code that implements functionality:
 
-| Package       | Type                  | What it ships                                      |
-| ------------- | --------------------- | -------------------------------------------------- |
+| Package        | Type                  | What it ships                                      |
+| -------------- | --------------------- | -------------------------------------------------- |
 | `lillux-proc`  | Rust binary           | Process lifecycle manager                          |
 | `lillux-watch` | Rust binary           | File watcher                                       |
 | `lillux`       | Python library        | Microkernel primitives (subprocess, signing, HTTP) |
-| `ryeos-bare`  | Python library        | Execution engine (`rye/` module), no `.ai/` data   |
-| `ryeos`       | Python library + data | Execution engine + standard `.ai/` bundle          |
-| `ryeos-mcp`   | Python library        | MCP server transport (`rye_mcp/` module)           |
+| `ryeos-engine` | Python library        | Execution engine (`rye/` module), no `.ai/` data   |
+| `ryeos-mcp`    | Python library        | MCP server transport (`rye_mcp/` module)           |
 
 Data bundles are primarily `.ai/` item collections with minimal Python glue:
 
-| Package      | What it ships                                           |
-| ------------ | ------------------------------------------------------- |
-| `ryeos-core` | Repackages `rye/` module + subset of `.ai/` (core only) |
-| `ryeos-web`  | `ryeos_web/.ai/` items + thin `bundle.py` entrypoint    |
-| `ryeos-code` | `ryeos_code/.ai/` items + thin `bundle.py` entrypoint   |
-| `ryeos-full` | Pure meta-package — no code or data, just dependencies  |
+| Package      | What it ships                                                  |
+| ------------ | -------------------------------------------------------------- |
+| `ryeos-core` | `ryeos_core/.ai/` items (rye/core/*) + `bundle.py` entrypoint |
+| `ryeos`      | `ryeos_std/.ai/` items (standard rye/*) + `bundle.py` entrypoint |
+| `ryeos-web`  | `ryeos_web/.ai/` items (rye/web/*) + `bundle.py` entrypoint   |
+| `ryeos-code` | `ryeos_code/.ai/` items (rye/code/*) + `bundle.py` entrypoint |

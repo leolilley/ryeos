@@ -60,7 +60,9 @@ ryeos/rye/
 │   └── logger.py
 ├── protocols/
 │   └── jsonrpc_handler.py    # MCP JSON-RPC protocol
-├── bundle_entrypoints.py     # Package entrypoints
+├── # Bundle entrypoints live in each bundle's module:
+│   #   ryeos_core/bundle.py, ryeos_std/bundle.py,
+│   #   ryeos_web/bundle.py, ryeos_code/bundle.py
 └── constants.py
 ```
 

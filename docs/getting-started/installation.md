@@ -20,7 +20,9 @@ pip install ryeos-mcp
 This pulls in the full dependency chain:
 
 - **`ryeos-mcp`** — the MCP server that exposes Rye OS to any MCP-compatible AI agent.
-- **`ryeos`** — the orchestration layer with the resolver, executor, signing, and metadata. Registers the standard bundle (~3MB) with agent, bash, file-system, MCP, primary, core, authoring, and guide items.
+- **`ryeos`** — the standard bundle (~3MB) with agent, bash, file-system, MCP, primary, core, authoring, and guide items. Depends on `ryeos-core`.
+- **`ryeos-core`** — the core runtimes, primitives, and extractors (`rye/core/*` items). Depends on `ryeos-engine`.
+- **`ryeos-engine`** — the orchestration layer with the resolver, executor, signing, and metadata.
 - **`lillux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing). Depends on `lillux-proc` (Rust binary for process lifecycle management).
 
 ### Optional extras
@@ -38,9 +40,9 @@ pip install ryeos[all]
 
 > **Without MCP:** Install just `ryeos` to call the executor directly from Python — useful for scripting, CI, or wrapping in a CLI.
 >
-> **Minimal install:** Install `ryeos-core` for only the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. Note: `ryeos-core` and `ryeos` are mutually exclusive — install one or the other.
+> **Minimal install:** Install `ryeos-core` for the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. `ryeos` depends on `ryeos-core`, so you get core items either way.
 >
-> **Engine only:** Install `ryeos-bare` for the engine with no `.ai/` data bundles at all.
+> **Engine only:** Install `ryeos-engine` for the engine with no `.ai/` data bundles at all. `ryeos-core` depends on `ryeos-engine`.
 >
 > See [Packages and Bundles](../internals/packages-and-bundles.md) for the full breakdown.
 

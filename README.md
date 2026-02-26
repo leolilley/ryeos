@@ -178,7 +178,7 @@ pip install ryeos[all]         # everything
 ```bash
 pip install ryeos              # standard bundle (no MCP transport)
 pip install ryeos-core         # engine + core only (runtimes, primitives)
-pip install ryeos-bare         # engine only, no .ai/ data (for embedding)
+pip install ryeos-engine       # engine only, no .ai/ data (for embedding)
 ```
 
 ### From source
@@ -197,14 +197,12 @@ lillux/
   proc/          → pip: lillux-proc     Process lifecycle manager (Rust)
   watch/         → pip: lillux-watch    Push-based file watcher (Rust)
 
-ryeos/           → pip: ryeos          Engine + standard .ai/ bundle
+ryeos/           → pip: ryeos-engine   Execution engine, no .ai/ data
   bundles/
     core/        → pip: ryeos-core     Minimal: rye/core only
+    standard/    → pip: ryeos          Standard .ai/ data bundle
     web/         → pip: ryeos-web      Browser, fetch, search tools
     code/        → pip: ryeos-code     Git, npm, typescript, LSP tools
-    full/        → pip: ryeos-full     Meta-package: everything
-
-ryeos-bare/      → pip: ryeos-bare     Engine only, no .ai/ data
 ryeos-mcp/       → pip: ryeos-mcp      MCP server transport (stdio/SSE)
 ```
 
