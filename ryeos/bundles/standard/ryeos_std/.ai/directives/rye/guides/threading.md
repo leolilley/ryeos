@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:02:40Z:1b9cb53d2ba75c7e4f7dc36e2ae26dc73465b7f0ce53a6e2c351bf0adac2f9e7:N9QWWvUiE7qCz1Nr3agl6_uwSKoWBxG-s_DHZwPaqri3SeklaIZbca5WXEjEzINMcNtz9tNBeao_hear_61UCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:1b9cb53d2ba75c7e4f7dc36e2ae26dc73465b7f0ce53a6e2c351bf0adac2f9e7:N9QWWvUiE7qCz1Nr3agl6_uwSKoWBxG-s_DHZwPaqri3SeklaIZbca5WXEjEzINMcNtz9tNBeao_hear_61UCg==:4b987fd4e40303ac -->
 # Threading
 
 Guide 7: The threading system — spawning LLM threads, limits, permissions, and orchestration.

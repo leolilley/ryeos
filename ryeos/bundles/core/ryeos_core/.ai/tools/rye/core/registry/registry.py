@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:02:30Z:d78b37f5ebb1a671abe7563ecca490ea9760fcd4626eb91be820f6b5f9c160b8:ZsgNovbYFIJbcEhByAGuhVan9h-HCUHpI9oD7WRYfq7KWMp0Zy91eKZ59b_-rsGWZegWgAh7UY7IJha8ib10BA==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:52:24Z:4699303fdd116671ce57005bbebc806805ea27c9bd009af3aeccab021f669744:pKkkTFexnq_JYS8MT8j8ZIVvZpWaUNo6NR_ZpYo_iKs6Z7sEt-kgg4KcAkP5OLjpCxEe9ncYYp3t71aC6N32Dg==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -22,7 +22,7 @@ Uses Railway API for item operations, Supabase for auth.
 Actions:
   Auth:
     - signup: Create account with email/password
-    - login: Device auth flow (opens browser, polls for completion, works for OAuth signup too)
+    - login: Device auth flow (opens browser, polls for completion, creates API key)
     - logout: Clear local auth session
     - whoami: Show current authenticated user
 
@@ -100,6 +100,10 @@ ACTIONS = [
     "login_email",
     "logout",
     "whoami",
+    # API keys
+    "create_api_key",
+    "list_api_keys",
+    "revoke_api_key",
     # Items
     "search",
     "pull",
@@ -130,7 +134,7 @@ REGISTRY_ANON_KEY = os.environ.get(
 # Service key for keyring storage (kernel uses service_name="lillux" by default)
 REGISTRY_SERVICE = "rye_registry"
 # Env var override for CI/headless - checked before keyring
-REGISTRY_TOKEN_ENV = "RYE_REGISTRY_TOKEN"
+REGISTRY_API_KEY_ENV = "RYE_REGISTRY_API_KEY"  # Primary: rye_sk_... API key
 
 
 # =============================================================================
@@ -214,9 +218,34 @@ def _get_session_dir() -> Path:
     return _get_rye_state_dir() / "sessions"
 
 
-def _get_token_from_env() -> Optional[str]:
-    """Check for token in env var (CI/headless mode)."""
-    return os.environ.get(REGISTRY_TOKEN_ENV)
+def _get_api_key_from_env() -> Optional[str]:
+    """Check for API key in env var (primary non-interactive auth)."""
+    return os.environ.get(REGISTRY_API_KEY_ENV)
+
+
+async def _resolve_auth_token(scope: str = "registry:read") -> Optional[str]:
+    """Resolve auth token from all sources in priority order.
+
+    1. RYE_REGISTRY_API_KEY env var (rye_sk_... API key)
+    2. Keyring via AuthStore
+
+    Returns token string or None if no auth available.
+    """
+    # 1. API key env var (primary)
+    api_key = _get_api_key_from_env()
+    if api_key:
+        return api_key
+
+    # 2. Keyring
+    try:
+        from lillux.runtime.auth import AuthStore
+        auth_store = AuthStore()
+        if auth_store.is_authenticated(REGISTRY_SERVICE):
+            return await auth_store.get_token(REGISTRY_SERVICE, scope=scope)
+    except Exception:
+        pass
+
+    return None
 
 
 @dataclass
@@ -501,6 +530,17 @@ async def execute(
         elif action == "whoami":
             result = await _whoami()
 
+        # API key actions
+        elif action == "create_api_key":
+            result = await _create_api_key(params)
+            http_calls = 1
+        elif action == "list_api_keys":
+            result = await _list_api_keys()
+            http_calls = 1
+        elif action == "revoke_api_key":
+            result = await _revoke_api_key(params)
+            http_calls = 1
+
         # Item actions
         elif action == "search":
             result = await _search(
@@ -558,7 +598,7 @@ async def execute(
             result = await _push_bundle(
                 bundle_id=params.get("bundle_id"),
                 version=params.get("version"),
-                project_path=project_path,
+                project_path=params.get("project_path", project_path),
             )
             http_calls = 1
         elif action == "pull_bundle":
@@ -851,14 +891,6 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
     except ImportError:
         return {"error": "AuthStore not available - auth runtime not installed"}
 
-    # Check env var override first (CI/headless mode)
-    env_token = _get_token_from_env()
-    if env_token:
-        return {
-            "status": "env_token",
-            "message": f"Using token from {REGISTRY_TOKEN_ENV} environment variable",
-        }
-
     # Check if already authenticated via keyring
     auth_store = AuthStore()  # Uses kernel default service_name="lillux"
     if auth_store.is_authenticated(REGISTRY_SERVICE):
@@ -986,6 +1018,38 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
                         # Plaintext token (simplified flow)
                         access_token = body["encrypted_token"]
 
+                    # Use temporary JWT to create a persistent API key
+                    api_key_result = await http.post(
+                        "/v1/api-keys",
+                        body={"name": token_name},
+                        auth_token=access_token,
+                    )
+
+                    _delete_session(session_id)
+
+                    if api_key_result["success"] and api_key_result["body"]:
+                        api_key = api_key_result["body"]["key"]
+
+                        # Store API key in keyring (not the JWT)
+                        auth_store.set_token(
+                            service=REGISTRY_SERVICE,
+                            access_token=api_key,
+                            refresh_token=None,
+                            expires_in=None,
+                            scopes=["registry:read", "registry:write"],
+                        )
+
+                        await http.close()
+                        return {
+                            "status": "authenticated",
+                            "message": "Successfully logged in to Rye Registry",
+                            "api_key_name": token_name,
+                            "api_key_prefix": api_key_result["body"].get("key_prefix", ""),
+                            "user": body.get("user", {}),
+                            "hint": "API key stored in keyring. For CI/serverless, set RYE_REGISTRY_API_KEY env var.",
+                        }
+
+                    # Fallback: store JWT if API key creation fails
                     auth_store.set_token(
                         service=REGISTRY_SERVICE,
                         access_token=access_token,
@@ -994,13 +1058,12 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
                         scopes=["registry:read", "registry:write"],
                     )
 
-                    _delete_session(session_id)
                     await http.close()
-
                     return {
                         "status": "authenticated",
-                        "message": "Successfully logged in to Rye Registry",
+                        "message": "Logged in (API key creation failed, using session token)",
                         "user": body.get("user", {}),
+                        "warning": "Run 'registry create_api_key' to create a persistent API key.",
                     }
 
                 except Exception as e:
@@ -1021,11 +1084,11 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _logout() -> Dict[str, Any]:
     """Clear local auth session."""
-    # Check if using env var token
-    if _get_token_from_env():
+    # Check if using API key env var
+    if _get_api_key_from_env():
         return {
-            "status": "env_token",
-            "message": f"Using {REGISTRY_TOKEN_ENV} env var. Unset it to logout.",
+            "status": "env_var",
+            "message": f"Using {REGISTRY_API_KEY_ENV} env var. Unset it to logout.",
         }
 
     try:
@@ -1044,14 +1107,15 @@ async def _logout() -> Dict[str, Any]:
 
 async def _whoami() -> Dict[str, Any]:
     """Show current authenticated user."""
-    # Check env var override first
-    env_token = _get_token_from_env()
-    if env_token:
+    # Check API key env var first (primary)
+    api_key = _get_api_key_from_env()
+    if api_key:
         return {
             "authenticated": True,
-            "source": "env",
-            "env_var": REGISTRY_TOKEN_ENV,
-            "message": f"Using token from {REGISTRY_TOKEN_ENV} environment variable",
+            "source": "api_key",
+            "env_var": REGISTRY_API_KEY_ENV,
+            "key_prefix": api_key[7:15] if len(api_key) > 15 else "***",
+            "message": f"Using API key from {REGISTRY_API_KEY_ENV} environment variable",
         }
 
     try:
@@ -1079,6 +1143,148 @@ async def _whoami() -> Dict[str, Any]:
             metadata.get("has_refresh_token", False) if metadata else False
         ),
     }
+
+
+# =============================================================================
+# API KEY ACTIONS
+# =============================================================================
+
+
+async def _create_api_key(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a new API key for non-interactive auth.
+
+    Requires an existing auth session (OAuth or API key).
+    The raw key is returned only once — store it securely.
+    """
+    name = params.get("name")
+    if not name:
+        # Auto-generate name from hostname
+        import getpass
+        import platform
+        try:
+            username = getpass.getuser()
+            hostname = platform.node()
+        except Exception:
+            username = "user"
+            hostname = "device"
+        name = f"{username}@{hostname}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first to create an auth session, then create an API key.",
+        }
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        body: Dict[str, Any] = {"name": name}
+        scopes = params.get("scopes")
+        if scopes:
+            body["scopes"] = scopes
+        expires_in_days = params.get("expires_in_days")
+        if expires_in_days:
+            body["expires_in_days"] = expires_in_days
+
+        result = await http.post("/v1/api-keys", body=body, auth_token=token)
+        await http.close()
+
+        if not result["success"]:
+            error_body = result.get("body", {})
+            detail = error_body.get("detail", result.get("error", "Unknown error"))
+            return {"error": f"Failed to create API key: {detail}"}
+
+        key_data = result["body"]
+        return {
+            "status": "created",
+            "key": key_data["key"],
+            "name": key_data["name"],
+            "key_prefix": key_data["key_prefix"],
+            "scopes": key_data.get("scopes", []),
+            "expires_at": key_data.get("expires_at"),
+            "message": (
+                f"API key created: {key_data['name']}\n"
+                f"Key: {key_data['key']}\n\n"
+                f"Store this key securely — it will not be shown again.\n"
+                f"Set it as: export RYE_REGISTRY_API_KEY={key_data['key']}"
+            ),
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Failed to create API key: {e}"}
+
+
+async def _list_api_keys() -> Dict[str, Any]:
+    """List all API keys for the current user."""
+    token = await _resolve_auth_token()
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first.",
+        }
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        result = await http.get("/v1/api-keys", auth_token=token)
+        await http.close()
+
+        if not result["success"]:
+            return {"error": f"Failed to list API keys: {result.get('error', 'Unknown')}"}
+
+        body = result["body"]
+        return {
+            "status": "success",
+            "keys": body.get("keys", []),
+            "count": body.get("count", 0),
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Failed to list API keys: {e}"}
+
+
+async def _revoke_api_key(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Revoke an API key by name."""
+    name = params.get("name")
+    if not name:
+        return {
+            "error": "Required: name",
+            "usage": "revoke_api_key(name='my-key-name')",
+        }
+
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first.",
+        }
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        result = await http.delete(f"/v1/api-keys/{name}", auth_token=token)
+        await http.close()
+
+        if not result["success"]:
+            error_body = result.get("body", {})
+            detail = error_body.get("detail", result.get("error", "Unknown error"))
+            return {"error": f"Failed to revoke API key: {detail}"}
+
+        return {
+            "status": "revoked",
+            "name": name,
+            "message": f"API key '{name}' has been revoked.",
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Failed to revoke API key: {e}"}
 
 
 # =============================================================================
@@ -1117,17 +1323,7 @@ async def _search(
     # Get auth token if include_mine is requested
     token = None
     if include_mine:
-        env_token = _get_token_from_env()
-        if env_token:
-            token = env_token
-        else:
-            try:
-                from lillux.runtime.auth import AuthStore
-                auth_store = AuthStore()
-                if auth_store.is_authenticated(REGISTRY_SERVICE):
-                    token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:read")
-            except Exception:
-                pass  # Fall back to unauthenticated search
+        token = await _resolve_auth_token(scope="registry:read")
 
     try:
         # Build query params for Registry API
@@ -1414,23 +1610,13 @@ async def _push(
     if not path.exists():
         return {"error": f"File not found: {item_path}"}
 
-    # Check auth - env var first, then keyring
-    env_token = _get_token_from_env()
-    if env_token:
-        token = env_token
-    else:
-        try:
-            from lillux.runtime.auth import AuthenticationRequired, AuthStore
-
-            auth_store = AuthStore()  # Uses kernel default service_name="lillux"
-            token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
-        except AuthenticationRequired:
-            return {
-                "error": "Authentication required",
-                "solution": "Run 'registry login' first",
-            }
-        except ImportError:
-            return {"error": "AuthStore not available"}
+    # Check auth
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
 
     # Read content
     content = path.read_text()
@@ -1589,23 +1775,13 @@ async def _delete(
             "valid": ["directive", "tool", "knowledge"],
         }
 
-    # Check auth - env var first, then keyring
-    env_token = _get_token_from_env()
-    if env_token:
-        token = env_token
-    else:
-        try:
-            from lillux.runtime.auth import AuthenticationRequired, AuthStore
-
-            auth_store = AuthStore()
-            token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
-        except AuthenticationRequired:
-            return {
-                "error": "Authentication required",
-                "solution": "Run 'registry login' first",
-            }
-        except ImportError:
-            return {"error": "AuthStore not available"}
+    # Check auth
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
 
     config = RegistryConfig.from_env()
     http = RegistryHttpClient(config)
@@ -1672,22 +1848,12 @@ async def _publish(
         }
 
     # Check auth
-    env_token = _get_token_from_env()
-    if env_token:
-        token = env_token
-    else:
-        try:
-            from lillux.runtime.auth import AuthenticationRequired, AuthStore
-
-            auth_store = AuthStore()
-            token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
-        except AuthenticationRequired:
-            return {
-                "error": "Authentication required",
-                "solution": "Run 'registry login' first",
-            }
-        except ImportError:
-            return {"error": "AuthStore not available"}
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
 
     config = RegistryConfig.from_env()
     http = RegistryHttpClient(config)
@@ -1748,22 +1914,12 @@ async def _unpublish(
         }
 
     # Check auth
-    env_token = _get_token_from_env()
-    if env_token:
-        token = env_token
-    else:
-        try:
-            from lillux.runtime.auth import AuthenticationRequired, AuthStore
-
-            auth_store = AuthStore()
-            token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
-        except AuthenticationRequired:
-            return {
-                "error": "Authentication required",
-                "solution": "Run 'registry login' first",
-            }
-        except ImportError:
-            return {"error": "AuthStore not available"}
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
 
     config = RegistryConfig.from_env()
     http = RegistryHttpClient(config)
@@ -1900,22 +2056,12 @@ async def _push_bundle(
         }
 
     # Auth check
-    env_token = _get_token_from_env()
-    if env_token:
-        token = env_token
-    else:
-        try:
-            from lillux.runtime.auth import AuthenticationRequired, AuthStore
-
-            auth_store = AuthStore()
-            token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:write")
-        except AuthenticationRequired:
-            return {
-                "error": "Authentication required",
-                "solution": "Run 'registry login' first",
-            }
-        except ImportError:
-            return {"error": "AuthStore not available"}
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
 
     # Push to registry
     config = RegistryConfig.from_env()
@@ -1981,22 +2127,12 @@ async def _pull_bundle(
         }
 
     # Auth check
-    env_token = _get_token_from_env()
-    if env_token:
-        token = env_token
-    else:
-        try:
-            from lillux.runtime.auth import AuthenticationRequired, AuthStore
-
-            auth_store = AuthStore()
-            token = await auth_store.get_token(REGISTRY_SERVICE, scope="registry:read")
-        except AuthenticationRequired:
-            return {
-                "error": "Authentication required",
-                "solution": "Run 'registry login' first",
-            }
-        except ImportError:
-            return {"error": "AuthStore not available"}
+    token = await _resolve_auth_token(scope="registry:read")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
 
     # Pull from registry
     config = RegistryConfig.from_env()

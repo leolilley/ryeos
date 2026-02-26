@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:12:47Z:2bedbcb3c19b9b4ed8b7e8e391fe49833cc2a5dcddd4c0afa7f523a8870829d0:7REwLlM6DU5Xv6BNf8O0Ffgl-rJUPHA_gHlQqFBS0zb72uVBDr9nM0OlvG5eLqXev04jv5zxBK7ZpPV9nsH6Bw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:ad2b6752c5cf0a521fd4e1cfe844893d1ef559f4780f832de31f427a6df211a0:4CcLWBubA_OkFZ0j2mSuOGn6yKL24y3VdzHpkenSuCI-bhM9NaAIKGnHFyx14bQcNMQPlGLpPwRP4jDUTIAJCA==:4b987fd4e40303ac -->
 
 ```yaml
 name: signing-and-integrity
@@ -95,7 +95,7 @@ For bundles, provision signing keys with `action: trust, space: project`.
 from lillux.primitives.signing import sign_hash, verify_signature
 
 # 1. Load existing keypair (fails if none exists)
-private_pem, public_pem = load_keypair(key_dir=~/.ai/keys/)
+private_pem, public_pem = load_keypair(key_dir=~/.ai/config/keys/signing/)
 
 # 2. Compute content hash
 content_hash = MetadataManager.compute_hash(item_type, content)
@@ -157,11 +157,11 @@ def verify_item(file_path, item_type, project_path=None):
 
 ## Trust Store
 
-The `TrustStore` manages which Ed25519 public keys are trusted for signature verification. Trusted keys are TOML identity documents at `.ai/trusted_keys/{fingerprint}.toml`. There are no exceptions — every item that executes must pass signature verification against a trusted key, including Rye's own system tools.
+The `TrustStore` manages which Ed25519 public keys are trusted for signature verification. Trusted keys are TOML identity documents at `.ai/config/keys/trusted/{fingerprint}.toml`. There are no exceptions — every item that executes must pass signature verification against a trusted key, including Rye's own system tools.
 
 ### Zero Exceptions Policy
 
-Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`, and every system item — every directive, tool, runtime, parser, extractor, and knowledge entry — is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key. The same key is used for registry publishing.
+Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the author's public key as a TOML identity document at `.ai/config/keys/trusted/{fingerprint}.toml`, and every system item — every directive, tool, runtime, parser, extractor, and knowledge entry — is signed with this key. When you install Rye, you are trusting Leo Lilley's signing key. The same key is used for registry publishing.
 
 There is no bypass for system items. There is no "trusted by default" escape hatch. The verification flow is identical whether the item lives in project space, user space, or system space:
 
@@ -173,7 +173,7 @@ There is no bypass for system items. There is no "trusted by default" escape hat
 ### Identity Document Format
 
 ```toml
-# .ai/trusted_keys/{fingerprint}.toml
+# .ai/config/keys/trusted/{fingerprint}.toml
 fingerprint = "bc8e267dadcce3a4"
 owner = "leo"
 attestation = ""
@@ -191,12 +191,12 @@ MCowBQYDK2VwAyEA...
 The trust store uses the same 3-tier resolution as directives, tools, and knowledge:
 
 ```
-project/.ai/trusted_keys/{fingerprint}.toml  →  (highest priority)
-user/.ai/trusted_keys/{fingerprint}.toml     →
-system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
+project/.ai/config/keys/trusted/{fingerprint}.toml  →  (highest priority)
+user/.ai/config/keys/trusted/{fingerprint}.toml     →
+system/.ai/config/keys/trusted/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
 ```
 
-First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
+First match wins. The system bundle ships the author's key at `rye/.ai/config/keys/trusted/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
 
 ### Key Sources
 

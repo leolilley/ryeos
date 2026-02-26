@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:02:40Z:ba25d77e7046327b39970fb805c1a872063d6993cc7c060d7fd5c8958c464e75:XieXHj8iABRVg6QDhs7Srx0gecK8Q4x16Uiey1KiSgLtMEQH0515UO1oMDVcw4zVPMu-au7xvGTjsme22zYcBA==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:52:24Z:ba25d77e7046327b39970fb805c1a872063d6993cc7c060d7fd5c8958c464e75:XieXHj8iABRVg6QDhs7Srx0gecK8Q4x16Uiey1KiSgLtMEQH0515UO1oMDVcw4zVPMu-au7xvGTjsme22zYcBA==:4b987fd4e40303ac
 name: git
 category: "rye/agent/permissions/capabilities/tools/rye"
 tool_type: "config"

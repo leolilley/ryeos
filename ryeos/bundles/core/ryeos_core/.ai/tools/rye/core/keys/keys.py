@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:02:30Z:303bfcdbb721271f698837452ffd8ddb091c7ca6dab24ba7af06ec60570f5353:r6W0Gvbc7lHv4AHTVppUkU1B_Z5l0fRkVgJJdF9U7icvbEPS6cGKM3dGRhI2ITikyjg5OeknRsdtTAmjeEExCQ==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:52:24Z:4e03ca5e8af1835a72638d0fddbac4855ced6dc3c23880a020326eebe635ec84:r5wAT-dP_ZoAXyqJwCbtRa4PCFdHtW3WN9ZXDPbVsWPpaxQwX0L2aU3x2KSJNuZ0wY2jU_Y1ChZXyKxsnb2jAA==:4b987fd4e40303ac
 """Key management tool — generate, inspect, and trust Ed25519 signing keys.
 
 The user's signing identity. Handles keypair generation, fingerprint display,
@@ -6,8 +6,9 @@ and trusted key provisioning into project or user space.
 
 Actions:
   generate - Create a new Ed25519 keypair (or return existing)
+  import   - Import a private key from an environment variable (for CI/serverless)
   info     - Show current key fingerprint and public key
-  trust    - Add the current key to a space's trusted_keys (signed TOML)
+  trust    - Add the current key to a space's config/keys/trusted (signed TOML)
   list     - List all trusted keys across all spaces
   remove   - Remove a key from the user trust store
 """
@@ -28,11 +29,12 @@ CONFIG_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["generate", "info", "trust", "list", "remove"],
+            "enum": ["generate", "import", "info", "trust", "list", "remove"],
             "description": (
-                "Key operation: generate (create keypair), info (show fingerprint), "
-                "trust (add key to space), list (show all trusted keys), "
-                "remove (remove from user trust store)"
+                "Key operation: generate (create keypair), "
+                "import (inject private key from env var for CI/serverless), "
+                "info (show fingerprint), trust (add key to space), "
+                "list (show all trusted keys), remove (remove from user trust store)"
             ),
         },
         "space": {
@@ -52,6 +54,14 @@ CONFIG_SCHEMA = {
             "type": "boolean",
             "description": "Force regeneration of keypair even if one exists.",
         },
+        "env_var": {
+            "type": "string",
+            "description": "Environment variable containing private key PEM for import action. Default: RYE_SIGNING_KEY.",
+        },
+        "auto_trust": {
+            "type": "boolean",
+            "description": "Automatically trust the imported key in user space. Default: true.",
+        },
     },
     "required": ["action"],
 }
@@ -64,6 +74,8 @@ def execute(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     try:
         if action == "generate":
             return _generate(params, project_path)
+        elif action == "import":
+            return _import(params, project_path)
         elif action == "info":
             return _info(params, project_path)
         elif action == "trust":
@@ -75,7 +87,7 @@ def execute(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
         else:
             return {
                 "success": False,
-                "error": f"Unknown action: {action}. Valid: generate, info, trust, list, remove",
+                "error": f"Unknown action: {action}. Valid: generate, import, info, trust, list, remove",
             }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -86,7 +98,7 @@ def _generate(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_user_space
 
-    key_dir = get_user_space() / AI_DIR / "keys"
+    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
     force = params.get("force", False)
 
     if force and key_dir.exists():
@@ -115,12 +127,88 @@ def _generate(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     }
 
 
+def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
+    """Import a private key from an environment variable.
+
+    Reads an Ed25519 private key PEM from an env var, derives the public key,
+    writes both to ~/.ai/config/keys/signing/, and optionally trusts the key in user space.
+    Designed for CI/CD and serverless containers.
+    """
+    import os
+    from cryptography.hazmat.primitives import serialization
+    from lillux.primitives.signing import (
+        save_keypair,
+        compute_key_fingerprint,
+    )
+    from rye.utils.path_utils import get_user_space
+
+    env_var = params.get("env_var", "RYE_SIGNING_KEY")
+    auto_trust = params.get("auto_trust", True)
+
+    raw_value = os.environ.get(env_var)
+    if not raw_value:
+        return {
+            "success": False,
+            "error": f"Environment variable {env_var} is not set.",
+            "hint": f"Export your private key: export {env_var}=\"$(cat ~/.ai/config/keys/signing/private_key.pem)\"",
+        }
+
+    # Normalize: env vars often have literal \n instead of newlines
+    private_pem = raw_value.replace("\\n", "\n").encode("utf-8")
+
+    # Validate and derive public key
+    try:
+        private_key = serialization.load_pem_private_key(private_pem, password=None)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Invalid private key in {env_var}: {e}",
+            "hint": "Value must be a PEM-encoded Ed25519 private key.",
+        }
+
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    # Write to key directory
+    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    save_keypair(private_pem, public_pem, key_dir)
+    fingerprint = compute_key_fingerprint(public_pem)
+
+    result = {
+        "success": True,
+        "fingerprint": fingerprint,
+        "public_key_pem": public_pem.decode("utf-8").strip(),
+        "key_dir": str(key_dir),
+        "env_var": env_var,
+        "message": f"Imported signing key from ${env_var} (fingerprint: {fingerprint})",
+    }
+
+    # Auto-trust in user space
+    if auto_trust:
+        from rye.utils.trust_store import TrustStore
+
+        store = TrustStore(project_path=Path(project_path))
+        existing = store.get_key(fingerprint)
+        if existing:
+            result["trusted"] = True
+            result["trust_message"] = f"Key {fingerprint} already trusted in {existing.source} space."
+        else:
+            store.add_key(public_pem, owner="local", space="user")
+            result["trusted"] = True
+            result["trust_message"] = f"Key {fingerprint} trusted in user space."
+
+    return result
+
+
 def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Show current key fingerprint and public key."""
     from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_user_space
 
-    key_dir = get_user_space() / AI_DIR / "keys"
+    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
 
     if not (key_dir / "private_key.pem").exists():
         return {
@@ -149,12 +237,12 @@ def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 
 def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
-    """Add the current signing key to a space's trusted_keys."""
+    """Add the current signing key to a space's config/keys/trusted."""
     from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_user_space
     from rye.utils.trust_store import TrustStore
 
-    key_dir = get_user_space() / AI_DIR / "keys"
+    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
 
     if not (key_dir / "private_key.pem").exists():
         return {
@@ -185,9 +273,9 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
     # Determine where it was written
     if space == "project":
-        trust_dir = Path(project_path) / AI_DIR / "trusted_keys"
+        trust_dir = Path(project_path) / AI_DIR / "config" / "keys" / "trusted"
     else:
-        trust_dir = get_user_space() / AI_DIR / "trusted_keys"
+        trust_dir = get_user_space() / AI_DIR / "config" / "keys" / "trusted"
 
     key_file = trust_dir / f"{result_fp}.toml"
 

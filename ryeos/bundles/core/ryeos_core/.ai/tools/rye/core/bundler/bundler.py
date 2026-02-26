@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:02:29Z:56e383536dcbfb68671c5dbd7dd4aa8eb84a08151e72563a016f82c59addc7de:PMLznVlfTjZ3ER-okP2V1huyGX6tc9cA2BgI2dBysSF5P_PmG5-bek62PxDjHGupLTJ9Yt7iTEm3Uk2zD-1xAg==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:53:14Z:0f85c0ea07ae2407adddc669f433e241ead9c64521a27254874e273a78cd0829:riIJ9XZKqGRX52wTzvSzryDl8-xLeZqSQG2b_mTmAfboBQlCquhe73hOWoXR6GmQ-vtyvOq9_GrimoRTn07KBw==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -88,7 +88,7 @@ _TYPE_DIRS = {
 }
 
 # Additional .ai/ subdirectories to include in bundles
-_EXTRA_DIRS = ["trusted_keys"]
+_EXTRA_DIRS = ["config/keys/trusted"]
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
                 }
             )
 
-    # Extra directories (trusted_keys, etc.)
+    # Extra directories (config/keys/trusted, etc.)
     for dir_name in _EXTRA_DIRS:
         extra_dir = project_path / AI_DIR / dir_name
         if not extra_dir.is_dir():
@@ -393,7 +393,7 @@ def _sign_manifest(content: str) -> str:
 
     trust_store = TrustStore()
     if not trust_store.is_trusted(pubkey_fp):
-        trust_store.add_key(public_pem, label="self")
+        trust_store.add_key(public_pem, owner="local")
 
     sig_line = f"# rye:signed:{timestamp}:{content_hash}:{ed25519_sig}:{pubkey_fp}\n"
     return sig_line + content
@@ -585,7 +585,7 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
                 }
             )
 
-    # Walk extra directories (trusted_keys, etc.)
+    # Walk extra directories (config/keys/trusted, etc.)
     for dir_name in _EXTRA_DIRS:
         extra_dir = ai_dir / dir_name
         if not extra_dir.is_dir():

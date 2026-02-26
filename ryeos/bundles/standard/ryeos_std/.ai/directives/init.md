@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:06:30Z:2be64011d8e55930a7fe30b5fea7b44e6dbf5741a2972e575d841b9b5aa1178b:hEdtqU3jRBFIP2SQ_uHTDWc3nXjubxDnM1Hqbm9GGlANW2mfQOHUMYzCbx6NTrJfnOsltdI1VOmusGLA15a8Dw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:2be64011d8e55930a7fe30b5fea7b44e6dbf5741a2972e575d841b9b5aa1178b:hEdtqU3jRBFIP2SQ_uHTDWc3nXjubxDnM1Hqbm9GGlANW2mfQOHUMYzCbx6NTrJfnOsltdI1VOmusGLA15a8Dw==:4b987fd4e40303ac -->
 
 # Init
 
@@ -122,8 +122,7 @@ Do NOT use shell commands (mkdir, touch, bash). Make ONE rye_execute call with a
             {"path": "{env:USER_SPACE}/{env:AI_DIR}/directives/.gitkeep", "content": ""},
             {"path": "{env:USER_SPACE}/{env:AI_DIR}/tools/.gitkeep", "content": ""},
             {"path": "{env:USER_SPACE}/{env:AI_DIR}/knowledge/.gitkeep", "content": ""},
-            {"path": "{env:USER_SPACE}/{env:AI_DIR}/keys/.gitkeep", "content": ""},
-            {"path": "{env:USER_SPACE}/{env:AI_DIR}/trusted_keys/.gitkeep", "content": ""}
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/config/keys/.gitkeep", "content": ""}
           ]
         }
       )
@@ -172,7 +171,7 @@ Signing identity created.
 
 This is your Ed25519 key. Every directive, tool, and knowledge entry you sign
 will carry this fingerprint. Keep your private key safe — it lives at
-`{env:USER_SPACE}/.ai/keys/`.
+`{env:USER_SPACE}/.ai/config/keys/signing/`.
 
 </render>
   </step>
@@ -249,7 +248,7 @@ rye execute directive graphs
 </process>
 
 <success_criteria>
-<criterion>.ai/ directory created in the resolved space with config/, directives/, tools/, knowledge/, keys/, trusted_keys/ subdirectories</criterion>
+<criterion>.ai/ directory created in the resolved space with config/, config/keys/, directives/, tools/, knowledge/ subdirectories</criterion>
 <criterion>Ed25519 signing keypair generated and trusted in user space (user space only)</criterion>
 <criterion>User shown their key fingerprint (user space only)</criterion>
 <criterion>User informed of next guide to run (user space only)</criterion>

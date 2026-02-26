@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:02:48Z:5b690a6704b241e12076949b9049a1f1b08a7c966dabc2421667691b47e180fc:EBB6ttzUcMAgZwMFvJxvpqUx5a33uCodNnlquRsCS-biVOxeoGe6PuBjwcfBY5amqwdwsC1fNuozLt6T8d-MCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:5b690a6704b241e12076949b9049a1f1b08a7c966dabc2421667691b47e180fc:EBB6ttzUcMAgZwMFvJxvpqUx5a33uCodNnlquRsCS-biVOxeoGe6PuBjwcfBY5amqwdwsC1fNuozLt6T8d-MCg==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # NPM
 

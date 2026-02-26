@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Supabase
     supabase_url: str
     supabase_service_key: str  # Secret key from Supabase dashboard
-    supabase_jwt_secret: str   # JWT secret for token validation
+    supabase_jwt_secret: str   # Bootstrap only: JWT secret for initial API key creation
 
     # Server
     host: str = "0.0.0.0"

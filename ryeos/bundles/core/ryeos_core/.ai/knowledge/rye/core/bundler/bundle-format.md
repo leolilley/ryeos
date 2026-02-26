@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:12:47Z:8042f91af2f30a635561e651ff83cca77bce55aaeb770b202e6b163a64bc5492:Vb0rPWoEN98qqVgIzc9hGGN_G7WGPhCo7rPw1oAc_JgaoxLZ0QdRd08osPv7GagyqSgCl00PyH9GThEho22mBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:d46d88ef3fb425de6fbfe225dbf753dd0d0872120011425942244fd06cc6ca32:flGtB5OKviMXvnVpIa5Mgz_YqGzmQzXDB3MtFvqp-S_PZcUG5T95eQTz1cOcypN3BJHntPNg5ieCMIgNLtWABg==:4b987fd4e40303ac -->
 
 ```yaml
 name: bundle-format
@@ -143,7 +143,7 @@ def get_bundle() -> dict:
     }
 ```
 
-The author's signing key is shipped as a TOML identity document at `rye/.ai/trusted_keys/{fingerprint}.toml` within the bundle root, discovered via standard 3-tier resolution.
+The author's signing key is shipped as a TOML identity document at `rye/.ai/config/keys/trusted/{fingerprint}.toml` within the bundle root, discovered via standard 3-tier resolution.
 
 ## Category Scoping
 
@@ -160,11 +160,11 @@ The resolver uses prefix matching — an item with category `rye/core/registry` 
 
 ## Author Key Trust
 
-Every bundle ships the author's Ed25519 public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`. All items in the bundle are signed with this key. The Rye system bundle is signed by Leo Lilley — the same key used for registry publishing.
+Every bundle ships the author's Ed25519 public key as a TOML identity document at `.ai/config/keys/trusted/{fingerprint}.toml`. All items in the bundle are signed with this key. The Rye system bundle is signed by Leo Lilley — the same key used for registry publishing.
 
 The trust model has **no exceptions**: system items go through the same signature verification as project and user items. The trust store uses standard 3-tier resolution (project → user → system), so the author's key in the system bundle is discovered automatically — no special bootstrap logic required.
 
-Third-party bundles follow the same pattern: ship a `.toml` identity document in `.ai/trusted_keys/`, and the key is resolved via 3-tier lookup. Users trust the bundle author, not the package. To provision signing keys for a bundle, use the `rye/core/keys/keys` tool with `action: trust, space: project`.
+Third-party bundles follow the same pattern: ship a `.toml` identity document in `.ai/config/keys/trusted/`, and the key is resolved via 3-tier lookup. Users trust the bundle author, not the package. To provision signing keys for a bundle, use the `rye/core/keys/keys` tool with `action: trust, space: project`.
 
 ## How get_system_spaces() Loads Bundles
 

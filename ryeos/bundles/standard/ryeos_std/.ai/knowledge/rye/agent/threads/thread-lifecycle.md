@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:02:40Z:ebb3c7381d5d042ba086d6e51e793bd6f5c044c109486197fceec60d4624386b:2EH8PbaPyoWLHmYdyyV9cAmHKdKfWtUUvIGLysFPZOSdwxXNYiufvavTnidSDF9TMTqc_wD3h-UHgGBPr7e5BQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:ebb3c7381d5d042ba086d6e51e793bd6f5c044c109486197fceec60d4624386b:2EH8PbaPyoWLHmYdyyV9cAmHKdKfWtUUvIGLysFPZOSdwxXNYiufvavTnidSDF9TMTqc_wD3h-UHgGBPr7e5BQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: thread-lifecycle

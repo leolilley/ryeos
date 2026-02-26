@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:02:40Z:0682c5db8ff6c7ba58a0a3c78b62b13982ffa49f771d0da56ee5b6fd33490b68:Xez5lnNzoWoKSKY-bJWldAbtDZzysyBFDFzTs9mRP9ktRJ5NZQNg1LG6EKlwKv2yMd-0rxxMTa8NSXvX3lKtAQ==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:52:24Z:0682c5db8ff6c7ba58a0a3c78b62b13982ffa49f771d0da56ee5b6fd33490b68:Xez5lnNzoWoKSKY-bJWldAbtDZzysyBFDFzTs9mRP9ktRJ5NZQNg1LG6EKlwKv2yMd-0rxxMTa8NSXvX3lKtAQ==:4b987fd4e40303ac
 name: db
 category: "rye/agent/permissions/capabilities/tools/rye"
 tool_type: "config"

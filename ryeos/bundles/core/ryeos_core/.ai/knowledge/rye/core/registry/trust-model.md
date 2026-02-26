@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:12:47Z:3ffecab401215d782ca99f1d9a800af864fc3ac2fd41df9f7801c035b88d433d:1KPxTWxzOtiqMLbWuD3FieN4f2EUbijwv38LN-NwqU0QMNeiiajG8Wm5a26f2-U7EBJNnwnPOSm6vji2l7t1Ag==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:e4cc8eec79c6651ddbcadf46966c8f9448b3f214b055974a9fe7c0def01b4aa3:K-_dW7LyWlpfJir95PR3gFMFZu42O1fscgvKD_P0ET1I7esa4Rar2LN4LAX5eAS6dj_3yYYHjK99672ygmpABw==:4b987fd4e40303ac -->
 
 ```yaml
 name: trust-model
@@ -30,12 +30,12 @@ Ed25519 signing, key pinning, TOFU bootstrap, and verification for Rye OS items.
 ### Keypair Storage
 
 ```
-~/.ai/keys/
+~/.ai/config/keys/signing/
 ├── private_key.pem   # Ed25519 private key (mode 0600)
 └── public_key.pem    # Ed25519 public key (mode 0644)
 ```
 
-Key directory: mode `0700`. Serialized as PEM (PKCS8 private, SubjectPublicKeyInfo public). Keys are managed via the `rye/core/keys/keys` tool (actions: `generate`, `info`, `trust`, `list`, `remove`). Signing no longer auto-generates keypairs — `MetadataManager.create_signature()` uses `load_keypair()` and raises `RuntimeError` if no keypair exists.
+Key directory: mode `0700`. Serialized as PEM (PKCS8 private, SubjectPublicKeyInfo public). Keys are managed via the `rye/core/keys/keys` tool (actions: `generate`, `info`, `trust`, `list`, `remove`, `import`). Signing no longer auto-generates keypairs — `MetadataManager.create_signature()` uses `load_keypair()` and raises `RuntimeError` if no keypair exists.
 
 ### Signature Format
 
@@ -89,7 +89,7 @@ def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
 
 ## Trust Store
 
-**Location:** `~/.ai/trusted_keys/`
+**Location:** `~/.ai/config/keys/trusted/`
 **Implementation:** `rye/rye/utils/trust_store.py`
 
 Every item in Rye — including Rye's own system tools — must pass Ed25519 signature verification against a trusted key. There are no exceptions and no bypass for system items.
@@ -99,7 +99,7 @@ Every item in Rye — including Rye's own system tools — must pass Ed25519 sig
 Trusted keys are TOML identity documents that bind a key to an owner:
 
 ```toml
-# .ai/trusted_keys/{fingerprint}.toml
+# .ai/config/keys/trusted/{fingerprint}.toml
 fingerprint = "bc8e267dadcce3a4"
 owner = "leo"
 attestation = ""
@@ -117,19 +117,19 @@ MCowBQYDK2VwAyEA...
 The trust store uses the same 3-tier resolution as directives, tools, and knowledge:
 
 ```
-project/.ai/trusted_keys/{fingerprint}.toml  →  (highest priority)
-user/.ai/trusted_keys/{fingerprint}.toml     →
-system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
+project/.ai/config/keys/trusted/{fingerprint}.toml  →  (highest priority)
+user/.ai/config/keys/trusted/{fingerprint}.toml     →
+system/.ai/config/keys/trusted/{fingerprint}.toml   →  (lowest priority, shipped with bundle)
 ```
 
-First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — resolved automatically via standard 3-tier lookup, with no special bootstrap logic.
+First match wins. The system bundle ships the author's key at `rye/.ai/config/keys/trusted/{fingerprint}.toml` — resolved automatically via standard 3-tier lookup, with no special bootstrap logic.
 
 ### TrustStore Operations
 
 | Operation                     | Method                        | Behavior                                                                    |
 | ----------------------------- | ----------------------------- | --------------------------------------------------------------------------- |
 | Check trust                   | `is_trusted(fingerprint)`     | Delegates to `get_key()`, returns True if key found                         |
-| Get key by fingerprint        | `get_key(fingerprint)`        | 3-tier search: project → user → system `.ai/trusted_keys/{fp}.toml`        |
+| Get key by fingerprint        | `get_key(fingerprint)`        | 3-tier search: project → user → system `.ai/config/keys/trusted/{fp}.toml`        |
 | Add key                       | `add_key(public_key_pem)`     | Writes `{fingerprint}.toml` identity document, returns fingerprint          |
 | Remove key                    | `remove_key(fingerprint)`     | Deletes `{fingerprint}.toml` from user store                               |
 | Pin registry key              | `pin_registry_key(pem)`       | Adds key with `owner="rye-registry"` (**no-op if already exists**)          |
@@ -171,7 +171,7 @@ rye_sign(
     action="trust",
     public_key_pem="<PEM content>"
 )
-# Writes to ~/.ai/trusted_keys/{fingerprint}.pem
+# Writes to ~/.ai/config/keys/trusted/{fingerprint}.toml
 ```
 
 ## Verification on Execute
@@ -254,6 +254,42 @@ Manifest verification via `validate_bundle_manifest()`:
 | **Per-file SHA256**    | Compute hash of each file, compare to manifest's recorded hash     |
 | **Inline signatures**  | If `inline_signed: true`, also `verify_item()` on that file       |
 | **Missing files**      | Files in manifest but not on disk → flagged                        |
+
+## API Key Authentication
+
+The Rye Registry uses `rye_sk_...` API keys as the primary authentication mechanism. JWTs are used only once during the initial device auth flow to bootstrap the first API key.
+
+### Auth Flow
+
+```
+Device flow → OAuth → temporary JWT → create rye_sk_... API key → store API key → use everywhere
+```
+
+### Token Resolution (Client)
+
+1. `RYE_REGISTRY_API_KEY` env var — primary for CI/serverless
+2. Keyring (AuthStore) — stores API key from device flow
+
+### API Key Format
+
+```
+rye_sk_{secrets.token_urlsafe(32)}
+```
+
+Only the SHA256 hash is stored server-side. The raw key is returned once on creation.
+
+### Registry API Auth Detection
+
+- `Bearer rye_sk_...` → API key path (primary)
+- Other Bearer tokens → JWT validation (bootstrap only, for initial API key creation)
+
+### Management Actions
+
+| Action | Description |
+| --- | --- |
+| `create_api_key` | Create new API key (requires existing session) |
+| `list_api_keys` | List active keys (prefix + name + created) |
+| `revoke_api_key` | Revoke by name |
 
 ## Threat Model
 

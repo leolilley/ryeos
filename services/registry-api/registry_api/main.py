@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 
 from registry_api import __version__
-from registry_api.auth import User, get_current_user, get_current_user_optional
+from registry_api.auth import API_KEY_PREFIX, User, get_current_user, get_current_user_optional, _hash_api_key
 from registry_api.config import Settings, get_settings
 from registry_api.models import (
     build_item_id,
@@ -39,6 +39,11 @@ from registry_api.models import (
     SearchResultItem,
     SignatureInfo,
     VisibilityResponse,
+    CreateApiKeyRequest,
+    CreateApiKeyResponse,
+    ApiKeyInfo,
+    ListApiKeysResponse,
+    RevokeApiKeyResponse,
 )
 from registry_api.validation import (
     get_registry_public_key,
@@ -836,6 +841,143 @@ async def pull_bundle(
         author=author_username,
         created_at=target["created_at"],
     )
+
+
+# =============================================================================
+# API KEYS - Create, list, and revoke API keys for non-interactive auth
+# =============================================================================
+
+
+@app.post("/v1/api-keys", response_model=CreateApiKeyResponse)
+async def create_api_key(
+    request: CreateApiKeyRequest,
+    user: User = Depends(get_current_user),
+):
+    """Create a new API key for non-interactive authentication.
+
+    The raw key is returned only once in the response. Store it securely.
+    """
+    import secrets
+    from datetime import datetime, timedelta, timezone
+
+    supabase = get_supabase()
+
+    await _ensure_user(user.id, user.username)
+
+    # Generate key: rye_sk_ + 32 bytes of randomness as url-safe base64
+    raw_secret = secrets.token_urlsafe(32)
+    raw_key = f"{API_KEY_PREFIX}{raw_secret}"
+    key_prefix = raw_secret[:8]
+    key_hash = _hash_api_key(raw_key)
+
+    expires_at = None
+    if request.expires_in_days:
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
+        ).isoformat()
+
+    try:
+        result = supabase.table("api_keys").insert({
+            "user_id": user.id,
+            "name": request.name,
+            "key_prefix": key_prefix,
+            "key_hash": key_hash,
+            "scopes": request.scopes,
+            "expires_at": expires_at,
+        }).execute()
+    except Exception as e:
+        error_msg = str(e)
+        if "idx_api_keys_user_name" in error_msg or "duplicate" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"API key with name '{request.name}' already exists. Revoke it first.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create API key: {error_msg}",
+        )
+
+    record = result.data[0]
+    logger.info(f"API key created: {request.name} for @{user.username}")
+
+    return CreateApiKeyResponse(
+        key=raw_key,
+        name=request.name,
+        key_prefix=key_prefix,
+        scopes=request.scopes,
+        expires_at=record.get("expires_at"),
+        created_at=record["created_at"],
+    )
+
+
+@app.get("/v1/api-keys", response_model=ListApiKeysResponse)
+async def list_api_keys(
+    user: User = Depends(get_current_user),
+):
+    """List all API keys for the authenticated user."""
+    supabase = get_supabase()
+
+    result = (
+        supabase.table("api_keys")
+        .select("id, name, key_prefix, scopes, created_at, expires_at, last_used_at, revoked_at")
+        .eq("user_id", user.id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    keys = [
+        ApiKeyInfo(
+            id=row["id"],
+            name=row["name"],
+            key_prefix=row["key_prefix"],
+            scopes=row["scopes"],
+            created_at=row["created_at"],
+            expires_at=row.get("expires_at"),
+            last_used_at=row.get("last_used_at"),
+            revoked=row.get("revoked_at") is not None,
+        )
+        for row in result.data
+    ]
+
+    return ListApiKeysResponse(keys=keys, count=len(keys))
+
+
+@app.delete("/v1/api-keys/{name}", response_model=RevokeApiKeyResponse)
+async def revoke_api_key(
+    name: str,
+    user: User = Depends(get_current_user),
+):
+    """Revoke an API key by name."""
+    supabase = get_supabase()
+
+    # Find the key
+    result = (
+        supabase.table("api_keys")
+        .select("id, revoked_at")
+        .eq("user_id", user.id)
+        .eq("name", name)
+        .execute()
+    )
+
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"API key '{name}' not found",
+        )
+
+    if result.data[0].get("revoked_at"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"API key '{name}' is already revoked",
+        )
+
+    supabase.table("api_keys").update(
+        {"revoked_at": "now()"}
+    ).eq("id", result.data[0]["id"]).execute()
+
+    logger.info(f"API key revoked: {name} for @{user.username}")
+
+    return RevokeApiKeyResponse(status="revoked", name=name)
 
 
 # =============================================================================

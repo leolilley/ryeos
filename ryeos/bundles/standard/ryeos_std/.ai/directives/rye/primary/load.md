@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:02:40Z:1d7b49bef84cc21979cb5098241cd439995f50675368ad8a993e9717ac3587de:ziJK9Fh9bjuswTctcYv4hYTmCYKZVo3RTd9TAEZ3CXyLiF0-O9cGhweO2a8z2sCPAHALuYnA7Jeql6CKc10rBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:1d7b49bef84cc21979cb5098241cd439995f50675368ad8a993e9717ac3587de:ziJK9Fh9bjuswTctcYv4hYTmCYKZVo3RTd9TAEZ3CXyLiF0-O9cGhweO2a8z2sCPAHALuYnA7Jeql6CKc10rBA==:4b987fd4e40303ac -->
 # Load
 
 Load or copy a directive, tool, or knowledge item by id and source.

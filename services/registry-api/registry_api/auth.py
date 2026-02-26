@@ -1,12 +1,17 @@
-"""Authentication utilities for Registry API."""
+"""Authentication utilities for Registry API.
 
+Primary auth: API keys (rye_sk_...) — non-interactive, used for all operations.
+Bootstrap auth: Supabase JWT (OAuth/device flow) — used once to create initial API key.
+"""
+
+import hashlib
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
 import httpx
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from jose.backends import ECKey
@@ -20,6 +25,9 @@ security_optional = HTTPBearer(auto_error=False)
 
 # Cache JWKS for 1 hour
 _jwks_cache: dict = {}
+
+# API key prefix
+API_KEY_PREFIX = "rye_sk_"
 
 
 @dataclass
@@ -64,6 +72,9 @@ def _get_signing_key(jwks: dict, kid: str) -> dict:
     )
 
 
+# --- Bootstrap auth (JWT) ---
+# Used only for initial API key creation via device auth flow.
+# Once an API key exists, all subsequent requests use rye_sk_... tokens.
 def decode_supabase_token(token: str, settings: Settings) -> dict:
     """Decode and validate a Supabase JWT token.
 
@@ -124,11 +135,100 @@ def decode_supabase_token(token: str, settings: Settings) -> dict:
         )
 
 
+def _hash_api_key(key: str) -> str:
+    """Compute SHA256 hash of an API key for lookup."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+async def _resolve_api_key(token: str, settings: Settings) -> User:
+    """Resolve an API key (rye_sk_...) to a User.
+
+    Looks up the key hash in the api_keys table, validates it's active,
+    updates last_used_at, and returns the associated User.
+    """
+    from supabase import create_client
+
+    key_hash = _hash_api_key(token)
+
+    supabase = create_client(settings.supabase_url, settings.supabase_service_key)
+
+    result = (
+        supabase.table("api_keys")
+        .select("id, user_id, scopes, expires_at, revoked_at")
+        .eq("key_hash", key_hash)
+        .execute()
+    )
+
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    key_record = result.data[0]
+
+    # Check revoked
+    if key_record.get("revoked_at"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Check expired
+    if key_record.get("expires_at"):
+        from datetime import datetime, timezone
+
+        expires = datetime.fromisoformat(key_record["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key has expired",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    # Update last_used_at
+    try:
+        supabase.table("api_keys").update(
+            {"last_used_at": "now()"}
+        ).eq("id", key_record["id"]).execute()
+    except Exception:
+        pass  # Non-critical
+
+    # Resolve user
+    user_id = key_record["user_id"]
+    user_result = (
+        supabase.table("users")
+        .select("id, username, email")
+        .eq("id", user_id)
+        .execute()
+    )
+
+    if not user_result.data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key user not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_data = user_result.data[0]
+    return User(
+        id=user_data["id"],
+        email=user_data.get("email"),
+        username=user_data["username"],
+    )
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     settings: Settings = Depends(get_settings),
 ) -> User:
-    """Extract and validate user from JWT token.
+    """Extract and validate user from Bearer token.
+
+    Auth detection order:
+    1. API keys (rye_sk_...) — primary auth for all operations
+    2. Supabase JWTs — bootstrap only, for initial API key creation
 
     Args:
         credentials: Bearer token from Authorization header
@@ -141,6 +241,12 @@ async def get_current_user(
         HTTPException: If authentication fails
     """
     token = credentials.credentials
+
+    # API key path
+    if token.startswith(API_KEY_PREFIX):
+        return await _resolve_api_key(token, settings)
+
+    # JWT path
     payload = decode_supabase_token(token, settings)
 
     user_id = payload.get("sub")

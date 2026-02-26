@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:12:47Z:e365a1fe46c6e9ecdf8346f43d6f1643b66e03acda354b1b21fc3bba335606e9:wQftaymnmKGPs8cTUzXD7ROduHuTP5TLI51cOtOxe7WqAWuyBbycG-2P4EoHXcuwXIEdvwCRDr8njDuPJ_KQDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:e365a1fe46c6e9ecdf8346f43d6f1643b66e03acda354b1b21fc3bba335606e9:wQftaymnmKGPs8cTUzXD7ROduHuTP5TLI51cOtOxe7WqAWuyBbycG-2P4EoHXcuwXIEdvwCRDr8njDuPJ_KQDQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: sign-semantics

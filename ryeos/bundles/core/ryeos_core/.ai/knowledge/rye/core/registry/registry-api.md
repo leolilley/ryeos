@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:02:34Z:7ab41fd349a15c1802d9d9ba09c410034b4cc5ea4555f72d332bf5dd1404755f:_CDn6jnU58V5Di3vwJgKfzL5uhV1zkg_50cwQAx_zpDtClesbn9HKbNOC2yIxsFqBZ2efZXyVDN2DMkhLl0aDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:7ab41fd349a15c1802d9d9ba09c410034b4cc5ea4555f72d332bf5dd1404755f:_CDn6jnU58V5Di3vwJgKfzL5uhV1zkg_50cwQAx_zpDtClesbn9HKbNOC2yIxsFqBZ2efZXyVDN2DMkhLl0aDQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api

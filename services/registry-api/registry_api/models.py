@@ -220,3 +220,52 @@ class BundlePullResponse(BaseModel):
     files: Dict[str, Any]
     author: str
     created_at: datetime
+
+
+# API Key Models
+
+
+class CreateApiKeyRequest(BaseModel):
+    """Request to create an API key."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    scopes: List[str] = Field(default=["registry:read", "registry:write"])
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=365)
+
+
+class CreateApiKeyResponse(BaseModel):
+    """Response with the created API key (shown only once)."""
+
+    key: str
+    name: str
+    key_prefix: str
+    scopes: List[str]
+    expires_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ApiKeyInfo(BaseModel):
+    """API key info (without the secret)."""
+
+    id: str
+    name: str
+    key_prefix: str
+    scopes: List[str]
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    revoked: bool = False
+
+
+class ListApiKeysResponse(BaseModel):
+    """Response listing API keys."""
+
+    keys: List[ApiKeyInfo]
+    count: int
+
+
+class RevokeApiKeyResponse(BaseModel):
+    """Response for API key revocation."""
+
+    status: Literal["revoked"]
+    name: str

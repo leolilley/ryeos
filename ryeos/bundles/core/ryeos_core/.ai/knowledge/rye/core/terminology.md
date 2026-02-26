@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T05:02:34Z:a506b6a12dba813bb5419168fa64a111f4b2c190eadf3b869ede031fca69844a:hvKFDdBL6uji2D4l-K0iuikwy066txKd18HiZgvTeIVbhtBg5W2HBCg3IdrqDc7G2AGia47cFv8nKdjAmPXjDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-26T05:52:24Z:a506b6a12dba813bb5419168fa64a111f4b2c190eadf3b869ede031fca69844a:hvKFDdBL6uji2D4l-K0iuikwy066txKd18HiZgvTeIVbhtBg5W2HBCg3IdrqDc7G2AGia47cFv8nKdjAmPXjDw==:4b987fd4e40303ac -->
 
 ```yaml
 name: terminology

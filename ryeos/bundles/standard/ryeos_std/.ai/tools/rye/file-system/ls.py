@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:02:40Z:09174c1f8385c5ebec3b2c0aebb678fe3d872e0769b818d2524bec0485d047c5:G2yJJo4AzDqRcbu99zLo7hlQ58PKBK7y2NrOoIoVl35F3g_YfNSQsWeWdRF2toy743X_5svGimcftkJG6pt2DA==:4b987fd4e40303ac
+# rye:signed:2026-02-26T05:52:24Z:09174c1f8385c5ebec3b2c0aebb678fe3d872e0769b818d2524bec0485d047c5:G2yJJo4AzDqRcbu99zLo7hlQ58PKBK7y2NrOoIoVl35F3g_YfNSQsWeWdRF2toy743X_5svGimcftkJG6pt2DA==:4b987fd4e40303ac
 """List directory contents."""
 
 import argparse
