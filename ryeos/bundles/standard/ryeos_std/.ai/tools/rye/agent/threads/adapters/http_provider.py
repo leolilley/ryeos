@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:09fdbdacfff269487420e447808e994e279278191afb67e42e2af415b6e86d90:iTRNwkhc2xUmxOvEDnsfRhiOocSsOnmoDygJvrlxp96BEUqFZ7sgjEcRzaXaai0zzdS5FFC6Wmp0N58qxFOiAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T03:49:32Z:3855cf2af62565da879e5d0783c99d0555b88b1cc113781d3e132c4594f031f4:54Z498vf2Wu0Q4emIRmcbBMppDjbklGPl7NDu2leENxv_O8bycnL3PSeYEgeMNVitZzPSgxLAx28mY20g5TCCQ==:9fbfabe975fa5a7f
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T08:12:00Z:5ce28a1e3989d0e70cd9ff1a79596f115d49c9c6fa5e77e23e00dac51781e365:B8jgmAF1OG9VHr92ySfaC2aVSpEQp821kGlTcZOXv6jhrwLyqD3YhdGtkks81BRFYpeGrQulaVrnq9DwNUYaBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T04:41:19Z:56e383536dcbfb68671c5dbd7dd4aa8eb84a08151e72563a016f82c59addc7de:haSaortdVw7Jg8H9HU_RJIAK_XlrDH9MH4vU5mNbKTH9YvOIiNHcJc_916jqZBf02m7aRY7J4fyinwGLvskrAQ==:9fbfabe975fa5a7f
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -86,6 +86,9 @@ _TYPE_DIRS = {
     "tool": "tools",
     "knowledge": "knowledge",
 }
+
+# Additional .ai/ subdirectories to include in bundles
+_EXTRA_DIRS = ["trusted_keys"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +224,13 @@ def _sha256_file(path: Path) -> str:
 
 
 def _classify_file(rel_path: str) -> str:
-    """Classify a file into directive/tool/knowledge/asset by its relative path."""
+    """Classify a file into directive/tool/knowledge/trusted_key/asset by its relative path."""
     for item_type, dir_name in _TYPE_DIRS.items():
         if rel_path.startswith(f"{AI_DIR}/{dir_name}/"):
             return item_type
+    for dir_name in _EXTRA_DIRS:
+        if rel_path.startswith(f"{AI_DIR}/{dir_name}/"):
+            return dir_name
     return "asset"
 
 
@@ -299,6 +305,26 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
                 }
             )
 
+    # Extra directories (trusted_keys, etc.)
+    for dir_name in _EXTRA_DIRS:
+        extra_dir = project_path / AI_DIR / dir_name
+        if not extra_dir.is_dir():
+            continue
+
+        for file_path in sorted(extra_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            if any(d in file_path.parts for d in exclude_dirs):
+                continue
+            rel = str(file_path.relative_to(project_path))
+            files.append(
+                {
+                    "path": rel,
+                    "sha256": _sha256_file(file_path),
+                    "inline_signed": _has_inline_signature(file_path),
+                }
+            )
+
     # Plans and lockfiles (use slug: bundle_id with / -> _)
     bundle_slug = bundle_id.replace("/", "_")
 
@@ -335,9 +361,10 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
 
 def _files_by_type(files: List[Dict[str, Any]]) -> Dict[str, int]:
     """Count files by classified type."""
-    counts: Dict[str, int] = {"directive": 0, "tool": 0, "knowledge": 0, "asset": 0}
+    counts: Dict[str, int] = {}
     for f in files:
-        counts[_classify_file(f["path"])] += 1
+        t = _classify_file(f["path"])
+        counts[t] = counts.get(t, 0) + 1
     return counts
 
 
@@ -555,6 +582,26 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
                     "sha256": _sha256_file(file_path),
                     "inline_signed": _has_inline_signature(file_path),
                     "item_type": item_type,
+                }
+            )
+
+    # Walk extra directories (trusted_keys, etc.)
+    for dir_name in _EXTRA_DIRS:
+        extra_dir = ai_dir / dir_name
+        if not extra_dir.is_dir():
+            continue
+
+        for file_path in sorted(extra_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+
+            rel = str(file_path.relative_to(package_path))
+            files.append(
+                {
+                    "path": rel,
+                    "sha256": _sha256_file(file_path),
+                    "inline_signed": _has_inline_signature(file_path),
+                    "item_type": "asset",
                 }
             )
 

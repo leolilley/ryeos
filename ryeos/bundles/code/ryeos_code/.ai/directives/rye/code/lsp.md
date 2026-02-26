@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-25T07:50:41Z:f546b5f6421d47d19963c045c036f98a43070b2b55ca349751074feb7b8ed4f3:0jGl5w-Hdwataj1OaDneoMmC0vI4oHmOLirk5eTTucB8qYiDeCJZZexl4xpaQc_Z5hijUm7-VbDrm_2CfFygBg==:9fbfabe975fa5a7f -->
-<!-- rye:signed:2026-02-23T02:07:54Z:40579d9448525d88665ab3a9daf8c9538899b3803f8905ac1c8522b6266e16fd:G5RynRkzitB5GN4GB7A9tvsUqrcAfs7KXFym8L6fxrnW1gcjHmS0zvR4Uj51RCMFaKl9qra_S82KKLg8Rg5PBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:41Z:f546b5f6421d47d19963c045c036f98a43070b2b55ca349751074feb7b8ed4f3:0jGl5w-Hdwataj1OaDneoMmC0vI4oHmOLirk5eTTucB8qYiDeCJZZexl4xpaQc_Z5hijUm7-VbDrm_2CfFygBg==:9fbfabe975fa5a7f -->
 <!-- rye:unsigned -->
 # LSP Query
 

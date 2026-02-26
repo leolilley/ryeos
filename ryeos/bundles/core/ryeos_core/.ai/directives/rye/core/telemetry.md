@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-25T07:50:41Z:f97828abf73dc0f6bcfbfdb77544d1d5b0dfada10a1b14ecfd9198cf87e615db:BRPlHSpEQ4qOHRSzTqSfDh8jtns_ASZztB2f2y4VSvVoSWfUvTwO2VwZTfx735Q78YXXNx-hQtMyhjGFbzsmBQ==:9fbfabe975fa5a7f -->
-<!-- rye:signed:2026-02-22T02:31:19Z:11cc710adfad74bfe344b4a6a6a13de51cfb12455d2bbd5559d7b732b785a7dc:YCVxEhWvjKU0-_6MEvB1njoLF6_SKTWCfUfus8YZa49pFgCekYiOKRZ1R7dA2nJagJyKrjfOwqxNGdfXS8mBAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:26Z:f97828abf73dc0f6bcfbfdb77544d1d5b0dfada10a1b14ecfd9198cf87e615db:BRPlHSpEQ4qOHRSzTqSfDh8jtns_ASZztB2f2y4VSvVoSWfUvTwO2VwZTfx735Q78YXXNx-hQtMyhjGFbzsmBQ==:9fbfabe975fa5a7f -->
 # Telemetry
 
 Retrieve telemetry data including logs, stats, and errors.

@@ -22,11 +22,15 @@ import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import FrozenSet, List, Optional
 
 from lillux.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
+from rye.utils.metadata_manager import ToolMetadataStrategy, compute_content_hash
 from rye.utils.path_utils import get_user_space
+
+# TOML uses # comments — same format as tools with # prefix
+_key_strategy = ToolMetadataStrategy()
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +115,111 @@ class TrustStore:
             )
         return dirs
 
+    # ------------------------------------------------------------------
+    # Integrity: sign on write, verify on load
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sign_key_content(content: str) -> str:
+        """Sign trusted key TOML content by prepending a signature comment.
+
+        Uses the user's Ed25519 keypair (auto-generated on first use).
+        """
+        from lillux.primitives.signing import (
+            ensure_keypair,
+            sign_hash,
+            compute_key_fingerprint as _fp,
+        )
+        from rye.utils.metadata_manager import generate_timestamp
+
+        content_for_hash = _key_strategy.extract_content_for_hash(content)
+        content_hash = compute_content_hash(content_for_hash)
+        timestamp = generate_timestamp()
+
+        key_dir = get_user_space() / AI_DIR / "keys"
+        private_pem, public_pem = ensure_keypair(key_dir)
+        ed25519_sig = sign_hash(content_hash, private_pem)
+        pubkey_fp = _fp(public_pem)
+
+        sig_line = _key_strategy.format_signature(
+            timestamp, content_hash, ed25519_sig, pubkey_fp
+        )
+        return _key_strategy.insert_signature(content, sig_line)
+
+    def _verify_key_integrity(
+        self,
+        path: Path,
+        key_info: TrustedKeyInfo,
+        *,
+        _loading: FrozenSet[str] = frozenset(),
+    ) -> Optional[str]:
+        """Verify integrity of a trusted key file.
+
+        Returns None if valid, or an error string:
+        - "unsigned"  — no signature present (warning-level)
+        - other       — integrity failure (reject the key)
+        """
+        content = path.read_text(encoding="utf-8")
+
+        sig_info = _key_strategy.extract_signature(content)
+        if not sig_info:
+            return "unsigned"
+
+        expected_hash = sig_info["hash"]
+        ed25519_sig = sig_info["ed25519_sig"]
+        pubkey_fp = sig_info["pubkey_fp"]
+
+        content_for_hash = _key_strategy.extract_content_for_hash(content)
+        actual_hash = compute_content_hash(content_for_hash)
+
+        if actual_hash != expected_hash:
+            return (
+                f"content tampered (expected {expected_hash[:16]}…, "
+                f"got {actual_hash[:16]}…)"
+            )
+
+        from lillux.primitives.signing import verify_signature
+
+        # Self-signed: the signing key is the key described in the file
+        if pubkey_fp == key_info.fingerprint:
+            if not verify_signature(expected_hash, ed25519_sig, key_info.public_key_pem):
+                return "Ed25519 signature invalid (self-signed)"
+            return None
+
+        # Cross-signed: look up the signing key with a recursion guard
+        if pubkey_fp in _loading:
+            logger.debug("Skipping recursive verification for %s", pubkey_fp)
+            return None
+
+        signing_key = self.get_key(
+            pubkey_fp, _loading=_loading | {key_info.fingerprint}
+        )
+        if signing_key is None:
+            return f"signing key {pubkey_fp} not in trust store"
+
+        if not verify_signature(expected_hash, ed25519_sig, signing_key.public_key_pem):
+            return "Ed25519 signature invalid"
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def is_trusted(self, fingerprint: str) -> bool:
         """Check if a key fingerprint is trusted in any space."""
         return self.get_key(fingerprint) is not None
 
-    def get_key(self, fingerprint: str) -> Optional[TrustedKeyInfo]:
+    def get_key(
+        self,
+        fingerprint: str,
+        *,
+        _loading: FrozenSet[str] = frozenset(),
+    ) -> Optional[TrustedKeyInfo]:
         """Get trusted key by fingerprint.
 
         Searches project > user > system .ai/trusted_keys/{fingerprint}.toml
+        Verifies file integrity when a signature is present.
         """
         for source, trust_dir in self._search_dirs():
             if not trust_dir.is_dir():
@@ -135,6 +236,20 @@ class TrustStore:
                             key_file, fingerprint, actual_fp,
                         )
                         continue
+
+                    # Verify file integrity
+                    integrity_err = self._verify_key_integrity(
+                        key_file, info, _loading=_loading
+                    )
+                    if integrity_err == "unsigned":
+                        logger.debug("Unsigned trusted key file: %s", key_file)
+                    elif integrity_err:
+                        logger.warning(
+                            "Integrity check failed for %s: %s",
+                            key_file, integrity_err,
+                        )
+                        continue
+
                     return info
                 except Exception:
                     logger.warning("Failed to load trusted key %s", key_file, exc_info=True)
@@ -181,7 +296,8 @@ class TrustStore:
             attestation=attestation,
         )
         key_file = trust_dir / f"{fingerprint}.toml"
-        key_file.write_text(info.to_toml(), encoding="utf-8")
+        content = self._sign_key_content(info.to_toml())
+        key_file.write_text(content, encoding="utf-8")
         logger.info("Trusted key %s (owner=%s)", fingerprint, owner)
         return fingerprint
 

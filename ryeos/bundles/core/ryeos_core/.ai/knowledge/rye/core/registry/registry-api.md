@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:9509a05dda4e48cc2aa1786c8c07604f993c559f9a752ffef4be7fd45f8b9bb4:sNVgsqsYse-z3VE14PSMgAVwmATfKUwwHHDJeirZqnRJcCLEUCXVsTyWO--DNAMrWR-kCtuOPumghx6HNq49BA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T04:51:10Z:7ab41fd349a15c1802d9d9ba09c410034b4cc5ea4555f72d332bf5dd1404755f:FDDE1prYLVMs_NTa34nroI-u5aqLBPOinaNQ9Jqba_JH8mLnNeuIiSsBdM9bNdg0qhDu3QHEveOJ8eF0JpVZDw==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: registry-api
@@ -63,19 +63,19 @@ Canonical ID format: `{namespace}/{category}/{name}`
 ### Device Code Auth Flow
 
 ```
-login  →  opens browser for OAuth PKCE (GitHub)
-login_poll  →  polls for completion, receives JWT
+login  →  opens browser for OAuth PKCE (GitHub), waits with initial delay,
+          polls for completion with a grace period for 404s, receives JWT
 ```
 
 ### Client Auth Actions
 
-| Action       | Description                                     |
-| ------------ | ----------------------------------------------- |
-| `signup`     | Create account with email/password              |
-| `login`      | Start device auth flow (opens browser)          |
-| `login_poll` | Poll for auth completion after device flow      |
-| `logout`     | Clear local auth session                        |
-| `whoami`     | Show current authenticated user                 |
+| Action        | Description                                              |
+| ------------- | -------------------------------------------------------- |
+| `signup`      | Create account with email/password                       |
+| `login`       | Device auth flow (opens browser, polls for completion)   |
+| `login_email` | Login via email/password                                 |
+| `logout`      | Clear local auth session                                 |
+| `whoami`      | Show current authenticated user                          |
 
 ### Server Auth
 
@@ -190,6 +190,13 @@ PATCH /v1/items/{item_type}/{item_id}/visibility
 3. Write each file to its relative path
 4. `verify_item(manifest_path, ItemType.TOOL)` — manifest Ed25519 check
 5. `validate_bundle_manifest()` — per-file SHA256 comparison
+
+### Client Bundle Actions
+
+| Action        | Description                                      |
+| ------------- | ------------------------------------------------ |
+| `push_bundle` | Push a bundle (manifest + files) to the registry |
+| `pull_bundle` | Pull a bundle from the registry to local space   |
 
 ## Download Counting
 

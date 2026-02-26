@@ -31,6 +31,34 @@ from rye.utils.validators import apply_field_mapping, validate_parsed_data
 logger = logging.getLogger(__name__)
 
 
+def _load_exclude_dirs(project_path: Optional[Path] = None) -> frozenset:
+    """Load exclude_dirs from collect.yaml via 3-tier resolution.
+
+    Uses the same config the bundler uses so signing and bundling
+    skip the same directories (node_modules, __pycache__, etc.).
+    """
+    import yaml as _yaml
+
+    config_name = "rye/core/bundler/collect.yaml"
+    search_order = []
+    if project_path:
+        search_order.append(Path(project_path) / AI_DIR / "tools" / config_name)
+    search_order.append(get_user_space() / AI_DIR / "tools" / config_name)
+    for bundle in get_system_spaces():
+        search_order.append(bundle.root_path / AI_DIR / "tools" / config_name)
+
+    for path in search_order:
+        if path.exists():
+            try:
+                data = _yaml.safe_load(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and "exclude_dirs" in data:
+                    return frozenset(data["exclude_dirs"])
+            except Exception:
+                continue
+
+    return frozenset()
+
+
 class SignTool:
     """Validate and sign directives, tools, or knowledge entries."""
 
@@ -95,7 +123,14 @@ class SignTool:
     def _glob_in_dir(
         self, base_dir: Path, item_type: str, pattern: str, project_path: str
     ) -> List[Path]:
-        """Glob for items inside a single base directory."""
+        """Glob for items inside a single base directory.
+
+        Skips paths containing directories listed in collect.yaml's
+        exclude_dirs (node_modules, __pycache__, .venv, etc.) to avoid
+        picking up third-party vendored files that aren't Rye items.
+        """
+        exclude = _load_exclude_dirs(Path(project_path) if project_path else None)
+
         if item_type == ItemType.TOOL:
             tool_extensions = get_tool_extensions(
                 Path(project_path) if project_path else None
@@ -107,7 +142,7 @@ class SignTool:
                 else:
                     glob_pattern = f"**/{pattern}{tool_ext}" if pattern != "*" else f"**/*{tool_ext}"
                 for path in base_dir.glob(glob_pattern):
-                    if path.is_file():
+                    if path.is_file() and not (exclude & set(path.parts)):
                         items.append(path)
             return items
         else:
@@ -118,7 +153,7 @@ class SignTool:
                 glob_pattern = f"**/{pattern}{ext}" if pattern != "*" else f"**/*{ext}"
             items = []
             for path in base_dir.glob(glob_pattern):
-                if path.is_file():
+                if path.is_file() and not (exclude & set(path.parts)):
                     items.append(path)
             return items
 

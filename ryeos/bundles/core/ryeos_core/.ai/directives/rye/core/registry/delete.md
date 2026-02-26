@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-25T07:50:41Z:85a5a45b18a44277801c3665306130004fda37200c4e0689d5d2d05fdab95ec1:S9eLCijiG4_DwQExkfe9aiYxXBSfqRwCOlYPJ_k2OM5St_sdoxi6uj6H7MX8zx50PZ48NAFt4nDMEpUyTfihAQ==:9fbfabe975fa5a7f -->
-<!-- rye:signed:2026-02-22T02:31:19Z:e107eb4af8368f73bfb6c0c4f77bbfe8359e4da1a7353fa4dc19406f5bacffc5:v6DDtTfDHuKn_OzTgCl0W1-OLK_wFiIP0exy_qtEdVWLhwbQ6IfbfUNSCryQw21LyLm-7JnK2DVCyBGJqz21Dw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:26Z:85a5a45b18a44277801c3665306130004fda37200c4e0689d5d2d05fdab95ec1:S9eLCijiG4_DwQExkfe9aiYxXBSfqRwCOlYPJ_k2OM5St_sdoxi6uj6H7MX8zx50PZ48NAFt4nDMEpUyTfihAQ==:9fbfabe975fa5a7f -->
 # Registry Delete
 
 Remove an item from the registry.

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:82a912043ead08055ddf38383848f3123be10125934836f92f9d31b5048c79b1:JNFXLYyvnJwE0dbohEoCRZntEvnOlhN8Zmqnaqi4ADNJ9hfRnlzS1U7g7qhuZExTHn_RHge3_X02yPyijpuQDg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T03:49:32Z:82a912043ead08055ddf38383848f3123be10125934836f92f9d31b5048c79b1:JNFXLYyvnJwE0dbohEoCRZntEvnOlhN8Zmqnaqi4ADNJ9hfRnlzS1U7g7qhuZExTHn_RHge3_X02yPyijpuQDg==:9fbfabe975fa5a7f
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"

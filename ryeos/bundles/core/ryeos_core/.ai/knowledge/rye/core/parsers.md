@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:c476466c90f3feed7ab499a851036ebea809e239061f3280f006ea382b7b3e16:SfJ2rHaZOXY5-aISssYdKdaBo4EimUQeOkY_UqJpmKqmVsgc7UVeNvUOQQlCdYz6iJIIrQ-Yt8elCEd2_y2uBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:26Z:c476466c90f3feed7ab499a851036ebea809e239061f3280f006ea382b7b3e16:SfJ2rHaZOXY5-aISssYdKdaBo4EimUQeOkY_UqJpmKqmVsgc7UVeNvUOQQlCdYz6iJIIrQ-Yt8elCEd2_y2uBg==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: parsers

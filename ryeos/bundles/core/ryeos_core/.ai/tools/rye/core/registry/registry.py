@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:a950dea7705e157f3b189ab72bba228f33185890bd3f2d6828a52d47ba34a890:JKCy97uzSG_LuHbyNT0nWwObdOAprG_esHiCO8ezkTkMAom7k90jQ9lrFgzEIzFrug4lsWYEcLY_5VNCo89kBg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T04:46:40Z:d78b37f5ebb1a671abe7563ecca490ea9760fcd4626eb91be820f6b5f9c160b8:NAxnTzYc01tZlBVankTRnAw6Rh-5AdcKKLFiFU4wb5ILs0LvJ9qoWeyYk1m4wH8T6eAmWA9vpYzk25TRTS2zDQ==:9fbfabe975fa5a7f
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -931,6 +931,10 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
 
     max_attempts = params.get("max_attempts", 60)
     interval = params.get("interval", 5)
+    initial_delay = params.get("initial_delay", 3)
+
+    # Wait before first poll to give the edge function time to create the session
+    await asyncio.sleep(initial_delay)
 
     for attempt in range(max_attempts):
         result = await http.get(
@@ -939,16 +943,22 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
 
         if not result["success"]:
             if result["status_code"] == 404:
+                # Grace period: session may not be created yet for the first few polls
+                if attempt < 6:
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(interval)
+                        continue
+                # After grace period, treat 404 as genuinely expired
                 _delete_session(session_id)
                 await http.close()
                 return {
                     "error": "Session expired or not found",
                     "solution": "Run 'registry login' again",
                 }
-            elif result["status_code"] == 202:
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(interval)
-                    continue
+            # Any other error (network, 5xx, etc.) — retry
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(interval)
+                continue
 
         if result["success"] and result["body"]:
             body = result["body"]
@@ -960,14 +970,21 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
 
             if body.get("status") == "completed":
                 try:
-                    server_public_key = base64.b64decode(body["server_public_key"])
-                    shared_secret = derive_shared_secret(private_key, server_public_key)
+                    # Try ECDH decryption if server provided its public key
+                    server_pub = body.get("server_public_key", "")
+                    nonce_val = body.get("nonce", "")
 
-                    access_token = decrypt_token(
-                        body["encrypted_token"],
-                        body["nonce"],
-                        shared_secret,
-                    )
+                    if server_pub and nonce_val:
+                        server_public_key = base64.b64decode(server_pub)
+                        shared_secret = derive_shared_secret(private_key, server_public_key)
+                        access_token = decrypt_token(
+                            body["encrypted_token"],
+                            nonce_val,
+                            shared_secret,
+                        )
+                    else:
+                        # Plaintext token (simplified flow)
+                        access_token = body["encrypted_token"]
 
                     auth_store.set_token(
                         service=REGISTRY_SERVICE,
@@ -989,7 +1006,7 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
                 except Exception as e:
                     await http.close()
                     return {
-                        "error": f"Failed to decrypt token: {e}",
+                        "error": f"Failed to process token: {e}",
                         "solution": "Try 'registry login' again",
                     }
 

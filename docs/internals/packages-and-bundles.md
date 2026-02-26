@@ -226,7 +226,9 @@ pip install ryeos ryeos-web ryeos-code
 
 ### Author Key Trust
 
-Every bundle ships the author's Ed25519 public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`. All items in the bundle are signed with this key. The Rye system bundle is signed by Leo Lilley — the same key used for registry publishing.
+Every bundle ships the author's Ed25519 public key as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`. All items in the bundle are signed with this key. The Rye system bundle is signed by Leo Lilley — the same key used for registry publishing. The trusted key file itself is signed with an inline `# rye:signed:...` signature (self-signed by the author's key), so its integrity can be verified independently of the bundle manifest.
+
+The bundler collects `.ai/trusted_keys/` files into bundle manifests alongside directives, tools, and knowledge. This means `bundle verify` covers key file integrity via SHA256 hashes — the same verification path used for every other item in the bundle.
 
 There are no exceptions to signature verification: system items go through the same verification as project and user items. The trust store uses standard 3-tier resolution (project → user → system), so the author's key in the system bundle is discovered automatically — no special bootstrap logic required.
 
@@ -290,7 +292,7 @@ def get_bundle() -> dict:
     }
 ```
 
-The author's signing key is shipped as a TOML identity document at `.ai/trusted_keys/{fingerprint}.toml` within each bundle's module root, discovered via standard 3-tier resolution.
+The author's signing key is shipped as a self-signed TOML identity document at `.ai/trusted_keys/{fingerprint}.toml` within each bundle's module root, discovered via standard 3-tier resolution.
 
 ## Dependency Chain
 

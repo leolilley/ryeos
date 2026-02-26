@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-25T07:50:41Z:cf7a8adfd8715912ff44b273d54118d4e35369fe8b8377617a5ebd33dc973fd5:-mweh-B3Zlibbv2jfKQGxWZ4x7BXTk793QnPFt4l-Mc2RREX0zIJAVw5bl4JfOPQhNVo4gNkx8jdavkEwpYhAA==:9fbfabe975fa5a7f -->
-<!-- rye:signed:2026-02-22T02:31:19Z:83bbf82679276ce14d646ebece0819042a4061f04b3c5141a91b3a896c27d9f5:301Nk7EfZ_JT3N-LzhHeNy5m4oa_TTdd-j0yiFcBlyUMWPqTauzbP9Z3lvwOtmlZ3jP-8qzNvJCf1wUE4WYzBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:32Z:cf7a8adfd8715912ff44b273d54118d4e35369fe8b8377617a5ebd33dc973fd5:-mweh-B3Zlibbv2jfKQGxWZ4x7BXTk793QnPFt4l-Mc2RREX0zIJAVw5bl4JfOPQhNVo4gNkx8jdavkEwpYhAA==:9fbfabe975fa5a7f -->
 # MCP Add Server
 
 Register a new MCP server and auto-discover its tools.

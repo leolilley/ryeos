@@ -36,17 +36,9 @@ def _setup_user_space(tmp_path, monkeypatch):
     private_pem, public_pem = generate_keypair()
     save_keypair(private_pem, public_pem, key_dir)
 
-    # Write trusted key as TOML identity document
-    trust_dir = user_space / AI_DIR / "trusted_keys"
-    trust_dir.mkdir(parents=True)
-    fp = compute_key_fingerprint(public_pem)
-
-    from rye.utils.trust_store import TrustedKeyInfo
-    info = TrustedKeyInfo(
-        fingerprint=fp,
-        owner="local",
-        public_key_pem=public_pem,
-    )
-    (trust_dir / f"{fp}.toml").write_text(info.to_toml(), encoding="utf-8")
+    # Write trusted key as signed TOML identity document
+    from rye.utils.trust_store import TrustStore
+    store = TrustStore()
+    store.add_key(public_pem, owner="local", space="user")
 
     yield user_space

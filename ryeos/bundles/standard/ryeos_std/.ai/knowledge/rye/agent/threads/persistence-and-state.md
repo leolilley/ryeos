@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T05:50:18Z:d825542ebe2d6d44ca71eb8b98f2050d3b93bcd4df0c2463c143f83b721025f0:uZ2KjK7O-5nZTr6edPqoqhVmIEDEtHgQUk5IWjyIZo5FLyflSexHnTPtF1rWlLIXLWVRLLKpn7qaMwKFm1ZfDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:32Z:a0ea3df9b6994eb95afbf0a696747d4d24cc759e031e39c38829f77053f91c17:LaoFtBQd5U6AznXysmNLIEola9eYKhES-40t0W2GDRNiUuhiTiU-21r152hUvSkRCVqyXOUe96dxJ2-IOpJ4Bg==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: persistence-and-state

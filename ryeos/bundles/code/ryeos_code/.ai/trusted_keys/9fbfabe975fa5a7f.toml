@@ -1,0 +1,10 @@
+fingerprint = "9fbfabe975fa5a7f"
+owner = "leo"
+attestation = ""
+
+[public_key]
+pem = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAY24FNlBttfGlH91xaEe4Ms0Meu5kvHL8L8W6w9lVyLU=
+-----END PUBLIC KEY-----
+"""

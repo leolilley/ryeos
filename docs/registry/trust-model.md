@@ -81,7 +81,7 @@ Rye ships pre-signed by its author, Leo Lilley. The system bundle includes the a
 Trusted keys are TOML identity documents that bind a key to an owner:
 
 ```toml
-# .ai/trusted_keys/{fingerprint}.toml
+# rye:signed:2026-02-14T00:27:54Z:a1b2c3d4...:WOclUqjr...:9fbfabe975fa5a7f
 fingerprint = "bc8e267dadcce3a4"
 owner = "leo"
 attestation = ""
@@ -118,12 +118,22 @@ First match wins. The system bundle ships the author's key at `rye/.ai/trusted_k
 | Operation             | Method                        | Behavior                                                                    |
 | --------------------- | ----------------------------- | --------------------------------------------------------------------------- |
 | **Check trust**       | `is_trusted(fingerprint)`     | Delegates to `get_key()`, returns True if key found                         |
-| **Get key**           | `get_key(fingerprint)`        | 3-tier search: project → user → system `.ai/trusted_keys/{fp}.toml`        |
-| **Add key**           | `add_key(public_key_pem)`     | Writes `{fingerprint}.toml` identity document, returns fingerprint          |
+| **Get key**           | `get_key(fingerprint)`        | 3-tier search with integrity verification: project → user → system `.ai/trusted_keys/{fp}.toml` |
+| **Add key**           | `add_key(public_key_pem)`     | Writes and signs `{fingerprint}.toml` identity document, returns fingerprint |
 | **Remove key**        | `remove_key(fingerprint)`     | Deletes `{fingerprint}.toml` from user store                               |
 | **Pin registry**      | `pin_registry_key(pem)`       | Adds key with `owner="rye-registry"` (no-op if already exists)             |
 | **Get registry key**  | `get_registry_key()`          | Scans all keys for `owner=="rye-registry"`                                  |
 | **List keys**         | `list_keys()`                 | Returns all `.toml` identity documents across all spaces                    |
+
+### Key File Integrity
+
+Trusted key TOML files are themselves signed with a `# rye:signed:...` comment on line 1, using the same signature format as all other Rye items. This ensures key files cannot be tampered with after they are written.
+
+`add_key()` signs the file on write. `get_key()` verifies the signature on load. If a key file is unsigned, a debug-level log is emitted and the key is still loaded — this preserves backwards compatibility with key files created before signing was introduced. If a key file has a signature that fails verification (i.e., the file has been tampered with), the key is rejected and not loaded.
+
+**Self-signed keys.** When the signing fingerprint in the `# rye:signed:...` comment matches the key's own fingerprint, the embedded PEM is used directly for verification. This bootstraps the system bundle author key — the very first trusted key in the chain can prove its own integrity without requiring another key to vouch for it.
+
+**Cross-signed keys.** When the signing fingerprint differs from the key's own fingerprint, the signing key is resolved via a bounded recursive trust store lookup. This allows one trusted key to vouch for another, enabling delegation chains while preventing unbounded recursion.
 
 The user's own public key is automatically added to the trust store when keys are first generated (with `owner="local"`).
 

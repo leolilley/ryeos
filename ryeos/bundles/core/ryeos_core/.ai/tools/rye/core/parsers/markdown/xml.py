@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:9c042b21d10c761c08d208dd61a72233052e56c7151dac60f30590e3a3d734c2:XJfWFvmbiyaZuJ-xLwfrplaArgSyZzPkU9Xyyvfa-9JAq-ZDc7R1hV_jHUqTQgk1rw48xJaAH3ATUvrltnifAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T03:49:26Z:9c042b21d10c761c08d208dd61a72233052e56c7151dac60f30590e3a3d734c2:XJfWFvmbiyaZuJ-xLwfrplaArgSyZzPkU9Xyyvfa-9JAq-ZDc7R1hV_jHUqTQgk1rw48xJaAH3ATUvrltnifAQ==:9fbfabe975fa5a7f
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing

@@ -52,13 +52,13 @@ __executor_id__ = "rye/core/runtimes/python/script"
 
 ### Authentication Actions
 
-| Action       | Description                                                       |
-| ------------ | ----------------------------------------------------------------- |
-| `signup`     | Create account with email/password                                |
-| `login`      | Start device auth flow (opens browser, supports OAuth via GitHub) |
-| `login_poll` | Poll for auth completion after device flow starts                 |
-| `logout`     | Clear local auth session                                          |
-| `whoami`     | Show current authenticated user                                   |
+| Action        | Description                                                                        |
+| ------------- | ---------------------------------------------------------------------------------- |
+| `signup`      | Create account with email/password                                                 |
+| `login`       | Start device auth flow (opens browser, polls for completion, supports OAuth via GitHub) |
+| `login_email` | Login via email/password                                                           |
+| `logout`      | Clear local auth session                                                           |
+| `whoami`      | Show current authenticated user                                                    |
 
 Authentication uses OAuth PKCE flow with GitHub as the primary provider. The device auth flow opens a browser for login and polls for completion.
 
@@ -140,6 +140,25 @@ action: publish     # Make public (visibility='public')
 action: unpublish   # Make private (visibility='private')
 item_type: tool
 item_id: leolilley/utilities/my-tool
+```
+
+#### Push Bundle
+
+Upload a bundle (manifest + files) to the registry:
+
+```
+action: push_bundle
+bundle_id: leolilley/my-bundle
+version: 1.0.0
+```
+
+#### Pull Bundle
+
+Download a bundle from the registry:
+
+```
+action: pull_bundle
+bundle_id: leolilley/my-bundle
 ```
 
 ## Registry API Service

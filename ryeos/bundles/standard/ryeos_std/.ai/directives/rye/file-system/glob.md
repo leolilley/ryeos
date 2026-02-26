@@ -1,5 +1,4 @@
-<!-- rye:signed:2026-02-25T07:50:41Z:d3c8312782b5580249ecc3907aebaa75a6323b56205848667b36185edc6034a2:7mbu4N_FjE0GYod8-AyGy_9MMA0kJlcRlYAKvzBQHa85fgvMeh2gZuku4ojZEgT6Cl8-cn2JzoJhnCiJ8WeVDg==:9fbfabe975fa5a7f -->
-<!-- rye:signed:2026-02-22T02:31:19Z:f901f840d5406a52de18ef0bb495a3ea1ac865ddb3dda3e71d9411b840714c80:o0JSEEn0PvOt3RyvfnrnuxkOZPhp8NkQxMDhviljRwafEcuaRB48omGZL08GUiOwYob9LHHbVQKvGfUqHJPgBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:32Z:d3c8312782b5580249ecc3907aebaa75a6323b56205848667b36185edc6034a2:7mbu4N_FjE0GYod8-AyGy_9MMA0kJlcRlYAKvzBQHa85fgvMeh2gZuku4ojZEgT6Cl8-cn2JzoJhnCiJ8WeVDg==:9fbfabe975fa5a7f -->
 # Glob
 
 Find files matching a glob pattern.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:03c6a007153e204591b8c5b23dd1f8516a50d1517af07b4e93a8310cc5f43e07:-lx_DCO50J1FjyfVLDOC9nsSTBwvuTI56qm7uxNVpTl1oTRCyBhWFa-xwCku1d-YWWVE4ai--jLBcZzD6UdJCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:32Z:03c6a007153e204591b8c5b23dd1f8516a50d1517af07b4e93a8310cc5f43e07:-lx_DCO50J1FjyfVLDOC9nsSTBwvuTI56qm7uxNVpTl1oTRCyBhWFa-xwCku1d-YWWVE4ai--jLBcZzD6UdJCw==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: search-semantics

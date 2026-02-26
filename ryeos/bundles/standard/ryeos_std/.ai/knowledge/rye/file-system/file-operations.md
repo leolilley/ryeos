@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:efc91f305a603c520848ee49e9f14fbddaae4dfe394cb0f2246649e6b4396480:5ihPOY-wD6ldS-YAHEKIXES3GGJLDzt12xUkMrclBzeygz1kdaL0NMIIVK210u4L2sd6_VqBJNo0XmbCgCArBw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T03:49:32Z:efc91f305a603c520848ee49e9f14fbddaae4dfe394cb0f2246649e6b4396480:5ihPOY-wD6ldS-YAHEKIXES3GGJLDzt12xUkMrclBzeygz1kdaL0NMIIVK210u4L2sd6_VqBJNo0XmbCgCArBw==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: file-operations

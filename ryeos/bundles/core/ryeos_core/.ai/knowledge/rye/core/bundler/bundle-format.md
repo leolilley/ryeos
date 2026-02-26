@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T05:24:41Z:1bfba037d142f4b65e1b634754a7542b88837171d0c615ac0eceb9ab7f6ee5b1:MKvnuBI36oxXOMYuVMoHDwv2JGURCm9W-Rbm9Gi7Dvd5P6UzenFzNsOnLXwrGILbnqPfXWMH7RQEVjxVqc2WDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T04:51:10Z:046ef903cc564e3a0209133c3d1b70abfc059a04d8e33f9d33aa148ed159453e:nd0HNBWIQfHWQBZ4XwY-MBOhtca3zwxMaI5sG3Mimq3QeIayrL3Ap1NH6iH87pAjSPH8PhcejKq-cjfA2I9EBQ==:9fbfabe975fa5a7f -->
 
 ```yaml
 name: bundle-format
@@ -30,14 +30,14 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 │  bundle: none (inherits from ryeos)               │
 ├───────────────────────────────────────────────────┤
 │  ryeos             (standard bundle)              │
-│  deps: lillux, pyyaml, cryptography, packaging     │
+│  deps: ryeos-core, pyyaml, cryptography, packaging │
 │  bundle: ryeos → all rye/* items                  │
 ├───────────────────────────────────────────────────┤
 │  ryeos-core        (minimal install)              │
-│  deps: lillux, pyyaml, cryptography, packaging     │
+│  deps: ryeos-engine, pyyaml, cryptography, packaging│
 │  bundle: ryeos-core → rye/core/* items only       │
 ├───────────────────────────────────────────────────┤
-│  ryeos-bare        (engine only)                  │
+│  ryeos-engine      (engine only)                  │
 │  deps: lillux                                      │
 │  bundle: none (engine only, no .ai/ items)        │
 ├───────────────────────────────────────────────────┤
@@ -55,8 +55,6 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 └───────────────────────────────────────────────────┘
 ```
 
-**Mutual exclusion:** `ryeos-core` and `ryeos` both install the `rye` Python module. Install one or the other, never both.
-
 **lillux-proc dependency:** lillux depends on `lillux-proc` (hard dep, no fallbacks). The Rust binaries `lillux-proc` and `lillux-watch` live in `lillux/proc/` and `lillux/watch/` at the monorepo top level.
 
 **node_modules not shipped:** Web and code bundles do not ship `node_modules`. Dependencies are installed on first use via the anchor system.
@@ -67,7 +65,7 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 pip install ryeos-core      → system space: rye/core/* only
 pip install ryeos            → system space: rye/* (standard items)
 pip install ryeos-mcp        → system space: rye/* (via ryeos dep)
-pip install ryeos-bare       → engine only (no .ai/ items)
+pip install ryeos-engine     → engine only (no .ai/ items)
 pip install ryeos-web        → system space: rye/web/* (opt-in)
 pip install ryeos-code       → system space: rye/code/* (opt-in)
 pip install ryeos my-tools   → system space: rye/* + my-tools/*
@@ -80,16 +78,22 @@ Web tools (`rye/web/*`) are in `ryeos/bundles/web/`, code tools (`rye/code/*`) a
 Bundles are registered in `pyproject.toml` under the `rye.bundles` entry point group:
 
 ```toml
-# ryeos — standard bundle
+# ryeos-core pyproject.toml
 [project.entry-points."rye.bundles"]
-ryeos = "rye.bundle_entrypoints:get_ryeos_bundle"
+ryeos-core = "ryeos_core.bundle:get_bundle"
 
-# ryeos-core — core-only bundle
+# ryeos pyproject.toml
 [project.entry-points."rye.bundles"]
-ryeos-core = "rye.bundle_entrypoints:get_ryeos_core_bundle"
+ryeos = "ryeos_std.bundle:get_bundle"
+
+# ryeos-web pyproject.toml
+[project.entry-points."rye.bundles"]
+ryeos-web = "ryeos_web.bundle:get_bundle"
+
+# ryeos-code pyproject.toml
+[project.entry-points."rye.bundles"]
+ryeos-code = "ryeos_code.bundle:get_bundle"
 ```
-
-Both entry point functions live in `rye/bundle_entrypoints.py`.
 
 ## bundle_info Dict Format
 
@@ -103,19 +107,39 @@ Each entry point function returns a `dict` with this shape:
 | `categories` | `list[str]` | Category prefixes this bundle exposes                | `["rye"]`, `["rye/core"]` |
 ### Concrete Implementations
 
+Each bundle has its own `bundle.py` in its own Python namespace package:
+
 ```python
-def get_ryeos_bundle() -> dict:
+# ryeos_core/bundle.py
+def get_bundle() -> dict:
+    return {
+        "bundle_id": "ryeos-core",
+        "root_path": Path(__file__).parent,
+        "categories": ["rye/core"],         # only rye/core/* items
+    }
+
+# ryeos_std/bundle.py
+def get_bundle() -> dict:
     return {
         "bundle_id": "ryeos",
         "root_path": Path(__file__).parent,
         "categories": ["rye"],              # all rye/* items
     }
 
-def get_ryeos_core_bundle() -> dict:
+# ryeos_web/bundle.py
+def get_bundle() -> dict:
     return {
-        "bundle_id": "ryeos-core",
+        "bundle_id": "ryeos-web",
         "root_path": Path(__file__).parent,
-        "categories": ["rye/core"],         # only rye/core/* items
+        "categories": ["rye/web"],          # web tools
+    }
+
+# ryeos_code/bundle.py
+def get_bundle() -> dict:
+    return {
+        "bundle_id": "ryeos-code",
+        "root_path": Path(__file__).parent,
+        "categories": ["rye/code"],         # code tools
     }
 ```
 

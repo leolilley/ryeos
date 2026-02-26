@@ -1,4 +1,4 @@
-# rye:signed:2026-02-25T00:02:14Z:844180b3aab9a63904111c72cfd1be9f23938ac6bd0af64a336687a00372fb8b:ybRchZjbd_9rfFGI4X5IPK_4dl3UvbGeQ9n8_RjvBo_56T0TR34b5TucG8CFAqZf7rk0_15nmoDPnB1OzyOEAQ==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T03:49:32Z:844180b3aab9a63904111c72cfd1be9f23938ac6bd0af64a336687a00372fb8b:ybRchZjbd_9rfFGI4X5IPK_4dl3UvbGeQ9n8_RjvBo_56T0TR34b5TucG8CFAqZf7rk0_15nmoDPnB1OzyOEAQ==:9fbfabe975fa5a7f
 """Edit files by line ID (not string matching)."""
 
 import argparse

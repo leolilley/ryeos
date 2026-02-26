@@ -187,7 +187,7 @@ There is no bypass for system items. The verification flow is identical whether 
 ### Identity Document Format
 
 ```toml
-# .ai/trusted_keys/{fingerprint}.toml
+# rye:signed:2026-02-14T00:27:54Z:a1b2c3d4...:WOclUqjr...:9fbfabe975fa5a7f
 fingerprint = "bc8e267dadcce3a4"
 owner = "leo"
 attestation = ""
@@ -212,12 +212,32 @@ system/.ai/trusted_keys/{fingerprint}.toml   →  (lowest priority, shipped with
 
 First match wins. The system bundle ships the author's key at `rye/.ai/trusted_keys/{fingerprint}.toml` — it is resolved automatically via the standard 3-tier lookup, with no special bootstrap logic.
 
+### Trusted Key Integrity
+
+Trusted key files are themselves signed, using TOML `#` comment syntax on line 1:
+
+```
+# rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP
+```
+
+This ensures the trust store cannot be silently tampered with.
+
+**Write path:** `TrustStore.add_key()` signs the `.toml` file on write using the caller's Ed25519 keypair. The signature covers all content below line 1 (fingerprint, owner, attestation, and the PEM block).
+
+**Read path:** `TrustStore.get_key()` verifies integrity on load. Unsigned files produce a debug-level warning but are still loaded (for backward compatibility). Files where the content hash or Ed25519 signature do not match are rejected with an `IntegrityError`.
+
+**Self-signed keys:** When the signing key fingerprint matches the file's key fingerprint (i.e., the key signs itself), verification uses the PEM embedded in the file itself. This handles the bootstrap case — the bundle author's key in the system bundle signs itself, so no external key is needed to verify it.
+
+**Cross-signed keys:** When the signing fingerprint differs from the file's fingerprint, `TrustStore` performs a bounded recursive lookup to resolve the signing key. A recursion guard prevents infinite loops (e.g., two keys that each claim to be signed by the other).
+
+**Bundler integration:** The bundler collects `trusted_keys/` files into bundle manifests alongside directives, tools, and knowledge entries. Each key file's SHA256 hash is recorded in the manifest for independent verification during bundle extraction.
+
 ### Key Sources
 
 | Source | How Trusted | Scope |
 | --- | --- | --- |
 | Own key | Auto-trusted on first keygen (`owner="local"`) | Signs your project/user items |
-| Bundle author key | Shipped as `.toml` in system bundle, resolved via 3-tier lookup | Verifies system items |
+| Bundle author key | Shipped as self-signed `.toml` in system bundle, resolved via 3-tier lookup | Verifies system items |
 | Registry key | TOFU-pinned on first pull (`owner="rye-registry"`) | Verifies registry-pulled items |
 | Peer key | Manually trusted via `rye_sign` | Verifies collaborator items |
 
