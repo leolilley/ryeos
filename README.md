@@ -4,7 +4,7 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE is a portable operating system for AI agents. It gives any LLM a persistent, signed workspace — directives, tools, and knowledge — that travels with you across projects, machines, and models. Four MCP tools. RYE is the interpreter.
+RYE is a portable operating system for AI. It gives any LLM a persistent, signed workspace — directives, tools, and knowledge — that travels with you across projects, machines, and models. Four MCP tools. RYE is the interpreter.
 
 | Tool      | Purpose                                  |
 | --------- | ---------------------------------------- |
