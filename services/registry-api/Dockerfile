@@ -20,19 +20,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy lillux kernel
 COPY lillux/kernel /app/lillux
 
-# Copy ryeos-bare and the rye Python module it references (../rye/rye)
-# ryeos-bare/pyproject.toml uses packages = ["../rye/rye"], so the rye
-# module must be at the expected relative path.
-COPY ryeos-bare /app/ryeos-bare
-COPY ryeos/rye /app/rye/rye
+# Copy ryeos-bare pyproject.toml and the rye module it packages.
+# The symlink (ryeos-bare/rye -> ../ryeos/rye) doesn't work in Docker,
+# so we copy the rye module directly into the ryeos-bare directory.
+COPY ryeos-bare/pyproject.toml /app/ryeos-bare/pyproject.toml
+COPY ryeos/rye /app/ryeos-bare/rye
 
 # Copy registry-api
 COPY services/registry-api/pyproject.toml services/registry-api/README.md /app/registry-api/
 COPY services/registry-api/registry_api /app/registry-api/registry_api
 
-# Install packages — the registry only uses rye.utils.*, rye.constants, and
-# rye/core/ bundle items (parsers, extractors) for validation. It does not
-# execute any bundled tools. Uses ryeos-bare (no bundles).
+# Install packages
 WORKDIR /app/registry-api
 RUN pip install --no-cache-dir /app/lillux/ /app/ryeos-bare/ -e .
 
