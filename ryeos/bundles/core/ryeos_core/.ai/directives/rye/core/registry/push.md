@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:26Z:5ab93cb93e35317c2fd5cd9e70d29f69df15c0929bdc0d007b3ce561a9b13e3e:kfHqTRaqIS8NIMePzJUOq5qFFlnTzxA7eTnuiQVava3RE81On1b6wF2ixwHHz2VnUibVNKepMFP5TqsRnbvLDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:34Z:5ab93cb93e35317c2fd5cd9e70d29f69df15c0929bdc0d007b3ce561a9b13e3e:mdJQeNA17_xv_lrtNldISROS_5J2dL0NfqnEFzl-E_9VipCYyOKSj6MhcKMWIipCYE0TWpb1ykqGoRhye0lDCg==:4b987fd4e40303ac -->
 # Registry Push
 
 Upload an item to the registry.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:92084e8dce2b8c2c341ab8d9fa2feef63692d92d4db1e464d63032fe8ccc05d7:E3cG6-4WOqxZS5R95xf0h7zk7y0N9fD6jBnNA0dvZljmwC2vzHW8827IBYVdpLghi5BTzCGpGDxR0GoPX4a7Cw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:92084e8dce2b8c2c341ab8d9fa2feef63692d92d4db1e464d63032fe8ccc05d7:oqB2Fbr9kFVHV8jyvRXWwtJII79JQZvj2QI6yGwv8Arr_Lh51pVqdzTIkeg3bhOIXSpaBl9VSl2PEPi8OBUaDw==:4b987fd4e40303ac -->
 
 ```yaml
 name: directive-format

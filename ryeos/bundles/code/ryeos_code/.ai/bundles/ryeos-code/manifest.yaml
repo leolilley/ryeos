@@ -1,26 +1,26 @@
-# rye:signed:2026-02-26T04:43:04Z:31f0fd41a4cf65a04b0887362895597583044f8fb276524836463a2a7b190f07:EZ7uDa9ySFMIbOTPmBxauCpFR_qSiZElJEUSXrxYtECr6pP178z63yyz4-2CAm3-9d5XoY4njJyr7jaoKjaTDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T05:09:04Z:0813ad6f943153ccb7739f95fe296a8ee5630d88be0761e2652120b396c8acf9:5ShYCnsJUqQ8t--HMRgAx_GeQCf6yerkbYRgtsExsG_JFZp3L7yMOrtaFucU_i4radxbuRG6YSAGLeaZKdNwCg==:4b987fd4e40303ac
 bundle:
   id: ryeos-code
-  version: 0.1.1
+  version: 0.1.3
   entrypoint: ''
-  description: "RYE Code \u2014 git, npm, typescript, LSP, and diagnostics tools"
-  created_at: '2026-02-26T04:43:04Z'
+  description: ''
+  created_at: '2026-02-26T05:09:04Z'
   type: package
 files:
   .ai/directives/rye/code/diagnostics.md:
-    sha256: 985b424952ed4afc1828709e0a8e1c49671aad25d48fdde358d879c5811dcb19
+    sha256: ed18a6cb099bf78b90bedcc674d832ed473030257737b5d257c500bec6d6130b
     inline_signed: true
   .ai/directives/rye/code/lsp.md:
-    sha256: 131dd8047f171007446eabf4532c764c3c6ae4292243f27cdec4eb5748a4ba3d
+    sha256: 2a8163b44b54f56d0a5e1ff6f3b778bb703172def0969099d01584932c834fc5
     inline_signed: true
   .ai/directives/rye/code/npm.md:
-    sha256: 9c2e1f9e0d233627c3e5a37bc4f062eecb0ec4b40e9d8dd3dcd21d4a17fd000d
+    sha256: 6261d2077d3c8cec7f01b9a61466f96c98f3a78dcff472e6d7b71dac8fd7e69d
     inline_signed: true
   .ai/directives/rye/code/typescript.md:
-    sha256: 91f2674aa002d76c25f59fcb194e1f169938c3bc86116f20d3a8c5ec97cd011a
+    sha256: 6965a6df0d4f4197e9cd25877059cec4256e5b39837b6e0bc0fe0afad8b56d9b
     inline_signed: true
   .ai/tools/rye/code/diagnostics/diagnostics.ts:
-    sha256: f9573a052ad55003d52a9bc14cb8697cb9e100bea930c84a78bf0eea7b30548c
+    sha256: 84de0d73897ec57ad13293671d1d63ba63ddbb80737a0219cbe661aa22d6e1e4
     inline_signed: true
   .ai/tools/rye/code/diagnostics/package-lock.json:
     sha256: 979c637e4d5b6b1f54335f4e482ee188df4197ed6376f1bb8e564d3fd58b0a5d
@@ -29,10 +29,10 @@ files:
     sha256: bd996b269235e275fb1a073c4b64729668b7f7ada052511c04b5dac94f159ed5
     inline_signed: false
   .ai/tools/rye/code/git/git.py:
-    sha256: 09bce6b9b2abaf93ad91ce8e328df3b616522d143c34f0887edc5077a00b830c
+    sha256: 55318e87c207ca48540cfb8cefe3d0154ede094131fe9b780b41900b04f12d99
     inline_signed: true
   .ai/tools/rye/code/lsp/lsp.ts:
-    sha256: 90c0adffc9b32fb8e290a4983abfb3ecefc977a78f917035b91fb114fa0684f6
+    sha256: 59af8b2957464caa03cc1254d8bd85c1479a83d982343219cf27c0192a9a5854
     inline_signed: true
   .ai/tools/rye/code/lsp/package-lock.json:
     sha256: 2fc5cec3e5c4ae7b6f469e445695fcdd5c3f64c01220698ae91aa3fff79ac786
@@ -41,7 +41,7 @@ files:
     sha256: 49b57baedc81c2f3ad041d52cc5d5f0df3dc2ea0d474f9f58f3cc766de0b875f
     inline_signed: false
   .ai/tools/rye/code/npm/npm.ts:
-    sha256: 53883609bc4e7d75b1d0b43829cc26bc4584eb4e1aea2bafb25bfacfe295c89a
+    sha256: a6d960feadf4bd76130c28b4f314b8014e62978defdecfd9206df4174389768a
     inline_signed: true
   .ai/tools/rye/code/npm/package-lock.json:
     sha256: 5daf93539fbc13797badf87db5f421f97f543431c1adb1f05214a62f3eb250bb
@@ -56,11 +56,11 @@ files:
     sha256: 1fbffb0db22497602c7cf485bf541bb4249af0392a04a353675b2eefccd0ce74
     inline_signed: false
   .ai/tools/rye/code/typescript/typescript.ts:
-    sha256: 87d819663800e0e59eb6912f391113db2cd2ef94fa636bacb1435e94b57a1842
+    sha256: 1cdd07415b1fc7c6f754583fc5880842f58d9d71723cb053ccca3cf2a3f22d61
     inline_signed: true
   .ai/knowledge/rye/code/code-tools.md:
-    sha256: 97983cc8892c863b0c0cf38a4c1a8393a4cee9f7ee84c33835d914eb59441057
+    sha256: 8f55ddeedeb433b7f3befff0362bae321f38cb073c392e1545b46c9a242eb543
     inline_signed: true
-  .ai/trusted_keys/9fbfabe975fa5a7f.toml:
-    sha256: 8510929ed38c3ae84e02825b274c3e763cd714f50d13b971413a492940085c13
-    inline_signed: false
+  .ai/trusted_keys/4b987fd4e40303ac.toml:
+    sha256: 2cbb00b6ccfb8510ece8627bd8c5be600f0ce921b200871a5952e426ce806154
+    inline_signed: true

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:58eb480536a60d7d9f7941a9b2ce711008e0dae31e6523995655f5dcd7f36dd5:0oGepw3B_84eBZPcNcLxsRmZeopNkUNyfxzPxcSVnCtwiItw_10vtpwTiy39aBkoASMy6FPnypC6NDD-kxkMDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:58eb480536a60d7d9f7941a9b2ce711008e0dae31e6523995655f5dcd7f36dd5:DkCu-y3HQQj4IN7Yqic-FGYkjpZc1IN_tRvUZy3ht0Z7rwi6mnvIn4q-j-tAxZMtwqvmwIPqANZyM81GgpvFDA==:4b987fd4e40303ac -->
 ```yaml
 name: permissions-in-threads
 title: Permissions in Threads

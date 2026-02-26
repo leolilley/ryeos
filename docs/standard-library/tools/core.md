@@ -36,6 +36,22 @@ MCP request/response logging. Read server logs, stats, and errors.
 
 ---
 
+## Keys — `rye/core/keys/keys`
+
+Manage Ed25519 signing keys — generate, inspect, trust, list, and remove.
+
+| Action     | Description                                                    |
+| ---------- | -------------------------------------------------------------- |
+| `generate` | Generate a new Ed25519 keypair in `~/.ai/keys/`                |
+| `info`     | Show fingerprint and details for the current keypair           |
+| `trust`    | Add the public key to the trust store (default: user space)    |
+| `list`     | List all trusted keys across all spaces                        |
+| `remove`   | Remove a trusted key by fingerprint                            |
+
+Use `space: project` with `trust` to provision a signing key into a bundle's `.ai/trusted_keys/` for distribution.
+
+---
+
 ## Registry — `rye/core/registry/registry`
 
 Push, pull, search, and manage items in the Rye OS registry. Supports these actions:

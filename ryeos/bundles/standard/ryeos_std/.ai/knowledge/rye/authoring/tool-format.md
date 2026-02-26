@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:ca420dd4d9f38b2dfc6bdcc1992b27d3baa8271d9a9dd865b08cf620989540db:VMQG1wEsOqXtJakntKv1QzzZon5hWopdiTlKhFVqK-R9xwNr07-3AcQlQv_H6xMwThAgwRJR2O8A4n1D6rQ2AQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:ca420dd4d9f38b2dfc6bdcc1992b27d3baa8271d9a9dd865b08cf620989540db:L1XCF6r71liMAFIuHE3_FbPqynSSDjUyLLsZSbrr4N4K2-Y6cbUy5gAKDOPqlz1-YM_BtOb8lJGFOCAQPTa0AQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: tool-format

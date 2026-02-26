@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:41Z:f546b5f6421d47d19963c045c036f98a43070b2b55ca349751074feb7b8ed4f3:0jGl5w-Hdwataj1OaDneoMmC0vI4oHmOLirk5eTTucB8qYiDeCJZZexl4xpaQc_Z5hijUm7-VbDrm_2CfFygBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:48Z:f546b5f6421d47d19963c045c036f98a43070b2b55ca349751074feb7b8ed4f3:0_8-sIdM01OwaktWDcEpDjiVLp3_5xiIQShRna0wq84z14RNRmkxrJadqtpE-9Mb_uJD-Ym3G_gjpMVgrMRlAw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # LSP Query
 

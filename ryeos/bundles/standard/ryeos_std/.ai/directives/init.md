@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:0fe2893f1a5eaecdaab665d91b6e2e1810d3a9f386916f291442abdaca09a1d5:G-IIPV0-Dx4xDm_Z5AOWR4skFrgIRKIp5dnYN9aBldKAgLk4GbkV5o-ISKIPsJMXh_1GFR7hB4B9nHCOtbBCBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:06:30Z:2be64011d8e55930a7fe30b5fea7b44e6dbf5741a2972e575d841b9b5aa1178b:hEdtqU3jRBFIP2SQ_uHTDWc3nXjubxDnM1Hqbm9GGlANW2mfQOHUMYzCbx6NTrJfnOsltdI1VOmusGLA15a8Dw==:4b987fd4e40303ac -->
 
 # Init
 
@@ -16,6 +16,7 @@ Welcome guide for Rye OS. The first directive a new user runs.
       <execute>
         <tool>rye.file-system.*</tool>
         <tool>rye.core.system.*</tool>
+        <tool>rye.core.keys.*</tool>
       </execute>
     </permissions>
   </metadata>
@@ -120,12 +121,60 @@ Do NOT use shell commands (mkdir, touch, bash). Make ONE rye_execute call with a
             {"path": "{env:USER_SPACE}/{env:AI_DIR}/config/.gitkeep", "content": ""},
             {"path": "{env:USER_SPACE}/{env:AI_DIR}/directives/.gitkeep", "content": ""},
             {"path": "{env:USER_SPACE}/{env:AI_DIR}/tools/.gitkeep", "content": ""},
-            {"path": "{env:USER_SPACE}/{env:AI_DIR}/knowledge/.gitkeep", "content": ""}
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/knowledge/.gitkeep", "content": ""},
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/keys/.gitkeep", "content": ""},
+            {"path": "{env:USER_SPACE}/{env:AI_DIR}/trusted_keys/.gitkeep", "content": ""}
           ]
         }
       )
     </instruction>
 
+  </step>
+
+  <step name="generate_key">
+    <instruction>
+      Generate the user's Ed25519 signing keypair and trust it in user space.
+      This is the user's cryptographic identity — every item they sign will
+      reference this key's fingerprint.
+
+      Make ONE rye_execute call:
+
+      rye_execute(
+        item_type="tool",
+        item_id="rye/core/keys/keys",
+        project_path="{env:USER_SPACE}",
+        parameters={
+          "action": "generate"
+        }
+      )
+
+      Then trust the key in user space:
+
+      rye_execute(
+        item_type="tool",
+        item_id="rye/core/keys/keys",
+        project_path="{env:USER_SPACE}",
+        parameters={
+          "action": "trust",
+          "space": "user",
+          "owner": "local"
+        }
+      )
+
+      After both calls succeed, output the render block with the fingerprint
+      substituted in. Do NOT add any other commentary.
+    </instruction>
+    <render>
+
+Signing identity created.
+
+**Fingerprint: `{fingerprint}`**
+
+This is your Ed25519 key. Every directive, tool, and knowledge entry you sign
+will carry this fingerprint. Keep your private key safe — it lives at
+`{env:USER_SPACE}/.ai/keys/`.
+
+</render>
   </step>
 
   <step name="confirm">
@@ -200,6 +249,8 @@ rye execute directive graphs
 </process>
 
 <success_criteria>
-<criterion>.ai/ directory created in the resolved space with config/, directives/, tools/, knowledge/ subdirectories</criterion>
+<criterion>.ai/ directory created in the resolved space with config/, directives/, tools/, knowledge/, keys/, trusted_keys/ subdirectories</criterion>
+<criterion>Ed25519 signing keypair generated and trusted in user space (user space only)</criterion>
+<criterion>User shown their key fingerprint (user space only)</criterion>
 <criterion>User informed of next guide to run (user space only)</criterion>
 </success_criteria>

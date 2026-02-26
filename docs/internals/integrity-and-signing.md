@@ -89,17 +89,29 @@ Signing uses the Ed25519 algorithm via `lillux/primitives/signing.py`:
 
 ### Key Generation
 
-```python
-from lillux.primitives.signing import generate_keypair, save_keypair
-from rye.utils.path_utils import get_user_space, AI_DIR
+Keys are managed via the `rye/core/keys/keys` tool, not generated directly in code. The recommended flow:
 
-private_pem, public_pem = generate_keypair()
-key_dir = get_user_space() / AI_DIR / "keys"  # respects $USER_SPACE env var
-save_keypair(private_pem, public_pem, key_dir=key_dir)
-# → private_key.pem (mode 0600)
-# → public_key.pem (mode 0644)
-# → key directory (mode 0700)
+```bash
+# Generate a new Ed25519 keypair
+rye execute tool rye/core/keys/keys --action generate
+
+# Trust the key in user space (makes it available for signing)
+rye execute tool rye/core/keys/keys --action trust
 ```
+
+The `init` directive handles this automatically — it includes a `generate_key` step that creates the keypair and trusts it in user space, showing the user their fingerprint.
+
+Keys are stored at:
+
+```
+~/.ai/keys/
+├── private_key.pem   # Ed25519 private key (mode 0600)
+└── public_key.pem    # Ed25519 public key (mode 0644)
+```
+
+The key directory itself is set to mode `0700`. Keys are generated via `Ed25519PrivateKey.generate()` and serialized to PEM format (PKCS8 for private, SubjectPublicKeyInfo for public).
+
+**Signing requires an existing keypair.** `MetadataManager.create_signature()` uses `load_keypair()` and raises a `RuntimeError` with instructions if no keypair is found. Keys are never auto-generated during signing.
 
 ### Signing Flow
 

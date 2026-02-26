@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T03:52:51Z:18f9c45fadee51fb5d89734e81ee942214ef9a8bb8028ab4bfb68d61cd4d6de8:mG1jURKvP4wzWyEQB2TC50REtJuUzjj67uaSG1WWnCcglhUOye5I3H9ULeVzEZqtfO3OIVMMupR-eCnjP_iDAg==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T05:02:48Z:18f9c45fadee51fb5d89734e81ee942214ef9a8bb8028ab4bfb68d61cd4d6de8:NMG6TKi6uV1EFDiU_nwNKdLhd0IvBFgGMfzNOZLTfzgUm5NEbwiWIHRvHRtdbXYDXsXWRvRm-WQfg9M6j7joCQ==:4b987fd4e40303ac
 """Web search via configurable provider."""
 
 import argparse

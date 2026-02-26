@@ -31,11 +31,14 @@ from rye.utils.validators import apply_field_mapping, validate_parsed_data
 logger = logging.getLogger(__name__)
 
 
-def _load_exclude_dirs(project_path: Optional[Path] = None) -> frozenset:
-    """Load exclude_dirs from collect.yaml via 3-tier resolution.
+def _load_collect_config(project_path: Optional[Path] = None) -> tuple[frozenset, frozenset]:
+    """Load exclude_dirs and exclude_files from collect.yaml via 3-tier resolution.
 
     Uses the same config the bundler uses so signing and bundling
-    skip the same directories (node_modules, __pycache__, etc.).
+    skip the same directories and files (node_modules, package.json, etc.).
+
+    Returns:
+        (exclude_dirs, exclude_files) as frozensets
     """
     import yaml as _yaml
 
@@ -51,12 +54,14 @@ def _load_exclude_dirs(project_path: Optional[Path] = None) -> frozenset:
         if path.exists():
             try:
                 data = _yaml.safe_load(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and "exclude_dirs" in data:
-                    return frozenset(data["exclude_dirs"])
+                if isinstance(data, dict):
+                    dirs = frozenset(data.get("exclude_dirs", []))
+                    files = frozenset(data.get("exclude_files", []))
+                    return dirs, files
             except Exception:
                 continue
 
-    return frozenset()
+    return frozenset(), frozenset()
 
 
 class SignTool:
@@ -125,11 +130,19 @@ class SignTool:
     ) -> List[Path]:
         """Glob for items inside a single base directory.
 
-        Skips paths containing directories listed in collect.yaml's
-        exclude_dirs (node_modules, __pycache__, .venv, etc.) to avoid
-        picking up third-party vendored files that aren't Rye items.
+        Skips paths matching collect.yaml's exclude_dirs and exclude_files
+        to avoid picking up third-party vendored files that aren't Rye items.
         """
-        exclude = _load_exclude_dirs(Path(project_path) if project_path else None)
+        exclude_dirs, exclude_files = _load_collect_config(
+            Path(project_path) if project_path else None
+        )
+
+        def _is_included(path: Path) -> bool:
+            return (
+                path.is_file()
+                and not (exclude_dirs & set(path.parts))
+                and path.name not in exclude_files
+            )
 
         if item_type == ItemType.TOOL:
             tool_extensions = get_tool_extensions(
@@ -142,7 +155,7 @@ class SignTool:
                 else:
                     glob_pattern = f"**/{pattern}{tool_ext}" if pattern != "*" else f"**/*{tool_ext}"
                 for path in base_dir.glob(glob_pattern):
-                    if path.is_file() and not (exclude & set(path.parts)):
+                    if _is_included(path):
                         items.append(path)
             return items
         else:
@@ -153,7 +166,7 @@ class SignTool:
                 glob_pattern = f"**/{pattern}{ext}" if pattern != "*" else f"**/*{ext}"
             items = []
             for path in base_dir.glob(glob_pattern):
-                if path.is_file() and not (exclude & set(path.parts)):
+                if _is_included(path):
                     items.append(path)
             return items
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:b1257c1dccd7b17e66247e56e772e8cba159119fd879050204a5cf7e3a0ab459:qTMIvhPRAw8VobN2dMnsFvxGfVr_pPkU6rIJFJMWGqx4meE2ozoTUsxVRh26rmgiiX4i_5-cslUEggKU0SJzAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:12:47Z:e365a1fe46c6e9ecdf8346f43d6f1643b66e03acda354b1b21fc3bba335606e9:wQftaymnmKGPs8cTUzXD7ROduHuTP5TLI51cOtOxe7WqAWuyBbycG-2P4EoHXcuwXIEdvwCRDr8njDuPJ_KQDQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: sign-semantics
@@ -32,6 +32,10 @@ Validate item structure using schema-driven extractors and sign the file with an
 | `item_id`      | string | yes      | —           | Item identifier or glob pattern (e.g., `"rye/core/*"` for batch)         |
 | `project_path` | string | yes      | —           | Absolute path to the project root                                        |
 | `source`       | string | no       | `"project"` | Where to find the item: `"project"`, `"user"`, or `"system"`             |
+
+## Prerequisite
+
+A signing keypair must exist before calling `rye_sign`. Signing no longer auto-generates keypairs — `MetadataManager.create_signature()` raises `RuntimeError` if no keypair is found. Use the `rye/core/keys/keys` tool with `action: generate` to create one.
 
 ## Signing Process
 

@@ -17,7 +17,19 @@ All cryptographic primitives live in `lillux/kernel/lillux/primitives/signing.py
 
 ### Keypair Generation
 
-When a user first runs the `rye_sign` tool, Ed25519 keys are generated and stored:
+Keys are managed via the `rye/core/keys/keys` tool, not auto-generated during signing. The recommended flow:
+
+```bash
+# Generate a new Ed25519 keypair
+rye execute tool rye/core/keys/keys --action generate
+
+# Trust the key in user space
+rye execute tool rye/core/keys/keys --action trust
+```
+
+The `init` directive handles both steps automatically — it generates the keypair and trusts it in user space, showing the user their fingerprint.
+
+Keys are stored at:
 
 ```
 ~/.ai/keys/
@@ -26,6 +38,8 @@ When a user first runs the `rye_sign` tool, Ed25519 keys are generated and store
 ```
 
 The key directory itself is set to mode `0700`. Keys are generated via `Ed25519PrivateKey.generate()` and serialized to PEM format (PKCS8 for private, SubjectPublicKeyInfo for public).
+
+**Signing requires an existing keypair.** `MetadataManager.create_signature()` uses `load_keypair()` and raises a `RuntimeError` with instructions if no keypair is found. Keys are never auto-generated behind the scenes.
 
 ### How Signing Works
 
@@ -135,7 +149,9 @@ Trusted key TOML files are themselves signed with a `# rye:signed:...` comment o
 
 **Cross-signed keys.** When the signing fingerprint differs from the key's own fingerprint, the signing key is resolved via a bounded recursive trust store lookup. This allows one trusted key to vouch for another, enabling delegation chains while preventing unbounded recursion.
 
-The user's own public key is automatically added to the trust store when keys are first generated (with `owner="local"`).
+The user's own public key is added to the trust store when trusted via the keys tool (`rye execute tool rye/core/keys/keys --action trust`), with `owner="local"`.
+
+Trusted keys in bundle project spaces are provisioned via the keys tool with `action: trust, space: project` — this is how bundle authors distribute their signing key into each bundle's `.ai/trusted_keys/`.
 
 ## TOFU (Trust On First Use)
 
@@ -196,7 +212,7 @@ For markdown items (HTML comment syntax), the provenance is inserted before the 
 
 ### Registry Keypair
 
-The registry server maintains its own Ed25519 keypair at `REGISTRY_KEY_DIR`. The keypair is generated on first use via `ensure_keypair()`. The public key is exposed at `GET /v1/public-key` for client-side TOFU pinning.
+The registry server maintains its own Ed25519 keypair at `REGISTRY_KEY_DIR`. The keypair is generated on first use via `ensure_keypair()` (the registry is a special case — it still auto-generates its keypair since it runs as an unattended service). The public key is exposed at `GET /v1/public-key` for client-side TOFU pinning.
 
 ## Integrity Verification on Execute
 

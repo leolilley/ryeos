@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T04:51:10Z:046ef903cc564e3a0209133c3d1b70abfc059a04d8e33f9d33aa148ed159453e:nd0HNBWIQfHWQBZ4XwY-MBOhtca3zwxMaI5sG3Mimq3QeIayrL3Ap1NH6iH87pAjSPH8PhcejKq-cjfA2I9EBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:12:47Z:8042f91af2f30a635561e651ff83cca77bce55aaeb770b202e6b163a64bc5492:Vb0rPWoEN98qqVgIzc9hGGN_G7WGPhCo7rPw1oAc_JgaoxLZ0QdRd08osPv7GagyqSgCl00PyH9GThEho22mBg==:4b987fd4e40303ac -->
 
 ```yaml
 name: bundle-format
@@ -164,7 +164,7 @@ Every bundle ships the author's Ed25519 public key as a TOML identity document a
 
 The trust model has **no exceptions**: system items go through the same signature verification as project and user items. The trust store uses standard 3-tier resolution (project → user → system), so the author's key in the system bundle is discovered automatically — no special bootstrap logic required.
 
-Third-party bundles follow the same pattern: ship a `.toml` identity document in `.ai/trusted_keys/`, and the key is resolved via 3-tier lookup. Users trust the bundle author, not the package.
+Third-party bundles follow the same pattern: ship a `.toml` identity document in `.ai/trusted_keys/`, and the key is resolved via 3-tier lookup. Users trust the bundle author, not the package. To provision signing keys for a bundle, use the `rye/core/keys/keys` tool with `action: trust, space: project`.
 
 ## How get_system_spaces() Loads Bundles
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:ea9c674c2c0a6527151770b4302cb206bbca50974ed2f2eae425dbf7fd2b14e1:L2LeQXTdBMSVZUxBwc9CcvZVLoJ3Jx50lL6azOr6lXIa2x2MEdWTHudiN-Af6XhFcOEIcfy2DDzGHjaAx_JHAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:ea9c674c2c0a6527151770b4302cb206bbca50974ed2f2eae425dbf7fd2b14e1:PIi0s78BtDXtnRUgUJI39Q4ZqcFNbKeMSvTKf8LQUQkpZ2H4V0LuSptYWX3MsW5OUaQdLxJZi55J_kl6nQOXDg==:4b987fd4e40303ac -->
 # MCP Discovery
 
 Guide 6 in the Rye OS onboarding sequence. Teaches MCP client integration — discover, manage, and connect to external MCP servers.

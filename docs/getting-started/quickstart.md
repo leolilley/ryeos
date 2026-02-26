@@ -306,6 +306,15 @@ version: "1.0.0"
 
 Before items can be executed or loaded, they must be signed. Signing validates the item's structure and records an integrity hash.
 
+**Prerequisite:** You need an Ed25519 keypair before signing. If you ran `rye execute directive init`, your key was created automatically. Otherwise, generate one explicitly:
+
+```
+rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "generate"})
+rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "trust"})
+```
+
+Then sign your items:
+
 ```
 rye_sign(item_type="directive", item_id="greet_user", project_path="/path/to/your/project")
 rye_sign(item_type="tool", item_id="word_count", project_path="/path/to/your/project")

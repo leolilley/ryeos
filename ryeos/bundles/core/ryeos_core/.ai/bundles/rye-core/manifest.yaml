@@ -1,229 +1,231 @@
-# rye:signed:2026-02-26T04:51:17Z:932190db4ea3de9c3cb9202c8c7aa2301c337907c2f7089a41ba2767c89c76ad:i48tlQHO3OIMyBMKtcpjBzyO90yxUH0sGq6-vE7dnvaovbuyeq68YQ3YSiQS4rEwsj1yTezIYrT41B5w8r9-DA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T05:12:54Z:10dcac9fa59f041bf26e65bdcc2347d16fefa83d0480ac761d30edf2c2d99f3e:XOnCROvv_Kq1WVfRfvEcsLZRKoAnpOHejJNrvqgZ_lxpgsBYNxXhcXCOAS5w7XN_yT8GfVUY1OI1xDZWNccvDQ==:4b987fd4e40303ac
 bundle:
   id: rye-core
-  version: 0.1.1
+  version: 0.1.3
   entrypoint: ''
-  description: "RYE Core \u2014 runtimes, primitives, extractors, bundler, parsers,\
-    \ registry"
-  created_at: '2026-02-26T04:51:16Z'
+  description: ''
+  created_at: '2026-02-26T05:12:54Z'
   type: package
 files:
   .ai/directives/rye/core/bundler/create_bundle.md:
-    sha256: 1ff52cab16df963c2278537c1a3b44ad6444c49701fff4fd95773f49a6fd7cca
+    sha256: 052937795f7e87b2422478b213a9483bdfc44fe1999b15040d466d1898ee4887
     inline_signed: true
   .ai/directives/rye/core/bundler/inspect_bundle.md:
-    sha256: 43a8d9fc0be04ffec0da4cadf639dbf8d44257cfe43a5d39849c113cf1c4a322
+    sha256: d4453cfbf2f403cd4597a27fc31e716c2e9eb097167268be0ccb44cfcaf0a04e
     inline_signed: true
   .ai/directives/rye/core/bundler/list_bundles.md:
-    sha256: 53b56c090ca9d9f51513860d5c49e18718b8ee340017ab9ddf4a66a0b6d398a1
+    sha256: e9e4f8777d5f3ae1766a963b9a94dffbd9c9261a96de5ea9ba8c2bd15ce02681
     inline_signed: true
   .ai/directives/rye/core/bundler/verify_bundle.md:
-    sha256: 1dd7f52aede6f91d876e0c4e2988599e64d240d809b35f97159bdb745eb66a13
+    sha256: b5658981136b09f5b82b50e2bf3b96ac1d1706a1fe27a57b99be8f2d50a57719
     inline_signed: true
   .ai/directives/rye/core/create_directive.md:
-    sha256: 2ef902160ee7e8b02c363a3ffb727043c57db4e38b48125eaf10918e8b221c27
+    sha256: a8034cfffd8017b8a48e048cd1b3a8843731b92fd52c018912b91116a1d4b153
     inline_signed: true
   .ai/directives/rye/core/create_knowledge.md:
-    sha256: f00b441a392af0ae40d7459f585e83ba3032ffe87884b18e43cdd19abab7b355
+    sha256: 0196a45203114ba0b82407d6a9b305bf940c6ecb3107d08f0d4cc5759e38325e
     inline_signed: true
   .ai/directives/rye/core/create_threaded_directive.md:
-    sha256: 0da4a1e2847cca2ac9067257ae46683929579a18b7e9c0648bd4fbbb0e7a0142
+    sha256: d1dfd72b41fec3741df3be8d9f8d24b4869d5b7a9efe64224ce0105b2c91c2f5
     inline_signed: true
   .ai/directives/rye/core/create_tool.md:
-    sha256: 0dc1aad47645f512ac4a38450c02d3c60b5917a985945af727b0f14d0df7df1b
+    sha256: 428a0214986dcb11cbf3910aca1124ef6577119a08de4b704df0deecda2a2893
     inline_signed: true
   .ai/directives/rye/core/registry/delete.md:
-    sha256: baef645272260a98084cb8899767c65d632c8b3b276eaed69793dc7f4d5ec9fc
+    sha256: 99091f2cab1b6542b84da834b547601f84c3faf5bed420acbe5dc31b63354589
     inline_signed: true
   .ai/directives/rye/core/registry/login.md:
-    sha256: 274b80d8f68f12d2261b257c1ca56188d2479e9a79a52641a755da356b02cd54
+    sha256: 7c2161676776662b51643c338ab5db78af898a430398ee755616842cd9cbeadb
     inline_signed: true
   .ai/directives/rye/core/registry/login_poll.md:
-    sha256: 85ff077a603817365ac291eba80242516d3b427bd71bf559bfaec531fbee2f13
+    sha256: 3ea67e5ea08197602eb2a90d1beffc4e4655f402edcf956508c535049cf426ed
     inline_signed: true
   .ai/directives/rye/core/registry/logout.md:
-    sha256: 5870fa2b186432ea92ecdb61af3bfd03e51363e9c49e667bda5b4d96e81652f1
+    sha256: 32def6e149dc048a3c7f76ebdfb83513b4c7875aeb9d5db0b937bd1c63c92dd0
     inline_signed: true
   .ai/directives/rye/core/registry/publish.md:
-    sha256: c1e80e1e55c1cc33e3292e2438283ff3f4228cfbf207b91652b7580fa4b38619
+    sha256: 4edc0d57fdd1d307615536ff209914ee92a5ce13bdc9b19a22bdab05cac7719b
     inline_signed: true
   .ai/directives/rye/core/registry/pull.md:
-    sha256: 2b4319c06007598979d95b63e317f0156e99201837b8c72dd5b3127e29b04ec7
+    sha256: 337d0ca2b6e99967ead044fd615c8dc703d71ad4540d8a959a31d33461af9936
     inline_signed: true
   .ai/directives/rye/core/registry/push.md:
-    sha256: 88e31bd5314fc980076660502851dfedf1870bee1bd193b7a7c2dccf6ba9e53f
+    sha256: e9173fe0445ce567eda178b955d11742904a5cc58bead682143a1cffb353f06d
     inline_signed: true
   .ai/directives/rye/core/registry/search.md:
-    sha256: 562afde87e231e4863d429e788597ddaf09adc7b2175f2d947e05b351d8d8a0b
+    sha256: 8e3de162738f7139ff9e9eda6f583cd75f45790be5897fe7fe173108bba9351b
     inline_signed: true
   .ai/directives/rye/core/registry/signup.md:
-    sha256: ef49526a7e311e6e98c2604ef36cd662912b0254b76620dd3aea512ffce7c9de
+    sha256: e879138c255cf45ba0d5a8be6ff4f8a0c5997ef50c8ee9f7a625f03dc01d3cdb
     inline_signed: true
   .ai/directives/rye/core/registry/unpublish.md:
-    sha256: 4dbb77e491b15b067936c89f43546140519f60e01b526ed544db83d64529a3d4
+    sha256: 6ba4e9705bb65d4be727e0b1da909d29f28b6f3614af1a1996f37406ae49fa96
     inline_signed: true
   .ai/directives/rye/core/registry/whoami.md:
-    sha256: 47991cd11f6744cc8ab87c6d605e070128237dfebde1b0740edd8f73973909aa
+    sha256: 854e1fcc2562ff55efaac4cd4c84ec5276c289a77731d355bab2de9bd2306106
     inline_signed: true
   .ai/directives/rye/core/system.md:
-    sha256: ee18db50c7b65ee8126e3b03f1ed49dabe66659381d66baab1174c84fc11d282
+    sha256: 4f0a6985749d55a71386a3053496ff1df66a4022bc9f9ab271dfb21d1927b04e
     inline_signed: true
   .ai/directives/rye/core/telemetry.md:
-    sha256: a243f9fc70f2a66e493a4b1445b0dfe6db117443f23033d1701f520f9054d440
+    sha256: e205bc68c2a8a6c5c0f0705228353e3879436bd8b40cd4a32e38d95af64e5776
     inline_signed: true
   .ai/tools/rye/core/bundler/__init__.py:
-    sha256: 137559a8b2f0318d6dfea840d0c07d8cd61069a6bd67e4c8b93cc52a0a6ac2a4
+    sha256: 56d31ea21ca6bb9041346f9dd6cb9181dda49885682c243ed4b89b841b3948f6
     inline_signed: true
   .ai/tools/rye/core/bundler/bundler.py:
-    sha256: 37abcee8cc486aa6b02b6744622b2ac8f0b7c8268d187bc6e8ba11720de4d4e2
+    sha256: 9c753089ae2d7c8190f6c664c0b1eece4d4da0d94d997d95718d5108625052bb
     inline_signed: true
   .ai/tools/rye/core/bundler/collect.yaml:
-    sha256: d80b8c3ad1a9984e6fd90aa8d96ac94f241e815f76880299873737016922913e
+    sha256: 842028776f0baf3b2fab035b00e066a393cf58059cf44cf1dc92d82f7d7eafa6
     inline_signed: true
   .ai/tools/rye/core/extractors/__init__.py:
-    sha256: 9dedc3a8fa2e7419bcf25ceade4b43f71e64f422305627b74e08f973e375cdf7
+    sha256: 42a4a7388d318bd49e3f56b9f314723c3e720d0d17573d4fe33900c3013cd9a6
     inline_signed: true
   .ai/tools/rye/core/extractors/directive/directive_extractor.yaml:
-    sha256: d335beca4e34b5e5e4174e05694d4184c7a27cab63cb866b055b9a48361c4759
+    sha256: e7584c65ae5babf1fa535641dbb21527a704480294c72ffc94ca4bbc5dac8267
     inline_signed: true
   .ai/tools/rye/core/extractors/knowledge/knowledge_extractor.yaml:
-    sha256: 1404507366246eaea07380ca45a8d98f4d9f5af670f7665fa38f559c922c82ba
+    sha256: 37a9f77d704c5d0fb9d5ab9de1993da8fbb0c61bdd7645796183b2678309f372
     inline_signed: true
   .ai/tools/rye/core/extractors/tool/tool_extractor.yaml:
-    sha256: 37f1635ce934d958a82b4dccc1ac609a6582693fdca97ffa37310b40f258df9f
+    sha256: b5c64a807d3aa7dd3d2c000b4702d43c17b07d7122865b7aeaab420cc0717a2e
+    inline_signed: true
+  .ai/tools/rye/core/keys/keys.py:
+    sha256: 299e3766ec264e6511eedbe94c82e12c80c2f10d54b3ad8f71b64cd79033d39e
     inline_signed: true
   .ai/tools/rye/core/parsers/__init__.py:
-    sha256: 0a4401960405430ccb1eba4391e19903a1bcc8b7b67db6df97d72de64ce7c965
+    sha256: 38f8774a348e51b70dd2345bd3f192d877babc3eaa07fb16e3ab266fc99bfb19
     inline_signed: true
   .ai/tools/rye/core/parsers/javascript/javascript.py:
-    sha256: 843714dfa9dc37b8c77ad846bca736feda965f34acedc3db5e0b8cfa55e741cf
+    sha256: 97760f8cebdedf3d02d76d835492fdbd546e185801f629542990770b6cf5d389
     inline_signed: true
   .ai/tools/rye/core/parsers/markdown/frontmatter.py:
-    sha256: 746dbf17c8fb60dc717803664bcfd1607552b943234aa00ddd9663cbb2b8c1f9
+    sha256: e8e2b4fa968235f2b0323d33bd010fb1a7efe698a0d6fc616085e02a7763cfba
     inline_signed: true
   .ai/tools/rye/core/parsers/markdown/xml.py:
-    sha256: be21e3361ebfbfade8b27de9d2e23541e621fb796ed9a9841f6beff4925e2b1c
+    sha256: a2df99e5e5e55c02d950872fe81faa5616833433ec1f735b39a600957f5ff623
     inline_signed: true
   .ai/tools/rye/core/parsers/python/ast.py:
-    sha256: b838878075e4b8a2e84aea9b744315577cfab48b151413893e31d5e875fe851e
+    sha256: 3620dca3ab18252ba57500c723544c840aa59764488f1f925c98c34caca8665c
     inline_signed: true
   .ai/tools/rye/core/parsers/yaml/yaml.py:
-    sha256: 34c0a7971e40ea1d7ec208ebde94d4cd807bbed1910794176d8ae54389ba9798
+    sha256: f6576348b6e09480dd5e17a53a78824be209aef6759d96694dc5cb582f1f377a
     inline_signed: true
   .ai/tools/rye/core/primitives/__init__.py:
-    sha256: 04c6b7feb985afe24cacd900460d8f94c51f9a993f69c7608ffcf78166b07d0c
+    sha256: 9bf7cb84c2817d941b3ec889bbdef059ee21c07309a3a2e6f883bcbffb88a5fc
     inline_signed: true
   .ai/tools/rye/core/primitives/http_client.yaml:
-    sha256: 41c143e5816ddb20e49ba6096a609f4ac22f9d93a7e8ac7ed444ba8a5406fd3a
+    sha256: 41b64a96b07d2d4cec41963702437a0af1cb360243c05ac3ebd9dc95c2ec257a
     inline_signed: true
   .ai/tools/rye/core/primitives/subprocess.yaml:
-    sha256: c60aba679699824058ef0c13c753424bcc061c6fa30d8c15c18a96b9df3ec99e
+    sha256: 4b11e28930ec9051c199722b20944e07cff39d840a4eefe9724055f48e9cf755
     inline_signed: true
   .ai/tools/rye/core/registry/__init__.py:
-    sha256: 087c86a53a06ff4f75ecf943cbf5431fb80f341ea2377c62e74cdb39ca111c99
+    sha256: 4c4c9e9e50834f4f5e11eb0dde8f62c390d8462aebd12a944bfc48079c1d0566
     inline_signed: true
   .ai/tools/rye/core/registry/registry.py:
-    sha256: dcb12dad18d0b435920cfb3adb9e876068933c1abd232d0c6ef23c54bde098a4
+    sha256: f2220a07431a6c045267823421411b56b856b024e874401c19d3648ca8569a6a
     inline_signed: true
   .ai/tools/rye/core/runtimes/bash/bash.yaml:
-    sha256: 445789cea903f613d10e4fe8114f304ddee0579a9ad80bb3e60e381c42658cd9
+    sha256: 688161c922b0d247a19c77f4f94eb22d28de8c14b3774db40d225bcac0630336
     inline_signed: true
   .ai/tools/rye/core/runtimes/mcp/http.yaml:
-    sha256: fc9b568d9d9fae35cf6c510137b2c128984a7c78fa2d97f98df9fc222a250d76
+    sha256: a5b4e2901a86a6a29da5a53f9503ce5f0eea46c70fb082ec1f8116ebf8b844da
     inline_signed: true
   .ai/tools/rye/core/runtimes/mcp/stdio.yaml:
-    sha256: 216ea5ab6083b88ef2565ecf3545f992fcc7b775894dd74ff012d08a0c62327b
+    sha256: 56b4896f1d43c7d81c87c056b91ba5c5b3a19477b71b4935b1864253f898198a
     inline_signed: true
   .ai/tools/rye/core/runtimes/node/node.yaml:
-    sha256: e2238ca9ecbb0ee0188132ebf54ab0e95f8412d32271471a65d3ecab663e61b6
+    sha256: fb28957320205b5fd3deb622a73eae4f3a2e95ddf3f2dcc70be7e2f3b93211c2
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/function.yaml:
-    sha256: 0e0e0a91af6841356e00c90d8814845e6b203affa409acc243904fd429c50c39
+    sha256: 6aa85746bcd6c0be2e49ff1509d75ec31f846aa0c0f0ac4328e97ead1988cda9
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/lib/__init__.py:
-    sha256: 38adf765f74f81a5a751bf9520da5320308a87c014d36abc06d425eb97af1a5a
+    sha256: dcdefe7fe3119743738478b905f2a28f7b5909fc0f89a80c3a1bdb4bc0446187
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/lib/module_loader.py:
-    sha256: 1decba904201ac5fc55505ac4b8adaae61564a408deb3d2952812972cab733c1
+    sha256: bac8aa451a93a40f5d97ae6b9ed728ddd0b830fab4ecffc4eb51ef2b9151e156
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/script.yaml:
-    sha256: 8a757e19a83134f7f2a6c1ca699875443e883f74eeef67c173969c87b817839e
+    sha256: 1da84b5771d793d24f66f9c8bdf67560d00639be62cab0944f59453a9b90417b
     inline_signed: true
   .ai/tools/rye/core/runtimes/rust/runtime.yaml:
-    sha256: e75ab7dfcf8ffe311f4485a1e32180b96b16a486090def24f0689c160b17fd22
+    sha256: 3c46fa420b5e4a7bbb740114e93e359ab8a652e76b5a2713c5a8422a0e9fcd7b
     inline_signed: true
   .ai/tools/rye/core/runtimes/state-graph/runtime.yaml:
-    sha256: 3bdfe7a5d089e18f5c046045f2e9b9b88a66e254f52e13852e7ec8becdd6be41
+    sha256: 5a69f1d0cd93b89cf1817e1216e1ded1f11ad820d239e61031f5e9ef0ad8046a
     inline_signed: true
   .ai/tools/rye/core/runtimes/state-graph/walker.py:
-    sha256: 52e780ac824a86880dcc4e4fbba2577ca577a98f893d85d0b7e57be8fba03737
+    sha256: 7bf86b0c517b89266e86de2c7b08d6f7d652f15e933310d5d9c50894874262b2
     inline_signed: true
   .ai/tools/rye/core/sinks/file_sink.py:
-    sha256: dda89df136520cf7c6984dd74382e104ddc9ae1c877b9ebe41e38375c34de6ac
+    sha256: 3cf1c905f0f6f6faba02d78cc2c85654386ae109c7e5d9e92ace5e07849f8d6e
     inline_signed: true
   .ai/tools/rye/core/sinks/null_sink.py:
-    sha256: 8cf0fd206a0fac8b71fe2e6ae78bf1ef4f7b062cdeb3d445f07594136652b951
+    sha256: 7ead835a315b2c9779e3c861b2c287cf772147e46a00c9eef022fa419e2d3cef
     inline_signed: true
   .ai/tools/rye/core/sinks/websocket_sink.py:
-    sha256: b7383258bac65519412717dde71d7c0f320ac17a06a93370252137c425b5efbd
+    sha256: 1af6fb38bd3ecdc678d2655b7b1dc980fee07cec6b15e5a2edaec9ac72180a8e
     inline_signed: true
   .ai/tools/rye/core/system/system.py:
-    sha256: 22cdfd62b5fbe354d68f185e242e2331a07c4968479f4124715efa3f7d8617c2
+    sha256: 87cbbf3e1c611e27bf1623b7a4de9e31df557c69d3c961e4929a9b99a5045a4f
     inline_signed: true
   .ai/tools/rye/core/telemetry/__init__.py:
-    sha256: 367d83f77c1c994c056b2cb2dcebc841b2948c80dea01635df808557cf506bee
+    sha256: 2686d4b362963dc2032c47c17caae0376dee80cb4a807c35e4be73ab9130bbd7
     inline_signed: true
   .ai/tools/rye/core/telemetry/telemetry.py:
-    sha256: 4d36bb86aeb2398dbc6f996675aea22af57b379ea7720d67c1865fc5d99671d9
+    sha256: 3cda558d0d4f1c83d6d53a0d09e024c57780b77912118274de2cb24c2cb36f2c
     inline_signed: true
   .ai/knowledge/rye/core/ai-directory.md:
-    sha256: e2940f3551b866aae1e7db3b108f54ad5e3e34cf9d641047d02aba09dd2ba4e3
+    sha256: 21b1fdb624529dfa7a9b1a3801acd250728809cd84f91fb15c0ab3f87bb4cc70
     inline_signed: true
   .ai/knowledge/rye/core/bundler/bundle-format.md:
-    sha256: ae57304c7a4d3a546e14d1c11a09bae7ac6aff168ba2590d815acdf194b265c4
+    sha256: c3ac87f5ad43a9350deae713e3c282bc2d75ba134d00a8dd54f01af8dcf27e06
     inline_signed: true
   .ai/knowledge/rye/core/capability-strings.md:
-    sha256: 5a2c439c72c8acfda3765352aaa8bbe46a1166400f34cc44e80c1079e541a5cb
+    sha256: d51ae4a31be9d37f8f67ef2c4d7e0113c4ecde8a0e7d8626de6376b8815bdf03
     inline_signed: true
   .ai/knowledge/rye/core/executor-chain.md:
-    sha256: af96c43e6fa3e0799cd94a091e9ca5cc364a2457a05513bcd73b4962a385e22f
+    sha256: db85b13e171dcafc55d8cda24529a7632f331b208990feee82b7cd60aba83e61
     inline_signed: true
   .ai/knowledge/rye/core/input-interpolation.md:
-    sha256: 18262460923c3fb25a7bf3a96ec5251582fa4760f172605d21a2176223f13693
+    sha256: c2acdebebfe4b1492a4bc088bd15390f4102d3162fb736a1ca9eb4127b456247
     inline_signed: true
   .ai/knowledge/rye/core/parsers.md:
-    sha256: 024e18ecfff767f3324898d33ff3c8403d8a5917952fe5391f67f44b898f3af8
+    sha256: 231c4ad84ba40638dd91e77eaa1fc62c1c80ab9b7cb3d5e8dc6f60d8b8101334
     inline_signed: true
   .ai/knowledge/rye/core/registry/registry-api.md:
-    sha256: f10c8669a2cc825350521b8b48a92d8921c01ec9c30d555d1f349d744309b4e8
+    sha256: 0cc1eef11454bde3665ede6f0d8acf0ca64a09f347ba43657573a5fb2ada24b7
     inline_signed: true
   .ai/knowledge/rye/core/registry/trust-model.md:
-    sha256: 701061e53dc79a1239682985ea65f3f809505a8203a85f84773d1b52746e35c3
+    sha256: 67bb972549249cf14d6863252b619c1af9729b28fa53d95f8a5c541d2ac43c85
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/runtime-authoring.md:
-    sha256: 44f980822d2b312540270ae12cbb46eb2492d182983e2aeb152ab5dad06686d5
+    sha256: 9bf8641ba92bf0a2f1d419eb987935c2f555eeac5c5c8e50148b0b99e766f713
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/standard-runtimes.md:
-    sha256: 40677f2d6380f03f0ee5896160034cb0decc65ef48bdc76567ecf26cfe0d6db9
+    sha256: ad093dcc94ed82497fca60dec16ded6fca23c5e2ca6656abdad4ec5ef498825b
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/state-graph-runtime.md:
-    sha256: 53c8df2105fbb49f04c19dcd418a537c38092e325d4ca13f78e7585db2231ebf
+    sha256: 015180b56f011a65f7e75c8d9894563031630e30ed1e80e0f282530de312a578
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/state-graph-walker.md:
-    sha256: ed80ff27fa999722b7b43c5b85a5d325934cee65ca87816473b9d57bf03ba9d1
+    sha256: 128ec92e1fb5d5be0cae7253a61d37c77169221a70639862f8cfdf5d647fc90a
     inline_signed: true
   .ai/knowledge/rye/core/signing-and-integrity.md:
-    sha256: 3d07917b868d178629a1493d0e3165737e047aaabb1782329999cfdee1684a46
+    sha256: 6ec98d59f0da03179dbbbfb46abacc9dec8a9c306ae3a42f3a7c59e01353dd74
     inline_signed: true
   .ai/knowledge/rye/core/templating-systems.md:
-    sha256: 65c88453aeaa473cbb88cb5b8e93cc95987be9586da2a0022a5240555a833943
+    sha256: ad8924f58801d1e70a962f2c875343aeb23996509a9477284735c527aa02343a
     inline_signed: true
   .ai/knowledge/rye/core/terminology.md:
-    sha256: 823df329efb3fa0d7eb9afaf3376903b09baa0ca8a6c7f83c2ff718d59488e4a
+    sha256: 879b78105760fcd018943ef9616d19bbd291a31da169934a31a2510ed331ec7b
     inline_signed: true
   .ai/knowledge/rye/core/three-tier-spaces.md:
-    sha256: ff7ee2d4885de8395171db98a77e4a8c8e7108445c5f70858880fe7b11a34adb
+    sha256: 566a9366666c1efddf31d339f8fedd414cae63e136f441dbd3dc64ea75acfe86
     inline_signed: true
-  .ai/trusted_keys/9fbfabe975fa5a7f.toml:
-    sha256: 8510929ed38c3ae84e02825b274c3e763cd714f50d13b971413a492940085c13
-    inline_signed: false
+  .ai/trusted_keys/4b987fd4e40303ac.toml:
+    sha256: 0c34453af4c443b2d60fab2709cce214e8516f6aef99e8206ccba633d205ecfd
+    inline_signed: true

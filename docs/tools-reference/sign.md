@@ -20,6 +20,17 @@ Validate item structure using schema-driven extractors and sign the file with an
 | `project_path` | string | yes      | —           | Absolute path to the project root                                        |
 | `source`       | string | no       | `"project"` | Where to find the item: `"project"`, `"user"`, or `"system"`             |
 
+## Prerequisites
+
+An Ed25519 keypair must exist before signing. If you ran `rye execute directive init`, your key was created automatically. Otherwise, generate one with the keys tool:
+
+```bash
+rye execute tool rye/core/keys/keys --action generate
+rye execute tool rye/core/keys/keys --action trust
+```
+
+If no keypair exists, signing will fail with a `RuntimeError` and instructions to generate one.
+
 ## Signing Process
 
 1. **Load and parse** — The file is read and routed to the appropriate parser based on item type and file extension:

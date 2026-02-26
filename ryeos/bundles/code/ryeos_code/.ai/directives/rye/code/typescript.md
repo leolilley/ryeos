@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:41Z:c2a9e4e385dc08ff8eb6672237444c44fd0177c33b8426059be6119e74086e4a:iA3MH61pDv212G4ePIExoupdmVY1FxPducYerRqBemc6tShgrE93GNWg1KVhqVm2nc6pBk2b9cbMqBlywNhTDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:48Z:c2a9e4e385dc08ff8eb6672237444c44fd0177c33b8426059be6119e74086e4a:VMPs8SdWhx85Chr7a4zQMSvkobdpzMBWEZhe0pTk4SodvxJbNLbswUPDymhvP9Ez31KTfUWpeIJ_DMuVcFBHBg==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # TypeScript Type Check
 

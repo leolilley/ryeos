@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:26Z:7c0753bfe3f3caaa7fcb6dc29cce5625fb2ef616a24ae404e8cdace63852d4ca:SLuVrnHH_JzXa7uJAxMVJYeFdqLZfUmYta1LpNVodJq0jfF7XUf1sgv6Hs0cgbCsLgptOlaYuiYakzhOmKVaBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:34Z:7c0753bfe3f3caaa7fcb6dc29cce5625fb2ef616a24ae404e8cdace63852d4ca:UfUa1Y4i2vblC2hiqqq13WRtLALKGi1OtpN8uD826gGLCHuY0ibjSFI3lPKN-hSBzyYb_vAdq0Gl1htOAfYwAA==:4b987fd4e40303ac -->
 # Registry Publish
 
 Make an item public in the registry.

@@ -316,7 +316,8 @@ class MetadataManager:
     ) -> str:
         """Create Ed25519 signature for content.
 
-        Auto-generates keypair on first use. Auto-trusts own public key.
+        Uses the keypair from ~/.ai/keys/ (created by `rye execute directive init`
+        or `rye/core/keys/keys generate`). Raises if no keypair exists.
         """
         strategy = cls.get_strategy(
             item_type, file_path=file_path, project_path=project_path
@@ -327,21 +328,23 @@ class MetadataManager:
 
         from rye.utils.path_utils import get_user_space
         from lillux.primitives.signing import (
-            ensure_keypair,
+            load_keypair,
             sign_hash,
             compute_key_fingerprint,
         )
-        from rye.utils.trust_store import TrustStore
 
         key_dir = get_user_space() / AI_DIR / "keys"
-        private_pem, public_pem = ensure_keypair(key_dir)
+        try:
+            private_pem, public_pem = load_keypair(key_dir)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "No signing keypair found. Generate one first:\n"
+                "  rye execute tool rye/core/keys/keys with {\"action\": \"generate\"}\n"
+                "  rye execute tool rye/core/keys/keys with {\"action\": \"trust\"}"
+            )
 
         ed25519_sig = sign_hash(content_hash, private_pem)
         pubkey_fp = compute_key_fingerprint(public_pem)
-
-        trust_store = TrustStore()
-        if not trust_store.is_trusted(pubkey_fp):
-            trust_store.add_key(public_pem, owner="local")
 
         return strategy.format_signature(timestamp, content_hash, ed25519_sig, pubkey_fp)
 
@@ -361,21 +364,22 @@ class MetadataManager:
 
         from rye.utils.path_utils import get_user_space
         from lillux.primitives.signing import (
-            ensure_keypair,
+            load_keypair,
             sign_hash,
             compute_key_fingerprint,
         )
-        from rye.utils.trust_store import TrustStore
-
         key_dir = get_user_space() / AI_DIR / "keys"
-        private_pem, public_pem = ensure_keypair(key_dir)
+        try:
+            private_pem, public_pem = load_keypair(key_dir)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "No signing keypair found. Generate one first:\n"
+                "  rye execute tool rye/core/keys/keys with {\"action\": \"generate\"}\n"
+                "  rye execute tool rye/core/keys/keys with {\"action\": \"trust\"}"
+            )
 
         ed25519_sig = sign_hash(content_hash, private_pem)
         pubkey_fp = compute_key_fingerprint(public_pem)
-
-        trust_store = TrustStore()
-        if not trust_store.is_trusted(pubkey_fp):
-            trust_store.add_key(public_pem, owner="local")
 
         return strategy.format_signature(timestamp, content_hash, ed25519_sig, pubkey_fp)
 

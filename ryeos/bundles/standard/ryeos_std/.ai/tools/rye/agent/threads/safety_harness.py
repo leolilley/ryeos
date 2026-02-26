@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T03:49:32Z:f7a7fb9fcd6c7570e25f358766c58400cadccce517be49307b47c0632b8c138c:1c0dG1erKTd08Pn7wry3mNN8uMvHuLt2Rdh7i5PhSaw4qwd51wF0eC33tYYYz9C7zoyWecFUeltw0FNyxuHHDA==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T05:02:40Z:f7a7fb9fcd6c7570e25f358766c58400cadccce517be49307b47c0632b8c138c:e-Y1dIWs-JY5-945npY9mqBu-QnRZlFdOnGzDLm0Cf6EEfzmUgUL-VVYQhjLn5jitg5pH9nHhq3KSfRW6_Q7CQ==:4b987fd4e40303ac
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """

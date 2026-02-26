@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T03:49:26Z:6c7942e9f235a8a153ab76f5c6bebf77601e54865e2fde37613ec3d49d1083c6:UDQNzBQI8zc5jRy5pbyWN69rr7Q1i0dRNH-b4pJUZz9I7SbVJ7FvvOW-VjdKi3NJ81UiBX6ob7AAZag6vQPnDw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T05:05:26Z:610269fb39778fc1719000b8f3052157c9f7aabd5964136f7cfe378acfb7a42d:Cw_bZ8pnLUIjdy397HUJ-oeS5uSiNHE5MgD03ex9zvCfh8SsNRGk1i62L1Bea6ckQu29HJ95rbNtlzrMo2Z1Ag==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: config
 executor_id: null
@@ -20,3 +20,12 @@ exclude_dirs:
   - .ruff_cache
   - .pytest_cache
   - .mypy_cache
+
+# Filenames to exclude when collecting/signing items.
+# These are ecosystem metadata files that live alongside tools
+# but are not Rye items themselves.
+exclude_files:
+  - package.json
+  - package-lock.json
+  - yarn.lock
+  - pnpm-lock.yaml

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:ffda66d6378ed78ef5c12b25c3dde150b828c47f157b5e91e853c5be7bbe2cb5:d7tgzK8h50BEGbagCYdnGTDIln1iX8HfmXyj7wanM6SNufcD229_TKQwQyvxp_UJJ_lWzk3TWOguUZWfWmMdCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:ffda66d6378ed78ef5c12b25c3dde150b828c47f157b5e91e853c5be7bbe2cb5:XJmdE5AgvxEh1bDwDsDP4xXrwfylHaNVyGMixBsV4JMYjsZS96LodHrADYipTdy52LYozNhC_u27xkRm-hsVCg==:4b987fd4e40303ac -->
 
 ```yaml
 name: bash-execution

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:1867ae278c4e189dd2316575368b46eadceed62479407f36bc4d2d6c786ca94e:EdEsTYwwCce--oZCvXRPeYqtokULUkbtPmhbhqQxWb6T0dNamWMuMM_PeZFL2AyGslQJY32bQTr3pRRqTE0CBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:1867ae278c4e189dd2316575368b46eadceed62479407f36bc4d2d6c786ca94e:W16DkmscQ3jiRwelc3HV_757FgW9SxpDJfJZf8a-uV4bPEgxob2ZI9hUECrxeJUZ83jBNZZLj9seVdg5ke-4Dg==:4b987fd4e40303ac -->
 # Bash
 
 Execute a shell command via subprocess.

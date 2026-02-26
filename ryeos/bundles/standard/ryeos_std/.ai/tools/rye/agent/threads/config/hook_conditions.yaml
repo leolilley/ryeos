@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T03:49:32Z:05ff36f61a8f7b7572f72f18d36777cd58f73f446202c7ce0a81306531200da0:aG4GnqJKujUVE8N0qACdgYFWFEycIFSBV7ietJBWZ2wMUHuUy05usNX7Wr6l8XgfU9CAUdn_ZeZOy4LBUu--Bw==:9fbfabe975fa5a7f
+# rye:signed:2026-02-26T05:02:40Z:05ff36f61a8f7b7572f72f18d36777cd58f73f446202c7ce0a81306531200da0:BkQh0rwivTTRP7auXmn1qPlgbsfM9fQFx4sc5AUofkQ97M1nFlFTn2juTs_UfDfr9ZLeFb0MEBuqnYqeVPGyCw==:4b987fd4e40303ac
 # config/hook_conditions.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"

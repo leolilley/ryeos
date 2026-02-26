@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:3bdbca5c92f2de56849a49c620c77416ab78db31f291a190377847425a3b1472:PWfy8EFkKxTBDYlxObAu0qrqZnt7Rj27L88eqHhiDLnzk9Ao6k_hLHMrBwHkPBzMhV-9xTXInPsCgthYrJB6Ag==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:3bdbca5c92f2de56849a49c620c77416ab78db31f291a190377847425a3b1472:VWXu-QI0DeHzz85BDX0yj2LPaexM-fUcgbsR6GL5QrTdz7-V2PrsnUzfpuFWF-phiRXOvhUJ9k1zzZA0LLugBg==:4b987fd4e40303ac -->
 
 ```yaml
 name: streaming

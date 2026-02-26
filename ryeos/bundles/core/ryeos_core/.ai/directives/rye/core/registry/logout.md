@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:26Z:d7b89f77a67173ccd883d83aac5c8cefa2a288393038e4f8008261c3af61e798:-Vt8f3hlJDuWUueqA9ELxZTap0oKt6ua20Us1brikMVfzuOJ9UYw4F93LwqPI4N2Kvqhu4c6bJUW_ys4JzkiDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:34Z:d7b89f77a67173ccd883d83aac5c8cefa2a288393038e4f8008261c3af61e798:JEIflAXO9QEN8aBM92cCN00TzjeVzJKaMLBtrT3p0GxnXmg1eyMDJF2B2302Vy6A6f-8bg4kITChYtZi27qvBw==:4b987fd4e40303ac -->
 # Registry Logout
 
 Clear the local authentication session.

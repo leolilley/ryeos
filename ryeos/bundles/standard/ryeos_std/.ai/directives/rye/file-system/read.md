@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:97f592b911ae423728a4cb91bb1a93d5ae513951dfa1e0474e16bb0aca063851:43xOl04lABl8jvqpr-7xMHGDjsDk6kaMyHVAatMkHcAmV08v0RGt87J1nUl2yLO3fc66x6pS0nFP7CkWiPIPCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:97f592b911ae423728a4cb91bb1a93d5ae513951dfa1e0474e16bb0aca063851:yKb4IHovELqgtEaylIqEums0WLm2m8zAokp770yNhOWUSjm66h1dk31H8J7gIqc0PJlgihvYCxdcOvkzqKd3Bw==:4b987fd4e40303ac -->
 # Read
 
 Read file contents with optional offset and line limit.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:26Z:415fd8b5e5f57a66dbc29808b38614736a63b3201e086da24ea4692325849ff8:4XLkCrni_iY_kQeyWampBBUQeTu1uLiNBxGItsAUqC705VS-gVkKvCuPdrfBMjj57k6X6LvJ7tNFxA1nf8a0Aw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:34Z:415fd8b5e5f57a66dbc29808b38614736a63b3201e086da24ea4692325849ff8:OyXjoO1tuoBhPwq0-374_C_zMRx5PiIXxNgrhToJTebuZq2S4SeirVBarkwofDzkFFfcjnSN28i2Xhqmu09DBA==:4b987fd4e40303ac -->
 # Registry Search
 
 Search the registry for items.

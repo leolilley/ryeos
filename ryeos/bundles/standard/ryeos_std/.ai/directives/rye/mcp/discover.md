@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:24b6f97bed95c261fa031375d1b730fd1391b3b695a0081f6f3b31b0279f4a87:MWB5PpyRvo8PSi9pebiulYkSg2M8C1fCPv9hhkKRUhfLP4a4Ql6SERYL7NeR8INiIer7DKavhDvoy-mH1-DXBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:24b6f97bed95c261fa031375d1b730fd1391b3b695a0081f6f3b31b0279f4a87:NqLC_rWNoQwsRlG6ljfWRrt2bXA4qqK-4Bw5E5B0kZp6BMZL6lwiWKhlcxeX5Sz76WjgDDe-yporDlt9vLDzAQ==:4b987fd4e40303ac -->
 # MCP Discover
 
 Discover available tools on an MCP server.

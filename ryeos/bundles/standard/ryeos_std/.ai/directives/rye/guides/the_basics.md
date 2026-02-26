@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:cf1eb75bf45bdf65f8b47323294e9f6f4c013cb3d4f8c5a63bf0b54239362ad3:CJJ0INLXFXa8QuGBLq7YjdrTDqz-i2OHyiv-ib7MW1OHPaUw3nTdQ3iViekmsuuT9f_v0JIHm_Alfu9Vd0rdDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:cf1eb75bf45bdf65f8b47323294e9f6f4c013cb3d4f8c5a63bf0b54239362ad3:1FxMOPQRw8q04lWzKmHn4mjteukRmzqAhF_wOTgN0nCC4qeBwK2i7T5T4o4CpkmBahPImTYtQE5i0NMwwV8KCw==:4b987fd4e40303ac -->
 
 # The Basics
 

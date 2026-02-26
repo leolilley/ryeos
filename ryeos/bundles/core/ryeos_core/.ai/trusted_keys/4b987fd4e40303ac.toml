@@ -1,0 +1,11 @@
+# rye:signed:2026-02-26T05:05:50Z:7b659071ac876924281b3c1d1cfd554f377cc6fea999492b4fa752cfed731edc:0YuJpMdmXfofE4GHzuF1FdXDUo2JRY2070yrgEEpCt26eDfB2R3vcPXcOFg5B7m5Q6EmgCdzipnBr4OEQakODw==:4b987fd4e40303ac
+fingerprint = "4b987fd4e40303ac"
+owner = "leo"
+attestation = ""
+
+[public_key]
+pem = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAgc0X8VKJuKzFh/aSw/XeYEdp3keIqncwu9ySd81Y69g=
+-----END PUBLIC KEY-----
+"""

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:26Z:0a6b7dfc7e0adf66f1283fe1d4939055e5459bcfd40816a06c8677d825388e4b:5qn8nJ5QIu5EJw26xXny7HewvZa8tDIB2klICFSBy3YBlPjFKpbyRSIkRAqH_qj3Hx7bI5HvrI_VvZ9VQyJWAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:12:47Z:2bedbcb3c19b9b4ed8b7e8e391fe49833cc2a5dcddd4c0afa7f523a8870829d0:7REwLlM6DU5Xv6BNf8O0Ffgl-rJUPHA_gHlQqFBS0zb72uVBDr9nM0OlvG5eLqXev04jv5zxBK7ZpPV9nsH6Bw==:4b987fd4e40303ac -->
 
 ```yaml
 name: signing-and-integrity
@@ -73,15 +73,29 @@ Canonical JSON serialization (sorted keys, no whitespace) ensures deterministic 
 
 ## Ed25519 Signing Flow
 
-```python
-from lillux.primitives.signing import generate_keypair, sign_hash, verify_signature
+### Prerequisite: Keypair Must Exist
 
-# 1. Generate keypair (one-time)
-private_pem, public_pem = generate_keypair()
-save_keypair(private_pem, public_pem, key_dir=~/.ai/keys/)
-# → private_key.pem (mode 0600)
-# → public_key.pem  (mode 0644)
-# → key directory    (mode 0700)
+Signing requires an existing Ed25519 keypair. `MetadataManager.create_signature()` calls `load_keypair()` (not `ensure_keypair()`) and raises `RuntimeError` with instructions if no keypair is found. To generate or manage keys, use the `rye/core/keys/keys` tool:
+
+```python
+# Generate a new keypair
+rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "generate"})
+
+# View key info
+rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "info"})
+
+# Other actions: trust, list, remove
+```
+
+For bundles, provision signing keys with `action: trust, space: project`.
+
+### Signing Steps
+
+```python
+from lillux.primitives.signing import sign_hash, verify_signature
+
+# 1. Load existing keypair (fails if none exists)
+private_pem, public_pem = load_keypair(key_dir=~/.ai/keys/)
 
 # 2. Compute content hash
 content_hash = MetadataManager.compute_hash(item_type, content)

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:26Z:aca5338da5f0965b54bbf7bbe31ae7baa41358d6e1677030919bba2aa6c09ed9:TyiNbgGSZRajK-qZiIuNCXIuieA_FAG3LEnPiRNPGwrlgldd1IWstrN5jYW3J84cmeZNPABtH9kjWjeLz0z8Bg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:12:47Z:3ffecab401215d782ca99f1d9a800af864fc3ac2fd41df9f7801c035b88d433d:1KPxTWxzOtiqMLbWuD3FieN4f2EUbijwv38LN-NwqU0QMNeiiajG8Wm5a26f2-U7EBJNnwnPOSm6vji2l7t1Ag==:4b987fd4e40303ac -->
 
 ```yaml
 name: trust-model
@@ -35,7 +35,7 @@ Ed25519 signing, key pinning, TOFU bootstrap, and verification for Rye OS items.
 └── public_key.pem    # Ed25519 public key (mode 0644)
 ```
 
-Key directory: mode `0700`. Generated via `Ed25519PrivateKey.generate()`. Serialized as PEM (PKCS8 private, SubjectPublicKeyInfo public).
+Key directory: mode `0700`. Serialized as PEM (PKCS8 private, SubjectPublicKeyInfo public). Keys are managed via the `rye/core/keys/keys` tool (actions: `generate`, `info`, `trust`, `list`, `remove`). Signing no longer auto-generates keypairs — `MetadataManager.create_signature()` uses `load_keypair()` and raises `RuntimeError` if no keypair exists.
 
 ### Signature Format
 
@@ -136,7 +136,7 @@ First match wins. The system bundle ships the author's key at `rye/.ai/trusted_k
 | Get registry key              | `get_registry_key()`          | Scans all keys for `owner=="rye-registry"`                                  |
 | List all keys                 | `list_keys()`                 | Returns all `.toml` identity documents across all spaces                    |
 
-**Auto-trust:** User's own public key is automatically added to the trust store on first keygen (with `owner="local"`).
+**Auto-trust:** User's own public key is automatically added to the trust store on keygen (with `owner="local"`). Keys are generated and managed via the `rye/core/keys/keys` tool. For bundles, use `action: trust, space: project` to provision trusted keys.
 
 ## TOFU (Trust On First Use)
 

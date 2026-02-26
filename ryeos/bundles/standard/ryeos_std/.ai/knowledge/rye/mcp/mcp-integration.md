@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:74bfd1ae79f31c8eb173dabc4a0f1267f5aca700d7f8c14b5d5545a76ea5afb5:jGpkMIju3K2Uq9z1MEhCjZyWnhKb2nZPJ0quh8pEyKNfC3biQ0IACp7o4MdoCrjHMrFY8jYJQAbDkrhagWl-Bg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:74bfd1ae79f31c8eb173dabc4a0f1267f5aca700d7f8c14b5d5545a76ea5afb5:3uytmqEQbVZ5-oCgq7fRNhgfgPxGmHUBu5wVe1rTVdLC9NhTWBczKckBmByMacJCKV2nx9Rk1m11Fq4nr_6QBw==:4b987fd4e40303ac -->
 
 ```yaml
 name: mcp-integration

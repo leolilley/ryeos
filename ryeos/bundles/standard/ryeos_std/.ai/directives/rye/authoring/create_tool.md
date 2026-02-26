@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:99973858524dca2e32bd67080533d1721aae3dd28b5654b0a54e62ae93571d84:wvZdbysmN9ANxRZZVOnuNORLIft-HKNlV9v41UlbjofoWku57N9UIMHvrfIeeZj10ZQGirnLM_MCvEt7To-3AQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:99973858524dca2e32bd67080533d1721aae3dd28b5654b0a54e62ae93571d84:D0RRFE_GRa6-lHEVfRFcGy1kBUCqpTm5mFOANQG3cBxGkkXCiuHWukm9L2TAzIiJe30YOrhMeeMUxWQAuvK2CQ==:4b987fd4e40303ac -->
 # Create Tool
 
 Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign it.

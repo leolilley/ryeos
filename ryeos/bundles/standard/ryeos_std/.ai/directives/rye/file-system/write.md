@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T03:49:32Z:db51589dc0801e8aab588ee14dfa9533de7eb1d5d91065b10f8035a4c82bc194:Y74_VXJGej7JhEU4WySz1E7drysriU6-0YPDFFCBbbEAq6mGLyOwlL9EZfas5iZK8O1H9E6d5ZkTXBR8UjiqDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-02-26T05:02:40Z:db51589dc0801e8aab588ee14dfa9533de7eb1d5d91065b10f8035a4c82bc194:6v2mioL0q0JlenpMPzVoY7eOgt68KG857XVrXZEM8M6ngyjJTnEWes0-3GWPHPrWpG1ep8rsz_8VB_HKwrEMDg==:4b987fd4e40303ac -->
 # Write
 
 Write content to a file, creating directories as needed.

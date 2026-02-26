@@ -292,7 +292,7 @@ def get_bundle() -> dict:
     }
 ```
 
-The author's signing key is shipped as a self-signed TOML identity document at `.ai/trusted_keys/{fingerprint}.toml` within each bundle's module root, discovered via standard 3-tier resolution.
+The author's signing key is provisioned into each bundle's `.ai/trusted_keys/` via the keys tool (`rye execute tool rye/core/keys/keys --action trust --space project` from each bundle's root). The key is stored as a self-signed TOML identity document at `.ai/trusted_keys/{fingerprint}.toml`, discovered via standard 3-tier resolution.
 
 ## Dependency Chain
 
