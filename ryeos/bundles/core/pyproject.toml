@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-core"
-version = "0.1.7"
+version = "0.1.8"
 description = "RYE Core Bundle — runtimes, primitives, extractors, and bundler"
 requires-python = ">=3.10"
 license = "MIT"
@@ -43,5 +43,3 @@ exclude = [
     "*.pyc",
 ]
 
-[tool.hatch.build.targets.wheel.force-include]
-"ryeos_core/.ai" = "ryeos_core/.ai"
