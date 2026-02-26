@@ -122,7 +122,7 @@ jobs:
         run: pip install build
 
       - name: Build package
-        run: python -m build
+        run: python -m build --wheel
         working-directory: ${{ matrix.path }}
 
       - name: Upload artifact
