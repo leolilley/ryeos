@@ -133,12 +133,18 @@ ryeos-mcp/pyproject.toml                      → ryeos-mcp
 lillux/kernel/pyproject.toml                  → lillux
 ```
 
-### Rust packages (Cargo.toml)
+### Rust packages (pyproject.toml AND Cargo.toml)
+
+Rust packages have **two** version fields that must be kept in sync:
 
 ```
-lillux/proc/Cargo.toml                        → lillux-proc
-lillux/watch/Cargo.toml                       → lillux-watch
+lillux/proc/pyproject.toml                    → lillux-proc (maturin uses this for wheel version)
+lillux/proc/Cargo.toml                        → lillux-proc (Rust binary version)
+lillux/watch/pyproject.toml                   → lillux-watch (maturin uses this for wheel version)
+lillux/watch/Cargo.toml                       → lillux-watch (Rust binary version)
 ```
+
+> **Important:** Maturin reads the version from `pyproject.toml`, not `Cargo.toml`. If you only bump `Cargo.toml`, the wheel will still have the old version.
 
 ### Bundle entry points (bundle.py)
 
