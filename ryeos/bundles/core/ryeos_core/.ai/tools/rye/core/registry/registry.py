@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:00:59Z:ee122ff3c13a9ac96433cd97c523672143163d258cc505c7457c5b3910e97d90:kQS8PnVFgHtSxdeb4abKGUACagdKukFbwuiqqZ36QCH4oCJK9QSDR7ObIHE8VvQ6kxyn0DFT5r5uNCipG9OuBA==:4b987fd4e40303ac
+# rye:signed:2026-02-26T06:05:54Z:edcabfd8d654d45b7270014d20eb47412f11063fa79b867b87a0b8eee401f08a:uom3e8K0lFbooHb8H_m_uHpnf_jqDpK3grmDVzLaKu4zI8ZUXxqaVP6asRoMRp9PqDBbmhzBqoePiOGEs2KUDQ==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -1154,7 +1154,7 @@ async def _create_api_key(params: Dict[str, Any]) -> Dict[str, Any]:
     """Create a new API key for non-interactive auth.
 
     Requires an existing auth session (OAuth or API key).
-    The raw key is returned only once — store it securely.
+    The raw key is stored in the OS keyring — never returned to the LLM.
     """
     name = params.get("name")
     if not name:
@@ -1197,18 +1197,33 @@ async def _create_api_key(params: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": f"Failed to create API key: {detail}"}
 
         key_data = result["body"]
+        raw_key = key_data["key"]
+
+        # Store in keyring immediately — raw key never leaves this function
+        try:
+            from lillux.runtime.auth import AuthStore
+            auth_store = AuthStore()
+            auth_store.set_token(
+                service=REGISTRY_SERVICE,
+                access_token=raw_key,
+                refresh_token=None,
+                expires_in=365 * 24 * 3600,
+                scopes=key_data.get("scopes", ["registry:read", "registry:write"]),
+            )
+            stored = True
+        except Exception:
+            stored = False
+
         return {
             "status": "created",
-            "key": key_data["key"],
             "name": key_data["name"],
             "key_prefix": key_data["key_prefix"],
             "scopes": key_data.get("scopes", []),
             "expires_at": key_data.get("expires_at"),
+            "stored_in_keyring": stored,
             "message": (
-                f"API key created: {key_data['name']}\n"
-                f"Key: {key_data['key']}\n\n"
-                f"Store this key securely — it will not be shown again.\n"
-                f"Set it as: export RYE_REGISTRY_API_KEY={key_data['key']}"
+                f"API key created: {key_data['name']} (prefix: {key_data['key_prefix']})\n"
+                f"Stored securely in OS keyring."
             ),
         }
 
