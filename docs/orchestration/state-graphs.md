@@ -469,9 +469,125 @@ rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
             parameters={"operation": "list_active"})
 ```
 
+## Single-Node Execution
+
+Execute a single node from a graph with optional injected state — useful for debugging failures without re-running the entire pipeline.
+
+Pass `node` in parameters to target a specific node:
+
+```python
+rye_execute(
+    item_type="tool",
+    item_id="my-project/workflows/scraper_pipeline",
+    parameters={
+        "node": "store_results",
+        "inject_state": {"scraped_data": [...], "results": [...]},
+        "capabilities": ["rye.execute.tool.*"],
+    }
+)
+# Returns: {"success": true, "state": {...}, "executed_node": "store_results", "next_node": "finalize", "step_count": 1}
+```
+
+Combined with resume — re-run a failed node from its checkpoint:
+
+```python
+rye_execute(
+    item_type="tool",
+    item_id="my-project/workflows/scraper_pipeline",
+    parameters={
+        "node": "store_results",
+        "resume": True,
+        "graph_run_id": "scraper-pipeline-1709000000",
+        "capabilities": ["rye.execute.tool.*"],
+    }
+)
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `node` | string | Target node to execute (must exist in graph) |
+| `inject_state` | dict | State overlay merged after init/resume |
+| `resume` + `graph_run_id` | bool + string | Load state from a previous run's checkpoint |
+
+Single-step runs use a `-step` suffixed run ID to avoid corrupting real transcripts.
+
+## Static Validation
+
+Validate graph structure without executing it:
+
+```python
+rye_execute(
+    item_type="tool",
+    item_id="my-project/workflows/scraper_pipeline",
+    parameters={"validate": True}
+)
+# Returns: {"success": true, "errors": [], "warnings": ["unreachable nodes: orphan_node"], "node_count": 8}
+```
+
+The validator checks:
+
+| Check | Type |
+|-------|------|
+| All `next:` targets reference existing nodes | Error |
+| All `on_error:` targets reference existing nodes | Error |
+| `start` node exists | Error |
+| `permissions` declared | Error |
+| Foreach `over:` expression present | Error |
+| Foreach has `action` | Error |
+| Deprecated `action.params.async` or `action.async` on foreach | Error |
+| Unreachable nodes (BFS from start) | Warning |
+| State keys referenced (`${state.x}`) but never assigned | Warning |
+| State keys assigned but never referenced downstream | Warning |
+
+## Environment Pre-Validation
+
+Declare required environment variables at the graph or node level. The walker checks all of them before execution starts.
+
+```yaml
+# Graph-level (checked before any node runs)
+env_requires:
+  - BACKEND_API_URL
+  - DATABASE_URL
+
+config:
+  nodes:
+    store_results:
+      env_requires:
+        - BACKEND_API_URL  # Can also be per-node
+      action:
+        primary: execute
+        item_type: tool
+        item_id: my/backend-client
+        params:
+          endpoint: "/api/results"
+```
+
+If any required env var is missing, execution fails immediately with a descriptive error — not 6 nodes deep when the tool finally tries to connect.
+
 ## Observability
 
 Graph execution produces a two-stream observability output — the same architecture used by thread transcripts, minus SSE streaming (graphs don't produce tokens, they emit discrete step events).
+
+### Streaming Progress (stderr)
+
+During execution, the walker prints one-line progress messages to stderr:
+
+```
+[graph:scraper_pipeline] step 1/8 discover_games ✓ 2.3s
+[graph:scraper_pipeline] step 2/8 batch_scrape ✓ 8.1s (foreach)
+[graph:scraper_pipeline] step 3/8 analyze_brainrot ✓ 1.2s (+brainrot_results)
+[graph:scraper_pipeline] step 4/8 calculate_revenue ✓ 0.9s (+revenue_results)
+[graph:scraper_pipeline] step 5/8 store_results ✗ 0.3s (connection refused)
+```
+
+- **Enabled by default.** Set `RYE_GRAPH_QUIET=1` to suppress.
+- Shows step number, node name, status icon (✓/✗/⏹), elapsed time, and detail.
+- **State diff:** when a step adds new state keys, they appear as `+key1, key2`.
+- Foreach nodes show elapsed time and "foreach" detail.
+- Gate nodes show "gate" detail.
+- Never writes to stdout (walker returns JSON on stdout).
 
 ### JSONL Event Log
 

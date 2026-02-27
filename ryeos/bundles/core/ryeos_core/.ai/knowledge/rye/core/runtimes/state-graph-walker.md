@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-27T23:29:21Z:d05c27f73cdfac8d5e9e01016862292225fc79665015a8ec3ca0b36844067fb3:Yn2ru_t9uYKR-DeO_oWFsxoexxx5cMFsf9ZjOazFHn2fuHpwhfHIB1__v6LbgdxGgLr9WJmqR_aXUSY49hFOCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-27T23:42:26Z:76197ff8e3cbf01c0b6749548261e0a4e7ab2f6f6f7964e65f2f2caf2a49d773:WIzCAvAxGz0nERdXJPryP58QKre_wol-96j1OPZok7qD0RZe3QfOwXjSW1BcDRYO055X-oKIaX4DyIkSn2R8Cg==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -42,7 +42,7 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
    - "return" → persist state as completed, fire graph_completed hooks, return
    - "foreach" → delegate to _handle_foreach(), persist, continue
    - default  → proceed to action dispatch
-3. Interpolate action via interpolation.interpolate_action(node["action"], ctx)
+3. Interpolate action via interpolation.interpolate_action(node["action"], ctx), then strip None values from params
 4. If execute directive / thread_directive call → inject parent context (_inject_parent_context)
 5. Check capabilities via _check_permission()
 6. Dispatch action via _dispatch_action() → _unwrap_result()
@@ -59,6 +59,7 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
 11. Persist state (signed knowledge item, atomic write)
 12. Fire "after_step" hooks
 13. Check cancellation (cancel file sentinel)
+13.5. If single-step mode (target_node set) → return {executed_node, next_node, state}
 14. Loop back to step 1
 ```
 
@@ -196,6 +197,17 @@ Pass `resume: true` + `graph_run_id` in params:
 4. Parses body as JSON state
 5. Continues execution from `current_node` at `step_count`
 
+## Single-Node Execution
+
+Pass `node` and optionally `inject_state` in params to execute a single node:
+
+1. State is initialized normally (fresh or resume)
+2. If `inject_state` provided, it's merged over state via `state.update(inject_state)`
+3. `current` is set to `target_node`
+4. Run ID gets a `-step` suffix to avoid corrupting real transcripts
+5. After executing the one node (action, foreach, or gate), returns immediately with:
+   `{success, state, executed_node, next_node, step_count}`
+
 ## Continuation Chain Handling
 
 When an LLM node returns `status: "continued"` with `continuation_thread_id`:
@@ -220,6 +232,19 @@ This handles context-limit handoffs transparently — the walker doesn't impleme
 
 The walker checks for a `cancel` sentinel file at `.ai/agent/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
 
+## Streaming Progress
+
+The walker writes one-line progress to stderr at step boundaries:
+
+```
+[graph:<id>] step N/M <node> <icon> <elapsed> (<detail>)
+```
+
+- Icons: `✓` (ok), `✗` (error), `⏹` (return), `...` (in progress)
+- Detail includes state diff (`+key1, key2`) for action nodes, "foreach"/"gate" for typed nodes
+- Suppressed by `RYE_GRAPH_QUIET=1` env var
+- Never writes to stdout (walker returns JSON on stdout)
+
 ## Graph Validation
 
 `_validate_graph(cfg)` checks before execution:
@@ -227,6 +252,27 @@ The walker checks for a `cancel` sentinel file at `.ai/agent/threads/<graph_run_
 - All `next` edge targets reference existing nodes
 - All `on_error` targets reference existing nodes
 - Warns (non-fatal) if no `return` node exists
+
+## Static Analysis
+
+`_analyze_graph(cfg, graph_config)` extends `_validate_graph` with:
+
+- **Reachability**: BFS from `start` node, reports unreachable nodes as warnings
+- **State flow**: regex scans `${state.X}` references across all nodes, compares against `assign` keys and `collect` vars
+  - Reports keys referenced but never assigned (warning)
+  - Reports keys assigned but never referenced (warning)
+- **Foreach checks**: validates `over` expression and `action` field exist
+
+Triggered by `validate: true` in params — returns `{success, errors, warnings, node_count}` without executing.
+
+## Environment Pre-Validation
+
+`_preflight_env_check(cfg, graph_config)` scans for `env_requires` declarations:
+
+- **Graph-level**: `graph_config.env_requires` — list of required env vars
+- **Node-level**: `node.env_requires` — per-node required env vars
+
+Checked against `os.environ` before execution starts. Returns list of missing var descriptions. If any are missing, execution fails immediately.
 
 ## Implementation Files
 
