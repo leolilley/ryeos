@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:52:24Z:4a566e7a12b4753753c6af614d174155dd14648135cbae1a579d477fe1847a09:SdVkU4T2oNnJkV1F0XJZGeProlzTwG9YEJq4zgiNXOeOM9VF4dCs3udUOFy13jrOBuuiCGiSPvdkvczPLRktAA==:4b987fd4e40303ac
+# rye:signed:2026-02-27T23:36:33Z:96265e3276f7248652d570d72e0042070c5a128d337b1c8d12fa3faf024316df:kdBqr3W5InIuoGktA3-W0IpuoJQPOcIkf4jhQur1WNH41WDcOxyexn6qDLC0kv2Yp2GSkabEF165HuqFOHiNBA==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -863,11 +864,36 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
     elif start not in nodes:
         errors.append(f"start node '{start}' not found in nodes")
 
+    _KNOWN_NODE_KEYS = frozenset({
+        "type", "action", "next", "on_error", "assign",
+        "over", "as", "collect", "parallel", "env_requires",
+    })
+
     has_return = False
     for name, node in nodes.items():
         if node.get("type") == "return":
             has_return = True
             continue
+
+        # Warn on unknown node-level keys
+        unknown = set(node.keys()) - _KNOWN_NODE_KEYS
+        if unknown:
+            logger.warning(
+                "node '%s' has unknown keys: %s", name, ", ".join(sorted(unknown)),
+            )
+
+        # Warn on deprecated async placement in foreach nodes
+        if node.get("type") == "foreach":
+            if node.get("action", {}).get("async") is True:
+                errors.append(
+                    f"node '{name}': 'action.async' is not supported — "
+                    f"use 'parallel: true' at node level"
+                )
+            if node.get("action", {}).get("params", {}).get("async") is True:
+                errors.append(
+                    f"node '{name}': 'action.params.async' is not supported — "
+                    f"use 'parallel: true' at node level"
+                )
 
         # Check next references
         next_spec = node.get("next")
@@ -895,6 +921,137 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
         logger.warning("graph has no return node — will terminate on edge dead-end")
 
     return errors
+
+
+_STATE_REF_RE = re.compile(r"\$\{state\.(\w+)")
+
+
+def _analyze_graph(
+    cfg: Dict, graph_config: Optional[Dict] = None
+) -> tuple:
+    """Static analysis of graph structure. Returns (errors, warnings).
+
+    Extends _validate_graph with reachability analysis and state flow checks.
+    """
+    errors = _validate_graph(cfg, graph_config)
+    warnings: List[str] = []
+
+    nodes = cfg.get("nodes", {})
+    start = cfg.get("start")
+    if not start or start not in nodes:
+        return errors, warnings
+
+    # BFS reachability from start
+    reachable: set = set()
+    queue = [start]
+    while queue:
+        n = queue.pop(0)
+        if n in reachable or n not in nodes:
+            continue
+        reachable.add(n)
+        node = nodes[n]
+        next_spec = node.get("next")
+        if isinstance(next_spec, str):
+            queue.append(next_spec)
+        elif isinstance(next_spec, list):
+            for edge in next_spec:
+                if edge.get("to"):
+                    queue.append(edge["to"])
+        on_error = node.get("on_error")
+        if on_error:
+            queue.append(on_error)
+
+    unreachable = set(nodes.keys()) - reachable
+    if unreachable:
+        warnings.append(f"unreachable nodes: {', '.join(sorted(unreachable))}")
+
+    # State flow analysis (best-effort)
+    assigned: set = set()
+    referenced: set = set()
+
+    for name, node in nodes.items():
+        # Assigned: from assign blocks and collect vars
+        for key in node.get("assign", {}).keys():
+            assigned.add(key)
+        collect = node.get("collect")
+        if collect:
+            assigned.add(collect)
+
+        # Referenced: scan all string values for ${state.X}
+        node_json = json.dumps(node, default=str)
+        for match in _STATE_REF_RE.findall(node_json):
+            referenced.add(match)
+
+    # Initial state keys count as assigned
+    initial_state = cfg.get("state", {})
+    for key in initial_state:
+        assigned.add(key)
+
+    # "inputs" is always available
+    assigned.add("inputs")
+    assigned.add("_last_error")
+    assigned.add("_retries")
+
+    ref_not_assigned = referenced - assigned
+    if ref_not_assigned:
+        warnings.append(
+            f"state keys referenced but never assigned: {', '.join(sorted(ref_not_assigned))}"
+        )
+
+    assigned_not_ref = assigned - referenced - {"inputs", "_last_error", "_retries"}
+    if assigned_not_ref:
+        warnings.append(
+            f"state keys assigned but never referenced: {', '.join(sorted(assigned_not_ref))}"
+        )
+
+    # Foreach structural checks
+    for name, node in nodes.items():
+        if node.get("type") == "foreach":
+            if not node.get("over"):
+                errors.append(f"foreach node '{name}' missing 'over' expression")
+            if "action" not in node:
+                errors.append(f"foreach node '{name}' missing 'action'")
+
+    return errors, warnings
+
+
+# ---------------------------------------------------------------------------
+# Environment pre-validation
+# ---------------------------------------------------------------------------
+
+
+def _preflight_env_check(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]:
+    """Check that required env vars for all graph tools are present.
+
+    Sources of env requirements:
+    1. Node-level ``env_requires`` lists (declared in graph YAML)
+    2. Graph-level ``env_requires`` (applies to all nodes)
+
+    Returns list of missing env var descriptions.
+    """
+    missing: List[str] = []
+    seen_vars: set = set()
+
+    # Graph-level env_requires
+    graph_env = graph_config.get("env_requires", []) if graph_config else []
+    for var in graph_env:
+        if var not in os.environ and var not in seen_vars:
+            missing.append(f"graph requires '{var}'")
+            seen_vars.add(var)
+
+    # Node-level env_requires
+    nodes = cfg.get("nodes", {})
+    for name, node in nodes.items():
+        node_env = node.get("env_requires", [])
+        if isinstance(node_env, str):
+            node_env = [node_env]
+        for var in node_env:
+            if var not in os.environ and var not in seen_vars:
+                tool_id = node.get("action", {}).get("item_id", "")
+                missing.append(f"node '{name}' ({tool_id}) requires '{var}'")
+                seen_vars.add(var)
+
+    return missing
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1221,11 @@ async def execute(
     is_resume = params.pop("resume", False)
     resume_run_id = params.pop("graph_run_id", None)
 
+    # Single-step and validate mode params
+    target_node = params.pop("node", None)
+    inject_state = params.pop("inject_state", None)
+    validate_only = params.pop("validate", False)
+
     # Resolve execution context
     exec_ctx = _resolve_execution_context(params, project_path, graph_config)
 
@@ -1076,6 +1238,31 @@ async def execute(
         return {
             "success": False,
             "error": f"Graph validation failed: {validation_errors}",
+        }
+
+    # Validate-only mode — static analysis, no execution
+    if validate_only:
+        errors, warnings = _analyze_graph(cfg, graph_config)
+        return {
+            "success": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "node_count": len(nodes),
+        }
+
+    # Environment pre-validation
+    missing_env = _preflight_env_check(cfg, graph_config)
+    if missing_env:
+        return {
+            "success": False,
+            "error": f"Missing environment variables: {missing_env}",
+        }
+
+    # Validate target_node exists
+    if target_node and target_node not in nodes:
+        return {
+            "success": False,
+            "error": f"Target node '{target_node}' not found in graph",
         }
 
     registry = None
@@ -1146,6 +1333,14 @@ async def execute(
             project_path,
         )
 
+    # Single-step mode: overlay injected state and jump to target node
+    if inject_state:
+        state.update(inject_state)
+    if target_node:
+        current = target_node
+        if not graph_run_id or not graph_run_id.endswith("-step"):
+            graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}-step"
+
     # Create graph transcript (JSONL event log + signed knowledge markdown)
     graph_transcript = GraphTranscript(project_path, graph_id, graph_run_id, nodes)
     graph_start_time = time.monotonic()
@@ -1183,6 +1378,7 @@ async def execute(
             graph_transcript.write_event("step_started", {
                 "step": step_count, "node": executed_node, "node_type": "return",
             })
+            _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=elapsed, status="return")
             graph_transcript.write_event("graph_completed", {
                 "status": "completed", "steps": step_count, "elapsed_s": elapsed,
             })
@@ -1200,6 +1396,7 @@ async def execute(
                 hooks,
                 project_path,
             )
+            _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="ok", detail=f"{step_count} steps")
             return {"success": True, "state": state, "steps": step_count}
 
         # Foreach node — iterate
@@ -1207,12 +1404,15 @@ async def execute(
             graph_transcript.write_event("step_started", {
                 "step": step_count, "node": executed_node, "node_type": "foreach",
             })
+            foreach_start = time.monotonic()
             current, state = await _handle_foreach(
                 node, state, params, exec_ctx, project_path
             )
             graph_transcript.write_event("foreach_completed", {
                 "step": step_count, "node": executed_node, "next_node": current,
             })
+            foreach_elapsed = time.monotonic() - foreach_start
+            _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=foreach_elapsed, status="ok", detail="foreach")
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge(
                 "running", step_count, time.monotonic() - graph_start_time,
@@ -1221,6 +1421,14 @@ async def execute(
                 project_path, graph_id, graph_run_id,
                 state, current, "running", step_count,
             )
+            if target_node:
+                return {
+                    "success": True,
+                    "state": state,
+                    "executed_node": executed_node,
+                    "next_node": current,
+                    "step_count": step_count,
+                }
             continue
 
         # Build interpolation context
@@ -1249,6 +1457,7 @@ async def execute(
                 "elapsed_s": 0,
                 "next_node": current,
             })
+            _log_progress(graph_id, step_count, len(nodes), executed_node, status="ok", detail="gate")
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge(
                 "running", step_count, time.monotonic() - graph_start_time,
@@ -1257,6 +1466,14 @@ async def execute(
                 project_path, graph_id, graph_run_id,
                 state, current, "running", step_count,
             )
+            if target_node:
+                return {
+                    "success": True,
+                    "state": state,
+                    "executed_node": executed_node,
+                    "next_node": current,
+                    "step_count": step_count,
+                }
             continue
 
         # Validate action exists on non-typed nodes
@@ -1270,6 +1487,7 @@ async def execute(
 
         # Interpolate action params from state
         action = interpolation.interpolate_action(node["action"], interp_ctx)
+        action["params"] = _strip_none(action.get("params", {}))
 
         # Inject parent context for thread_directive calls
         if action.get("item_id") == "rye/agent/threads/thread_directive":
@@ -1285,6 +1503,8 @@ async def execute(
             "running", step_count, time.monotonic() - graph_start_time,
         )
         node_start = time.monotonic()
+        state_keys_before = set(state.keys())
+        _log_progress(graph_id, step_count, len(nodes), executed_node)
 
         # Check capabilities before dispatch
         denied = _check_permission(
@@ -1362,6 +1582,8 @@ async def execute(
                 )
                 if registry is not None:
                     registry.update_status(graph_run_id, "error")
+                node_elapsed = time.monotonic() - node_start
+                _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error", detail=str(result.get("error", ""))[:80])
                 return {
                     "success": False,
                     "error": result.get("error"),
@@ -1397,6 +1619,8 @@ async def execute(
             "thread_id": result.get("thread_id", ""),
             "error": result.get("error", ""),
         })
+        added_keys = set(state.keys()) - state_keys_before
+        _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error" if result.get("status") == "error" else "ok", detail=f"+{', '.join(sorted(added_keys))}" if added_keys else "")
         graph_transcript.checkpoint(step_count, state=state, current_node=current)
         graph_transcript.render_knowledge(
             "running", step_count, time.monotonic() - graph_start_time,
@@ -1421,6 +1645,16 @@ async def execute(
             hooks,
             project_path,
         )
+
+        # Single-step mode — return after executing one node
+        if target_node:
+            return {
+                "success": result.get("status") != "error",
+                "state": state,
+                "executed_node": executed_node,
+                "next_node": current,
+                "step_count": step_count,
+            }
 
         # Cancellation check
         cancel_path = (
@@ -1477,11 +1711,57 @@ async def execute(
         hooks,
         project_path,
     )
+    _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="error", detail=f"max_steps_exceeded ({max_steps})")
     return {
         "success": False,
         "error": f"Max steps exceeded ({max_steps})",
         "state": state,
     }
+
+
+# ---------------------------------------------------------------------------
+# Param cleaning
+# ---------------------------------------------------------------------------
+
+
+def _strip_none(d: Any) -> Any:
+    """Remove None values from nested dicts so tool CONFIG_SCHEMA defaults apply."""
+    if isinstance(d, dict):
+        return {k: _strip_none(v) for k, v in d.items() if v is not None}
+    if isinstance(d, list):
+        return [_strip_none(v) for v in d]
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Streaming progress (stderr)
+# ---------------------------------------------------------------------------
+
+_QUIET = os.environ.get("RYE_GRAPH_QUIET")
+
+
+def _log_progress(
+    graph_id: str,
+    step: int,
+    total: int,
+    node: str,
+    *,
+    elapsed_s: float = 0,
+    status: str = "...",
+    detail: str = "",
+) -> None:
+    """One-line progress to stderr. Set RYE_GRAPH_QUIET=1 to suppress."""
+    if _QUIET:
+        return
+    icons = {"ok": "✓", "error": "✗", "...": "...", "return": "⏹"}
+    icon = icons.get(status, status)
+    step_str = f"step {step}/{total}" if total else f"step {step}"
+    elapsed_str = f" {elapsed_s:.1f}s" if elapsed_s else ""
+    detail_str = f" ({detail})" if detail else ""
+    sys.stderr.write(
+        f"[graph:{graph_id}] {step_str} {node} {icon}{elapsed_str}{detail_str}\n"
+    )
+    sys.stderr.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -1498,10 +1778,9 @@ async def _handle_foreach(
 ) -> tuple:
     """Handle a foreach node — iterate over a list, execute action per item.
 
-    Parallel mode: when the inner action contains async: true (e.g. a
-    thread_directive call), all iterations are dispatched concurrently via
-    asyncio.gather.  Sequential mode (default): each iteration completes
-    before the next starts.
+    Parallel mode: when the node has ``parallel: true``, all iterations are
+    dispatched concurrently via asyncio.gather.  Sequential mode (default):
+    each iteration completes before the next starts.
 
     Returns (next_node, updated_state).
     """
@@ -1514,9 +1793,8 @@ async def _handle_foreach(
     as_var = node.get("as", "item")
     collect_var = node.get("collect")
 
-    # Detect parallel mode: check if the raw action template has async
-    raw_params = node.get("action", {}).get("params", {})
-    is_parallel = raw_params.get("async") is True
+    # Detect parallel mode from node-level key
+    is_parallel = node.get("parallel", False) is True
 
     if is_parallel:
         collected = await _foreach_parallel(
@@ -1556,6 +1834,7 @@ async def _foreach_sequential(
         }
 
         action = interpolation.interpolate_action(node["action"], interp_ctx)
+        action["params"] = _strip_none(action.get("params", {}))
 
         if action.get("item_id") == "rye/agent/threads/thread_directive":
             action["params"] = _inject_parent_context(
@@ -1599,6 +1878,7 @@ async def _foreach_parallel(
             as_var: item,
         }
         action = interpolation.interpolate_action(node["action"], interp_ctx)
+        action["params"] = _strip_none(action.get("params", {}))
 
         if action.get("item_id") == "rye/agent/threads/thread_directive":
             action["params"] = _inject_parent_context(

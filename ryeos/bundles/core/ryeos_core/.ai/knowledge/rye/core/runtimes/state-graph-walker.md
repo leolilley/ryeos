@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:28b0c6990e3efe9c065220a513c1fccb2f243321329b65967b19e9d08335ba71:fMMUtSQgSI9ztdhfD0FaZQdVgiVJh-EeRKk8KeyL-GbDDZsGLrj27djHP45b2kjDXsOA2RCwkygj6WTMHy7pDg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-27T23:29:21Z:d05c27f73cdfac8d5e9e01016862292225fc79665015a8ec3ca0b36844067fb3:Yn2ru_t9uYKR-DeO_oWFsxoexxx5cMFsf9ZjOazFHn2fuHpwhfHIB1__v6LbgdxGgLr9WJmqR_aXUSY49hFOCA==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -104,6 +104,10 @@ The walker builds a context dict with three namespaces:
 
 Foreach nodes add the iteration variable (e.g., `task`) as an additional top-level namespace.
 
+### None Stripping
+
+After `interpolate_action()`, `None` values are stripped from the params dict. This means missing `${inputs.x}` references no longer pass empty strings or `None` to tools — instead, the key is omitted entirely. As a result, tool `CONFIG_SCHEMA` defaults take effect when graph inputs are omitted, so there is no need to hardcode defaults in graph YAML when the tool already defines them.
+
 ## Permission Enforcement
 
 `_check_permission(exec_ctx, primary, item_type, item_id)`:
@@ -153,7 +157,23 @@ Filtered out events: `context_limit_reached`, `thread_started` (thread-only, not
 - **`as`**: variable name bound to each item (default: `item`)
 - **`collect`**: optional state key to store collected results
 - **Sequential** (default): each iteration completes before next, full state visible
-- **Parallel** (`async: true` in action params): dispatched via `asyncio.gather`, isolated per-item state
+- **Parallel** (`parallel: true` at node level): dispatched via `asyncio.gather`, isolated per-item state
+
+`parallel: true` is set at the **node level**, not inside `action.params`. The old `action.params.async: true` pattern is no longer supported — the walker validation will error if it encounters it.
+
+```yaml
+my_node:
+  type: foreach
+  over: "${state.items}"
+  as: item
+  parallel: true  # ← node-level, not in action.params
+  action:
+    primary: execute
+    item_type: tool
+    item_id: my/tool
+    params:
+      data: "${item}"
+```
 
 After iteration, the `as` variable is cleaned up from state.
 

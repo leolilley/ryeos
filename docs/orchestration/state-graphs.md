@@ -95,6 +95,7 @@ fan_out:
   type: foreach
   over: "${state.tasks}" # Expression resolving to a list
   as: task # Variable name for current item
+  parallel: true # Dispatch iterations concurrently
   action: # Action to execute per item
     primary: execute
     item_type: tool
@@ -112,7 +113,7 @@ fan_out:
 - **`as`** — Variable name bound to each item during iteration
 - **`action`** — Standard action dict executed per item
 - **`collect`** — Optional state key to store collected results as a list
-- **Parallel mode** — When the action has `async: true` in params, iterations dispatch concurrently via `asyncio.gather`
+- **`parallel`** — When `parallel: true` is set at the node level, iterations dispatch concurrently via `asyncio.gather`
 
 Items in `over` can be dicts, enabling dotted access: if `task` is `{text: "...", path: "..."}`, then `${task.text}` resolves correctly.
 
@@ -535,7 +536,7 @@ rye_execute(
 
 ### Cross-Process Wait
 
-When one graph waits for another (e.g., a foreach node with `async: true` iterations):
+When one graph waits for another (e.g., a foreach node with `parallel: true` iterations):
 
 - **In-process waits** use `asyncio.Event` — zero polling, the event is set when the child completes
 - **Cross-process waits** poll the thread registry at a flat **500ms** interval until the target reaches a terminal status
