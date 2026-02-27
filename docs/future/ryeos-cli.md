@@ -1,16 +1,17 @@
 ```yaml
 id: ryeos-cli
 title: "ryeos-cli — Terminal-Native Interface"
-description: A CLI wrapper around ryeos that maps shell commands to deterministic RYE invocations — shorthand verbs for the four primitives, a parameter parser for correct tool call construction, and a thread verb that makes directive execution a first-class shell operation
+description: A CLI wrapper around ryeos that maps shell commands to deterministic RYE invocations — shorthand verbs for the four primitives, a parameter parser for correct tool call construction, a thread verb for directive execution, and a graph verb for state-graph operation
 category: future
-tags: [cli, terminal, interface, shell, parser]
-version: "0.1.0"
+tags: [cli, terminal, interface, shell, parser, graph]
+version: "0.2.0"
 status: exploratory
 ```
 
 # ryeos-cli — Terminal-Native Interface
 
 > **Status:** Exploratory — architecturally straightforward, not scheduled for implementation.
+> The `graph` verb is the first candidate for implementation (see [Graph DX Plan](../../.tmp/graph-dx-implementation-plan.md)).
 
 ## The Idea
 
@@ -37,6 +38,7 @@ The CLI exposes verbs that map to the four primitives, plus a `thread` verb that
 | `rye execute <item_type> <item_id> [params]` | `rye_execute(item_type=..., item_id=..., parameters=...)`                                                         | Execute a tool or spawn a directive thread          |
 | `rye sign <item_type> <item_id>`             | `rye_sign(item_type=..., item_id=...)`                                                                            | Ed25519 sign an item                                |
 | `rye thread <directive_id> [params]`         | `rye_execute(item_type="directive", item_id=..., parameters={...}, async=True)` | **Alias** — spawn a directive thread with explicit thread flags |
+| `rye graph <subcommand> <graph_id> [flags]`  | `walker.run_sync(graph_config, params, project_path)` | **Graph-specific** — run, step, validate (see graph verb section) |
 
 ### The `thread` Verb
 
@@ -158,6 +160,93 @@ Dependencies: `ryeos` (which brings `lillux`). No MCP dependency.
 
 ---
 
+## The `graph` Verb — State Graph Operations
+
+The `graph` verb is a purpose-built interface for state-graph tools. Unlike `execute tool`, which treats graphs as opaque tools, `graph` understands graph structure and exposes graph-specific operations: single-node stepping, validation, and streaming progress.
+
+### Subcommands
+
+| CLI | What It Does | Walker Params |
+|-----|-------------|--------------|
+| `rye graph run <id>` | Run a graph end-to-end | `rye execute tool <id>` |
+| `rye graph run <id> --params '{...}'` | Run with input params | `parameters = json.loads(...)` |
+| `rye graph run <id> --async` | Spawn in background, return run ID | `params.async = True` |
+| `rye graph step <id> --node X` | Execute one node only | `params.node = "X"` |
+| `rye graph step <id> --node X --resume-from <run_id>` | Step from checkpoint | `params.node = "X", resume = True, graph_run_id = "..."` |
+| `rye graph step <id> --node X --state '{...}'` | Step with injected state | `params.node = "X", inject_state = {...}` |
+| `rye graph validate <id>` | Static analysis only | `params.validate = True` |
+
+### Examples
+
+```bash
+# Full run — stderr shows progress, stdout gets JSON result
+rye graph run track-blox/graphs/scraper_pipeline
+# [graph:scraper_pipeline] step 1/8 discover_games ... 2.3s ✓
+# [graph:scraper_pipeline] step 2/8 batch_scrape ... 8.1s ✓
+# ...
+# {"success": true, "state": {...}, "steps": 8}
+
+# Run with params
+rye graph run track-blox/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+
+# Graph failed at node 5 — re-run just that node from the checkpoint
+rye graph step track-blox/graphs/scraper_pipeline \
+  --node store_results \
+  --resume-from scraper-pipeline-1709000000
+
+# Inject state manually for testing
+rye graph step track-blox/graphs/scraper_pipeline \
+  --node store_results \
+  --state '{"scraped_experiences": [{"id": 1}], "brainrot_results": [0.8]}'
+
+# Validate graph structure without executing
+rye graph validate track-blox/graphs/scraper_pipeline
+# ✓ All node references valid (8 nodes, 7 edges)
+# ✓ No unreachable nodes
+# ⚠ State key 'total_stored' assigned but never referenced downstream
+```
+
+### Why a separate verb?
+
+`rye execute tool track-blox/graphs/scraper_pipeline` already works. The `graph` verb adds:
+
+1. **Step mode** — execute one node with injected state (10x faster iteration on failures)
+2. **Validate mode** — static analysis without execution
+3. **Streaming progress** — stderr progress lines enabled by default (via walker's `_log_progress`)
+4. **Graph-aware flags** — `--node`, `--resume-from`, `--state`, `--params` as first-class flags instead of JSON parameter construction
+
+The verb is a thin parameter translator — it constructs the same `walker.run_sync()` call that `rye execute tool` uses, just with graph-specific UX.
+
+### Implementation
+
+The `graph` verb imports `ryeos` directly (no MCP transport):
+
+```
+rye graph run track-blox/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+    │
+    ▼
+1. Parse subcommand: "run" → full execution
+2. Resolve graph tool: track-blox/graphs/scraper_pipeline → load YAML
+3. Map flags: --params → parameters dict
+4. Call: walker.run_sync(graph_config, params, project_path)
+5. Stream: stderr progress (walker handles this), stdout JSON result
+```
+
+For `step` mode:
+
+```
+rye graph step ... --node store_results --resume-from <run_id>
+    │
+    ▼
+1. Parse subcommand: "step" → single-node execution
+2. Resolve graph tool → load YAML
+3. Map flags: --node → params["node"], --resume-from → params["resume"] + params["graph_run_id"]
+4. Call: walker.run_sync(graph_config, params, project_path)
+5. Return: {executed_node, next_node, state} — caller sees what would run next
+```
+
+---
+
 ## Full Verb Reference
 
 ```bash
@@ -187,6 +276,15 @@ rye thread my-project/analyze --model haiku --max-spend 0.50
 rye sign tool my-project/scraper
 rye sign directive my-project/onboarding
 rye sign tool "my-project/*"                         # glob batch signing
+
+# Graph (state-graph specific operations)
+rye graph run track-blox/graphs/scraper_pipeline
+rye graph run track-blox/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+rye graph run track-blox/graphs/scraper_pipeline --async
+rye graph step track-blox/graphs/scraper_pipeline --node store_results
+rye graph step track-blox/graphs/scraper_pipeline --node store_results --resume-from <run_id>
+rye graph step track-blox/graphs/scraper_pipeline --node store_results --state '{...}'
+rye graph validate track-blox/graphs/scraper_pipeline
 ```
 
 ---
@@ -295,3 +393,5 @@ If the function-calling format (Option B) turns out to be better for the small m
 | Three-tier spaces (project → user → system)          | Same resolution, same precedence             |
 | Ed25519 signing                                      | Same keys, same verification                 |
 | Item metadata schemas                                | Drive the parameter parser                   |
+| State-graph walker (`walker.py`)                     | `graph` verb calls `run_sync()` directly     |
+| Graph transcript (JSONL + knowledge markdown)        | `graph step --resume-from` uses checkpoints  |
