@@ -59,7 +59,7 @@ pip install ryeos-mcp
 }
 ```
 
-**Then direct RYE to initialise by expressing the intent:**
+**Then direct RYE to initialise by expressing the intent to your model:**
 
 > _"rye execute directive init"_
 
