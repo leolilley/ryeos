@@ -71,13 +71,13 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 
 ## Packages
 
-| Package        | What it provides                                               |
-| -------------- | -------------------------------------------------------------- |
-| `lillux`       | Microkernel — subprocess, HTTP, signing, integrity primitives  |
-| `ryeos-engine` | Execution engine — resolver, executor, metadata                |
-| `ryeos-core`   | Minimal bundle for rye functionality (`rye/core/*` items only) |
-| `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary tools |
-| `ryeos-mcp`    | MCP server transport (stdio/SSE)                               |
+| Package        | What it provides                                                    |
+| -------------- | ------------------------------------------------------------------- |
+| `lillux`       | Microkernel — subprocess, HTTP, signing, integrity primitives       |
+| `ryeos-engine` | Execution engine — resolver, executor, metadata                     |
+| `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only) |
+| `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary tools      |
+| `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
 
 Both `ryeos` and `ryeos-mcp` support optional extras:
 
