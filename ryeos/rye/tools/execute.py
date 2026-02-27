@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import AI_DIR, DIRECTIVE_INSTRUCTION, ItemType
+from rye.constants import AI_DIR, ItemType
 from rye.directive_parser import parse_and_validate_directive
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
@@ -163,25 +163,13 @@ class ExecuteTool:
                 "message": "Directive validation passed (dry run)",
             }
 
-        # 4a. In-thread mode (default): return lean actionable content
-        #     Only what the caller needs to follow the directive:
-        #     - your_directions: the "go do it" nudge
-        #     - body: interpolated process steps (not parsed beyond interpolation)
-        #     - outputs: what the directive expects back
-        #     No permissions (can't enforce without harness), no parser internals.
+        # 4a. In-thread mode (default): return only the directive for
+        #     the LLM to follow.  Nothing else — extra fields distract.
         if not thread:
             parsed = validation["parsed"]
-            result: Dict[str, Any] = {
-                "status": "success",
-                "type": ItemType.DIRECTIVE,
-                "item_id": item_id,
-                "your_directions": DIRECTIVE_INSTRUCTION,
-                "body": parsed.get("body", ""),
+            return {
+                "your_directions": parsed.get("body", ""),
             }
-            outputs = parsed.get("outputs")
-            if outputs:
-                result["outputs"] = outputs
-            return result
 
         # 4b. Threaded mode: spawn managed thread via thread_directive tool
         #     Requires rye/agent infrastructure (thread_directive tool + LLM config)

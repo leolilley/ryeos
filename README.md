@@ -63,9 +63,9 @@ pip install ryeos-mcp
 
 > _"rye execute directive init"_
 
-RYE operates through your model of choice — if it can't action the baseline init, it's incompatible with RYE.
+The baseline init directive instructs RYE to handle your system setup and guide you through RYE itself.
 
-The baseline init handles your system setup and RYE will guide you through RYE itself.
+RYE operates through your model and harness of choice. Successfully actioning the baseline init directive demonstrates the compatiblity of your chosen model and harness with RYE directives.
 
 ---
 

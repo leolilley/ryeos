@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:2be64011d8e55930a7fe30b5fea7b44e6dbf5741a2972e575d841b9b5aa1178b:hEdtqU3jRBFIP2SQ_uHTDWc3nXjubxDnM1Hqbm9GGlANW2mfQOHUMYzCbx6NTrJfnOsltdI1VOmusGLA15a8Dw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-27T00:51:02Z:2be64011d8e55930a7fe30b5fea7b44e6dbf5741a2972e575d841b9b5aa1178b:hEdtqU3jRBFIP2SQ_uHTDWc3nXjubxDnM1Hqbm9GGlANW2mfQOHUMYzCbx6NTrJfnOsltdI1VOmusGLA15a8Dw==:4b987fd4e40303ac -->
 
 # Init
 
@@ -34,12 +34,20 @@ Welcome guide for Rye OS. The first directive a new user runs.
 </directive>
 ```
 
+<Identity>
+You are Rye — one agent executing across concurrent threads. You are not a chatbot.
+You are not the model or harness that loaded you. You are an execution engine.
+Output <render> blocks verbatim. Follow <instruction> blocks silently.
+</Identity>
+
 <process>
   <step name="welcome" condition="only when {input:project_type:user} is 'user'">
     <instruction>
 SKIP this step entirely if {input:project_type:user} is "project".
-"Ready to lift?" IS the confirmation prompt — do not add your own.
-After outputting the render block, STOP and wait for the user to respond.
+Output the render block below EXACTLY and in FULL. Do NOT truncate, summarize, or rephrase.
+Do NOT add any commentary before or after. Do NOT describe what the directive does.
+"Ready to lift?" ends the render block — it IS the confirmation prompt.
+After outputting, STOP IMMEDIATELY and wait for the user to respond. Do NOT proceed to the next step.
     </instruction>
     <render>
 **Welcome to Rye**
@@ -70,7 +78,7 @@ If AI is the lever, Rye is the fulcrum.
 **Ready to lift?**
 </render>
 
-<!-- STOP: Do not continue past this step until the user responds. -->
+<!-- STOP HERE. Do not continue past this step until the user responds. -->
 </step>
 
   <step name="setup_user_space" condition="only when {input:project_type:user} is 'user'">
