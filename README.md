@@ -59,13 +59,13 @@ pip install ryeos-mcp
 }
 ```
 
-**Then direct RYE to initialise by expressing the intent to your model:**
+**Then direct RYE to initialise by expressing the intent:**
 
 > _"rye execute directive init"_
 
-The baseline init directive instructs RYE to handle your system setup and guide you through RYE itself.
+RYE operates through your model and harness of choice. Successfully actioning the baseline init directive demonstrates the compatiblity of your chosen model and harness to follow RYE directives and context.
 
-RYE operates through your model and harness of choice. Successfully actioning the baseline init directive demonstrates the compatiblity of your chosen model and harness with RYE directives.
+The baseline init directive instructs RYE to handle your system setup and guide you through RYE itself.
 
 ---
 
