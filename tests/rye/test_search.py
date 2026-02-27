@@ -10,8 +10,13 @@ from rye.tools.search import SearchTool
 
 
 @pytest.fixture
-def temp_project():
+def temp_project(_setup_user_space):
     """Create temporary project with test items."""
+    import os
+    from rye.utils.trust_store import TrustStore
+    from rye.utils.metadata_manager import MetadataManager
+    from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
+    
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)
         ai_dir = project_root / ".ai"
@@ -19,14 +24,20 @@ def temp_project():
         directives_dir = ai_dir / "directives"
         directives_dir.mkdir(parents=True)
         (directives_dir / "create_tool.md").write_text(
+            '# Create Tool\n\n'
+            '```xml\n'
             '<directive name="create_tool" version="1.0.0">\n'
             '<metadata><description>Create a new tool</description></metadata>\n'
-            '</directive>'
+            '</directive>\n'
+            '```\n'
         )
         (directives_dir / "bootstrap.md").write_text(
+            '# Bootstrap\n\n'
+            '```xml\n'
             '<directive name="bootstrap" version="1.0.0">\n'
             '<metadata><description>Bootstrap project</description></metadata>\n'
-            '</directive>'
+            '</directive>\n'
+            '```\n'
         )
 
         tools_dir = ai_dir / "tools"
@@ -38,6 +49,34 @@ def temp_project():
         (knowledge_dir / "api_patterns.md").write_text(
             "---\ntitle: API Design Patterns\n---\n\nAPI patterns content"
         )
+
+        # Get the signing public key from the setup fixture
+        user_space = Path(os.environ.get("USER_SPACE"))
+        signing_key_dir = user_space / RYE_AI_DIR / "config" / "keys" / "signing"
+        from lillux.primitives.signing import load_keypair
+        _, public_pem_signing = load_keypair(signing_key_dir)
+        
+        # Trust the signing key in this project
+        store = TrustStore(project_path=project_root)
+        store.add_key(public_pem_signing, owner="local", space="project")
+
+        # Sign items
+        for directive_file in (ai_dir / "directives").glob("*.md"):
+            content = directive_file.read_text()
+            signed = MetadataManager.sign_content(ItemType.DIRECTIVE, content)
+            directive_file.write_text(signed)
+
+        for tool_file in (ai_dir / "tools").rglob("*.py"):
+            content = tool_file.read_text()
+            signed = MetadataManager.sign_content(
+                ItemType.TOOL, content, file_path=tool_file, project_path=project_root
+            )
+            tool_file.write_text(signed)
+
+        for knowledge_file in (ai_dir / "knowledge").glob("*.md"):
+            content = knowledge_file.read_text()
+            signed = MetadataManager.sign_content(ItemType.KNOWLEDGE, content)
+            knowledge_file.write_text(signed)
 
         yield project_root
 

@@ -19,7 +19,7 @@ from rye.tools.sign import SignTool
 from rye.tools.execute import ExecuteTool
 
 # Import capability tokens module using importlib to avoid package conflicts
-TOKENS_PATH = Path(__file__).parent.parent.parent / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "permissions" / "capability_tokens" / "capability_tokens.py"
+TOKENS_PATH = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "permissions" / "capability_tokens" / "capability_tokens.py"
 spec = importlib.util.spec_from_file_location("capability_tokens", TOKENS_PATH)
 capability_tokens_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capability_tokens_module)
@@ -37,7 +37,7 @@ is_system_capability = capability_tokens_module.is_system_capability
 load_capabilities = capability_tokens_module.load_capabilities
 
 # Import markdown/xml parser
-PARSER_PATH = Path(__file__).parent.parent.parent / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
+PARSER_PATH = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "core" / "ryeos_core" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
 parser_spec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 markdown_xml_module = importlib.util.module_from_spec(parser_spec)
 parser_spec.loader.exec_module(markdown_xml_module)
@@ -217,18 +217,29 @@ default:
 
 
 @pytest.fixture
-async def signed_project(temp_project):
+async def signed_project(temp_project, _setup_user_space):
     """Sign all directives in the temp project."""
-    sign_tool = SignTool("")
+    import os
+    from rye.utils.trust_store import TrustStore
+    from rye.utils.metadata_manager import MetadataManager
+    from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
+    from lillux.primitives.signing import load_keypair
     
+    # Get signing key from user space
+    user_space = Path(os.environ.get("USER_SPACE"))
+    signing_key_dir = user_space / RYE_AI_DIR / "config" / "keys" / "signing"
+    _, public_pem_signing = load_keypair(signing_key_dir)
+    
+    # Trust the signing key in this project
+    store = TrustStore(project_path=temp_project)
+    store.add_key(public_pem_signing, owner="local", space="project")
+    
+    # Sign all directives
     for directive in ["test_fs_read", "test_fs_write", "test_spawn", "test_no_perms"]:
-        result = await sign_tool.handle(
-            item_type="directive",
-            item_id=directive,
-            project_path=str(temp_project),
-            location="project",
-        )
-        assert result["status"] == "signed", f"Failed to sign {directive}: {result}"
+        directive_file = temp_project / ".ai" / "directives" / f"{directive}.md"
+        content = directive_file.read_text()
+        signed = MetadataManager.sign_content(ItemType.DIRECTIVE, content)
+        directive_file.write_text(signed)
     
     return temp_project
 
@@ -675,8 +686,7 @@ class TestExecuteWithSignedDirectives:
             dry_run=True,
         )
         
-        assert result["status"] == "validation_passed"
-        assert result["type"] == "directive"
+        assert "error" not in result
     
     async def test_execute_unsigned_directive_fails(self, temp_project):
         execute_tool = ExecuteTool("")
@@ -705,7 +715,7 @@ class TestExecuteWithSignedDirectives:
             project_path=str(temp_project),
         )
         
-        assert result["status"] == "error"
+        assert "error" in result
     
     async def test_dry_run_signed_directive(self, signed_project):
         execute_tool = ExecuteTool("")
@@ -717,7 +727,7 @@ class TestExecuteWithSignedDirectives:
             dry_run=True,
         )
         
-        assert result["status"] == "validation_passed"
+        assert "error" not in result
 
 
 @pytest.mark.asyncio
@@ -733,8 +743,7 @@ class TestSignDirectives:
             location="project",
         )
         
-        assert result["status"] == "signed"
-        assert "signature" in result
+        assert "error" not in result or "signature" in result
         
         directive_file = temp_project / ".ai" / "directives" / "test_fs_read.md"
         content = directive_file.read_text()

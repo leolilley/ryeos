@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 SIGNER_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads"
+    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
     / "persistence" / "transcript_signer.py"
 )
 _spec = importlib.util.spec_from_file_location("transcript_signer", SIGNER_PATH)

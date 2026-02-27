@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # Import _resolve_directive_chain via importlib (same pattern as test_thread_context_injection.py)
 TD_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads" / "thread_directive.py"
+    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "runner.py"
 )
 _td_spec = importlib.util.spec_from_file_location("thread_directive_test", TD_PATH)
 _td_mod = importlib.util.module_from_spec(_td_spec)

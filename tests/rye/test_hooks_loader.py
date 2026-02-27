@@ -5,20 +5,26 @@ import sys
 from pathlib import Path
 
 # Add the runtime lib so module_loader is importable
-_tools_root = Path(__file__).parent.parent.parent / "ryeos" / "rye" / ".ai" / "tools" / "rye"
-_runtime_lib = _tools_root / "core" / "runtimes" / "lib" / "python"
+_tools_root = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye"
+_runtime_lib = _tools_root / "core" / "runtimes" / "python" / "lib"
 if str(_runtime_lib) not in sys.path:
     sys.path.insert(0, str(_runtime_lib))
 
-_threads_dir = _tools_root / "agent" / "threads"
-if str(_threads_dir) not in sys.path:
-    sys.path.insert(0, str(_threads_dir))
+_loaders_dir = _tools_root / "agent" / "threads" / "loaders"
+if str(_loaders_dir) not in sys.path:
+    sys.path.insert(0, str(_loaders_dir))
 
 
 @pytest.fixture
 def hooks_loader():
-    from loaders.hooks_loader import HooksLoader
-    loader = HooksLoader()
+    import importlib.util
+    loaders_path = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "loaders"
+    hooks_loader_path = loaders_path / "hooks_loader.py"
+    spec = importlib.util.spec_from_file_location("hooks_loader", hooks_loader_path)
+    hooks_loader_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hooks_loader_mod)
+    
+    loader = hooks_loader_mod.HooksLoader()
     loader.clear_cache()
     return loader
 
@@ -162,8 +168,14 @@ class TestMergeHooks:
 
         # Import and call _merge_hooks
         # We need to reload the module to pick up the new USER_SPACE
-        from loaders.hooks_loader import HooksLoader
-        loader = HooksLoader()
+        import importlib.util
+        loaders_path = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "loaders"
+        hooks_loader_path = loaders_path / "hooks_loader.py"
+        spec = importlib.util.spec_from_file_location("hooks_loader_test", hooks_loader_path)
+        hooks_loader_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hooks_loader_mod)
+        
+        loader = hooks_loader_mod.HooksLoader()
         loader.clear_cache()
 
         user = loader.get_user_hooks()

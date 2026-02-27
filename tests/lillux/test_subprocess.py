@@ -102,7 +102,9 @@ class TestConfigurationError:
     """Test lillux-proc hard requirement."""
 
     def test_raises_when_lillux_proc_missing(self):
-        with patch("shutil.which", return_value=None):
+        # Mock both shutil.which and Path.is_file to simulate missing lillux-proc
+        with patch("lillux.primitives.subprocess.shutil.which", return_value=None), \
+             patch("lillux.primitives.subprocess.Path.is_file", return_value=False):
             with pytest.raises(ConfigurationError, match="lillux-proc"):
                 SubprocessPrimitive()
 

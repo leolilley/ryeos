@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 PARSER_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
+    / "ryeos" / "bundles" / "core" / "ryeos_core" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
 )
 _pspec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 _parser_mod = importlib.util.module_from_spec(_pspec)
@@ -32,7 +32,7 @@ md_parse = _parser_mod.parse
 
 TRANSCRIPT_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads"
+    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
     / "persistence" / "transcript.py"
 )
 _tspec = importlib.util.spec_from_file_location("transcript", TRANSCRIPT_PATH)
@@ -42,7 +42,7 @@ Transcript = _transcript_mod.Transcript
 
 HARNESS_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads" / "safety_harness.py"
+    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "safety_harness.py"
 )
 _hspec = importlib.util.spec_from_file_location("safety_harness", HARNESS_PATH)
 _harness_mod = importlib.util.module_from_spec(_hspec)
