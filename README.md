@@ -65,6 +65,8 @@ pip install ryeos-mcp
 
 RYE operates through your model of choice — if it can't action the baseline init, it's incompatible with RYE.
 
+The baseline init handles your system setup and RYE will guide you through RYE itself.
+
 ---
 
 ## Packages
@@ -87,6 +89,8 @@ pip install ryeos-mcp[web]      # MCP server + web bundle
 pip install ryeos-mcp[code]     # MCP server + code bundle
 pip install ryeos-mcp[all]      # MCP server + all bundles
 ```
+
+Fully modular and extendable.
 
 ## Documentation
 
