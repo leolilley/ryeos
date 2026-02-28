@@ -4,14 +4,15 @@ title: "ryeos-cli — Terminal-Native Interface"
 description: A CLI wrapper around ryeos that maps shell commands to deterministic RYE invocations — shorthand verbs for the four primitives, a parameter parser for correct tool call construction, a thread verb for directive execution, and a graph verb for state-graph operation
 category: future
 tags: [cli, terminal, interface, shell, parser, graph]
-version: "0.2.0"
-status: exploratory
+version: "0.3.0"
+status: implemented
 ```
 
 # ryeos-cli — Terminal-Native Interface
 
-> **Status:** Exploratory — architecturally straightforward, not scheduled for implementation.
-> The `graph` verb is the first candidate for implementation (see [Graph DX Plan](../../.tmp/graph-dx-implementation-plan.md)).
+> **Status:** Implemented — `pip install ryeos-cli` (package at `ryeos-cli/`).
+> All verbs functional: `search`, `load`, `execute`, `sign`, `thread`, `graph` (run/step/validate), `test`.
+> Schema-driven flag expansion deferred — all verbs use `--params '{json}'` escape hatch for now.
 
 ## The Idea
 
@@ -39,6 +40,7 @@ The CLI exposes verbs that map to the four primitives, plus a `thread` verb that
 | `rye sign <item_type> <item_id>`             | `rye_sign(item_type=..., item_id=...)`                                                                            | Ed25519 sign an item                                |
 | `rye thread <directive_id> [params]`         | `rye_execute(item_type="directive", item_id=..., parameters={...}, async=True)` | **Alias** — spawn a directive thread with explicit thread flags |
 | `rye graph <subcommand> <graph_id> [flags]`  | `walker.run_sync(graph_config, params, project_path)` | **Graph-specific** — run, step, validate (see graph verb section) |
+| `rye test [tool_id] [flags]`                 | `rye_execute(item_type="tool", item_id="rye/dev/test-runner", parameters={...})` | **Test runner** — discover and run `.test.yaml` specs |
 
 ### The `thread` Verb
 

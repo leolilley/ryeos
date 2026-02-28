@@ -22,6 +22,7 @@ on:
           - ryeos-web
           - ryeos-code
           - ryeos-mcp
+          - ryeos-cli
 
 permissions:
   contents: read
@@ -51,6 +52,8 @@ jobs:
             path: ryeos/bundles/code
           - package: ryeos-mcp
             path: ryeos-mcp
+          - package: ryeos-cli
+            path: ryeos-cli
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -47,6 +47,7 @@ The workflow has two jobs:
 | ryeos-web    | `ryeos/bundles/web`      |
 | ryeos-code   | `ryeos/bundles/code`     |
 | ryeos-mcp    | `ryeos-mcp`              |
+| ryeos-cli    | `ryeos-cli`              |
 
 **`publish-rust`** — builds and publishes Rust binaries (maturin):
 
@@ -116,6 +117,7 @@ No secrets or protection rules are needed — OIDC handles authentication.
 | ryeos-web    | Active |
 | ryeos-code   | Active |
 | ryeos-mcp    | Active |
+| ryeos-cli    | Pending — register at pypi.org/manage/account/publishing/ |
 
 ## Version Bumping
 
@@ -130,6 +132,7 @@ ryeos/bundles/standard/pyproject.toml         → ryeos
 ryeos/bundles/web/pyproject.toml              → ryeos-web
 ryeos/bundles/code/pyproject.toml             → ryeos-code
 ryeos-mcp/pyproject.toml                      → ryeos-mcp
+ryeos-cli/pyproject.toml                      → ryeos-cli
 lillux/kernel/pyproject.toml                  → lillux
 ```
 
@@ -196,7 +199,7 @@ Layer 2 — lillux                          (depends on lillux-proc)
 Layer 3 — ryeos-engine                    (depends on lillux)
 Layer 4 — ryeos-core                      (depends on ryeos-engine)
 Layer 5 — ryeos                           (depends on ryeos-core)
-Layer 6 — ryeos-web, ryeos-code, ryeos-mcp (depend on ryeos)
+Layer 6 — ryeos-web, ryeos-code, ryeos-mcp, ryeos-cli (depend on ryeos)
 ```
 
 For a **first-time publish** of all packages, you may need to run the workflow multiple times — later layers will fail if their dependencies haven't been uploaded yet. Subsequent releases (where deps already exist on PyPI) publish cleanly in a single run.
