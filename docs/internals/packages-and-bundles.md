@@ -9,7 +9,7 @@ version: "2.0.0"
 
 # Packages and Bundles
 
-Rye OS is distributed as 9 pip packages organized in a monorepo. Each package has a clear role, minimal dependencies, its own Python namespace, and optionally registers a **bundle** of `.ai/` items into the system space. This page explains the full package hierarchy, what each package ships, how bundles compose, and the install tiers.
+Rye OS is distributed as 10 pip packages organized in a monorepo. Each package has a clear role, minimal dependencies, its own Python namespace, and optionally registers a **bundle** of `.ai/` items into the system space. This page explains the full package hierarchy, what each package ships, how bundles compose, and the install tiers.
 
 ## Monorepo Layout
 
@@ -27,6 +27,7 @@ ryeos/               → pip: ryeos-engine  (ships rye/ module, no .ai/ data)
     code/            → pip: ryeos-code    (ryeos_code/.ai/rye/code/*)
 
 ryeos-mcp/           → pip: ryeos-mcp    (rye_mcp/ module)
+ryeos-cli/           → pip: ryeos-cli   (rye_cli/ module)
 ```
 
 ## Install Tiers
@@ -55,6 +56,9 @@ pip install ryeos[all]
 # MCP server (pulls in ryeos automatically)
 pip install ryeos-mcp
 
+# Terminal CLI (pulls in ryeos automatically)
+pip install ryeos-cli
+
 # MCP server + code tools
 pip install ryeos-mcp[code]
 ```
@@ -69,6 +73,7 @@ pip install ryeos[web]     → + rye/web/*
 pip install ryeos[code]    → + rye/code/*
 pip install ryeos[all]     → everything
 pip install ryeos-mcp      → ryeos + MCP transport
+pip install ryeos-cli     → ryeos + terminal CLI (rye command)
 pip install ryeos-mcp[code] → ryeos + MCP + rye/code/*
 pip install ryeos my-tools → standard + my-tools/*
 ```
@@ -195,6 +200,26 @@ Tools provided: `rye/code/npm/npm` (NPM/NPX operations), `rye/code/diagnostics/d
 
 The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so any MCP-compatible AI agent can use them. Does **not** register its own bundle — it inherits bundles from its `ryeos` dependency chain.
 
+### ryeos-cli (terminal CLI)
+
+**Package name:** `ryeos-cli`
+**Source:** `ryeos-cli/`
+**Python module:** `rye_cli/`
+**Dependencies:** `ryeos`, `pyyaml`
+**Bundle:** none — inherits bundles from its `ryeos` dependency
+
+The terminal-native CLI. Maps shell verbs (`search`, `load`, `execute`, `sign`, `thread`, `graph`, `test`) directly to the four RYE primitives — no MCP transport. Imports `ryeos` directly as a Python library for zero-overhead invocation.
+
+Use `ryeos-cli` when you want to invoke RYE from the terminal without an MCP client — CI scripts, graph operations, test running, or interactive development.
+
+```bash
+rye search directive "lead generation"
+rye execute tool rye/bash/bash --params '{"command": "ls"}'
+rye graph run my-project/graphs/pipeline --params '{"min_ccu": 50000}'
+rye graph validate my-project/graphs/pipeline
+rye test my-project/tools/scraper --exclude-tags integration
+```
+
 ### services/registry-api
 
 **Package name:** N/A (deployed as a service)
@@ -300,6 +325,7 @@ Dependencies are strictly additive. Each package depends on the layer below it:
 
 ```
 ryeos-engine ← ryeos-core ← ryeos ← ryeos-mcp
+                                   ← ryeos-cli
                                    ← ryeos-web
                                    ← ryeos-code
 ```
@@ -320,6 +346,10 @@ ryeos-mcp
   │     │           └── packaging            (semver parsing in chain validator)
   │     └── (standard .ai/ items via ryeos_std)
   └── mcp                       (MCP protocol transport)
+
+ryeos-cli
+  ├── ryeos                     (inherits full engine + core + standard)
+  └── pyyaml                    (YAML parsing)
 
 ryeos-web
   └── ryeos                     (inherits full engine + core + standard)
@@ -356,6 +386,7 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 | `ryeos/bundles/web/` | `ryeos-web` | `ryeos` | `ryeos-web` | `rye/web/*` |
 | `ryeos/bundles/code/` | `ryeos-code` | `ryeos` | `ryeos-code` | `rye/code/*` |
 | `ryeos-mcp/` | `ryeos-mcp` | `ryeos`, `mcp` | — | — |
+| `ryeos-cli/` | `ryeos-cli` | `ryeos`, `pyyaml` | — | — |
 | `services/registry-api/` | — | `fastapi`, `supabase`, `httpx`, etc. | — | — |
 
 ## Publishing Order
@@ -400,6 +431,7 @@ Packages must be published to PyPI in dependency order. The two Rust packages (`
  │   ryeos-web     (data bundle — rye/web/*)                       │
  │   ryeos-code    (data bundle — rye/code/*)                      │
  │   ryeos-mcp     (MCP server transport)                          │
+ │   ryeos-cli     (terminal CLI)                                  │
  └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -414,6 +446,7 @@ Code packages contain Python or Rust source code that implements functionality:
 | `lillux`       | Python library        | Microkernel primitives (subprocess, signing, HTTP) |
 | `ryeos-engine` | Python library        | Execution engine (`rye/` module), no `.ai/` data   |
 | `ryeos-mcp`    | Python library        | MCP server transport (`rye_mcp/` module)           |
+| `ryeos-cli`    | Python library        | Terminal CLI (`rye_cli/` module)                    |
 
 Data bundles are primarily `.ai/` item collections with minimal Python glue:
 

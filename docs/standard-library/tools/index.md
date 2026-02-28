@@ -25,6 +25,7 @@ This section documents every tool that ships with Rye OS. Tools are organized in
 | [MCP Client](mcp.md)          | `rye/mcp/`         | 3     | Connect to external MCP servers   |
 | [Primary Tools](primary.md)   | `rye/primary/`     | 4     | Search, load, execute, sign items |
 | [Agent System](agent.md)      | `rye/agent/`       | 40+   | Thread orchestration engine       |
+| Dev Tools             | `rye/dev/`         | 1     | Tool test runner                  |
 
 ## Infrastructure Tools
 
@@ -45,3 +46,9 @@ rye_execute(
 ```
 
 Every tool returns a dict with at minimum `success: bool`. On failure, an `error` string is included. Most tools also return an `output` string with human-readable results.
+
+Or from the terminal via `ryeos-cli`:
+
+```bash
+rye execute tool <namespace>/<tool_name> --params '{...}'
+```

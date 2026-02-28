@@ -657,6 +657,39 @@ When one graph waits for another (e.g., a foreach node with `parallel: true` ite
 - **In-process waits** use `asyncio.Event` — zero polling, the event is set when the child completes
 - **Cross-process waits** poll the thread registry at a flat **500ms** interval until the target reaches a terminal status
 
+## CLI Operations
+
+State-graph operations are available from the terminal via `ryeos-cli`:
+
+```bash
+# Run a graph end-to-end
+rye graph run my-project/graphs/scraper_pipeline
+
+# Run with input parameters
+rye graph run my-project/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+
+# Run in background (returns run ID immediately)
+rye graph run my-project/graphs/scraper_pipeline --async
+
+# Execute a single node (for debugging failures)
+rye graph step my-project/graphs/scraper_pipeline --node store_results
+
+# Re-run a failed node from checkpoint
+rye graph step my-project/graphs/scraper_pipeline \
+  --node store_results \
+  --resume-from scraper-pipeline-1709000000
+
+# Inject state manually for testing
+rye graph step my-project/graphs/scraper_pipeline \
+  --node store_results \
+  --state '{"scraped_data": [{"id": 1}]}'
+
+# Static analysis without execution
+rye graph validate my-project/graphs/scraper_pipeline
+```
+
+Install the CLI: `pip install ryeos-cli`. See the [CLI documentation](../future/ryeos-cli.md) for the full verb reference.
+
 ## What's Next
 
 - [Thread Lifecycle](./thread-lifecycle.md) — How threads are created, executed, and finalized
@@ -674,3 +707,4 @@ When one graph waits for another (e.g., a foreach node with `parallel: true` ite
 | Interpolation       | `.ai/tools/rye/agent/threads/loaders/interpolation.py`       |
 | Condition evaluator | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` |
 | Thread registry     | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` |
+| Tool test runner | `.ai/tools/rye/dev/test_runner.py`                           |

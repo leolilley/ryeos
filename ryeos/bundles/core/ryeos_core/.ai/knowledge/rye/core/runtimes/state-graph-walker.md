@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-27T23:42:26Z:76197ff8e3cbf01c0b6749548261e0a4e7ab2f6f6f7964e65f2f2caf2a49d773:WIzCAvAxGz0nERdXJPryP58QKre_wol-96j1OPZok7qD0RZe3QfOwXjSW1BcDRYO055X-oKIaX4DyIkSn2R8Cg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:24:58Z:3448aa2f096043ba145789720b1ca8d282d08dd219ec2c3a43de53e60d1eb293:lTnd6X1xA0Z5ohfHw2aZxx89rWAC36Rhs4BdO0EtzwrAMjZfuaioGQNv4IapQr0qaUnRmIiTB7KIvir6kYdIBA==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -228,6 +228,17 @@ This handles context-limit handoffs transparently — the walker doesn't impleme
 4. Parent returns immediately: `{success, graph_run_id, graph_id, status: "running", pid}`
 5. Child runs `execute()` to completion, updates registry status
 
+## CLI
+
+Graph operations are available from the terminal via `ryeos-cli` (`pip install ryeos-cli`):
+
+- `rye graph run <id>` — full execution
+- `rye graph step <id> --node <name>` — single-node execution
+- `rye graph validate <id>` — static analysis
+- `rye graph run <id> --async` — background execution
+
+The CLI is a thin parameter translator — it constructs the same `walker.run_sync()` call that `rye execute tool` uses.
+
 ## Cancellation
 
 The walker checks for a `cancel` sentinel file at `.ai/agent/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
@@ -286,3 +297,4 @@ Checked against `os.environ` before execution starts. Returns list of missing va
 | `.ai/tools/rye/agent/threads/loaders/error_loader.py` | Error classification for hook context |
 | `.ai/tools/rye/agent/threads/loaders/hooks_loader.py` | Builtin + infra hook loading |
 | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` | Run registration + status tracking |
+| `ryeos-cli/rye_cli/verbs/graph.py` | CLI integration |

@@ -1,7 +1,7 @@
 ```yaml
 id: installation
 title: Installation
-description: Install and configure Rye OS as an MCP server for your AI agent
+description: Install and configure Rye OS — MCP server and terminal CLI for your AI agent
 category: getting-started
 tags: [install, setup, mcp, configuration]
 version: "1.0.0"
@@ -45,6 +45,23 @@ pip install ryeos[all]
 > **Engine only:** Install `ryeos-engine` for the engine with no `.ai/` data bundles at all. `ryeos-core` depends on `ryeos-engine`.
 >
 > See [Packages and Bundles](../internals/packages-and-bundles.md) for the full breakdown.
+
+### Terminal CLI
+
+```bash
+pip install ryeos-cli
+```
+
+The CLI maps shell verbs directly to the four primitives — no MCP transport, no JSON-RPC:
+
+```bash
+rye search directive "lead generation"
+rye execute tool rye/bash/bash --params '{"command": "ls"}'
+rye graph run my-project/graphs/pipeline
+rye test my-project/tools/scraper
+```
+
+See the [CLI documentation](../future/ryeos-cli.md) for the full verb reference.
 
 ## Configure your MCP client
 

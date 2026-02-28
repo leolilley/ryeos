@@ -146,6 +146,37 @@ rye_execute(item_type="tool", item_id="rye/code/npm/npm",
 | ------ | ------------------------ | --------------------------------------------- |
 | system | `rye/core/system/system` | System info: env vars, paths, runtime details |
 
+### Dev Tools (`rye/dev/`)
+
+Development and testing utilities.
+
+| Tool        | Item ID                | Description                          |
+| ----------- | ---------------------- | ------------------------------------ |
+| test_runner | `rye/dev/test-runner`  | Run `.test.yaml` specs against tools |
+
+The test runner discovers test specs from `.ai/tests/**/*.test.yaml`, executes tools via `ExecuteTool`, and evaluates assertions. Supports tag-based filtering and validate-only mode.
+
+**Examples:**
+
+```python
+# Run all tests for a specific tool
+rye_execute(item_type="tool", item_id="rye/dev/test-runner",
+    parameters={"tool": "my-project/scrapers/chart-discovery"})
+
+# Skip integration tests
+rye_execute(item_type="tool", item_id="rye/dev/test-runner",
+    parameters={"tool": "my-project/scrapers/chart-discovery", "exclude_tags": "integration"})
+```
+
+Or from the CLI:
+
+```bash
+rye test my-project/scrapers/chart-discovery
+rye test my-project/scrapers/chart-discovery --exclude-tags integration
+```
+
+See the [test runner knowledge](../orchestration/state-graphs.md) for test spec format and assertion DSL.
+
 ---
 
 ## Orchestration Engine (`rye/agent/threads/`)
