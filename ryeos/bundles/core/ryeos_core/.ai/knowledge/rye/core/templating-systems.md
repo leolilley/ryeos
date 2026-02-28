@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:53e8db20554facb6c8d5647de369d7cf005d543db8ac84f7e59558c5636ff88d:AvIOkM1yJ6iGhBf2LTQjV8rWlU2-rBT6uvrAS6eYC2nvlL3QPGfjbJAgQqlRkjajw_BgjlVUB8051O5fGguKDg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:40:35Z:f0e1849fc306a595f4a39a0c8c8df879a682e1841f8046c5ae71ef62dc5e4dba:NCyVZtT0Dl8yCw6zZTliI8O8CfyrAJi1F7r8qIJxsBWz86eLvh_7sUTWpipHFX-rLZqh-qh5h1tiLXeZ0cJADQ==:4b987fd4e40303ac -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems
@@ -101,12 +101,11 @@ config:
 config:
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
-  # Or pipe params via stdin (recommended for large payloads):
-  # input_data: "{params_json}"
+  input_data: "{params_json}"
+  # Legacy alternative: pass params in args (not recommended, subject to ARG_MAX limits):
+  # args: ["{tool_path}", "--params", "{params_json}", "--project-path", "{project_path}"]
 ```
 
 ## System 3: Context Interpolation

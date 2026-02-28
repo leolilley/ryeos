@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:20d03f939936ee9b7bcaffa9302677e7e66ac8ed30e0b12a5a1495f3294f5c4f:cHbHdORlJthoPniwv-2j8d13tsH9F4HoPzZa-ZR07f9ocJGatMjx3iiwwa80AwFSQgeBO7bhzLeGLpkOn9v_DA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:40:35Z:3b3dc08fe121d0b0c7c2c037deeae87a6247ad8d18c9de4cadb953b3f4e1c448:lQ8n04E4KfD8gyOr7v4bomNKRyEHOKKgoYR7WJw53pJDduIUmAxAgFgC0dxI9TJBxfw1lMqMjxYkJ5FzJUuQBw==:4b987fd4e40303ac -->
 
 ```yaml
 name: executor-chain
@@ -78,14 +78,11 @@ config:
   command: "${RYE_PYTHON}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 ```
-
-> **Note:** Runtimes can alternatively use `input_data: "{params_json}"` to pipe parameters via stdin instead of passing them in args. This avoids OS `ARG_MAX` / `E2BIG` limits on large payloads. See the Python Function Runtime for an example.
 
 Available runtimes:
 
@@ -216,7 +213,7 @@ When active:
 
 1. Start from primitive, merge upward (tool configs override runtime configs)
 2. Inject execution context: `tool_path`, `project_path`, `user_space`, `system_space`
-3. Serialize parameters as `params_json`
+3. Serialize parameters as `params_json` (piped via `input_data` stdin in standard runtimes)
 4. Two-pass templating:
    - Pass 1: `${VAR}` — env var substitution (shell-escaped via `shlex.quote`)
    - Pass 2: `{param}` — config value substitution (iterates up to 3 times until stable)

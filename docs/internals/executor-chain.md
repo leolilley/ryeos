@@ -55,10 +55,9 @@ config:
   command: "${RYE_PYTHON}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 ```
 
@@ -184,7 +183,7 @@ When `mode: always` is set, the anchor activates unconditionally — marker file
 
 1. Start from the primitive and merge configs upward (tool configs override runtime configs)
 2. Inject execution context: `tool_path`, `project_path`, `user_space`, `system_space`
-3. Serialize runtime parameters as `params_json`
+3. Serialize runtime parameters as `params_json` (used in `input_data` to pipe via stdin)
 4. Run two-pass templating:
    - Pass 1: `${VAR}` — environment variable substitution (with shell escaping via `shlex.quote`)
    - Pass 2: `{param}` — config value substitution (iterates up to 3 times until stable)

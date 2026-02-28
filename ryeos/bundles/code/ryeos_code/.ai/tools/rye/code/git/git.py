@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:43Z:a23a1a0375614da586cad7d7dcaa6e27ebe4ddb16efad18e250643bd760bbf66:T3nOWnXiQGrJ01dYvkT5WAn2Nua2lrvgU-HsZissNpVkj4vasWwNC-wYc_3HGGxCgNSSU4_tin1UA-eQ2ooRCg==:4b987fd4e40303ac
+# rye:signed:2026-02-28T00:36:04Z:e50c9b952b14265e04eeb02d5d22afc78ff29ef8f268df013461825e2eff9ec0:6yY46KNDi60MxpezuvkwWga8Xo5UDhI2-md_WMlW5LE7eRgZLMaAyug2NfCj3Ik9FEAbmcccfDSyEamw7ep_Aw==:4b987fd4e40303ac
 
 """Git operations - status, add, commit, diff, log, branch, checkout, stash, reset, tag."""
 
@@ -238,9 +238,12 @@ def execute(params: dict, project_path: str) -> dict:
 
 
 if __name__ == "__main__":
+    import sys
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

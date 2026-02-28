@@ -126,15 +126,16 @@ The function can be sync or async — both are supported.
 
 ### CLI Fallback
 
-Tools also support direct CLI execution via `__main__`:
+Tools also support direct CLI execution via `__main__`. The runtime passes params via stdin by default, but `--params` is supported as a CLI fallback:
 
 ```python
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))
 ```
 
@@ -192,12 +193,25 @@ const { values } = parseArgs({
   },
 });
 
-execute(JSON.parse(values.params!), values["project-path"]!)
-  .then((result) => console.log(JSON.stringify(result)))
-  .catch((err) => {
+async function main() {
+  let paramsJson: string;
+  if (values.params) {
+    paramsJson = values.params;
+  } else {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    paramsJson = Buffer.concat(chunks).toString();
+  }
+  const result = await execute(JSON.parse(paramsJson), values["project-path"]!);
+  console.log(JSON.stringify(result));
+}
+
+if (values["project-path"]) {
+  main().catch((err) => {
     console.log(JSON.stringify({ success: false, error: err.message }));
     process.exit(1);
   });
+}
 ```
 
 ### Metadata Variables
@@ -214,7 +228,7 @@ Metadata is extracted by the `javascript/javascript` parser via regex, including
 
 ### CLI Entry Point
 
-The Node runtime passes parameters as CLI arguments. Use `parseArgs` from `node:util`:
+The Node runtime passes parameters via stdin by default, with `--params` as a CLI fallback. Use `parseArgs` from `node:util`:
 
 ```typescript
 import { parseArgs } from "node:util";
@@ -226,8 +240,19 @@ const { values } = parseArgs({
   },
 });
 
-const params = JSON.parse(values.params!);
-const projectPath = values["project-path"]!;
+async function main() {
+  let paramsJson: string;
+  if (values.params) {
+    paramsJson = values.params;
+  } else {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    paramsJson = Buffer.concat(chunks).toString();
+  }
+  const params = JSON.parse(paramsJson);
+  const projectPath = values["project-path"]!;
+  // ... use params and projectPath
+}
 ```
 
 ### Returning Results
@@ -291,13 +316,22 @@ if (require.main === module) {
   const args = process.argv.slice(2);
   const paramsIdx = args.indexOf("--params");
   const projectPathIdx = args.indexOf("--project-path");
-
-  const params: Params = JSON.parse(args[paramsIdx + 1]);
   const projectPath = args[projectPathIdx + 1];
 
-  execute(params, projectPath).then((result) => {
+  async function main() {
+    let paramsJson;
+    if (paramsIdx !== -1) {
+      paramsJson = args[paramsIdx + 1];
+    } else {
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      paramsJson = Buffer.concat(chunks).toString();
+    }
+    const result = await execute(JSON.parse(paramsJson), projectPath);
     console.log(JSON.stringify(result));
-  });
+  }
+
+  if (projectPath) main();
 }
 
 module.exports = { execute };
@@ -361,20 +395,23 @@ if (require.main === module) {
   const args = process.argv.slice(2);
   const paramsIdx = args.indexOf("--params");
   const projectPathIdx = args.indexOf("--project-path");
-
-  if (paramsIdx === -1 || projectPathIdx === -1) {
-    console.error("Usage: node greet.js --params '{}' --project-path /path");
-    process.exit(1);
-  }
-
-  const params = JSON.parse(args[paramsIdx + 1]);
   const projectPath = args[projectPathIdx + 1];
 
-  execute(params, projectPath)
-    .then((result) => {
-      console.log(JSON.stringify(result));
-    })
-    .catch((err) => {
+  async function main() {
+    let paramsJson;
+    if (paramsIdx !== -1) {
+      paramsJson = args[paramsIdx + 1];
+    } else {
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      paramsJson = Buffer.concat(chunks).toString();
+    }
+    const result = await execute(JSON.parse(paramsJson), projectPath);
+    console.log(JSON.stringify(result));
+  }
+
+  if (projectPath) {
+    main().catch((err) => {
       console.log(
         JSON.stringify({
           success: false,
@@ -383,6 +420,7 @@ if (require.main === module) {
       );
       process.exit(1);
     });
+  }
 }
 
 module.exports = { execute, CONFIG_SCHEMA };
@@ -541,10 +579,11 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))
 ```
 

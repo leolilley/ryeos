@@ -121,7 +121,9 @@ No secrets or protection rules are needed — OIDC handles authentication.
 
 ## Version Bumping
 
-All packages should be bumped together to keep versions in sync. Version numbers live in:
+Each package has its own independent version. Only bump packages that have changed — they do **not** need to be in sync. The `v*` tag triggers publishing for all packages; any package whose version already exists on PyPI will simply skip with a harmless "File already exists" error.
+
+Version numbers live in:
 
 ### Python packages (pyproject.toml)
 
@@ -138,7 +140,7 @@ lillux/kernel/pyproject.toml                  → lillux
 
 ### Rust packages (pyproject.toml AND Cargo.toml)
 
-Rust packages have **two** version fields that must be kept in sync:
+Rust packages have **two** version fields that must be kept in sync **with each other** (pyproject.toml and Cargo.toml for the same package):
 
 ```
 lillux/proc/pyproject.toml                    → lillux-proc (maturin uses this for wheel version)
@@ -147,22 +149,23 @@ lillux/watch/pyproject.toml                   → lillux-watch (maturin uses thi
 lillux/watch/Cargo.toml                       → lillux-watch (Rust binary version)
 ```
 
-> **Important:** Maturin reads the version from `pyproject.toml`, not `Cargo.toml`. If you only bump `Cargo.toml`, the wheel will still have the old version.
+> **Important:** Maturin reads the version from `pyproject.toml`, not `Cargo.toml`. If you only bump `Cargo.toml`, the wheel will still have the old version. Always bump both files for Rust packages.
 
 ### Bump workflow
 
 ```bash
-# 1. Bump all versions (example: 0.1.1 → 0.1.2)
-#    Update all pyproject.toml, Cargo.toml, and bundle.py files
+# 1. Bump versions for changed packages
+#    Update their pyproject.toml (and Cargo.toml for Rust packages)
+#    Unchanged packages can keep their current version — they'll skip on PyPI
 
 # 2. Commit and push
 git add -A
-git commit -m "bump all packages to 0.1.2"
+git commit -m "bump changed packages for release"
 git push origin main
 
-# 3. Tag and push
-git tag v0.1.2 -m "v0.1.2"
-git push origin v0.1.2
+# 3. Tag and push (tag triggers publish for all packages)
+git tag v0.1.6 -m "v0.1.6"
+git push origin v0.1.6
 
 # 4. Monitor the workflow at:
 #    https://github.com/leolilley/ryeos/actions/workflows/publish.yml

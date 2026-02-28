@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:6b01b3eaae82c282fa5e8965d97d62b3d09715600b5778928b04fb403cb3db0b:LndmAUpsDFG7-3ul0vPF3zze7rILFQW3vozZtuxKqLoQHy8IRpAz4s7wwO1qPOltCt6hv2wCF9JHhhYmEdi6AQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:40:35Z:9dad51e493618cd0d919a43cac05dd02b2aace20225372927bb9c9f7b6294623:C3hkTR6gCnZXsT0bT1ktodbixzY9_8-eooryvgTIX8NSwuUb7aogxrX148p7S0wXXlL5QSUwFTMzIXfloDybDA==:4b987fd4e40303ac -->
 
 ```yaml
 name: runtime-authoring
@@ -240,7 +240,22 @@ Any mismatch raises `IntegrityError` and halts execution.
 
 Define how to invoke the tool:
 
-**Pattern A — parameters in args (traditional):**
+**Standard pattern — parameters via stdin:**
+
+```yaml
+config:
+  command: "${RYE_RUBY}"
+  args:
+    - "{tool_path}"
+    - "--project-path"
+    - "{project_path}"
+  input_data: "{params_json}"
+  timeout: 300
+```
+
+All standard runtimes use `input_data` to pipe parameters via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits. The tool reads JSON from stdin instead of parsing a `--params` CLI argument.
+
+**Legacy pattern — parameters in args (not recommended):**
 
 ```yaml
 config:
@@ -254,25 +269,10 @@ config:
   timeout: 300
 ```
 
-**Pattern B — parameters via stdin (recommended for new runtimes):**
-
-```yaml
-config:
-  command: "${RYE_RUBY}"
-  args:
-    - "{tool_path}"
-    - "--project-path"
-    - "{project_path}"
-  input_data: "{params_json}"
-  timeout: 300
-```
-
-Using `input_data` pipes parameters via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits on large payloads. The tool reads JSON from stdin instead of parsing a `--params` CLI argument.
-
 **Fields:**
 - `command` — Interpreter binary (typically from `env_config.interpreter.var`)
 - `args` — Array of arguments to pass, supporting template variables
-- `input_data` — Data piped to the process via stdin, supporting template variables (recommended for `{params_json}`)
+- `input_data` — Data piped to the process via stdin, supporting template variables (standard approach for `{params_json}`)
 - `timeout` — Execution timeout in seconds
 - `cwd` — Optional working directory (defaults to `tool_dir`)
 
@@ -353,13 +353,12 @@ config:
   command: "${RYE_RUBY}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
-  # Alternative: use input_data to avoid ARG_MAX limits on large payloads:
-  #   input_data: "{params_json}"
-  #   (and remove "--params" / "{params_json}" from args above)
+  input_data: "{params_json}"
+  # Legacy alternative: pass params in args (not recommended, subject to ARG_MAX limits):
+  #   args: ["{tool_path}", "--params", "{params_json}", "--project-path", "{project_path}"]
+  #   (and remove input_data above)
   timeout: 300
 
 config_schema:
@@ -389,7 +388,7 @@ __category__ = "category/path"
 __tool_description__ = "What this does"
 
 def execute(params, project_path)
-  # Parse params (passed as --params JSON)
+  # Parse params (read from stdin as JSON)
   name = params["name"]
   
   # Do work
@@ -410,7 +409,8 @@ if __FILE__ == $0
     opts.on("--project-path PATH") { |v| project_path = v }
   end.parse!
   
-  params = JSON.parse(params_json || "{}")
+  # Read params from stdin (standard), fall back to --params arg (legacy)
+  params = JSON.parse(params_json || $stdin.read)
   result = execute(params, project_path)
   puts JSON.generate(result)
 end
@@ -452,5 +452,5 @@ Common issues:
 |---------|-------|
 | "Command not found" | Verify `binary` name is in system PATH; check `fallback` |
 | "Module not found" | Verify `anchor` and `env_paths` are configured correctly |
-| "Parameter parsing fails" | Verify tool receives `--params` and `--project-path` args |
+| "Parameter parsing fails" | Verify tool reads params from stdin (or `--params` arg for legacy); check `--project-path` arg |
 | "Signature verification fails" | Re-sign the tool: `rye_sign(item_type="tool", item_id="...")` |

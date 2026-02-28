@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:25:41Z:edcabfd8d654d45b7270014d20eb47412f11063fa79b867b87a0b8eee401f08a:uom3e8K0lFbooHb8H_m_uHpnf_jqDpK3grmDVzLaKu4zI8ZUXxqaVP6asRoMRp9PqDBbmhzBqoePiOGEs2KUDQ==:4b987fd4e40303ac
+# rye:signed:2026-02-28T00:36:04Z:1108ce54afe30a8fc69d54e415c7dd524ddd0f96eb01dc0e852266a455db0d92:m2udtX1WevtDtgCNkMUXBeIt1QTu28UBG7xiHekNt5g4TGYbOmkGU4Dt8JwsqG1QOLtPKtqh_R7WNWTS4DmNBQ==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -2259,13 +2259,13 @@ if __name__ == "__main__":
     import sys
 
     parser = argparse.ArgumentParser(description="Registry Tool")
-    parser.add_argument("--params", required=True, help="Parameters as JSON")
+    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True, help="Project path")
 
     args = parser.parse_args()
 
     try:
-        params = json.loads(args.params)
+        params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
         action = params.pop("action", None)
         if not action:
             print(json.dumps({"success": False, "error": "action required in params"}))

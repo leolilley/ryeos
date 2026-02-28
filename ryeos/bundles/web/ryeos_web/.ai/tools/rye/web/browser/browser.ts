@@ -1,4 +1,4 @@
-// rye:signed:2026-02-26T06:42:42Z:f3a7c36f42b746420bbc4829c50e3da78e3826332d10c0113a48b3ae5f3dee49:oHPe9QU81VgfWVYnX5JUzkywQ5Fz-N-Kt5QasrccwkcgP36RLwpolBW_qMz7mnK7Y_mPeJ4BPVBf2yrlP8OoAQ==:4b987fd4e40303ac
+// rye:signed:2026-02-28T00:36:04Z:126649acb11b5cdd77133f94df91d5f9856af65931449306d04521667c2c5d66:EhViGqruUJCQ9Ys8QcCmx7xHAquAKFom6T69tZannt5I6yVG9rPgZWRkInx_qEGFwGrJUCtM-rQDjEzYV2ETBw==:4b987fd4e40303ac
 // rye:unsigned
 import { parseArgs } from "node:util";
 import { execSync } from "node:child_process";
@@ -377,10 +377,20 @@ const { values } = parseArgs({
   },
 });
 
-if (values.params && values["project-path"]) {
+async function main() {
+  let paramsJson: string;
+  if (values.params) {
+    paramsJson = values.params;
+  } else {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    paramsJson = Buffer.concat(chunks).toString();
+  }
   const result = execute(
-    JSON.parse(values.params) as Params,
-    values["project-path"],
+    JSON.parse(paramsJson) as Params,
+    values["project-path"]!,
   );
   console.log(JSON.stringify(result));
 }
+
+if (values["project-path"]) main();

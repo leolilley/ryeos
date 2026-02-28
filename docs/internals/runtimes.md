@@ -249,7 +249,7 @@ args:
 | Variable | Value | Example |
 |----------|-------|---------|
 | `{tool_path}` | Absolute path to tool file | `/project/.ai/tools/rye/bash/bash.py` |
-| `{params_json}` | Tool parameters as JSON (can be used in `args` or `input_data`; prefer `input_data` for large payloads to avoid OS argument length limits) | `{"command":"ls -la"}` |
+| `{params_json}` | Tool parameters as JSON (passed via `input_data`/stdin to avoid OS argument length limits) | `{"command":"ls -la"}` |
 | `{project_path}` | Project root | `/project` |
 | `{system_space}` | System space root | `/usr/local/lib/python3.11/site-packages/ryeos/rye/.ai` |
 | `{server_config_path}` | MCP server config path | `/project/.ai/tools/mcp/servers/context7.yaml` |
@@ -265,24 +265,23 @@ config:
   command: "${RYE_PYTHON}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
 ```
 
 When executing `rye/bash/bash` with params `{"command":"echo hello"}`:
 1. `${RYE_PYTHON}` → `/project/.venv/bin/python3`
 2. `{tool_path}` → `/project/.ai/tools/rye/bash/bash.py`
-3. `{params_json}` → `{"command":"echo hello"}`
+3. `{params_json}` → `{"command":"echo hello"}` (piped via stdin)
 4. `{project_path}` → `/project`
 
 Final command:
 ```bash
-/project/.venv/bin/python3 /project/.ai/tools/rye/bash/bash.py --params '{"command":"echo hello"}' --project-path /project
+echo '{"command":"echo hello"}' | /project/.venv/bin/python3 /project/.ai/tools/rye/bash/bash.py --project-path /project
 ```
 
-> **⚠️ E2BIG risk:** Passing `{params_json}` as a CLI argument works for small payloads but can hit OS argument length limits (`E2BIG` / `ARG_MAX`) with large parameters. For new runtimes, prefer `input_data` to pipe parameters via stdin instead. See the [Python Function Runtime](#python-function-runtime-in-process) for an example.
+> **Note:** All standard runtimes pass `{params_json}` via `input_data` (stdin) instead of CLI arguments. This avoids OS argument length limits (`E2BIG` / `ARG_MAX`) regardless of payload size.
 
 ---
 
@@ -332,10 +331,9 @@ config:
   command: "${RYE_RUBY}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 
 config_schema:
@@ -500,16 +498,15 @@ verify_deps:
   extensions: [".py", ".yaml", ".yml", ".json"]
   exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
 
-# Args: tool.py gets --params and --project-path
-# Tool must have: if __name__ == "__main__": argparse --params --project-path
+# Args: tool.py gets --project-path; params are piped via stdin
+# Tool must have: if __name__ == "__main__": argparse --project-path, read params from stdin
 config:
   command: "${RYE_PYTHON}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 
 config_schema:
@@ -573,15 +570,14 @@ verify_deps:
   extensions: [".js", ".ts", ".mjs", ".cjs", ".json", ".yaml", ".yml"]
   exclude_dirs: ["node_modules", "__pycache__", ".git", "dist", "build"]
 
-# Args: tool.js gets --params and --project-path as CLI args
+# Args: tool.js gets --project-path; params are piped via stdin
 config:
   command: "${RYE_NODE}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 
 config_schema:
@@ -621,8 +617,8 @@ config:
     - "-c"
     - "{command}"
     - "{tool_path}"
-    - "{params_json}"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 
 config_schema:

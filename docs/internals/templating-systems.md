@@ -65,7 +65,7 @@ env_config:
 | `{tool_path}`                 | Absolute path to the tool file  |
 | `{tool_dir}`                  | Directory containing the tool   |
 | `{tool_parent}`               | Parent directory of the tool    |
-| `{params_json}`               | JSON-serialized tool parameters |
+| `{params_json}`               | JSON-serialized tool parameters (piped via `input_data`/stdin) |
 | `{project_path}`              | Project root path               |
 | `{anchor_path}`               | Module resolution root          |
 | `{runtime_lib}`               | Runtime library path            |
@@ -83,10 +83,9 @@ env_config:
 config:
   args:
     - "{tool_path}" # → /path/to/my_tool.py
-    - "--params"
-    - "{params_json}" # → '{"files": ["a.py"]}'
     - "--project-path"
     - "{project_path}" # → /home/user/my-project
+  input_data: "{params_json}" # → '{"files": ["a.py"]}' (piped via stdin)
 ```
 
 ## System 3: Context Interpolation

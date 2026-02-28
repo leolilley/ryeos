@@ -132,7 +132,7 @@ CONFIG_SCHEMA = {
 def execute(params: dict, project_path: str) -> dict:
     """Execute the word count tool.
 
-    The executor runs: python word_count.py --params '{"text":"..."}' --project-path /path
+    The executor runs: echo '{"text":"..."}' | python word_count.py --project-path /path
     """
     text = params.get("text")
     file_path = params.get("file_path")
@@ -253,7 +253,7 @@ When you call `rye_execute(item_type="tool", item_id="word_count", ...)`:
 1. **Resolution** — Rye OS loads the tool script and reads `__executor_id__`.
 2. **Runtime Lookup** — Finds the runtime config (e.g., `python/script.yaml`).
 3. **Environment Setup** — Resolves interpreter (`.venv/bin/python` or `node`), sets env vars, prepends `PYTHONPATH` or `NODE_PATH`.
-4. **Execution** — Runs the command template with your params: `python word_count.py --params '{"text":"..."}' --project-path /path`.
+4. **Execution** — Runs the command template, piping params via stdin: `echo '{"text":"..."}' | python word_count.py --project-path /path`.
 5. **Result** — Collects stdout/stderr, parses the returned dict, and returns to the agent.
 
 ## 4. Create a knowledge entry

@@ -39,13 +39,9 @@ config:
     - "run"
     - "{tool_path}"
     - "--"
-    - "{params_json}"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
-  # For large payloads, use input_data instead of passing {params_json}
-  # in args to avoid OS argument size limits (~128KB per arg):
-  #   args: ["run", "{tool_path}", "--", "{project_path}"]
-  #   input_data: "{params_json}"
 
 config_schema:
   type: object
@@ -259,14 +255,10 @@ config:
   command: "${RYE_RUBY}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
-  # Preferred for large payloads — avoids OS CLI arg size limits:
-  #   args: ["{tool_path}", "--project-path", "{project_path}"]
-  #   input_data: "{params_json}"
 
 config_schema:
   type: object
@@ -287,7 +279,7 @@ Create `.ai/tools/my/ruby_example.rb`:
 
 ```ruby
 #!/usr/bin/env ruby
-# Ruby tool example - receives JSON params via CLI
+# Ruby tool example - receives JSON params via stdin
 
 require "json"
 require "optparse"
@@ -299,8 +291,12 @@ OptionParser.new do |opts|
   opts.on("--project-path PATH", String) { |v| options[:project_path] = v }
 end.parse!
 
-# Load and parse params
-params = options[:params] ? JSON.parse(options[:params]) : {}
+# Load params from --params flag or stdin
+params = if options[:params]
+           JSON.parse(options[:params])
+         else
+           JSON.parse($stdin.read)
+         end
 project_path = options[:project_path]
 
 begin
@@ -440,14 +436,14 @@ config:
   command: "${MY_PYTHON}"      # Expanded: /path/to/.venv/bin/python3
   args:
     - "{tool_path}"            # Expanded later: /path/to/tool.py
-    - "{params_json}"          # Expanded later: {"foo":"bar"}
+  input_data: "{params_json}"  # Expanded later: {"foo":"bar"} — piped via stdin
 ```
 
 Two-stage process:
 1. `${MY_PYTHON}` → resolved interpreter path
 2. `{tool_path}`, `{params_json}` → tool invocation parameters
 
-> `{params_json}` can appear in `args` or `input_data`. Use `input_data` for large payloads.
+> `{params_json}` is passed via `input_data` (stdin) by default in all standard runtimes.
 
 ### Conditional Execution (Per-Environment)
 
@@ -504,13 +500,9 @@ config:
   args:
     - "-v"                      # Verbose Ruby
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
-  # Or use input_data to avoid CLI arg size limits:
-  #   args: ["-v", "{tool_path}", "--project-path", "{project_path}"]
-  #   input_data: "{params_json}"
+  input_data: "{params_json}"
 ```
 
 ---
@@ -522,10 +514,10 @@ config:
 | Tool can't find libraries | Enable anchoring and set `PYTHONPATH`/`NODE_PATH`/`RUBYLIB` in `env_paths` |
 | Interpreter not found | Check `fallback` path exists, or set in `env` with static path |
 | Working directory wrong | Use `anchor.cwd: "{anchor_path}"` to set working directory |
-| Parameters not parsed | Tool must read `--params` and `--project-path` CLI args, or use a wrapper |
+| Parameters not parsed | Tool must read params from stdin (or `--params` CLI fallback) and `--project-path` CLI arg |
 | Timeout errors | Increase `config.timeout` in runtime YAML |
 | Output not JSON | Tool must return `print(json.dumps(...))` or equivalent |
-| `{params_json}` exceeds CLI arg limit | Use `input_data: "{params_json}"` instead of passing in `args`. OS limits CLI args to ~128KB per arg |
+| `{params_json}` exceeds CLI arg limit | All standard runtimes now use `input_data: "{params_json}"` (stdin) by default, avoiding OS CLI arg size limits |
 
 ---
 

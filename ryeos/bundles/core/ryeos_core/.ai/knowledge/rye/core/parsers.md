@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:c476466c90f3feed7ab499a851036ebea809e239061f3280f006ea382b7b3e16:IFsKEjJQduUMEh8x9Mp6w-_PfRAm9vno0acoR_Z9PTUnBshQPfNRIa8FFXqP8BtuZgl1AtUAtQiQcEYhh2JABw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:40:35Z:8028ae450dfd42b19880d379c08e0a4c46feacb89139ac958a6b53f6ab51089b:U9i36FeZGP__EwzQpeHihg8tbvRN2E3JiHlhsAVoy-8trmXmjkKmjBGP_YsKz8ekOcDe-Wi-4IKfRrajHxz4Ag==:4b987fd4e40303ac -->
 
 ```yaml
 name: parsers
@@ -227,7 +227,8 @@ env_config:
 
 config:
   command: "${RYE_PYTHON}"
-  args: ["{tool_path}", "--params", "{params_json}"]
+  args: ["{tool_path}", "--project-path", "{project_path}"]
+  input_data: "{params_json}"
   timeout: 300
 
 parameters:

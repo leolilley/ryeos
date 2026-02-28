@@ -92,7 +92,7 @@ YAML configs defining how each tool type is executed:
 
 | Runtime | Language/Protocol | How It Runs |
 | --- | --- | --- |
-| `python/script` | Python | Subprocess: `python tool.py --params '{}' --project-path /path` |
+| `python/script` | Python | Subprocess: `echo '{}' \| python tool.py --project-path /path` (params via stdin) |
 | `python/function` | Python | In-process: import module, call `execute(params, project_path)` |
 | `node/node` | JavaScript | Subprocess: `node tool.js` |
 | `bash/bash` | Bash | Subprocess: `bash tool.sh` |

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:25:41Z:0f85c0ea07ae2407adddc669f433e241ead9c64521a27254874e273a78cd0829:riIJ9XZKqGRX52wTzvSzryDl8-xLeZqSQG2b_mTmAfboBQlCquhe73hOWoXR6GmQ-vtyvOq9_GrimoRTn07KBw==:4b987fd4e40303ac
+# rye:signed:2026-02-28T00:36:04Z:2127dda2e0cbc338c7ddffd1c8a5fc6f417514b39e00310e11bf4632f9eb6558:Tde2ugj2YzQ008JItzz6e8pDG4l8Cy5sOShhQBzA4ZDtG5aueG2F26GR3ML7SJrqQdxkdNS8UkhcglznCcfHCw==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -780,13 +780,13 @@ if __name__ == "__main__":
     import sys
 
     parser = argparse.ArgumentParser(description="Bundler Tool")
-    parser.add_argument("--params", required=True, help="Parameters as JSON")
+    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True, help="Project path")
 
     args = parser.parse_args()
 
     try:
-        params = json.loads(args.params)
+        params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
         action = params.pop("action", None)
         if not action:
             print(json.dumps({"success": False, "error": "action required in params"}))

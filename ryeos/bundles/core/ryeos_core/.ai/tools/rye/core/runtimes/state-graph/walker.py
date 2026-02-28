@@ -1378,6 +1378,10 @@ async def execute(
             graph_transcript.write_event("step_started", {
                 "step": step_count, "node": executed_node, "node_type": "return",
             })
+            graph_transcript.write_event("step_completed", {
+                "step": step_count, "node": executed_node, "status": "completed",
+                "elapsed_s": 0, "action_id": "", "thread_id": "",
+            })
             _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=elapsed, status="return")
             graph_transcript.write_event("graph_completed", {
                 "status": "completed", "steps": step_count, "elapsed_s": elapsed,

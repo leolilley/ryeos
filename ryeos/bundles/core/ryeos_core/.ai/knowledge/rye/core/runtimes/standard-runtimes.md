@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:8ef1c1aa6134602231ce7c8f83526beaeb695f1fa7b37ba4d9dd8e6aa029e257:LprZIbr8dcJbOPcBrQI_rOrIZj4zh_-NsnDpGtfOGt3_aALz4LupLHayG62N3KpA8mMVVAqByHbxovZJdnqdAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:40:35Z:f53b035a3711319f65833ee1f053c144cdb0b85c46d59a5339d778bed47f7dae:NtyFgndOdvLCVV3kU2yK0l2DHnGpmMUzuD83TkzxwqfC393ozQLSZ3ZACFewIpFX4fx1FPUg4fMmB1Ybi_rKBA==:4b987fd4e40303ac -->
 
 ```yaml
 name: standard-runtimes
@@ -81,7 +81,7 @@ Lillux execution layer
 
 **File:** `.ai/tools/rye/core/runtimes/python/script.yaml`
 
-Executes Python scripts in a subprocess. Scripts receive parameters as CLI args.
+Executes Python scripts in a subprocess. Scripts receive parameters via stdin.
 
 ### Config
 
@@ -118,14 +118,11 @@ config:
   command: "${RYE_PYTHON}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 ```
-
-> **Note:** Passing `{params_json}` in args is subject to OS `ARG_MAX` / `E2BIG` limits. For tools that may receive large parameters, consider using `input_data` instead (see Python Function Runtime for an example).
 
 ### Tool Signature
 
@@ -142,12 +139,13 @@ __tool_description__ = "Description"
 CONFIG_SCHEMA = { ... }
 
 if __name__ == "__main__":
-    import argparse, json
+    import argparse, json, sys
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))
 ```
 
@@ -201,7 +199,7 @@ Same as script runtime — `execute(params: dict, project_path: str) → dict`. 
 
 **File:** `.ai/tools/rye/core/runtimes/node/node.yaml`
 
-Executes JavaScript/TypeScript via Node.js in a subprocess. Tools receive parameters as CLI args.
+Executes JavaScript/TypeScript via Node.js in a subprocess. Tools receive parameters via stdin.
 
 ### Config
 
@@ -241,14 +239,11 @@ config:
   command: "${RYE_NODE}"
   args:
     - "{tool_path}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 ```
-
-> **Note:** Passing `{params_json}` in args is subject to OS `ARG_MAX` / `E2BIG` limits. For tools that may receive large parameters, consider using `input_data` instead.
 
 ### Tool Signature (JSDoc)
 
@@ -312,26 +307,24 @@ config:
   command: "${RYE_BASH}"
   args:
     - "{tool_path}"
-    - "{params_json}"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 ```
 
-> **Note:** Passing `{params_json}` in args is subject to OS `ARG_MAX` / `E2BIG` limits. For tools that may receive large parameters, consider using `input_data` instead.
-
 ### Tool Format
 
-Shell scripts receive three arguments:
+Shell scripts receive parameters via stdin and the project path as `$1`:
 
-1. `$1` — Parameters as JSON string
-2. `$2` — Project path
+1. `$1` — Project path
+2. `stdin` — Parameters as JSON string
 
 ```bash
 #!/bin/bash
 # rye:signed:TIMESTAMP:HASH:SIG:FP
 
-params="$1"
-project_path="$2"
+project_path="$1"
+params=$(cat)  # Read JSON params from stdin
 
 # Parse params (jq recommended)
 name=$(echo "$params" | jq -r '.name')
@@ -454,7 +447,7 @@ All runtimes support template variables in `config.args` and `config.input_data`
 | `{user_space}` | Executor context | User space path |
 | `{system_space}` | Executor context | System space path |
 
-> **Tip:** `{params_json}` can be used in either `args` or `input_data`. Using `input_data` is recommended for large payloads because it pipes data via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits on command-line argument length.
+> **Tip:** `{params_json}` can be used in either `args` or `input_data`. All standard runtimes now use `input_data` to pipe parameters via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits on command-line argument length.
 
 Template substitution happens in two passes:
 1. **Pass 1:** `${VAR}` environment variable expansion
