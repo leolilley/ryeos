@@ -117,7 +117,7 @@ No secrets or protection rules are needed — OIDC handles authentication.
 | ryeos-web    | Active |
 | ryeos-code   | Active |
 | ryeos-mcp    | Active |
-| ryeos-cli    | Pending — register at pypi.org/manage/account/publishing/ |
+| ryeos-cli    | Active |
 
 ## Version Bumping
 
