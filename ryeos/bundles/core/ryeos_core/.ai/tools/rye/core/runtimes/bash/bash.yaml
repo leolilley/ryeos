@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:63ad2228dd6b4bd7bda3fa9736373e88fca938d0fd304954cfd55c06d07ec846:y42jXuFnCXn-cN1HEmbqh-9I0y-JdswL5bQo7tl0E26RDHT_CYUq-RRIMSR4cOfFjp7oEb50ikQhx-N_hNmGCA==:4b987fd4e40303ac
+# rye:signed:2026-02-28T00:25:40Z:63ad2228dd6b4bd7bda3fa9736373e88fca938d0fd304954cfd55c06d07ec846:y42jXuFnCXn-cN1HEmbqh-9I0y-JdswL5bQo7tl0E26RDHT_CYUq-RRIMSR4cOfFjp7oEb50ikQhx-N_hNmGCA==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -15,8 +15,8 @@ config:
     - "-c"
     - "{command}"
     - "{tool_path}"
-    - "{params_json}"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 
 config_schema:

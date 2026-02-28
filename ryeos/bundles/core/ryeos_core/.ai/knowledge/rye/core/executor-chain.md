@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:689a0814c67fdafb183fbc8665c664d818b5117c6eaf6cded95cb75c3257395d:RzYl9OF7j5hCIsPq9ulNv-ENWMvbwWMOHN8v0o_MIceDQubG-hJEe563Z2iyZyaJY5cjWVXrbUqPvfRn6EK-CA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:32:39Z:20d03f939936ee9b7bcaffa9302677e7e66ac8ed30e0b12a5a1495f3294f5c4f:cHbHdORlJthoPniwv-2j8d13tsH9F4HoPzZa-ZR07f9ocJGatMjx3iiwwa80AwFSQgeBO7bhzLeGLpkOn9v_DA==:4b987fd4e40303ac -->
 
 ```yaml
 name: executor-chain
@@ -84,6 +84,8 @@ config:
     - "{project_path}"
   timeout: 300
 ```
+
+> **Note:** Runtimes can alternatively use `input_data: "{params_json}"` to pipe parameters via stdin instead of passing them in args. This avoids OS `ARG_MAX` / `E2BIG` limits on large payloads. See the Python Function Runtime for an example.
 
 Available runtimes:
 

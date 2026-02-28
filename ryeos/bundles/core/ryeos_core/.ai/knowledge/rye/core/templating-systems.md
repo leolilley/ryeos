@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:4a9e4d8e07876abc342d68718484997fa839e707a7ec5036f335b69f9e66b2ab:uEraYMfaQ-uCwg1P5YW0dzd8nhJnK6MpVlsiI-V1L-psDNuXvKbcFBm7o3mMDE7meFelr-Md25Qfe-eAPMjPAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:32:39Z:53e8db20554facb6c8d5647de369d7cf005d543db8ac84f7e59558c5636ff88d:AvIOkM1yJ6iGhBf2LTQjV8rWlU2-rBT6uvrAS6eYC2nvlL3QPGfjbJAgQqlRkjajw_BgjlVUB8051O5fGguKDg==:4b987fd4e40303ac -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems
@@ -105,6 +105,8 @@ config:
     - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  # Or pipe params via stdin (recommended for large payloads):
+  # input_data: "{params_json}"
 ```
 
 ## System 3: Context Interpolation

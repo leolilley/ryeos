@@ -249,7 +249,7 @@ args:
 | Variable | Value | Example |
 |----------|-------|---------|
 | `{tool_path}` | Absolute path to tool file | `/project/.ai/tools/rye/bash/bash.py` |
-| `{params_json}` | Tool parameters as JSON | `{"command":"ls -la"}` |
+| `{params_json}` | Tool parameters as JSON (can be used in `args` or `input_data`; prefer `input_data` for large payloads to avoid OS argument length limits) | `{"command":"ls -la"}` |
 | `{project_path}` | Project root | `/project` |
 | `{system_space}` | System space root | `/usr/local/lib/python3.11/site-packages/ryeos/rye/.ai` |
 | `{server_config_path}` | MCP server config path | `/project/.ai/tools/mcp/servers/context7.yaml` |
@@ -281,6 +281,8 @@ Final command:
 ```bash
 /project/.venv/bin/python3 /project/.ai/tools/rye/bash/bash.py --params '{"command":"echo hello"}' --project-path /project
 ```
+
+> **⚠️ E2BIG risk:** Passing `{params_json}` as a CLI argument works for small payloads but can hit OS argument length limits (`E2BIG` / `ARG_MAX`) with large parameters. For new runtimes, prefer `input_data` to pipe parameters via stdin instead. See the [Python Function Runtime](#python-function-runtime-in-process) for an example.
 
 ---
 
@@ -426,6 +428,7 @@ verify_deps:
 
 # Args passed to python -c (inline code loader)
 # Loads module, finds execute(), calls with params and project_path
+# Params are piped via stdin (input_data) to avoid E2BIG on large payloads
 config:
   command: "${RYE_PYTHON}"
   args:
@@ -437,13 +440,13 @@ config:
       spec.loader.exec_module(mod)
       fn=getattr(mod,"execute",None)
       if not fn:sys.exit("No execute() in "+sys.argv[1])
-      p=json.loads(sys.argv[2])
-      if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,sys.argv[3]))
-      else:r=fn(p,sys.argv[3])
+      p=json.loads(sys.stdin.read())
+      if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,sys.argv[2]))
+      else:r=fn(p,sys.argv[2])
       print(json.dumps(r,default=str)if r is not None else'{}')
     - "{tool_path}"
-    - "{params_json}"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 
 config_schema:

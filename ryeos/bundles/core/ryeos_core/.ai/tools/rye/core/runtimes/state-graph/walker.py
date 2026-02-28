@@ -1,4 +1,4 @@
-# rye:signed:2026-02-27T23:36:33Z:96265e3276f7248652d570d72e0042070c5a128d337b1c8d12fa3faf024316df:kdBqr3W5InIuoGktA3-W0IpuoJQPOcIkf4jhQur1WNH41WDcOxyexn6qDLC0kv2Yp2GSkabEF165HuqFOHiNBA==:4b987fd4e40303ac
+# rye:signed:2026-02-28T00:25:41Z:586ae693405541c468a0cf9799d465104ff054480090549baac02af489dce10f:0cGbug8EW22YOj1PGbwIemtWGFP5Zqt2l87BQIc8Z-JkFffXWXa2l0uNG8vGWczgeWpleo9Ik6HPBV2gpLGmBg==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -1397,7 +1397,17 @@ async def execute(
                 project_path,
             )
             _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="ok", detail=f"{step_count} steps")
-            return {"success": True, "state": state, "steps": step_count}
+            # Return interpolated output from the return node (slim),
+            # full state is already persisted as a knowledge artifact.
+            output_template = node.get("output", {})
+            interp_ctx: Dict[str, Any] = {"state": state, "inputs": params}
+            output = interpolation.interpolate(output_template, interp_ctx) if output_template else {}
+            return {
+                "success": True,
+                "output": output,
+                "steps": step_count,
+                "graph_run_id": graph_run_id,
+            }
 
         # Foreach node — iterate
         if node.get("type") == "foreach":

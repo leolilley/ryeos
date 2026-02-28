@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:b632de2da88d3826a466fe8dabdfd265bb774e9025ca63b49a6d0cf1005e1e8e:-EkFtSFbNS2e39wC_oVdfnm8QyVuEFa7m4EAbmE-qb6zHtWJqALx3wCieA1HogF5RvtWZbGaMsL6pMJKMgyNBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:32:39Z:6b01b3eaae82c282fa5e8965d97d62b3d09715600b5778928b04fb403cb3db0b:LndmAUpsDFG7-3ul0vPF3zze7rILFQW3vozZtuxKqLoQHy8IRpAz4s7wwO1qPOltCt6hv2wCF9JHhhYmEdi6AQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: runtime-authoring
@@ -240,6 +240,8 @@ Any mismatch raises `IntegrityError` and halts execution.
 
 Define how to invoke the tool:
 
+**Pattern A — parameters in args (traditional):**
+
 ```yaml
 config:
   command: "${RYE_RUBY}"
@@ -252,13 +254,29 @@ config:
   timeout: 300
 ```
 
+**Pattern B — parameters via stdin (recommended for new runtimes):**
+
+```yaml
+config:
+  command: "${RYE_RUBY}"
+  args:
+    - "{tool_path}"
+    - "--project-path"
+    - "{project_path}"
+  input_data: "{params_json}"
+  timeout: 300
+```
+
+Using `input_data` pipes parameters via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits on large payloads. The tool reads JSON from stdin instead of parsing a `--params` CLI argument.
+
 **Fields:**
 - `command` — Interpreter binary (typically from `env_config.interpreter.var`)
 - `args` — Array of arguments to pass, supporting template variables
+- `input_data` — Data piped to the process via stdin, supporting template variables (recommended for `{params_json}`)
 - `timeout` — Execution timeout in seconds
 - `cwd` — Optional working directory (defaults to `tool_dir`)
 
-**Template variables available:**
+**Template variables available (in both `args` and `input_data`):**
 
 | Variable | Source | Description |
 |----------|--------|-------------|
@@ -339,6 +357,9 @@ config:
     - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  # Alternative: use input_data to avoid ARG_MAX limits on large payloads:
+  #   input_data: "{params_json}"
+  #   (and remove "--params" / "{params_json}" from args above)
   timeout: 300
 
 config_schema:

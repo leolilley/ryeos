@@ -42,6 +42,10 @@ config:
     - "{params_json}"
     - "{project_path}"
   timeout: 300
+  # For large payloads, use input_data instead of passing {params_json}
+  # in args to avoid OS argument size limits (~128KB per arg):
+  #   args: ["run", "{tool_path}", "--", "{project_path}"]
+  #   input_data: "{params_json}"
 
 config_schema:
   type: object
@@ -260,6 +264,9 @@ config:
     - "--project-path"
     - "{project_path}"
   timeout: 300
+  # Preferred for large payloads — avoids OS CLI arg size limits:
+  #   args: ["{tool_path}", "--project-path", "{project_path}"]
+  #   input_data: "{params_json}"
 
 config_schema:
   type: object
@@ -440,6 +447,8 @@ Two-stage process:
 1. `${MY_PYTHON}` → resolved interpreter path
 2. `{tool_path}`, `{params_json}` → tool invocation parameters
 
+> `{params_json}` can appear in `args` or `input_data`. Use `input_data` for large payloads.
+
 ### Conditional Execution (Per-Environment)
 
 Use env variables for conditional behavior:
@@ -499,6 +508,9 @@ config:
     - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  # Or use input_data to avoid CLI arg size limits:
+  #   args: ["-v", "{tool_path}", "--project-path", "{project_path}"]
+  #   input_data: "{params_json}"
 ```
 
 ---
@@ -513,6 +525,7 @@ config:
 | Parameters not parsed | Tool must read `--params` and `--project-path` CLI args, or use a wrapper |
 | Timeout errors | Increase `config.timeout` in runtime YAML |
 | Output not JSON | Tool must return `print(json.dumps(...))` or equivalent |
+| `{params_json}` exceeds CLI arg limit | Use `input_data: "{params_json}"` instead of passing in `args`. OS limits CLI args to ~128KB per arg |
 
 ---
 

@@ -176,24 +176,30 @@ class SubprocessPrimitive:
             if cwd:
                 exec_args.extend(["--cwd", cwd])
             if input_data:
-                exec_args.extend(["--stdin", input_data])
+                # Signal lillux-proc to read stdin data from its own stdin
+                # instead of passing as CLI arg (avoids E2BIG on large payloads)
+                exec_args.append("--stdin-pipe")
             if timeout:
                 exec_args.extend(["--timeout", str(timeout)])
-            for key, value in process_env.items():
-                exec_args.extend(["--env", f"{key}={value}"])
+            # Pass env via process environment instead of --env CLI args
+            # to avoid E2BIG when env + args exceed OS limits
 
             try:
+                stdin_pipe = asyncio.subprocess.PIPE if input_data else None
                 proc = await asyncio.create_subprocess_exec(
                     *exec_args,
+                    stdin=stdin_pipe,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=process_env,
                 )
 
                 # lillux-proc handles its own timeout, add buffer for the wrapper
                 wrapper_timeout = timeout + 10 if timeout else 310
+                pipe_input = input_data.encode("utf-8") if input_data else None
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        proc.communicate(),
+                        proc.communicate(input=pipe_input),
                         timeout=wrapper_timeout,
                     )
                 except asyncio.TimeoutError:

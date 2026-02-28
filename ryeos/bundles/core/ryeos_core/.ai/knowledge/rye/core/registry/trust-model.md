@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:e4cc8eec79c6651ddbcadf46966c8f9448b3f214b055974a9fe7c0def01b4aa3:K-_dW7LyWlpfJir95PR3gFMFZu42O1fscgvKD_P0ET1I7esa4Rar2LN4LAX5eAS6dj_3yYYHjK99672ygmpABw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:32:39Z:e4cc8eec79c6651ddbcadf46966c8f9448b3f214b055974a9fe7c0def01b4aa3:K-_dW7LyWlpfJir95PR3gFMFZu42O1fscgvKD_P0ET1I7esa4Rar2LN4LAX5eAS6dj_3yYYHjK99672ygmpABw==:4b987fd4e40303ac -->
 
 ```yaml
 name: trust-model

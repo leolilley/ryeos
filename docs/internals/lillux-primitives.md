@@ -31,6 +31,14 @@ class SubprocessPrimitive:
             raise ConfigurationError("lillux-proc binary not found on PATH.")
 ```
 
+### lillux-proc CLI Flags
+
+| Flag            | Subcommand | Description                                                                 |
+| --------------- | ---------- | --------------------------------------------------------------------------- |
+| `--stdin-pipe`  | `exec`     | Read stdin data from the process's real stdin instead of a `--stdin` argument. Avoids the 128KB per-argument OS limit. |
+
+Environment variables are no longer passed as `--env` CLI arguments. Instead, lillux-proc inherits the environment from its parent process (set via `asyncio.create_subprocess_exec(env=...)`).
+
 ### Interface
 
 ```python
@@ -45,16 +53,20 @@ class SubprocessPrimitive:
 
 Delegates to `lillux-proc exec`. Two-stage templating (env vars then runtime params) stays in Python; the actual process execution is handled by lillux-proc.
 
+When `input_data` is provided, it is piped through real stdin (via the `--stdin-pipe` flag on lillux-proc) rather than passed as a `--stdin` CLI argument. This avoids the 128KB per-argument OS limit that would cause failures with large payloads.
+
+Environment variables are passed via the `env` parameter to `asyncio.create_subprocess_exec()` so that lillux-proc inherits them from its parent process, rather than serialized as `--env` CLI arguments. This avoids `E2BIG` errors when the combined environment + arguments would exceed OS limits.
+
 **Config keys:**
 
-| Key          | Type      | Default  | Description           |
-| ------------ | --------- | -------- | --------------------- |
-| `command`    | str       | required | Command to execute    |
-| `args`       | list[str] | `[]`     | Command arguments     |
-| `cwd`        | str       | None     | Working directory     |
-| `input_data` | str       | None     | Data piped to stdin   |
-| `env`        | dict      | `{}`     | Environment variables |
-| `timeout`    | int       | `300`    | Timeout in seconds    |
+| Key          | Type      | Default  | Description                                      |
+| ------------ | --------- | -------- | ------------------------------------------------ |
+| `command`    | str       | required | Command to execute                               |
+| `args`       | list[str] | `[]`     | Command arguments                                |
+| `cwd`        | str       | None     | Working directory                                |
+| `input_data` | str       | None     | Data piped to stdin (via `--stdin-pipe`)          |
+| `env`        | dict      | `{}`     | Environment variables (inherited via process env) |
+| `timeout`    | int       | `300`    | Timeout in seconds                               |
 
 ### spawn() — Detached Process
 
@@ -91,6 +103,8 @@ result = await primitive.status(12345)
 Both stages run on `command`, `args`, `cwd`, and `input_data` within `execute()`.
 
 ### Environment Merge Heuristic
+
+The merged environment dict is passed to `asyncio.create_subprocess_exec(env=...)` so that lillux-proc inherits it directly. This replaces the previous approach of passing individual `--env KEY=VALUE` CLI arguments, which could trigger `E2BIG` errors when the total argument size exceeded OS limits.
 
 ```python
 if len(config_env) < 50:

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-26T06:42:50Z:605b33d92fe736f889659588b1ff96b11c713fd81a91dee7bfb066b4fe769d88:05W3v-hIaQYx4S195-JZLFd1ByQocgumlkgbiwecGJfKrpBjvZ5Ix5MOFGNhcYD2W1B0fWa4nSk0OM5-1MPtBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-02-28T00:32:39Z:8ef1c1aa6134602231ce7c8f83526beaeb695f1fa7b37ba4d9dd8e6aa029e257:LprZIbr8dcJbOPcBrQI_rOrIZj4zh_-NsnDpGtfOGt3_aALz4LupLHayG62N3KpA8mMVVAqByHbxovZJdnqdAg==:4b987fd4e40303ac -->
 
 ```yaml
 name: standard-runtimes
@@ -125,6 +125,8 @@ config:
   timeout: 300
 ```
 
+> **Note:** Passing `{params_json}` in args is subject to OS `ARG_MAX` / `E2BIG` limits. For tools that may receive large parameters, consider using `input_data` instead (see Python Function Runtime for an example).
+
 ### Tool Signature
 
 ```python
@@ -167,8 +169,17 @@ env_config:
     var: RYE_PYTHON
 
 config:
+  command: "${RYE_PYTHON}"
+  args:
+    - "-c"
+    - "import sys,json,importlib.util as u;p=json.loads(sys.stdin.read());s=u.spec_from_file_location('m',sys.argv[1]);m=u.module_from_spec(s);s.loader.exec_module(m);print(json.dumps(m.execute(p,sys.argv[2])))"
+    - "{tool_path}"
+    - "{project_path}"
+  input_data: "{params_json}"
   timeout: 300
 ```
+
+Parameters are passed via stdin (`input_data`) rather than command-line args to avoid OS `E2BIG` / `ARG_MAX` limits on large payloads.
 
 ### Tool Signature
 
@@ -237,6 +248,8 @@ config:
   timeout: 300
 ```
 
+> **Note:** Passing `{params_json}` in args is subject to OS `ARG_MAX` / `E2BIG` limits. For tools that may receive large parameters, consider using `input_data` instead.
+
 ### Tool Signature (JSDoc)
 
 ```javascript
@@ -303,6 +316,8 @@ config:
     - "{project_path}"
   timeout: 300
 ```
+
+> **Note:** Passing `{params_json}` in args is subject to OS `ARG_MAX` / `E2BIG` limits. For tools that may receive large parameters, consider using `input_data` instead.
 
 ### Tool Format
 
@@ -424,9 +439,9 @@ config:
 
 All types resolve to an absolute path stored in the env var named by `var`. If resolution fails, `fallback` is used.
 
-## Template Variables in Args
+## Template Variables in Args and input_data
 
-All runtimes support template variables in `config.args`:
+All runtimes support template variables in `config.args` and `config.input_data`:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
@@ -438,6 +453,8 @@ All runtimes support template variables in `config.args`:
 | `{runtime_lib}` | Anchor config | Runtime library path (if anchor enabled) |
 | `{user_space}` | Executor context | User space path |
 | `{system_space}` | Executor context | System space path |
+
+> **Tip:** `{params_json}` can be used in either `args` or `input_data`. Using `input_data` is recommended for large payloads because it pipes data via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits on command-line argument length.
 
 Template substitution happens in two passes:
 1. **Pass 1:** `${VAR}` environment variable expansion

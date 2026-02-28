@@ -28,9 +28,13 @@ enum Command {
         #[arg(long)]
         cwd: Option<String>,
 
-        /// Data to pipe to stdin (optional)
+        /// Data to pipe to stdin (optional, for small payloads)
         #[arg(long)]
         stdin: Option<String>,
+
+        /// Read stdin data from own stdin pipe (for large payloads)
+        #[arg(long)]
+        stdin_pipe: bool,
 
         /// Environment variable to set (KEY=VALUE, repeatable)
         #[arg(long = "env")]
@@ -88,9 +92,22 @@ fn main() {
             args,
             cwd,
             stdin,
+            stdin_pipe,
             envs,
             timeout,
-        } => do_exec(&cmd, &args, cwd.as_deref(), stdin.as_deref(), &envs, timeout),
+        } => {
+            // Resolve stdin data: --stdin arg takes priority, then --stdin-pipe
+            let stdin_data = if let Some(data) = stdin {
+                Some(data)
+            } else if stdin_pipe {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                if buf.is_empty() { None } else { Some(buf) }
+            } else {
+                None
+            };
+            do_exec(&cmd, &args, cwd.as_deref(), stdin_data.as_deref(), &envs, timeout)
+        }
         Command::Spawn {
             cmd,
             args,
@@ -161,6 +178,29 @@ fn do_exec(
         }
     }
 
+    // Drain stdout/stderr in background threads to prevent pipe deadlock.
+    // If the child writes more than the OS pipe buffer (~64KB on Linux),
+    // it blocks on write() until someone reads. Reading only after exit
+    // means the child can never exit — classic deadlock.
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let stdout_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_handle {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr_handle {
+            let _ = err.read_to_end(&mut buf);
+        }
+        buf
+    });
+
     // Wait with timeout using a dedicated thread
     let timeout_dur = Duration::from_secs_f64(timeout);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -173,15 +213,9 @@ fn do_exec(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Child exited
-                let mut stdout_buf = Vec::new();
-                let mut stderr_buf = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout_buf);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr_buf);
-                }
+                // Child exited — join reader threads
+                let stdout_buf = stdout_thread.join().unwrap_or_default();
+                let stderr_buf = stderr_thread.join().unwrap_or_default();
                 let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let code = status.code().unwrap_or(-1);
                 return serde_json::json!({
@@ -198,11 +232,14 @@ fn do_exec(
                     // Timeout reached — kill
                     let _ = child.kill();
                     let _ = child.wait();
+                    let stdout_buf = stdout_thread.join().unwrap_or_default();
+                    let stderr_buf = stderr_thread.join().unwrap_or_default();
                     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                     return serde_json::json!({
                         "success": false,
-                        "stdout": "",
-                        "stderr": format!("Command timed out after {timeout} seconds"),
+                        "stdout": String::from_utf8_lossy(&stdout_buf),
+                        "stderr": format!("Command timed out after {timeout} seconds\n{}",
+                            String::from_utf8_lossy(&stderr_buf)),
                         "return_code": -1,
                         "duration_ms": duration_ms,
                     });
@@ -210,6 +247,8 @@ fn do_exec(
                 thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
                 let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                 return serde_json::json!({
                     "success": false,
