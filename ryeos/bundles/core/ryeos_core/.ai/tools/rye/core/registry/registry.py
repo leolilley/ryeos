@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T22:12:46Z:df6b8ed29ac457dff0b03e02738e89866cc072b053885ed104f89a048430d434:oRBd4oA_gTVn0QeJio7ZP5yr50aDq-ufqiGJDlkjPWUmeEnZkupOKSh3MPg96vL4Qp3cAB5JqzE2OemWBnYfCA==:4b987fd4e40303ac
+# rye:signed:2026-03-01T22:22:06Z:7e3bc9ca9a88e5feb8892aa0615627181bd6fe4e675058c2254c3c949d49f703:FcEPYFZ_ZnWJS-wxauR6oC9xNPibGwXwsVgKD6epczyHSEy4uefJYMeWDeUIEOd1pn0wjk_moXlEO9uDK0xxBg==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -2374,17 +2374,15 @@ async def _search_bundle(
     http = RegistryHttpClient(config)
 
     try:
-        params = {
+        qs = urlencode({
             "query": query,
             "include_mine": str(include_mine).lower(),
             "limit": str(limit),
-        }
-        if namespace:
-            params["namespace"] = namespace
+            **({"namespace": namespace} if namespace else {}),
+        })
 
         result = await http.get(
-            "/v1/bundle/search",
-            params=params,
+            f"/v1/bundle/search?{qs}",
             auth_token=token,
         )
         await http.close()

@@ -46,18 +46,23 @@ pip install ryeos-mcp
 > ```
 > git clone https://github.com/leolilley/ryeos.git
 > cd ryeos/ryeos-mcp
-> pip install -e ryeos-mcp
+> pip install -e .
 > ```
 
 ```json
 {
   "mcpServers": {
     "rye": {
-      "command": "ryeos-mcp"
+      "command": "ryeos-mcp",
+      "env": {
+        "USER_SPACE": "/home/you"
+      }
     }
   }
 }
 ```
+
+> `USER_SPACE` sets the base path for your user-level `.ai/` directory (defaults to `~`). See [Installation docs](docs/getting-started/installation.md) for per-client examples and other environment variables.
 
 **Then direct RYE to initialise by expressing the intent:**
 

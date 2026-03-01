@@ -92,7 +92,10 @@ Add to your Amp MCP configuration:
 {
   "amp.mcpServers": {
     "rye": {
-      "command": "ryeos-mcp"
+      "command": "ryeos-mcp",
+      "env": {
+        "USER_SPACE": "/home/you"
+      }
     }
   }
 }

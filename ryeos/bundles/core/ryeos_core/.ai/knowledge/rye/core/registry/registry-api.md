@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:4fa7a49a558ae129a915c8f94e8505e20e22e41e279bf3f465fe9db4bf143b26:Qfu0aVoENcjNtBqO8OoQN-ME3oyPOLIdrsuyJ8l7knu6Os_a-CVU4REdsB37E-1rIH2auR6ljpaNHQ8SXJPdBw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-01T22:17:20Z:b8e97959d1e250673243d4a763a632389a5121eb085db9096eb2441dbc7d9ae9:Tz8A_Mr8lz7j1EbcukYs5bUaFwtpZAY2GnVw0ldiIqH6y3L6PXyv5rBOwSy5Ttiws5CG7GplsGl2VvewXg1pDQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api
@@ -44,6 +44,8 @@ Endpoints, auth flow, and semantics for the Rye OS item registry.
 | PATCH  | `/v1/items/{item_type}/{item_id}/visibility` | Set visibility (publish/unpublish)    | Required |
 | POST   | `/v1/bundle/push`                            | Push bundle (manifest + files)        | Required |
 | GET    | `/v1/bundle/pull/{bundle_id}`                | Pull bundle (manifest + files)        | Required |
+| GET    | `/v1/bundle/search`                          | Search bundles by query               | Optional |
+| POST   | `/v1/bundle/{bundle_id}/visibility`          | Set bundle visibility                 | Required |
 
 ## Item Identity
 
@@ -183,6 +185,27 @@ PATCH /v1/items/{item_type}/{item_id}/visibility
 
 `GET /v1/bundle/pull/{bundle_id}` — returns manifest and all files as JSON. Increments download count on each pull.
 
+### Bundle Search
+
+```
+GET /v1/bundle/search?query=...&namespace=...&include_mine=true&limit=20
+```
+
+Same query parameters as item search but scoped to bundles. Only public bundles by default; authenticated users can add `include_mine=true`.
+
+### Bundle Visibility
+
+```
+POST /v1/bundle/{bundle_id}/visibility
+```
+
+Same pattern as item visibility but scoped to bundles. Bundle push creates bundles as `private` by default — must `publish_bundle` to make public.
+
+| Action      | Sets visibility to | Effect                 |
+| ----------- | ------------------ | ---------------------- |
+| `publish`   | `public`           | Visible to all users   |
+| `unpublish` | `private`          | Visible only to owner  |
+
 ### Bundle Pull Client Flow
 
 1. `GET /v1/bundle/pull/{bundle_id}` → manifest + files JSON
@@ -193,10 +216,13 @@ PATCH /v1/items/{item_type}/{item_id}/visibility
 
 ### Client Bundle Actions
 
-| Action        | Description                                      |
-| ------------- | ------------------------------------------------ |
-| `push_bundle` | Push a bundle (manifest + files) to the registry |
-| `pull_bundle` | Pull a bundle from the registry to local space   |
+| Action            | Description                                      |
+| ----------------- | ------------------------------------------------ |
+| `push_bundle`     | Push a bundle (manifest + files) to the registry |
+| `pull_bundle`     | Pull a bundle from the registry to local space   |
+| `search_bundle`   | Search bundles in registry                       |
+| `publish_bundle`  | Make bundle public (set visibility to 'public')  |
+| `unpublish_bundle`| Make bundle private (set visibility to 'private')|
 
 ## Download Counting
 
@@ -260,6 +286,18 @@ API keys use the `rye_sk_` prefix (e.g., `rye_sk_a1b2c3d4...`). Pass via the `Au
 | `rye_execute(item_id="rye/core/registry/registry", action="search")` | Registry server | Yes |
 
 Search is **explicit** — agents must consciously invoke the registry tool. No implicit network calls.
+
+### Bundle Workflow
+
+```python
+# Search for bundles
+rye_execute(item_id="rye/core/registry/registry",
+            parameters={"action": "search_bundle", "query": "ryeos"})
+
+# Publish a bundle
+rye_execute(item_id="rye/core/registry/registry",
+            parameters={"action": "publish_bundle", "bundle_id": "my-bundle"})
+```
 
 ### Pull-and-Use Pattern
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:300b35599e534a5faa82e920a800dcb8bc95648d1e5897b4c6e310ead1e5d10c:-q8crY2imAJZTZqWyR84k9kX-fPGevWREad3-eedwHetShzb90juPW9d3TqykASbZwRt8EBjL7TNn5riimyOCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-01T22:17:26Z:707a27b5a059c4d591d203bd7c1b1801f93da6a1e7fc82af1f3bc68c2b437705:21L4m9d9FjIqbPdHZPt4_Ah3WfJ9jgFhImwx3G5wVyITGLZK7vzVe0aFuNVb5k7BZ7dKR8L70riFivHuU7S9Cg==:4b987fd4e40303ac -->
 ```yaml
 name: input-interpolation
 title: Input Interpolation
@@ -150,3 +150,35 @@ Directive `<outputs>` are transformed into `<returns>` and appended to the promp
 ```
 
 Output names must be consistent between the directive declaration and what the parent thread expects.
+
+## Graph Interpolation (`${...}` Syntax)
+
+State graphs use a separate interpolation system with `${dotted.path}` syntax. Key features:
+
+### Fallback Chains
+
+Use `||` to try multiple paths left-to-right — the first non-None value wins:
+
+```yaml
+params:
+  directory: "${inputs.directory || state.directory}"
+```
+
+### Built-in Variables
+
+Available in all `${...}` interpolation contexts without a namespace prefix:
+
+| Variable        | Value                          |
+| --------------- | ------------------------------ |
+| `${_now}`       | ISO 8601 UTC timestamp         |
+| `${_timestamp}` | Unix epoch milliseconds        |
+
+### None Warnings
+
+Expressions that resolve to `None` now log a warning with the full dotted path, making typos and missing state keys easy to spot.
+
+### Consistent `inputs` Context
+
+`inputs.x` works identically in `${...}` interpolation and gate `when` conditions — no need for `state.inputs.x` in gates.
+
+See [State Graphs — Interpolation](docs/orchestration/state-graphs.md#interpolation) for the full reference.

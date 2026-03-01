@@ -173,6 +173,81 @@ path: "${state.files.1.analysis_path}" # Second item's analysis_path
 text: "${state.tasks.2.text}" # Third task's text field
 ```
 
+### Fallback Chains
+
+Use `||` to try multiple paths left-to-right. The first non-None value wins:
+
+```yaml
+params:
+  directory: "${inputs.directory || state.directory}"
+  api_key: "${inputs.api_key || state.api_key || state.default_key}"
+```
+
+This is useful when a value may come from graph inputs or from state accumulated in earlier nodes.
+
+### Built-in Variables
+
+Two built-in variables are available in all interpolation contexts — no namespace prefix needed:
+
+| Variable         | Value                                      |
+| ---------------- | ------------------------------------------ |
+| `${_now}`        | ISO 8601 UTC timestamp (e.g., `2026-03-02T12:00:00Z`) |
+| `${_timestamp}`  | Unix epoch milliseconds (e.g., `1740912000000`)        |
+
+```yaml
+assign:
+  started_at: "${_now}"
+  run_id: "pipeline-${_timestamp}"
+```
+
+### None Warnings
+
+When an expression resolves to `None`, the interpolation engine logs a warning with the full dotted path. This surfaces typos and missing state keys without silently producing `"None"` strings:
+
+```
+WARNING: Interpolation resolved to None: state.greting (did you mean state.greeting?)
+```
+
+### Consistent `inputs` Context
+
+`inputs.x` works the same way in both `${...}` interpolation and gate `when` conditions. You do **not** need `state.inputs.x` in gates:
+
+```yaml
+# Both of these reference the same value:
+params:
+  dir: "${inputs.directory}"        # In interpolation
+next:
+  - to: custom_path
+    when:
+      path: "inputs.directory"      # In gate conditions
+      op: "neq"
+      value: "."
+  - to: default_path
+```
+
+### Gate Execution Order
+
+Within a node, `assign` runs **before** `next` is evaluated. This means gate conditions can reference values set in the current node's `assign` block:
+
+```yaml
+check_status:
+  action:
+    primary: execute
+    item_type: tool
+    item_id: rye/bash/bash
+    params:
+      command: "curl -s ${state.health_url}"
+  assign:
+    healthy: "${result.exit_code}"
+  next:
+    - to: proceed
+      when:
+        path: "state.healthy"
+        op: "eq"
+        value: 0
+    - to: retry
+```
+
 ### Type Preservation
 
 When `${path}` is the **entire expression** (the whole string value), the resolved type is preserved:

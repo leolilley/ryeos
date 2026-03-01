@@ -38,7 +38,7 @@ Parsing rule: first segment = namespace, last segment = name, everything in betw
 
 ### Visibility
 
-Items are either `public` (visible to all users) or `private` (visible only to the owner). Visibility is controlled via the `publish` and `unpublish` actions.
+Items and bundles are either `public` (visible to all users) or `private` (visible only to the owner). Visibility is controlled via the `publish` and `unpublish` actions for both individual items and bundles.
 
 ## The Registry Tool
 
@@ -164,6 +164,33 @@ action: pull_bundle
 bundle_id: leolilley/my-bundle
 ```
 
+Optionally specify a version with `version`. Defaults to the latest version.
+
+#### Search Bundles
+
+Find bundles in the registry:
+
+```
+action: search_bundle
+query: "core utilities"
+namespace: leolilley   # optional filter
+limit: 20              # optional, default 20
+```
+
+Search matches against bundle names and descriptions. Only public bundles are returned by default.
+
+#### Publish / Unpublish Bundle
+
+Control bundle visibility, just like individual items:
+
+```
+action: publish_bundle     # Make public (visibility='public')
+action: unpublish_bundle   # Make private (visibility='private')
+bundle_id: leolilley/my-bundle
+```
+
+Only the namespace owner can change bundle visibility.
+
 ## Registry API Service
 
 **Location:** `services/registry-api/registry_api/`
@@ -183,6 +210,8 @@ A separate FastAPI application that handles server-side operations. Deployed ind
 | PATCH  | `/v1/items/{item_type}/{item_id}/visibility` | Set visibility                                     | Required |
 | POST   | `/v1/bundle/push`                            | Push a bundle (manifest + files)                   | Required |
 | GET    | `/v1/bundle/pull/{bundle_id}`                | Pull a bundle                                      | Required |
+| GET    | `/v1/bundle/search`                          | Search bundles by query                            | Optional |
+| PATCH  | `/v1/bundle/{bundle_id}/visibility`          | Set bundle visibility (publish/unpublish)          | Required |
 
 ### Push Flow (Server-Side)
 
@@ -205,11 +234,15 @@ Search performs case-insensitive matching on `name` and `description` fields. Ca
 
 ### Bundle Operations
 
-Bundles are versioned collections of items (manifest + files) that can be pushed and pulled as a unit:
+Bundles are versioned collections of items (manifest + files) that can be pushed and pulled as a unit. Like individual items, bundles support visibility control and search.
 
 **Push:** Stores the manifest and all bundle files as JSONB in Supabase. Each version tracks a content hash (SHA256 of manifest) and an `is_latest` flag.
 
 **Pull:** Returns the manifest and all files for a specific version (or latest). Increments download count on each pull.
+
+**Search:** Queries bundles by name and description with optional namespace filtering. Only public bundles are returned by default.
+
+**Publish / Unpublish:** Sets bundle visibility to `public` or `private`, the same model used for individual items.
 
 ### Database Tables
 
@@ -291,4 +324,38 @@ The registry exposes its Ed25519 public key at `GET /v1/public-key` (PEM format)
 
 4. Use it:
    execute(tool="utilities/web-scraper", ...)
+```
+
+### Publishing a bundle (CLI)
+
+The full build → push → publish workflow using the CLI:
+
+```bash
+# Build a bundle manifest from a package directory
+rye registry bundle build ryeos/bundles/core --bundle-id ryeos-core
+
+# Push the bundle to the registry
+rye registry bundle push ryeos-core
+
+# Make the bundle publicly discoverable
+rye registry bundle publish ryeos-core
+```
+
+### Searching and pulling bundles (CLI)
+
+```bash
+# Search for public bundles
+rye registry bundle search "core utilities"
+
+# Narrow search by namespace
+rye registry bundle search "core" --namespace leolilley --limit 10
+
+# Pull a bundle into your project
+rye registry bundle pull ryeos-core
+
+# Pull a specific version
+rye registry bundle pull ryeos-core --version 1.2.0
+
+# Make a bundle private again
+rye registry bundle unpublish ryeos-core
 ```
