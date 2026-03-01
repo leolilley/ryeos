@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:807e8a0961e231abca91bc4e22c1e86af749605a23ef5e7ba72362e4603a2668:cwUEXf2-S8FkiTU3C0o3_8Weh2fLWTbqwHteABgl6RlccX10t507O_VivewmWBTS2SMZaVAkb8DKyExGjxlNCg==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:21:13Z:4a0108178063b64125aa5718679aba1bf0485857af753706f4ca634e1a782137:oTA53Hw770SZq_yZ_4YpDlzPnn43jDyLFR5jGRbLTYWN_Vb2c09tyaTLfSj4SElUv4vuOqk_XMy3qYfeLkNWBw==:4b987fd4e40303ac
 # config/error_classification.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"
@@ -7,21 +7,35 @@ description: "Error classification patterns, retry policies, and operators for t
 schema_version: "1.0.0"
 
 patterns:
+  - id: "quota_exhausted"
+    name: "quota_exhausted"
+    category: "permanent"
+    retryable: false
+    match:
+      any:
+        - path: "error.code"
+          op: "in"
+          value: ["insufficient_quota", "quota_exceeded", "billing_hard_limit_reached"]
+        - path: "error.message"
+          op: "regex"
+          value: "insufficient[_ ]quota|quota (exceeded|has been exceeded)|billing.*hard limit|exceeded your current quota"
+
   - id: "http_429"
     name: "rate_limited"
     category: "rate_limited"
     retryable: true
     match:
-      any:
+      all:
         - path: "status_code"
           op: "eq"
           value: 429
-        - path: "error.type"
-          op: "in"
-          value: ["rate_limit_error", "RateLimitError"]
-        - path: "error.message"
-          op: "regex"
-          value: "rate limit|too many requests|throttled"
+        - any:
+            - path: "error.type"
+              op: "in"
+              value: ["rate_limit_error", "RateLimitError"]
+            - path: "error.message"
+              op: "regex"
+              value: "rate limit|too many requests|throttled"
     retry_policy:
       type: "use_header"
       header: "retry-after"

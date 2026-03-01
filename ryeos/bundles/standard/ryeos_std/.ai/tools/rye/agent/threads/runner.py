@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:e47e07a696f6c3bc8ff7b37a1ce2956c5c4fdd54c2b01629a9544e9625dcac05:ro6I4jf3n1LYxnKFQHEAWj7ZfrUSg-5mf84qyZUUzEFKnP0R0Mj38EYhDOz95WlPstNfLXy-T1cf53S1ocMLBw==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:21:13Z:85a08dcbcd6cf516cc48fa548a29a0a39596022d802e8a00f5707b08685b23aa:37pd3Su_uFWY2gmcmbkUPNsvL0Zuv8QhRsjbvqwmTwNEF5Ebqu-wCJ-TxNObTzW6VFdUVqAmY1aFjQ6u--xeDg==:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -89,6 +89,9 @@ async def run(
     cost = {"turns": 0, "input_tokens": 0, "output_tokens": 0, "spend": 0.0}
 
     start_time = time.monotonic()
+    consecutive_llm_errors = 0
+    max_consecutive_errors = 3
+    recent_llm_errors = []
 
     # Checkpoint signing for transcript integrity
     transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
@@ -208,6 +211,7 @@ async def run(
             if limit_result:
                 # Capture error context from recent conversation
                 limit_result["error_context"] = _extract_error_context(messages)
+                limit_result["error_context"]["recent_llm_errors"] = recent_llm_errors[-3:]
 
                 hook_result = await harness.run_hooks(
                     "limit", limit_result, dispatcher, thread_ctx
@@ -256,7 +260,6 @@ async def run(
                 )
 
             # LLM call
-            cost["turns"] += 1
             emitter.emit(
                 thread_id,
                 "cognition_in",
@@ -272,7 +275,7 @@ async def run(
                         thread_id=thread_id,
                         response_format=getattr(provider, "_response_format", "content_blocks"),
                         knowledge_path=transcript.knowledge_path,
-                        turn=cost["turns"],
+                        turn=cost["turns"] + 1,
                     )
                     response = await provider.create_streaming_completion(
                         messages, harness.available_tools, sinks=[stream_sink],
@@ -287,6 +290,29 @@ async def run(
                 if os.environ.get("RYE_DEBUG"):
                     import traceback
                     logger.error("LLM call failed: %s: %s\n%s", type(e).__name__, e, traceback.format_exc())
+
+                consecutive_llm_errors += 1
+                recent_llm_errors.append({
+                    "attempt": consecutive_llm_errors,
+                    "error": str(e) or type(e).__name__,
+                    "error_type": type(e).__name__,
+                    "code": getattr(e, "code", getattr(e, "error_type", None)),
+                    "http_status": getattr(e, "http_status", None),
+                })
+
+                if consecutive_llm_errors >= max_consecutive_errors:
+                    return _finalize(
+                        thread_id,
+                        cost,
+                        {
+                            "success": False,
+                            "error": f"LLM call failed {consecutive_llm_errors} consecutive times: {str(e) or type(e).__name__}",
+                            "recent_llm_errors": recent_llm_errors[-3:],
+                        },
+                        emitter,
+                        transcript,
+                        signer,
+                    )
 
                 original_error = {"success": False, "error": str(e) or type(e).__name__}
 
@@ -320,6 +346,10 @@ async def run(
                 return _finalize(
                     thread_id, cost, original_error, emitter, transcript, signer
                 )
+
+            # Only count successful LLM responses as turns
+            cost["turns"] += 1
+            consecutive_llm_errors = 0
 
             # Track tokens
             cost["input_tokens"] += response.get("input_tokens", 0)
@@ -813,7 +843,7 @@ def _error_to_context(e: Exception) -> Dict:
         "error": {
             "type": type(e).__name__,
             "message": str(e),
-            "code": getattr(e, "code", None),
+            "code": getattr(e, "code", None) or getattr(e, "error_type", None),
         }
     }
     # Surface http_status for classifier pattern matching

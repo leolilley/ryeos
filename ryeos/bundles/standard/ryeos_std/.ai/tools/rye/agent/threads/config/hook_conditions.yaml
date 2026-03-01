@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:05ff36f61a8f7b7572f72f18d36777cd58f73f446202c7ce0a81306531200da0:BkQh0rwivTTRP7auXmn1qPlgbsfM9fQFx4sc5AUofkQ97M1nFlFTn2juTs_UfDfr9ZLeFb0MEBuqnYqeVPGyCw==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:21:13Z:18374589a089fcde3433058cfd7a5085658357cdba1285d5686af08e27125180:3R-meHvY3Z711UIs9hW201Tjx-c6K0rddjv3GMAbQ6PJtv9-d37BrrQ7iFZz2SXOyjYpUeeu7xbwHHKbWbH_BA==:4b987fd4e40303ac
 # config/hook_conditions.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"
@@ -11,16 +11,16 @@ builtin_hooks:
     event: "error"
     layer: 2
     condition:
-      path: "classification.category"
-      op: "in"
-      value: ["transient", "rate_limited"]
+      path: "classification.retryable"
+      op: "eq"
+      value: true
     action:
       primary: "execute"
       item_type: "tool"
       item_id: "rye/agent/threads/internal/control"
       params:
         action: "retry"
-    description: "Retry transient and rate-limited errors"
+    description: "Retry errors classified as retryable"
 
   - id: "default_fail_permanent"
     event: "error"

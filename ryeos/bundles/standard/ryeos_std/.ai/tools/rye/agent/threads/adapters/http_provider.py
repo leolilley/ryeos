@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:3855cf2af62565da879e5d0783c99d0555b88b1cc113781d3e132c4594f031f4:hjTtCjklEpLiQ6EV1J4buC7ZkPFLp3vOXkcIgjM-ne1RIb0wsulDmj8-KMeJIXf-LLkStMYJpkG7aJ9P7fUzDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:21:13Z:adecb48063816979c191e395057ce77fb6e904ea5421476fc3b38f5320feddb3:GfRyCFXeJuu-Yj6w_nZ05J6HHU81I27HdDEqt4L46YW-s61Rk4Rs3BjO-X6ua5LL6niBYEvZFkQ5I9upV9GkDg==:4b987fd4e40303ac
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -460,11 +460,13 @@ class HttpProvider(ProviderAdapter):
         http_status = result.status_code
         request_id = result.headers.get("request-id", "") if result.headers else ""
 
+        error_code = None
         if isinstance(body, dict) and "error" in body:
             api_error = body["error"]
             if isinstance(api_error, dict):
                 error_msg = api_error.get("message", str(api_error))
                 error_type = api_error.get("type", "api_error")
+                error_code = api_error.get("code")
             else:
                 error_msg = str(api_error)
                 error_type = "api_error"
@@ -472,13 +474,22 @@ class HttpProvider(ProviderAdapter):
             error_msg = result.error or str(body or "Unknown provider error")
             error_type = "unknown"
 
+        # Quota/billing errors are never retryable even on 429
+        non_retryable_codes = {"insufficient_quota", "quota_exceeded", "billing_hard_limit_reached"}
+        if error_code and error_code in non_retryable_codes:
+            is_retryable = False
+        elif http_status is not None:
+            is_retryable = http_status in (0, 429, 500, 502, 503, 529)
+        else:
+            is_retryable = True
+
         raise ProviderCallError(
             provider_id=self._provider_item_id,
             message=error_msg,
             http_status=http_status,
             request_id=request_id,
-            error_type=error_type,
-            retryable=http_status in (0, 429, 500, 502, 503, 529) if http_status is not None else True,
+            error_type=error_code or error_type,
+            retryable=is_retryable,
         )
 
     # ── Completion ─────────────────────────────────────────────────────

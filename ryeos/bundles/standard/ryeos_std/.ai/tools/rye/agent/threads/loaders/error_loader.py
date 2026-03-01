@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:59f4d4f333e6272d96ab87f5b59884bdeef10e2d501770b54ac176a2c54ec962:t7WwN67OZeSj3osIMNc3OvBC_WEa8EUFXgUEOBP8FObyHu5Pb7U8eBsmyWlYPKr6fDyX9ybZl-wiL1SfGcYBDg==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:21:13Z:778ca9eaf3666d858c97e84c26bdd6245a02ad6026638c685c98f5b07d1c8f4a:Kj9-ZgLAZ7oAzhWlUMBbM_6nAP7qlQ6c2-nHaykPrEE8l20O506sOzGjOY7aAcTM6x_qQYxxy_iEe_0-v6FdBw==:4b987fd4e40303ac
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -44,6 +44,9 @@ class ErrorLoader(ConfigLoader):
             return min(base * (2**attempt), max_delay)
         if policy_type == "fixed":
             return policy.get("delay", 60.0)
+        if policy_type == "use_header":
+            fallback = policy.get("fallback") or {"type": "exponential", "base": 2.0, "max": 60.0}
+            return self.calculate_retry_delay(project_path, fallback, attempt)
         return 0.0
 
 

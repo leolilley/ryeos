@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:248b521a12b44fad43cb4ed13048fdc0cd252fc698b985b0bf17da84c22db2d1:-U6vBSoFLM-QJ2crSG90KQI0jJw_Yx7KuFroOU5vEAW9EOKkY62V3xqRf3-0liVkqG2d1ZKbzuljj9ZRyfVoBg==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:21:13Z:4aa44965cc252c8833da02f4dd73d34c5321508aa24b491d38ab2359b37f3695:HgvkxePp6dfxsfPF4pJgm2peAa29Ege6JJiTzKMotZJqTGou7Gqm3AbwDbzpplYjafhiHOxQxHhN-JGxSVlFCQ==:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -807,6 +807,17 @@ async def execute(params: Dict, project_path: str) -> Dict:
     except Exception as e:
         registry.update_status(thread_id, "error")
         return {"success": False, "error": str(e), "thread_id": thread_id}
+    # Resolve env_config from provider YAML (loads .env, resolves ${VAR} refs)
+    env_config = provider_config.get("env_config")
+    if env_config:
+        from lillux.runtime.env_resolver import EnvResolver
+        resolver = EnvResolver(project_path=proj_path)
+        resolved_env = resolver.resolve(env_config=env_config)
+        # Inject resolved vars into os.environ so http_client can find them
+        for key in (env_config.get("env") or {}):
+            if key in resolved_env and resolved_env[key]:
+                os.environ[key] = resolved_env[key]
+
     provider_type = provider_config.get("tool_type", "http")
     if provider_type == "http":
         HttpProvider = load_module("adapters/http_provider", anchor=_ANCHOR).HttpProvider
@@ -969,7 +980,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     parser.add_argument("--thread-id", default=None)
     parser.add_argument("--pre-registered", action="store_true")
@@ -984,7 +994,8 @@ if __name__ == "__main__":
             stream=sys.stderr,
         )
 
-    params = json.loads(args.params)
+    # Params come via stdin (script runtime delivers input_data via stdin pipe)
+    params = json.loads(sys.stdin.read())
     if args.thread_id:
         params["_thread_id"] = args.thread_id
     if args.pre_registered:

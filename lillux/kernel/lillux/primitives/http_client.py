@@ -1,3 +1,4 @@
+# rye:signed:2026-03-01T08:24:27Z:5bcd1a7f47955d36b2c8d46433f1b023b908c9eb2b11e4d9309955a81d4912dd:5Can7VzxJmXrviurPo5hoaSm72CHRUy39xo5hpfT_9H-qeNf2ejG5B3g4G4Jd5gdNgfyJhrO326FhJkz7BJgBg==:4b987fd4e40303ac
 """HTTP client primitive for making HTTP requests with retry logic."""
 
 import asyncio
@@ -225,6 +226,24 @@ class HttpClientPrimitive:
                 timeout=timeout,
             ) as response:
                 event_count = 0
+                success = 200 <= response.status_code < 400
+
+                if not success:
+                    # Error responses are regular JSON, not SSE — read full body
+                    raw_body = await response.aread()
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    try:
+                        error_body = json.loads(raw_body)
+                    except (json.JSONDecodeError, ValueError):
+                        error_body = {"raw": raw_body.decode("utf-8", errors="replace")}
+                    return HttpResult(
+                        success=False,
+                        status_code=response.status_code,
+                        body=error_body,
+                        headers=dict(response.headers),
+                        duration_ms=duration_ms,
+                        error=f"HTTP {response.status_code}: {response.reason_phrase}",
+                    )
 
                 async for line in response.aiter_lines():
                     if line.startswith("data:"):
@@ -244,16 +263,13 @@ class HttpClientPrimitive:
                         body = return_sink.get_events()
 
                 duration_ms = int((time.time() - start_time) * 1000)
-                success = 200 <= response.status_code < 400
-                error_msg = None if success else f"HTTP {response.status_code}: {response.reason_phrase}"
 
                 return HttpResult(
-                    success=success,
+                    success=True,
                     status_code=response.status_code,
                     body=body,
                     headers=dict(response.headers),
                     duration_ms=duration_ms,
-                    error=error_msg,
                     stream_events_count=event_count,
                     stream_destinations=[type(s).__name__ for s in sinks] if sinks else None,
                 )
