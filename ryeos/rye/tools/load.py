@@ -9,6 +9,7 @@ from rye.constants import ItemType, AI_DIR
 from rye.utils.path_utils import get_project_type_path, get_system_spaces, get_user_space
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.integrity import verify_item
+from rye.utils.remote_providers import get_remote_provider
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,15 @@ class LoadTool:
         logger.debug(f"Load: item_type={item_type}, item_id={item_id}, source={source}")
 
         try:
+            # Remote source — delegate to provider
+            if source == "registry":
+                return await self._load_from_remote(
+                    "registry", item_type, item_id, project_path, destination,
+                    version=kwargs.get("version"),
+                )
+
             if source:
-                # Explicit source — search only that space
+                # Explicit local source — search only that space
                 source_path = self._find_item(project_path, source, item_type, item_id)
                 resolved_source = source
             else:
@@ -87,6 +95,106 @@ class LoadTool:
         except Exception as e:
             logger.error(f"Load error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}
+
+    async def _load_from_remote(
+        self,
+        provider_id: str,
+        item_type: str,
+        item_id: str,
+        project_path: str,
+        destination: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Load item from a remote space provider.
+
+        Pulls content and metadata from the remote provider. If a local
+        destination is specified (project/user), writes the content to disk.
+        """
+        provider = get_remote_provider(provider_id)
+        if not provider:
+            return {
+                "status": "error",
+                "error": f"Remote provider not found: {provider_id}",
+                "item_type": item_type,
+                "item_id": item_id,
+            }
+
+        result = await provider.pull(
+            item_type=item_type,
+            item_id=item_id,
+            version=version,
+        )
+
+        if result.get("error"):
+            return {
+                "status": "error",
+                "error": result["error"],
+                "item_type": item_type,
+                "item_id": item_id,
+            }
+
+        content = result.get("content", "")
+        metadata = result.get("metadata", {})
+
+        load_result = {
+            "status": "success",
+            "content": content,
+            "metadata": metadata,
+            "source": provider_id,
+            "item_type": item_type,
+            "item_id": item_id,
+            "version": result.get("version", ""),
+        }
+
+        # Write to local destination if requested
+        if destination in ("project", "user"):
+            dest_path = self._resolve_remote_destination(
+                project_path, destination, item_type, item_id,
+            )
+            if dest_path:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                dest_path.write_text(content, encoding="utf-8")
+                load_result["copied_to"] = destination
+                load_result["destination_path"] = str(dest_path)
+
+        return load_result
+
+    def _resolve_remote_destination(
+        self,
+        project_path: str,
+        destination: str,
+        item_type: str,
+        item_id: str,
+    ) -> Optional[Path]:
+        """Resolve destination path for a remote item.
+
+        Uses the item_id's last segment as filename and category from
+        the middle segments to reconstruct the local path.
+        """
+        type_dir = ItemType.TYPE_DIRS.get(item_type)
+        if not type_dir:
+            return None
+
+        if destination == "project":
+            base = get_project_type_path(Path(project_path), item_type)
+        elif destination == "user":
+            base = Path(self.user_space) / AI_DIR / type_dir
+        else:
+            return None
+
+        # Determine extension from item type
+        ext = ".md" if item_type in ("directive", "knowledge") else ".py"
+
+        # For registry items, item_id is namespace/category/name —
+        # strip the namespace prefix and use category/name for local path
+        segments = item_id.split("/")
+        if len(segments) >= 3:
+            # Drop namespace, keep category/name
+            local_path = "/".join(segments[1:])
+        else:
+            local_path = item_id
+
+        return base / f"{local_path}{ext}"
 
     def _find_item(
         self, project_path: str, source: str, item_type: str, item_id: str

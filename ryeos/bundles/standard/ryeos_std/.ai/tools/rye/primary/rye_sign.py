@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:9f41d887e2c1cba71b27257e86fc9169f63f851409a288159fdd8437cb1f5389:AxfaM2WDG_318wOFsXeZQqSmC8d4IRe1wMvQs35ouaDNoEBeyrKz4dpm-IqFKLBVWYusi9qqq0P2fxz4sm56CA==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:42:55Z:ade6e713f13b025e3f94c9a516bfc86a53f194935231b22b46024dda1f3e8090:rm_7O8pHFQOfSh4vdEWurKVheBLeEfRu2s6qSj5b0_XtEFU259do4iaP05udgLUlijfLkt8UPtywn7OVm-HdCg==:4b987fd4e40303ac
 """Validate and sign a directive, tool, or knowledge item."""
 
 import argparse
@@ -58,8 +58,10 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    import sys
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

@@ -56,7 +56,16 @@ The workflow has two jobs:
 | lillux-proc  | `lillux/proc`  |
 | lillux-watch | `lillux/watch` |
 
-Both jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
+**`publish-bundles`** — builds and pushes data bundles to the Rye Registry (runs after `publish-python`):
+
+| Bundle     | Package path             |
+| ---------- | ------------------------ |
+| ryeos-core | `ryeos/bundles/core`     |
+| ryeos      | `ryeos/bundles/standard` |
+| ryeos-web  | `ryeos/bundles/web`      |
+| ryeos-code | `ryeos/bundles/code`     |
+
+Both Python and Rust jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
 
 Each job uses the `pypi` GitHub environment and `id-token: write` permission for OIDC authentication.
 
@@ -218,6 +227,34 @@ The registry API is a standalone FastAPI service deployed to Railway.
 - **Dependencies:** fastapi, supabase, httpx, python-jose, pydantic, pydantic-settings
 
 Deployment is managed separately from the PyPI publishing workflow.
+
+## Registry Bundle Publishing
+
+Data bundles (`.ai/` directories containing tools, directives, and knowledge) are published to the Rye Registry alongside PyPI packages. This makes bundle content available via `rye registry bundle pull` without requiring a `pip install`.
+
+### How It Works
+
+1. **Install from local checkout** — avoids PyPI propagation delays by installing `ryeos`, `ryeos-core`, `ryeos` (standard), and `ryeos-cli` as editable packages from the same commit
+2. **Build manifest** — `rye registry bundle build <path>` creates a `manifest.yaml` with SHA256 checksums for all `.ai/` files
+3. **Push to registry** — `rye registry bundle push <bundle_id>` uploads the manifest + all files using `RYE_REGISTRY_API_KEY` for auth
+
+### CLI Commands
+
+```bash
+# Build a bundle manifest from a package
+rye registry bundle build ryeos/bundles/core --bundle-id ryeos-core
+
+# Push bundle to registry
+rye registry bundle push ryeos-core
+
+# Pull bundle from registry (consumer side)
+rye registry bundle pull ryeos-core
+```
+
+### Required Setup
+
+1. **Generate an API key**: `rye registry login` then `rye execute tool rye/core/registry/registry --params '{"action": "create_api_key"}'`
+2. **Add GitHub secret**: Add `RYE_REGISTRY_API_KEY` to the repository's `pypi` environment (Settings → Environments → pypi → Add secret)
 
 ## Troubleshooting
 

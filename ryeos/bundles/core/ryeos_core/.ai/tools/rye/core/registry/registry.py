@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:36:04Z:1108ce54afe30a8fc69d54e415c7dd524ddd0f96eb01dc0e852266a455db0d92:m2udtX1WevtDtgCNkMUXBeIt1QTu28UBG7xiHekNt5g4TGYbOmkGU4Dt8JwsqG1QOLtPKtqh_R7WNWTS4DmNBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-01T09:49:16Z:90bd7795318947a0329c91e4e811856ffb9adb380959cddb7c7d3f84425ade0e:o76EMMOwC7Y4IGRjbxVFU9bNt_6yRsuRtYMTrZl8shZulD4v4kH_gTt4O0QmQsQqpRCpAsU7OBiqOLUYsklXAw==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -548,7 +548,7 @@ async def execute(
                 item_type=params.get("item_type"),
                 category=params.get("category"),
                 namespace=params.get("namespace"),
-                include_mine=params.get("include_mine", False),
+                include_mine=params.get("include_mine", True),
                 limit=params.get("limit", 20),
             )
             http_calls = 1
@@ -566,7 +566,6 @@ async def execute(
         elif action == "push":
             result = await _push(
                 item_type=params.get("item_type"),
-                item_path=params.get("item_path"),
                 item_id=params.get("item_id"),
                 version=params.get("version"),
                 visibility=params.get("visibility", "private"),
@@ -1312,7 +1311,7 @@ async def _search(
     item_type: Optional[str] = None,
     category: Optional[str] = None,
     namespace: Optional[str] = None,
-    include_mine: bool = False,
+    include_mine: bool = True,
     limit: int = 20,
 ) -> Dict[str, Any]:
     """
@@ -1323,7 +1322,7 @@ async def _search(
         item_type: Filter by type ("directive", "tool", or "knowledge")
         category: Filter by category prefix
         namespace: Filter by namespace (owner)
-        include_mine: Include your own private items (requires auth)
+        include_mine: Include your own private items (requires auth, default True)
         limit: Maximum results to return (default 20)
     """
     if not query:
@@ -1574,11 +1573,58 @@ async def _pull(
         return {"error": f"Pull failed: {e}"}
 
 
+# =============================================================================
+# PUSH HELPERS
+# =============================================================================
+
+_TYPE_DIRS = {
+    "directive": "directives",
+    "tool": "tools",
+    "knowledge": "knowledge",
+}
+
+
+def _type_dir(item_type: str) -> str:
+    """Get the .ai/ subdirectory name for an item type."""
+    return _TYPE_DIRS.get(item_type, item_type)
+
+
+def _find_local_item(
+    item_type: str, local_item_id: str, project_path: Optional[str] = None
+) -> Optional[Path]:
+    """Resolve a local item file from item_type + local_item_id.
+
+    Uses the same resolution pattern as sign tool's _find_item:
+    searches project space for matching files with known extensions.
+
+    Args:
+        item_type: "directive", "tool", or "knowledge"
+        local_item_id: Relative path without extension (e.g., "test/provider_test_tool")
+        project_path: Project root path
+    """
+    from rye.utils.extensions import get_item_extensions
+    from rye.utils.path_utils import get_project_type_path
+
+    if not project_path:
+        return None
+
+    base = get_project_type_path(Path(project_path), item_type)
+    if not base.exists():
+        return None
+
+    extensions = get_item_extensions(item_type, Path(project_path))
+    for ext in extensions:
+        file_path = base / f"{local_item_id}{ext}"
+        if file_path.is_file():
+            return file_path
+
+    return None
+
+
 async def _push(
     item_type: Optional[str],
-    item_path: Optional[str],
     item_id: Optional[str],
-    version: Optional[str],
+    version: Optional[str] = None,
     visibility: str = "private",
     project_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1586,23 +1632,25 @@ async def _push(
     Upload local item to registry with server-side validation.
 
     Flow:
-    1. Validate content locally using rye validators
-    2. Sign content locally (standard signature)
-    3. Push to Registry API (server re-validates and adds |registry@username)
-    4. Update local file with registry-signed content
+    1. Resolve local file from item_id (strip namespace, use standard resolution)
+    2. Validate content locally using rye validators
+    3. Sign content locally (standard signature)
+    4. Push to Registry API (server re-validates and adds |registry@username)
+    5. Update local file with registry-signed content
 
     Args:
         item_type: "directive", "tool", or "knowledge"
-        item_path: Path to local item file
         item_id: Registry identifier (namespace/category/name format)
-                 Example: "leolilley/core/bootstrap"
-        version: Version string (semver)
+                 Example: "leolilley/test/provider_test_tool"
+                 Local file resolved from category/name (e.g., test/provider_test_tool)
+        version: Version string (semver). If omitted, extracted from parsed content.
         visibility: "public", "private", or "unlisted"
     """
-    if not item_type or not item_path or not item_id or not version:
+    if not item_type or not item_id:
         return {
-            "error": "Required: item_type, item_path, item_id, version",
-            "usage": "push(item_type='tool', item_path='.ai/tools/test/my_tool.py', item_id='leolilley/test/my_tool', version='1.0.0')",
+            "error": "Required: item_type, item_id",
+            "usage": "push(item_type='tool', item_id='leolilley/test/my_tool')",
+            "hint": "item_id format: namespace/category/name. Version extracted from file if omitted.",
         }
     
     # Validate item_id format
@@ -1621,9 +1669,16 @@ async def _push(
             "valid": ["directive", "tool", "knowledge"],
         }
 
-    path = Path(item_path)
-    if not path.exists():
-        return {"error": f"File not found: {item_path}"}
+    # Resolve local file from item_id — strip namespace, use category/name
+    # Same resolution pattern as sign tool's _find_item
+    local_item_id = f"{category}/{name}"
+    path = _find_local_item(item_type, local_item_id, project_path)
+    if not path:
+        return {
+            "error": f"Item not found: {local_item_id}",
+            "item_type": item_type,
+            "hint": f"Expected at .ai/{_type_dir(item_type)}/{local_item_id}.*",
+        }
 
     # Check auth
     token = await _resolve_auth_token(scope="registry:write")
@@ -1642,13 +1697,26 @@ async def _push(
         from rye.utils.validators import apply_field_mapping, validate_parsed_data
         from rye.utils.metadata_manager import MetadataManager
 
-        parser_router = ParserRouter()
-        parser_types = {
-            "directive": "markdown_xml",
-            "tool": "python_ast",
-            "knowledge": "markdown_yaml",
-        }
-        parser_type = parser_types.get(item_type)
+        parser_router = ParserRouter(Path(project_path) if project_path else None)
+
+        # Resolve parser name — match sign tool's approach:
+        # tools: data-driven lookup by extension via get_parsers_map()
+        # directives/knowledge: hardcoded (both use .md, distinguished by item_type)
+        if item_type == "tool":
+            from rye.utils.extensions import get_parsers_map
+            parsers_map = get_parsers_map(Path(project_path) if project_path else None)
+            parser_type = parsers_map.get(path.suffix)
+            if not parser_type:
+                return {
+                    "error": f"No parser registered for extension: {path.suffix}",
+                    "path": str(path),
+                }
+        elif item_type == "directive":
+            parser_type = "markdown/xml"
+        elif item_type == "knowledge":
+            parser_type = "markdown/frontmatter"
+        else:
+            parser_type = None
 
         # Strip existing signature for validation
         strategy = MetadataManager.get_strategy(item_type)
@@ -1668,7 +1736,19 @@ async def _push(
             parsed["name"] = path.stem
 
         # Apply field mapping
-        parsed = apply_field_mapping(item_type, parsed)
+        parsed = apply_field_mapping(
+            item_type, parsed,
+            project_path=Path(project_path) if project_path else None,
+        )
+
+        # Extract version from parsed content if not explicitly provided
+        if not version:
+            version = parsed.get("version")
+        if not version:
+            return {
+                "error": "Version required but not found in file metadata",
+                "hint": "Set __version__ in the file or pass version parameter",
+            }
 
         # Validate
         validation = validate_parsed_data(
@@ -1732,6 +1812,7 @@ async def _push(
             return {
                 "error": f"Push failed: {result.get('error', 'Unknown error')}",
                 "status_code": result.get("status_code"),
+                "details": error_body if isinstance(error_body, dict) else str(error_body),
             }
 
         # Step 4: Update local file with registry-signed content
@@ -2251,6 +2332,128 @@ async def _pull_bundle(
     except Exception as e:
         await http.close()
         return {"error": f"Pull bundle failed: {e}"}
+
+
+# =============================================================================
+# REMOTE SPACE PROVIDER
+# =============================================================================
+
+
+class RegistryProvider:
+    """RemoteSpaceProvider implementation for the Rye Registry.
+
+    Wraps the existing _search and _pull module functions behind the
+    RemoteSpaceProvider protocol. Discovered via bundle entry point.
+    """
+
+    @property
+    def provider_id(self) -> str:
+        return "registry"
+
+    async def search(
+        self,
+        *,
+        query: str,
+        item_type: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search the registry, returning normalized result dicts."""
+        result = await _search(
+            query=query,
+            item_type=item_type if item_type else None,
+            limit=limit,
+        )
+
+        if result.get("error"):
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for item in result.get("results", []):
+            results.append({
+                "id": item.get("item_id", ""),
+                "name": item.get("name", ""),
+                "description": item.get("description", ""),
+                "type": item.get("item_type", item_type),
+                "source": "registry",
+                "score": 0.5,
+                "metadata": {
+                    "version": item.get("version", ""),
+                    "author": item.get("author", ""),
+                    "namespace": item.get("namespace", ""),
+                    "download_count": item.get("download_count", 0),
+                },
+            })
+        return results
+
+    async def pull(
+        self,
+        *,
+        item_type: str,
+        item_id: str,
+        version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pull item content from the registry without writing to disk.
+
+        Returns content and metadata for the caller to handle destination.
+        """
+        if item_type not in ["directive", "tool", "knowledge"]:
+            return {
+                "error": f"Invalid item_type: {item_type}",
+                "valid": ["directive", "tool", "knowledge"],
+            }
+
+        try:
+            parse_item_id(item_id)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        config = RegistryConfig.from_env()
+        http = RegistryHttpClient(config)
+
+        try:
+            url = f"/v1/pull/{item_type}/{item_id}"
+            if version:
+                url += f"?version={version}"
+
+            result = await http.get(url)
+            await http.close()
+
+            if not result["success"]:
+                error_body = result.get("body", {})
+                if isinstance(error_body, dict) and "error" in error_body:
+                    return {"error": error_body["error"]}
+                return {
+                    "error": f"Failed to fetch {item_type}: {result.get('error', 'Unknown')}",
+                }
+
+            body = result.get("body", {})
+            namespace, category, name = parse_item_id(item_id)
+
+            return {
+                "status": "success",
+                "content": body.get("content", ""),
+                "item_type": item_type,
+                "item_id": item_id,
+                "version": body.get("version", ""),
+                "source": "registry",
+                "metadata": {
+                    "author": body.get("author", ""),
+                    "namespace": namespace,
+                    "category": category,
+                    "name": name,
+                    "signature": body.get("signature", {}),
+                },
+            }
+
+        except Exception as e:
+            await http.close()
+            return {"error": f"Pull failed: {e}"}
+
+
+# Register as a RemoteSpaceProvider — called by provider discovery
+def get_provider() -> RegistryProvider:
+    """Return a RegistryProvider instance for remote space discovery."""
+    return RegistryProvider()
 
 
 # CLI entry point for subprocess execution

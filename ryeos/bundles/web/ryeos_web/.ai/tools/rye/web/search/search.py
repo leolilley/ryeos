@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:18f9c45fadee51fb5d89734e81ee942214ef9a8bb8028ab4bfb68d61cd4d6de8:NMG6TKi6uV1EFDiU_nwNKdLhd0IvBFgGMfzNOZLTfzgUm5NEbwiWIHRvHRtdbXYDXsXWRvRm-WQfg9M6j7joCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:43:00Z:ba32192273e24b1a1a7c3691a8aa1712fd5d46e57787365d34f7385ea52db10f:gNKeW7dn2wPnUng-yCWdUc3H6Znfgtf-6jKUutQX8BTMycc8CfNcAMf4Mduogd_HrCby0RHYPW131yDa8wnbCw==:4b987fd4e40303ac
 """Web search via configurable provider."""
 
 import argparse
@@ -210,8 +210,10 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    import sys
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

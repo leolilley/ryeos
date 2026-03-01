@@ -8,10 +8,11 @@ def register(subparsers):
     p.add_argument("item_type", choices=["directive", "tool", "knowledge"],
                    help="Item type")
     p.add_argument("item_id", help="Item ID (slash-separated path)")
-    p.add_argument("--source", choices=["project", "user", "system"],
+    p.add_argument("--source", choices=["project", "user", "system", "registry"],
                    help="Restrict lookup to a specific space")
     p.add_argument("--destination", choices=["project", "user"],
                    help="Copy item to this space after loading")
+    p.add_argument("--version", help="Version to pull (registry only)")
     p.set_defaults(handler=handle)
 
 
@@ -28,6 +29,8 @@ def handle(args, project_path: str):
         kwargs["source"] = args.source
     if args.destination:
         kwargs["destination"] = args.destination
+    if args.version:
+        kwargs["version"] = args.version
 
     tool = LoadTool(str(get_user_space()))
     result = run_async(tool.handle(**kwargs))

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:25:41Z:8b7c8d285b7389089a0dbcff7050209c68b2e4b4754ea448692bb1eb5311d18a:r7CSuo9yj6opzQsoL8isQEYCzME8u9bzg4JY7s8LayyGrcXeZScPwRQCocU-S3SxG7EIWNiCOKiEZlghrHWjAg==:4b987fd4e40303ac
+# rye:signed:2026-03-01T21:42:35Z:3b88c7f5a4f986e8f2fc2982b051789205c459a0a4633eb5d3e25c4761bb5b8d:WIkV6I3OvefXFFg64WeY7GZUQqlx992H0jHGnIs03qJ0LijwI9wUSpJyKHPqo2NhOImYgXBR8IaWQcuQA3ipDQ==:4b987fd4e40303ac
 """Template interpolation for ${...} and {input:...} expressions.
 
 Shared runtime library — resolves template expressions against
@@ -12,10 +12,13 @@ __tool_type__ = "python"
 __category__ = "rye/core/runtimes/python/lib"
 __tool_description__ = "Template interpolation for parameter expressions"
 
+import logging
 import re
 from typing import Any, Dict
 
 from condition_evaluator import resolve_path
+
+logger = logging.getLogger(__name__)
 
 _INTERPOLATION_RE = re.compile(r"\$\{([^}]+)\}")
 _INPUT_REF_RE = re.compile(r"\{input:(\w+)(\?|[:|][^}]*)?\}")
@@ -35,6 +38,21 @@ def _resolve_input_ref(match, inputs: Dict) -> str:
     return match.group(0)
 
 
+def _resolve_expr(context: Dict, expr: str) -> Any:
+    """Resolve an expression, supporting ``||`` fallback chains.
+
+    ``a.b || c.d`` tries each path left-to-right, returning the first
+    non-None value.  Plain paths (no ``||``) are resolved directly.
+    """
+    if "||" not in expr:
+        return resolve_path(context, expr.strip())
+    for part in expr.split("||"):
+        value = resolve_path(context, part.strip())
+        if value is not None:
+            return value
+    return None
+
+
 def interpolate(template: Any, context: Dict) -> Any:
     """Interpolate ${...} and {input:...} expressions in a value.
 
@@ -52,13 +70,19 @@ def interpolate(template: Any, context: Dict) -> Any:
     if isinstance(template, str):
         whole = _WHOLE_EXPR_RE.match(template)
         if whole:
-            value = resolve_path(context, whole.group(1))
+            expr = whole.group(1)
+            value = _resolve_expr(context, expr)
+            if value is None:
+                logger.warning("interpolation '${%s}' resolved to None", expr)
             return value
 
         def _replace(match):
-            path = match.group(1)
-            value = resolve_path(context, path)
-            return str(value) if value is not None else ""
+            expr = match.group(1)
+            value = _resolve_expr(context, expr)
+            if value is None:
+                logger.warning("interpolation '${%s}' resolved to None", expr)
+                return ""
+            return str(value)
 
         result = _INTERPOLATION_RE.sub(_replace, template)
         inputs = context.get("inputs", {})

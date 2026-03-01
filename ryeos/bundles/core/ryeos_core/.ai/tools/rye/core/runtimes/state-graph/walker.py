@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:25:41Z:586ae693405541c468a0cf9799d465104ff054480090549baac02af489dce10f:0cGbug8EW22YOj1PGbwIemtWGFP5Zqt2l87BQIc8Z-JkFffXWXa2l0uNG8vGWczgeWpleo9Ik6HPBV2gpLGmBg==:4b987fd4e40303ac
+# rye:signed:2026-03-01T21:42:35Z:ba6eb2ce9dd3277d5965b9443c3edc9adbc8f51d0ceb32f2645f00fa97461029:vGr5s3E5CMWPHPt503l7WIJzO0GwzvF8fcBgl8lmw-duIFNKciIob4qJiEMMIZyiWWfcEqsJzvtL_p5FGTEUBg==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -769,7 +769,7 @@ def _evaluate_edges(
     if isinstance(next_spec, str):
         return next_spec
     if isinstance(next_spec, list):
-        doc = {"state": state, "result": result}
+        doc = {"state": state, "result": result, "inputs": state.get("inputs", {})}
         for edge in next_spec:
             condition = edge.get("when")
             if condition is None:
@@ -1404,7 +1404,7 @@ async def execute(
             # Return interpolated output from the return node (slim),
             # full state is already persisted as a knowledge artifact.
             output_template = node.get("output", {})
-            interp_ctx: Dict[str, Any] = {"state": state, "inputs": params}
+            interp_ctx: Dict[str, Any] = {"state": state, "inputs": params, **_builtins()}
             output = interpolation.interpolate(output_template, interp_ctx) if output_template else {}
             return {
                 "success": True,
@@ -1446,7 +1446,7 @@ async def execute(
             continue
 
         # Build interpolation context
-        interp_ctx: Dict[str, Any] = {"state": state, "inputs": params}
+        interp_ctx: Dict[str, Any] = {"state": state, "inputs": params, **_builtins()}
 
         # Gate node — explicit routing/assign, no action execution
         if node.get("type") == "gate":
@@ -1738,6 +1738,15 @@ async def execute(
 # ---------------------------------------------------------------------------
 
 
+def _builtins() -> Dict[str, Any]:
+    """Built-in variables injected into every interpolation context."""
+    now = datetime.now(timezone.utc)
+    return {
+        "_now": now.isoformat(),
+        "_timestamp": int(now.timestamp() * 1000),
+    }
+
+
 def _strip_none(d: Any) -> Any:
     """Remove None values from nested dicts so tool CONFIG_SCHEMA defaults apply."""
     if isinstance(d, dict):
@@ -1798,7 +1807,7 @@ async def _handle_foreach(
 
     Returns (next_node, updated_state).
     """
-    interp_ctx: Dict[str, Any] = {"state": state, "inputs": inputs}
+    interp_ctx: Dict[str, Any] = {"state": state, "inputs": inputs, **_builtins()}
     over_expr = node.get("over", "")
     items = interpolation.interpolate(over_expr, interp_ctx)
     if not isinstance(items, list):
@@ -1844,7 +1853,7 @@ async def _foreach_sequential(
     for item in items:
         state[as_var] = item
         interp_ctx: Dict[str, Any] = {
-            "state": state, "inputs": inputs, as_var: item,
+            "state": state, "inputs": inputs, as_var: item, **_builtins(),
         }
 
         action = interpolation.interpolate_action(node["action"], interp_ctx)
@@ -1890,6 +1899,7 @@ async def _foreach_parallel(
             "state": {"inputs": inputs, as_var: item},
             "inputs": inputs,
             as_var: item,
+            **_builtins(),
         }
         action = interpolation.interpolate_action(node["action"], interp_ctx)
         action["params"] = _strip_none(action.get("params", {}))
@@ -2020,7 +2030,7 @@ def run_sync(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--graph-path", required=True)
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True)
     parser.add_argument("--graph-run-id", default=None)
     parser.add_argument("--pre-registered", action="store_true")
@@ -2034,7 +2044,7 @@ if __name__ == "__main__":
         )
 
     graph_config = _load_graph_yaml(args.graph_path)
-    params = json.loads(args.params)
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
 
     # If called from subprocess with --graph-run-id and --pre-registered,
     # call execute() directly (child process behavior)

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:f889ddec6d663449d4de2a50bf290db22cc44298704fdb6049472f9b832d714b:EvCzq6Oi05_hVw5lkP8yv5zP4dIO9sBexMGD5UewF7BWXLMvVGJWoUMXoVycIS7pshQhltXJ5-8X0MEBUan8Bg==:4b987fd4e40303ac
+# rye:signed:2026-03-01T08:42:55Z:6d67428a6cd51240a866d093cbdc6fe613f04e363390db14d55171741a031851:bhUDO2s9oHOuPv5mi-rQWdi6swYyJN8vIz-rFbCn3YGtOKIqqh5vnWAiRyAxoOVgPXKUdh6VHqVFQEZLPFpPBw==:4b987fd4e40303ac
 """Load item content for inspection."""
 
 import argparse
@@ -67,8 +67,10 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
+    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    import sys
+    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

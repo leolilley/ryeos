@@ -129,7 +129,7 @@ class RYEServer:
                             },
                             "space": {
                                 "type": "string",
-                                "enum": ["project", "user", "system", "all"],
+                                "enum": ["project", "user", "system", "local", "registry", "all"],
                                 "default": "all",
                                 "description": SEARCH_SPACE_DESC,
                             },
@@ -163,13 +163,17 @@ class RYEServer:
                             },
                             "source": {
                                 "type": "string",
-                                "enum": ["project", "user", "system"],
+                                "enum": ["project", "user", "system", "registry"],
                                 "description": LOAD_SOURCE_DESC,
                             },
                             "destination": {
                                 "type": "string",
                                 "enum": ["project", "user"],
                                 "description": LOAD_DESTINATION_DESC,
+                            },
+                            "version": {
+                                "type": "string",
+                                "description": "Version to pull (registry source only).",
                             },
                         },
                         "required": ["item_type", "item_id", "project_path"],

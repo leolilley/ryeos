@@ -122,7 +122,8 @@ SEARCH_QUERY_DESC = (
 )
 
 SEARCH_SPACE_DESC = (
-    '<description>Which spaces to search: "project", "user", "system", or "all" (default).</description>'
+    '<description>Which spaces to search: "project", "user", "system", "local" (all local spaces), '
+    '"registry" (published items only), or "all" (local + registry, default).</description>'
 )
 
 SEARCH_LIMIT_DESC = "Maximum number of results to return."
@@ -146,8 +147,10 @@ LOAD_TOOL_DESC = (
 
 LOAD_SOURCE_DESC = (
     "<description>"
-    'Restrict where to load from: "project", "user", or "system". '
-    "If omitted, resolves project → user → system (first match wins)."
+    'Restrict where to load from: "project", "user", "system", or "registry". '
+    "If omitted, resolves project → user → system (first match wins). "
+    'Use "registry" to pull items from a remote registry by their full item_id '
+    "(namespace/category/name format)."
     "</description>"
 )
 

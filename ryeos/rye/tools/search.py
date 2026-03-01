@@ -33,6 +33,7 @@ from rye.utils.path_utils import (
 )
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.parser_router import ParserRouter
+from rye.utils.remote_providers import get_remote_providers
 
 logger = logging.getLogger(__name__)
 
@@ -896,7 +897,6 @@ class SearchTool:
 
         item_type = parsed_scope["item_type"] or kwargs.get("item_type", "")
         namespace_filter = parsed_scope["namespace_filter"]
-
         opts = SearchOptions(
             query=kwargs.get("query", ""),
             scope=scope,
@@ -928,10 +928,30 @@ class SearchTool:
             extractor = MetadataExtractor(
                 Path(opts.project_path) if opts.project_path else None
             )
-            results = self._search_items(
-                search_paths, opts, item_type, namespace_filter,
-                query_ast, field_weights, extractor
-            )
+            # Search local spaces unless registry-only
+            results = []
+            if opts.space != "registry":
+                results = self._search_items(
+                    search_paths, opts, item_type, namespace_filter,
+                    query_ast, field_weights, extractor
+                )
+
+            # Include remote provider results when space is "registry" or "all"
+            if opts.space in ("registry", "all"):
+                for provider in get_remote_providers().values():
+                    try:
+                        remote_results = await provider.search(
+                            query=opts.query,
+                            item_type=item_type,
+                            limit=opts.limit,
+                        )
+                        results.extend(remote_results)
+                    except Exception as e:
+                        logger.debug(
+                            "Remote provider %s search error: %s",
+                            provider.provider_id, e,
+                        )
+
             results = self._sort_results(results, opts.sort_by)
             total = len(results)
             results = results[opts.offset : opts.offset + opts.limit]
@@ -961,21 +981,27 @@ class SearchTool:
 
         Always returns type-root directories (.ai/directives/, .ai/tools/, etc.)
         so that item IDs are computed correctly as full paths from the type root.
+
+        Space values:
+          - project, user, system: single space
+          - local: all local spaces (project + user + system)
+          - all: local + registry (registry handled separately)
+          - registry: no local paths (registry handled separately)
         """
         project_path = Path(opts.project_path) if opts.project_path else None
         paths: List[Tuple[Path, str]] = []
 
-        if opts.space in ("project", "all") and project_path:
+        if opts.space in ("project", "local", "all") and project_path:
             d = get_project_type_path(project_path, item_type)
             if d.exists():
                 paths.append((d, "project"))
 
-        if opts.space in ("user", "all"):
+        if opts.space in ("user", "local", "all"):
             d = get_user_type_path(item_type)
             if d.exists():
                 paths.append((d, "user"))
 
-        if opts.space in ("system", "all"):
+        if opts.space in ("system", "local", "all"):
             for bundle in get_system_spaces():
                 type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
                 type_root = bundle.root_path / AI_DIR / type_folder
@@ -1166,3 +1192,4 @@ class SearchTool:
                 key=lambda x: (x.get("name", "").lower(), *_tie_key(x)),
             )
         return results
+

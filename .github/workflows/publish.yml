@@ -94,6 +94,65 @@ jobs:
           packages-dir: ${{ matrix.path }}/dist/
           skip-existing: true
 
+  # ── Publish data bundles to Rye Registry ──────────────────────────
+  publish-bundles:
+    needs: publish-python
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: ryeos-core
+            path: ryeos/bundles/core
+            package: ryeos-core
+          - bundle: ryeos
+            path: ryeos/bundles/standard
+            package: ryeos
+          - bundle: ryeos-web
+            path: ryeos/bundles/web
+            package: ryeos-web
+          - bundle: ryeos-code
+            path: ryeos/bundles/code
+            package: ryeos-code
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Check if this bundle should run
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "all" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "${{ matrix.package }}" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip == 'false'
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip == 'false'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install from local checkout
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          pip install -e ryeos
+          pip install -e ryeos/bundles/core
+          pip install -e ryeos/bundles/standard
+          pip install -e ryeos-cli
+
+      - name: Build bundle manifest
+        if: steps.check.outputs.skip == 'false'
+        run: rye registry bundle build ${{ matrix.path }} --bundle-id ${{ matrix.bundle }}
+
+      - name: Push bundle to registry
+        if: steps.check.outputs.skip == 'false'
+        env:
+          RYE_REGISTRY_API_KEY: ${{ secrets.RYE_REGISTRY_API_KEY }}
+        run: rye -p ${{ matrix.path }} registry bundle push ${{ matrix.bundle }}
+
   # ── Build & publish Rust packages individually ───────────────────
   publish-rust:
     strategy:

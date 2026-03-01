@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-28T00:32:39Z:3448aa2f096043ba145789720b1ca8d282d08dd219ec2c3a43de53e60d1eb293:lTnd6X1xA0Z5ohfHw2aZxx89rWAC36Rhs4BdO0EtzwrAMjZfuaioGQNv4IapQr0qaUnRmIiTB7KIvir6kYdIBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-01T21:42:35Z:98fa3e4f9d43cecacc37e25256c3b8f6ec24b595af59eacf5eb537faba9d5ed1:U7ZJHmQB_IYTB2yAPNfCs2B6uoZQR5wDP-nSgUzqvCHcf6Fz2bUjBsyNHH8yIPKsW79RP3knMG9kKNSBqRV6DQ==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -95,15 +95,36 @@ This is why `${result.stdout}` works in `assign` expressions.
 
 ## Interpolation Context
 
-The walker builds a context dict with three namespaces:
+The walker builds a context dict with these namespaces:
 
 | Namespace | Contents | Available In |
 | --- | --- | --- |
 | `state` | Accumulated state from prior `assign` mutations | `action.params`, `assign`, `next` conditions |
-| `inputs` | Original graph input parameters | `action.params`, `assign`, `next` conditions |
+| `inputs` | Original graph input parameters | `action.params`, `assign`, `next` conditions (including gate `when` paths) |
 | `result` | Unwrapped output of current node's action | `assign`, `next` conditions (not `action.params`) |
+| `_now` | ISO 8601 UTC timestamp (e.g., `2026-03-02T12:00:00+00:00`) | All interpolation sites |
+| `_timestamp` | Unix epoch milliseconds (e.g., `1740912000000`) | All interpolation sites |
 
 Foreach nodes add the iteration variable (e.g., `task`) as an additional top-level namespace.
+
+### Fallback Chains (`||`)
+
+Interpolation expressions support `||` as a fallback operator:
+
+```yaml
+params:
+  universe_id: "${inputs.universe_id || state.universe_id}"
+```
+
+Each path is tried left-to-right; the first non-None value is used. This works in both whole-expression (`${a || b}`) and inline (`prefix-${a || b}-suffix`) contexts.
+
+### Gate Node Execution Order
+
+Gate nodes execute in this order: **assign → next evaluation**. The `assign` block runs first, writing values into state, then `next` edge conditions are evaluated against the updated state. This means you can assign a derived value and then gate on it in the same node.
+
+### Consistent Context Across Gates and Interpolation
+
+The `inputs` namespace is available in both `${...}` interpolation expressions and gate `when` condition paths. You can use `inputs.x` consistently everywhere — there is no need to use `state.inputs.x` in gate conditions.
 
 ### None Stripping
 
