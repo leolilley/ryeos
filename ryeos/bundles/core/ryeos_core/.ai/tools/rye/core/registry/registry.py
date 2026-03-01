@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T09:49:16Z:90bd7795318947a0329c91e4e811856ffb9adb380959cddb7c7d3f84425ade0e:o76EMMOwC7Y4IGRjbxVFU9bNt_6yRsuRtYMTrZl8shZulD4v4kH_gTt4O0QmQsQqpRCpAsU7OBiqOLUYsklXAw==:4b987fd4e40303ac
+# rye:signed:2026-03-01T22:12:46Z:df6b8ed29ac457dff0b03e02738e89866cc072b053885ed104f89a048430d434:oRBd4oA_gTVn0QeJio7ZP5yr50aDq-ufqiGJDlkjPWUmeEnZkupOKSh3MPg96vL4Qp3cAB5JqzE2OemWBnYfCA==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -114,6 +114,9 @@ ACTIONS = [
     # Bundles
     "push_bundle",
     "pull_bundle",
+    "search_bundle",
+    "publish_bundle",
+    "unpublish_bundle",
 ]
 
 # Registry configuration from environment
@@ -605,6 +608,24 @@ async def execute(
                 bundle_id=params.get("bundle_id"),
                 version=params.get("version"),
                 project_path=project_path,
+            )
+            http_calls = 1
+        elif action == "search_bundle":
+            result = await _search_bundle(
+                query=params.get("query"),
+                namespace=params.get("namespace"),
+                include_mine=params.get("include_mine", True),
+                limit=params.get("limit", 20),
+            )
+            http_calls = 1
+        elif action == "publish_bundle":
+            result = await _publish_bundle(
+                bundle_id=params.get("bundle_id"),
+            )
+            http_calls = 1
+        elif action == "unpublish_bundle":
+            result = await _unpublish_bundle(
+                bundle_id=params.get("bundle_id"),
             )
             http_calls = 1
         else:
@@ -2332,6 +2353,149 @@ async def _pull_bundle(
     except Exception as e:
         await http.close()
         return {"error": f"Pull bundle failed: {e}"}
+
+
+async def _search_bundle(
+    query: Optional[str] = None,
+    namespace: Optional[str] = None,
+    include_mine: bool = True,
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """Search for bundles in the registry."""
+    if not query:
+        return {
+            "error": "Required: query",
+            "usage": "search_bundle(query='ryeos')",
+        }
+
+    token = await _resolve_auth_token(scope="registry:read")
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        params = {
+            "query": query,
+            "include_mine": str(include_mine).lower(),
+            "limit": str(limit),
+        }
+        if namespace:
+            params["namespace"] = namespace
+
+        result = await http.get(
+            "/v1/bundle/search",
+            params=params,
+            auth_token=token,
+        )
+        await http.close()
+
+        if not result["success"]:
+            return {
+                "error": f"Search failed: {result.get('error', 'Unknown error')}",
+                "status_code": result.get("status_code"),
+            }
+
+        body = result.get("body", {})
+        return {
+            "status": "success",
+            "query": query,
+            "results": body.get("results", []),
+            "total": body.get("total", 0),
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Search failed: {e}"}
+
+
+async def _publish_bundle(
+    bundle_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Make a bundle public."""
+    if not bundle_id:
+        return {
+            "error": "Required: bundle_id",
+            "usage": "publish_bundle(bundle_id='ryeos-core')",
+        }
+
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        result = await http.post(
+            f"/v1/bundle/{bundle_id}/visibility",
+            body={"visibility": "public"},
+            auth_token=token,
+        )
+        await http.close()
+
+        if not result["success"]:
+            return {
+                "error": f"Publish failed: {result.get('error', 'Unknown error')}",
+                "status_code": result.get("status_code"),
+            }
+
+        return {
+            "status": "published",
+            "bundle_id": bundle_id,
+            "visibility": "public",
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Publish failed: {e}"}
+
+
+async def _unpublish_bundle(
+    bundle_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Make a bundle private."""
+    if not bundle_id:
+        return {
+            "error": "Required: bundle_id",
+            "usage": "unpublish_bundle(bundle_id='ryeos-core')",
+        }
+
+    token = await _resolve_auth_token(scope="registry:write")
+    if not token:
+        return {
+            "error": "Authentication required",
+            "solution": "Run 'registry login' first",
+        }
+
+    config = RegistryConfig.from_env()
+    http = RegistryHttpClient(config)
+
+    try:
+        result = await http.post(
+            f"/v1/bundle/{bundle_id}/visibility",
+            body={"visibility": "private"},
+            auth_token=token,
+        )
+        await http.close()
+
+        if not result["success"]:
+            return {
+                "error": f"Unpublish failed: {result.get('error', 'Unknown error')}",
+                "status_code": result.get("status_code"),
+            }
+
+        return {
+            "status": "unpublished",
+            "bundle_id": bundle_id,
+            "visibility": "private",
+        }
+
+    except Exception as e:
+        await http.close()
+        return {"error": f"Unpublish failed: {e}"}
 
 
 # =============================================================================

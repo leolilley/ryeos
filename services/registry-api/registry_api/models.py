@@ -222,6 +222,38 @@ class BundlePullResponse(BaseModel):
     created_at: datetime
 
 
+class BundleSearchResultItem(BaseModel):
+    """Single bundle in search results."""
+
+    bundle_id: str
+    namespace: str
+    name: str
+    description: Optional[str] = None
+    version: Optional[str] = None
+    author: Optional[str] = None
+    download_count: int = 0
+    file_count: int = 0
+    created_at: Optional[datetime] = None
+
+
+class BundleSearchResponse(BaseModel):
+    """Response for bundle search."""
+
+    results: List[BundleSearchResultItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class BundleVisibilityResponse(BaseModel):
+    """Response for bundle visibility change."""
+
+    status: Literal["updated"]
+    bundle_id: str
+    visibility: str
+    previous_visibility: str
+
+
 # API Key Models
 
 

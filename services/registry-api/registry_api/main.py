@@ -29,6 +29,9 @@ from registry_api.models import (
     BundlePullResponse,
     BundlePushRequest,
     BundlePushResponse,
+    BundleSearchResultItem,
+    BundleSearchResponse,
+    BundleVisibilityResponse,
     DeleteResponse,
     HealthResponse,
     PullResponse,
@@ -840,6 +843,112 @@ async def pull_bundle(
         files=target["files"],
         author=author_username,
         created_at=target["created_at"],
+    )
+
+
+# =============================================================================
+# BUNDLE SEARCH - Search bundles in the registry
+# =============================================================================
+
+
+@app.get("/v1/bundle/search", response_model=BundleSearchResponse)
+async def search_bundles(
+    query: str,
+    namespace: str = None,
+    include_mine: bool = False,
+    limit: int = 20,
+    offset: int = 0,
+    user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Search for bundles in the registry."""
+    supabase = get_supabase()
+
+    q = supabase.table("bundles").select("*", count="exact")
+
+    # Text search on bundle_id, name, and description
+    q = q.or_(f"bundle_id.ilike.%{query}%,name.ilike.%{query}%,description.ilike.%{query}%")
+
+    if namespace:
+        q = q.eq("namespace", namespace)
+
+    # Visibility filter
+    if include_mine and user:
+        q = q.or_(f"visibility.eq.public,author_id.eq.{user.id}")
+    else:
+        q = q.eq("visibility", "public")
+
+    result = q.order("download_count", desc=True).range(offset, offset + limit - 1).execute()
+
+    results = []
+    for b in result.data:
+        results.append(BundleSearchResultItem(
+            bundle_id=b["bundle_id"],
+            namespace=b["namespace"],
+            name=b["name"],
+            description=b.get("description"),
+            version=b.get("latest_version"),
+            author=b["namespace"],
+            download_count=b.get("download_count") or 0,
+            created_at=b.get("created_at"),
+        ))
+
+    return BundleSearchResponse(
+        results=results,
+        total=result.count or 0,
+        limit=limit,
+        offset=offset,
+    )
+
+
+# =============================================================================
+# BUNDLE VISIBILITY - Set bundle visibility
+# =============================================================================
+
+
+@app.post("/v1/bundle/{bundle_id:path}/visibility", response_model=BundleVisibilityResponse)
+async def set_bundle_visibility(
+    bundle_id: str,
+    body: dict,
+    user: User = Depends(get_current_user),
+):
+    """Set bundle visibility (public/private/unlisted)."""
+    visibility = body.get("visibility")
+    if visibility not in ["public", "private", "unlisted"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": f"Invalid visibility: {visibility}"},
+        )
+
+    supabase = get_supabase()
+
+    result = supabase.table("bundles").select("id, author_id, visibility, namespace").eq(
+        "namespace", user.username
+    ).eq("bundle_id", bundle_id).execute()
+
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Bundle not found: {bundle_id}"},
+        )
+
+    bundle = result.data[0]
+
+    if bundle["author_id"] != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "You can only change visibility of your own bundles"},
+        )
+
+    old_visibility = bundle.get("visibility", "private")
+    supabase.table("bundles").update({"visibility": visibility}).eq("id", bundle["id"]).execute()
+
+    logger.info(f"Bundle visibility: {bundle_id} {old_visibility} -> {visibility}")
+
+    return BundleVisibilityResponse(
+        status="updated",
+        bundle_id=bundle_id,
+        visibility=visibility,
+        previous_visibility=old_visibility,
     )
 
 

@@ -83,6 +83,23 @@ def register(subparsers):
     bpull.add_argument("--version", help="Specific version to pull")
     bpull.set_defaults(handler=_handle_bundle_pull)
 
+    # bundle search
+    bs = bundle_sub.add_parser("search", help="Search bundles in registry")
+    bs.add_argument("query", help="Search query")
+    bs.add_argument("--namespace", help="Filter by namespace")
+    bs.add_argument("--limit", type=int, default=20, help="Max results")
+    bs.set_defaults(handler=_handle_bundle_search)
+
+    # bundle publish
+    bpub = bundle_sub.add_parser("publish", help="Make bundle public")
+    bpub.add_argument("bundle_id", help="Bundle identifier")
+    bpub.set_defaults(handler=_handle_bundle_publish)
+
+    # bundle unpublish
+    bunpub = bundle_sub.add_parser("unpublish", help="Make bundle private")
+    bunpub.add_argument("bundle_id", help="Bundle identifier")
+    bunpub.set_defaults(handler=_handle_bundle_unpublish)
+
 
 # ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -204,4 +221,32 @@ def _handle_bundle_pull(args, project_path: str):
     if args.version:
         params["version"] = args.version
     result = _registry_execute(project_path, params)
+    print_result(result)
+
+
+def _handle_bundle_search(args, project_path: str):
+    params = {
+        "action": "search_bundle",
+        "query": args.query,
+        "limit": args.limit,
+    }
+    if args.namespace:
+        params["namespace"] = args.namespace
+    result = _registry_execute(project_path, params)
+    print_result(result)
+
+
+def _handle_bundle_publish(args, project_path: str):
+    result = _registry_execute(project_path, {
+        "action": "publish_bundle",
+        "bundle_id": args.bundle_id,
+    })
+    print_result(result)
+
+
+def _handle_bundle_unpublish(args, project_path: str):
+    result = _registry_execute(project_path, {
+        "action": "unpublish_bundle",
+        "bundle_id": args.bundle_id,
+    })
     print_result(result)
