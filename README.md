@@ -83,6 +83,9 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only) |
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary tools      |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
+| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the four primitives |
+
+> **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
 Both `ryeos` and `ryeos-mcp` support optional extras:
 
