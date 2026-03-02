@@ -373,7 +373,7 @@ class TestCapabilityRisk:
         """Import the risk assessment function."""
         td_path = (
             PROJECT_ROOT
-            / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads" / "thread_directive.py"
+            / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "thread_directive.py"
         )
         spec = importlib.util.spec_from_file_location("thread_directive", td_path)
         mod = importlib.util.module_from_spec(spec)
@@ -491,6 +491,7 @@ class TestTranscriptRendering:
         assert "Custom system." in result
 
     def test_context_injected_event(self):
+        """context_injected events return empty — content is in cognition_in."""
         event = {
             "event_type": "context_injected",
             "payload": {
@@ -501,10 +502,10 @@ class TestTranscriptRendering:
             },
         }
         result = Transcript._render_cognition_event(event, 1)
-        assert 'id="rye/agent/core/environment"' in result
-        assert "Project: /app" in result
+        assert result == ""
 
     def test_context_injected_multiple_blocks(self):
+        """context_injected with multiple blocks also returns empty."""
         event = {
             "event_type": "context_injected",
             "payload": {
@@ -516,19 +517,16 @@ class TestTranscriptRendering:
             },
         }
         result = Transcript._render_cognition_event(event, 1)
-        assert "item-a" in result
-        assert "item-b" in result
-        assert "A content" in result
-        assert "B content" in result
+        assert result == ""
 
 
 # ── Core Knowledge Items ──────────────────────────────────────────────
 
 KNOWLEDGE_DIR = (
-    PROJECT_ROOT / "ryeos" / "rye" / ".ai" / "knowledge" / "rye" / "agent" / "core"
+    PROJECT_ROOT / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "knowledge" / "rye" / "agent" / "core"
 )
 
-EXPECTED_ITEMS = ["Identity", "Behavior", "ToolProtocol", "Environment", "Completion"]
+EXPECTED_ITEMS = ["Identity", "Behavior", "ToolProtocol", "Environment", "DirectiveInstruction"]
 
 
 class TestCoreKnowledgeItems:
@@ -571,10 +569,6 @@ class TestCoreKnowledgeItems:
         assert "rye_search" in content
         assert "rye_load" in content
         assert "rye_sign" in content
-
-    def test_completion_mentions_directive_return(self):
-        content = (KNOWLEDGE_DIR / "Completion.md").read_text()
-        assert "directive_return" in content
 
     def test_environment_has_template_vars(self):
         content = (KNOWLEDGE_DIR / "Environment.md").read_text()
@@ -793,7 +787,7 @@ class TestRunHooksContextSuppress:
 
 CONDITION_EVALUATOR_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads"
+    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
     / "loaders" / "condition_evaluator.py"
 )
 _cespec = importlib.util.spec_from_file_location("condition_evaluator", CONDITION_EVALUATOR_PATH)
@@ -1006,7 +1000,7 @@ class TestConditionalHookDispatch:
 
 CONFIG_LOADER_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "rye" / ".ai" / "tools" / "rye" / "agent" / "threads"
+    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
     / "loaders" / "config_loader.py"
 )
 _clspec = importlib.util.spec_from_file_location("config_loader", CONFIG_LOADER_PATH)
@@ -1096,7 +1090,7 @@ class TestConfigLoaderThreeTierCascade:
         """Create a fake bundle root with system config YAML on disk."""
         bundle_root = tmp_path / "bundle"
         self._write_yaml(
-            bundle_root / ".ai" / "tools" / "rye" / "agent" / "threads" / "config" / "test.yaml",
+            bundle_root / ".ai" / "config" / "agent" / "test.yaml",
             system_data,
         )
         return BundleInfo(
@@ -1112,7 +1106,7 @@ class TestConfigLoaderThreeTierCascade:
         user_dir = tmp_path / "user_home" / ".ai"
         monkeypatch.setattr(_config_mod, "get_user_ai_path", lambda: user_dir)
 
-        self._write_yaml(user_dir / "config" / "test.yaml", {"custom_key": "from_user"})
+        self._write_yaml(user_dir / "config" / "agent" / "test.yaml", {"custom_key": "from_user"})
 
         bundle = self._make_bundle(tmp_path, {"base_key": "from_system"})
         monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
@@ -1129,13 +1123,13 @@ class TestConfigLoaderThreeTierCascade:
         user_dir = tmp_path / "user_home" / ".ai"
         monkeypatch.setattr(_config_mod, "get_user_ai_path", lambda: user_dir)
 
-        self._write_yaml(user_dir / "config" / "test.yaml", {
+        self._write_yaml(user_dir / "config" / "agent" / "test.yaml", {
             "value": "user",
             "user_only": True,
         })
 
         project_path = tmp_path / "project"
-        self._write_yaml(project_path / ".ai" / "config" / "test.yaml", {
+        self._write_yaml(project_path / ".ai" / "config" / "agent" / "test.yaml", {
             "value": "project",
             "project_only": True,
         })
@@ -1155,12 +1149,12 @@ class TestConfigLoaderThreeTierCascade:
         user_dir = tmp_path / "user_home" / ".ai"
         monkeypatch.setattr(_config_mod, "get_user_ai_path", lambda: user_dir)
 
-        self._write_yaml(user_dir / "config" / "test.yaml", {
+        self._write_yaml(user_dir / "config" / "agent" / "test.yaml", {
             "shared": "user_value",
         })
 
         project_path = tmp_path / "project"
-        self._write_yaml(project_path / ".ai" / "config" / "test.yaml", {
+        self._write_yaml(project_path / ".ai" / "config" / "agent" / "test.yaml", {
             "shared": "project_value",
         })
 
@@ -1178,7 +1172,7 @@ class TestConfigLoaderThreeTierCascade:
         # No user config file created
 
         project_path = tmp_path / "project"
-        self._write_yaml(project_path / ".ai" / "config" / "test.yaml", {
+        self._write_yaml(project_path / ".ai" / "config" / "agent" / "test.yaml", {
             "project_key": "present",
         })
 
