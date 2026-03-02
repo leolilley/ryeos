@@ -34,7 +34,7 @@ PRIMITIVE_MAP = {
 
 ### Layer 2: Runtimes
 
-Runtimes are YAML configs in `.ai/tools/rye/core/runtimes/`. They point to a primitive and add configuration: interpreter resolution via `ENV_CONFIG`, command templates, timeout, anchor setup, and dependency verification. The `state-graph/runtime` is a special runtime that walks declarative graph YAML tools — it resolves state graph definitions and orchestrates node execution rather than running a single script.
+Runtimes are YAML configs in `.ai/tools/rye/core/runtimes/`. They point to a primitive and add configuration: interpreter resolution via `ENV_CONFIG`, command templates, timeout, anchor setup, dependency verification, and config resolution via `CONFIG_RESOLVE`. The `state-graph/runtime` is a special runtime that walks declarative graph YAML tools — it resolves state graph definitions and orchestrates node execution rather than running a single script.
 
 Example — `python/script` runtime:
 
@@ -75,7 +75,7 @@ __executor_id__ = "rye/core/runtimes/python/script"
 
 1. **Cache check** — If the chain is cached and all file hashes still match, return cached chain.
 2. **Resolve path** — Call `_resolve_tool_path(item_id)` to find the file using three-tier space precedence (project → user → system).
-3. **Load metadata** — Parse the file using AST (Python) or YAML to extract `__executor_id__`, `ENV_CONFIG`, `CONFIG`, `anchor`, `verify_deps`, etc.
+3. **Load metadata** — Parse the file using AST (Python) or YAML to extract `__executor_id__`, `ENV_CONFIG`, `CONFIG`, `CONFIG_RESOLVE`, `anchor`, `verify_deps`, etc. `CONFIG_RESOLVE` (Python) or `config_resolve:` (YAML) declares a config file the tool needs from `.ai/config/`. The executor resolves it across all 3 tiers before spawning the tool. Two modes: `deep_merge` (system → user → project, all layers merged) and `first_match` (project → user → system, first found wins). Resolved config is injected into the tool's params as `resolved_config`.
 4. **Create ChainElement** — Store the item_id, path, space, and all extracted metadata.
 5. **Check termination** — If `executor_id` is `None`, this is a primitive; stop.
 6. **Recurse** — Set `current_id = executor_id` and repeat from step 2.
@@ -176,6 +176,28 @@ When active, the anchor system:
 This allows tools with multi-file dependencies (e.g., a tool with a `lib/` directory) to have their entire dependency tree verified and their module paths set up correctly.
 
 When `mode: always` is set, the anchor activates unconditionally — marker files are not checked. This is used by runtimes like `state-graph/runtime` where the tool being executed (a graph YAML) won't have marker files in its directory, but the runtime still needs its `lib/python` path on `PYTHONPATH`.
+
+## Config Resolution
+
+After anchor resolution and before execution config building, the executor resolves tool config files:
+
+5.7 **Resolve tool config** — If the tool declares `config_resolve`, walk `.ai/config/` across system → user → project, merge or match, and inject into params as `resolved_config`.
+
+Tools declare their config dependency via `CONFIG_RESOLVE` (Python) or `config_resolve:` (YAML):
+
+```python
+# Python tool
+CONFIG_RESOLVE = {"path": "web/websearch.yaml", "mode": "deep_merge"}
+```
+
+```yaml
+# YAML runtime/tool
+config_resolve:
+  path: agent/agent.yaml
+  mode: deep_merge
+```
+
+The `path` is relative to `.ai/config/` in each space. In `deep_merge` mode, the executor loads the file from all tiers (system → user → project) and deep-merges them so project-level values override. In `first_match` mode, it walks project → user → system and returns the first file found without merging.
 
 ## Execution Config Building
 

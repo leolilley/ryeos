@@ -74,6 +74,7 @@ class ChainElement:
     config: Optional[Dict[str, Any]] = None
     anchor_config: Optional[Dict[str, Any]] = None
     verify_deps_config: Optional[Dict[str, Any]] = None
+    config_resolve: Optional[Dict[str, Any]] = None
 
 
 class PrimitiveExecutor:
@@ -294,6 +295,13 @@ class PrimitiveExecutor:
                 cwd = self._template_string(anchor_cfg["cwd"], anchor_ctx)
                 parameters = {**(parameters or {}), "cwd": cwd}
 
+            # 5.7 Resolve tool config if declared
+            tool_config_resolve = chain[0].config_resolve if chain else None
+            if tool_config_resolve:
+                resolved_config = self._resolve_tool_config(tool_config_resolve)
+                if resolved_config:
+                    parameters["resolved_config"] = resolved_config
+
             # 6. Execute via the root primitive
             # Inject anchor context vars so {runtime_lib}, {anchor_path},
             # {tool_dir}, {tool_parent} are available for subprocess templating
@@ -415,6 +423,7 @@ class PrimitiveExecutor:
                 config=metadata.get("config"),
                 anchor_config=metadata.get("anchor"),
                 verify_deps_config=metadata.get("verify_deps"),
+                config_resolve=metadata.get("config_resolve"),
             )
             chain.append(element)
 
@@ -583,6 +592,7 @@ class PrimitiveExecutor:
             "CONFIG_SCHEMA": "config_schema",
             "ENV_CONFIG": "env_config",
             "CONFIG": "config",
+            "CONFIG_RESOLVE": "config_resolve",
         }
 
         for upper_key, lower_key in _CONFIG_FIELDS.items():
@@ -1053,6 +1063,97 @@ class PrimitiveExecutor:
                     parts.append(resolved)
 
             resolved_env[var_name] = _os.pathsep.join(parts)
+
+    def _resolve_tool_config(
+        self, config_resolve: Any
+    ) -> Dict[str, Any]:
+        """Resolve config files from .ai/config/ using 3-tier cascade.
+
+        Supports single spec (dict) or multiple specs (list of dicts).
+        Each spec has:
+            path: relative path under .ai/config/ (e.g., "agent/agent.yaml")
+            mode: "deep_merge" (system→user→project merged) or "first_match" (first found wins)
+
+        Single spec returns the resolved config dict directly.
+        Multiple specs returns {path: config_dict} mapping.
+        """
+        import yaml as _yaml
+
+        if isinstance(config_resolve, list):
+            result = {}
+            for spec in config_resolve:
+                path = spec.get("path", "")
+                result[path] = self._resolve_single_config(spec)
+            return result
+        elif isinstance(config_resolve, dict):
+            return self._resolve_single_config(config_resolve)
+        return {}
+
+    def _resolve_single_config(
+        self, spec: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Resolve a single config file using 3-tier cascade."""
+        import yaml as _yaml
+
+        path = spec.get("path")
+        if not path:
+            return {}
+
+        mode = spec.get("mode", "deep_merge")
+
+        if mode == "deep_merge":
+            # system → user → project (lowest to highest priority, all merged)
+            config: Dict[str, Any] = {}
+
+            for bundle in self.system_spaces:
+                system_path = bundle.root_path / AI_DIR / "config" / path
+                if system_path.exists():
+                    with open(system_path) as f:
+                        layer = _yaml.safe_load(f) or {}
+                    config = self._deep_merge_config(config, layer)
+
+            user_path = self.user_space / AI_DIR / "config" / path
+            if user_path.exists():
+                with open(user_path) as f:
+                    layer = _yaml.safe_load(f) or {}
+                config = self._deep_merge_config(config, layer)
+
+            project_path = self.project_path / AI_DIR / "config" / path
+            if project_path.exists():
+                with open(project_path) as f:
+                    layer = _yaml.safe_load(f) or {}
+                config = self._deep_merge_config(config, layer)
+
+            return config
+
+        elif mode == "first_match":
+            # project → user → system (first found wins)
+            candidates = [
+                self.project_path / AI_DIR / "config" / path,
+                self.user_space / AI_DIR / "config" / path,
+            ]
+            for bundle in self.system_spaces:
+                candidates.append(bundle.root_path / AI_DIR / "config" / path)
+
+            for candidate in candidates:
+                if candidate.exists():
+                    with open(candidate) as f:
+                        return _yaml.safe_load(f) or {}
+
+        return {}
+
+    @staticmethod
+    def _deep_merge_config(base: Dict, override: Dict) -> Dict:
+        """Deep merge override into base. Dicts merge recursively, else override."""
+        result = dict(base)
+        for key, value in override.items():
+            if key == "extends":
+                continue
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = PrimitiveExecutor._deep_merge_config(result[key], value)
+            else:
+                result[key] = value
+        return result
 
     def _template_string(self, template: str, ctx: Dict[str, str]) -> str:
         """Substitute {var} placeholders in a template string."""

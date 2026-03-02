@@ -96,6 +96,32 @@ CONFIG_SCHEMA = {
 }
 ```
 
+### CONFIG_RESOLVE
+
+Tools can declaratively request configuration files using `CONFIG_RESOLVE`. The executor resolves them from `.ai/config/` across the 3-tier cascade (system → user → project) and injects the merged result into `params["resolved_config"]` before the tool runs.
+
+```python
+CONFIG_RESOLVE = {
+    "path": "web/websearch.yaml",   # relative to .ai/config/
+    "mode": "deep_merge",           # or "first_match"
+}
+```
+
+**Modes:**
+- `deep_merge` — merges all layers (system → user → project). Use for configs where users override specific fields.
+- `first_match` — returns the first file found (project → user → system). Use for configs that should be replaced wholesale.
+
+**Multiple files:**
+```python
+CONFIG_RESOLVE = [
+    {"path": "agent/agent.yaml", "mode": "deep_merge"},
+    {"path": "agent/coordination.yaml", "mode": "deep_merge"},
+]
+```
+When multiple files are requested, `params["resolved_config"]` is a dict keyed by path.
+
+This is language-agnostic — works for Python, TypeScript, and any runtime. The executor resolves config before spawning the tool, so the tool just reads from `params`.
+
 ### The `execute()` Function
 
 The entry point. Always takes `params` dict and `project_path` string, returns a dict:

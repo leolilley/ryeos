@@ -116,24 +116,36 @@ Consistent across all three spaces: `project_path / AI_DIR`, `get_user_space() /
 
 ## Configuration Overrides
 
-Config files follow the same three-tier pattern under `.ai/config/`, namespaced by category:
+Config files follow the same three-tier pattern under `.ai/config/`, namespaced by category. System defaults now consistently live under `.ai/config/` (not under `.ai/tools/`):
 
 ```
 .ai/config/
 ├── agent/
-│   ├── agent.yaml              # agent settings (default provider, tiers)
-│   └── coordination.yaml       # thread coordination
+│   ├── agent.yaml                    # agent settings (default provider, tiers)
+│   ├── coordination.yaml             # thread coordination
+│   ├── resilience.yaml               # retry and resilience policies
+│   ├── events.yaml                   # event system definitions
+│   ├── error_classification.yaml     # error classification rules
+│   ├── capability_risk.yaml          # capability risk tiers
+│   ├── hook_conditions.yaml          # hook event conditions
+│   └── budget_ledger_schema.yaml     # budget ledger schema
 └── web/
-    └── websearch.yaml           # web search provider config
+    └── websearch.yaml                # web search provider config
 ```
 
 Resolution: system → user → project (deep merge). Each layer overrides fields from the layer below.
 
-| Config       | System default                | User/Project override                |
-| ------------ | ----------------------------- | ------------------------------------ |
-| Agent        | `.ai/config/agent/agent.yaml` | `.ai/config/agent/agent.yaml`        |
-| Coordination | —                             | `.ai/config/agent/coordination.yaml` |
-| Websearch    | —                             | `.ai/config/web/websearch.yaml`      |
+| Config               | System default                                       | User/Project override                                |
+| -------------------- | ---------------------------------------------------- | ---------------------------------------------------- |
+| Agent                | `.ai/config/agent/agent.yaml`                        | `.ai/config/agent/agent.yaml`                        |
+| Coordination         | `.ai/config/agent/coordination.yaml`                 | `.ai/config/agent/coordination.yaml`                 |
+| Resilience           | `.ai/config/agent/resilience.yaml`                   | `.ai/config/agent/resilience.yaml`                   |
+| Events               | `.ai/config/agent/events.yaml`                       | `.ai/config/agent/events.yaml`                       |
+| Error Classification | `.ai/config/agent/error_classification.yaml`         | `.ai/config/agent/error_classification.yaml`         |
+| Capability Risk      | `.ai/config/agent/capability_risk.yaml`              | `.ai/config/agent/capability_risk.yaml`              |
+| Hook Conditions      | `.ai/config/agent/hook_conditions.yaml`              | `.ai/config/agent/hook_conditions.yaml`              |
+| Budget Ledger        | `.ai/config/agent/budget_ledger_schema.yaml`         | `.ai/config/agent/budget_ledger_schema.yaml`         |
+| Websearch            | `.ai/config/web/websearch.yaml`                      | `.ai/config/web/websearch.yaml`                      |
 
 Config subdirectories are created by the features that need them (e.g., `setup_provider` creates `config/agent/`).
 

@@ -112,7 +112,7 @@ __category__ = "rye/bash"
 
 1. **Cache check** — if cached chain exists and all file hashes match, return cached
 2. **Resolve path** — `_resolve_tool_path(item_id)` using three-tier space precedence
-3. **Load metadata** — dispatch to the appropriate parser via `ParserRouter` (data-driven lookup from the `parsers` map in `tool_extractor.yaml` keyed by file extension) to extract `__executor_id__`, `ENV_CONFIG`, `CONFIG`, `anchor`, `verify_deps`
+3. **Load metadata** — dispatch to the appropriate parser via `ParserRouter` (data-driven lookup from the `parsers` map in `tool_extractor.yaml` keyed by file extension) to extract `__executor_id__`, `ENV_CONFIG`, `CONFIG`, `CONFIG_RESOLVE`, `anchor`, `verify_deps`
 4. **Create ChainElement** — store item_id, path, space, extracted metadata
 5. **Check termination** — if `executor_id is None`, this is a primitive; stop
 6. **Recurse** — set `current_id = executor_id`, repeat from step 2
@@ -213,8 +213,9 @@ When active:
 
 1. Start from primitive, merge upward (tool configs override runtime configs)
 2. Inject execution context: `tool_path`, `project_path`, `user_space`, `system_space`
-3. Serialize parameters as `params_json` (piped via `input_data` stdin in standard runtimes)
-4. Two-pass templating:
+3. **Resolve `CONFIG_RESOLVE`** — if the tool declares `CONFIG_RESOLVE`, resolve the referenced files from `.ai/config/` across the 3-tier cascade (system → user → project), merge or select per mode (`deep_merge` or `first_match`), and inject the result into `params["resolved_config"]`
+4. Serialize parameters as `params_json` (piped via `input_data` stdin in standard runtimes)
+5. Two-pass templating:
    - Pass 1: `${VAR}` — env var substitution (shell-escaped via `shlex.quote`)
    - Pass 2: `{param}` — config value substitution (iterates up to 3 times until stable)
 

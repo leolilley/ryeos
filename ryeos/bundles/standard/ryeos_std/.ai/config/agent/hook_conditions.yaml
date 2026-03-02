@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T08:21:13Z:18374589a089fcde3433058cfd7a5085658357cdba1285d5686af08e27125180:3R-meHvY3Z711UIs9hW201Tjx-c6K0rddjv3GMAbQ6PJtv9-d37BrrQ7iFZz2SXOyjYpUeeu7xbwHHKbWbH_BA==:4b987fd4e40303ac
+# rye:signed:2026-03-02T09:01:57Z:65163b996c7e23a05cd9db32eb0e5fef26b5d8270b050236b5211aa6a4edfe7f:o9zibFhjQH9yEsxFjFAgyRq9ZZ0M6q2JE-q6jBdvKe0RtmWg5mzGCeTcPWgqnfyQqnfXpp5IMM_cPMdXG3yXDw==:4b987fd4e40303ac
 # config/hook_conditions.yaml
 category: "rye/agent/threads/config"
 tool_type: "config"
@@ -172,13 +172,13 @@ context_hooks:
   - id: "ctx_directive_instruction"
     event: "thread_started"
     layer: 2
-    position: "before"
+    position: "after"
     wrap: false
     action:
       primary: "execute"
       item_type: "knowledge"
       item_id: "rye/agent/core/DirectiveInstruction"
-    description: "Inject directive execution instruction before directive body"
+    description: "Inject directive execution instruction after directive body"
 
 action_primaries: ["execute", "search", "load", "sign"]
 

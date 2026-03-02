@@ -29,17 +29,17 @@ class ConfigLoader:
         # System defaults — merge from all bundles
         config: Dict[str, Any] = {}
         for bundle in get_system_spaces():
-            system_path = bundle.root_path / AI_DIR / "tools" / "rye" / "agent" / "threads" / "config" / self.config_name
+            system_path = bundle.root_path / AI_DIR / "config" / "agent" / self.config_name
             if system_path.exists():
                 bundle_config = self._load_yaml(system_path)
                 config = self._merge(config, bundle_config)
 
-        user_config_path = get_user_ai_path() / "config" / self.config_name
+        user_config_path = get_user_ai_path() / "config" / "agent" / self.config_name
         if user_config_path.exists():
             user_config = self._load_yaml(user_config_path)
             config = self._merge(config, user_config)
 
-        project_config_path = project_path / AI_DIR / "config" / self.config_name
+        project_config_path = project_path / AI_DIR / "config" / "agent" / self.config_name
         if project_config_path.exists():
             project_config = self._load_yaml(project_config_path)
             config = self._merge(config, project_config)

@@ -61,6 +61,29 @@ The immutable "standard library" that ships inside the `rye` Python package. Loc
 
 System space items are never modified at runtime. To override a system tool, place a file with the same item ID in project or user space.
 
+## Configuration
+
+All spaces can contain configuration under `.ai/config/`. Config resolution follows the same 3-tier precedence (project wins over user, user wins over system). Tools can use `CONFIG_RESOLVE` for automatic resolution.
+
+```
+.ai/config/
+├── agent/
+│   ├── agent.yaml
+│   ├── coordination.yaml
+│   ├── resilience.yaml
+│   ├── events.yaml
+│   ├── error_classification.yaml
+│   ├── capability_risk.yaml
+│   ├── hook_conditions.yaml
+│   └── budget_ledger_schema.yaml
+├── keys/
+│   ├── signing/
+│   └── trusted/
+└── web/
+    ├── websearch.yaml
+    └── browser.json
+```
+
 ## Resolver Classes
 
 Three resolver classes in `rye/utils/resolvers.py` implement the same pattern for each item type:
