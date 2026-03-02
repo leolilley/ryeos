@@ -36,6 +36,22 @@ Layout and conventions for the `.ai/` portable data bundle.
 ├── directives/    # Workflow instructions
 ├── tools/         # Executable items
 ├── knowledge/     # Domain information
+├── config/
+│   ├── agent/
+│   │   ├── agent.yaml
+│   │   ├── coordination.yaml
+│   │   ├── resilience.yaml
+│   │   ├── events.yaml
+│   │   ├── error_classification.yaml
+│   │   ├── capability_risk.yaml
+│   │   ├── hook_conditions.yaml
+│   │   └── budget_ledger_schema.yaml
+│   ├── keys/
+│   │   ├── signing/   # Ed25519 signing keypairs
+│   │   └── trusted/   # Trusted public keys
+│   └── web/
+│       ├── websearch.yaml
+│       └── browser.json
 ├── bundles/       # Bundle manifests
 ├── lockfiles/     # Integrity pinning
 ├── threads/       # Thread execution state  (auto-generated)

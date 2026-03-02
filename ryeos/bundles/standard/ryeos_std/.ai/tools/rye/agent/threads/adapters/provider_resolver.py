@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:c4a8d2a776e6485073c7e6f08b7ccb371a14e50a55a08d5003ae2f7716d24a12:ILcbJCDFQpj5fpy3Is7piiNkFZ-9cWhQLvIRGFKSBILcmrMbv7zAhlg4i8-JBTkePVOuda6Y1zW1uJZcD-y4Dw==:4b987fd4e40303ac
+# rye:signed:2026-03-02T08:55:42Z:5755f782c53b9ee248cd7d0679a7765d277170c950c7b788c8e64dbcb5fae2ec:sBn0C-J4jBX5u-pHjwXrgD_TMyH6pFs4dJV4_LM_PUy8Xp_ZxOnFLJ5Zgcq_2B1xxWzX9QFMOEJNkET5h1xZDQ==:4b987fd4e40303ac
 
 # # rye:signed:2026-02-25T08:10:44Z:0d965e6faa7916fa1958c1a0bc2523075bfbe0c32f4513475a0b5841296a335f:wN-agmztF7QYrpCM1J8REfAY1SemuAWtu0Ere1sB-IfKUVTK3hZSS4rUwvMDvfOg0FieSDirlOYrEL5DH4WGCg==:9fbfabe975fa5a7f
 
@@ -210,6 +210,7 @@ def resolve_provider(
     3. All providers alphabetically (first match wins)
 
     Within the selected provider(s), resolution order:
+    0. Check project-level tier_mapping from agent.yaml (highest priority)
     1. Check tier_mapping keys (e.g., "fast" → "claude-haiku-4-5-20251001")
     2. Check literal model ID match
     3. Check prefix match on model IDs
@@ -236,9 +237,9 @@ def resolve_provider(
         )
 
     # Determine preferred provider: explicit hint > agent config > none
+    agent_config = _load_agent_config(project_path)
     preferred = provider
     if not preferred:
-        agent_config = _load_agent_config(project_path)
         preferred = agent_config.get("provider", {}).get("default")
 
     # If we have an explicit provider hint (from directive), filter to only that provider
@@ -261,6 +262,31 @@ def resolve_provider(
         ordered = filtered
     else:
         ordered = _order_configs(configs, preferred)
+
+    # Pass 0: Check project-level tier_mapping override from agent.yaml
+    project_tiers = agent_config.get("tier_mapping", {})
+    if model in project_tiers:
+        override_model = project_tiers[model]
+        logger.debug(
+            "Project-level tier override: '%s' → '%s'", model, override_model,
+        )
+        # Find which provider handles this model ID (reuse Pass 2/3 logic)
+        for yaml_path, config in ordered:
+            tier_mapping = config.get("tier_mapping", {})
+            if override_model in tier_mapping.values():
+                item_id = _build_item_id(config, yaml_path)
+                return override_model, item_id, _apply_model_profiles(config, override_model)
+        for yaml_path, config in ordered:
+            tier_mapping = config.get("tier_mapping", {})
+            for tier, model_id in tier_mapping.items():
+                if model_id.startswith(override_model) or override_model.startswith(model_id):
+                    item_id = _build_item_id(config, yaml_path)
+                    return override_model, item_id, _apply_model_profiles(config, override_model)
+        # Fallback: check pricing sections
+        for yaml_path, config in ordered:
+            if override_model in config.get("pricing", {}):
+                item_id = _build_item_id(config, yaml_path)
+                return override_model, item_id, _apply_model_profiles(config, override_model)
 
     # Pass 1: Check tier_mapping
     # If no preferred provider, check for ambiguity first

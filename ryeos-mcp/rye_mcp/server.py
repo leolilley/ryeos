@@ -258,6 +258,8 @@ async def run_stdio():
 
 def main():
     """Entry point."""
+    import sys
+    os.environ.setdefault("RYE_KERNEL_PYTHON", sys.executable)
     asyncio.run(run_stdio())
 
 

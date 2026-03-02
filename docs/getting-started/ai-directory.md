@@ -19,9 +19,21 @@ The `.ai/` directory is a portable data bundle that gives AI agents structured a
 ├── tools/                # Executable items (.py, .yaml, .sh, .js)
 ├── knowledge/            # Domain information (.md files)
 ├── config/
-│   └── keys/
-│       ├── signing/      # Ed25519 signing keypairs
-│       └── trusted/      # Trusted public keys
+│   ├── agent/
+│   │   ├── agent.yaml
+│   │   ├── coordination.yaml
+│   │   ├── resilience.yaml
+│   │   ├── events.yaml
+│   │   ├── error_classification.yaml
+│   │   ├── capability_risk.yaml
+│   │   ├── hook_conditions.yaml
+│   │   └── budget_ledger_schema.yaml
+│   ├── keys/
+│   │   ├── signing/      # Ed25519 signing keypairs
+│   │   └── trusted/      # Trusted public keys
+│   └── web/
+│       ├── websearch.yaml
+│       └── browser.json
 ├── bundles/              # Bundle manifests
 ├── lockfiles/            # Integrity pinning
 ├── threads/              # Thread execution state (auto-generated at runtime)

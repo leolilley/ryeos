@@ -12,7 +12,7 @@ requires:
 # Tier mapping across all Zen models
 tier_mapping:
   fast: "claude-haiku-4-5"
-  general: "claude-sonnet-4-5"
+  general: "claude-haiku-4-5"
   high: "claude-sonnet-4-6"
   max: "claude-opus-4-6"
 

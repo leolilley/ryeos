@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:2be52274ee81fc536a215bdcacf5d28f80cebcb8cb2a752056ccdf41ccc1e5b6:LoVfqNuEvBmSfotFLmMnCJ3AWOq6aIJs-VpG_k6TjCVQkxkaMq3rY5yuHd3QHfDtesI1Mw6HOYjyIiU0Wj-RCw==:4b987fd4e40303ac
+# rye:signed:2026-03-02T07:44:06Z:ae608bc34f49969da81fd69313b44b6632d493b290d83a14510a2c9adc7e3420:dl0hnr_0GXWDHnOCwvPBQJGl57cT0gPC-GbADA52FLYBRg3RWlIQoN0tnxCQuEmJLwY3axUZRlEUO1P7qAD0DQ==:4b987fd4e40303ac
 __tool_type__ = "python"
 __version__ = "1.3.0"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -40,7 +40,8 @@ async def execute(
     transport: str,
     command: Optional[str] = None,
     args: Optional[List[str]] = None,
-    env: Optional[Dict[str, str]] = None,
+    mcp_server_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
     url: Optional[str] = None,
     headers: Optional[Dict[str, str]] = None,
     auth: Optional[Dict[str, Any]] = None,
@@ -56,7 +57,7 @@ async def execute(
                   - "sse": Legacy SSE transport (deprecated)
         command: Command for stdio transport (required if transport="stdio")
         args: Command arguments for stdio transport
-        env: Environment variables for stdio transport
+        mcp_server_env: Environment variables for stdio transport
         url: URL for HTTP transport (required if transport="http" or "sse")
         headers: HTTP headers dict (e.g., {"CONTEXT7_API_KEY": "..."})
         auth: Authentication config (legacy, use headers instead)
@@ -85,7 +86,8 @@ async def execute(
             server_params = StdioServerParameters(
                 command=command,
                 args=args or [],
-                env=env or {},
+                env=mcp_server_env if mcp_server_env else None,
+                cwd=cwd,
             )
 
             # Add timeout to prevent stalling
@@ -314,7 +316,7 @@ if __name__ == "__main__":
         if args.args:
             params["args"] = args.args
         if args.env:
-            params["env"] = json.loads(args.env)
+            params["mcp_server_env"] = json.loads(args.env)
         if args.url:
             params["url"] = args.url
         if args.headers:

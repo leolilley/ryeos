@@ -201,7 +201,7 @@ The static personality document approach can never get here because it doesn't a
 
 ### Existing Hook Infrastructure
 
-Rye's hook system is defined in `hook_conditions.yaml` (`ryeos/rye/.ai/tools/rye/agent/threads/config/hook_conditions.yaml`). The currently supported hook events are:
+Rye's hook system is defined in `hook_conditions.yaml` (`.ai/config/agent/hook_conditions.yaml`). The currently supported hook events are:
 
 - `error` — error classification and retry/fail/abort
 - `limit` — spend/turns/tokens/duration limits
@@ -212,7 +212,7 @@ Rye's hook system is defined in `hook_conditions.yaml` (`ryeos/rye/.ai/tools/rye
 
 ### Proposed New Hook Events
 
-Personality injection would require **new hook events** beyond what currently exists. These would need to be added to `hook_conditions.yaml` and the event system in `events.yaml` (`ryeos/rye/.ai/tools/rye/agent/threads/config/events.yaml`):
+Personality injection would require **new hook events** beyond what currently exists. These would need to be added to `hook_conditions.yaml` and the event system in `events.yaml` (`.ai/config/agent/events.yaml`):
 
 ```yaml
 # PROPOSED additions to hook_conditions.yaml

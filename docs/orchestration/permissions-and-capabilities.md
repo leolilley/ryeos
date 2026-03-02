@@ -315,7 +315,7 @@ Every capability is classified into a risk tier based on pattern matching agains
 
 ### Classification Rules in `capability_risk.yaml`
 
-Classifications are defined in `.ai/tools/rye/agent/threads/config/capability_risk.yaml`. Each entry maps a set of fnmatch patterns to a risk tier:
+Classifications are defined in `.ai/config/agent/capability_risk.yaml`. Each entry maps a set of fnmatch patterns to a risk tier:
 
 ```yaml
 classifications:

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:b7159a37773e9b72e25ca1984feeef8d1422103c9c4593e821fad3b835b58b38:KSB2zZcR_itiXQHrWT1jTHoCpsGvVhBRrwKsZwWd7VJwDZiJtIYQCg83PpwHm7U2kjUukUiYQ5Sr9nwS6R2aAw==:4b987fd4e40303ac
+# rye:signed:2026-03-02T07:49:08Z:4191694d0219313e98e76ca97347299ac36c1fe596e67ad8f1bea11ae05d449d:GQ0HhuH8_3S7hnBhLrjdGrlXs-YPKYHnxTDi8mD0-vuOsD5ykK_yGuFe3qCHaq7GVV2VQoLZlpeBrdj5TmejAg==:4b987fd4e40303ac
 """
 MCP Connect Tool
 
@@ -30,7 +30,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import AI_DIR
+try:
+    from rye.constants import AI_DIR
+except ImportError:
+    AI_DIR = ".ai"
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +140,8 @@ def load_server_config(
         "headers": resolved_config.get("headers", {}),
         "command": resolved_config.get("command"),
         "args": resolved_config.get("args", []),
-        "env": resolved_config.get("env", {}),
+        "mcp_server_env": resolved_config.get("env", {}),
+        "cwd": resolved_config.get("cwd"),
         "timeout": resolved_config.get("timeout", 30),
     }
 
@@ -203,7 +207,8 @@ async def call_stdio(
     args: List[str],
     tool_name: str,
     params: Dict[str, Any],
-    env: Optional[Dict[str, str]] = None,
+    mcp_server_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
     timeout: int = 30,
 ) -> Dict[str, Any]:
     """Call an MCP tool via stdio transport."""
@@ -214,7 +219,8 @@ async def call_stdio(
         server_params = StdioServerParameters(
             command=command,
             args=args,
-            env=env or {},
+            env=mcp_server_env if mcp_server_env else None,
+            cwd=cwd,
         )
 
         try:
@@ -318,7 +324,8 @@ async def execute_with_server_config(
                 args=config.get("args", []),
                 tool_name=tool_name,
                 params=params,
-                env=config.get("env"),
+                mcp_server_env=config.get("mcp_server_env"),
+                cwd=config.get("cwd"),
                 timeout=config.get("timeout", 30),
             )
 
@@ -337,7 +344,8 @@ async def execute_direct(
     headers: Optional[Dict[str, str]] = None,
     command: Optional[str] = None,
     args: Optional[List[str]] = None,
-    env: Optional[Dict[str, str]] = None,
+    mcp_server_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
     timeout: int = 30,
 ) -> Dict[str, Any]:
     """Execute MCP tool call with direct parameters."""
@@ -349,7 +357,7 @@ async def execute_direct(
     elif transport == "stdio":
         if not command:
             return {"success": False, "error": "Command required for stdio transport"}
-        return await call_stdio(command, args or [], tool_name, params, env, timeout)
+        return await call_stdio(command, args or [], tool_name, params, mcp_server_env, cwd, timeout)
 
     else:
         return {"success": False, "error": f"Unknown transport: {transport}"}
@@ -377,6 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--command", help="Command to run (for stdio)")
     parser.add_argument("--args", nargs="*", help="Command arguments (for stdio)")
     parser.add_argument("--env", default="{}", help="Environment variables (JSON)")
+    parser.add_argument("--cwd", help="Working directory for stdio transport")
 
     # Common
     parser.add_argument("--tool", required=True, help="Tool name to call")
@@ -412,7 +421,7 @@ if __name__ == "__main__":
         # Direct mode
         try:
             headers = json.loads(parsed.headers)
-            env = json.loads(parsed.env)
+            mcp_server_env = json.loads(parsed.env)
         except json.JSONDecodeError as e:
             print(json.dumps({"success": False, "error": f"Invalid JSON: {e}"}))
             sys.exit(1)
@@ -426,7 +435,8 @@ if __name__ == "__main__":
                 headers=headers,
                 command=parsed.command,
                 args=parsed.args,
-                env=env,
+                mcp_server_env=mcp_server_env,
+                cwd=parsed.cwd,
                 timeout=parsed.timeout,
             )
         )

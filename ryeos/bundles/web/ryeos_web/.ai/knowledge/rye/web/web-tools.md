@@ -54,7 +54,7 @@ Search the web via configurable provider. Defaults to DuckDuckGo (no API key nee
 
 ### Provider Configuration
 
-YAML config at `.ai/config/web/search.yaml` (project or user). Project takes precedence.
+YAML config at `.ai/config/web/websearch.yaml`. Resolved across all 3 tiers (system → user → project, project takes precedence). Tools can use `CONFIG_RESOLVE` for automatic resolution.
 
 ```yaml
 default_provider:
@@ -202,7 +202,7 @@ Browser automation via `playwright-cli`. Open pages, take screenshots, interact 
 
 ### Browser Configuration
 
-Config is resolved project → user → system, from `.ai/config/web/browser.json`. The default config uses Playwright's bundled Chromium:
+Config at `.ai/config/web/browser.json`, resolved across all 3 tiers (system → user → project, project takes precedence). Tools can use `CONFIG_RESOLVE` for automatic resolution. The default config uses Playwright's bundled Chromium:
 
 ```json
 {

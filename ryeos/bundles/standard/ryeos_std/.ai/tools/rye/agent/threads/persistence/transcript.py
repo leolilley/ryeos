@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:4157ae5e508afa58aa204c0212f1b3f9a819701e4816660f97c4eeeff5ae5e4b:kQyxXYKp-CBMwyw9Ec82pUkFToeH2CgWF-rIrxfz02OsPQcF8CDkiEoAOK7OwtM8hfohBuPqbNQUB3rlIuSPBg==:4b987fd4e40303ac
+# rye:signed:2026-03-02T08:51:19Z:55cc78060d372641835efece801a70e6f2bc72131daab711052fa93e278a5411:CEYvjM8lknBOUS687pc9F1ALuVO-I06WbKlL9D7yB9ieE26pJGfO1Yi_k6lR1xkJbwC0NyOphEhAo9XOkncrDA==:4b987fd4e40303ac
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -299,14 +299,9 @@ class Transcript:
             return f"## System Prompt ({layer_str})\n\n{text}\n\n"
 
         if event_type == "context_injected":
-            blocks = payload.get("blocks", [])
-            parts = []
-            for block in blocks:
-                bid = block.get("id", "unknown")
-                tag = block.get("role", bid.rsplit("/", 1)[-1] if "/" in bid else bid)
-                content = block.get("content", "")
-                parts.append(f'<{tag} id="{bid}">\n{content}\n</{tag}>\n\n')
-            return "".join(parts)
+            # Context blocks are already included in cognition_in — skip
+            # rendering them separately to avoid duplicate content.
+            return ""
 
         if event_type == "cognition_in":
             role = payload.get("role", "user")

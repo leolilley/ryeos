@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:48305b56d45e9292c673f8a18ed4a4001bab02d5984007d088d32b8b3241fd9b:m8B7L_Q5MVIA8URosQvjTo3jEDpil5BFmAtP1-yGoZC1YjSuk0FWLq26cw46K_jm-PAOKW8BfdQsV7M4qCAcDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-02T07:44:06Z:66182c36ead89362c0521f2585fc9ddb827d548e1ea663d414164aef627f09ed:B-25kC9kqk3DMYTLx3m_8kn5ZopFHBQwZVizsm1o5hgf3THy7BCPmfIt4wHdJneHQMjGTuTpwnYj4YuYHWvtDA==:4b987fd4e40303ac
 """
 MCP Manager Tool
 
@@ -62,7 +62,8 @@ def create_server_config(
     headers: Optional[Dict[str, str]] = None,
     command: Optional[str] = None,
     args: Optional[List[str]] = None,
-    env: Optional[Dict[str, str]] = None,
+    mcp_server_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
     timeout: int = 30,
 ) -> str:
     """Generate server config YAML content."""
@@ -83,8 +84,10 @@ def create_server_config(
             config["command"] = command
         if args:
             config["args"] = args
-        if env:
-            config["env"] = env
+        if mcp_server_env:
+            config["env"] = mcp_server_env
+        if cwd:
+            config["cwd"] = cwd
 
     data = {
         "tool_type": "mcp_server",
@@ -157,7 +160,8 @@ async def discover_tools(
     headers: Optional[Dict[str, str]] = None,
     command: Optional[str] = None,
     args: Optional[List[str]] = None,
-    env: Optional[Dict[str, str]] = None,
+    mcp_server_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
     timeout: int = 30,
 ) -> Dict[str, Any]:
     """Discover tools from an MCP server."""
@@ -186,7 +190,8 @@ async def discover_tools(
             transport="stdio",
             command=command,
             args=args,
-            env=env,
+            mcp_server_env=mcp_server_env,
+            cwd=cwd,
             timeout=timeout,
         )
     else:
@@ -202,7 +207,8 @@ async def action_add(
     headers: Optional[Dict[str, str]] = None,
     command: Optional[str] = None,
     args: Optional[List[str]] = None,
-    env: Optional[Dict[str, str]] = None,
+    mcp_server_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
     timeout: int = 30,
 ) -> Dict[str, Any]:
     """Add a new MCP server and discover its tools."""
@@ -225,7 +231,8 @@ async def action_add(
         headers=headers,
         command=command,
         args=args,
-        env=env,
+        mcp_server_env=mcp_server_env,
+        cwd=cwd,
         timeout=timeout,
     )
 
@@ -251,7 +258,8 @@ async def action_add(
         headers=headers,
         command=command,
         args=args,
-        env=env,
+        mcp_server_env=mcp_server_env,
+        cwd=cwd,
         timeout=timeout,
     )
     server_file.write_text(server_content, encoding="utf-8")
@@ -396,7 +404,7 @@ async def action_refresh(
         headers=config.get("headers"),
         command=config.get("command"),
         args=config.get("args"),
-        env=config.get("env"),
+        mcp_server_env=config.get("env"),
         timeout=config.get("timeout", 30),
     )
 
@@ -515,7 +523,8 @@ async def execute_action(
             headers=params.get("headers"),
             command=params.get("command"),
             args=params.get("args"),
-            env=params.get("env"),
+            mcp_server_env=params.get("mcp_server_env"),
+            cwd=params.get("cwd"),
             timeout=params.get("timeout", 30),
         )
 
@@ -551,7 +560,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="MCP Manager")
-    parser.add_argument("--params", required=True, help="Parameters as JSON")
+    parser.add_argument("--params", help="Parameters as JSON (also accepts stdin)")
     parser.add_argument("--project-path", required=True, help="Project path")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
@@ -563,7 +572,8 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.INFO)
 
     try:
-        params = json.loads(args.params)
+        raw = args.params if args.params else sys.stdin.read()
+        params = json.loads(raw)
         action = params.pop("action", None)
         if not action:
             print(json.dumps({"success": False, "error": "action required in params"}))

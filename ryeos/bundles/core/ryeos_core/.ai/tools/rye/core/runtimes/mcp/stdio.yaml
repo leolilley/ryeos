@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:25:40Z:c42df67b9a342c957516c6082ad6e2343226bfa5b9fc798bd40ee58842647df4:Otbnq82XYumawDV5x4uhLz9YT9zfCIVRk64ZcDY3-lgz8ZQAmQxthKUIeWCqy9v_A-nL6qQUZiQjK5jKDupTBw==:4b987fd4e40303ac
+# rye:signed:2026-03-02T07:56:22Z:c00bf6d1da3c422558021859c37fb6a6c9721ac484d509945af669630eb51caa:Nuo057TmvUr6hngu9uJAxZpH_fjABDzQ5l_7E-8TMN_d_Xr0cDoUqB1QEje_6NXKvOlmhW-1VNonDreQha0VBw==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -6,20 +6,13 @@ category: rye/core/runtimes/mcp
 description: "MCP stdio runtime - executes MCP tools via stdio transport"
 
 env_config:
-  interpreter:
-    type: local_binary
-    binary: python
-    candidates: [python3]
-    search_paths: [".venv/bin", ".venv/Scripts"]
-    var: RYE_PYTHON
-    fallback: python3
   env:
     PYTHONUNBUFFERED: "1"
 
 config:
-  command: "${RYE_PYTHON}"
+  command: "${RYE_KERNEL_PYTHON}"
   args:
-    - "{system_space}/tools/rye/core/mcp/connect.py"
+    - "{system_space}/.ai/tools/rye/mcp/connect.py"
     - "--server-config"
     - "{server_config_path}"
     - "--tool"

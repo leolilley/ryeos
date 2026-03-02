@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T08:21:13Z:4aa44965cc252c8833da02f4dd73d34c5321508aa24b491d38ab2359b37f3695:HgvkxePp6dfxsfPF4pJgm2peAa29Ege6JJiTzKMotZJqTGou7Gqm3AbwDbzpplYjafhiHOxQxHhN-JGxSVlFCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-02T08:42:37Z:c6a2304ad26068d1af6c872aab418d0a4e9188a7e6b74518c472f40c7b5f4cbe:VZZdc1GWEa3cV7mFxpg6cEYJko5jeK965lZdtTIx7yqMIW5cmCPnOTKPFzs91QE2UcBZ-nmRHr7BZqRcZpBpBA==:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -558,18 +558,21 @@ async def execute(params: Dict, project_path: str) -> Dict:
             chain_result = await _resolve_directive_chain(
                 directive_name, directive, project_path
             )
-            # Load knowledge items for all context positions
-            from rye.tools.load import LoadTool
+            # Execute knowledge items for all context positions
+            # (execute parses frontmatter and returns body only, unlike load
+            # which returns raw content with YAML metadata and signatures)
+            from rye.tools.execute import ExecuteTool
             from rye.utils.resolvers import get_user_space
-            load_tool = LoadTool(user_space=str(get_user_space()))
+            exec_tool = ExecuteTool(user_space=str(get_user_space()))
             for position in ("system", "before", "after"):
                 parts = []
                 for kid in chain_result["context"].get(position, []):
-                    kr = await load_tool.handle(
+                    kr = await exec_tool.handle(
                         item_type="knowledge", item_id=kid, project_path=project_path,
                     )
                     if kr.get("status") == "success":
-                        content = kr.get("content", "")
+                        data = kr.get("data", {})
+                        content = data.get("body", "") if isinstance(data, dict) else ""
                         if content:
                             parts.append(content.strip())
                 if parts:

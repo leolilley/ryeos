@@ -243,7 +243,7 @@ Low-level components that power the LLM loop:
 
 Data-driven config loaders — read YAML configs and return structured data:
 
-- **config_loader**, **coordination_loader**, **error_loader**, **events_loader**, **hooks_loader**, **resilience_loader**
+- **config_loader**, **coordination_loader**, **error_loader**, **events_loader**, **hooks_loader**, **resilience_loader** — read YAML configs from `.ai/config/agent/` (resolved via the 3-tier cascade)
 - **condition_evaluator** — Evaluate hook conditions
 - **interpolation** — Interpolate variables in hook actions
 

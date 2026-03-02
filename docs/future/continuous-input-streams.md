@@ -29,7 +29,7 @@ The foundation for continuous input streams is already built:
 **Thread continuation** — `coordination.yaml` defines the handoff pipeline:
 
 ```yaml
-# ryeos/rye/.ai/tools/rye/agent/threads/config/coordination.yaml
+# .ai/config/agent/coordination.yaml
 coordination:
   continuation:
     trigger_threshold: 0.9

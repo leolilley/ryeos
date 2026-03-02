@@ -130,6 +130,15 @@ class EnvResolver:
         if not var_name:
             return env
 
+        # If the var is already set in the environment (e.g. inherited from
+        # the parent process) and the binary exists, respect it. This lets
+        # system tools (like MCP runtimes) use the parent's RYE_PYTHON
+        # instead of searching the project venv.
+        existing = env.get(var_name) or os.environ.get(var_name)
+        if existing and Path(existing).is_file():
+            env[var_name] = existing
+            return env
+
         if resolver_type == "local_binary":
             path = self._resolve_local_binary(config)
         elif resolver_type == "system_binary":
