@@ -43,7 +43,13 @@ limits:
     spawns: 10
     depth: 5
     duration_seconds: 600
+
+tool_preload:
+  enabled: true    # Set false to disable tool schema preload
+  max_tokens: 2000 # Token budget for schema injection (~4 chars/token)
 ```
+
+The `tool_preload` section controls Layer 1 of context injection — tool schema preload. When enabled, resolved tool schemas are injected into the first user message so the agent knows parameter shapes before turn 1. See [Context Injection — Layer 1](./context-injection.md) for details.
 
 ### Layer 2: Directive metadata
 

@@ -37,25 +37,30 @@ These layers combine to give the agent a complete working context on its first t
 
 After capabilities are resolved, the system scans `harness._capabilities` for `rye.execute.tool.*` capability strings. Matching tool files are resolved across three-tier space (project → user → system), and their `CONFIG_SCHEMA` and `__tool_description__` are extracted via AST parsing — safe, no execution.
 
-The extracted schemas are formatted as concise `<tool_schemas>` XML blocks and injected into `directive_context["before"]`:
+The extracted schemas are formatted using the `rye_execute()` calling convention and injected into `directive_context["before"]`:
 
-```xml
-<tool_schemas>
-  <tool id="project/deploy/kubectl">
-    <description>Execute kubectl commands against the staging cluster</description>
-    <params>
-      <param name="command" type="string" required="true">The kubectl command to run</param>
-      <param name="namespace" type="string" required="false">Kubernetes namespace</param>
-    </params>
-  </tool>
-</tool_schemas>
+```
+Available tools (call via rye_execute):
+rye_execute(item_type="tool", item_id="project/deploy/kubectl", parameters={"command": "<string>", "namespace": "<string>"})
+  Execute kubectl commands against the staging cluster
+  command (string) [required]: The kubectl command to run
+  namespace (string): Kubernetes namespace
 ```
 
 Primary tools (`rye/primary/`) are skipped — they're already registered as API-level tool definitions with the LLM provider.
 
 ### Token Budget and Prioritization
 
-Tool schema preload is governed by a configurable `max_tool_preload_tokens` budget (default ~2000 tokens, estimated at 4 characters per token). When the budget is tight, specific capability strings (e.g. `rye.execute.tool.project/deploy/kubectl`) are prioritized over broad wildcards (e.g. `rye.execute.tool.*`).
+Tool schema preload is governed by a configurable token budget (default ~2000 tokens, estimated at 4 characters per token). The budget is configured via the `tool_preload` section in `resilience.yaml`:
+
+```yaml
+# .ai/config/agent/resilience.yaml
+tool_preload:
+  enabled: true
+  max_tokens: 2000
+```
+
+Setting `enabled: false` disables preload entirely. When the budget is tight, specific capability strings (e.g. `rye.execute.tool.project/deploy/kubectl`) are prioritized over broad wildcards (e.g. `rye.execute.tool.*`).
 
 **Implementation:** `tools/rye/agent/threads/loaders/tool_schema_loader.py`
 
@@ -172,7 +177,7 @@ Hooks can set `wrap: false` to inject content without XML wrapping. By default, 
 With all layers active, the first user message is assembled as:
 
 ```
-tool schemas (Layer 1)            ← from tool_schema_loader (wrapped in <tool_schemas>)
+tool schemas (Layer 1)            ← from tool_schema_loader (rye_execute calling convention)
 hook before-context (environment) ← from thread_started hooks (wrapped)
 hook before-context (dir. instr)  ← from thread_started hooks (raw, wrap: false)
 extends before-context            ← from extends chain <before> items (protocol, domain knowledge)
@@ -382,7 +387,7 @@ Context injection overhead depends on which layers are active:
 
 | Source | Approximate Tokens | Notes |
 |---|---|---|
-| Tool schema preload (Layer 1) | ~200–2000 | Configurable via `max_tool_preload_tokens` (default ~2000) |
+| Tool schema preload (Layer 1) | ~200–2000 | Configurable via `tool_preload.max_tokens` in `resilience.yaml` (default ~2000) |
 | Environment + directive instruction | ~200 | Fixed cost from `thread_started` hooks |
 | Identity + Behavior (Layer 3) | ~400 | From extends chain `<system>` entries |
 | Protocol items (Layer 3) | ~100–400 | Depends on how many protocol items the base declares |
