@@ -7,10 +7,11 @@ from pathlib import Path
 # The conftest.py in this directory already sets up runtime lib paths
 # and pre-imports core modules (condition_evaluator, interpolation, module_loader).
 
+from conftest import PROJECT_ROOT, get_bundle_path
 from module_loader import load_module
 
 _THREADS_ANCHOR = (
-    Path(__file__).parent.parent.parent
+    PROJECT_ROOT
     / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
 )
 

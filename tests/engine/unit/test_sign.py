@@ -10,7 +10,7 @@ from rye.tools.sign import SignTool
 
 
 @pytest.fixture
-def temp_project():
+def temp_project(_setup_user_space):
     """Create temporary project with test items."""
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)

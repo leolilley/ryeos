@@ -8,22 +8,29 @@ pytest.importorskip("supabase")
 
 from fastapi.testclient import TestClient
 
+from registry_api.config import Settings, get_settings
+from registry_api.main import app
 
-# Mock settings before importing app
+
+def _mock_settings():
+    return MagicMock(
+        spec=Settings,
+        supabase_url="https://test.supabase.co",
+        supabase_service_key="test-service-key",
+        supabase_jwt_secret="test-jwt-secret",
+        host="0.0.0.0",
+        port=8000,
+        log_level="INFO",
+        allowed_origins=["*"],
+    )
+
+
 @pytest.fixture(autouse=True)
-def mock_settings():
-    """Mock settings for all tests."""
-    with patch("registry_api.config.get_settings") as mock:
-        mock.return_value = MagicMock(
-            supabase_url="https://test.supabase.co",
-            supabase_service_key="test-service-key",
-            supabase_jwt_secret="test-jwt-secret",
-            host="0.0.0.0",
-            port=8000,
-            log_level="INFO",
-            allowed_origins=["*"],
-        )
-        yield mock
+def _override_settings():
+    """Override settings via FastAPI dependency overrides."""
+    app.dependency_overrides[get_settings] = _mock_settings
+    yield
+    app.dependency_overrides.pop(get_settings, None)
 
 
 @pytest.fixture
@@ -45,8 +52,16 @@ def mock_user():
 @pytest.fixture
 def client(mock_supabase):
     """Test client with mocked dependencies."""
-    from registry_api.main import app
     return TestClient(app)
+
+
+@pytest.fixture
+def authed_client(mock_supabase, mock_user):
+    """Test client with authentication bypassed."""
+    from registry_api.auth import get_current_user
+    app.dependency_overrides[get_current_user] = lambda: mock_user
+    yield TestClient(app)
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 class TestHealthCheck:
@@ -90,12 +105,12 @@ class TestPushEndpoint:
             "version": "1.0.0",
         })
         
-        # Should return 403 (no auth header)
-        assert response.status_code == 403
+        # HTTPBearer returns 401 when no Authorization header is present
+        assert response.status_code == 401
 
-    def test_push_validates_item_type(self, client):
+    def test_push_validates_item_type(self, authed_client):
         """Push validates item_type field."""
-        response = client.post(
+        response = authed_client.post(
             "/v1/push",
             json={
                 "item_type": "invalid",
@@ -103,15 +118,14 @@ class TestPushEndpoint:
                 "content": "test",
                 "version": "1.0.0",
             },
-            headers={"Authorization": "Bearer fake-token"},
         )
         
         # Should return 422 (validation error) for invalid enum
         assert response.status_code == 422
 
-    def test_push_validates_version_format(self, client):
+    def test_push_validates_version_format(self, authed_client):
         """Push validates semver version format."""
-        response = client.post(
+        response = authed_client.post(
             "/v1/push",
             json={
                 "item_type": "directive",
@@ -119,7 +133,6 @@ class TestPushEndpoint:
                 "content": "test",
                 "version": "v1.0",  # Invalid semver
             },
-            headers={"Authorization": "Bearer fake-token"},
         )
         
         assert response.status_code == 422
@@ -137,12 +150,12 @@ class TestPullEndpoint:
 
     def test_pull_not_found(self, client, mock_supabase):
         """Pull returns 404 for non-existent item."""
-        # Mock empty result
-        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
-            data=[]
-        )
+        # Mock empty result — chain is .select().eq().eq().eq().execute()
+        eq_chain = mock_supabase.table.return_value.select.return_value.eq.return_value
+        eq_chain.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
         
-        response = client.get("/v1/pull/directive/nonexistent")
+        # item_id must be namespace/category/name format
+        response = client.get("/v1/pull/directive/testns/core/nonexistent")
         
         assert response.status_code == 404
 
@@ -152,20 +165,26 @@ class TestSearchEndpoint:
 
     def test_search_basic(self, client, mock_supabase):
         """Search returns results."""
-        # Mock search result
-        mock_supabase.table.return_value.select.return_value.or_.return_value.range.return_value.execute.return_value = MagicMock(
+        mock_result = MagicMock(
             data=[{
+                "id": "uuid-1",
+                "namespace": "testuser",
+                "category": "core",
                 "name": "test-directive",
                 "description": "A test",
-                "category": "core",
+                "visibility": "public",
                 "download_count": 10,
+                "latest_version": "1.0.0",
                 "created_at": "2026-02-04T10:00:00Z",
-                "users": {"username": "testuser"},
             }],
             count=1,
         )
+        # The search iterates 3 item types, each calling the same chain.
+        # MagicMock auto-chains so all paths resolve to this result.
+        tbl = mock_supabase.table.return_value
+        tbl.select.return_value.or_.return_value.eq.return_value.range.return_value.execute.return_value = mock_result
         
-        response = client.get("/v1/search?query=test")
+        response = client.get("/v1/search?query=test&item_type=directive")
         
         assert response.status_code == 200
         data = response.json()

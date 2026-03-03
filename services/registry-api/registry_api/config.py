@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import List, Optional
 
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 
 class Settings(BaseSettings):
@@ -17,6 +18,8 @@ class Settings(BaseSettings):
     Note: Supabase now uses "Secret keys" instead of legacy "service_role" keys.
     Both work the same way - they bypass RLS for backend operations.
     """
+
+    model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # Supabase
     supabase_url: str
@@ -34,10 +37,6 @@ class Settings(BaseSettings):
     # Rate limiting (requests per minute)
     rate_limit_push: int = 30
     rate_limit_pull: int = 100
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 @lru_cache

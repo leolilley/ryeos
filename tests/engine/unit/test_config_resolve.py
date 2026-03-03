@@ -16,10 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-
-# Ensure rye is importable
-sys.path.insert(0, str(PROJECT_ROOT / "ryeos"))
+from conftest import PROJECT_ROOT
 
 from rye.constants import AI_DIR
 from rye.executor.primitive_executor import PrimitiveExecutor, ChainElement
