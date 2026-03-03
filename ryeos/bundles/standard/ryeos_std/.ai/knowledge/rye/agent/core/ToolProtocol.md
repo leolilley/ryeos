@@ -72,6 +72,21 @@ If blocked, return error immediately — do not waste turns:
 rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"status": "error", "error_detail": "what is missing"})
 ```
 
+### Integrity errors
+
+If execution fails with an IntegrityError, the error message tells you exactly what to do:
+- **Unsigned item** → run `rye sign {type} {item_id}` (the exact command is in the error)
+- **Content modified** → the file was edited after signing, re-sign it
+- **Untrusted key** → the error lists all trusted key fingerprints
+
+### Shadow detection
+
+When `rye_search` returns results from multiple spaces, items may include:
+- `shadows` — this item overrides the same item_id in a lower space
+- `shadowed_by` — this item is overridden by a higher-precedence space
+
+If a project tool shadows a system tool, search results make this visible.
+
 ### When unsure
 
 If a directive tells you to use a tool and you don't know the exact item_id or parameters:

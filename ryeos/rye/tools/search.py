@@ -952,6 +952,7 @@ class SearchTool:
                             provider.provider_id, e,
                         )
 
+            self._detect_shadows(results)
             results = self._sort_results(results, opts.sort_by)
             total = len(results)
             results = results[opts.offset : opts.offset + opts.limit]
@@ -1150,6 +1151,30 @@ class SearchTool:
                 max_score += weight
 
         return min(1.0, total_score / max_score) if max_score > 0 else 0.0
+
+    # ------------------------------------------------------------------
+    # Shadow detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_shadows(results: List[Dict[str, Any]]) -> None:
+        """Mark items that shadow or are shadowed by items in other spaces.
+
+        Results are collected in precedence order (project > user > system),
+        so the first occurrence of an item_id is the "winner" and later
+        occurrences are shadowed by it.
+        """
+        seen: Dict[str, Dict[str, Any]] = {}
+        for item in results:
+            iid = item["id"]
+            src = item.get("source", "")
+            if iid not in seen:
+                seen[iid] = item
+            else:
+                item["shadowed_by"] = seen[iid].get("source", "")
+                if "shadows" not in seen[iid]:
+                    seen[iid]["shadows"] = []
+                seen[iid]["shadows"].append({"space": src})
 
     # ------------------------------------------------------------------
     # Sorting with tie-breaking

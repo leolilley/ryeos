@@ -58,6 +58,7 @@ class ExecutionResult:
     duration_ms: float = 0.0
     chain: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    trace: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -153,6 +154,7 @@ class PrimitiveExecutor:
         parameters: Optional[Dict[str, Any]] = None,
         validate_chain: bool = True,
         use_lockfile: bool = True,
+        trace: bool = False,
     ) -> ExecutionResult:
         """Execute a tool by resolving its executor chain recursively.
 
@@ -161,6 +163,7 @@ class PrimitiveExecutor:
             parameters: Runtime parameters for the tool
             validate_chain: Whether to validate chain before execution
             use_lockfile: Whether to check/create lockfiles
+            trace: Whether to collect trace events at each decision point
 
         Returns:
             ExecutionResult with execution details
@@ -171,6 +174,7 @@ class PrimitiveExecutor:
         parameters = parameters or {}
         lockfile_used = False
         lockfile_created = False
+        trace_events: List[Dict[str, Any]] = []
 
         try:
             # 1. Check for existing lockfile
@@ -236,6 +240,14 @@ class PrimitiveExecutor:
                                     duration_ms=(time.time() - start_time) * 1000,
                                 )
 
+            if trace and lockfile_used:
+                trace_events.append({
+                    "step": "lockfile",
+                    "item_id": item_id,
+                    "version": version,
+                    "status": "used",
+                })
+
             # 2. Build the executor chain
             chain = await self._build_chain(item_id)
 
@@ -244,7 +256,19 @@ class PrimitiveExecutor:
                     success=False,
                     error=f"Tool not found: {item_id}",
                     duration_ms=(time.time() - start_time) * 1000,
+                    trace=trace_events if trace else [],
                 )
+
+            if trace and chain:
+                for element in chain:
+                    shadowed = self._find_shadowed_paths(element.item_id, element.space)
+                    trace_events.append({
+                        "step": "resolve",
+                        "item_id": element.item_id,
+                        "path": str(element.path),
+                        "space": element.space,
+                        "shadowed": shadowed,
+                    })
 
             # 3. Verify integrity of every chain element
             for element in chain:
@@ -253,6 +277,21 @@ class PrimitiveExecutor:
                     ItemType.TOOL,
                     project_path=self.project_path,
                 )
+
+            if trace:
+                for element in chain:
+                    content = element.path.read_text(encoding="utf-8")
+                    sig_info = MetadataManager.get_signature_info(
+                        ItemType.TOOL, content,
+                        file_path=element.path,
+                        project_path=self.project_path,
+                    )
+                    trace_events.append({
+                        "step": "verify_integrity",
+                        "item_id": element.item_id,
+                        "verified": True,
+                        "key_fp": sig_info["pubkey_fp"] if sig_info else None,
+                    })
 
             # 4. Validate chain if requested
             if validate_chain:
@@ -285,6 +324,15 @@ class PrimitiveExecutor:
 
             # 5. Resolve environment through the chain
             resolved_env = self._resolve_chain_env(chain, anchor_ctx)
+
+            if trace:
+                for element in chain:
+                    if element.env_config:
+                        trace_events.append({
+                            "step": "resolve_env",
+                            "contributed_by": element.item_id,
+                            "keys": list(element.env_config.keys()),
+                        })
 
             # 5.5 Apply anchor env mutations
             if anchor_active:
@@ -348,6 +396,7 @@ class PrimitiveExecutor:
                     "lockfile_used": lockfile_used,
                     "lockfile_created": lockfile_created,
                 },
+                trace=trace_events if trace else [],
             )
 
         except Exception as e:
@@ -356,6 +405,7 @@ class PrimitiveExecutor:
                 success=False,
                 error=str(e),
                 duration_ms=(time.time() - start_time) * 1000,
+                trace=trace_events if trace else [],
             )
 
     async def _build_chain(
@@ -510,6 +560,39 @@ class PrimitiveExecutor:
 
         return None
 
+    def _find_shadowed_paths(self, item_id: str, found_space: str) -> List[Dict[str, str]]:
+        """Find items in lower-precedence spaces that are shadowed by the found item."""
+        system_entries = [
+            (bundle.root_path / AI_DIR / "tools", f"system:{bundle.bundle_id}")
+            for bundle in self.system_spaces
+        ]
+
+        all_spaces = [
+            (self.project_path / AI_DIR / "tools", "project"),
+            (self.user_space / AI_DIR / "tools", "user"),
+            *system_entries,
+        ]
+
+        extensions = get_tool_extensions(self.project_path)
+        shadowed = []
+        found = False
+
+        for base_path, space in all_spaces:
+            if space == found_space:
+                found = True
+                continue
+            if not found:
+                continue
+            if not base_path.exists():
+                continue
+            for ext in extensions:
+                file_path = base_path / f"{item_id}{ext}"
+                if file_path.is_file():
+                    shadowed.append({"path": str(file_path), "space": space})
+                    break
+
+        return shadowed
+
     def _load_metadata(self, path: Path) -> Dict[str, Any]:
         """Load tool metadata from file.
 
@@ -537,12 +620,21 @@ class PrimitiveExecutor:
             parsed = self.parser_router.parse(parser_name, content)
             if "error" in parsed:
                 logger.warning(
-                    f"Parser {parser_name} failed for {path}: {parsed['error']}"
+                    "Parser %s failed for %s: %s\n"
+                    "  Parser expects module-level metadata: "
+                    "__version__, __tool_type__, __executor_id__",
+                    parser_name, path, parsed['error'],
                 )
                 return metadata
 
             # Normalise parser output to metadata dict
             metadata = self._extract_metadata_from_parsed(parsed)
+            if metadata and not metadata.get("executor_id") and not metadata.get("tool_type"):
+                logger.debug(
+                    "Metadata for %s missing executor_id and tool_type. "
+                    "Ensure these are defined at module scope.",
+                    path,
+                )
 
         except Exception as e:
             logger.warning(f"Failed to load metadata from {path}: {e}")

@@ -15,11 +15,12 @@ from pathlib import Path
 
 import pytest
 
+from conftest import get_bundle_path
 from rye.tools.sign import SignTool
 from rye.tools.execute import ExecuteTool
 
 # Import capability tokens module using importlib to avoid package conflicts
-TOKENS_PATH = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "permissions" / "capability_tokens" / "capability_tokens.py"
+TOKENS_PATH = get_bundle_path('standard', 'tools/rye/agent/permissions/capability_tokens/capability_tokens.py')
 spec = importlib.util.spec_from_file_location("capability_tokens", TOKENS_PATH)
 capability_tokens_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capability_tokens_module)
@@ -37,7 +38,7 @@ is_system_capability = capability_tokens_module.is_system_capability
 load_capabilities = capability_tokens_module.load_capabilities
 
 # Import markdown/xml parser
-PARSER_PATH = Path(__file__).parent.parent.parent / "ryeos" / "bundles" / "core" / "ryeos_core" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
+PARSER_PATH = get_bundle_path('core', 'tools/rye/core/parsers/markdown/xml.py')
 parser_spec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 markdown_xml_module = importlib.util.module_from_spec(parser_spec)
 parser_spec.loader.exec_module(markdown_xml_module)

@@ -163,16 +163,35 @@ The `max_distance` parameter sets the maximum number of words allowed between th
 
 ### Result fields
 
-| Field         | Description                                  |
-| ------------- | -------------------------------------------- |
-| `id`          | Item ID (relative path without extension)    |
-| `name`        | Item name (filename stem)                    |
-| `description` | Item description from metadata               |
-| `category`    | Item category                                |
-| `score`       | Relevance score (0.0–1.0)                    |
-| `type`        | Item type (`directive`, `tool`, `knowledge`) |
-| `source`      | Space where the item was found               |
-| `preview`     | Truncated content preview                    |
+| Field         | Description                                               |
+| ------------- | --------------------------------------------------------- |
+| `id`          | Item ID (relative path without extension)                 |
+| `name`        | Item name (filename stem)                                 |
+| `description` | Item description from metadata                            |
+| `category`    | Item category                                             |
+| `score`       | Relevance score (0.0–1.0)                                 |
+| `type`        | Item type (`directive`, `tool`, `knowledge`)              |
+| `source`      | Space where the item was found                            |
+| `preview`     | Truncated content preview                                 |
+| `shadows`     | *(optional)* List of spaces this item shadows             |
+| `shadowed_by` | *(optional)* Source of the higher-precedence item that shadows this one |
+
+### Shadow Detection
+
+When searching across multiple spaces (`space: "all"`), the same item ID can appear in more than one space. Search results include shadow annotations:
+
+- **`shadows`** — present on the winning item (highest-precedence space). Lists the lower-precedence spaces that have the same item ID.
+- **`shadowed_by`** — present on items that are overridden. Contains the source label of the item that takes priority.
+
+```json
+{
+  "id": "my/custom-tool",
+  "source": "project",
+  "shadows": [{"space": "system:ryeos-core"}]
+}
+```
+
+This makes silent shadowing visible — if a project tool overrides a system tool with the same ID, the search results show exactly what happened.
 
 ## Examples
 

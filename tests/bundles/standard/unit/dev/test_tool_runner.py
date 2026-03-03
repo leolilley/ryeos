@@ -5,12 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from conftest import get_bundle_path
+
 # Add the tool's directory to sys.path so we can import it directly
-_TOOL_DIR = (
-    Path(__file__).parent.parent.parent
-    / "ryeos" / "bundles" / "standard" / "ryeos_std"
-    / ".ai" / "tools" / "rye" / "dev"
-)
+_TOOL_DIR = get_bundle_path('standard', 'tools/rye/dev')
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 

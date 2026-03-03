@@ -97,8 +97,12 @@ class ParserRouter:
         try:
             return parser.parse(content)
         except Exception as e:
-            logger.error(f"Parser {parser_name} failed: {e}")
-            return {"error": str(e)}
+            parser_path = getattr(parser, '__file__', 'unknown')
+            logger.error(
+                "Parser %s (%s) failed: %s",
+                parser_name, parser_path, e,
+            )
+            return {"error": f"{parser_name}: {e}"}
 
     def list_parsers(self) -> List[str]:
         """List available parser names."""

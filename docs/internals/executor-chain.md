@@ -223,6 +223,35 @@ Two caches with hash-based invalidation:
 
 Cache invalidation is automatic: if any file in the chain changes (content hash differs), the cached entry is discarded and the chain is rebuilt from the filesystem.
 
+## Chain Trace Mode
+
+Pass `trace=True` to `PrimitiveExecutor.execute()` to get a detailed event log of every decision point alongside the normal result. The trace is returned in `ExecutionResult.trace` as a list of event dicts.
+
+Trace events are emitted at each stage:
+
+| Step               | Fields                                              | Purpose                                       |
+| ------------------ | --------------------------------------------------- | --------------------------------------------- |
+| `lockfile`         | `item_id`, `version`, `status`                      | Whether a lockfile was found and used          |
+| `resolve`          | `item_id`, `path`, `space`, `shadowed`               | Which file was resolved and what it shadows    |
+| `verify_integrity` | `item_id`, `verified`, `key_fp`                      | Signature verification result per chain element |
+| `resolve_env`      | `contributed_by`, `keys`                             | Which env vars each chain element contributes  |
+
+The `shadowed` field in resolve events lists items in lower-precedence spaces that would have matched but were overridden:
+
+```json
+{
+  "step": "resolve",
+  "item_id": "rye/bash/bash",
+  "path": "/project/.ai/tools/rye/bash/bash.py",
+  "space": "project",
+  "shadowed": [
+    {"path": "/system/.ai/tools/rye/bash/bash.py", "space": "system:ryeos-core"}
+  ]
+}
+```
+
+Trace mode has no effect on execution — the same chain is built, verified, and run. It only adds observability.
+
 ## Lockfile Verification
 
 Before building the chain, `PrimitiveExecutor.execute()` checks for an existing lockfile:

@@ -163,7 +163,15 @@ Parses markdown with YAML frontmatter and returns the content for the agent to u
 
 ## Integrity Verification
 
-All items are verified against their signature before execution. If an item has been modified since signing, or moved without re-signing, execution fails with an `IntegrityError`.
+All items are verified against their signature before execution. If an item has been modified since signing, or moved without re-signing, execution fails with an `IntegrityError`. Error messages include the item type, signing key details, and a concrete `rye sign` fix command.
+
+Set `RYE_DEV_MODE=1` to downgrade integrity failures to warnings during development (see [Integrity — Dev Mode](../internals/integrity-and-signing.md#dev-mode)).
+
+## Chain Trace
+
+For tool execution, the `PrimitiveExecutor` supports a `trace` mode that returns detailed event logs alongside the result. Trace events show which files were resolved, which spaces were searched, what was shadowed, integrity verification results per chain element, and environment variable contributions.
+
+See [Executor Chain — Chain Trace Mode](../internals/executor-chain.md#chain-trace-mode) for details.
 
 ## Error Responses
 

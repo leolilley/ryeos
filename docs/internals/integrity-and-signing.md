@@ -179,12 +179,34 @@ def verify_item(file_path, item_type, project_path=None):
 
 ### What Triggers IntegrityError
 
-| Condition                 | Error                                     |
-| ------------------------- | ----------------------------------------- |
-| No signature line         | `Unsigned item: {path}`                   |
-| Content hash mismatch     | `Integrity failed: expected {X}, got {Y}` |
-| Unknown key fingerprint   | `Untrusted key {fingerprint}`             |
-| Invalid Ed25519 signature | `Ed25519 signature verification failed`   |
+Every error includes actionable context: the item type, a `rye sign` fix command, and relevant diagnostics.
+
+| Condition                 | Error includes                                                                      |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| No signature line         | Item type, expected `rye:signed:` header, fix: `rye sign {type} {item_id}`          |
+| Content hash mismatch     | Expected vs actual hash, fix: re-sign after editing                                 |
+| Unknown key fingerprint   | Signing key fingerprint, list of all trusted keys, fix: add key or re-sign          |
+| Invalid Ed25519 signature | Signing key fingerprint and owner, indication of possible tampering                 |
+
+Example error:
+
+```
+Unsigned item: /project/.ai/tools/my/tool.py
+  Item type: tool
+  Expected: rye:signed: header
+  Fix: rye sign tool my/tool
+```
+
+### Dev Mode
+
+Set `RYE_DEV_MODE=1` to downgrade `IntegrityError` to a warning during development. Unsigned or tampered items will execute with a warning log instead of failing. `verify_item()` returns `"unverified"` instead of raising.
+
+```bash
+RYE_DEV_MODE=1 rye execute tool my/unsigned-tool
+# [DEV MODE] Unsigned item: ... — executing anyway
+```
+
+This does not weaken the security model for production — system and registry items still require valid signatures. It stops the sign-edit-sign cycle from killing flow during local tool development. Only the value `"1"` activates dev mode.
 
 ## Trust Store
 

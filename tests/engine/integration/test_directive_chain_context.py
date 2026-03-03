@@ -15,13 +15,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+from conftest import get_bundle_path
 
 # Import _resolve_directive_chain via importlib (same pattern as test_thread_context_injection.py)
-TD_PATH = (
-    PROJECT_ROOT
-    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "thread_directive.py"
-)
+TD_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/thread_directive.py')
 _td_spec = importlib.util.spec_from_file_location("thread_directive_test", TD_PATH)
 _td_mod = importlib.util.module_from_spec(_td_spec)
 _td_spec.loader.exec_module(_td_mod)

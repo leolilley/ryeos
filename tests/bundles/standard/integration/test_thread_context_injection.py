@@ -17,33 +17,24 @@ from pathlib import Path
 import pytest
 import yaml
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+from conftest import get_bundle_path, PROJECT_ROOT
+from rye.utils.path_utils import BundleInfo
 
 # ── Module imports via importlib ──────────────────────────────────────
 
-PARSER_PATH = (
-    PROJECT_ROOT
-    / "ryeos" / "bundles" / "core" / "ryeos_core" / ".ai" / "tools" / "rye" / "core" / "parsers" / "markdown" / "xml.py"
-)
+PARSER_PATH = get_bundle_path('core', 'tools/rye/core/parsers/markdown/xml.py')
 _pspec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 _parser_mod = importlib.util.module_from_spec(_pspec)
 _pspec.loader.exec_module(_parser_mod)
 md_parse = _parser_mod.parse
 
-TRANSCRIPT_PATH = (
-    PROJECT_ROOT
-    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
-    / "persistence" / "transcript.py"
-)
+TRANSCRIPT_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/persistence/transcript.py')
 _tspec = importlib.util.spec_from_file_location("transcript", TRANSCRIPT_PATH)
 _transcript_mod = importlib.util.module_from_spec(_tspec)
 _tspec.loader.exec_module(_transcript_mod)
 Transcript = _transcript_mod.Transcript
 
-HARNESS_PATH = (
-    PROJECT_ROOT
-    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "safety_harness.py"
-)
+HARNESS_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/safety_harness.py')
 _hspec = importlib.util.spec_from_file_location("safety_harness", HARNESS_PATH)
 _harness_mod = importlib.util.module_from_spec(_hspec)
 _hspec.loader.exec_module(_harness_mod)
@@ -998,16 +989,10 @@ class TestConditionalHookDispatch:
 
 # ── ConfigLoader merge-by-id for hook overrides ──────────────────────
 
-CONFIG_LOADER_PATH = (
-    PROJECT_ROOT
-    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
-    / "loaders" / "config_loader.py"
-)
+CONFIG_LOADER_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/loaders/config_loader.py')
 _clspec = importlib.util.spec_from_file_location("config_loader", CONFIG_LOADER_PATH)
 _config_mod = importlib.util.module_from_spec(_clspec)
 _clspec.loader.exec_module(_config_mod)
-
-from rye.utils.path_utils import BundleInfo
 
 
 class TestConfigMergeForHookOverrides:
