@@ -188,6 +188,7 @@ class PrimitiveExecutor:
 
                     lockfile = self.lockfile_resolver.get_lockfile(item_id, version)
                     if lockfile:
+                        lockfile_path = getattr(lockfile, "_resolved_path", None)
                         logger.debug(f"Using lockfile for {item_id}@{version}")
                         lockfile_used = True
                         content = tool_path[0].read_text(encoding="utf-8")
@@ -202,7 +203,8 @@ class PrimitiveExecutor:
                                 success=False,
                                 error=(
                                     f"Lockfile integrity mismatch for {item_id}. "
-                                    f"Re-sign and delete stale lockfile."
+                                    f"Re-sign the tool and delete the stale lockfile at: "
+                                    f"{lockfile_path}"
                                 ),
                                 duration_ms=(time.time() - start_time) * 1000,
                             )
@@ -219,7 +221,8 @@ class PrimitiveExecutor:
                                     success=False,
                                     error=(
                                         f"Lockfile chain element not found: {entry_id} "
-                                        f"(space: {entry_space}). Delete stale lockfile."
+                                        f"(space: {entry_space}). Delete the stale lockfile at: "
+                                        f"{lockfile_path}"
                                     ),
                                     duration_ms=(time.time() - start_time) * 1000,
                                 )
@@ -235,7 +238,8 @@ class PrimitiveExecutor:
                                     success=False,
                                     error=(
                                         f"Lockfile integrity mismatch for chain element "
-                                        f"{entry_id}. Re-sign and delete stale lockfile."
+                                        f"{entry_id}. Re-sign the tool and delete the stale "
+                                        f"lockfile at: {lockfile_path}"
                                     ),
                                     duration_ms=(time.time() - start_time) * 1000,
                                 )

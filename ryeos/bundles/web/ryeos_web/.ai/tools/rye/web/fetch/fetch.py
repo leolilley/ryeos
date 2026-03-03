@@ -1,9 +1,7 @@
-# rye:signed:2026-03-01T08:43:01Z:f062230f0570a226c29b3618383505a2fa739653ef2551aa8252b2f8b4004d5d:I0kGZ_qKKRCSquIxvwMA3KUU6AUy9M7kdWlVj6D7uKNKUFXitw89pgm8zmiiMkB6z6qZva4sJPKJ3cTazF8pBg==:4b987fd4e40303ac
+# rye:signed:2026-03-03T22:32:56Z:f062230f0570a226c29b3618383505a2fa739653ef2551aa8252b2f8b4004d5d:I0kGZ_qKKRCSquIxvwMA3KUU6AUy9M7kdWlVj6D7uKNKUFXitw89pgm8zmiiMkB6z6qZva4sJPKJ3cTazF8pBg==:4b987fd4e40303ac
 """Fetch URL content with optional format conversion."""
 
-import argparse
 import json
-import sys
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -201,14 +199,3 @@ def execute(params: dict, project_path: str) -> dict:
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
-    parser.add_argument("--project-path", required=True)
-    args = parser.parse_args()
-    import sys
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
-    result = execute(params, args.project_path)
-    print(json.dumps(result))

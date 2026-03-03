@@ -102,7 +102,9 @@ class LockfileResolver:
         path = self._resolve_read_path(tool_id, version)
         if path:
             try:
-                return self.manager.load(path)
+                lockfile = self.manager.load(path)
+                lockfile._resolved_path = path
+                return lockfile
             except Exception:
                 return None
         return None

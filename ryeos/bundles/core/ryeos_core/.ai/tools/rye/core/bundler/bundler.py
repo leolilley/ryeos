@@ -1,4 +1,4 @@
-# rye:signed:2026-02-28T00:36:04Z:2127dda2e0cbc338c7ddffd1c8a5fc6f417514b39e00310e11bf4632f9eb6558:Tde2ugj2YzQ008JItzz6e8pDG4l8Cy5sOShhQBzA4ZDtG5aueG2F26GR3ML7SJrqQdxkdNS8UkhcglznCcfHCw==:4b987fd4e40303ac
+# rye:signed:2026-03-03T22:32:56Z:2127dda2e0cbc338c7ddffd1c8a5fc6f417514b39e00310e11bf4632f9eb6558:Tde2ugj2YzQ008JItzz6e8pDG4l8Cy5sOShhQBzA4ZDtG5aueG2F26GR3ML7SJrqQdxkdNS8UkhcglznCcfHCw==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -20,7 +20,7 @@ Actions:
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python/script"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/bundler"
 __tool_description__ = "Create, verify, and inspect bundle manifests"
 
@@ -745,7 +745,7 @@ _ACTION_MAP = {
 }
 
 
-async def execute(
+async def _execute_action(
     action: str, project_path: str, params: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Execute a bundler action.
@@ -771,38 +771,14 @@ async def execute(
     return await handler(pp, params)
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(description="Bundler Tool")
-    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
-    parser.add_argument("--project-path", required=True, help="Project path")
-
-    args = parser.parse_args()
-
-    try:
-        params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
-        action = params.pop("action", None)
-        if not action:
-            print(json.dumps({"success": False, "error": "action required in params"}))
-            sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"success": False, "error": f"Invalid params JSON: {e}"}))
-        sys.exit(1)
-
-    try:
-        result = asyncio.run(execute(action, args.project_path, params))
-        if "error" in result:
-            result["success"] = False
-        elif "success" not in result:
-            result["success"] = True
-        print(json.dumps(result, indent=2), flush=True)
-        sys.exit(0 if result.get("success") else 1)
-    except Exception as e:
-        print(json.dumps({"success": False, "error": str(e)}), flush=True)
-        sys.exit(1)
+async def execute(params: dict, project_path: str) -> dict:
+    """Entry point for function runtime."""
+    action = params.pop("action", None)
+    if not action:
+        return {"success": False, "error": "action required in params"}
+    result = await _execute_action(action, project_path, params)
+    if "error" in result:
+        result["success"] = False
+    elif "success" not in result:
+        result["success"] = True
+    return result

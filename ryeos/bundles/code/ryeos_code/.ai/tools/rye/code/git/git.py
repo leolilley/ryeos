@@ -1,15 +1,14 @@
-# rye:signed:2026-02-28T00:36:04Z:e50c9b952b14265e04eeb02d5d22afc78ff29ef8f268df013461825e2eff9ec0:6yY46KNDi60MxpezuvkwWga8Xo5UDhI2-md_WMlW5LE7eRgZLMaAyug2NfCj3Ik9FEAbmcccfDSyEamw7ep_Aw==:4b987fd4e40303ac
+# rye:signed:2026-03-03T22:32:56Z:e50c9b952b14265e04eeb02d5d22afc78ff29ef8f268df013461825e2eff9ec0:6yY46KNDi60MxpezuvkwWga8Xo5UDhI2-md_WMlW5LE7eRgZLMaAyug2NfCj3Ik9FEAbmcccfDSyEamw7ep_Aw==:4b987fd4e40303ac
 
 """Git operations - status, add, commit, diff, log, branch, checkout, stash, reset, tag."""
 
-import argparse
 import json
 import subprocess
 from pathlib import Path
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python/script"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/code/git"
 __tool_description__ = "Git operations - status, add, commit, diff, log, branch, checkout, stash, reset, tag"
 
@@ -235,15 +234,3 @@ def execute(params: dict, project_path: str) -> dict:
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-if __name__ == "__main__":
-    import sys
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None)
-    parser.add_argument("--project-path", required=True)
-    args = parser.parse_args()
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
-    result = execute(params, args.project_path)
-    print(json.dumps(result))

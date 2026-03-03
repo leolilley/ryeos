@@ -1,9 +1,7 @@
-# rye:signed:2026-03-01T08:43:00Z:ba32192273e24b1a1a7c3691a8aa1712fd5d46e57787365d34f7385ea52db10f:gNKeW7dn2wPnUng-yCWdUc3H6Znfgtf-6jKUutQX8BTMycc8CfNcAMf4Mduogd_HrCby0RHYPW131yDa8wnbCw==:4b987fd4e40303ac
+# rye:signed:2026-03-03T22:32:56Z:ba32192273e24b1a1a7c3691a8aa1712fd5d46e57787365d34f7385ea52db10f:gNKeW7dn2wPnUng-yCWdUc3H6Znfgtf-6jKUutQX8BTMycc8CfNcAMf4Mduogd_HrCby0RHYPW131yDa8wnbCw==:4b987fd4e40303ac
 """Web search via configurable provider."""
 
-import argparse
 import json
-import sys
 from pathlib import Path
 
 __version__ = "1.0.0"
@@ -206,14 +204,3 @@ def execute(params: dict, project_path: str) -> dict:
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
-    parser.add_argument("--project-path", required=True)
-    args = parser.parse_args()
-    import sys
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
-    result = execute(params, args.project_path)
-    print(json.dumps(result))

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T22:22:06Z:7e3bc9ca9a88e5feb8892aa0615627181bd6fe4e675058c2254c3c949d49f703:FcEPYFZ_ZnWJS-wxauR6oC9xNPibGwXwsVgKD6epczyHSEy4uefJYMeWDeUIEOd1pn0wjk_moXlEO9uDK0xxBg==:4b987fd4e40303ac
+# rye:signed:2026-03-03T22:32:56Z:7e3bc9ca9a88e5feb8892aa0615627181bd6fe4e675058c2254c3c949d49f703:FcEPYFZ_ZnWJS-wxauR6oC9xNPibGwXwsVgKD6epczyHSEy4uefJYMeWDeUIEOd1pn0wjk_moXlEO9uDK0xxBg==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -37,7 +37,7 @@ Actions:
 
 __version__ = "1.1.0"
 __tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python/script"
+__executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/registry"
 __tool_description__ = "Registry tool for auth and item management"
 
@@ -492,7 +492,20 @@ def decrypt_token(encrypted_b64: str, nonce_b64: str, shared_secret: bytes) -> s
     return decrypted.decode("utf-8")
 
 
-async def execute(
+async def execute(params: dict, project_path: str) -> dict:
+    """Entry point for function runtime."""
+    action = params.pop("action", None)
+    if not action:
+        return {"success": False, "error": "action required in params"}
+    result = await _execute_action(action, project_path, params)
+    if "error" in result:
+        result["success"] = False
+    elif "success" not in result:
+        result["success"] = True
+    return result
+
+
+async def _execute_action(
     action: str, project_path: str, params: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
@@ -2616,38 +2629,3 @@ class RegistryProvider:
 def get_provider() -> RegistryProvider:
     """Return a RegistryProvider instance for remote space discovery."""
     return RegistryProvider()
-
-
-# CLI entry point for subprocess execution
-if __name__ == "__main__":
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(description="Registry Tool")
-    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
-    parser.add_argument("--project-path", required=True, help="Project path")
-
-    args = parser.parse_args()
-
-    try:
-        params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
-        action = params.pop("action", None)
-        if not action:
-            print(json.dumps({"success": False, "error": "action required in params"}))
-            sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"success": False, "error": f"Invalid params JSON: {e}"}))
-        sys.exit(1)
-
-    try:
-        result = asyncio.run(execute(action, args.project_path, params))
-        # Normalize result format
-        if "error" in result:
-            result["success"] = False
-        elif "success" not in result:
-            result["success"] = True
-        print(json.dumps(result, indent=2), flush=True)
-        sys.exit(0 if result.get("success") else 1)
-    except Exception as e:
-        print(json.dumps({"success": False, "error": str(e)}), flush=True)
-        sys.exit(1)
