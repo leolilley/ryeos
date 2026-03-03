@@ -1,0 +1,5 @@
+# E2E test project — agent configuration
+schema_version: "1.0.0"
+
+provider:
+  default: zen

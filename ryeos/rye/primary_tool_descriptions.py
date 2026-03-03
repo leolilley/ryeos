@@ -33,9 +33,19 @@ EXECUTE_TOOL_DESC = (
     "Run a Rye item. item_id is a slash-separated path without extension. "
     "Resolved project → user → system. "
     "Executing a directive returns your_directions and a body — follow them. "
-    "Set thread=true in parameters to spawn a managed thread instead. "
     "Executing a tool runs it. Executing knowledge returns context."
     "</description>"
+    "<threading>"
+    "To spawn a directive as a managed thread (with its own LLM loop), pass thread=true in parameters. "
+    "Threading parameters (all in the parameters object):"
+    "<param>thread: true — spawn as managed thread instead of returning your_directions</param>"
+    "<param>async: true — return immediately with thread_id (fire-and-forget). false (default) blocks until complete.</param>"
+    "<param>model: string — override the LLM model for the thread</param>"
+    "<param>limit_overrides: object — override limits e.g. {\"turns\": 10, \"spend\": 0.10}</param>"
+    "Directive inputs go directly in parameters alongside thread/async/model/limit_overrides. "
+    "Example: parameters={\"thread\": true, \"async\": true, \"niche\": \"plumbers\", \"city\": \"Dunedin\"} "
+    "The framework auto-injects parent_thread_id, parent_depth, and parent_capabilities — never pass these manually."
+    "</threading>"
     "<rules>"
     "<rule>When the user says 'rye execute [type] [name]', call execute DIRECTLY with the given name as item_id. "
     "Do NOT call search or load first — go straight to execute. "
@@ -50,6 +60,8 @@ EXECUTE_TOOL_DESC = (
     "<examples>"
     '<example>User says "rye execute init project" → call with item_id="init", parameters={"project_type": "project"}</example>'
     '<example>User says "rye execute init" → call with item_id="init", parameters={}</example>'
+    '<example>Spawn directive as thread: item_type="directive", item_id="my/workflow", parameters={"thread": true, "target": "value"}</example>'
+    '<example>Spawn async thread: item_type="directive", item_id="my/workflow", parameters={"thread": true, "async": true, "target": "value"}</example>'
     "</examples>"
 )
 

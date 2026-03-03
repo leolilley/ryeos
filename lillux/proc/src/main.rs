@@ -62,6 +62,14 @@ enum Command {
         /// Environment variable to set (KEY=VALUE, repeatable)
         #[arg(long = "env")]
         envs: Vec<String>,
+
+        /// Data to pipe to stdin (optional)
+        #[arg(long)]
+        stdin: Option<String>,
+
+        /// Read stdin data from own stdin pipe (for large payloads)
+        #[arg(long)]
+        stdin_pipe: bool,
     },
 
     /// Kill a process by PID (graceful then force)
@@ -113,7 +121,20 @@ fn main() {
             args,
             log,
             envs,
-        } => do_spawn(&cmd, &args, log.as_deref(), &envs),
+            stdin,
+            stdin_pipe,
+        } => {
+            let stdin_data = if let Some(data) = stdin {
+                Some(data)
+            } else if stdin_pipe {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                if buf.is_empty() { None } else { Some(buf) }
+            } else {
+                None
+            };
+            do_spawn(&cmd, &args, log.as_deref(), &envs, stdin_data.as_deref())
+        }
         Command::Kill { pid, grace } => do_kill(pid, grace),
         Command::Status { pid } => do_status(pid),
     };
@@ -266,8 +287,8 @@ fn do_exec(
 // Spawn
 // ---------------------------------------------------------------------------
 
-fn do_spawn(cmd: &str, args: &[String], log: Option<&str>, envs: &[String]) -> serde_json::Value {
-    let result = spawn_detached(cmd, args, log, envs);
+fn do_spawn(cmd: &str, args: &[String], log: Option<&str>, envs: &[String], stdin_data: Option<&str>) -> serde_json::Value {
+    let result = spawn_detached(cmd, args, log, envs, stdin_data);
     match result {
         Ok(pid) => serde_json::json!({ "success": true, "pid": pid }),
         Err(e) => serde_json::json!({ "success": false, "error": e }),
@@ -280,6 +301,7 @@ fn spawn_detached(
     args: &[String],
     log: Option<&str>,
     envs: &[String],
+    stdin_data: Option<&str>,
 ) -> Result<u32, String> {
     use std::fs::OpenOptions;
     use std::os::unix::process::CommandExt;
@@ -295,7 +317,11 @@ fn spawn_detached(
     }
 
     // Redirect I/O
-    command.stdin(process::Stdio::null());
+    if stdin_data.is_some() {
+        command.stdin(process::Stdio::piped());
+    } else {
+        command.stdin(process::Stdio::null());
+    }
     if let Some(log_path) = log {
         let file = OpenOptions::new()
             .create(true)
@@ -320,7 +346,15 @@ fn spawn_detached(
         });
     }
 
-    let child = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
+
+    // Write stdin data and close pipe
+    if let Some(data) = stdin_data {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let _ = child_stdin.write_all(data.as_bytes());
+        }
+    }
+
     Ok(child.id())
 }
 
@@ -330,6 +364,7 @@ fn spawn_detached(
     args: &[String],
     log: Option<&str>,
     envs: &[String],
+    stdin_data: Option<&str>,
 ) -> Result<u32, String> {
     use std::fs::OpenOptions;
     use std::os::windows::process::CommandExt;
@@ -346,7 +381,11 @@ fn spawn_detached(
         }
     }
 
-    command.stdin(process::Stdio::null());
+    if stdin_data.is_some() {
+        command.stdin(process::Stdio::piped());
+    } else {
+        command.stdin(process::Stdio::null());
+    }
     if let Some(log_path) = log {
         let file = OpenOptions::new()
             .create(true)
@@ -364,7 +403,15 @@ fn spawn_detached(
 
     command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
 
-    let child = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
+
+    // Write stdin data and close pipe
+    if let Some(data) = stdin_data {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let _ = child_stdin.write_all(data.as_bytes());
+        }
+    }
+
     Ok(child.id())
 }
 

@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:5c6849473f777a684c6fedfef36bbfbdd0d3809a201f37dc5cd0c53b96b8daa7:CZ6VIgzOdQIiy43vq6NEZ1qQxWWRchGcNDgdlfOHlZNuxS2pS6vRWOyhGn0wnAaGF0MaQjPfKNz2Pd8Lhn-FCw==:4b987fd4e40303ac
+# rye:signed:2026-03-03T23:29:04Z:9061af74e0c5a0f18185b9f955f7cf9978a24d48d3f2b6fa31406336eea953c4:pBydUiW8OWI869h8pjH0eLCdxm8CAOJtT2jOuc8CUHGEolik9sin0cj3zd44jq6dHoUks-xbePKTq_skol07CA==:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
@@ -202,12 +202,13 @@ async def spawn_detached(
     cmd: str, args: List[str],
     log_path: Optional[str] = None,
     envs: Optional[Dict[str, str]] = None,
+    input_data: Optional[str] = None,
 ) -> Dict:
     """Spawn a detached process via SubprocessPrimitive.
 
     Returns dict with 'success' and 'pid' on success.
     """
-    result = await _subprocess.spawn(cmd, args, log_path=log_path, envs=envs)
+    result = await _subprocess.spawn(cmd, args, log_path=log_path, envs=envs, input_data=input_data)
     if result.success:
         return {"success": True, "pid": result.pid}
     return {"success": False, "error": result.error}

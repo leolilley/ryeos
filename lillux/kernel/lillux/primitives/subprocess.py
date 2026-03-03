@@ -264,6 +264,7 @@ class SubprocessPrimitive:
         args: List[str],
         log_path: Optional[str] = None,
         envs: Optional[Dict[str, str]] = None,
+        input_data: Optional[str] = None,
     ) -> SpawnResult:
         """Detached spawn via lillux-proc spawn."""
         exec_args = [self._lillux_proc, "spawn", "--cmd", cmd]
@@ -271,17 +272,22 @@ class SubprocessPrimitive:
             exec_args.extend(["--arg", arg])
         if log_path:
             exec_args.extend(["--log", log_path])
+        if input_data:
+            exec_args.append("--stdin-pipe")
         if envs:
             for k, v in envs.items():
                 exec_args.extend(["--env", f"{k}={v}"])
 
         try:
+            stdin_pipe = asyncio.subprocess.PIPE if input_data else None
             proc = await asyncio.create_subprocess_exec(
                 *exec_args,
+                stdin=stdin_pipe,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            pipe_input = input_data.encode("utf-8") if input_data else None
+            stdout, _ = await asyncio.wait_for(proc.communicate(input=pipe_input), timeout=10)
             if proc.returncode == 0 and stdout:
                 data = json.loads(stdout.strip())
                 return SpawnResult(

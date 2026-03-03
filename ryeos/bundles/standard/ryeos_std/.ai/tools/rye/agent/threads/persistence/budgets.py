@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:da555d46a7568e3acdaee7e3de17362ec9ea0360125ac5dfc297c5e3fb08e774:ij6vY8YSXAcsCNriPgf433wZ2wszTuaASplTczYizejfPgaBbNhFVmQGCTxS-5LRIapsvbNgj0TuHN57dN1OCw==:4b987fd4e40303ac
+# rye:signed:2026-03-03T23:08:48Z:5487e314a3cff890e2e4b8127fbdd1d6d0d07a1f975e03e6774d6290eacb0094:TLT3rLCbslggXrDQ17uJ0FMhqQT4P5-srYWe89IspUZ-xXBSL2TwXgrfiWQjusmNmCdOtglfn7nvI3YiHymbAA==:4b987fd4e40303ac
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -73,6 +73,12 @@ class BudgetLedger:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             if not parent_thread_id:
+                # Delete children of terminal parents first (orphans from crashed runs),
+                # then terminal entries themselves. Order matters for FK constraint.
+                conn.execute(
+                    "DELETE FROM budget_ledger WHERE parent_thread_id IN "
+                    "(SELECT thread_id FROM budget_ledger WHERE status IN ('completed', 'error', 'cancelled'))"
+                )
                 conn.execute(
                     "DELETE FROM budget_ledger WHERE status IN ('completed', 'error', 'cancelled')"
                 )

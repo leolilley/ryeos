@@ -1,4 +1,4 @@
-# rye:signed:2026-03-02T08:42:37Z:c6a2304ad26068d1af6c872aab418d0a4e9188a7e6b74518c472f40c7b5f4cbe:VZZdc1GWEa3cV7mFxpg6cEYJko5jeK965lZdtTIx7yqMIW5cmCPnOTKPFzs91QE2UcBZ-nmRHr7BZqRcZpBpBA==:4b987fd4e40303ac
+# rye:signed:2026-03-03T23:29:04Z:47538580e27d520baadf7c0d9ab8ef20954bf2fb1ee33b374a87f60fa088a8d8:d2dPIvXRw94xl21IlNA-FhezWl4nWsXVV9zH5JlsPwAF0AK2COGbkQARerSpTzww6pvuf8afx_3OOytERUjhDA==:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -864,7 +864,16 @@ async def execute(params: Dict, project_path: str) -> Dict:
         )
     except Exception as e:
         registry.update_status(thread_id, "error")
-        return {"success": False, "error": str(e), "thread_id": thread_id}
+        return {
+            "success": False,
+            "error": (
+                f"Model resolution failed for directive '{directive_name}': "
+                f"requested model/tier '{model}'"
+                + (f" (provider: {provider_hint})" if provider_hint else "")
+                + f". {e}"
+            ),
+            "thread_id": thread_id,
+        }
     # Resolve env_config from provider YAML (loads .env, resolves ${VAR} refs)
     env_config = provider_config.get("env_config")
     if env_config:
@@ -909,6 +918,8 @@ async def execute(params: Dict, project_path: str) -> Dict:
     )
 
     # 13. Set env var so children discover this thread as parent
+    # Save and restore to prevent leaking into sibling/subsequent top-level threads
+    _prev_parent_env = os.environ.get("RYE_PARENT_THREAD_ID")
     os.environ["RYE_PARENT_THREAD_ID"] = thread_id
 
     if params.get("async"):
@@ -931,13 +942,13 @@ async def execute(params: Dict, project_path: str) -> Dict:
             cmd=sys.executable,
             args=[
                 str(Path(__file__).resolve()),
-                "--params", json.dumps(child_params),
                 "--project-path", str(proj_path),
                 "--thread-id", thread_id,
                 "--pre-registered",
             ],
             log_path=spawn_log,
             envs=_spawn_env(thread_id),
+            input_data=json.dumps(child_params),
         )
 
         if not spawn_result.get("success"):
@@ -958,82 +969,89 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
     # 14. Run thread synchronously
     # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
-    result = await runner.run(
-        thread_id,
-        user_prompt,
-        harness,
-        provider,
-        dispatcher,
-        emitter,
-        transcript,
-        proj_path,
-        resume_messages=params.get("resume_messages"),
-        directive_body=clean_directive_text,
-        previous_thread_id=params.get("previous_thread_id"),
-        inputs=inputs,
-        system_prompt=system_prompt,
-        directive_context=directive_context,
-    )
-
-    # Ensure non-empty error message on failure
-    if not result.get("success") and not result.get("error"):
-        result["error"] = result.get("status", "unknown error (no message from runner)")
-
-    # 15. Report spend and finalize
-    actual_spend = result.get("cost", {}).get("spend", 0.0)
     try:
-        ledger.report_actual(thread_id, actual_spend)
-    except Exception:
-        pass  # overspend is logged but shouldn't block finalization
-    if parent_thread_id:
-        ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)
-    status = result.get("status", "completed")
-    ledger.release(thread_id, final_status=status)
+        result = await runner.run(
+            thread_id,
+            user_prompt,
+            harness,
+            provider,
+            dispatcher,
+            emitter,
+            transcript,
+            proj_path,
+            resume_messages=params.get("resume_messages"),
+            directive_body=clean_directive_text,
+            previous_thread_id=params.get("previous_thread_id"),
+            inputs=inputs,
+            system_prompt=system_prompt,
+            directive_context=directive_context,
+        )
 
-    # Update registry with final status
-    status = result.get("status", "completed")
-    registry.update_status(thread_id, status)
-    result_data = {"cost": result.get("cost")}
-    if result.get("outputs"):
-        result_data["outputs"] = result["outputs"]
-    registry.set_result(thread_id, result_data)
+        # Ensure non-empty error message on failure
+        if not result.get("success") and not result.get("error"):
+            result["error"] = result.get("status", "unknown error (no message from runner)")
 
-    # Write final thread.json
-    _write_thread_meta(
-        proj_path, thread_id, directive_name, status,
-        thread_created_at, datetime.now(timezone.utc).isoformat(),
-        model=resolved_model, cost=result.get("cost"),
-        limits=limits, capabilities=harness._capabilities,
-        outputs=result.get("outputs"),
-    )
-
-    # Write per-thread diagnostics file on error for debugging
-    if not result.get("success") and os.environ.get("RYE_DEBUG"):
-        diag_path = proj_path / ".ai" / "agent" / "threads" / thread_id.replace("/", os.sep) / "diagnostics.json"
+        # 15. Report spend and finalize
+        actual_spend = result.get("cost", {}).get("spend", 0.0)
         try:
-            import json as _json
-            diag_path.parent.mkdir(parents=True, exist_ok=True)
-            diag_data = {
-                "thread_id": thread_id,
-                "directive": directive_name,
-                "model": resolved_model,
-                "error": result.get("error", ""),
-                "cost": result.get("cost", {}),
-                "provider_item_id": provider_item_id,
-                "limits": limits,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            diag_path.write_text(_json.dumps(diag_data, indent=2, default=str))
+            ledger.report_actual(thread_id, actual_spend)
         except Exception:
-            pass  # diagnostics are best-effort
+            pass  # overspend is logged but shouldn't block finalization
+        if parent_thread_id:
+            ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)
+        status = result.get("status", "completed")
+        ledger.release(thread_id, final_status=status)
 
-    # Trim result text to prevent context bloat in parent threads
-    MAX_RESULT_CHARS = 4000
-    if isinstance(result.get("result"), str) and len(result["result"]) > MAX_RESULT_CHARS:
-        result["result"] = result["result"][:MAX_RESULT_CHARS] + "\n\n[... truncated]"
-        result["result_truncated"] = True
+        # Update registry with final status
+        status = result.get("status", "completed")
+        registry.update_status(thread_id, status)
+        result_data = {"cost": result.get("cost")}
+        if result.get("outputs"):
+            result_data["outputs"] = result["outputs"]
+        registry.set_result(thread_id, result_data)
 
-    return {**result, "directive": directive_name}
+        # Write final thread.json
+        _write_thread_meta(
+            proj_path, thread_id, directive_name, status,
+            thread_created_at, datetime.now(timezone.utc).isoformat(),
+            model=resolved_model, cost=result.get("cost"),
+            limits=limits, capabilities=harness._capabilities,
+            outputs=result.get("outputs"),
+        )
+
+        # Write per-thread diagnostics file on error for debugging
+        if not result.get("success") and os.environ.get("RYE_DEBUG"):
+            diag_path = proj_path / ".ai" / "agent" / "threads" / thread_id.replace("/", os.sep) / "diagnostics.json"
+            try:
+                import json as _json
+                diag_path.parent.mkdir(parents=True, exist_ok=True)
+                diag_data = {
+                    "thread_id": thread_id,
+                    "directive": directive_name,
+                    "model": resolved_model,
+                    "error": result.get("error", ""),
+                    "cost": result.get("cost", {}),
+                    "provider_item_id": provider_item_id,
+                    "limits": limits,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                diag_path.write_text(_json.dumps(diag_data, indent=2, default=str))
+            except Exception:
+                pass  # diagnostics are best-effort
+
+        # Trim result text to prevent context bloat in parent threads
+        MAX_RESULT_CHARS = 4000
+        if isinstance(result.get("result"), str) and len(result["result"]) > MAX_RESULT_CHARS:
+            result["result"] = result["result"][:MAX_RESULT_CHARS] + "\n\n[... truncated]"
+            result["result_truncated"] = True
+
+        return {**result, "directive": directive_name}
+    finally:
+        # Restore previous env to prevent leaking into subsequent top-level spawns
+        if _prev_parent_env is not None:
+            os.environ["RYE_PARENT_THREAD_ID"] = _prev_parent_env
+        else:
+            os.environ.pop("RYE_PARENT_THREAD_ID", None)
 
 
 if __name__ == "__main__":
