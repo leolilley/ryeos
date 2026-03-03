@@ -484,9 +484,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     thread_created_at = datetime.now(timezone.utc).isoformat()
     proj_path = Path(project_path)
 
-    # 1. Resolve parent context
-    #    Explicit param (from handoff/resume) takes precedence, then env var
-    #    (subprocess inheritance), then no parent (root thread).
+    # 1. Resolve parent context — explicit param > env var > no parent
     parent_thread_id = params.get("parent_thread_id") or os.environ.get("RYE_PARENT_THREAD_ID")
     parent_meta = None
     if parent_thread_id:
@@ -502,13 +500,13 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 "thread_id": thread_id,
             }
 
-    # 2. Register thread in registry (skip if pre-registered by parent process)
+    # 2. Register thread
     thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
     registry = thread_registry.get_registry(proj_path)
     if not pre_registered:
         registry.register(thread_id, directive_name, parent_id=parent_thread_id)
 
-    # 3. Load directive
+    # 3. Load and parse directive
     from rye.utils.resolvers import get_user_space
     user_space = str(get_user_space())
 
@@ -550,7 +548,48 @@ async def execute(params: Dict, project_path: str) -> Dict:
             return {"success": False, "error": result.get("error", "Directive validation failed"), "thread_id": thread_id}
         directive = result["parsed"]
 
-    # 3.6. Resolve extends chain and compose context
+    # 4. Resolve extends — fire resolve_extends hooks to route into extends chains
+    hooks_loader = load_module("loaders/hooks_loader", anchor=_ANCHOR)
+    loader = hooks_loader.get_hooks_loader()
+    resolve_hooks = (
+        loader.get_project_hooks(proj_path)
+        + loader.get_user_hooks()
+        + loader.get_builtin_hooks(proj_path)
+    )
+    condition_eval = load_module("loaders/condition_evaluator", anchor=_ANCHOR)
+    hook_ctx = {
+        "directive": directive_name,
+        "has_extends": bool(directive.get("extends")),
+        "category": directive.get("category", ""),
+        "inputs": inputs,
+        "model": directive.get("model", {}),
+    }
+    for hook in resolve_hooks:
+        if hook.get("event") != "resolve_extends":
+            continue
+        if not condition_eval.matches(hook_ctx, hook.get("condition", {})):
+            continue
+        action = hook.get("action", {})
+        extends_target = action.get("set_extends")
+        if extends_target:
+            original_extends = directive.get("extends")
+            directive["extends"] = extends_target
+            import logging
+            if original_extends:
+                logging.getLogger(__name__).info(
+                    "Thread %s: resolve_extends hook '%s' overrode extends "
+                    "'%s' → '%s'",
+                    thread_id, hook.get("id", "?"),
+                    original_extends, extends_target,
+                )
+            else:
+                logging.getLogger(__name__).info(
+                    "Thread %s: resolve_extends hook '%s' set extends → '%s'",
+                    thread_id, hook.get("id", "?"), extends_target,
+                )
+            break  # first match wins
+
+    # 5. Resolve extends chain and compose context
     system_prompt = ""
     directive_context = {"before": "", "after": "", "suppress": []}
     if directive.get("extends") or directive.get("context"):
@@ -596,7 +635,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             registry.update_status(thread_id, "error")
             return {"success": False, "error": str(e), "thread_id": thread_id}
 
-    # 3.5. Reconstruct resume_messages from previous thread's transcript JSONL
+    # 6. Reconstruct resume messages from previous thread transcript
     if params.get("previous_thread_id") and not params.get("resume_messages"):
         prev_tid = params["previous_thread_id"]
 
@@ -682,14 +721,14 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
         params["resume_messages"] = trailing
 
-    # 4. Build limits with parent as upper bound (depth decrements automatically)
+    # 7. Build limits
     parent_limits = parent_meta.get("limits") if parent_meta else None
     limits = _resolve_limits(
         directive.get("limits", {}), params.get("limit_overrides", {}),
         project_path, parent_limits=parent_limits,
     )
 
-    # 5. Check depth limit — depth < 0 means parent's depth was exhausted
+    # 8. Check depth limit
     if limits.get("depth", 10) < 0:
         registry.update_status(thread_id, "error")
         return {
@@ -698,7 +737,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "thread_id": thread_id,
         }
 
-    # 6. Check spawns limit for parent
+    # 9. Check spawns limit
     orchestrator_mod = load_module("orchestrator", anchor=_ANCHOR)
     if parent_thread_id:
         spawns_limit = parent_limits.get("spawns", 10) if parent_limits else limits.get("spawns", 10)
@@ -712,7 +751,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             }
         orchestrator_mod.increment_spawn_count(parent_thread_id)
 
-    # 7. Build hooks, harness
+    # 10. Build hooks, harness
     hooks = _merge_hooks(directive.get("hooks", []), project_path)
 
     SafetyHarness = load_module("safety_harness", anchor=_ANCHOR).SafetyHarness
@@ -724,6 +763,22 @@ async def execute(params: Dict, project_path: str) -> Dict:
         parent_capabilities=parent_capabilities,
     )
     harness.available_tools = _build_tool_schemas()
+
+    # Tool schema preload (Layer 1) — inject CONFIG_SCHEMA for granted tools
+    # so the agent knows parameter shapes before turn 1.
+    resilience_loader = load_module("loaders/resilience_loader", anchor=_ANCHOR)
+    preload_config = resilience_loader.get_resilience_loader().get_tool_preload_config(proj_path)
+    tool_schema_loader = load_module("loaders/tool_schema_loader", anchor=_ANCHOR)
+    preload_result = tool_schema_loader.preload_tool_schemas(
+        harness._capabilities, proj_path,
+        max_tokens=preload_config.get("max_tokens", 2000),
+    ) if preload_config.get("enabled", True) else {"schemas": "", "preloaded_tools": []}
+    if preload_result["schemas"]:
+        existing_before = directive_context.get("before", "")
+        if existing_before:
+            directive_context["before"] = existing_before + "\n\n" + preload_result["schemas"]
+        else:
+            directive_context["before"] = preload_result["schemas"]
 
     # Grant directive_return capability and set output field names if directive declares <outputs>
     directive_outputs = directive.get("outputs", [])
@@ -768,7 +823,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "thread_id": thread_id,
         }
 
-    # 8. Reserve budget
+    # 11. Reserve budget
     budgets = load_module("persistence/budgets", anchor=_ANCHOR)
     ledger = budgets.get_ledger(proj_path)
     spend_limit = limits.get("spend", 1.0)
@@ -845,7 +900,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         directive_name, directive_desc, directive_body
     ]))
 
-    # 9. Write initial thread.json (with limits/depth/caps for child lookup)
+    # 12. Write initial thread.json
     registry.update_status(thread_id, "running")
     _write_thread_meta(
         proj_path, thread_id, directive_name, "running",
@@ -853,7 +908,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         limits=limits, capabilities=harness._capabilities,
     )
 
-    # 10. Set env var so children discover this thread as their parent
+    # 13. Set env var so children discover this thread as parent
     os.environ["RYE_PARENT_THREAD_ID"] = thread_id
 
     if params.get("async"):
@@ -901,7 +956,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "pid": spawn_result["pid"],
         }
 
-    # 11. Run thread synchronously
+    # 14. Run thread synchronously
     # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
     result = await runner.run(
         thread_id,
@@ -924,7 +979,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     if not result.get("success") and not result.get("error"):
         result["error"] = result.get("status", "unknown error (no message from runner)")
 
-    # 12. Report spend + cascade to parent + release
+    # 15. Report spend and finalize
     actual_spend = result.get("cost", {}).get("spend", 0.0)
     try:
         ledger.report_actual(thread_id, actual_spend)
@@ -935,7 +990,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     status = result.get("status", "completed")
     ledger.release(thread_id, final_status=status)
 
-    # 13. Update registry with final status
+    # Update registry with final status
     status = result.get("status", "completed")
     registry.update_status(thread_id, status)
     result_data = {"cost": result.get("cost")}
@@ -943,7 +998,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         result_data["outputs"] = result["outputs"]
     registry.set_result(thread_id, result_data)
 
-    # 14. Write final thread.json
+    # Write final thread.json
     _write_thread_meta(
         proj_path, thread_id, directive_name, status,
         thread_created_at, datetime.now(timezone.utc).isoformat(),

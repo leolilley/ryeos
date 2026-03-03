@@ -303,20 +303,6 @@ Steps can also use XML action elements for richer structure:
 </cost>
 ```
 
-### Context and Relationships
-
-```xml
-<context>
-  <related_files>
-    - scripts/deploy.py
-    - tests/integration/
-  </related_files>
-  <requires>subagent</requires>
-  <depends_on>build-images</depends_on>
-  <suggests>monitoring-setup</suggests>
-</context>
-```
-
 ### Hooks (event-driven actions)
 
 ```xml
@@ -559,17 +545,16 @@ Circular extends chain: rye/agent/core/base (chain: deploy_staging → base_depl
 
 ## Context Injection with `<context>`
 
-The `<context>` metadata section declares knowledge items to inject into the LLM prompt, or suppresses hook-driven context layers. Items are loaded at thread startup and merged with hook-injected context:
+The `<context>` metadata section declares knowledge items to inject into the LLM prompt, or suppresses inherited context layers from the extends chain. Items are loaded at thread startup and merged with hook-injected context:
 
 ```xml
 <directive name="deploy_staging" version="1.0.0" extends="rye/agent/core/base">
   <metadata>
     <context>
-      <system>rye/agent/core/Identity</system>
-      <system>rye/agent/core/Behavior</system>
+      <suppress>rye/agent/core/Identity</suppress>
+      <system>project/deploy/identity</system>
       <before>project/deploy/environment-rules</before>
       <after>project/deploy/completion-checklist</after>
-      <suppress>tool-protocol</suppress>
     </context>
     ...
   </metadata>
@@ -584,20 +569,20 @@ The `<context>` metadata section declares knowledge items to inject into the LLM
 | `<system>`    | Appended to the system message (after hook layers)      | Extra system-level instructions         |
 | `<before>`    | Between hook before-context and directive body           | Domain rules, project conventions       |
 | `<after>`     | Between directive body and hook after-context             | Checklists, extra completion rules      |
-| `<suppress>`  | Skips the named hook-driven context layer                | Replace default layers with custom ones |
+| `<suppress>`  | Skips the named context layer from the extends chain     | Replace inherited layers with custom ones |
 
 ### Suppressing Context Layers
 
-`<suppress>` skips a hook-driven context layer by matching against the hook's `id` field or the action's full knowledge `item_id`:
+`<suppress>` skips an inherited context layer by matching against the knowledge `item_id` in the extends chain:
 
 ```xml
 <context>
-  <suppress>system_tool_protocol</suppress>
-  <before>project/custom-tool-protocol</before>
+  <suppress>rye/agent/core/Identity</suppress>
+  <system>project/custom-identity</system>
 </context>
 ```
 
-This removes the default tool-protocol from the system message and injects a custom one in the user message instead. Suppressions compose through `extends` — if any directive in the chain suppresses a layer, it stays suppressed.
+This prevents the inherited `Identity` knowledge from being injected and replaces it with a project-specific one. Suppressions compose through `extends` — if any directive in the chain suppresses a layer, it stays suppressed.
 
 ### Composition through `extends`
 
@@ -609,7 +594,7 @@ Chain: rye/agent/core/base → project/deploy/base → deploy_staging
 System items:  [Identity, Behavior]          ← from rye/agent/core/base
 Before items:  [environment-rules]           ← from project/deploy/base
 After items:   [completion-checklist]        ← from deploy_staging
-Suppressions:  [tool-protocol]              ← from deploy_staging
+Suppressions:  [rye/agent/core/Identity]    ← from deploy_staging
 ```
 
 See [Context Injection](../orchestration/context-injection.md) for the full system overview including project-level customization via conditional hooks.

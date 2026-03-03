@@ -67,3 +67,7 @@ child_policy:
 concurrency:
   max_concurrent_children: 5
   max_total_threads: 20
+
+tool_preload:
+  enabled: true
+  max_tokens: 2000

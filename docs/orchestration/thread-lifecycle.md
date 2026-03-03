@@ -64,7 +64,31 @@ The directive is loaded via `DirectiveResolver`, searching project → user → 
 
 For normal execution, `directive_parser.parse_and_validate_directive()` handles input validation and interpolation. For resume/handoff, `LoadTool` is used instead (no input validation needed since the directive ran before).
 
-### Step 4: Resolve limits
+### Step 4: Resolve extends
+
+After the directive is loaded, `resolve_extends` hooks fire to allow dynamic routing into extends chains. Hooks can set or override the directive's `extends` attribute before the extends chain is walked.
+
+Hook context includes:
+
+| Key | Description |
+|-----|-------------|
+| `directive` | Directive name |
+| `has_extends` | Whether the directive already declares an `extends` target |
+| `category` | Directive category |
+| `inputs` | Resolved inputs |
+| `model` | Resolved model |
+
+First matching hook wins. A hook's `set_extends` action sets the directive's extends target.
+
+### Step 5: Resolve extends chain and compose context
+
+The extends chain is walked — each parent directive's context is composed into the current directive. This merges capabilities, hooks, and context from ancestor directives.
+
+### Step 6: Reconstruct resume messages
+
+For continuation/resume threads, previous thread transcript messages are reconstructed from the prior thread's transcript. For fresh threads this step is a no-op.
+
+### Step 7: Build limits
 
 Limits are resolved through a layered merge:
 
@@ -74,15 +98,15 @@ defaults (resilience.yaml) → directive metadata → limit_overrides → parent
 
 Parent limits **cap** all values via `min()`. A child can never exceed its parent's limits. Depth decrements by 1 per level — if the parent has `depth: 5`, the child gets `depth: 4`.
 
-### Step 5: Check depth
+### Step 8: Check depth
 
 If resolved depth is less than 0 (i.e., the parent's depth was already exhausted), the thread returns an error immediately. This prevents infinite recursion.
 
-### Step 6: Check spawns limit
+### Step 9: Check spawns limit
 
 If the thread has a parent, the orchestrator checks whether the parent has exceeded its `spawns` limit. If so, the thread returns an error. Otherwise, the parent's spawn count is incremented.
 
-### Step 7: Build hooks and harness
+### Step 10: Build hooks, harness, and preload tool schemas
 
 Hooks are merged from five sources and sorted by layer:
 
@@ -98,7 +122,9 @@ User and project hooks use the same format as directive hooks — `id`, `event`,
 
 The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities. Tool schemas are loaded from the primary tools directory and attached to the harness.
 
-### Step 8: Reserve budget
+After capabilities are resolved and attached to the harness, **tool schema preload** (Layer 1) runs. `tool_schema_loader.preload_tool_schemas()` scans capabilities for `rye.execute.tool.*` patterns, resolves matching tools across the 3-tier space, extracts `CONFIG_SCHEMA` and `__tool_description__` via AST, and injects formatted schema blocks into `directive_context["before"]`. Primary tools are skipped. Token budget is ~2000.
+
+### Step 11: Reserve budget
 
 The hierarchical budget ledger handles cost tracking:
 
@@ -107,11 +133,7 @@ The hierarchical budget ledger handles cost tracking:
 
 If the parent has insufficient remaining budget, the reservation fails and the thread returns an error.
 
-### Step 9: Build prompt and providers
-
-The LLM prompt is built from the directive's raw content (the full markdown file minus the signature comment). The model is resolved from: `params.model` → `directive.model.id` → `directive.model.tier`. An `HttpProvider` is created with the resolved model configuration.
-
-### Step 10: Write initial thread.json
+### Step 12: Write initial thread.json
 
 The thread metadata file is written to `.ai/agent/threads/<thread_id>/thread.json`:
 
@@ -139,20 +161,16 @@ The thread metadata file is written to `.ai/agent/threads/<thread_id>/thread.jso
 
 The `thread.json` file is signed using canonical JSON serialization with a `_signature` field, protecting capabilities and limits from tampering.
 
-### Step 11: Set parent env var
+### Step 13: Set parent env var
 
 `RYE_PARENT_THREAD_ID` is set to this thread's ID so any child subprocesses (spawned via `async`) inherit the parent relationship.
 
-### Step 12: Spawn or run
+### Step 14: Run thread synchronously / spawn async
 
 - **Synchronous** (default): Calls `runner.run()` directly and blocks until completion
 - **Asynchronous** (`async: true`): Triggered by `execute directive` with `async: true`, which delegates to `thread_directive` internally. `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `lillux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
 
-### Step 13: Run LLM loop
-
-See "The Runner's LLM Loop" below.
-
-### Step 14: Finalize
+### Step 15: Report spend and finalize
 
 After the LLM loop completes:
 
@@ -293,6 +311,7 @@ hooks:
 
 | Event | When it fires | Context available |
 |-------|--------------|-------------------|
+| `resolve_extends` | After directive load, before extends chain is walked (step 4) | `directive`, `has_extends`, `category`, `inputs`, `model`. Action: `set_extends` sets the directive's extends target. |
 | `thread_started` | Before first LLM turn (fresh threads) | `directive`, `directive_body`, `model`, `limits`, `inputs` |
 | `thread_continued` | Before first LLM turn (continuation threads) | `directive`, `directive_body`, `model`, `limits`, `previous_thread_id`, `inputs` |
 | `after_step` | After each turn in the LLM loop | `cost`, `thread_id` |

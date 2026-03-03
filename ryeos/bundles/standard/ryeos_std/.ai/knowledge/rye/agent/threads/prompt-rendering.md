@@ -175,13 +175,13 @@ def _build_prompt(directive: Dict) -> str:
 
 ## System Message Assembly
 
-Before the main loop begins, `build_system_prompt` hooks fire to produce the system message. This content is delivered via the provider's native system message field — it is **not** stuffed into a user message.
+System messages are assembled from `<system>` context items declared in the directive's extends chain. This content is delivered via the provider's native system message field — it is **not** stuffed into a user message.
 
 ### How It Works
 
-1. Hooks registered with `build_system_prompt` are invoked in order
-2. Each hook returns a string fragment (or `None`)
-3. Non-empty fragments are concatenated to form the final system prompt
+1. The extends chain is walked root-first, collecting `<context><system>` knowledge items
+2. Each knowledge item is loaded and its content extracted
+3. Non-empty content blocks are concatenated to form the final system prompt
 4. The assembled prompt is sent as the API's system message
 
 ### Provider-Specific Delivery
@@ -235,7 +235,7 @@ Directives can declare a `<context>` metadata section that specifies knowledge i
 | `<system>`    | Appended to the system message (after hook-driven layers)|
 | `<before>`    | Injected between hook before-context and directive body  |
 | `<after>`     | Injected between directive body and hook after-context   |
-| `<suppress>`  | Skips the named hook-driven context layer                |
+| `<suppress>`  | Skips the named inherited context layer from extends chain |
 
 ### Knowledge Item Loading
 
@@ -249,22 +249,20 @@ Context entries reference knowledge items by ID. These are loaded via `LoadTool`
 </context>
 ```
 
-### Suppressing Hook-Driven Layers
+### Suppressing Inherited Context Layers
 
-Directives can suppress specific hook-driven context layers using `<suppress>`. The value matches against:
-- The hook's `id` field (e.g. `system_tool_protocol`)
-- The action's full knowledge `item_id` (e.g. `rye/agent/core/ToolProtocol`)
+Directives can suppress specific inherited context layers using `<suppress>`. The value matches against the knowledge `item_id` in the extends chain:
 
 Basename matching is intentionally not supported to avoid ambiguous clashes (e.g. `Identity` matching both `rye/agent/core/Identity` and `project/auth/Identity`).
 
 ```xml
 <context>
-  <suppress>system_tool_protocol</suppress>
-  <before>project/custom-tool-protocol</before>
+  <suppress>rye/agent/core/Identity</suppress>
+  <system>project/custom-identity</system>
 </context>
 ```
 
-This replaces the standard tool-protocol layer with a project-specific one.
+This prevents the inherited `Identity` from being injected and replaces it with a project-specific one.
 
 ### Message Assembly Order
 
@@ -277,7 +275,7 @@ directive prompt (body + outputs)     ← from _build_prompt()
 directive after-context               ← from <after> knowledge items
 ```
 
-Suppressions apply to both `build_system_prompt` and `thread_started` hooks.
+Suppressions apply to context items from the extends chain and `thread_started` hooks.
 
 ## Directive Extends and Context Composition
 
@@ -307,9 +305,9 @@ Projects can customize the thread context without modifying system-level knowled
 
 1. Create `.ai/knowledge/rye/agent/core/Identity.md` in your project
 2. The project-level file will be loaded instead of the system default
-3. No directive changes needed — hooks automatically pick up the override
+3. No directive changes needed — extends chains automatically pick up the override
 
-This works for any core knowledge item: `Identity`, `Behavior`, `ToolProtocol`, `Environment`.
+This works for any core knowledge item: `Identity`, `Behavior`, `Environment`, and the decomposed protocol items (`protocol/execute`, `protocol/search`, `protocol/load`, `protocol/sign`).
 
 ### Override via Directive `<context>`
 
@@ -317,8 +315,8 @@ For per-directive customization (not project-wide), use `<context>` metadata:
 
 ```xml
 <context>
-  <suppress>system_tool_protocol</suppress>
-  <before>project/my-custom-protocol</before>
+  <suppress>rye/agent/core/Identity</suppress>
+  <system>project/custom-identity</system>
 </context>
 ```
 
@@ -326,8 +324,8 @@ For per-directive customization (not project-wide), use `<context>` metadata:
 
 | Mechanism | Scope | Applies To |
 |-----------|-------|------------|
-| Project knowledge item override | All threads in project | Hooks loading that item |
-| Directive `<suppress>` | Single directive | Named hook layers |
+| Project knowledge item override | All threads in project | Extends chains loading that item |
+| Directive `<suppress>` | Single directive | Named inherited context layers |
 | Directive `<before>`/`<after>` | Single directive | Additional context items |
 | Directive `<system>` | Single directive | System message extensions |
 

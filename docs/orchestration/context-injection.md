@@ -1,10 +1,10 @@
 ```yaml
 id: context-injection
 title: "Context Injection"
-description: How system messages, directive context, and hooks deliver knowledge to threads
+description: How layered context injection delivers knowledge to threads through tool schemas, routing hooks, and extends chains
 category: orchestration
-tags: [context, system-prompt, hooks, extends]
-version: "1.0.0"
+tags: [context, extends, hooks, tool-schemas, layers]
+version: "2.0.0"
 ```
 
 # Context Injection
@@ -13,76 +13,148 @@ Context injection is the system that loads knowledge into threads before the LLM
 
 ## Overview
 
-Every thread receives injected context through two channels:
+Context injection uses three independent, composable layers:
 
-1. **System messages** — delivered via the LLM provider's system message field (identity, behavior rules, tool protocol)
-2. **User message context** — injected into the first user message before and after the directive body (environment info, directive instruction, directive-declared knowledge)
+1. **Layer 1 — Tool Schema Preload** — permission-driven tool schema extraction, injected before the directive body
+2. **Layer 2 — Resolve Extends Hooks** — routing layer that dynamically assigns an `extends` chain to a directive
+3. **Layer 3 — Extends Chain** — delivers the operating context (identity, behavior, tool protocol knowledge) via inheritance
 
-Together, these give the agent a complete working context on its first turn — no discovery required.
+These layers combine to give the agent a complete working context on its first turn — no discovery required. Each layer is optional; a directive can use any combination or none at all.
 
-## System Messages
+### Layer Composition
 
-System messages are assembled from `build_system_prompt` hooks and delivered via the API's system message parameter. They contain foundational instructions that apply to every turn:
+| Configuration | What the thread gets |
+|---|---|
+| Permissions only (layer 1) | Tool schemas for granted tools. No identity, no behavioral framing. |
+| Permissions + hooks (layer 1+2) | Tool schemas + hook routes into an extends chain → full operating context |
+| Permissions + extends (layer 1+3) | Tool schemas + explicit inherited context, identity, behavior |
+| All three (layer 1+2+3) | Full stack — hook routing + inheritance + tool schemas |
+| Nothing declared | Bare. Primary tool APIs available at provider level but no pre-taught context. |
 
-- **Identity** (`rye/agent/core/Identity`) — who the agent is, its role
-- **Behavior** (`rye/agent/core/Behavior`) — operational rules, safety constraints
-- **Tool protocol** (`rye/agent/core/ToolProtocol`) — how to call Rye tools
+**Key principle:** Identity, Behavior, and tool protocol knowledge are delivered via the extends chain's `<context>` blocks. A directive without `extends` gets NO inherited identity/behavior context. It gets tool schemas from Layer 1 only if it declares permissions.
 
-These are loaded by built-in hooks defined in `hook_conditions.yaml`:
+## Layer 1 — Tool Schema Preload
+
+After capabilities are resolved, the system scans `harness._capabilities` for `rye.execute.tool.*` capability strings. Matching tool files are resolved across three-tier space (project → user → system), and their `CONFIG_SCHEMA` and `__tool_description__` are extracted via AST parsing — safe, no execution.
+
+The extracted schemas are formatted as concise `<tool_schemas>` XML blocks and injected into `directive_context["before"]`:
+
+```xml
+<tool_schemas>
+  <tool id="project/deploy/kubectl">
+    <description>Execute kubectl commands against the staging cluster</description>
+    <params>
+      <param name="command" type="string" required="true">The kubectl command to run</param>
+      <param name="namespace" type="string" required="false">Kubernetes namespace</param>
+    </params>
+  </tool>
+</tool_schemas>
+```
+
+Primary tools (`rye/primary/`) are skipped — they're already registered as API-level tool definitions with the LLM provider.
+
+### Token Budget and Prioritization
+
+Tool schema preload is governed by a configurable `max_tool_preload_tokens` budget (default ~2000 tokens, estimated at 4 characters per token). When the budget is tight, specific capability strings (e.g. `rye.execute.tool.project/deploy/kubectl`) are prioritized over broad wildcards (e.g. `rye.execute.tool.*`).
+
+**Implementation:** `tools/rye/agent/threads/loaders/tool_schema_loader.py`
+
+## Layer 2 — Resolve Extends Hooks
+
+The `resolve_extends` lifecycle event fires during step 4 of `thread_directive.execute()`, after the directive is parsed but before the extends chain is resolved. Hooks registered for this event can dynamically set or override the `extends` attribute of a directive.
+
+Hook context includes:
+
+| Field | Type | Description |
+|---|---|---|
+| `directive` | `str` | The directive name/ID |
+| `has_extends` | `bool` | Whether the directive already declares `extends` |
+| `category` | `str` | The directive's category |
+| `inputs` | `dict` | Inputs passed to the directive |
+| `model` | `str` | The model configuration |
+
+**First match wins** — hooks are evaluated in layer order, and the first hook whose condition matches terminates the resolution loop. This enables dynamic routing without modifying the directive itself:
 
 ```yaml
-- id: "system_identity"
-  event: "build_system_prompt"
-  layer: 2
-  position: "before"
-  action:
-    primary: "load"
-    item_type: "knowledge"
-    item_id: "rye/agent/core/Identity"
-
-- id: "system_behavior"
-  event: "build_system_prompt"
-  layer: 2
-  position: "before"
-  action:
-    primary: "load"
-    item_type: "knowledge"
-    item_id: "rye/agent/core/Behavior"
-
-- id: "system_tool_protocol"
-  event: "build_system_prompt"
-  layer: 2
-  position: "before"
-  action:
-    primary: "load"
-    item_type: "knowledge"
-    item_id: "rye/agent/core/ToolProtocol"
+# .ai/config/agent/hooks.yaml — route deploy directives to a deploy context
+hooks:
+  - id: "route_deploy_extends"
+    event: "resolve_extends"
+    layer: 2
+    condition:
+      path: "directive"
+      op: "contains"
+      value: "deploy"
+    action:
+      set_extends: "project/contexts/deploy"
 ```
 
-The runner assembles system messages by calling `harness.run_hooks_context()` with `event="build_system_prompt"`, then concatenates the `before` and `after` blocks:
+If no hook matches and the directive has no `extends` declared, it proceeds without an extends chain (Layer 3 is skipped entirely).
 
-```python
-system_ctx = await harness.run_hooks_context(
-    {"directive": harness.directive_name, ...},
-    dispatcher,
-    event="build_system_prompt",
-)
-hook_system = "\n\n".join(filter(None, [system_ctx["before"], system_ctx["after"]]))
+## Layer 3 — Extends Chain
+
+Directives can extend base operating contexts that carry Identity, Behavior, tool protocol knowledge, permissions, and suppressions through an inheritance chain.
+
+### Standard Base Contexts
+
+Three standard bases are provided:
+
+| Base | Permissions | Protocol Items | Description |
+|---|---|---|---|
+| `rye/agent/core/base` | Full (execute, search, load, sign) | All 4 protocol items + Identity + Behavior | Standard operating context |
+| `rye/agent/core/base_execute_only` | Execute only | `protocol/execute` + Identity + Behavior | Narrow — execute tools only |
+| `rye/agent/core/base_review` | Read-only file access | `protocol/execute`, `search`, `load` + Identity + Behavior | Review and analysis |
+
+### Decomposed Tool Protocol
+
+ToolProtocol has been decomposed into 4 per-primary knowledge items, each explaining how to call one Rye primary tool:
+
+- `rye/agent/core/protocol/execute`
+- `rye/agent/core/protocol/search`
+- `rye/agent/core/protocol/load`
+- `rye/agent/core/protocol/sign`
+
+Base contexts declare only the protocol items that match their permissions — `base_execute_only` includes only `protocol/execute`, while `base` includes all four. This means **what you can do determines what you're told about** — permission attenuation through the chain also controls context narrowing.
+
+### Chain Composition
+
+When a directive uses `extends`, context items from the entire inheritance chain are composed root-first:
+
+```xml
+<!-- rye/agent/core/base declares: -->
+<context>
+  <system>rye/agent/core/Identity</system>
+  <system>rye/agent/core/Behavior</system>
+  <before>rye/agent/core/protocol/execute</before>
+  <before>rye/agent/core/protocol/search</before>
+  <before>rye/agent/core/protocol/load</before>
+  <before>rye/agent/core/protocol/sign</before>
+</context>
+
+<!-- project/deploy/base extends rye/agent/core/base, declares: -->
+<context>
+  <before>project/deploy/environment-rules</before>
+</context>
+
+<!-- deploy_staging (leaf) extends project/deploy/base, declares: -->
+<context>
+  <after>project/deploy/completion-checklist</after>
+</context>
 ```
 
-The assembled system prompt is emitted as a `system_prompt` transcript event with the list of contributing hook layers.
+Resolution walks the chain leaf → parent → root, then reverses to compose root-first:
 
-### Provider-Specific Delivery
+```
+Chain: rye/agent/core/base → project/deploy/base → deploy_staging
 
-System messages are passed to the LLM via each provider's native system message mechanism:
+System:  [Identity, Behavior]                                     ← from root
+Before:  [protocol/execute, search, load, sign, environment-rules] ← root + middle
+After:   [completion-checklist]                                    ← from leaf
+```
 
-| Provider  | How system messages are sent                   |
-| --------- | ---------------------------------------------- |
-| Anthropic | `system` parameter on the messages API call    |
-| OpenAI    | `{"role": "system", "content": "..."}` message |
-| Gemini    | `system_instruction` parameter                 |
+Duplicates are deduplicated — if both parent and child declare the same knowledge item, it appears only once. Circular `extends` chains are detected and rejected.
 
-The runner passes the assembled string to the provider — each provider adapter maps it to the correct API field.
+See [Authoring Directives — Directive Inheritance](../authoring/directives.md#directive-inheritance-with-extends) for the directive-side syntax.
 
 ## User Message Context
 
@@ -95,28 +167,21 @@ User message context is injected into the first user message via `thread_started
 
 Hooks can set `wrap: false` to inject content without XML wrapping. By default, injected knowledge is wrapped in an XML tag derived from the knowledge item's `name` field (e.g. `<Environment id="rye/agent/core/Environment" type="knowledge">...</Environment>`). With `wrap: false`, the raw content is injected directly — this is used for `DirectiveInstruction` which needs to appear as plain instructions before the directive body, not as a tagged context block.
 
-The runner constructs the first message by sandwiching the directive body:
+### Message Assembly Order
 
-```python
-first_message_parts = []
-if hook_ctx["before"]:
-    first_message_parts.append(hook_ctx["before"])
-first_message_parts.append(user_prompt)       # the directive body
-if hook_ctx["after"]:
-    first_message_parts.append(hook_ctx["after"])
-messages.append({"role": "user", "content": "\n\n".join(first_message_parts)})
-```
-
-This produces a first message structured as:
+With all layers active, the first user message is assembled as:
 
 ```
-[environment context]            ← before (wrapped)
-[directive instruction]          ← before (raw, wrap: false)
-[directive body + inputs]        ← the actual task
-[directive after-context]        ← after (if any)
+tool schemas (Layer 1)            ← from tool_schema_loader (wrapped in <tool_schemas>)
+hook before-context (environment) ← from thread_started hooks (wrapped)
+hook before-context (dir. instr)  ← from thread_started hooks (raw, wrap: false)
+extends before-context            ← from extends chain <before> items (protocol, domain knowledge)
+directive before-context          ← from directive's own <before> items
+directive prompt (body + outputs) ← from _build_prompt()
+directive after-context           ← from <after> knowledge items
 ```
 
-A `context_injected` event is emitted to the transcript recording which hooks contributed.
+A `context_injected` event is emitted to the transcript recording which sources contributed.
 
 ## `<context>` in Directives
 
@@ -129,91 +194,53 @@ Directives can declare additional knowledge items to inject using the `<context>
       <system>project/deploy/system-rules</system>
       <before>project/deploy/environment-rules</before>
       <after>project/deploy/completion-checklist</after>
-      <suppress>tool-protocol</suppress>
+      <suppress>rye/agent/core/protocol/sign</suppress>
     </context>
     ...
   </metadata>
 </directive>
 ```
 
-These items are loaded at thread startup and merged with hook-injected context:
+These items are loaded at thread startup and merged with extends-chain context:
 
-| Tag          | Destination                                              |
-| ------------ | -------------------------------------------------------- |
-| `<system>`   | Appended to the system message (after hook layers)       |
-| `<before>`   | Injected between hook before-context and directive body  |
-| `<after>`    | Injected after directive body                            |
-| `<suppress>` | Skips a named hook-driven context layer                  |
+| Tag          | Destination                                                   |
+| ------------ | ------------------------------------------------------------- |
+| `<system>`   | Appended to the system message (after extends-chain layers)   |
+| `<before>`   | Injected between extends-chain before-context and directive body |
+| `<after>`    | Injected after directive body                                 |
+| `<suppress>` | Skips a named context layer from the extends chain            |
 
 Directive-declared context items are resolved via the `load` tool (same as knowledge items loaded by hooks), so they follow the standard three-tier resolution: project → user → system.
 
 ### Suppressing Context Layers
 
-The `<suppress>` tag skips a specific hook-driven context layer. It matches against:
+The `<suppress>` tag skips a context layer inherited from the extends chain. It matches against:
 
-- The hook's `id` field (e.g. `system_tool_protocol`)
-- The action's full knowledge `item_id` (e.g. `rye/agent/core/ToolProtocol`)
+- The full knowledge `item_id` of a context entry (e.g. `rye/agent/core/protocol/sign`)
+- Context entries declared at any level of the extends chain
 
-Basename matching (e.g. just `tool-protocol`) is intentionally not supported to avoid ambiguous clashes across namespaces.
-
-This is useful when a directive needs to replace a default layer with something custom:
+This is useful when a directive needs to remove an inherited layer or replace it with something custom:
 
 ```xml
 <context>
-  <suppress>system_tool_protocol</suppress>
-  <before>project/custom-tool-protocol</before>
+  <suppress>rye/agent/core/protocol/sign</suppress>
+  <before>project/custom-sign-protocol</before>
 </context>
 ```
 
-Suppressions apply to both `build_system_prompt` and `thread_started` hooks. They are also composed through `extends` chains — if any directive in the chain suppresses a layer, it stays suppressed.
+Suppressions compose through `extends` chains — if any directive in the chain suppresses a layer, it stays suppressed for all descendants.
 
-### Message Assembly Order
+## Provider-Specific Delivery
 
-With both hook context and directive context, the first user message is assembled as:
+System messages (from `<system>` context entries in the extends chain and directives) are passed to the LLM via each provider's native system message mechanism:
 
-```
-hook before-context (environment)     ← from thread_started hooks (wrapped)
-hook before-context (directive instr) ← from thread_started hooks (raw, wrap: false)
-directive before-context              ← from <before> knowledge items
-directive prompt (body + outputs)     ← from _build_prompt()
-directive after-context               ← from <after> knowledge items
-```
+| Provider  | How system messages are sent                   |
+| --------- | ---------------------------------------------- |
+| Anthropic | `system` parameter on the messages API call    |
+| OpenAI    | `{"role": "system", "content": "..."}` message |
+| Gemini    | `system_instruction` parameter                 |
 
-## The `extends` Chain
-
-When a directive uses `extends`, context items from the entire inheritance chain are composed root-first:
-
-```xml
-<!-- rye/agent/core/base declares: -->
-<context>
-  <system>rye/agent/core/Identity</system>
-  <system>rye/agent/core/Behavior</system>
-</context>
-
-<!-- project/deploy/base declares: -->
-<context>
-  <before>project/deploy/environment-rules</before>
-</context>
-
-<!-- deploy_staging (leaf) declares: -->
-<context>
-  <after>project/deploy/completion-checklist</after>
-</context>
-```
-
-Resolution walks the chain leaf → parent → root, then reverses to compose root-first:
-
-```
-Chain: rye/agent/core/base → project/deploy/base → deploy_staging
-
-System:  [identity, behavior]          ← from root
-Before:  [environment-rules]           ← from middle
-After:   [completion-checklist]        ← from leaf
-```
-
-Duplicates are deduplicated — if both parent and child declare the same knowledge item, it appears only once. Circular `extends` chains are detected and rejected.
-
-See [Authoring Directives — Directive Inheritance](../authoring/directives.md#directive-inheritance-with-extends) for the directive-side syntax.
+The runner passes the assembled string to the provider — each provider adapter maps it to the correct API field.
 
 ## Project-Level Context Customization
 
@@ -227,7 +254,7 @@ The simplest approach: create a project-level knowledge item that shadows the sy
 .ai/knowledge/rye/agent/core/Identity.md    ← project override
 ```
 
-All threads in the project will load this instead of the system identity. No hook changes needed.
+All threads in the project that extend a base context will load this instead of the system identity. No other changes needed.
 
 ### Additive Hooks via `hooks.yaml`
 
@@ -251,43 +278,38 @@ hooks:
 
 This adds deploy-specific context alongside the default layers — it doesn't replace anything.
 
-### Conditional Context via `hook_conditions.yaml`
+### Dynamic Routing via `resolve_extends` Hooks
 
-For dynamic identity switching — different contexts for different directive types — override the system hooks in `.ai/config/hook_conditions.yaml`. The `ConfigLoader` merge-by-id system replaces hooks with the same ID:
+For dynamic context switching — different operating contexts for different directive types — use `resolve_extends` hooks in `.ai/config/agent/hooks.yaml`:
 
 ```yaml
-context_hooks:
-  # Replace default identity with a conditional version
-  - id: "system_identity"
-    event: "build_system_prompt"
+hooks:
+  # Web directives get a specialized base context with web-specific identity
+  - id: "route_web_extends"
+    event: "resolve_extends"
     layer: 2
-    position: "before"
-    condition:
-      not:
-        path: "directive"
-        op: "contains"
-        value: "web"
-    action:
-      primary: "load"
-      item_type: "knowledge"
-      item_id: "rye/agent/core/Identity"
-
-  # Add: web directives get a different identity
-  - id: "project_web_identity"
-    event: "build_system_prompt"
-    layer: 2
-    position: "before"
     condition:
       path: "directive"
       op: "contains"
       value: "web"
     action:
-      primary: "load"
-      item_type: "knowledge"
-      item_id: "project/identities/web-agent"
+      set_extends: "project/contexts/web-agent-base"
+
+  # Deploy directives get a deploy-specific context chain
+  - id: "route_deploy_extends"
+    event: "resolve_extends"
+    layer: 2
+    condition:
+      path: "directive"
+      op: "contains"
+      value: "deploy"
+    action:
+      set_extends: "project/contexts/deploy-base"
 ```
 
-This gives web directives a specialized identity while all other directives keep the default. The condition evaluator supports:
+This routes web directives into a `project/contexts/web-agent-base` extends chain (which can declare its own Identity, Behavior, and protocol knowledge), while deploy directives get a different chain. Directives that don't match any hook proceed with their declared `extends` (or none).
+
+The condition evaluator supports:
 
 | Operator   | Example                                                       | Matches when       |
 | ---------- | ------------------------------------------------------------- | ------------------ |
@@ -299,31 +321,28 @@ This gives web directives a specialized identity while all other directives keep
 | `any`      | `{any: [{...}, {...}]}`                                       | Any child matches  |
 | `all`      | `{all: [{...}, {...}]}`                                       | All children match |
 
-The context dict available to conditions includes: `directive`, `directive_body`, `model`, `limits`, `inputs`.
+The context dict available to conditions includes: `directive`, `has_extends`, `category`, `inputs`, `model`.
 
 ### Precedence Summary
 
-| Mechanism                                 | Scope                          | Effect                                        |
-| ----------------------------------------- | ------------------------------ | --------------------------------------------- |
-| Project knowledge item override           | All threads in project         | Shadows system knowledge via LoadTool cascade |
-| Project `hooks.yaml`                      | All threads matching condition | Adds extra context hooks                      |
-| Project `hook_conditions.yaml`            | All threads matching condition | Replaces/adds system hooks by ID              |
-| Directive `<suppress>`                    | Single directive               | Skips specific hook layers                    |
-| Directive `<before>`/`<after>`/`<system>` | Single directive               | Adds extra knowledge items                    |
+| Mechanism                                 | Scope                          | Effect                                                |
+| ----------------------------------------- | ------------------------------ | ----------------------------------------------------- |
+| Project knowledge item override           | All threads in project         | Shadows system knowledge via LoadTool cascade          |
+| Project `hooks.yaml` (`thread_started`)   | All threads matching condition | Adds extra context hooks                               |
+| Project `hooks.yaml` (`resolve_extends`)  | All threads matching condition | Dynamically routes directives into extends chains      |
+| Directive `extends`                       | Single directive               | Inherits full operating context from a base directive  |
+| Directive `<suppress>`                    | Single directive               | Skips specific extends-chain context layers            |
+| Directive `<before>`/`<after>`/`<system>` | Single directive               | Adds extra knowledge items                             |
 
-## Hooks vs `<context>`
+## Hooks vs Extends Chain vs `<context>`
 
-Both hooks and `<context>` inject knowledge, but they serve different purposes:
-
-| Aspect          | Hooks                                               | `<context>`                                     |
-| --------------- | --------------------------------------------------- | ----------------------------------------------- |
-| **Definition**  | `hook_conditions.yaml` or `hooks.yaml`              | Directive `<context>` metadata section          |
-| **When**        | Dynamic — evaluated at runtime with conditions      | Static — declared at authoring time             |
-| **Conditional** | Yes — `condition` field with full evaluator         | No — always loaded if declared                  |
-| **Scope**       | System-wide, project-wide, or per-directive         | Per-directive (composed through `extends`)      |
-| **Use case**    | Infrastructure concerns, dynamic identity switching | Domain knowledge specific to a directive's task |
-
-In practice, hooks handle foundational context (identity, behavior, tool protocol, environment) and dynamic switching (different identity per directive category), while `<context>` handles directive-specific domain knowledge that varies by task.
+| Aspect          | `thread_started` Hooks                         | `resolve_extends` Hooks                         | Extends Chain `<context>`                          | Directive `<context>`                           |
+| --------------- | ---------------------------------------------- | ----------------------------------------------- | -------------------------------------------------- | ----------------------------------------------- |
+| **Definition**  | `hooks.yaml`                                   | `hooks.yaml`                                    | Base directive `<context>` metadata                | Leaf directive `<context>` metadata             |
+| **When**        | Dynamic — evaluated at runtime with conditions | Dynamic — evaluated before chain resolution     | Static — declared in base directive                | Static — declared at authoring time             |
+| **Conditional** | Yes — `condition` field with full evaluator    | Yes — first match wins                          | No — always loaded when extended                   | No — always loaded if declared                  |
+| **Delivers**    | Environment info, directive instruction        | Routes into an extends chain                    | Identity, Behavior, tool protocol                  | Domain knowledge specific to a task             |
+| **Use case**    | Infrastructure concerns, runtime context       | Dynamic identity/context switching per category | Foundational operating context                     | Task-specific knowledge                         |
 
 ## Transcript Rendering
 
@@ -331,24 +350,26 @@ Context injection produces two transcript events:
 
 ### `system_prompt`
 
-Emitted after system message assembly. Contains the full system prompt text and the list of contributing hook layers:
+Emitted after system message assembly. Contains the full system prompt text and the list of contributing context sources from the extends chain:
 
 ```json
 {
   "event": "system_prompt",
   "text": "You are a Rye agent...",
-  "layers": ["system_identity", "system_behavior", "system_tool_protocol"]
+  "layers": ["rye/agent/core/Identity", "rye/agent/core/Behavior"]
 }
 ```
 
+The layers array reflects which `<system>` context entries from the extends chain contributed to the system message. If no extends chain is active, the layers array is empty.
+
 ### `context_injected`
 
-Emitted after user message context is assembled. Records which hooks contributed before/after content:
+Emitted after user message context is assembled. Records which sources contributed before/after content:
 
 ```json
 {
   "event": "context_injected",
-  "before": ["ctx_environment", "ctx_directive_instruction"],
+  "before": ["tool_schemas", "ctx_environment", "ctx_directive_instruction", "rye/agent/core/protocol/execute", "rye/agent/core/protocol/search"],
   "after": []
 }
 ```
@@ -357,13 +378,24 @@ These events are useful for debugging — they show exactly what the LLM receive
 
 ## Token Budget
 
-Context injection adds approximately **~1,100 tokens** of overhead to the first turn (identity + behavior + tool protocol + environment + directive instruction). This is a fixed cost that pays for itself on the first turn by:
+Context injection overhead depends on which layers are active:
+
+| Source | Approximate Tokens | Notes |
+|---|---|---|
+| Tool schema preload (Layer 1) | ~200–2000 | Configurable via `max_tool_preload_tokens` (default ~2000) |
+| Environment + directive instruction | ~200 | Fixed cost from `thread_started` hooks |
+| Identity + Behavior (Layer 3) | ~400 | From extends chain `<system>` entries |
+| Protocol items (Layer 3) | ~100–400 | Depends on how many protocol items the base declares |
+
+A fully-loaded thread (all three layers active with the `base` context) adds approximately **~1,200–3,000 tokens** to the first turn. This is a cost that pays for itself on the first turn by:
 
 - Eliminating "what tools do I have?" discovery loops (saves 2–3 turns)
 - Preventing tool call format errors (saves retry turns)
 - Providing directive instruction so the agent knows how to interpret directive bodies
 
-For a haiku-tier thread at ~$0.001/turn, the context overhead costs less than $0.001 and saves $0.002–0.003 in avoided discovery turns.
+A directive with no extends chain and no permissions adds only the ~200-token environment/instruction overhead.
+
+For a haiku-tier thread at ~$0.001/turn, the context overhead costs less than $0.002 and saves $0.002–0.003 in avoided discovery turns.
 
 ## What's Next
 

@@ -128,37 +128,12 @@ infra_hooks:
         payload:
           cost: "${cost}"
 
+# Identity, Behavior, and ToolProtocol removed — delivered via extends chain
+# and permission-driven tool schema preload (see layered-context-injection-design.md).
+# Directives that need them should extend rye/agent/core/base or be routed via
+# resolve_extends hooks.
+
 context_hooks:
-  - id: "system_identity"
-    event: "build_system_prompt"
-    layer: 2
-    position: "before"
-    action:
-      primary: "execute"
-      item_type: "knowledge"
-      item_id: "rye/agent/core/Identity"
-    description: "Load agent identity into system prompt"
-
-  - id: "system_behavior"
-    event: "build_system_prompt"
-    layer: 2
-    position: "before"
-    action:
-      primary: "execute"
-      item_type: "knowledge"
-      item_id: "rye/agent/core/Behavior"
-    description: "Load behavioral rules into system prompt"
-
-  - id: "system_tool_protocol"
-    event: "build_system_prompt"
-    layer: 2
-    position: "before"
-    action:
-      primary: "execute"
-      item_type: "knowledge"
-      item_id: "rye/agent/core/ToolProtocol"
-    description: "Load tool usage protocol into system prompt"
-
   - id: "ctx_environment"
     event: "thread_started"
     layer: 2

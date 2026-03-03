@@ -12,6 +12,7 @@ __tool_description__ = (
     "Markdown XML parser - extracts and parses XML from markdown code fences"
 )
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Optional, Tuple
@@ -277,9 +278,17 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                 result["hooks"] = hooks
 
             elif tag == "context":
+                _CONTEXT_TAGS = {"system", "before", "after", "suppress"}
                 context = {"system": [], "before": [], "after": [], "suppress": []}
                 for ctx_child in child:
                     position = ctx_child.tag
+                    if position not in _CONTEXT_TAGS:
+                        logging.getLogger(__name__).warning(
+                            "Unrecognized tag <%s> inside <context>. "
+                            "Valid tags: %s",
+                            position, ", ".join(sorted(_CONTEXT_TAGS)),
+                        )
+                        continue
                     if position == "suppress" and ctx_child.text and ctx_child.text.strip():
                         context["suppress"].append(ctx_child.text.strip())
                     elif position in ("system", "before", "after") and ctx_child.text and ctx_child.text.strip():

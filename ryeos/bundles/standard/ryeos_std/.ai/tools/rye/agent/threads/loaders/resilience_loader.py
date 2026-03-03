@@ -30,6 +30,10 @@ class ResilienceLoader(ConfigLoader):
         config = self.load(project_path)
         return config.get("child_policy", {})
 
+    def get_tool_preload_config(self, project_path: Path) -> Dict:
+        config = self.load(project_path)
+        return config.get("tool_preload", {})
+
 
 _resilience_loader: Optional[ResilienceLoader] = None
 
