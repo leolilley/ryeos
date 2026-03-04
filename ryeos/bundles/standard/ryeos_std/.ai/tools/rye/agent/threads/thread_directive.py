@@ -1,5 +1,5 @@
-# rye:signed:2026-03-04T00:54:11Z:af452865ef1ee77af40998937d3376bafbdc58655d16ae222aacb4e9247cd9d4:h2APg2o4prcF2szW27o4LC6FBYF92dGMJXcrQ0DZXJzz2Vzco5KsiDlj6f2I3_Gn3x49nt9tD0Ah3uHpAQqRBQ==:4b987fd4e40303ac
-__version__ = "1.6.0"
+# rye:signed:2026-03-04T03:37:15Z:8020777b046a17554f284d51e89207d6ce1873af5e24f26091fadfb8cc893fb7:EMCIQgBZyTR-IQrngDafRh4AMd_lRqEh1gckwXQZ_l83-FbFuoZlnf7Q6N1hTUR0PaN8327IPIIH7Z_1rxB0Cg==:4b987fd4e40303ac
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/agent/threads"
@@ -67,28 +67,31 @@ CONFIG_SCHEMA = {
 }
 
 
-_PRIMARY_TOOLS_DIR = _TOOLS_ROOT / "rye" / "primary"
+_PRIMARY_TOOL_NAMES = ("rye_execute", "rye_search", "rye_load", "rye_sign")
 
 
-def _build_tool_schemas() -> list:
-    """Build generic tool schemas from primary tools.
+def _build_primary_tools() -> list:
+    """Load primary tool schemas for passing to tool_schema_loader.
 
-    Uses generic keys (name, description, schema) that the provider
-    adapter remaps via tool_use.tool_definition config.
-
-    Tool names must be API-safe (alphanumeric, _, -). The full item_id
-    is stored in _item_id for dispatcher resolution.
+    Primary tools use variable refs in CONFIG_SCHEMA (imported from
+    primary_tool_descriptions.py) that the AST parser can't evaluate,
+    so we load them via load_module to get the resolved schemas.
     """
     schemas = []
-    for py_file in sorted(_PRIMARY_TOOLS_DIR.glob("rye_*.py")):
+    for name in _PRIMARY_TOOL_NAMES:
+        # Strip rye_ prefix to get the file stem under rye/
+        file_stem = name[4:]  # rye_execute → execute
+        py_file = _TOOLS_ROOT / "rye" / f"{file_stem}.py"
+        if not py_file.exists():
+            continue
         mod = load_module(py_file)
         config_schema = getattr(mod, "CONFIG_SCHEMA", None)
         desc = getattr(mod, "__tool_description__", "")
         category = getattr(mod, "__category__", "")
         if config_schema:
-            item_id = f"{category}/{py_file.stem}" if category else py_file.stem
+            item_id = f"{category}/{file_stem}" if category else file_stem
             schemas.append({
-                "name": py_file.stem,
+                "name": name,
                 "description": desc,
                 "schema": config_schema,
                 "_item_id": item_id,
@@ -240,17 +243,15 @@ def _build_prompt(directive: Dict) -> str:
             output_fields = dict(outputs)
 
         if output_fields:
-            params_obj = ", ".join(f'"{k}": "<{v or k}>"' for k, v in output_fields.items())
+            field_lines = "\n".join(f'  "{k}": "<{v or k}>"' for k, v in output_fields.items())
             parts.append(
-                "When you have completed all steps, return structured results:\n"
-                f'`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
-                f"parameters={{{params_obj}}})`\n\n"
-                "If you are BLOCKED and cannot complete the directive — missing context, "
-                "permission denied on a required tool, required files not found, or repeated "
-                "failures on the same error — do NOT waste turns working around it. "
-                "Return immediately with an error:\n"
-                '`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
-                'parameters={"status": "error", "error_detail": "<what is missing or broken>"})`'
+                "When you have completed all steps, call the `directive_return` tool "
+                "via the tool_use API with these fields:\n"
+                f"{{{field_lines}\n}}\n\n"
+                "If you are BLOCKED and cannot complete the directive, call "
+                "`directive_return` with `status` set to `error` and `error_detail` "
+                "describing what is missing or broken. Do NOT output directive_return "
+                "as text — it MUST be a tool_use call."
             )
 
     # Close directive tag if opened
@@ -779,25 +780,21 @@ async def execute(params: Dict, project_path: str) -> Dict:
         directive_name=directive_name, permissions=permissions,
         parent_capabilities=parent_capabilities,
     )
-    harness.available_tools = _build_tool_schemas()
-
-    # Tool schema preload (Layer 1) — inject CONFIG_SCHEMA for granted tools
-    # so the agent knows parameter shapes before turn 1.
+    # Dynamic tool registration — resolve all granted tools as API-level
+    # tool definitions so the LLM calls them directly (no rye_execute wrapper).
     resilience_loader = load_module("loaders/resilience_loader", anchor=_ANCHOR)
     preload_config = resilience_loader.get_resilience_loader().get_tool_preload_config(proj_path)
     tool_schema_loader = load_module("loaders/tool_schema_loader", anchor=_ANCHOR)
+    primary_tools = _build_primary_tools()
     preload_result = tool_schema_loader.preload_tool_schemas(
         harness._capabilities, proj_path,
         max_tokens=preload_config.get("max_tokens", 2000),
-        primary_tools=harness.available_tools,
-    ) if preload_config.get("enabled", True) else {"schemas": "", "preloaded_tools": []}
-    if preload_result["schemas"]:
-        if system_prompt:
-            system_prompt = system_prompt + "\n\n" + preload_result["schemas"]
-        else:
-            system_prompt = preload_result["schemas"]
+        primary_tools=primary_tools,
+    ) if preload_config.get("enabled", True) else {"tool_defs": [], "capabilities_summary": []}
+    harness.available_tools = preload_result["tool_defs"]
+    harness.capabilities_tree = preload_result.get("capabilities_tree", "")
 
-    # Grant directive_return capability and set output field names if directive declares <outputs>
+    # Grant directive_return as a direct tool if directive declares <outputs>
     directive_outputs = directive.get("outputs", [])
     if directive_outputs:
         harness._capabilities.append("rye.execute.tool.rye.agent.threads.directive_return")
@@ -805,6 +802,26 @@ async def execute(params: Dict, project_path: str) -> Dict:
             harness.output_fields = [o["name"] for o in directive_outputs if o.get("name")]
         elif isinstance(directive_outputs, dict):
             harness.output_fields = list(directive_outputs.keys())
+
+        # Build schema from output fields so LLM calls it directly
+        props = {}
+        required = []
+        for o in (directive_outputs if isinstance(directive_outputs, list) else []):
+            name = o.get("name", "")
+            if not name:
+                continue
+            props[name] = {"type": o.get("type", "string"), "description": o.get("description", "")}
+            if o.get("required"):
+                required.append(name)
+        if not props:
+            props = {"result": {"type": "string", "description": "Result output"}}
+        harness.available_tools.append({
+            "name": "directive_return",
+            "description": "Return structured results when the directive is complete",
+            "schema": {"type": "object", "properties": props, "required": required},
+            "_item_id": "rye/agent/threads/directive_return",
+            "_primary": "execute",
+        })
 
     # Assess capability risk
     acknowledged_risks = directive.get("acknowledged_risks", [])

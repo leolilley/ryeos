@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T22:32:56Z:85a08dcbcd6cf516cc48fa548a29a0a39596022d802e8a00f5707b08685b23aa:37pd3Su_uFWY2gmcmbkUPNsvL0Zuv8QhRsjbvqwmTwNEF5Ebqu-wCJ-TxNObTzW6VFdUVqAmY1aFjQ6u--xeDg==:4b987fd4e40303ac
+# rye:signed:2026-03-04T03:39:44Z:4d21df83096a2078aa6288b7c372364fda0b341cf0d3122190f34f4a55996d3e:OPdRZa2PmCnPjSID2tN15-V1l2OU2zzoZr663qWh_NuWXqNtJbHsrZzV7j3DnexmYMBSTCm9tXkDkOsdxTA2CA==:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -78,11 +78,16 @@ async def run(
 
     orchestrator.register_thread(thread_id, harness)
 
-    # Build name → item_id lookup from tool schemas
+    # Build name → item_id and name → primary action lookups from tool schemas
     tool_id_map = {
         t["name"]: t["_item_id"]
         for t in harness.available_tools
         if "_item_id" in t
+    }
+    tool_primary_map = {
+        t["name"]: t["_primary"]
+        for t in harness.available_tools
+        if "_primary" in t
     }
 
     messages = []
@@ -257,6 +262,8 @@ async def run(
                     status="running",
                     model=provider.model,
                     cost=cost,
+                    capabilities_tree=getattr(harness, "capabilities_tree", ""),
+                    permissions=harness._capabilities,
                 )
 
             # LLM call
@@ -383,14 +390,14 @@ async def run(
                 text_parsed = bool(tool_calls)
 
             if not tool_calls:
-                # Detect empty/stalled responses: if the LLM returned no text
-                # AND no tool calls, it likely stalled (common with Gemini).
-                # Also nudge if the directive expects structured outputs via
-                # directive_return but none was called yet.
-                empty_response = not response["text"].strip()
+                # No tool calls in this response. Nudge only when the LLM
+                # has never produced tool calls (first turn) or the directive
+                # expects structured outputs via directive_return. Empty
+                # responses after the LLM has already done work are treated
+                # as natural completion — not stalls worth nudging.
                 expects_return = bool(getattr(harness, "output_fields", None))
                 nudge_count = getattr(harness, "_nudge_count", 0)
-                max_nudges = 3
+                max_nudges = 2
 
                 should_nudge = (
                     provider.tool_use_mode == "native"
@@ -398,7 +405,6 @@ async def run(
                     and nudge_count < max_nudges
                     and (
                         cost["turns"] == 1  # first turn, never produced tools
-                        or empty_response   # stalled: empty text + no tools
                         or expects_return   # directive expects directive_return
                     )
                 )
@@ -409,23 +415,16 @@ async def run(
                     if response.get("thinking"):
                         msg["_thinking"] = response["thinking"]
                     messages.append(msg)
-                    if empty_response:
-                        nudge_text = (
-                            "Your response was empty. You MUST continue working on the directive. "
-                            "Use the provided tools to complete all steps. Do not stop until you "
-                            "have written the required files and called directive_return."
-                        )
-                    elif expects_return:
+                    if expects_return:
                         nudge_text = (
                             "You have not yet called directive_return. The directive requires "
                             "structured outputs. Continue working: use tools to complete all steps, "
-                            "then call rye_execute with item_id='rye/agent/threads/directive_return' "
-                            "to return your results."
+                            "then call directive_return to return your results."
                         )
                     else:
                         nudge_text = (
-                            "You did not call any tools. Please use the provided tools to "
-                            "complete the directive steps. Call tools using the tool_use mechanism."
+                            "You did not call any tools. Use the provided tools to "
+                            "complete the directive steps."
                         )
                     messages.append({"role": "user", "content": nudge_text})
                     continue
@@ -464,38 +463,52 @@ async def run(
                     transcript,
                 )
 
-                # Permission check: extract the inner action from tool input
+                # Permission check via tool_primary_map
                 tc_input = tool_call["input"]
                 tc_name = tool_call["name"]
-                # rye_execute -> execute, rye_search -> search, etc.
-                inner_primary = tc_name.replace("rye_", "", 1) if tc_name.startswith("rye_") else tc_name
-                inner_item_type = tc_input.get("item_type", "tool")
-                # search has no item_id (uses query), load/sign/execute do
-                inner_item_id = tc_input.get("item_id", "")
+                primary = tool_primary_map.get(tc_name, "execute")
+                resolved_id = tool_id_map.get(tc_name, tc_name)
 
-                denied = harness.check_permission(inner_primary, inner_item_type, inner_item_id)
+                if primary == "execute":
+                    inner_item_type = tc_input.get("item_type", "tool")
+                    inner_item_id = tc_input.get("item_id", "") or resolved_id
+                    denied = harness.check_permission("execute", inner_item_type, inner_item_id)
+                elif primary == "search":
+                    scope = tc_input.get("scope", "")
+                    item_type_from_scope = scope.split(".")[0] if scope else ""
+                    denied = harness.check_permission("search", item_type_from_scope, "")
+                else:
+                    denied = harness.check_permission(
+                        primary, tc_input.get("item_type", ""), tc_input.get("item_id", "")
+                    )
+
                 if denied:
-                    clean = denied
                     emitter.emit(
                         thread_id,
                         "tool_call_result",
-                        {"call_id": tool_call["id"], "output": str(clean), "error": denied["error"]},
+                        {"call_id": tool_call["id"], "output": str(denied), "error": denied["error"]},
                         transcript,
                     )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
-                        "content": str(clean),
+                        "content": str(denied),
                     })
                     continue
 
                 # directive_return: completion signal with structured outputs.
-                # Detected by inner item_id before dispatch. Outputs are
+                # Detected by resolved_id before dispatch. Outputs are
                 # extracted from the call parameters (not the tool result)
                 # to avoid envelope/unwrapping fragility.
-                if inner_item_id == "rye/agent/threads/directive_return":
-                    inner_params = tc_input.get("parameters", {})
-                    outputs = inner_params if isinstance(inner_params, dict) else {}
+                directive_return_id = "rye/agent/threads/directive_return"
+                check_item_id = tc_input.get("item_id", "") if primary == "execute" else ""
+                if resolved_id == directive_return_id or check_item_id == directive_return_id:
+                    # Direct call: tc_input is the outputs directly
+                    # Via rye_execute: outputs are nested under "parameters"
+                    if "parameters" in tc_input and "item_id" in tc_input:
+                        outputs = tc_input.get("parameters", {})
+                    else:
+                        outputs = dict(tc_input)
 
                     # Validate required fields against harness
                     missing = [
@@ -548,25 +561,32 @@ async def run(
                         signer,
                     )
 
-                resolved_id = tool_id_map.get(tool_call["name"], tool_call["name"])
-                dispatch_params = dict(tool_call["input"])
+                # Unified dispatch — route based on _primary field
+                dispatch_params = dict(tc_input)
 
-                # Auto-inject parent context for child thread spawns
-                if resolved_id == "rye/agent/threads/thread_directive":
-                    dispatch_params.setdefault("parent_thread_id", thread_id)
-                    dispatch_params.setdefault("parent_depth", orchestrator.get_depth(thread_id))
-                    dispatch_params.setdefault("parent_limits", harness.limits)
-                    dispatch_params.setdefault("parent_capabilities", harness._capabilities)
+                if primary == "execute":
+                    # Auto-inject parent context for child thread spawns
+                    if resolved_id == "rye/agent/threads/thread_directive":
+                        dispatch_params.setdefault("parent_thread_id", thread_id)
+                        dispatch_params.setdefault("parent_depth", orchestrator.get_depth(thread_id))
+                        dispatch_params.setdefault("parent_limits", harness.limits)
+                        dispatch_params.setdefault("parent_capabilities", harness._capabilities)
 
-                result = await dispatcher.dispatch(
-                    {
-                        "primary": "execute",
-                        "item_type": "tool",
-                        "item_id": resolved_id,
-                        "params": dispatch_params,
-                    },
-                    thread_context=thread_ctx,
-                )
+                    result = await dispatcher.dispatch(
+                        {
+                            "primary": "execute",
+                            "item_type": "tool",
+                            "item_id": resolved_id,
+                            "params": dispatch_params,
+                        },
+                        thread_context=thread_ctx,
+                    )
+                else:
+                    # search/load/sign — params are the tool input directly
+                    result = await dispatcher.dispatch(
+                        {"primary": primary, **dispatch_params},
+                        thread_context=thread_ctx,
+                    )
 
                 clean = _clean_tool_result(result)
 
@@ -669,6 +689,8 @@ async def run(
             status=final["status"],
             model=provider.model,
             cost=cost,
+            capabilities_tree=getattr(harness, "capabilities_tree", ""),
+            permissions=harness._capabilities,
         )
 
         # Dispatch after_complete hooks (best-effort)
@@ -725,9 +747,9 @@ def _clean_tool_result(result: Any) -> Any:
             cleaned["content"] = _strip_signature(cleaned["content"])
         return cleaned
 
-    # Unwrap rye_execute envelope: {status, type, item_id: "rye/primary-tools/rye_execute", data: {actual result}}
+    # Unwrap rye_execute envelope: {status, type, item_id: "rye/execute", data: {actual result}}
     inner = result.get("data")
-    if isinstance(inner, dict) and result.get("item_id", "").startswith("rye/primary/"):
+    if isinstance(inner, dict) and result.get("item_id", "").startswith("rye/"):
         return _strip(inner)
 
     return _strip(result)

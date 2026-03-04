@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T22:32:56Z:55cc78060d372641835efece801a70e6f2bc72131daab711052fa93e278a5411:CEYvjM8lknBOUS687pc9F1ALuVO-I06WbKlL9D7yB9ieE26pJGfO1Yi_k6lR1xkJbwC0NyOphEhAo9XOkncrDA==:4b987fd4e40303ac
+# rye:signed:2026-03-04T03:39:44Z:147723b393e154c1974fcdfb98279a384749ef6f79c1c828f26a552aa91aed8c:lUzqR_bRPjqjrCRZC1WPS2yVltq3ihwuJDh51x1Z3ykFx3ZaTQIwrN3FcL33uJFdQDJzSkCgkPi_S_3DQ7yZCw==:4b987fd4e40303ac
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -157,6 +157,8 @@ class Transcript:
         status: str = "completed",
         model: str = "",
         cost: Optional[Dict] = None,
+        capabilities_tree: str = "",
+        permissions: Optional[list] = None,
     ) -> Optional[Path]:
         """Render transcript as a signed knowledge entry.
 
@@ -228,6 +230,15 @@ class Transcript:
             f"output_tokens: {cost.get('output_tokens', 0)}\n"
             f"spend: {cost.get('spend', 0)}\n"
             f"tags: [thread, {status}]\n"
+        )
+        if permissions:
+            perms_str = ", ".join(permissions)
+            frontmatter += f"permissions: [{perms_str}]\n"
+        if capabilities_tree:
+            # YAML block scalar — indent each line by 2 for valid YAML
+            indented = "\n".join(f"  {line}" for line in capabilities_tree.split("\n"))
+            frontmatter += f"capabilities: |\n{indented}\n"
+        frontmatter += (
             f"```\n\n"
         )
 

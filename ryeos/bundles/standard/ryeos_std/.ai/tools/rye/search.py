@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T22:32:56Z:9834ae53aa07b73045a6cfe19080c82aef4345f7df3372bd62346faf7973ab95:4XgewIBT2rjYClwZJ4GhbTm62386AYqDP_8qBTkCgf47Ni89dvS9CMOsON_S_gUbpwMdSHAnqt-4p3XARqH7AA==:4b987fd4e40303ac
+# rye:signed:2026-03-04T03:05:59Z:4552af676edc5460e92695ac5d284c03a247f9e61dc81b15fc16f17e02c65dbf:iPQD50n4HIJWLYkBuUbQhnsi5cvkXPxrP5BFTnpWoWs8bOIdhMJJkPaBTuhX-JFV_lSRRkzhvzwtY3YJYiKUCQ==:4b987fd4e40303ac
 """Search for directives, tools, or knowledge items."""
 
 import argparse
@@ -17,7 +17,7 @@ from rye.primary_tool_descriptions import (
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
-__category__ = "rye/primary"
+__category__ = "rye"
 __tool_description__ = "Discover item IDs before calling execute or load"
 
 CONFIG_SCHEMA = {

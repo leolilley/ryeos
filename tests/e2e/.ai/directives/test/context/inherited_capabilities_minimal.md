@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-04T01:47:19Z:cbcf6ea7516a4d4f18e091f8f74bcea34baf9ed75c1a6ab1c1f1e8683e2701b3:4P3cIL47wLekeheKaPi0sbHKcxilrdXEakd_LGGqbAupWHP7s_tGva-e7QXy7kgdHrX2CoRFRwOSHont0OaiBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-04T03:35:33Z:9dd9b8d29872ceb33f3c84d559695017c0a655894e65adcfe14d18dbc3649810:JdDbylu808dH8KlirZ37gKs_JZ3KtOQTYsJ28KZ-GrylCGxfGaORmgzBXtK_nwXu_yRGgT-MQi6KfqAxWfizCw==:4b987fd4e40303ac -->
 # Inherited Capabilities Minimal Test
 
 Minimal-guidance version of inherited_capabilities_test. The LLM must
@@ -11,11 +11,12 @@ figure out tool names and parameters from the `<capabilities>` block alone.
     <category>test/context</category>
     <author>rye-os</author>
     <model tier="fast" />
-    <limits turns="8" tokens="32000" spend="0.15" />
+    <limits turns="12" tokens="32000" spend="0.15" />
   </metadata>
 
   <outputs>
-    <result>Report confirming which tools were called</result>
+    <output name="result" type="string" required="true">Report confirming which tools were called</output>
+    <output name="tools_used" type="string" required="true">Comma-separated list of tool names that were called</output>
   </outputs>
 </directive>
 ```

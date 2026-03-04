@@ -1,20 +1,19 @@
-# rye:signed:2026-03-04T02:00:49Z:f631b34d11347a78cdf0286aacd7ea3bcb4a7cff4cf39e8aa1dbc4e8e7f17408:v_W83YUKgf_SzTm0lGYOy-fOxRl6JrXVE36vVlJuw335oDJ5CjFQhfN5VyUllndt1dZ_kiN_C9Gd-NnRtcfPAg==:4b987fd4e40303ac
-__version__ = "1.5.0"
+# rye:signed:2026-03-04T03:32:45Z:6998af8f0dfbe9b2bbc19d06cd4c2562f89f72af820f6a43da4333efc7e97aa2:66NVXku7JoY2gn5XtqviWttFL0hotbf6MyMEZtjDYjwp3efisO1v2LzGjpAjRFruitL_MTQSDmyNJu2XLsoCCQ==:4b987fd4e40303ac
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
-__tool_description__ = "Capability-driven context preload for thread system prompt"
+__tool_description__ = "Capability-driven dynamic tool registration for thread agents"
 
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from rye.utils.extensions import get_tool_extensions
+from rye.utils.extensions import get_parsers_map, get_tool_extensions
 from rye.utils.parser_router import ParserRouter
 from rye.utils.resolvers import ToolResolver
 
 logger = logging.getLogger(__name__)
 
-_PRIMARY_PREFIX = "rye/primary/"
 _CHARS_PER_TOKEN = 4
 
 # Capability prefixes → (primary_action, sub_type_or_none)
@@ -39,13 +38,8 @@ _CAP_PREFIXES = {
     "rye.sign.": ("sign", None),
 }
 
-# Map capability actions to primary tool API names
-_ACTION_TO_PRIMARY_NAME = {
-    "execute": "rye_execute",
-    "search": "rye_search",
-    "load": "rye_load",
-    "sign": "rye_sign",
-}
+# Actions that get registered as direct agent tools when granted.
+_PRIMARY_ACTIONS = ("execute", "search", "load", "sign")
 
 
 def _classify_capability(cap: str) -> Optional[dict]:
@@ -73,27 +67,18 @@ def _pattern_specificity(pattern: str) -> int:
     return len(parts)
 
 
-# Extension → parser name mapping (mirrors tool_extractor.yaml parsers)
-_EXT_PARSERS = {
-    ".py": "python/ast",
-    ".yaml": "yaml/yaml",
-    ".yml": "yaml/yaml",
-    ".js": "javascript/javascript",
-    ".ts": "javascript/javascript",
-    ".mjs": "javascript/javascript",
-    ".cjs": "javascript/javascript",
-}
-
-
-def _extract_tool_metadata(file_path: Path, router: ParserRouter) -> Optional[dict]:
+def _extract_tool_metadata(
+    file_path: Path, router: ParserRouter, parsers_map: Dict[str, str]
+) -> Optional[dict]:
     """Extract schema and description from a tool file via ParserRouter.
 
     Uses the same parser infrastructure as the rest of Rye (python/ast,
     yaml/yaml, javascript/javascript) so any supported file type works.
+    parsers_map is the extension→parser name mapping from get_parsers_map().
     Returns {"schema": dict, "description": str} or None.
     """
     ext = file_path.suffix.lower()
-    parser_name = _EXT_PARSERS.get(ext)
+    parser_name = parsers_map.get(ext)
     if not parser_name:
         return None
 
@@ -151,6 +136,16 @@ def _tool_id_from_path(file_path: Path, search_dir: Path) -> str:
     return str(rel.with_suffix(""))
 
 
+def _tool_id_to_api_name(tool_id: str) -> str:
+    """Flatten a tool_id into an API-safe tool name.
+
+    rye/search → rye_search
+    rye/file-system/ls → rye_file_system_ls
+    rye/bash → rye_bash
+    """
+    return tool_id.replace("/", "_").replace("-", "_")
+
+
 def _strip_xml_markup(text: str) -> str:
     """Strip XML/HTML tags and truncate to first sentence.
 
@@ -202,13 +197,12 @@ def _resolve_tools_for_pattern(
     extensions: List[str],
     seen: set,
     router: ParserRouter,
+    parsers_map: Dict[str, str],
 ) -> List[dict]:
     """Find all tool files matching a namespace pattern across 3-tier space.
 
     Returns list of {"tool_id": str, "metadata": dict} for unseen tools.
     Uses first-match semantics (project > user > system).
-    Skips primary tools (rye/primary/*) — those are handled separately
-    via the primary_tools argument to preload_tool_schemas.
     """
     results = []
     resolved_ids = set()
@@ -225,22 +219,18 @@ def _resolve_tools_for_pattern(
                     tool_id = _tool_id_from_path(fp, search_dir)
                     if tool_id in resolved_ids or tool_id in seen:
                         continue
-                    if tool_id.startswith(_PRIMARY_PREFIX):
-                        continue
                     resolved_ids.add(tool_id)
-                    meta = _extract_tool_metadata(fp, router)
+                    meta = _extract_tool_metadata(fp, router, parsers_map)
                     if meta:
                         results.append({"tool_id": tool_id, "metadata": meta})
         else:
             if pattern in resolved_ids or pattern in seen:
                 continue
-            if pattern.startswith(_PRIMARY_PREFIX):
-                continue
             for ext in extensions:
                 fp = search_dir / f"{pattern}{ext}"
                 if fp.is_file():
                     resolved_ids.add(pattern)
-                    meta = _extract_tool_metadata(fp, router)
+                    meta = _extract_tool_metadata(fp, router, parsers_map)
                     if meta:
                         results.append({"tool_id": pattern, "metadata": meta})
                     break
@@ -250,23 +240,234 @@ def _resolve_tools_for_pattern(
     return results
 
 
+def _build_path_tree(item_ids: List[str]) -> dict:
+    """Build nested dict from slash-separated item IDs.
+
+    ["rye/bash", "rye/file-system/glob"] →
+    {"rye": {"bash": {}, "file-system": {"glob": {}}}}
+    """
+    tree: dict = {}
+    for item_id in item_ids:
+        node = tree
+        for part in item_id.split("/"):
+            node = node.setdefault(part, {})
+    return tree
+
+
+def _render_tree_lines(tree: dict, prefix: str = "") -> List[str]:
+    """Render nested dict as box-drawing tree lines."""
+    lines = []
+    keys = sorted(tree.keys())
+    for i, key in enumerate(keys):
+        last = i == len(keys) - 1
+        branch = "└── " if last else "├── "
+        child_prefix = prefix + ("    " if last else "│   ")
+        lines.append(f"{prefix}{branch}{key}")
+        if tree[key]:
+            lines.extend(_render_tree_lines(tree[key], child_prefix))
+    return lines
+
+
+def _load_exclude_dirs(tool_search_paths: List[Tuple[Path, str]]) -> frozenset:
+    """Load exclude_dirs from collect.yaml using 3-tier resolution.
+
+    Same config the bundler uses — first match from project > user > system.
+    Falls back to a minimal hardcoded set if no config found.
+    """
+    import yaml
+
+    config_rel = Path("rye") / "core" / "bundler" / "collect.yaml"
+    for search_dir, _space in tool_search_paths:
+        config_path = search_dir / config_rel
+        if config_path.exists():
+            try:
+                data = yaml.safe_load(config_path.read_text())
+                if isinstance(data, dict) and "exclude_dirs" in data:
+                    return frozenset(data["exclude_dirs"]) | {"__init__"}
+            except Exception:
+                continue
+
+    return frozenset(("__pycache__", "node_modules", ".venv", ".git", "__init__"))
+
+
+def _resolve_items_for_type(
+    item_type: str,
+    patterns: List[str],
+    search_paths: List[Tuple[Path, str]],
+    extensions: List[str],
+    exclude_dirs: frozenset = frozenset(),
+) -> List[str]:
+    """Resolve patterns to actual item IDs from the filesystem.
+
+    Walks search_paths (project > user > system) with first-match semantics.
+    Skips directories matching exclude_dirs (from collect.yaml).
+    """
+    seen: set = set()
+    items: List[str] = []
+
+    def _is_excluded(fp: Path) -> bool:
+        return fp.stem in exclude_dirs or any(part in exclude_dirs for part in fp.parts)
+
+    for pattern in patterns:
+        for search_dir, _space in search_paths:
+            if not search_dir.exists():
+                continue
+            if pattern == "*" or pattern.endswith("/*"):
+                glob_dir = search_dir if pattern == "*" else search_dir / pattern[:-2]
+                if not glob_dir.exists():
+                    continue
+                for ext in extensions:
+                    for fp in glob_dir.rglob(f"*{ext}"):
+                        if not fp.is_file() or _is_excluded(fp.relative_to(search_dir)):
+                            continue
+                        item_id = _tool_id_from_path(fp, search_dir)
+                        if item_id not in seen:
+                            seen.add(item_id)
+                            items.append(item_id)
+            else:
+                if pattern in seen:
+                    continue
+                for ext in extensions:
+                    fp = search_dir / f"{pattern}{ext}"
+                    if fp.is_file():
+                        seen.add(pattern)
+                        items.append(pattern)
+                        break
+                if pattern in seen:
+                    break
+
+    return sorted(items)
+
+
+def _format_capabilities_tree(capabilities: list, project_path: Path) -> str:
+    """Resolve capabilities to actual filesystem items and format as a tree.
+
+    Walks the 3-tier space (project > user > system) for each item type
+    and renders every accessible item. This is metadata-only — not sent
+    to the LLM — so full resolution is fine.
+
+    Input:  ["rye.execute.tool.rye.file-system.*", "rye.search.*"]
+    Output:
+      ├── execute
+      │   └── tool
+      │       └── rye
+      │           └── file-system
+      │               ├── glob
+      │               ├── grep
+      │               ├── ls
+      │               ├── read
+      │               └── write
+      └── search
+          ├── directive
+          │   ├── init
+          │   └── ...
+          ├── knowledge
+          │   └── ...
+          └── tool
+              └── ...
+    """
+    _ALL_TYPES = ("directive", "knowledge", "tool")
+    _TYPE_DIRS = {"directive": "directives", "knowledge": "knowledge", "tool": "tools"}
+
+    # 1. Classify capabilities → action → {sub_type → [patterns]}
+    action_types: Dict[str, Dict[str, List[str]]] = {}
+    for cap in capabilities:
+        classified = _classify_capability(cap)
+        if not classified:
+            continue
+        action = classified["action"]
+        sub_type = classified["sub_type"]
+        pattern = classified["pattern"]
+
+        action_types.setdefault(action, {})
+        types = [sub_type] if sub_type else list(_ALL_TYPES)
+        for st in types:
+            action_types[action].setdefault(st, []).append(pattern)
+
+    if not action_types:
+        return ""
+
+    # 2. Build search paths per item type from the tool resolver's paths.
+    #    ToolResolver gives us .ai/tools dirs; we swap to sibling dirs.
+    resolver = ToolResolver(project_path)
+    tool_search_paths = resolver.get_search_paths()
+    tool_extensions = get_tool_extensions(project_path)
+
+    search_paths_by_type: Dict[str, List[Tuple[Path, str]]] = {"tool": tool_search_paths}
+    extensions_by_type: Dict[str, List[str]] = {"tool": tool_extensions}
+
+    for st in ("directive", "knowledge"):
+        type_dir = _TYPE_DIRS[st]
+        paths = []
+        for tool_dir, space in tool_search_paths:
+            sibling = tool_dir.parent / type_dir
+            if sibling.exists():
+                paths.append((sibling, space))
+        search_paths_by_type[st] = paths
+        extensions_by_type[st] = [".md"]
+
+    exclude_dirs = _load_exclude_dirs(tool_search_paths)
+
+    # 3. Resolve each action → sub_type → actual item IDs
+    resolved: Dict[str, Dict[str, List[str]]] = {}
+    for action, type_patterns in action_types.items():
+        resolved[action] = {}
+        for st, patterns in type_patterns.items():
+            resolved[action][st] = _resolve_items_for_type(
+                st, patterns,
+                search_paths_by_type.get(st, []),
+                extensions_by_type.get(st, [".md"]),
+                exclude_dirs=exclude_dirs,
+            )
+
+    # 4. Render tree
+    lines: List[str] = []
+    actions = sorted(resolved.keys())
+    for i, action in enumerate(actions):
+        last_action = i == len(actions) - 1
+        a_branch = "└── " if last_action else "├── "
+        a_indent = "    " if last_action else "│   "
+
+        lines.append(f"{a_branch}{action}")
+        sub_types = sorted(resolved[action].keys())
+        for j, st in enumerate(sub_types):
+            last_st = j == len(sub_types) - 1
+            st_branch = a_indent + ("└── " if last_st else "├── ")
+            st_indent = a_indent + ("    " if last_st else "│   ")
+
+            items = resolved[action][st]
+            if not items:
+                lines.append(f"{st_branch}{st} (none)")
+            else:
+                lines.append(f"{st_branch}{st}")
+                path_tree = _build_path_tree(items)
+                lines.extend(_render_tree_lines(path_tree, st_indent))
+
+    return "\n".join(lines)
+
+
 def preload_tool_schemas(
     capabilities: list,
     project_path: Path,
     max_tokens: int = 2000,
     primary_tools: Optional[List[dict]] = None,
 ) -> dict:
-    """Build a <capabilities> block from resolved capability strings.
+    """Build dynamic tool definitions from resolved capability strings.
 
-    Produces a flat list of <tool> elements covering:
-      - Primary tools (rye_execute, rye_search, rye_load, rye_sign) when their
-        corresponding action is granted — schemas come from primary_tools arg
-        since primary tool CONFIG_SCHEMAs use variable refs that AST can't eval.
-      - Non-primary tools (rye/file-system/*, etc.) resolved from execute.tool
-        capability patterns via filesystem search.
+    Resolves ALL tools uniformly — primary tools (search, load, sign) and
+    non-primary tools (file-system/ls, bash, etc.) are treated as peers.
+    Each tool gets a flattened API name and a _primary field for dispatch routing.
+
+    The _primary field comes from the capability action:
+      - rye.search.*             → _primary: "search"
+      - rye.load.*               → _primary: "load"
+      - rye.sign.*               → _primary: "sign"
+      - rye.execute.tool.*       → individual tool defs, _primary: "execute"
+      - rye.execute.directive.*  → rye_execute registered, _primary: "execute"
+      - rye.execute.knowledge.*  → rye_execute registered, _primary: "execute"
 
     Returns:
-        {"schemas": formatted_xml_string, "preloaded_tools": [tool_item_ids]}
+        {"tool_defs": [tool_def_dicts], "capabilities_summary": [str]}
     """
     # Step 1: Classify capabilities — collect tool patterns, granted actions,
     # and which item types each action can operate on.
@@ -285,35 +486,53 @@ def preload_tool_schemas(
         if sub_type:
             action_item_types.setdefault(action, set()).add(sub_type)
         else:
-            # sub_type=None → wildcard (e.g. rye.search.*), grant all types
             action_item_types.setdefault(action, set()).update(_ALL_TYPES)
         if sub_type == "tool":
             tool_patterns.append(classified["pattern"])
 
     if not tool_patterns and not granted_actions:
-        return {"schemas": "", "preloaded_tools": []}
+        return {"tool_defs": [], "capabilities_summary": []}
 
-    # Step 2: Select primary tools for granted actions.
-    # Primary tool schemas are already loaded (via load_module) in
-    # harness.available_tools — we just pick the ones whose action is granted.
-    primary_entries: List[dict] = []
+    # Step 2: Build tool defs for primary tools (search, load, sign).
+    # rye_execute is NOT registered as an agent tool — its functionality
+    # is exposed via individual tool defs with _primary="execute".
+    tool_defs: List[dict] = []
+    seen: set = set()
+    capabilities_summary: List[str] = []
+
     if primary_tools:
-        for action in ("execute", "search", "load", "sign"):
+        for action in _PRIMARY_ACTIONS:
             if action not in granted_actions:
                 continue
-            name = _ACTION_TO_PRIMARY_NAME[action]
+            primary_name = f"rye_{action}"
             for t in primary_tools:
-                if t["name"] == name:
-                    tool_id = t.get("_item_id", name)
-                    primary_entries.append(
-                        {
-                            "tool_id": tool_id,
-                            "metadata": {
-                                "schema": t["schema"],
-                                "description": t.get("description", ""),
-                            },
-                        }
-                    )
+                if t["name"] == primary_name:
+                    tool_id = t["_item_id"]
+                    api_name = _tool_id_to_api_name(tool_id)
+                    desc = t.get("description", "")
+                    # Narrow description to granted item types
+                    accessible = action_item_types.get(action, set())
+                    if accessible and accessible != _ALL_TYPES:
+                        type_labels = sorted(accessible)
+                        desc = f"{action.capitalize()} a {' or '.join(type_labels)}"
+
+                    tool_defs.append({
+                        "name": api_name,
+                        "description": desc,
+                        "schema": t["schema"],
+                        "_item_id": tool_id,
+                        "_primary": action,
+                    })
+                    seen.add(tool_id)
+
+                    # Build summary entry
+                    type_info = sorted(action_item_types.get(action, set()))
+                    if type_info:
+                        capabilities_summary.append(
+                            f"{api_name} ({', '.join(type_info)})"
+                        )
+                    else:
+                        capabilities_summary.append(api_name)
                     break
 
     # Step 3: Resolve non-primary tool schemas for execute.tool patterns
@@ -321,162 +540,47 @@ def preload_tool_schemas(
     search_paths = resolver.get_search_paths()
     extensions = get_tool_extensions(project_path)
     router = ParserRouter(project_path)
+    parsers_map = get_parsers_map(project_path)
     tool_patterns.sort(key=_pattern_specificity, reverse=True)
-    seen: set = {t["tool_id"] for t in primary_entries}
     non_primary_tools: List[dict] = []
 
     for pattern in tool_patterns:
-        matches = _resolve_tools_for_pattern(pattern, search_paths, extensions, seen, router)
+        matches = _resolve_tools_for_pattern(
+            pattern, search_paths, extensions, seen, router, parsers_map
+        )
         for m in matches:
             seen.add(m["tool_id"])
         non_primary_tools.extend(matches)
 
-    all_tools = primary_entries + non_primary_tools
-
-    if not all_tools:
-        return {"schemas": "", "preloaded_tools": []}
-
-    # Step 4: Build compact <capabilities> within token budget.
-    #
-    # Each primary tool gets a sub-tree showing which item types it can
-    # operate on (derived from granted capabilities).  For rye_execute's
-    # "tool" type, the resolved namespace tree is nested underneath.
-    # This makes the LLM see *only* what's available — if "directive"
-    # isn't listed, it won't try item_type="directive".
-    _TYPE_ORDER = ["directive", "tool", "knowledge"]
+    # Step 4: Build tool defs for non-primary tools within token budget.
     max_chars = max_tokens * _CHARS_PER_TOKEN
-    current_chars = len("<capabilities>\n</capabilities>")
-    preloaded = []
+    current_chars = 0
+    # Estimate chars already used by primary tool defs
+    for td in tool_defs:
+        current_chars += len(str(td.get("schema", {}))) + len(td.get("description", ""))
 
-    # Reverse map: api_name → action
-    _NAME_TO_ACTION = {v: k for k, v in _ACTION_TO_PRIMARY_NAME.items()}
-
-    # Pre-group non-primary tools by namespace for the execute tree
-    from collections import OrderedDict
-
-    tool_groups: OrderedDict[str, List[Tuple[str, dict]]] = OrderedDict()
     for entry in non_primary_tools:
         tool_id = entry["tool_id"]
-        if "/" in tool_id:
-            prefix = tool_id.rsplit("/", 1)[0]
-            bare_name = tool_id.rsplit("/", 1)[1]
-        else:
-            prefix = ""
-            bare_name = tool_id
-        tool_groups.setdefault(prefix, []).append((bare_name, entry))
+        api_name = _tool_id_to_api_name(tool_id)
+        meta = entry["metadata"]
 
-    blocks: List[str] = []
-
-    for entry in primary_entries:
-        tool_id = entry["tool_id"]
-        api_name = tool_id.rsplit("/", 1)[-1] if "/" in tool_id else tool_id
-        action = _NAME_TO_ACTION.get(api_name)
-        accessible = action_item_types.get(action, set())
-        types_in_order = [t for t in _TYPE_ORDER if t in accessible]
-
-        sig = _format_tool_signature(tool_id, entry["metadata"], display_name=api_name)
-        sig_chars = len(sig) + 1
-        if current_chars + sig_chars > max_chars:
+        # Estimate token cost of this tool def
+        tool_chars = len(str(meta["schema"])) + len(meta.get("description", ""))
+        if current_chars + tool_chars > max_chars:
             continue
 
-        sub_lines: List[str] = []
+        tool_defs.append({
+            "name": api_name,
+            "description": meta.get("description", ""),
+            "schema": meta["schema"],
+            "_item_id": tool_id,
+            "_primary": "execute",
+        })
+        capabilities_summary.append(api_name)
+        current_chars += tool_chars
 
-        for ti, item_type in enumerate(types_in_order):
-            is_last_type = ti == len(types_in_order) - 1
-
-            if action == "execute" and item_type == "tool" and non_primary_tools:
-                # Resolved tool namespace tree under "tools:" header
-                header = "  tools:"
-                h_chars = len(header) + 1
-                if (
-                    current_chars
-                    + sig_chars
-                    + sum(len(l) + 1 for l in sub_lines)
-                    + h_chars
-                    > max_chars
-                ):
-                    break
-                sub_lines.append(header)
-
-                group_keys = list(tool_groups.keys())
-                for gi, prefix in enumerate(group_keys):
-                    tools = tool_groups[prefix]
-                    is_last_group = gi == len(group_keys) - 1
-                    if prefix:
-                        branch = "  └─" if is_last_group else "  ├─"
-                        gh = f"{branch} {prefix}:"
-                        if (
-                            current_chars
-                            + sig_chars
-                            + sum(len(l) + 1 for l in sub_lines)
-                            + len(gh)
-                            + 1
-                            > max_chars
-                        ):
-                            break
-                        sub_lines.append(gh)
-                    trunk = "     " if is_last_group else "  │  "
-                    for tti, (bare_name, tool_entry) in enumerate(tools):
-                        tool_sig = _format_tool_signature(
-                            tool_entry["tool_id"],
-                            tool_entry["metadata"],
-                            display_name=bare_name,
-                        )
-                        is_last_tool = tti == len(tools) - 1
-                        if prefix:
-                            twig = "└─" if is_last_tool else "├─"
-                            line = f"{trunk}{twig} {tool_sig}"
-                        else:
-                            twig = "└─" if (is_last_tool and is_last_group) else "├─"
-                            line = f"  {twig} {tool_sig}"
-                        if (
-                            current_chars
-                            + sig_chars
-                            + sum(len(l) + 1 for l in sub_lines)
-                            + len(line)
-                            + 1
-                            > max_chars
-                        ):
-                            break
-                        sub_lines.append(line)
-                        preloaded.append(tool_entry["tool_id"])
-            else:
-                # Flat type label (directives, tools, knowledge)
-                branch = "  └─" if is_last_type else "  ├─"
-                label = f"{branch} {item_type}s"
-                if (
-                    current_chars
-                    + sig_chars
-                    + sum(len(l) + 1 for l in sub_lines)
-                    + len(label)
-                    + 1
-                    > max_chars
-                ):
-                    break
-                sub_lines.append(label)
-
-        block_chars = sig_chars + sum(len(l) + 1 for l in sub_lines)
-        current_chars += block_chars
-        preloaded.append(tool_id)
-        if sub_lines:
-            blocks.append(sig + "\n" + "\n".join(sub_lines))
-        else:
-            blocks.append(sig)
-
-    # Fallback: non-primary tools without a primary rye_execute entry
-    # (e.g. when primary_tools is not passed). Render them as flat signatures.
-    if not blocks and non_primary_tools:
-        for entry in non_primary_tools:
-            sig = _format_tool_signature(entry["tool_id"], entry["metadata"])
-            sig_chars = len(sig) + 1
-            if current_chars + sig_chars > max_chars:
-                break
-            blocks.append(sig)
-            preloaded.append(entry["tool_id"])
-            current_chars += sig_chars
-
-    if not blocks:
-        return {"schemas": "", "preloaded_tools": []}
-
-    schemas = "<capabilities>\n" + "\n".join(blocks) + "\n</capabilities>"
-    return {"schemas": schemas, "preloaded_tools": preloaded}
+    return {
+        "tool_defs": tool_defs,
+        "capabilities_summary": capabilities_summary,
+        "capabilities_tree": _format_capabilities_tree(capabilities, project_path),
+    }

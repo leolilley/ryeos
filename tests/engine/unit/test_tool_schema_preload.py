@@ -88,11 +88,6 @@ def tool_project(tmp_path):
         .replace('"integer"', '"string"')
     )
 
-    # rye/primary/rye_execute.py — should be skipped
-    primary_dir = tools / "rye" / "primary"
-    primary_dir.mkdir(parents=True)
-    (primary_dir / "rye_execute.py").write_text(SAMPLE_TOOL)
-
     return tmp_path
 
 
@@ -139,6 +134,9 @@ class TestPatternSpecificity:
         assert _tsl._pattern_specificity("rye/file-system/*") > _tsl._pattern_specificity("rye/*")
 
 
+_DEFAULT_PARSERS_MAP = {".py": "python/ast", ".yaml": "yaml/yaml", ".yml": "yaml/yaml"}
+
+
 class TestExtractToolMetadata:
     def _router(self):
         return _tsl.ParserRouter(None)
@@ -147,7 +145,7 @@ class TestExtractToolMetadata:
         tool_file = tmp_path / "test_tool.py"
         tool_file.write_text(SAMPLE_TOOL)
 
-        meta = _tsl._extract_tool_metadata(tool_file, self._router())
+        meta = _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP)
         assert meta is not None
         assert meta["description"] == "Run bash commands"
         assert "command" in meta["schema"]["properties"]
@@ -156,12 +154,12 @@ class TestExtractToolMetadata:
     def test_returns_none_without_schema(self, tmp_path):
         tool_file = tmp_path / "no_schema.py"
         tool_file.write_text(SAMPLE_TOOL_NO_SCHEMA)
-        assert _tsl._extract_tool_metadata(tool_file, self._router()) is None
+        assert _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP) is None
 
     def test_returns_none_for_syntax_error(self, tmp_path):
         tool_file = tmp_path / "bad.py"
         tool_file.write_text("def broken(:\n")
-        assert _tsl._extract_tool_metadata(tool_file, self._router()) is None
+        assert _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP) is None
 
     def test_extracts_yaml_tool(self, tmp_path):
         tool_file = tmp_path / "my_tool.yaml"
@@ -174,7 +172,7 @@ class TestExtractToolMetadata:
             "  - name: verbose\n"
             "    type: boolean\n"
         )
-        meta = _tsl._extract_tool_metadata(tool_file, self._router())
+        meta = _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP)
         assert meta is not None
         assert meta["description"] == "My YAML tool"
         assert "target" in meta["schema"]["properties"]
@@ -206,7 +204,7 @@ class TestFormatToolSignature:
 
 _MOCK_PRIMARY_TOOLS = [{
     "name": "rye_execute",
-    "_item_id": "rye/primary/rye_execute",
+    "_item_id": "rye/execute",
     "schema": {"type": "object", "properties": {
         "item_type": {"type": "string"},
         "item_id": {"type": "string"},
@@ -216,7 +214,7 @@ _MOCK_PRIMARY_TOOLS = [{
     "description": "Run a Rye item",
 }, {
     "name": "rye_search",
-    "_item_id": "rye/primary/rye_search",
+    "_item_id": "rye/search",
     "schema": {"type": "object", "properties": {
         "query": {"type": "string"},
         "scope": {"type": "string"},
@@ -224,7 +222,7 @@ _MOCK_PRIMARY_TOOLS = [{
     "description": "Discover item IDs",
 }, {
     "name": "rye_load",
-    "_item_id": "rye/primary/rye_load",
+    "_item_id": "rye/load",
     "schema": {"type": "object", "properties": {
         "item_type": {"type": "string"},
         "item_id": {"type": "string"},
@@ -232,7 +230,7 @@ _MOCK_PRIMARY_TOOLS = [{
     "description": "Read raw content and metadata",
 }, {
     "name": "rye_sign",
-    "_item_id": "rye/primary/rye_sign",
+    "_item_id": "rye/sign",
     "schema": {"type": "object", "properties": {
         "item_type": {"type": "string"},
         "item_id": {"type": "string"},
@@ -241,75 +239,77 @@ _MOCK_PRIMARY_TOOLS = [{
 }]
 
 
+def _tool_names(tool_defs):
+    """Helper: extract tool names from tool_defs list."""
+    return [t["name"] for t in tool_defs]
+
+
+def _tool_ids(tool_defs):
+    """Helper: extract _item_id values from tool_defs list."""
+    return [t["_item_id"] for t in tool_defs]
+
+
 class TestPreloadToolSchemas:
     def test_preloads_matching_tools(self, tool_project):
         from unittest.mock import patch
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                result = _tsl.preload_tool_schemas(
-                    ["rye.execute.tool.rye.bash.*"], tool_project,
-                    primary_tools=_MOCK_PRIMARY_TOOLS,
-                )
+                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                    result = _tsl.preload_tool_schemas(
+                        ["rye.execute.tool.rye.bash.*"], tool_project,
+                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                    )
 
-        assert result["schemas"]
-        assert "rye/bash/bash" in result["preloaded_tools"]
-        assert "Run bash commands" in result["schemas"]
-
-    def test_skips_primary_tools(self, tool_project):
-        from unittest.mock import patch
-        mock_paths = [(tool_project / ".ai" / "tools", "project")]
-        with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
-            with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                result = _tsl.preload_tool_schemas(
-                    ["rye.execute.tool.rye.primary.*"], tool_project,
-                    primary_tools=_MOCK_PRIMARY_TOOLS,
-                )
-
-        # Non-primary tools under rye/primary/ are not resolved from filesystem;
-        # only the rye_execute primary entry itself appears (from primary_tools arg).
-        non_primary_ids = [t for t in result["preloaded_tools"]
-                          if t not in {p["_item_id"] for p in _MOCK_PRIMARY_TOOLS}]
-        assert not any(t.startswith("rye/primary/") for t in non_primary_ids)
+        assert result["tool_defs"]
+        ids = _tool_ids(result["tool_defs"])
+        assert "rye/bash/bash" in ids
+        # Tool should have _primary="execute" and flattened name
+        bash_def = [t for t in result["tool_defs"] if t["_item_id"] == "rye/bash/bash"][0]
+        assert bash_def["name"] == "rye_bash_bash"
+        assert bash_def["_primary"] == "execute"
 
     def test_non_tool_caps_without_primary_tools(self, tool_project):
         """Without primary_tools arg, search/load/sign caps produce no output."""
         result = _tsl.preload_tool_schemas(
             ["rye.search.*", "rye.load.knowledge.*"], tool_project,
         )
-        assert result["schemas"] == ""
-        assert result["preloaded_tools"] == []
+        assert result["tool_defs"] == []
+        assert result["capabilities_summary"] == []
 
     def test_empty_capabilities(self, tool_project):
         result = _tsl.preload_tool_schemas([], tool_project)
-        assert result["schemas"] == ""
-        assert result["preloaded_tools"] == []
+        assert result["tool_defs"] == []
+        assert result["capabilities_summary"] == []
 
     def test_token_budget_limits_output(self, tool_project):
         from unittest.mock import patch
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                result = _tsl.preload_tool_schemas(
-                    ["rye.execute.tool.rye.bash.*", "rye.execute.tool.rye.file-system.*"],
-                    tool_project, max_tokens=10,
-                    primary_tools=_MOCK_PRIMARY_TOOLS,
-                )
+                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                    result = _tsl.preload_tool_schemas(
+                        ["rye.execute.tool.rye.bash.*", "rye.execute.tool.rye.file-system.*"],
+                        tool_project, max_tokens=10,
+                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                    )
 
         # Very tight budget — can't fit everything
-        assert len(result["preloaded_tools"]) < 4
+        assert len(result["tool_defs"]) < 4
 
     def test_exact_tool_reference(self, tool_project):
         from unittest.mock import patch
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                result = _tsl.preload_tool_schemas(
-                    ["rye.execute.tool.rye.file-system.read"], tool_project,
-                    primary_tools=_MOCK_PRIMARY_TOOLS,
-                )
+                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                    result = _tsl.preload_tool_schemas(
+                        ["rye.execute.tool.rye.file-system.read"], tool_project,
+                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                    )
 
-        assert "rye/file-system/read" in result["preloaded_tools"]
+        ids = _tool_ids(result["tool_defs"])
+        assert "rye/file-system/read" in ids
 
     def test_deduplicates_across_patterns(self, tool_project):
         """Same tool matched by wildcard and exact cap appears only once."""
@@ -317,38 +317,38 @@ class TestPreloadToolSchemas:
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                result = _tsl.preload_tool_schemas(
-                    [
-                        "rye.execute.tool.rye.bash.bash",
-                        "rye.execute.tool.rye.bash.*",
-                    ],
-                    tool_project,
-                    primary_tools=_MOCK_PRIMARY_TOOLS,
-                )
+                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                    result = _tsl.preload_tool_schemas(
+                        [
+                            "rye.execute.tool.rye.bash.bash",
+                            "rye.execute.tool.rye.bash.*",
+                        ],
+                        tool_project,
+                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                    )
 
-        assert result["preloaded_tools"].count("rye/bash/bash") == 1
+        ids = _tool_ids(result["tool_defs"])
+        assert ids.count("rye/bash/bash") == 1
 
-    def test_type_tree_shows_granted_types(self, tool_project):
-        """Primary tools show sub-trees of accessible item types."""
+    def test_primary_tools_registered_with_correct_primary(self, tool_project):
+        """Primary tools (search, load, sign) get _primary matching their action."""
         from unittest.mock import patch
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                result = _tsl.preload_tool_schemas(
-                    ["rye.execute.tool.rye.bash.*", "rye.search.*"],
-                    tool_project,
-                    primary_tools=_MOCK_PRIMARY_TOOLS,
-                )
+                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                    result = _tsl.preload_tool_schemas(
+                        ["rye.execute.tool.rye.bash.*", "rye.search.*", "rye.load.*"],
+                        tool_project,
+                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                    )
 
-        schemas = result["schemas"]
-        # rye_execute should show "tools:" sub-tree, NOT "directives"
-        assert "tools:" in schemas
-        assert "directives" not in schemas.split("rye_search")[0]
-        # rye_search with wildcard should show all three types
-        search_section = schemas.split("rye_search")[1]
-        assert "directives" in search_section
-        assert "tools" in search_section
-        assert "knowledge" in search_section
+        by_name = {t["name"]: t for t in result["tool_defs"]}
+        assert by_name["rye_search"]["_primary"] == "search"
+        assert by_name["rye_load"]["_primary"] == "load"
+        # execute tools get _primary="execute"
+        bash_defs = [t for t in result["tool_defs"] if t["_primary"] == "execute"]
+        assert len(bash_defs) >= 1
 
 
 # ---------------------------------------------------------------------------
