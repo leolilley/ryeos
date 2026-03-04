@@ -408,9 +408,13 @@ is_valid = verify_json(signed)  # True
 
 The hash is computed over canonical JSON (sorted keys, compact separators) of all fields except `_signature`. This protects thread capabilities and limits from tampering.
 
+### Capabilities File Signing
+
+Each thread writes a `capabilities.md` file alongside `transcript.jsonl` in the thread directory. This is a signed markdown file (using `MetadataManager.create_signature`, same as knowledge entries) containing the full tool definitions in a JSON fenced block and the capabilities tree in a code fence. Written once before the LLM loop starts.
+
 ### Knowledge Entry Export
 
-Transcripts are also exported as signed knowledge entries at `.ai/knowledge/threads/{thread_id}.md`. These use cognition-style framing (`## > Turn N`, `### < Cognition`) and standard knowledge metadata with `entry_type: thread_transcript`. The knowledge entry is updated at each checkpoint and at finalization, replacing the legacy `transcript.md` file in the thread directory.
+Transcripts are exported as signed knowledge entries at `.ai/knowledge/agent/threads/{directive}/{thread_id}.md`. These use cognition-style framing and standard knowledge metadata with `entry_type: thread_transcript`. The frontmatter includes a `capabilities_ref` field pointing to `.ai/agent/threads/{thread_id}/capabilities.md` instead of embedding tool definitions inline. The knowledge entry is updated at each checkpoint and at finalization.
 
 ## What Breaks Integrity
 

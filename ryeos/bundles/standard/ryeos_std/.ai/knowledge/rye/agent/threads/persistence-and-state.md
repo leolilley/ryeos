@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:a0ea3df9b6994eb95afbf0a696747d4d24cc759e031e39c38829f77053f91c17:L_Uv7xdcO__u7yV-ubAMyL6bE291iXl-jCwGEDHT53XD05WIqaod1fejWZ_l-f0pJU-vRF_h0EOFjyyzGwFnCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-04T04:36:27Z:16934a55247103d14e32d0239d74be9e3593925775ace86f5f6491fefcb83ee5:RCSqzLLby187d8tHhrcFYvL_dImhQ6-wEGUKA3D33uWN2MHuTvPWDsf6KEEOhPECle8fULPFkkowSqNU7e1uDA==:4b987fd4e40303ac -->
 
 ```yaml
 name: persistence-and-state
@@ -31,7 +31,8 @@ How threads persist state, handle context limits via continuation, and support u
 ├── budget_ledger.db         # Hierarchical budget tracking (SQLite)
 ├── <thread_id>/             # Thread transcripts
 │   ├── thread.json          # Signed thread metadata
-│   └── transcript.jsonl     # Append-only event log with checkpoint signatures
+│   ├── transcript.jsonl     # Append-only event log with checkpoint signatures
+│   └── capabilities.md      # Signed tool definitions + capabilities tree
 └── <graph_run_id>/          # Graph transcripts (same pattern)
     └── transcript.jsonl     # Graph events, checkpoint-signed
 
@@ -106,9 +107,13 @@ Signed with a `_signature` field using canonical JSON serialization. Protects ca
 
 Append-only JSONL event log. Each line is a JSON object with `timestamp`, `thread_id`, `event_type`, and `payload`. Checkpoint events are interleaved at turn boundaries with SHA256 hash and Ed25519 signature covering all preceding bytes.
 
+### Capabilities File (`capabilities.md`)
+
+Signed markdown file written once before the LLM loop starts. Contains the thread's tool definitions in a JSON fenced block and the capabilities tree in a code fence. Signed via `MetadataManager.create_signature` (same `<!-- rye:signed:... -->` format as knowledge entries).
+
 ### Knowledge Entry (`.ai/knowledge/agent/threads/{directive}/{thread_id}.md`)
 
-Signed knowledge entry with cognition-framed markdown. Contains YAML frontmatter with thread-specific fields (`thread_id`, `directive`, `status`, `model`, `turns`, `spend`) and `entry_type: thread_transcript`. Updated at each checkpoint and finalization. Discoverable via `rye search knowledge`.
+Signed knowledge entry with cognition-framed markdown. Contains YAML frontmatter with thread-specific fields (`thread_id`, `directive`, `status`, `model`, `turns`, `spend`, `capabilities_ref`) and `entry_type: thread_transcript`. The `capabilities_ref` field points to `.ai/agent/threads/{thread_id}/capabilities.md` rather than embedding tool definitions inline. Updated at each checkpoint and finalization. Discoverable via `rye search knowledge`.
 
 ### Graph Transcripts
 

@@ -242,8 +242,9 @@ Each thread creates a directory at `.ai/agent/threads/<thread_id>/` containing:
 |------|---------|
 | `thread.json` | Signed thread metadata: ID, directive, status, model, cost, limits, capabilities |
 | `transcript.jsonl` | Append-only event log with inline checkpoint signatures |
+| `capabilities.md` | Signed snapshot of tool definitions and capabilities tree available to the thread |
 
-Thread transcripts are also exported as signed knowledge entries at `.ai/knowledge/threads/{thread_id}.md` for discoverability via `rye search knowledge`.
+Thread transcripts are also exported as signed knowledge entries at `.ai/knowledge/agent/threads/{directive}/{thread_id}.md` for discoverability via `rye search knowledge`. The knowledge frontmatter includes a `capabilities_ref` field pointing to the capabilities file.
 
 The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/agent/threads/`.
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:ebb3c7381d5d042ba086d6e51e793bd6f5c044c109486197fceec60d4624386b:2EH8PbaPyoWLHmYdyyV9cAmHKdKfWtUUvIGLysFPZOSdwxXNYiufvavTnidSDF9TMTqc_wD3h-UHgGBPr7e5BQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-04T04:36:27Z:35d54f1abe58657d8a980a57bef73456e0d1090774cfe9aecee15046ffe0a5f5:vII4Yn-a7skrHsIHmmwfC7yVrupkH9rZAnMybpqWDO1i16uNiB-8M7UYYcRnXKTVECyMADYiIXTZXf53H-LXAA==:4b987fd4e40303ac -->
 
 ```yaml
 name: thread-lifecycle
@@ -205,7 +205,8 @@ Each thread creates `.ai/agent/threads/<thread_id>/`:
 | File              | Purpose                                  |
 |-------------------|------------------------------------------|
 | `thread.json`     | Metadata: ID, directive, status, model, cost, limits, capabilities |
-| `transcript.md`   | Full conversation log (EventEmitter)     |
+| `transcript.jsonl` | Append-only event log with checkpoint signatures |
+| `capabilities.md` | Signed tool definitions + capabilities tree |
 
 Shared databases at `.ai/agent/threads/`:
 - `registry.db` — thread registry (SQLite)

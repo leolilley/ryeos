@@ -394,6 +394,8 @@ Records the full conversation to `.ai/agent/threads/<thread_id>/transcript.jsonl
 - Event markers (thread_started, thread_completed, etc.)
 - Supports reconstruction of messages for resume/handoff
 
+Also writes `capabilities.md` — a signed markdown snapshot of the thread's tool definitions (JSON fenced block) and capabilities tree (code fence). Written once before the LLM loop starts. Referenced from the knowledge transcript via `capabilities_ref`.
+
 ### State Store (`persistence/state_store`)
 
 Persists arbitrary thread state between turns. Used by hooks and internal components.
