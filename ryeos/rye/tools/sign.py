@@ -266,7 +266,8 @@ class SignTool:
             return {
                 "status": "error",
                 "error": f"Directive not found: {item_id}",
-                "hint": f"Create file at .ai/directives/{item_id}.md",
+                "searched_in": str(Path(project_path) / AI_DIR / "directives"),
+                "hint": "Ensure project_path is the parent of the .ai/ directory containing this item.",
             }
 
         content = file_path.read_text(encoding="utf-8")
@@ -330,7 +331,8 @@ class SignTool:
             return {
                 "status": "error",
                 "error": f"Tool not found: {item_id}",
-                "hint": f"Create file at .ai/tools/<category>/{item_id}.py",
+                "searched_in": str(Path(project_path) / AI_DIR / "tools"),
+                "hint": "Ensure project_path is the parent of the .ai/ directory containing this item.",
             }
 
         content = file_path.read_text(encoding="utf-8")
@@ -434,7 +436,8 @@ class SignTool:
             return {
                 "status": "error",
                 "error": f"Knowledge entry not found: {item_id}",
-                "hint": f"Create file at .ai/knowledge/<category>/{item_id}.md",
+                "searched_in": str(Path(project_path) / AI_DIR / "knowledge"),
+                "hint": "Ensure project_path is the parent of the .ai/ directory containing this item.",
             }
 
         content = file_path.read_text(encoding="utf-8")

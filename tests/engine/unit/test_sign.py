@@ -177,3 +177,63 @@ class TestSignTool:
             "invalid" in result["error"].lower()
             or "validation" in result["error"].lower()
         )
+
+
+@pytest.mark.asyncio
+class TestSignNotFoundErrors:
+    """Not-found errors include searched_in path and hint about project_path."""
+
+    async def test_directive_not_found_shows_searched_path(self, _setup_user_space):
+        """Error should include the path that was searched."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".ai" / "directives").mkdir(parents=True)
+
+            tool = SignTool("")
+            result = await tool.handle(
+                item_type="directive",
+                item_id="missing",
+                project_path=str(root),
+                source="project",
+            )
+
+            assert result["status"] == "error"
+            assert "searched_in" in result
+            assert ".ai/directives" in result["searched_in"]
+            assert "parent of the .ai/" in result["hint"]
+
+    async def test_tool_not_found_shows_searched_path(self, _setup_user_space):
+        """Error should include the path that was searched."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".ai" / "tools").mkdir(parents=True)
+
+            tool = SignTool("")
+            result = await tool.handle(
+                item_type="tool",
+                item_id="my/tool",
+                project_path=str(root),
+                source="project",
+            )
+
+            assert result["status"] == "error"
+            assert "searched_in" in result
+            assert ".ai/tools" in result["searched_in"]
+
+    async def test_knowledge_not_found_shows_searched_path(self, _setup_user_space):
+        """Error should include the path that was searched."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".ai" / "knowledge").mkdir(parents=True)
+
+            tool = SignTool("")
+            result = await tool.handle(
+                item_type="knowledge",
+                item_id="topic",
+                project_path=str(root),
+                source="project",
+            )
+
+            assert result["status"] == "error"
+            assert "searched_in" in result
+            assert ".ai/knowledge" in result["searched_in"]
