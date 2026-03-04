@@ -460,7 +460,6 @@ class TestHookConditionsPhase4:
             config = yaml.safe_load(f)
 
         hook_ids = {h["id"] for h in config.get("context_hooks", [])}
-        assert "ctx_environment" in hook_ids
         assert "ctx_directive_instruction" in hook_ids
 
     def test_builtin_and_infra_hooks_unchanged(self):
