@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T03:39:44Z:147723b393e154c1974fcdfb98279a384749ef6f79c1c828f26a552aa91aed8c:lUzqR_bRPjqjrCRZC1WPS2yVltq3ihwuJDh51x1Z3ykFx3ZaTQIwrN3FcL33uJFdQDJzSkCgkPi_S_3DQ7yZCw==:4b987fd4e40303ac
+# rye:signed:2026-03-04T04:22:38Z:eb18faaa427c905115c76d6d1bec9787ae8853f4cff833380c00bf7cd2ee2864:s-TMEqZbAP4wwxf6XuEdfAvZxk550ZefuRmGYezxnPIWP_xbYfqKiCvhyvroKJsn2Rx5wlRk0aTk2MMXUs4CCA==:4b987fd4e40303ac
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -51,6 +51,31 @@ class Transcript:
     def get_events(self) -> List[Dict[str, Any]]:
         """Return accumulated events."""
         return list(self._events)
+
+    def write_capabilities(self, tool_defs: list, tree: str = "") -> Path:
+        """Write signed capabilities.md alongside transcript.jsonl.
+
+        Markdown format: tool_defs in a JSON fenced block, tree as plain text.
+        Signed via MetadataManager like knowledge entries.
+        Atomic write (tmp + rename) so readers never see partial content.
+        Returns the path to the written file.
+        """
+        from rye.utils.metadata_manager import MetadataManager
+        from rye.constants import ItemType
+
+        defs_json = json.dumps(tool_defs, indent=2, default=str, ensure_ascii=False)
+        body = f"# Capabilities\n\n## Tool Definitions\n\n```json\n{defs_json}\n```\n"
+        if tree:
+            body += f"\n## Capabilities Tree\n\n```\n{tree}\n```\n"
+
+        signature = MetadataManager.create_signature(ItemType.KNOWLEDGE, body)
+        signed_content = signature + body
+
+        caps_path = self._dir / "capabilities.md"
+        tmp_path = caps_path.with_suffix(".md.tmp")
+        tmp_path.write_text(signed_content, encoding="utf-8")
+        tmp_path.rename(caps_path)
+        return caps_path
 
     @property
     def knowledge_path(self) -> Path:
@@ -157,7 +182,6 @@ class Transcript:
         status: str = "completed",
         model: str = "",
         cost: Optional[Dict] = None,
-        capabilities_tree: str = "",
         permissions: Optional[list] = None,
     ) -> Optional[Path]:
         """Render transcript as a signed knowledge entry.
@@ -188,13 +212,15 @@ class Transcript:
             return None
 
         cost = cost or {}
-        # Use thread_id path components for category
+        # Derive name (must match filename stem) and category (must match path)
         thread_path = Path(self.thread_id)
+        name = thread_path.name
         if thread_path.parent != Path("."):
             category = f"agent/threads/{thread_path.parent}"
         else:
             category = "agent/threads"
-        safe_id = thread_path.name
+        # Title is the leaf directive name, not the full path
+        directive_leaf = directive.rsplit("/", 1)[-1] if directive else name
         created_at = ""
         for e in events:
             if e.get("timestamp"):
@@ -212,8 +238,8 @@ class Transcript:
 
         frontmatter = (
             f"```yaml\n"
-            f"id: {safe_id}\n"
-            f'title: "{directive or self.thread_id}"\n'
+            f"name: {name}\n"
+            f'title: "{directive_leaf}"\n'
             f"entry_type: thread_transcript\n"
             f"category: {category}\n"
             f'version: "1.0.0"\n'
@@ -234,10 +260,7 @@ class Transcript:
         if permissions:
             perms_str = ", ".join(permissions)
             frontmatter += f"permissions: [{perms_str}]\n"
-        if capabilities_tree:
-            # YAML block scalar — indent each line by 2 for valid YAML
-            indented = "\n".join(f"  {line}" for line in capabilities_tree.split("\n"))
-            frontmatter += f"capabilities: |\n{indented}\n"
+        frontmatter += f"capabilities_ref: .ai/agent/threads/{self.thread_id}/capabilities.md\n"
         frontmatter += (
             f"```\n\n"
         )

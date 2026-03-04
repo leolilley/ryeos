@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T03:39:44Z:4d21df83096a2078aa6288b7c372364fda0b341cf0d3122190f34f4a55996d3e:OPdRZa2PmCnPjSID2tN15-V1l2OU2zzoZr663qWh_NuWXqNtJbHsrZzV7j3DnexmYMBSTCm9tXkDkOsdxTA2CA==:4b987fd4e40303ac
+# rye:signed:2026-03-04T04:22:38Z:5754ff08c8945ef561702807a6a1f8678fa6b6d494a29c02bbd85df0200a5ad5:r2kxylQ8ioFIc47u1Z_pjpyCDZctLDAP02JBiYxiCzmebqDPNBeGUTptuhIM4rPln6GatCnhrJk4Dn_wiM2RAg==:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -89,6 +89,12 @@ async def run(
         for t in harness.available_tools
         if "_primary" in t
     }
+
+    # Write signed capabilities.json alongside transcript.jsonl
+    transcript.write_capabilities(
+        harness.available_tools,
+        tree=getattr(harness, "capabilities_tree", ""),
+    )
 
     messages = []
     cost = {"turns": 0, "input_tokens": 0, "output_tokens": 0, "spend": 0.0}
@@ -262,7 +268,6 @@ async def run(
                     status="running",
                     model=provider.model,
                     cost=cost,
-                    capabilities_tree=getattr(harness, "capabilities_tree", ""),
                     permissions=harness._capabilities,
                 )
 
@@ -689,7 +694,6 @@ async def run(
             status=final["status"],
             model=provider.model,
             cost=cost,
-            capabilities_tree=getattr(harness, "capabilities_tree", ""),
             permissions=harness._capabilities,
         )
 
