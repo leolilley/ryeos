@@ -24,7 +24,7 @@ from rye.utils.path_utils import (
     get_project_type_path,
     get_user_type_path,
 )
-from rye.constants import ItemType
+from rye.constants import AI_DIR, ItemType
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +101,15 @@ class ToolResolver:
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
-        # System space — all installed bundles (lowest priority)
+        # System space — all installed bundles (lowest priority).
+        # Use the raw type directory (.ai/tools/), NOT category-scoped paths,
+        # because tool_ids are always relative to the type root
+        # (e.g. "rye/file-system/read" resolves under .ai/tools/).
+        type_folder = ItemType.TYPE_DIRS.get(ItemType.TOOL, "tools")
         for bundle in get_system_spaces():
-            for type_path in bundle.get_type_paths(ItemType.TOOL):
-                if type_path.exists():
-                    paths.append((type_path, f"system:{bundle.bundle_id}"))
+            sys_dir = bundle.root_path / AI_DIR / type_folder
+            if sys_dir.exists():
+                paths.append((sys_dir, f"system:{bundle.bundle_id}"))
 
         return paths
 
