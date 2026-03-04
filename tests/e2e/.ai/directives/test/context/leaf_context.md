@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:30Z:2c4c8a892963d721c69bc386400286d947b3b83406c3bb3d79dc274754e995b6:YxflOJ8jpFSkTEZ65isvaquOHOh41raa4dkGfEZqe4_q7TZrCpfuUChTOuZitZskI__t1L1FopEAsfF0U-GLCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-04T00:05:20Z:2c4c8a892963d721c69bc386400286d947b3b83406c3bb3d79dc274754e995b6:IkfdfWxfT1VFtf-PfOooN1VZI1Bl7WoAgvzH4HCvcGg6HYR1s4ODwzZPmyBbqqyXdi_wFW_zBhB1-1PtDf5IDA==:4b987fd4e40303ac -->
 # Leaf Context Directive
 
 Leaf of extends chain. Adds after-context. Should receive base system + mid before + own after.

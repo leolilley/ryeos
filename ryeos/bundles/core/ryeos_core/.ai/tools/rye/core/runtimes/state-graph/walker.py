@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T21:42:35Z:ba6eb2ce9dd3277d5965b9443c3edc9adbc8f51d0ceb32f2645f00fa97461029:vGr5s3E5CMWPHPt503l7WIJzO0GwzvF8fcBgl8lmw-duIFNKciIob4qJiEMMIZyiWWfcEqsJzvtL_p5FGTEUBg==:4b987fd4e40303ac
+# rye:signed:2026-03-03T22:32:56Z:ba6eb2ce9dd3277d5965b9443c3edc9adbc8f51d0ceb32f2645f00fa97461029:vGr5s3E5CMWPHPt503l7WIJzO0GwzvF8fcBgl8lmw-duIFNKciIob4qJiEMMIZyiWWfcEqsJzvtL_p5FGTEUBg==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 

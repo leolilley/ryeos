@@ -134,16 +134,6 @@ infra_hooks:
 # resolve_extends hooks.
 
 context_hooks:
-  - id: "ctx_environment"
-    event: "thread_started"
-    layer: 2
-    position: "before"
-    action:
-      primary: "execute"
-      item_type: "knowledge"
-      item_id: "rye/agent/core/Environment"
-    description: "Inject runtime environment context into first user message"
-
   - id: "ctx_directive_instruction"
     event: "thread_started"
     layer: 2

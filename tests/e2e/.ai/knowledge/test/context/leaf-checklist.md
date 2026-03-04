@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:39Z:fc0a7fb66924c45ed0afd7d5afb74ff0c5ea1b67d51db11da0223f4264731a99:8HeQf4YWUj8WcLqJowXHRoFkqZYlTY_mNW-MddM6dBJ2cY2AIq1g0BhmRvlPyOfzpPQvWG9HygDgr106COS7AQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-04T00:04:34Z:fc0a7fb66924c45ed0afd7d5afb74ff0c5ea1b67d51db11da0223f4264731a99:vZ9-WbE4rFK_lPXsXVDBxbUn7IgeudA7OyTx8ky93kHw8f7es9dWVDAnvxFraNpjpHJ2vaWEHsU8JspLA3RMBg==:4b987fd4e40303ac -->
 ```yaml
 name: leaf-checklist
 title: Leaf Completion Checklist

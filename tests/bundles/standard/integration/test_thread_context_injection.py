@@ -987,6 +987,121 @@ class TestConditionalHookDispatch:
         assert "project/identities/web-agent" not in d3.dispatched
 
 
+# ── Integrity error abort behaviour ──────────────────────────────────
+
+
+class TestContextHookIntegrityAbort:
+    """run_hooks_context() must abort on integrity errors from dispatchers."""
+
+    @pytest.mark.asyncio
+    async def test_integrity_error_raises_runtime_error(self, tmp_path):
+        """Dispatcher returning error_type='integrity' must raise RuntimeError."""
+        hooks = [
+            {
+                "id": "sig_check",
+                "event": "build_system_prompt",
+                "layer": 1,
+                "position": "before",
+                "action": {
+                    "primary": "load",
+                    "item_type": "knowledge",
+                    "item_id": "project/secrets",
+                },
+            },
+        ]
+        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+
+        class MockDispatcher:
+            async def dispatch(self, action, **kwargs):
+                return {
+                    "status": "error",
+                    "error": "Untrusted key abc",
+                    "error_type": "integrity",
+                }
+
+        with pytest.raises(RuntimeError):
+            await harness.run_hooks_context(
+                {"directive": "test"}, MockDispatcher(),
+                event="build_system_prompt",
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_integrity_error_continues_silently(self, tmp_path):
+        """A plain error (no error_type) should log and continue, not raise."""
+        hooks = [
+            {
+                "id": "optional_hook",
+                "event": "build_system_prompt",
+                "layer": 1,
+                "position": "before",
+                "action": {
+                    "primary": "load",
+                    "item_type": "knowledge",
+                    "item_id": "missing/thing",
+                },
+            },
+            {
+                "id": "good_hook",
+                "event": "build_system_prompt",
+                "layer": 1,
+                "position": "after",
+                "action": {
+                    "primary": "load",
+                    "item_type": "knowledge",
+                    "item_id": "good/thing",
+                },
+            },
+        ]
+        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+
+        class MockDispatcher:
+            async def dispatch(self, action, **kwargs):
+                if action.get("item_id") == "missing/thing":
+                    return {"status": "error", "error": "Not found"}
+                return {"status": "success", "content": "ok"}
+
+        # Should not raise — the first hook fails gracefully, the second succeeds
+        results = await harness.run_hooks_context(
+            {"directive": "test"}, MockDispatcher(),
+            event="build_system_prompt",
+        )
+        # The good hook's content should appear in the "after" bucket
+        assert "ok" in results["after"]
+
+    @pytest.mark.asyncio
+    async def test_integrity_error_message_includes_hook_id(self, tmp_path):
+        """RuntimeError message must contain the hook id and item_id."""
+        hooks = [
+            {
+                "id": "verified_loader",
+                "event": "build_system_prompt",
+                "layer": 1,
+                "position": "before",
+                "action": {
+                    "primary": "load",
+                    "item_type": "knowledge",
+                    "item_id": "secure/config",
+                },
+            },
+        ]
+        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+
+        class MockDispatcher:
+            async def dispatch(self, action, **kwargs):
+                return {
+                    "status": "error",
+                    "error": "Tampered signature",
+                    "error_type": "integrity",
+                }
+
+        with pytest.raises(RuntimeError, match="verified_loader") as exc_info:
+            await harness.run_hooks_context(
+                {"directive": "test"}, MockDispatcher(),
+                event="build_system_prompt",
+            )
+        assert "secure/config" in str(exc_info.value)
+
+
 # ── ConfigLoader merge-by-id for hook overrides ──────────────────────
 
 CONFIG_LOADER_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/loaders/config_loader.py')

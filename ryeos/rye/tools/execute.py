@@ -103,6 +103,9 @@ class ExecuteTool:
 
             return result
 
+        except IntegrityError as e:
+            logger.error(f"Integrity error: {e}")
+            return {"status": "error", "error": str(e), "error_type": "integrity", "item_id": item_id}
         except Exception as e:
             logger.error(f"Execute error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}

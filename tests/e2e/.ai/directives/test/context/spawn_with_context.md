@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-25T00:16:20Z:4ad875f2dcbdae1c54eda31fa16762b8b1e5c9664935daea622136a50f05ad1d:06sdSrrcEn3ROxwGvKAWqiID6fMituK66AB2fS0IPKm_Ur6eU_E5xk7TYgrjS5sHbzIkERmvq7qHhia_Va18AA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-04T00:05:20Z:4ad875f2dcbdae1c54eda31fa16762b8b1e5c9664935daea622136a50f05ad1d:6rehttFhMNLW8p_Co49imajZbqo24VtjqPOmkuQHrQ_MqiGkBtnxz3E94PvDfc3lJT_VO0bk3O74is-b2kHgBA==:4b987fd4e40303ac -->
 # Spawn With Context Test
 
 Orchestrator that spawns the leaf_context directive as a child thread. Tests that the entire extends chain context (base system + mid before + leaf after) plus the default system context hooks (identity, behavior, tool-protocol, environment, completion) all flow correctly into the spawned thread's transcript.

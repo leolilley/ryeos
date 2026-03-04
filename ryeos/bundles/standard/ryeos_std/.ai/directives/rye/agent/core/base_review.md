@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-03-03T22:32:56Z:955ed75045fac2d54bf1bb4a8e6252b5814a95a96c0cc00f82513fe392d295e4:0eq_ifu7ciFl6iS0iZQJC3lEp2Mg0mvOtg-YcN8HazD0qzMoTq6B0UuNRwg4ep4VMx9kyHvfVO3l0GBcpXTeCw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Base Review

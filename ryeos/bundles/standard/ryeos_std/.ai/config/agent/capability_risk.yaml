@@ -51,4 +51,5 @@ classifications:
     patterns:
       - "rye.search.*"
       - "rye.load.*"
-    description: "Read-only discovery and inspection"
+      - "rye.sign.*"
+    description: "Read-only discovery, inspection, and signing"

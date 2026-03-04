@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-02T08:59:56Z:d2f8f9cfb593591a5289f66d681f3d47cbb2fa0bf490cf756ae11554142c373f:fC5_ipjNCg6i2cYipGm2tQFcDReywCA98U5nCadde2qaDPR9ZCJ45uMeAaiqKm_13FDlVXSgvGfZGGDItcrIDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-03T22:32:56Z:d2f8f9cfb593591a5289f66d681f3d47cbb2fa0bf490cf756ae11554142c373f:fC5_ipjNCg6i2cYipGm2tQFcDReywCA98U5nCadde2qaDPR9ZCJ45uMeAaiqKm_13FDlVXSgvGfZGGDItcrIDw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml

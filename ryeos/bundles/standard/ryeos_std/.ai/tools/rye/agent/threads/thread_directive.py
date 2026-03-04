@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T23:29:04Z:47538580e27d520baadf7c0d9ab8ef20954bf2fb1ee33b374a87f60fa088a8d8:d2dPIvXRw94xl21IlNA-FhezWl4nWsXVV9zH5JlsPwAF0AK2COGbkQARerSpTzww6pvuf8afx_3OOytERUjhDA==:4b987fd4e40303ac
+# rye:signed:2026-03-04T00:54:11Z:af452865ef1ee77af40998937d3376bafbdc58655d16ae222aacb4e9247cd9d4:h2APg2o4prcF2szW27o4LC6FBYF92dGMJXcrQ0DZXJzz2Vzco5KsiDlj6f2I3_Gn3x49nt9tD0Ah3uHpAQqRBQ==:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -603,23 +603,40 @@ async def execute(params: Dict, project_path: str) -> Dict:
             from rye.tools.execute import ExecuteTool
             from rye.utils.resolvers import get_user_space
             exec_tool = ExecuteTool(user_space=str(get_user_space()))
+            suppressed = set(chain_result["context"].get("suppress", []))
             for position in ("system", "before", "after"):
                 parts = []
                 for kid in chain_result["context"].get(position, []):
+                    if kid in suppressed:
+                        continue
                     kr = await exec_tool.handle(
                         item_type="knowledge", item_id=kid, project_path=project_path,
                     )
-                    if kr.get("status") == "success":
-                        data = kr.get("data", {})
-                        content = data.get("body", "") if isinstance(data, dict) else ""
-                        if content:
-                            parts.append(content.strip())
+                    if kr.get("status") != "success":
+                        error = kr.get("error", "unknown error")
+                        # Integrity failures must abort — untrusted/tampered
+                        # context must never be silently injected or skipped.
+                        if "integrity" in error.lower() or "untrusted" in error.lower():
+                            raise ValueError(
+                                f"Context knowledge '{kid}' (position={position}) "
+                                f"integrity failure: {error}"
+                            )
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Context knowledge '%s' (position=%s) failed: %s",
+                            kid, position, error,
+                        )
+                        continue
+                    data = kr.get("data", {})
+                    content = data.get("body", "") if isinstance(data, dict) else ""
+                    if content:
+                        parts.append(content.strip())
                 if parts:
                     if position == "system":
                         system_prompt = "\n\n".join(parts)
                     else:
                         directive_context[position] = "\n\n".join(parts)
-            directive_context["suppress"] = chain_result["context"].get("suppress", [])
+            directive_context["suppress"] = list(suppressed)
 
             # Merge parent capabilities from extends chain.
             # The root directive provides the broadest capabilities;
@@ -772,13 +789,13 @@ async def execute(params: Dict, project_path: str) -> Dict:
     preload_result = tool_schema_loader.preload_tool_schemas(
         harness._capabilities, proj_path,
         max_tokens=preload_config.get("max_tokens", 2000),
+        primary_tools=harness.available_tools,
     ) if preload_config.get("enabled", True) else {"schemas": "", "preloaded_tools": []}
     if preload_result["schemas"]:
-        existing_before = directive_context.get("before", "")
-        if existing_before:
-            directive_context["before"] = existing_before + "\n\n" + preload_result["schemas"]
+        if system_prompt:
+            system_prompt = system_prompt + "\n\n" + preload_result["schemas"]
         else:
-            directive_context["before"] = preload_result["schemas"]
+            system_prompt = preload_result["schemas"]
 
     # Grant directive_return capability and set output field names if directive declares <outputs>
     directive_outputs = directive.get("outputs", [])
@@ -938,6 +955,12 @@ async def execute(params: Dict, project_path: str) -> Dict:
         orchestrator_mod = load_module("orchestrator", anchor=_ANCHOR)
         thread_dir = proj_path / AI_DIR / "agent" / "threads" / thread_id
         spawn_log = str(thread_dir / "spawn.log")
+
+        # Write params to file — detached spawn has no stdin pipe
+        params_file = thread_dir / "spawn_params.json"
+        with open(params_file, "w") as f:
+            json.dump(child_params, f)
+
         spawn_result = await orchestrator_mod.spawn_detached(
             cmd=sys.executable,
             args=[
@@ -945,10 +968,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 "--project-path", str(proj_path),
                 "--thread-id", thread_id,
                 "--pre-registered",
+                "--params-file", str(params_file),
             ],
             log_path=spawn_log,
             envs=_spawn_env(thread_id),
-            input_data=json.dumps(child_params),
         )
 
         if not spawn_result.get("success"):

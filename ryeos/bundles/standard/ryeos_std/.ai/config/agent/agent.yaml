@@ -9,3 +9,7 @@ provider:
   # No default — user chooses during onboarding.
   # Set to "anthropic", "openai", etc. in .ai/config/agent/agent.yaml
   default: null
+
+# Default max output tokens per LLM call.
+# Providers can override per-model via pricing.<model>.max_output_tokens.
+max_output_tokens: 16384

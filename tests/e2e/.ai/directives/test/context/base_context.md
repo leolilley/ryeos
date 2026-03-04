@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:30Z:e6e0685096459585d32f84f57281a068defa9e244a1c6f871301973892b693bc:elDevYacRJo0T1XAw9sQCo0NDP6BsSbVas29G7ki9A7SQ46u7z-hoTX4JMheIcntULVn6_r52FxGWvd_kWZZDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-04T00:05:20Z:e6e0685096459585d32f84f57281a068defa9e244a1c6f871301973892b693bc:wf25UWODhQyT70uNVopZBPiqwmRhtpSMcstgNdKSJhxBcb7Yf9McLhQLZAwhoSGANq-3N32gYxkMD32JdyXFDA==:4b987fd4e40303ac -->
 # Base Context Directive
 
 Root of an extends chain. Declares system context that should propagate to all children.

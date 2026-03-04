@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:39Z:e2ed684930b9cd07b0b97aa4ae028a5697dfa3183c0262e2d614878117f1396a:_BEq8W2lhnuwhd74sjBfl3VLeI8vXHi4LuOU-f9-q9cBNrlBVbcXxgIIX-xbNVs4DShYtL4N205rz8sAEVqHBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-04T00:04:34Z:e2ed684930b9cd07b0b97aa4ae028a5697dfa3183c0262e2d614878117f1396a:JWtAJXVz9AlFy9ZLUzuuCx4GH6yN9fXzfUka_l78k85_t8ETMmOE1KOZKiqQHUPviwliqf-MnsieadR2r4kLBg==:4b987fd4e40303ac -->
 ```yaml
 name: base-identity
 title: Base Test Identity

@@ -9,6 +9,8 @@ import pytest
 
 from rye.utils.integrity import verify_item, IntegrityError, _infer_item_id
 from rye.constants import ItemType
+from rye.tools.execute import ExecuteTool
+from rye.tools.load import LoadTool
 
 
 class TestInferItemId:
@@ -141,3 +143,65 @@ class TestDevMode:
             with patch.dict(os.environ, {"RYE_DEV_MODE": "true"}):
                 with pytest.raises(IntegrityError):
                     verify_item(tool_file, ItemType.TOOL, project_path=project)
+
+
+class TestExecuteToolIntegrityErrorType:
+    """Test that ExecuteTool.handle() propagates error_type='integrity' for IntegrityErrors."""
+
+    @pytest.mark.asyncio
+    async def test_execute_unsigned_knowledge_returns_integrity_error_type(self, _setup_user_space):
+        """Unsigned knowledge item should return error_type='integrity'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            knowledge_dir = project / ".ai" / "knowledge"
+            knowledge_dir.mkdir(parents=True)
+            (knowledge_dir / "unsigned_entry.md").write_text(
+                "---\ntitle: Unsigned\nname: unsigned_entry\n---\n\nSome content"
+            )
+
+            tool = ExecuteTool(project_path=str(project))
+            result = await tool.handle(
+                item_type=ItemType.KNOWLEDGE,
+                item_id="unsigned_entry",
+                project_path=str(project),
+            )
+            assert result["status"] == "error"
+            assert result["error_type"] == "integrity"
+            assert result["item_id"] == "unsigned_entry"
+
+    @pytest.mark.asyncio
+    async def test_load_unsigned_directive_returns_integrity_error_type(self, _setup_user_space):
+        """LoadTool.handle() for an unsigned directive should return error_type='integrity'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            directives_dir = project / ".ai" / "directives"
+            directives_dir.mkdir(parents=True)
+            (directives_dir / "unsigned_workflow.md").write_text(
+                "# Unsigned Workflow\n\nSome directive content"
+            )
+
+            loader = LoadTool()
+            result = await loader.handle(
+                item_type=ItemType.DIRECTIVE,
+                item_id="unsigned_workflow",
+                project_path=str(project),
+            )
+            assert result["status"] == "error"
+            assert result["error_type"] == "integrity"
+            assert result["item_id"] == "unsigned_workflow"
+
+    @pytest.mark.asyncio
+    async def test_execute_non_integrity_error_has_no_error_type(self, _setup_user_space):
+        """Non-existent item should error without error_type key."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            (project / ".ai" / "knowledge").mkdir(parents=True)
+
+            tool = ExecuteTool(project_path=str(project))
+            result = await tool.handle(
+                item_type=ItemType.KNOWLEDGE,
+                item_id="nonexistent_item",
+                project_path=str(project),
+            )
+            assert result["status"] == "error"
+            assert "error_type" not in result

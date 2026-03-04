@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-03-03T22:32:56Z:c40abbbf0ff47a56d9dbbb8e0ad8bd881702e86cf2879e05a921b160ec1687f9:OfsD4csRcShcFYs7MwExQuobEhI22jFhkTB9x7jBgpLB6nuXdx2QinNEX9nMwLMZhEudmkxPkVIMC-fiwq7tAQ==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml

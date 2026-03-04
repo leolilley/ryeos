@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T06:42:42Z:f7a7fb9fcd6c7570e25f358766c58400cadccce517be49307b47c0632b8c138c:e-Y1dIWs-JY5-945npY9mqBu-QnRZlFdOnGzDLm0Cf6EEfzmUgUL-VVYQhjLn5jitg5pH9nHhq3KSfRW6_Q7CQ==:4b987fd4e40303ac
+# rye:signed:2026-03-03T23:57:56Z:2b9a3fc615a3cb4b1eb281483753b1eefd13f9b0d3cc2a05d3fa2a394807f28b:FWxDD1e3A_OIlBPD-cj409xwB2jty-XxHRl1pU6_bnazsF4uyNeg_a1a9EVBwQQsuf2_VyV2wZYqKG646IdyAg==:4b987fd4e40303ac
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """
@@ -265,6 +265,11 @@ class SafetyHarness:
                 if not result or result.get("status") != "success":
                     item_id = action.get("item_id", "unknown")
                     error = result.get("error", "unknown error") if result else "no result"
+                    if result and result.get("error_type") == "integrity":
+                        raise RuntimeError(
+                            f"Context hook '{hook.get('id', '?')}' integrity failure "
+                            f"loading {item_id}: {error}"
+                        )
                     logger.warning(
                         "Context hook '%s' failed to load %s: %s",
                         hook.get("id", "?"), item_id, error,

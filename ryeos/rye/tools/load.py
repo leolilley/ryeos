@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from rye.constants import ItemType, AI_DIR
 from rye.utils.path_utils import get_project_type_path, get_system_spaces, get_user_space
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
-from rye.utils.integrity import verify_item
+from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.remote_providers import get_remote_provider
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,9 @@ class LoadTool:
 
             return result
 
+        except IntegrityError as e:
+            logger.error(f"Integrity error: {e}")
+            return {"status": "error", "error": str(e), "error_type": "integrity", "item_id": item_id}
         except Exception as e:
             logger.error(f"Load error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}

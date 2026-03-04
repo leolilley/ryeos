@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T08:42:55Z:6d67428a6cd51240a866d093cbdc6fe613f04e363390db14d55171741a031851:bhUDO2s9oHOuPv5mi-rQWdi6swYyJN8vIz-rFbCn3YGtOKIqqh5vnWAiRyAxoOVgPXKUdh6VHqVFQEZLPFpPBw==:4b987fd4e40303ac
+# rye:signed:2026-03-04T01:23:09Z:c0f79432a135a1ac1a539d19f134937d2d3046c150d6083df50be6932c9841fa:m-rAWuNBX4HMYnh-Lm56QCONFAh-yv8espuJEN8eN0fJxtUnxg4zDxIm5n4TSkp-1fOxV5oFgkNlZn1XBJezCw==:4b987fd4e40303ac
 """Load item content for inspection."""
 
 import argparse
@@ -33,7 +33,6 @@ CONFIG_SCHEMA = {
         "source": {
             "type": "string",
             "enum": ["project", "user", "system"],
-            "default": "project",
             "description": LOAD_SOURCE_DESC,
         },
         "destination": {
@@ -55,7 +54,7 @@ def execute(params: dict, project_path: str) -> dict:
             "item_type": params["item_type"],
             "item_id": params["item_id"],
             "project_path": project_path,
-            "source": params.get("source", "project"),
+            "source": params.get("source"),
         }
         if "destination" in params:
             kwargs["destination"] = params["destination"]

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-01T08:21:13Z:adecb48063816979c191e395057ce77fb6e904ea5421476fc3b38f5320feddb3:GfRyCFXeJuu-Yj6w_nZ05J6HHU81I27HdDEqt4L46YW-s61Rk4Rs3BjO-X6ua5LL6niBYEvZFkQ5I9upV9GkDg==:4b987fd4e40303ac
+# rye:signed:2026-03-04T01:18:06Z:596810981653f413e1df51281d572962a685f932d0a635c82ed0b0d55facab83:cxPNHW-fF_o-qBsGY5ygnJLeGFt9-xDKj-SJxMWe9XCaN49bBVckkWgPv7afkVEWXqNsueVp437vznk2Vm5rDA==:4b987fd4e40303ac
 """
 http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
 
@@ -57,6 +57,12 @@ class HttpProvider(ProviderAdapter):
         self._provider_item_id = provider_item_id
         self._tool_use = provider_config.get("tool_use", {})
         self._http_config = provider_config.get("config", {})
+        # max_output_tokens: per-model pricing override > provider default > 16384
+        model_pricing = provider_config.get("pricing", {}).get(model, {})
+        self._max_output_tokens = model_pricing.get(
+            "max_output_tokens",
+            provider_config.get("max_output_tokens", 16384),
+        )
 
     @property
     def supports_streaming(self) -> bool:
@@ -504,7 +510,7 @@ class HttpProvider(ProviderAdapter):
         params = {
             "model": self.model,
             "messages": converted_messages,
-            "max_tokens": 16384,
+            "max_tokens": self._max_output_tokens,
         }
         if formatted_tools:
             params["tools"] = formatted_tools
@@ -536,7 +542,7 @@ class HttpProvider(ProviderAdapter):
         params = {
             "model": self.model,
             "messages": converted_messages,
-            "max_tokens": 16384,
+            "max_tokens": self._max_output_tokens,
             "stream": True,
             "mode": "stream",
         }
