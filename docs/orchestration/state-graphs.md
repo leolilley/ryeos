@@ -49,7 +49,7 @@ config:
       action: # Action dict — same format as everywhere in Rye
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo hello"
       assign: # State mutations — write action results into state
@@ -60,7 +60,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo ${state.greeting}"
       next: # Conditional edges — list of {to, when}
@@ -234,7 +234,7 @@ check_status:
   action:
     primary: execute
     item_type: tool
-    item_id: rye/bash/bash
+    item_id: rye/bash
     params:
       command: "curl -s ${state.health_url}"
   assign:
@@ -289,7 +289,7 @@ rye_execute(
 | Example                           | Grants                                 |
 | --------------------------------- | -------------------------------------- |
 | `rye.execute.tool.*`              | Execute any tool                       |
-| `rye.execute.tool.rye.bash.bash`  | Execute only `rye/bash/bash`           |
+| `rye.execute.tool.rye.bash`       | Execute only `rye/bash`           |
 | `rye.load.knowledge.my-project.*` | Load any knowledge under `my-project/` |
 
 ## Result Unwrapping
@@ -297,7 +297,7 @@ rye_execute(
 When a node's action executes a tool, the raw result is an `ExecuteTool` envelope:
 
 ```json
-{"status": "success", "type": "tool", "item_id": "rye/bash/bash", "data": {"stdout": "42", "stderr": "", "exit_code": 0}, "chain": [...], "metadata": {...}}
+{"status": "success", "type": "tool", "item_id": "rye/bash", "data": {"stdout": "42", "stderr": "", "exit_code": 0}, "chain": [...], "metadata": {...}}
 ```
 
 The walker **unwraps** this envelope — it lifts `data` to the top level and drops envelope keys (`chain`, `metadata`, `path`, `source`, `resolved_env_keys`). After unwrapping:
@@ -358,7 +358,7 @@ nodes:
     action:
       primary: execute
       item_type: tool
-      item_id: rye/bash/bash
+      item_id: rye/bash
       params:
         command: "might-fail"
     on_error: handle_error # Route to recovery node on failure
@@ -368,7 +368,7 @@ nodes:
     action:
       primary: execute
       item_type: tool
-      item_id: rye/bash/bash
+      item_id: rye/bash
       params:
         command: "echo 'recovered'"
     assign:
@@ -420,7 +420,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo 'Reached step 5'"
 ```
@@ -452,7 +452,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "find ${inputs.directory} -name '*.py' -not -path '*/.venv/*' | wc -l"
       assign:
@@ -463,7 +463,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "find ${inputs.directory} -name '*.py' -not -path '*/.venv/*' -exec cat {} + 2>/dev/null | wc -l"
       assign:
@@ -482,7 +482,7 @@ rye_execute(
     item_id="my-project/workflows/project_stats",
     parameters={
         "directory": ".",
-        "capabilities": ["rye.execute.tool.rye.bash.bash"],
+        "capabilities": ["rye.execute.tool.rye.bash"],
         "depth": 5
     }
 )

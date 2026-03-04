@@ -24,7 +24,7 @@ thread_directive (entry point)
   │
   ├── Loads directive → extracts model, limits, permissions, hooks
   ├── Resolves parent context (depth, capabilities, budget)
-  ├── Creates SafetyHarness (limits, permissions, hooks)
+  ├── Creates SafetyHarness (limits, permissions, hooks, dynamic tool registration)
   ├── Resolves LLM provider (Anthropic/OpenAI via YAML config)
   ├── Reserves budget in hierarchical ledger
   │
@@ -236,7 +236,7 @@ The runner is the core execution loop. It is not called directly — `thread_dir
 5. **Tool call parsing** — native API `tool_use` blocks, or text-parsed fallback for models without native tool use
 6. **First-turn nudge** — if the model responds without tool calls on turn 1, it gets a reminder to use tools
 7. **Permission check** — each tool call is checked against the directive's capability strings
-8. **Tool dispatch** — calls routed through `ToolDispatcher` → `rye_execute`
+8. **Tool dispatch** — calls routed through `tool_primary_map` → `ToolDispatcher` → `rye_execute`
 9. **Result guarding** — large results are truncated, deduped, or stored as artifacts
 10. **Post-turn hooks** — `after_step` hooks run
 11. **Context limit check** — if context usage exceeds threshold, triggers automatic handoff (no summary — summarization is hook-driven)
@@ -252,7 +252,7 @@ LLM response contains tool_use blocks
   ├── Text-parsed mode: extract tool calls from plain text (models without native tool_use)
   │
   ├── For each tool call:
-  │     ├── Map tool name to item_id (rye_execute → rye/primary/rye_execute)
+  │     ├── Map tool name to dispatch route via tool_primary_map
   │     ├── Check permission against directive capabilities
   │     ├── Auto-inject parent context for child thread spawns
   │     ├── Dispatch via ToolDispatcher
@@ -309,7 +309,7 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | ------------------------------------ | --------------------------------- |
 | `rye.execute.tool.rye.file-system.*` | Any tool under `rye/file-system/` |
 | `rye.search.directive.*`             | Search any directive              |
-| `rye.execute.tool.rye.bash.bash`     | Only the bash tool                |
+| `rye.execute.tool.rye.bash`          | Only the bash tool                |
 
 **Rules:**
 
@@ -368,7 +368,7 @@ Resolves a model name or tier string to a concrete provider configuration:
 
 ### Tool Dispatcher (`tool_dispatcher`)
 
-Routes tool calls from the LLM to `rye_execute`. Maps tool names back to item IDs and handles the dispatch lifecycle.
+Routes tool calls from the LLM to `rye_execute`. The runner uses a `tool_primary_map` (built from `harness.available_tools`) to resolve flattened tool names to their item IDs and `_primary` action for dispatch.
 
 ---
 
@@ -388,7 +388,7 @@ Tracks all threads in `.ai/agent/threads/registry.json`:
 
 ### Transcript (`persistence/transcript`)
 
-Records the full conversation to `.ai/agent/threads/<thread_id>/transcript.md`:
+Records the full conversation to `.ai/agent/threads/<thread_id>/transcript.jsonl`:
 
 - All LLM messages (user, assistant, tool results)
 - Event markers (thread_started, thread_completed, etc.)

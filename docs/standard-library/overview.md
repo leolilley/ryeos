@@ -54,11 +54,11 @@ Tools are organized by namespace under `.ai/tools/rye/`. For detailed documentat
 | Section | Namespace | Tools | Bundle | Description |
 | --- | --- | --- | --- | --- |
 | [File System](tools/file-system.md) | `rye/file-system/` | 6 | `ryeos` | Read, write, edit (via line IDs), glob, grep, ls |
-| [Bash](tools/bash.md) | `rye/bash/` | 1 | `ryeos` | Shell command execution |
+| [Bash](tools/bash.md) | `rye/` | 1 | `ryeos` | Shell command execution |
 | [Web](tools/web.md) | `rye/web/` | 3 | `ryeos-web` | Web search, page fetching, browser automation |
 | [Code](tools/code.md) | `rye/code/` | 4 | `ryeos-code` | NPM, diagnostics, TypeScript, LSP |
 | [MCP Client](tools/mcp.md) | `rye/mcp/` | 3 | `ryeos` | Connect to external MCP servers |
-| [Primary Tools](tools/primary.md) | `rye/primary/` | 4 | `ryeos` | Search, load, execute, sign items |
+| [Primary Tools](tools/primary.md) | `rye/` | 4 | `ryeos` | Search, load, execute, sign items |
 | [Agent System](tools/agent.md) | `rye/agent/` | 40+ | `ryeos` | Thread orchestration, LLM loops, budgets, permissions |
 | [Infrastructure](tools/infrastructure.md) | `rye/core/` | 20+ | `ryeos` | Parsers, runtimes, extractors, sinks, bundler, registry |
 

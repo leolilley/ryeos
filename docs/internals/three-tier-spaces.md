@@ -166,8 +166,8 @@ The item ID is a **relative path** from `.ai/{type}/` without the extension. For
 To override a system tool, create a file with the same item ID in your project space:
 
 ```bash
-# System provides: site-packages/rye/.ai/tools/rye/bash/bash.py
-# Override by creating: my-project/.ai/tools/rye/bash/bash.py
+# System provides: site-packages/rye/.ai/tools/rye/bash.py
+# Override by creating: my-project/.ai/tools/rye/bash.py
 
 # Your project version will be used instead of the system version.
 ```

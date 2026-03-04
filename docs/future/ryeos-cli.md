@@ -107,14 +107,14 @@ Thread-level params are a known fixed set (`--model`, `--max-spend`, `--max-turn
 For `rye execute tool`, the same schema-driven approach applies:
 
 ```bash
-rye execute tool rye/bash/bash --command "find . -name '*.py' | wc -l"
+rye execute tool rye/bash --command "find . -name '*.py' | wc -l"
 ```
 
 ```
-1. Parse: execute tool rye/bash/bash
+1. Parse: execute tool rye/bash
 2. Load tool metadata → params schema: {command: string}
 3. Map --command → parameters.command
-4. Construct: rye_execute(item_type="tool", item_id="rye/bash/bash", parameters={"command": "find ..."})
+4. Construct: rye_execute(item_type="tool", item_id="rye/bash", parameters={"command": "find ..."})
 ```
 
 ### Positional Shorthand
@@ -123,8 +123,8 @@ For tools with a single primary parameter, allow positional:
 
 ```bash
 # These are equivalent:
-rye execute tool rye/bash/bash --command "ls -la"
-rye execute tool rye/bash/bash "ls -la"
+rye execute tool rye/bash --command "ls -la"
+rye execute tool rye/bash "ls -la"
 ```
 
 The schema marks which parameter is `primary` (if any), and a bare positional argument maps to it.
@@ -260,12 +260,12 @@ rye search tool.rye.core.* "*"         # scope + wildcard
 
 # Load
 rye load directive rye/outreach/email_campaign
-rye load tool rye/bash/bash
+rye load tool rye/bash
 rye load knowledge my-project/api-docs
-rye load tool rye/bash/bash --destination project   # copy to project space
+rye load tool rye/bash --destination project   # copy to project space
 
 # Execute (runs tools, spawns directive threads, loads knowledge)
-rye execute tool rye/bash/bash --command "pytest tests/"
+rye execute tool rye/bash --command "pytest tests/"
 rye execute directive my-project/onboarding         # spawns a thread running the directive
 rye execute knowledge my-project/api-docs            # returns parsed knowledge content
 
@@ -352,7 +352,7 @@ There are two plausible targets for the small model's output:
 **Option A — CLI string (flat, shell-like):**
 
 ```
-rye execute tool rye/bash/bash --command "find . -name '*.py' | wc -l"
+rye execute tool rye/bash --command "find . -name '*.py' | wc -l"
 ```
 
 The argument for this: it's a flat string with no nesting, no JSON escaping, closer to natural language. Shell commands are abundant in base model training data. The CLI parser handles the structuring deterministically.
@@ -360,7 +360,7 @@ The argument for this: it's a flat string with no nesting, no JSON escaping, clo
 **Option B — Structured function call (JSON):**
 
 ```json
-{"name": "rye_execute", "parameters": {"item_type": "tool", "item_id": "rye/bash/bash", "parameters": {"command": "find . -name '*.py' | wc -l"}}}
+{"name": "rye_execute", "parameters": {"item_type": "tool", "item_id": "rye/bash", "parameters": {"command": "find . -name '*.py' | wc -l"}}}
 ```
 
 The argument for this: function-calling models like Gemma are specifically fine-tuned to produce structured tool calls. This is literally what they're optimized for. Asking them to generate CLI strings instead may be going against their training rather than with it. The model already knows how to produce nested JSON with correct key names — that's the whole point of function-calling fine-tunes.

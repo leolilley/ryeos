@@ -120,9 +120,9 @@ Hooks are merged from five sources and sorted by layer:
 
 User and project hooks use the same format as directive hooks — `id`, `event`, optional `condition`, and `action`. See [Hooks Configuration](#hooks-configuration) below.
 
-The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities. Tool schemas are loaded from the primary tools directory and attached to the harness.
+The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities.
 
-After capabilities are resolved and attached to the harness, **tool schema preload** (Layer 1) runs. `tool_schema_loader.preload_tool_schemas()` scans capabilities for `rye.execute.tool.*` patterns, resolves matching tools across the 3-tier space, extracts `CONFIG_SCHEMA` and `__tool_description__` via AST, and injects formatted schema blocks into `directive_context["before"]`. Primary tools are skipped. Token budget is ~2000.
+After capabilities are resolved and attached to the harness, **dynamic tool registration** runs. `tool_schema_loader.preload_tool_schemas()` scans capabilities for `rye.execute.tool.*` patterns, resolves matching tools across the 3-tier space, extracts `CONFIG_SCHEMA` and `__tool_description__` via AST, and returns structured `tool_defs`. Each tool gets a flattened API name (e.g., `rye_file_system_read`) and a `_primary` field for dispatch routing. Primary tools (`rye/search`, `rye/load`, `rye/sign`) are included as peers. The tool defs are set on `harness.available_tools` and registered in the LLM's native tool palette. A capabilities tree is also generated for transcript metadata. Token budget is ~2000.
 
 ### Step 11: Reserve budget
 
@@ -213,12 +213,12 @@ Each turn follows this sequence:
 
 5. **Parse tool calls** — Native tool_use blocks are used if the provider supports them. Otherwise, `text_tool_parser.extract_tool_calls()` parses tool calls from the response text.
 
-6. **No tool calls** — If the LLM responds with text only (no tool calls), the thread completes with the raw text as the result. For directives with `<outputs>`, the LLM should call `directive_return` via `rye_execute` instead, which provides structured key-value outputs that parent threads can consume programmatically. On the first turn with native tool_use, the runner nudges the model to use tools before accepting a text-only response.
+6. **No tool calls** — If the LLM responds with text only (no tool calls), the thread completes with the raw text as the result. For directives with `<outputs>`, the LLM should call `rye_directive_return` directly (registered as a tool in the palette), which provides structured key-value outputs that parent threads can consume programmatically. On the first turn with native tool_use, the runner nudges the model to use tools before accepting a text-only response.
 
 7. **Dispatch each tool call:**
-   - Resolve the tool name to an item_id via `tool_id_map`
+   - Resolve the tool name to a dispatch route via `tool_primary_map`
    - Check permission via `harness.check_permission()` — denied calls return an error message to the LLM
-   - If the inner `item_id` is `rye/agent/threads/directive_return`, the runner intercepts the call before dispatch. It validates that all required output fields (declared in `<outputs>`) are present. If fields are missing, an error is returned to the LLM to retry. If valid, the `directive_return` hook event fires, and the thread finalizes with structured `outputs` in the result.
+   - If the tool is `rye_directive_return`, the runner intercepts the call before dispatch. It validates that all required output fields (declared in `<outputs>`) are present. If fields are missing, an error is returned to the LLM to retry. If valid, the `directive_return` hook event fires, and the thread finalizes with structured `outputs` in the result.
    - Auto-inject parent context for child thread spawns (parent_thread_id, parent_depth, parent_limits, parent_capabilities)
    - Execute via `ToolDispatcher`
    - Guard result (bound large results, deduplicate, store artifacts)

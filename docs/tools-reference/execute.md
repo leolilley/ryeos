@@ -272,7 +272,7 @@ rye_execute(
 ```python
 rye_execute(
     item_type="tool",
-    item_id="rye/bash/bash",
+    item_id="rye/bash",
     project_path="/home/user/my-project",
     parameters={"command": "echo test"},
     dry_run=True

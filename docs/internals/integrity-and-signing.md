@@ -288,13 +288,13 @@ Stored as `{tool_id}@{version}.lock.json`:
   "lockfile_version": 1,
   "generated_at": "2026-02-15T12:00:00+00:00",
   "root": {
-    "tool_id": "rye/bash/bash",
+    "tool_id": "rye/bash",
     "version": "1.0.0",
     "integrity": "a1b2c3d4e5f6..."
   },
   "resolved_chain": [
     {
-      "item_id": "rye/bash/bash",
+      "item_id": "rye/bash",
       "space": "system",
       "tool_type": "python",
       "executor_id": "rye/core/runtimes/python/script",

@@ -56,7 +56,7 @@ The CLI maps shell verbs directly to the four primitives — no MCP transport, n
 
 ```bash
 rye search directive "lead generation"
-rye execute tool rye/bash/bash --params '{"command": "ls"}'
+rye execute tool rye/bash --params '{"command": "ls"}'
 rye graph run my-project/graphs/pipeline
 rye test my-project/tools/scraper
 ```
@@ -170,7 +170,7 @@ You can also search for tools:
 rye_search(scope="tool", query="bash", project_path="/path/to/your/project")
 ```
 
-This should find the built-in `rye/bash/bash` tool, confirming that the system bundles are discoverable.
+This should find the built-in `rye/bash` tool, confirming that the system bundles are discoverable.
 
 ## What's next
 

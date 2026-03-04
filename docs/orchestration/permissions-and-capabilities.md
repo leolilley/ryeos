@@ -103,11 +103,11 @@ The runner checks permissions before every tool call dispatch:
 
 ```python
 # runner.py — inside the tool call loop
-inner_primary = tc_name.replace("rye_", "", 1)   # "rye_execute" → "execute"
-inner_item_type = tc_input.get("item_type", "tool")
-inner_item_id = tc_input.get("item_id", "")
+primary = tool_primary_map.get(tc_name, {}).get("_primary")
+item_type = tc_input.get("item_type", "tool")
+item_id = tool_primary_map.get(tc_name, {}).get("_item_id", tc_input.get("item_id", ""))
 
-denied = harness.check_permission(inner_primary, inner_item_type, inner_item_id)
+denied = harness.check_permission(primary, item_type, item_id)
 if denied:
     # Return error to the LLM as the tool result
     messages.append({
@@ -359,7 +359,7 @@ Projects can customize by placing their own `capability_risk.yaml` in `.ai/confi
 When a capability matches multiple classification patterns, the **most specific** pattern wins (determined by the number of `.` segments in the pattern). This prevents broad patterns from overriding narrow ones:
 
 ```
-Capability: rye.execute.tool.rye.bash.bash
+Capability: rye.execute.tool.rye.bash
 
 Matches:
   "rye.*"                          → unrestricted (1 dot)

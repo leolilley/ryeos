@@ -104,7 +104,7 @@ Rye MCP Server
   ▼  PrimitiveExecutor.execute(item_id, params)
 Chain Resolution
   │  _build_chain() follows __executor_id__ recursively
-  │  e.g., "rye/bash/bash" → python/script → subprocess primitive
+  │  e.g., "rye/bash" → python/script → subprocess primitive
   │
   ▼  verify_item() on every chain element
 Integrity Verification

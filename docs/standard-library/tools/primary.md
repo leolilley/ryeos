@@ -9,18 +9,18 @@ version: "1.0.0"
 
 # Primary Tools
 
-**Namespace:** `rye/primary/`
+**Namespace:** `rye/`
 **Runtime:** `python/script`
 
-These are the four foundational MCP tools that Rye OS exposes. They map 1:1 to the MCP tool interface — when you call `rye_search`, `rye_load`, `rye_execute`, or `rye_sign` in an MCP client, these are the tools being invoked.
+These are the four foundational MCP tools that Rye OS exposes. They map 1:1 to the MCP tool interface and are the same implementations exposed via MCP. Inside threads, these tools are dynamically registered in the LLM's tool palette via dynamic tool registration based on the directive's capability strings.
 
-Inside threads, these same tools are the ones the LLM calls. The thread's `tool_dispatcher` routes LLM tool calls to these implementations.
+Inside threads, these tools are dynamically registered in the LLM's tool palette based on the directive's capability strings. The runner routes calls using a `_primary` field on each tool definition.
 
 ---
 
 ## `rye_search`
 
-**Item ID:** `rye/primary/rye_search`
+**Item ID:** `rye/search`
 
 Search for directives, tools, or knowledge items by query. Supports full-text search with AND, OR, NOT operators, wildcards, and quoted phrases.
 
@@ -56,7 +56,7 @@ rye_search(scope="knowledge", query="metadata specification", space="system")
 
 ## `rye_load`
 
-**Item ID:** `rye/primary/rye_load`
+**Item ID:** `rye/load`
 
 Load an item's full content for inspection. Can also copy items between spaces.
 
@@ -84,7 +84,7 @@ rye_load(item_type="tool", item_id="rye/file-system/read",
 
 ## `rye_execute`
 
-**Item ID:** `rye/primary/rye_execute`
+**Item ID:** `rye/execute`
 
 Execute a directive, tool, or knowledge item. This is the universal execution entry point.
 
@@ -117,7 +117,7 @@ rye_execute(item_type="directive", item_id="rye/core/create_tool",
     parameters={"tool_name": "my-tool", "category": "utils", "tool_type": "python"})
 
 # Dry run — validate without executing
-rye_execute(item_type="tool", item_id="rye/bash/bash",
+rye_execute(item_type="tool", item_id="rye/bash",
     parameters={"command": "echo test"}, dry_run=True)
 ```
 
@@ -125,7 +125,7 @@ rye_execute(item_type="tool", item_id="rye/bash/bash",
 
 ## `rye_sign`
 
-**Item ID:** `rye/primary/rye_sign`
+**Item ID:** `rye/sign`
 
 Validate and sign an item file. Signing computes a content hash and cryptographic signature, embedding it in the file's header comment. Signed items can be verified for integrity.
 

@@ -91,11 +91,11 @@ The resulting chain is ordered `[tool, runtime, ..., primitive]` — the tool is
 
 ## Concrete Example
 
-Executing the bash tool `rye/bash/bash`:
+Executing the bash tool `rye/bash`:
 
 ```
-Step 1: Resolve "rye/bash/bash"
-  → .ai/tools/rye/bash/bash.py (system space)
+Step 1: Resolve "rye/bash"
+  → .ai/tools/rye/bash.py (system space)
   → __executor_id__ = "rye/core/runtimes/python/script"
 
 Step 2: Resolve "rye/core/runtimes/python/script"
@@ -241,11 +241,11 @@ The `shadowed` field in resolve events lists items in lower-precedence spaces th
 ```json
 {
   "step": "resolve",
-  "item_id": "rye/bash/bash",
-  "path": "/project/.ai/tools/rye/bash/bash.py",
+  "item_id": "rye/bash",
+  "path": "/project/.ai/tools/rye/bash.py",
   "space": "project",
   "shadowed": [
-    {"path": "/system/.ai/tools/rye/bash/bash.py", "space": "system:ryeos-core"}
+    {"path": "/system/.ai/tools/rye/bash.py", "space": "system:ryeos-core"}
   ]
 }
 ```
@@ -270,12 +270,12 @@ Lockfile format (`{tool_id}@{version}.lock.json`):
   "lockfile_version": 1,
   "generated_at": "2026-02-15T12:00:00+00:00",
   "root": {
-    "tool_id": "rye/bash/bash",
+    "tool_id": "rye/bash",
     "version": "1.0.0",
     "integrity": "a1b2c3..."
   },
   "resolved_chain": [
-    { "item_id": "rye/bash/bash", "space": "system", "integrity": "a1b2c3..." },
+    { "item_id": "rye/bash", "space": "system", "integrity": "a1b2c3..." },
     {
       "item_id": "rye/core/runtimes/python/script",
       "space": "system",

@@ -65,7 +65,7 @@ Every item in Rye OS is identified by its **item ID** — the relative path from
 | --------------------------------------- | --------- | -------------------------------------------------------- |
 | `greet_user`                            | directive | `.ai/directives/greet_user.md`                           |
 | `rye/core/create_directive`             | directive | `.ai/directives/rye/core/create_directive.md`            |
-| `rye/bash/bash`                         | tool      | `.ai/tools/rye/bash/bash.py`                             |
+| `rye/bash`                         | tool      | `.ai/tools/rye/bash.py`                             |
 | `rye/file-system/write`                 | tool      | `.ai/tools/rye/file-system/write.py`                     |
 | `project_conventions`                   | knowledge | `.ai/knowledge/project_conventions.md`                   |
 | `rye/core/directive-metadata-reference` | knowledge | `.ai/knowledge/rye/core/directive-metadata-reference.md` |
@@ -74,7 +74,7 @@ The item ID is what you pass to `rye_execute`, `rye_load`, `rye_sign`, and `rye_
 
 ```
 rye_execute(item_type="directive", item_id="rye/core/create_directive", ...)
-rye_load(item_type="tool", item_id="rye/bash/bash", ...)
+rye_load(item_type="tool", item_id="rye/bash", ...)
 rye_sign(item_type="knowledge", item_id="project_conventions", ...)
 ```
 
@@ -92,7 +92,7 @@ Items are organized into **namespaces** using directory nesting. The first path 
 │   └── my-project/            # my-project namespace — your custom items
 │       └── deploy.md
 ├── tools/
-│   ├── rye/bash/              # rye/bash namespace
+│   ├── rye/                   # rye namespace
 │   │   └── bash.py
 │   └── my-project/utils/      # my-project/utils namespace
 │       └── lint.py
@@ -173,25 +173,25 @@ System-space items include:
 - `rye/core/create_directive` — directive for creating new directives
 - `rye/core/create_tool` — directive for creating new tools
 - `rye/core/create_knowledge` — directive for creating new knowledge entries
-- `rye/bash/bash` — shell command execution tool
+- `rye/bash` — shell command execution tool
 - `rye/web/search/search`, `rye/web/fetch/fetch` — web interaction tools
 - `rye/core/directive-metadata-reference` — knowledge entry documenting directive format
 
 ## Resolution order
 
-When you call `rye_execute(item_type="tool", item_id="rye/bash/bash", ...)`, Rye OS resolves the item by checking each space in order:
+When you call `rye_execute(item_type="tool", item_id="rye/bash", ...)`, Rye OS resolves the item by checking each space in order:
 
-1. **Project:** `{project_path}/.ai/tools/rye/bash/bash.py` — if it exists, use it.
-2. **User:** `~/.ai/tools/rye/bash/bash.py` — if it exists, use it.
-3. **System:** `site-packages/rye/.ai/tools/rye/bash/bash.py` — fallback.
+1. **Project:** `{project_path}/.ai/tools/rye/bash.py` — if it exists, use it.
+2. **User:** `~/.ai/tools/rye/bash.py` — if it exists, use it.
+3. **System:** `site-packages/rye/.ai/tools/rye/bash.py` — fallback.
 
 **First match wins.** This means you can override any system item by placing a file with the same item ID in your project or user space. For example, to customize the bash tool for your project, copy it into your project space:
 
 ```
-rye_load(item_type="tool", item_id="rye/bash/bash", source="system", destination="project", project_path=".")
+rye_load(item_type="tool", item_id="rye/bash", source="system", destination="project", project_path=".")
 ```
 
-This copies the system version into `.ai/tools/rye/bash/bash.py` in your project, where you can modify it. Your project's version will take priority over the system version.
+This copies the system version into `.ai/tools/rye/bash.py` in your project, where you can modify it. Your project's version will take priority over the system version.
 
 When searching, `rye_search` checks all three spaces by default and deduplicates by item ID (project wins over user, user wins over system). You can restrict the search to a specific space:
 
@@ -214,7 +214,7 @@ bundle:
 files:
   .ai/directives/rye/core/create_directive.md:
     sha256: c7deaec3367b868e9fc42f9626b347ed21819baa...
-  .ai/tools/rye/bash/bash.py:
+  .ai/tools/rye/bash.py:
     sha256: 5d4ac0daaa9f4b5070b677bfdc8325d201ecef6a...
   # ... all items in the bundle with integrity hashes
 ```

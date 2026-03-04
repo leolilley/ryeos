@@ -62,7 +62,7 @@ When copying, the file is placed in the destination's type directory, preserving
   "status": "success",
   "content": "...",
   "metadata": { "..." },
-  "path": "/path/to/rye/package/.ai/tools/rye/bash/bash.py",
+  "path": "/path/to/rye/package/.ai/tools/rye/bash.py",
   "source": "system",
   "copied_to": "project",
   "destination_path": "/home/user/my-project/.ai/tools/bash.py"

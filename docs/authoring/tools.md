@@ -533,8 +533,8 @@ item_id: "rye/file-system/write"
 item_id: "mcp/context7/query-docs"
   → .ai/tools/mcp/context7/query-docs.yaml
 
-item_id: "rye/bash/bash"
-  → .ai/tools/rye/bash/bash.py
+item_id: "rye/bash"
+  → .ai/tools/rye/bash.py
 ```
 
 The category determines the directory path within `.ai/tools/`.
@@ -615,7 +615,7 @@ if __name__ == "__main__":
 
 ### Bash Tool
 
-From `ryeos/rye/.ai/tools/rye/bash/bash.py`:
+From `ryeos/rye/.ai/tools/rye/bash.py`:
 
 ```python
 # rye:signed:2026-02-15T07:32:49Z:5d4a...

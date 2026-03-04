@@ -53,14 +53,14 @@ rye_execute(item_type="tool", item_id="rye/file-system/glob",
     parameters={"pattern": "**/*.md", "path": "docs/"})
 ```
 
-### Bash (`rye/bash/`)
+### Bash (`rye/`)
 
-| Tool | Item ID         | Description            |
-| ---- | --------------- | ---------------------- |
-| bash | `rye/bash/bash` | Execute shell commands |
+| Tool | Item ID     | Description            |
+| ---- | ----------- | ---------------------- |
+| bash | `rye/bash`  | Execute shell commands |
 
 ```python
-rye_execute(item_type="tool", item_id="rye/bash/bash",
+rye_execute(item_type="tool", item_id="rye/bash",
     parameters={"command": "git status --short"})
 ```
 
@@ -362,15 +362,15 @@ Output sinks for streaming events:
 - **bundler.py** — Create and verify `.ai/` bundles
 - **collect.yaml** — Collection config
 
-### Primary Tools (`rye/primary/`)
+### Primary Tools (`rye/`)
 
 Wrappers around the 4 MCP tools, used inside threads:
 
-| Tool        | Item ID                   | Description                             |
-| ----------- | ------------------------- | --------------------------------------- |
-| rye_execute | `rye/primary/rye_execute` | Execute tools, directives, or knowledge |
-| rye_load    | `rye/primary/rye_load`    | Load item content for inspection        |
-| rye_search  | `rye/primary/rye_search`  | Search for items by scope and query     |
-| rye_sign    | `rye/primary/rye_sign`    | Validate and sign item files            |
+| Tool        | Item ID        | Description                             |
+| ----------- | -------------- | --------------------------------------- |
+| rye_execute | `rye/execute`  | Execute tools, directives, or knowledge |
+| rye_load    | `rye/load`     | Load item content for inspection        |
+| rye_search  | `rye/search`   | Search for items by scope and query     |
+| rye_sign    | `rye/sign`     | Validate and sign item files            |
 
-These are the tools the LLM sees when running inside a thread. They call the same underlying MCP tool implementations but are exposed as individual tool definitions for the LLM's function-calling interface.
+These are the tools the LLM sees when running inside a thread. Inside threads, these are dynamically registered in the LLM's tool palette based on the directive's capability strings. The runner routes calls using a `_primary` field for dispatch.

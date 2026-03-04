@@ -68,7 +68,7 @@ pip install ryeos-mcp[code]
 ```
 pip install ryeos-engine   → engine only, no .ai/ data
 pip install ryeos-core     → engine + rye/core/* only
-pip install ryeos          → engine + core + standard items (rye/agent/*, rye/bash/*, rye/file-system/*, rye/mcp/*, rye/primary/*, rye/authoring/*, rye/guides/*)
+pip install ryeos          → engine + core + standard items (rye/agent/*, rye/bash, rye/file-system/*, rye/mcp/*, rye/execute, rye/search, rye/load, rye/sign, rye/authoring/*, rye/guides/*)
 pip install ryeos[web]     → + rye/web/*
 pip install ryeos[code]    → + rye/code/*
 pip install ryeos[all]     → everything
@@ -127,7 +127,7 @@ Use `ryeos-engine` when you need the engine but no `.ai/` data at all (e.g., ser
 # Direct execution without MCP:
 from rye.tools.execute import ExecuteTool
 executor = ExecuteTool()
-result = await executor.run(item_type="tool", item_id="rye/bash/bash", parameters={"command": "ls"})
+result = await executor.run(item_type="tool", item_id="rye/bash", parameters={"command": "ls"})
 ```
 
 ### ryeos-core (core data bundle)
@@ -214,7 +214,7 @@ Use `ryeos-cli` when you want to invoke RYE from the terminal without an MCP cli
 
 ```bash
 rye search directive "lead generation"
-rye execute tool rye/bash/bash --params '{"command": "ls"}'
+rye execute tool rye/bash --params '{"command": "ls"}'
 rye graph run my-project/graphs/pipeline --params '{"min_ccu": 50000}'
 rye graph validate my-project/graphs/pipeline
 rye test my-project/tools/scraper --exclude-tags integration
@@ -246,7 +246,7 @@ When multiple bundle packages are installed, `get_system_spaces()` discovers all
 pip install ryeos ryeos-web ryeos-code
   → get_system_spaces() returns: [ryeos-core bundle, ryeos bundle, ryeos-web bundle, ryeos-code bundle]
   → system space search checks all four roots
-  → rye/bash/bash found in ryeos, rye/web/fetch/fetch found in ryeos-web, rye/code/npm/npm found in ryeos-code
+  → rye/bash found in ryeos, rye/web/fetch/fetch found in ryeos-web, rye/code/npm/npm found in ryeos-code
 ```
 
 ### Author Key Trust

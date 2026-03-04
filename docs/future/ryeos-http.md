@@ -42,7 +42,7 @@ A front-end directive is a standard RYE directive that's designed to be the entr
     <limits max_turns="5" max_tokens="4096" max_spend="0.05" />
     <permissions>
       <execute>
-        <tool>rye/bash/bash</tool>
+        <tool>rye/bash</tool>
         <tool>rye/file-system/read</tool>
       </execute>
       <load>
@@ -86,7 +86,7 @@ Everything about how this bot behaves — model, budget, permissions, tone, styl
     <limits max_turns="10" max_tokens="8192" max_spend="0.50" />
     <permissions>
       <execute>
-        <tool>rye/bash/bash</tool>
+        <tool>rye/bash</tool>
         <tool>rye/file-system/*</tool>
       </execute>
     </permissions>

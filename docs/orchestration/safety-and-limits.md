@@ -45,11 +45,11 @@ limits:
     duration_seconds: 600
 
 tool_preload:
-  enabled: true    # Set false to disable tool schema preload
-  max_tokens: 2000 # Token budget for schema injection (~4 chars/token)
+  enabled: true    # Set false to disable dynamic tool registration
+  max_tokens: 2000 # Token budget for tool palette registration (~4 chars/token)
 ```
 
-The `tool_preload` section controls Layer 1 of context injection — tool schema preload. When enabled, resolved tool schemas are injected into the first user message so the agent knows parameter shapes before turn 1. See [Context Injection — Layer 1](./context-injection.md) for details.
+The `tool_preload` section controls dynamic tool registration. When enabled, resolved tool schemas are registered directly in the LLM's native tool palette so the agent can call them by name. See [Context Injection — Layer 1](./context-injection.md) for details.
 
 ### Layer 2: Directive metadata
 

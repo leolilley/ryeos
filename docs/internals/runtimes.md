@@ -248,7 +248,7 @@ args:
 
 | Variable | Value | Example |
 |----------|-------|---------|
-| `{tool_path}` | Absolute path to tool file | `/project/.ai/tools/rye/bash/bash.py` |
+| `{tool_path}` | Absolute path to tool file | `/project/.ai/tools/rye/bash.py` |
 | `{params_json}` | Tool parameters as JSON (passed via `input_data`/stdin to avoid OS argument length limits) | `{"command":"ls -la"}` |
 | `{project_path}` | Project root | `/project` |
 | `{system_space}` | System space root | `/usr/local/lib/python3.11/site-packages/ryeos/rye/.ai` |
@@ -270,15 +270,15 @@ config:
   input_data: "{params_json}"
 ```
 
-When executing `rye/bash/bash` with params `{"command":"echo hello"}`:
+When executing `rye/bash` with params `{"command":"echo hello"}`:
 1. `${RYE_PYTHON}` → `/project/.venv/bin/python3`
-2. `{tool_path}` → `/project/.ai/tools/rye/bash/bash.py`
+2. `{tool_path}` → `/project/.ai/tools/rye/bash.py`
 3. `{params_json}` → `{"command":"echo hello"}` (piped via stdin)
 4. `{project_path}` → `/project`
 
 Final command:
 ```bash
-echo '{"command":"echo hello"}' | /project/.venv/bin/python3 /project/.ai/tools/rye/bash/bash.py --project-path /project
+echo '{"command":"echo hello"}' | /project/.venv/bin/python3 /project/.ai/tools/rye/bash.py --project-path /project
 ```
 
 > **Note:** All standard runtimes pass `{params_json}` via `input_data` (stdin) instead of CLI arguments. This avoids OS argument length limits (`E2BIG` / `ARG_MAX`) regardless of payload size.

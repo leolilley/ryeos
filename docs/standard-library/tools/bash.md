@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Bash Tool
 
-**Namespace:** `rye/bash/`
+**Namespace:** `rye/`
 **Runtime:** `python/script`
 
 Execute shell commands via `subprocess.run()` with `shell=True`. Commands run in the project root by default and are sandboxed to the project workspace.
@@ -18,7 +18,7 @@ Execute shell commands via `subprocess.run()` with `shell=True`. Commands run in
 
 ## `bash`
 
-**Item ID:** `rye/bash/bash`
+**Item ID:** `rye/bash`
 
 ### Parameters
 
@@ -63,11 +63,11 @@ On timeout:
 
 ```python
 # Simple command
-rye_execute(item_type="tool", item_id="rye/bash/bash",
+rye_execute(item_type="tool", item_id="rye/bash",
     parameters={"command": "git status --short"})
 
 # With timeout and working directory
-rye_execute(item_type="tool", item_id="rye/bash/bash",
+rye_execute(item_type="tool", item_id="rye/bash",
     parameters={
         "command": "npm test",
         "timeout": 300,

@@ -674,7 +674,7 @@ Deploy the current build to the staging environment.
 
   <step name="run_deploy">
     Execute the deployment script.
-    `rye_execute(item_type="tool", item_id="rye/bash/bash", parameters={"command": "./scripts/deploy.sh {input:target}"})`
+    `rye_execute(item_type="tool", item_id="rye/bash", parameters={"command": "./scripts/deploy.sh {input:target}"})`
   </step>
 </process>
 ````
