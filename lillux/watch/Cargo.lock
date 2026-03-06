@@ -290,8 +290,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "lilux-watch"
-version = "0.1.0"
+name = "lillux-watch"
+version = "0.1.2"
 dependencies = [
  "clap",
  "notify",

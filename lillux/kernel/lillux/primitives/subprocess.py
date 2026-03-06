@@ -376,13 +376,11 @@ class SubprocessPrimitive:
     def _prepare_env(self, config_env: Dict[str, str]) -> Dict[str, str]:
         """Prepare process environment.
 
-        Heuristic:
-        - <50 vars: merge config_env over os.environ
-        - >=50 vars: use config_env directly (assumed fully resolved)
+        Always merges config_env over os.environ so the child inherits
+        PATH and other system vars.  Env is passed via the process
+        environment (env= on create_subprocess_exec), not CLI args,
+        so there is no E2BIG risk.
         """
-        if len(config_env) < 50:
-            result = os.environ.copy()
-            result.update(config_env)
-            return result
-        else:
-            return config_env
+        result = os.environ.copy()
+        result.update(config_env)
+        return result
