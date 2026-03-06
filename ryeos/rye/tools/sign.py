@@ -219,6 +219,7 @@ class SignTool:
                     if source == "project"
                     else get_user_type_path(item_type)
                 ),
+                "hint": f"Ensure project_path is the parent of the {AI_DIR}/ directory containing this item.",
             }
 
         results: Dict[str, Any] = {"signed": [], "failed": [], "total": len(items)}
@@ -267,7 +268,7 @@ class SignTool:
                 "status": "error",
                 "error": f"Directive not found: {item_id}",
                 "searched_in": str(Path(project_path) / AI_DIR / "directives"),
-                "hint": "Ensure project_path is the parent of the .ai/ directory containing this item.",
+                "hint": f"Ensure project_path is the parent of the {AI_DIR}/ directory containing this item.",
             }
 
         content = file_path.read_text(encoding="utf-8")
@@ -332,7 +333,7 @@ class SignTool:
                 "status": "error",
                 "error": f"Tool not found: {item_id}",
                 "searched_in": str(Path(project_path) / AI_DIR / "tools"),
-                "hint": "Ensure project_path is the parent of the .ai/ directory containing this item.",
+                "hint": f"Ensure project_path is the parent of the {AI_DIR}/ directory containing this item.",
             }
 
         content = file_path.read_text(encoding="utf-8")
@@ -437,7 +438,7 @@ class SignTool:
                 "status": "error",
                 "error": f"Knowledge entry not found: {item_id}",
                 "searched_in": str(Path(project_path) / AI_DIR / "knowledge"),
-                "hint": "Ensure project_path is the parent of the .ai/ directory containing this item.",
+                "hint": f"Ensure project_path is the parent of the {AI_DIR}/ directory containing this item.",
             }
 
         content = file_path.read_text(encoding="utf-8")

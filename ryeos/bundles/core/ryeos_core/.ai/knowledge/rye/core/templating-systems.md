@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:f0e1849fc306a595f4a39a0c8c8df879a682e1841f8046c5ae71ef62dc5e4dba:NCyVZtT0Dl8yCw6zZTliI8O8CfyrAJi1F7r8qIJxsBWz86eLvh_7sUTWpipHFX-rLZqh-qh5h1tiLXeZ0cJADQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-06T02:20:05Z:b93ee8656b0966d510a3c933a556a61eb1c70969356cefa66335bf9fe4e70ab3:8QW9aQYwYdQceXTaiVYl6N0vWd6bV07d49uzaR5btvcdQpLvaNUnbGuqUiZytSh8ULqzvVZIkJUwl8IHBR6BAw==:4b987fd4e40303ac -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems
@@ -148,8 +148,8 @@ config:
 
 **Where it runs:**
 
-- `execute.py._resolve_input_refs()` and `_interpolate_parsed()`
-- During directive execution via `directive_parser.parse_and_validate_directive()`
+- `rye/core/processors/inputs/interpolate` — `_resolve_input_refs()` and `_interpolate_parsed()`
+- `rye/core/processors/inputs/validate` — input validation during directive execution
 
 **Operates on:** directive `body`, `content`, `raw`, and `actions` fields.
 

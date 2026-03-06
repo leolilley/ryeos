@@ -132,8 +132,8 @@ This is the same dollar-brace syntax as System 1, but System 1's tightened regex
 
 **Where it runs:**
 
-- `execute.py._resolve_input_refs()` and `_interpolate_parsed()`
-- During directive execution via `directive_parser.parse_and_validate_directive()`
+- `rye/core/processors/inputs/interpolate` — `_resolve_input_refs()` and `_interpolate_parsed()`
+- `rye/core/processors/inputs/validate` — input validation during directive execution
 
 **Operates on:** directive `body`, `content`, `raw`, and `actions` fields.
 
