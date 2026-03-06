@@ -1,0 +1,2209 @@
+<!-- rye:signed:2026-03-04T04:16:13Z:439c604240b7a9f6c93f6605ed5deb8303c4d63624d9e30c33c75ce505010683:gDEgAdBRdv4UtZs-s6O5ApMEuupzp-s8JNPEySz9veeof-82vDX8rOkvfpE0iOp7PkzzyAvOT4wduywfGbmpAg==:4b987fd4e40303ac -->
+```yaml
+name: inherited_capabilities_minimal-1772596864230
+title: "inherited_capabilities_minimal"
+entry_type: thread_transcript
+category: agent/threads/test/context/inherited_capabilities_minimal
+version: "1.0.0"
+author: rye
+created_at: 2026-03-04T04:01:04Z
+thread_id: test/context/inherited_capabilities_minimal/inherited_capabilities_minimal-1772596864230
+directive: test/context/inherited_capabilities_minimal
+status: completed
+model: claude-3-haiku-20240307
+duration: 13.9s
+elapsed_seconds: 13.87
+turns: 8
+input_tokens: 35927
+output_tokens: 911
+spend: 0.0101205
+tags: [thread, completed]
+permissions: [rye.execute.tool.rye.file-system.*, rye.search.*, rye.load.*, rye.sign.*, rye.execute.tool.rye.agent.threads.directive_return]
+capability_context: |
+  [
+    {
+      "name": "rye_execute",
+      "description": "Execute a tool",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "item_type": {
+            "type": "string",
+            "enum": [
+              "directive",
+              "tool",
+              "knowledge"
+            ],
+            "description": "What to operate on: \"directive\", \"tool\", or \"knowledge\"."
+          },
+          "item_id": {
+            "type": "string",
+            "description": "<description>Slash-separated path without file extension. Resolved project \u2192 user \u2192 system. If unsure of the ID, call search first.</description><examples><example>\"init\" \u2192 .ai/directives/init.md</example><example>\"rye/core/create_directive\" \u2192 .ai/directives/rye/core/create_directive.md</example><example>\"rye/bash/bash\" \u2192 .ai/tools/rye/bash/bash.py</example></examples>"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "<description>Parameters passed to the item. For directives, these are input values. For tools, these are tool-specific parameters.</description><rules><rule>When the user provides extra words after the directive name, those ARE parameter values \u2014 do NOT ask for clarification, pass them as parameters.</rule><rule>If unsure which parameter key they map to, call load on the item first to see its input schema.</rule><rule>Unknown keys are rejected with the list of valid inputs \u2014 safe to guess and let the tool correct you.</rule></rules><examples><example>{\"name\": \"my_tool\"}</example><example>{\"space\": \"project\"}</example><example>{\"thread\": true, \"async\": true, \"model\": \"sonnet\"}</example></examples>",
+            "default": {}
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "<description>Validate without executing. Directives: parse and check inputs. Tools: build and validate the executor chain.</description>",
+            "default": false
+          }
+        },
+        "required": [
+          "item_type",
+          "item_id"
+        ]
+      },
+      "_item_id": "rye/execute",
+      "_primary": "execute"
+    },
+    {
+      "name": "rye_search",
+      "description": "Discover item IDs before calling execute or load",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "<description>Keyword search query. Supports AND, OR, NOT, quoted phrases, and * wildcards.</description><rules><rule>Use \"*\" to list all items in a scope.</rule></rules>"
+          },
+          "scope": {
+            "type": "string",
+            "description": "<description>Item type and optional namespace filter.</description><examples><example>Shorthand: \"directive\", \"tool\", \"knowledge\", \"tool.rye.core.*\"</example><example>Capability format: \"rye.search.directive.*\", \"rye.search.tool.rye.core.*\"</example></examples><rules><rule>Namespace dots map to path separators; trailing .* matches all items under that prefix.</rule></rules>"
+          },
+          "space": {
+            "type": "string",
+            "enum": [
+              "project",
+              "user",
+              "system",
+              "all"
+            ],
+            "default": "all",
+            "description": "<description>Which spaces to search: \"project\", \"user\", \"system\", \"local\" (all local spaces), \"registry\" (published items only), or \"all\" (local + registry, default).</description>"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 10,
+            "description": "Maximum number of results to return."
+          }
+        },
+        "required": [
+          "query",
+          "scope"
+        ]
+      },
+      "_item_id": "rye/search",
+      "_primary": "search"
+    },
+    {
+      "name": "rye_load",
+      "description": "Read raw content and metadata of a Rye item for inspection",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "item_type": {
+            "type": "string",
+            "enum": [
+              "directive",
+              "tool",
+              "knowledge"
+            ],
+            "description": "What to operate on: \"directive\", \"tool\", or \"knowledge\"."
+          },
+          "item_id": {
+            "type": "string",
+            "description": "<description>Slash-separated path without file extension. Resolved project \u2192 user \u2192 system. If unsure of the ID, call search first.</description><examples><example>\"init\" \u2192 .ai/directives/init.md</example><example>\"rye/core/create_directive\" \u2192 .ai/directives/rye/core/create_directive.md</example><example>\"rye/bash/bash\" \u2192 .ai/tools/rye/bash/bash.py</example></examples>"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "project",
+              "user",
+              "system"
+            ],
+            "description": "<description>Restrict where to load from: \"project\", \"user\", \"system\", or \"registry\". If omitted, resolves project \u2192 user \u2192 system (first match wins). Use \"registry\" to pull items from a remote registry by their full item_id (namespace/category/name format).</description>"
+          },
+          "destination": {
+            "type": "string",
+            "enum": [
+              "project",
+              "user"
+            ],
+            "description": "<description>Copy the item to this space after loading: \"project\" or \"user\". Use to customize system items.</description><rules><rule>Re-sign after copying or editing.</rule></rules>"
+          }
+        },
+        "required": [
+          "item_type",
+          "item_id"
+        ]
+      },
+      "_item_id": "rye/load",
+      "_primary": "load"
+    },
+    {
+      "name": "rye_sign",
+      "description": "Validate structure and write an Ed25519 signature to a Rye item file",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "item_type": {
+            "type": "string",
+            "enum": [
+              "directive",
+              "tool",
+              "knowledge"
+            ],
+            "description": "What to operate on: \"directive\", \"tool\", or \"knowledge\"."
+          },
+          "item_id": {
+            "type": "string",
+            "description": "<description>Item path or glob pattern. Supports * and ? wildcards.</description><examples><example>Single: \"my-project/workflows/deploy\"</example><example>Batch: \"my-project/workflows/*\" or \"*\" (all items of that type)</example></examples>"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "project",
+              "user"
+            ],
+            "default": "project",
+            "description": "<description>Where the item lives: \"project\" (default) or \"user\".</description><rules><rule>System items cannot be signed \u2014 copy them first.</rule></rules>"
+          }
+        },
+        "required": [
+          "item_type",
+          "item_id"
+        ]
+      },
+      "_item_id": "rye/sign",
+      "_primary": "sign"
+    },
+    {
+      "name": "rye_file_system_ls",
+      "description": "List directory contents",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Directory path (default: project root)"
+          }
+        },
+        "required": []
+      },
+      "_item_id": "rye/file-system/ls",
+      "_primary": "execute"
+    },
+    {
+      "name": "rye_file_system_edit_lines",
+      "description": "Edit files using LIDs (stable line references from the read tool). Pass LIDs as line_id for single-line edits, or start_line_id/end_line_id for ranges.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to file (relative to project root or absolute)"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "line_id": {
+                  "type": "string",
+                  "description": "Line ID to replace"
+                },
+                "start_line_id": {
+                  "type": "string",
+                  "description": "Start line ID for range replacement"
+                },
+                "end_line_id": {
+                  "type": "string",
+                  "description": "End line ID for range replacement (inclusive)"
+                },
+                "new_content": {
+                  "type": "string",
+                  "description": "New content for the line(s)"
+                }
+              }
+            },
+            "description": "List of change operations"
+          }
+        },
+        "required": [
+          "path",
+          "changes"
+        ]
+      },
+      "_item_id": "rye/file-system/edit_lines",
+      "_primary": "execute"
+    },
+    {
+      "name": "rye_file_system_glob",
+      "description": "Find files by glob pattern",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern (e.g., '**/*.py')"
+          },
+          "path": {
+            "type": "string",
+            "description": "Search path (default: project root)"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      },
+      "_item_id": "rye/file-system/glob",
+      "_primary": "execute"
+    },
+    {
+      "name": "rye_file_system_grep",
+      "description": "Search file contents with regex. Results include LIDs (stable line references) when available \u2014 pass them to edit_lines to edit matched lines.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex pattern to search for"
+          },
+          "path": {
+            "type": "string",
+            "description": "Search path (default: project root)"
+          },
+          "include": {
+            "type": "string",
+            "description": "File glob filter (e.g., '*.py')"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      },
+      "_item_id": "rye/file-system/grep",
+      "_primary": "execute"
+    },
+    {
+      "name": "rye_file_system_read",
+      "description": "Read file content. Each line is prefixed with LINE_NUM:LID where LID is a stable 6-char hex reference. LIDs are NOT part of the file content \u2014 they are metadata for use with edit_lines (pass as line_id, start_line_id, end_line_id).",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to file (relative to project root or absolute)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Starting line number (1-indexed)",
+            "default": 1
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of lines to read",
+            "default": 2000
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "_item_id": "rye/file-system/read",
+      "_primary": "execute"
+    },
+    {
+      "name": "rye_file_system_write",
+      "description": "Create or overwrite one or more files",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to file (single-file mode). Mutually exclusive with 'files'."
+          },
+          "content": {
+            "type": "string",
+            "description": "Content to write (single-file mode)."
+          },
+          "files": {
+            "type": "array",
+            "description": "Batch mode \u2014 list of {path, content} objects to write in one call.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          }
+        }
+      },
+      "_item_id": "rye/file-system/write",
+      "_primary": "execute"
+    },
+    {
+      "name": "directive_return",
+      "description": "Return structured results when the directive is complete",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "string",
+            "description": "Report confirming which tools were called"
+          },
+          "tools_used": {
+            "type": "string",
+            "description": "Comma-separated list of tool names that were called"
+          }
+        },
+        "required": [
+          "result",
+          "tools_used"
+        ]
+      },
+      "_item_id": "rye/agent/threads/directive_return",
+      "_primary": "execute"
+    }
+  ]
+capability_tree: |
+  ├── execute
+  │   └── tool
+  │       └── rye
+  │           └── file-system
+  │               ├── edit_lines
+  │               ├── glob
+  │               ├── grep
+  │               ├── ls
+  │               ├── read
+  │               └── write
+  ├── load
+  │   ├── directive
+  │   │   ├── init
+  │   │   ├── rye
+  │   │   │   ├── agent
+  │   │   │   │   ├── continuation
+  │   │   │   │   ├── core
+  │   │   │   │   │   ├── base
+  │   │   │   │   │   ├── base_execute_only
+  │   │   │   │   │   └── base_review
+  │   │   │   │   ├── graphs
+  │   │   │   │   │   ├── create_graph
+  │   │   │   │   │   ├── graph_orchestrator
+  │   │   │   │   │   └── state_graph
+  │   │   │   │   ├── setup_provider
+  │   │   │   │   └── threads
+  │   │   │   │       ├── create_threaded_directive
+  │   │   │   │       ├── orchestrator
+  │   │   │   │       ├── thread_directive
+  │   │   │   │       └── thread_summary
+  │   │   │   ├── authoring
+  │   │   │   │   ├── create_directive
+  │   │   │   │   ├── create_knowledge
+  │   │   │   │   └── create_tool
+  │   │   │   ├── bash
+  │   │   │   │   └── bash
+  │   │   │   ├── code
+  │   │   │   │   ├── diagnostics
+  │   │   │   │   ├── lsp
+  │   │   │   │   ├── npm
+  │   │   │   │   ├── quality
+  │   │   │   │   │   ├── build_with_review
+  │   │   │   │   │   └── review
+  │   │   │   │   └── typescript
+  │   │   │   ├── core
+  │   │   │   │   ├── bundler
+  │   │   │   │   │   ├── create_bundle
+  │   │   │   │   │   ├── inspect_bundle
+  │   │   │   │   │   ├── list_bundles
+  │   │   │   │   │   └── verify_bundle
+  │   │   │   │   ├── create_directive
+  │   │   │   │   ├── create_knowledge
+  │   │   │   │   ├── create_threaded_directive
+  │   │   │   │   ├── create_tool
+  │   │   │   │   ├── registry
+  │   │   │   │   │   ├── delete
+  │   │   │   │   │   ├── login
+  │   │   │   │   │   ├── login_poll
+  │   │   │   │   │   ├── logout
+  │   │   │   │   │   ├── publish
+  │   │   │   │   │   ├── pull
+  │   │   │   │   │   ├── push
+  │   │   │   │   │   ├── search
+  │   │   │   │   │   ├── signup
+  │   │   │   │   │   ├── unpublish
+  │   │   │   │   │   └── whoami
+  │   │   │   │   ├── system
+  │   │   │   │   └── telemetry
+  │   │   │   ├── file-system
+  │   │   │   │   ├── edit_lines
+  │   │   │   │   ├── glob
+  │   │   │   │   ├── grep
+  │   │   │   │   ├── ls
+  │   │   │   │   ├── read
+  │   │   │   │   └── write
+  │   │   │   ├── guides
+  │   │   │   │   ├── advanced_tools
+  │   │   │   │   ├── core_utils
+  │   │   │   │   ├── graphs
+  │   │   │   │   ├── mcp_discovery
+  │   │   │   │   ├── registry
+  │   │   │   │   ├── the_basics
+  │   │   │   │   └── threading
+  │   │   │   ├── mcp
+  │   │   │   │   ├── add_server
+  │   │   │   │   ├── connect
+  │   │   │   │   ├── discover
+  │   │   │   │   ├── list_servers
+  │   │   │   │   ├── refresh_server
+  │   │   │   │   └── remove_server
+  │   │   │   ├── primary
+  │   │   │   │   ├── execute
+  │   │   │   │   ├── load
+  │   │   │   │   ├── search
+  │   │   │   │   └── sign
+  │   │   │   └── web
+  │   │   │       ├── browser
+  │   │   │       ├── fetch
+  │   │   │       └── search
+  │   │   └── test
+  │   │       ├── anchor_demo
+  │   │       │   └── run_demo
+  │   │       ├── context
+  │   │       │   ├── base_context
+  │   │       │   ├── broad_capabilities_base
+  │   │       │   ├── full_hook_routed_composition_test
+  │   │       │   ├── hook_routed_base
+  │   │       │   ├── hook_routed_test
+  │   │       │   ├── inherited_capabilities_minimal
+  │   │       │   ├── inherited_capabilities_test
+  │   │       │   ├── leaf_context
+  │   │       │   ├── mid_context
+  │   │       │   ├── spawn_with_context
+  │   │       │   ├── suppress_test
+  │   │       │   └── tool_preload_test
+  │   │       ├── graphs
+  │   │       │   ├── analyze_code
+  │   │       │   ├── orchestrate_review
+  │   │       │   └── summarize_text
+  │   │       ├── limits
+  │   │       │   ├── budget_cascade_test
+  │   │       │   ├── depth_child
+  │   │       │   ├── depth_limit_test
+  │   │       │   ├── duration_limit_test
+  │   │       │   ├── limit_inheritance_test
+  │   │       │   ├── limit_test
+  │   │       │   ├── spawn_limit_test
+  │   │       │   ├── spend_limit_test
+  │   │       │   └── tokens_limit_test
+  │   │       ├── permissions
+  │   │       │   ├── perm_fs_only
+  │   │       │   ├── perm_inheritance_test
+  │   │       │   ├── perm_none
+  │   │       │   ├── perm_wildcard
+  │   │       │   └── perm_wrong_scope
+  │   │       ├── quality
+  │   │       │   ├── build_with_review_test
+  │   │       │   ├── practices_injection_test
+  │   │       │   ├── quality_gate_test
+  │   │       │   └── review_test
+  │   │       ├── tools
+  │   │       │   ├── file_system
+  │   │       │   │   ├── child_write
+  │   │       │   │   ├── write_and_read
+  │   │       │   │   └── write_file
+  │   │       │   ├── primary
+  │   │       │   │   ├── 03_search_and_report
+  │   │       │   │   ├── 04_load_and_summarize
+  │   │       │   │   ├── 05_research_and_write
+  │   │       │   │   ├── 06_create_and_sign
+  │   │       │   │   ├── 09_self_evolving_researcher
+  │   │       │   │   ├── auto_generated_echo
+  │   │       │   │   └── directive_lifecycle_test
+  │   │       │   └── threads
+  │   │       │       ├── 07_spawn_child
+  │   │       │       ├── 08_multi_thread_pipeline
+  │   │       │       ├── file_investigator
+  │   │       │       ├── parent_spawn
+  │   │       │       ├── spawn_chain_4_deep
+  │   │       │       └── spawn_chain_child
+  │   │       ├── zen_anthropic_test
+  │   │       ├── zen_gemini_test
+  │   │       └── zen_openai_test
+  │   ├── knowledge
+  │   │   ├── agent
+  │   │   │   └── threads
+  │   │   │       ├── rye
+  │   │   │       │   └── code
+  │   │   │       │       └── quality
+  │   │   │       │           ├── build_with_review
+  │   │   │       │           │   └── build_with_review-1772579687352
+  │   │   │       │           └── review
+  │   │   │       │               ├── review-1772579373854
+  │   │   │       │               └── review-1772579554156
+  │   │   │       └── test
+  │   │   │           ├── context
+  │   │   │           │   ├── full_hook_routed_composition_test
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583394064
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583494257
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583676083
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583720632
+  │   │   │           │   │   └── full_hook_routed_composition_test-1772584010604
+  │   │   │           │   ├── hook_routed_test
+  │   │   │           │   │   └── hook_routed_test-1772582885418
+  │   │   │           │   ├── inherited_capabilities_minimal
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772586965328
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587091178
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587447645
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587477760
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587902013
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772589653798
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772589888225
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772593691069
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772594617697
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595101525
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595182703
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595299185
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595448490
+  │   │   │           │   │   └── inherited_capabilities_minimal-1772595622430
+  │   │   │           │   ├── inherited_capabilities_test
+  │   │   │           │   │   ├── inherited_capabilities_test-1772584483505
+  │   │   │           │   │   ├── inherited_capabilities_test-1772585686330
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586059173
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586110971
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586127855
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586137637
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586163839
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586199137
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586211145
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586553251
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586593705
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586617160
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586676670
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586684440
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586689255
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586787755
+  │   │   │           │   │   └── inherited_capabilities_test-1772586794440
+  │   │   │           │   ├── leaf_context
+  │   │   │           │   │   ├── leaf_context-1771977968215
+  │   │   │           │   │   ├── leaf_context-1771978057773
+  │   │   │           │   │   ├── leaf_context-1771978651040
+  │   │   │           │   │   └── leaf_context-1771978657588
+  │   │   │           │   ├── spawn_with_context
+  │   │   │           │   │   ├── spawn_with_context-1771978093809
+  │   │   │           │   │   └── spawn_with_context-1771978613536
+  │   │   │           │   ├── suppress_test
+  │   │   │           │   │   ├── suppress_test-1772582747420
+  │   │   │           │   │   └── suppress_test-1772582847651
+  │   │   │           │   └── tool_preload_test
+  │   │   │           │       ├── tool_preload_test-1772582905505
+  │   │   │           │       ├── tool_preload_test-1772583366783
+  │   │   │           │       └── tool_preload_test-1772584243988
+  │   │   │           └── quality
+  │   │   │               ├── build_with_review_test
+  │   │   │               │   ├── build_with_review_test-1772579590035
+  │   │   │               │   └── build_with_review_test-1772579684650
+  │   │   │               ├── practices_injection_test
+  │   │   │               │   ├── practices_injection_test-1772579105276
+  │   │   │               │   ├── practices_injection_test-1772580694422
+  │   │   │               │   └── practices_injection_test-1772580972153
+  │   │   │               ├── quality_gate_test
+  │   │   │               │   ├── quality_gate_test-1772579115281
+  │   │   │               │   ├── quality_gate_test-1772579213526
+  │   │   │               │   └── quality_gate_test-1772579249172
+  │   │   │               └── review_test
+  │   │   │                   ├── review_test-1772579265434
+  │   │   │                   ├── review_test-1772579366390
+  │   │   │                   ├── review_test-1772579417678
+  │   │   │                   └── review_test-1772579544345
+  │   │   ├── rye
+  │   │   │   ├── agent
+  │   │   │   │   ├── core
+  │   │   │   │   │   ├── Behavior
+  │   │   │   │   │   ├── DirectiveInstruction
+  │   │   │   │   │   ├── Environment
+  │   │   │   │   │   ├── Identity
+  │   │   │   │   │   ├── ToolProtocol
+  │   │   │   │   │   └── protocol
+  │   │   │   │   │       ├── execute
+  │   │   │   │   │       ├── load
+  │   │   │   │   │       ├── search
+  │   │   │   │   │       └── sign
+  │   │   │   │   ├── provider-configuration
+  │   │   │   │   └── threads
+  │   │   │   │       ├── directive-extends
+  │   │   │   │       ├── limits-and-safety
+  │   │   │   │       ├── orchestrator-patterns
+  │   │   │   │       ├── permissions-in-threads
+  │   │   │   │       ├── persistence-and-state
+  │   │   │   │       ├── prompt-rendering
+  │   │   │   │       ├── spawning-patterns
+  │   │   │   │       ├── streaming
+  │   │   │   │       └── thread-lifecycle
+  │   │   │   ├── authoring
+  │   │   │   │   ├── directive-format
+  │   │   │   │   ├── knowledge-format
+  │   │   │   │   └── tool-format
+  │   │   │   ├── bash
+  │   │   │   │   └── bash-execution
+  │   │   │   ├── code
+  │   │   │   │   ├── code-tools
+  │   │   │   │   └── quality
+  │   │   │   │       ├── practices
+  │   │   │   │       └── scrap-and-retry
+  │   │   │   ├── core
+  │   │   │   │   ├── ai-directory
+  │   │   │   │   ├── bundler
+  │   │   │   │   │   └── bundle-format
+  │   │   │   │   ├── capability-strings
+  │   │   │   │   ├── executor-chain
+  │   │   │   │   ├── input-interpolation
+  │   │   │   │   ├── parsers
+  │   │   │   │   ├── registry
+  │   │   │   │   │   ├── registry-api
+  │   │   │   │   │   └── trust-model
+  │   │   │   │   ├── runtimes
+  │   │   │   │   │   ├── runtime-authoring
+  │   │   │   │   │   ├── standard-runtimes
+  │   │   │   │   │   ├── state-graph-runtime
+  │   │   │   │   │   └── state-graph-walker
+  │   │   │   │   ├── signing-and-integrity
+  │   │   │   │   ├── templating-systems
+  │   │   │   │   ├── terminology
+  │   │   │   │   └── three-tier-spaces
+  │   │   │   ├── dev
+  │   │   │   │   └── test-runner
+  │   │   │   ├── file-system
+  │   │   │   │   └── file-operations
+  │   │   │   ├── mcp
+  │   │   │   │   └── mcp-integration
+  │   │   │   ├── primary
+  │   │   │   │   ├── execute-semantics
+  │   │   │   │   ├── load-semantics
+  │   │   │   │   ├── search-semantics
+  │   │   │   │   └── sign-semantics
+  │   │   │   └── web
+  │   │   │       └── web-tools
+  │   │   ├── test
+  │   │   │   └── context
+  │   │   │       ├── alt-identity
+  │   │   │       ├── base-identity
+  │   │   │       ├── hook-routed-rules
+  │   │   │       ├── leaf-checklist
+  │   │   │       └── mid-rules
+  │   │   └── test-findings
+  │   └── tool
+  │       ├── graphs
+  │       │   ├── code-analysis-pipeline
+  │       │   ├── conditional-pipeline
+  │       │   ├── full-review-pipeline
+  │       │   ├── multi-thread-fanout
+  │       │   └── thread-monitor
+  │       ├── mcp
+  │       │   ├── campaign-kiwi
+  │       │   │   ├── execute
+  │       │   │   ├── load
+  │       │   │   └── search
+  │       │   ├── context7
+  │       │   │   ├── query-docs
+  │       │   │   └── resolve-library-id
+  │       │   ├── rye-os
+  │       │   │   ├── execute
+  │       │   │   ├── load
+  │       │   │   ├── search
+  │       │   │   └── sign
+  │       │   └── servers
+  │       │       ├── campaign-kiwi
+  │       │       ├── context7
+  │       │       └── rye-os
+  │       ├── rye
+  │       │   ├── agent
+  │       │   │   ├── permissions
+  │       │   │   │   ├── capabilities
+  │       │   │   │   │   ├── primary
+  │       │   │   │   │   └── tools
+  │       │   │   │   │       └── rye
+  │       │   │   │   │           ├── agent
+  │       │   │   │   │           ├── db
+  │       │   │   │   │           ├── fs
+  │       │   │   │   │           ├── git
+  │       │   │   │   │           ├── mcp
+  │       │   │   │   │           ├── net
+  │       │   │   │   │           ├── process
+  │       │   │   │   │           └── registry
+  │       │   │   │   └── capability_tokens
+  │       │   │   │       └── capability_tokens
+  │       │   │   ├── providers
+  │       │   │   │   ├── anthropic
+  │       │   │   │   │   └── anthropic
+  │       │   │   │   ├── openai
+  │       │   │   │   │   └── openai
+  │       │   │   │   └── zen
+  │       │   │   │       └── zen
+  │       │   │   └── threads
+  │       │   │       ├── adapters
+  │       │   │       │   ├── http_provider
+  │       │   │       │   ├── provider_adapter
+  │       │   │       │   ├── provider_resolver
+  │       │   │       │   └── tool_dispatcher
+  │       │   │       ├── errors
+  │       │   │       ├── events
+  │       │   │       │   ├── event_emitter
+  │       │   │       │   ├── streaming_tool_parser
+  │       │   │       │   └── transcript_sink
+  │       │   │       ├── internal
+  │       │   │       │   ├── budget_ops
+  │       │   │       │   ├── cancel_checker
+  │       │   │       │   ├── classifier
+  │       │   │       │   ├── control
+  │       │   │       │   ├── cost_tracker
+  │       │   │       │   ├── emitter
+  │       │   │       │   ├── limit_checker
+  │       │   │       │   ├── state_persister
+  │       │   │       │   ├── text_tool_parser
+  │       │   │       │   ├── thread_chain_search
+  │       │   │       │   └── tool_result_guard
+  │       │   │       ├── loaders
+  │       │   │       │   ├── condition_evaluator
+  │       │   │       │   ├── config_loader
+  │       │   │       │   ├── coordination_loader
+  │       │   │       │   ├── error_loader
+  │       │   │       │   ├── events_loader
+  │       │   │       │   ├── hooks_loader
+  │       │   │       │   ├── interpolation
+  │       │   │       │   ├── resilience_loader
+  │       │   │       │   └── tool_schema_loader
+  │       │   │       ├── orchestrator
+  │       │   │       ├── persistence
+  │       │   │       │   ├── artifact_store
+  │       │   │       │   ├── budgets
+  │       │   │       │   ├── state_store
+  │       │   │       │   ├── thread_registry
+  │       │   │       │   ├── transcript
+  │       │   │       │   └── transcript_signer
+  │       │   │       ├── runner
+  │       │   │       ├── safety_harness
+  │       │   │       ├── security
+  │       │   │       │   └── security
+  │       │   │       └── thread_directive
+  │       │   ├── bash
+  │       │   ├── code
+  │       │   │   ├── diagnostics
+  │       │   │   │   ├── diagnostics
+  │       │   │   │   ├── package
+  │       │   │   │   └── package-lock
+  │       │   │   ├── git
+  │       │   │   │   └── git
+  │       │   │   ├── lsp
+  │       │   │   │   ├── lsp
+  │       │   │   │   ├── package
+  │       │   │   │   └── package-lock
+  │       │   │   ├── npm
+  │       │   │   │   ├── npm
+  │       │   │   │   ├── package
+  │       │   │   │   └── package-lock
+  │       │   │   ├── quality
+  │       │   │   │   └── gate
+  │       │   │   └── typescript
+  │       │   │       ├── package
+  │       │   │       ├── package-lock
+  │       │   │       └── typescript
+  │       │   ├── core
+  │       │   │   ├── bundler
+  │       │   │   │   ├── bundler
+  │       │   │   │   └── collect
+  │       │   │   ├── extractors
+  │       │   │   │   ├── directive
+  │       │   │   │   │   └── directive_extractor
+  │       │   │   │   ├── knowledge
+  │       │   │   │   │   └── knowledge_extractor
+  │       │   │   │   └── tool
+  │       │   │   │       └── tool_extractor
+  │       │   │   ├── keys
+  │       │   │   │   └── keys
+  │       │   │   ├── parsers
+  │       │   │   │   ├── javascript
+  │       │   │   │   │   └── javascript
+  │       │   │   │   ├── markdown
+  │       │   │   │   │   ├── frontmatter
+  │       │   │   │   │   └── xml
+  │       │   │   │   ├── python
+  │       │   │   │   │   └── ast
+  │       │   │   │   └── yaml
+  │       │   │   │       └── yaml
+  │       │   │   ├── primitives
+  │       │   │   │   ├── http_client
+  │       │   │   │   └── subprocess
+  │       │   │   ├── registry
+  │       │   │   │   └── registry
+  │       │   │   ├── runtimes
+  │       │   │   │   ├── bash
+  │       │   │   │   │   └── bash
+  │       │   │   │   ├── mcp
+  │       │   │   │   │   ├── http
+  │       │   │   │   │   └── stdio
+  │       │   │   │   ├── node
+  │       │   │   │   │   └── node
+  │       │   │   │   ├── python
+  │       │   │   │   │   ├── function
+  │       │   │   │   │   ├── lib
+  │       │   │   │   │   │   ├── condition_evaluator
+  │       │   │   │   │   │   ├── interpolation
+  │       │   │   │   │   │   └── module_loader
+  │       │   │   │   │   └── script
+  │       │   │   │   ├── rust
+  │       │   │   │   │   └── runtime
+  │       │   │   │   └── state-graph
+  │       │   │   │       ├── runtime
+  │       │   │   │       └── walker
+  │       │   │   ├── sinks
+  │       │   │   │   ├── file_sink
+  │       │   │   │   ├── null_sink
+  │       │   │   │   └── websocket_sink
+  │       │   │   ├── system
+  │       │   │   │   └── system
+  │       │   │   └── telemetry
+  │       │   │       └── telemetry
+  │       │   ├── dev
+  │       │   │   └── test_runner
+  │       │   ├── execute
+  │       │   ├── file-system
+  │       │   │   ├── edit_lines
+  │       │   │   ├── glob
+  │       │   │   ├── grep
+  │       │   │   ├── ls
+  │       │   │   ├── read
+  │       │   │   └── write
+  │       │   ├── load
+  │       │   ├── mcp
+  │       │   │   ├── connect
+  │       │   │   ├── discover
+  │       │   │   └── manager
+  │       │   ├── search
+  │       │   ├── sign
+  │       │   └── web
+  │       │       ├── browser
+  │       │       │   ├── browser
+  │       │       │   ├── package
+  │       │       │   └── package-lock
+  │       │       ├── fetch
+  │       │       │   └── fetch
+  │       │       └── search
+  │       │           └── search
+  │       └── test
+  │           ├── anchor_demo
+  │           │   ├── anchor_demo
+  │           │   └── helpers
+  │           └── test_registry_tool
+  ├── search
+  │   ├── directive
+  │   │   ├── init
+  │   │   ├── rye
+  │   │   │   ├── agent
+  │   │   │   │   ├── continuation
+  │   │   │   │   ├── core
+  │   │   │   │   │   ├── base
+  │   │   │   │   │   ├── base_execute_only
+  │   │   │   │   │   └── base_review
+  │   │   │   │   ├── graphs
+  │   │   │   │   │   ├── create_graph
+  │   │   │   │   │   ├── graph_orchestrator
+  │   │   │   │   │   └── state_graph
+  │   │   │   │   ├── setup_provider
+  │   │   │   │   └── threads
+  │   │   │   │       ├── create_threaded_directive
+  │   │   │   │       ├── orchestrator
+  │   │   │   │       ├── thread_directive
+  │   │   │   │       └── thread_summary
+  │   │   │   ├── authoring
+  │   │   │   │   ├── create_directive
+  │   │   │   │   ├── create_knowledge
+  │   │   │   │   └── create_tool
+  │   │   │   ├── bash
+  │   │   │   │   └── bash
+  │   │   │   ├── code
+  │   │   │   │   ├── diagnostics
+  │   │   │   │   ├── lsp
+  │   │   │   │   ├── npm
+  │   │   │   │   ├── quality
+  │   │   │   │   │   ├── build_with_review
+  │   │   │   │   │   └── review
+  │   │   │   │   └── typescript
+  │   │   │   ├── core
+  │   │   │   │   ├── bundler
+  │   │   │   │   │   ├── create_bundle
+  │   │   │   │   │   ├── inspect_bundle
+  │   │   │   │   │   ├── list_bundles
+  │   │   │   │   │   └── verify_bundle
+  │   │   │   │   ├── create_directive
+  │   │   │   │   ├── create_knowledge
+  │   │   │   │   ├── create_threaded_directive
+  │   │   │   │   ├── create_tool
+  │   │   │   │   ├── registry
+  │   │   │   │   │   ├── delete
+  │   │   │   │   │   ├── login
+  │   │   │   │   │   ├── login_poll
+  │   │   │   │   │   ├── logout
+  │   │   │   │   │   ├── publish
+  │   │   │   │   │   ├── pull
+  │   │   │   │   │   ├── push
+  │   │   │   │   │   ├── search
+  │   │   │   │   │   ├── signup
+  │   │   │   │   │   ├── unpublish
+  │   │   │   │   │   └── whoami
+  │   │   │   │   ├── system
+  │   │   │   │   └── telemetry
+  │   │   │   ├── file-system
+  │   │   │   │   ├── edit_lines
+  │   │   │   │   ├── glob
+  │   │   │   │   ├── grep
+  │   │   │   │   ├── ls
+  │   │   │   │   ├── read
+  │   │   │   │   └── write
+  │   │   │   ├── guides
+  │   │   │   │   ├── advanced_tools
+  │   │   │   │   ├── core_utils
+  │   │   │   │   ├── graphs
+  │   │   │   │   ├── mcp_discovery
+  │   │   │   │   ├── registry
+  │   │   │   │   ├── the_basics
+  │   │   │   │   └── threading
+  │   │   │   ├── mcp
+  │   │   │   │   ├── add_server
+  │   │   │   │   ├── connect
+  │   │   │   │   ├── discover
+  │   │   │   │   ├── list_servers
+  │   │   │   │   ├── refresh_server
+  │   │   │   │   └── remove_server
+  │   │   │   ├── primary
+  │   │   │   │   ├── execute
+  │   │   │   │   ├── load
+  │   │   │   │   ├── search
+  │   │   │   │   └── sign
+  │   │   │   └── web
+  │   │   │       ├── browser
+  │   │   │       ├── fetch
+  │   │   │       └── search
+  │   │   └── test
+  │   │       ├── anchor_demo
+  │   │       │   └── run_demo
+  │   │       ├── context
+  │   │       │   ├── base_context
+  │   │       │   ├── broad_capabilities_base
+  │   │       │   ├── full_hook_routed_composition_test
+  │   │       │   ├── hook_routed_base
+  │   │       │   ├── hook_routed_test
+  │   │       │   ├── inherited_capabilities_minimal
+  │   │       │   ├── inherited_capabilities_test
+  │   │       │   ├── leaf_context
+  │   │       │   ├── mid_context
+  │   │       │   ├── spawn_with_context
+  │   │       │   ├── suppress_test
+  │   │       │   └── tool_preload_test
+  │   │       ├── graphs
+  │   │       │   ├── analyze_code
+  │   │       │   ├── orchestrate_review
+  │   │       │   └── summarize_text
+  │   │       ├── limits
+  │   │       │   ├── budget_cascade_test
+  │   │       │   ├── depth_child
+  │   │       │   ├── depth_limit_test
+  │   │       │   ├── duration_limit_test
+  │   │       │   ├── limit_inheritance_test
+  │   │       │   ├── limit_test
+  │   │       │   ├── spawn_limit_test
+  │   │       │   ├── spend_limit_test
+  │   │       │   └── tokens_limit_test
+  │   │       ├── permissions
+  │   │       │   ├── perm_fs_only
+  │   │       │   ├── perm_inheritance_test
+  │   │       │   ├── perm_none
+  │   │       │   ├── perm_wildcard
+  │   │       │   └── perm_wrong_scope
+  │   │       ├── quality
+  │   │       │   ├── build_with_review_test
+  │   │       │   ├── practices_injection_test
+  │   │       │   ├── quality_gate_test
+  │   │       │   └── review_test
+  │   │       ├── tools
+  │   │       │   ├── file_system
+  │   │       │   │   ├── child_write
+  │   │       │   │   ├── write_and_read
+  │   │       │   │   └── write_file
+  │   │       │   ├── primary
+  │   │       │   │   ├── 03_search_and_report
+  │   │       │   │   ├── 04_load_and_summarize
+  │   │       │   │   ├── 05_research_and_write
+  │   │       │   │   ├── 06_create_and_sign
+  │   │       │   │   ├── 09_self_evolving_researcher
+  │   │       │   │   ├── auto_generated_echo
+  │   │       │   │   └── directive_lifecycle_test
+  │   │       │   └── threads
+  │   │       │       ├── 07_spawn_child
+  │   │       │       ├── 08_multi_thread_pipeline
+  │   │       │       ├── file_investigator
+  │   │       │       ├── parent_spawn
+  │   │       │       ├── spawn_chain_4_deep
+  │   │       │       └── spawn_chain_child
+  │   │       ├── zen_anthropic_test
+  │   │       ├── zen_gemini_test
+  │   │       └── zen_openai_test
+  │   ├── knowledge
+  │   │   ├── agent
+  │   │   │   └── threads
+  │   │   │       ├── rye
+  │   │   │       │   └── code
+  │   │   │       │       └── quality
+  │   │   │       │           ├── build_with_review
+  │   │   │       │           │   └── build_with_review-1772579687352
+  │   │   │       │           └── review
+  │   │   │       │               ├── review-1772579373854
+  │   │   │       │               └── review-1772579554156
+  │   │   │       └── test
+  │   │   │           ├── context
+  │   │   │           │   ├── full_hook_routed_composition_test
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583394064
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583494257
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583676083
+  │   │   │           │   │   ├── full_hook_routed_composition_test-1772583720632
+  │   │   │           │   │   └── full_hook_routed_composition_test-1772584010604
+  │   │   │           │   ├── hook_routed_test
+  │   │   │           │   │   └── hook_routed_test-1772582885418
+  │   │   │           │   ├── inherited_capabilities_minimal
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772586965328
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587091178
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587447645
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587477760
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772587902013
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772589653798
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772589888225
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772593691069
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772594617697
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595101525
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595182703
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595299185
+  │   │   │           │   │   ├── inherited_capabilities_minimal-1772595448490
+  │   │   │           │   │   └── inherited_capabilities_minimal-1772595622430
+  │   │   │           │   ├── inherited_capabilities_test
+  │   │   │           │   │   ├── inherited_capabilities_test-1772584483505
+  │   │   │           │   │   ├── inherited_capabilities_test-1772585686330
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586059173
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586110971
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586127855
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586137637
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586163839
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586199137
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586211145
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586553251
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586593705
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586617160
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586676670
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586684440
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586689255
+  │   │   │           │   │   ├── inherited_capabilities_test-1772586787755
+  │   │   │           │   │   └── inherited_capabilities_test-1772586794440
+  │   │   │           │   ├── leaf_context
+  │   │   │           │   │   ├── leaf_context-1771977968215
+  │   │   │           │   │   ├── leaf_context-1771978057773
+  │   │   │           │   │   ├── leaf_context-1771978651040
+  │   │   │           │   │   └── leaf_context-1771978657588
+  │   │   │           │   ├── spawn_with_context
+  │   │   │           │   │   ├── spawn_with_context-1771978093809
+  │   │   │           │   │   └── spawn_with_context-1771978613536
+  │   │   │           │   ├── suppress_test
+  │   │   │           │   │   ├── suppress_test-1772582747420
+  │   │   │           │   │   └── suppress_test-1772582847651
+  │   │   │           │   └── tool_preload_test
+  │   │   │           │       ├── tool_preload_test-1772582905505
+  │   │   │           │       ├── tool_preload_test-1772583366783
+  │   │   │           │       └── tool_preload_test-1772584243988
+  │   │   │           └── quality
+  │   │   │               ├── build_with_review_test
+  │   │   │               │   ├── build_with_review_test-1772579590035
+  │   │   │               │   └── build_with_review_test-1772579684650
+  │   │   │               ├── practices_injection_test
+  │   │   │               │   ├── practices_injection_test-1772579105276
+  │   │   │               │   ├── practices_injection_test-1772580694422
+  │   │   │               │   └── practices_injection_test-1772580972153
+  │   │   │               ├── quality_gate_test
+  │   │   │               │   ├── quality_gate_test-1772579115281
+  │   │   │               │   ├── quality_gate_test-1772579213526
+  │   │   │               │   └── quality_gate_test-1772579249172
+  │   │   │               └── review_test
+  │   │   │                   ├── review_test-1772579265434
+  │   │   │                   ├── review_test-1772579366390
+  │   │   │                   ├── review_test-1772579417678
+  │   │   │                   └── review_test-1772579544345
+  │   │   ├── rye
+  │   │   │   ├── agent
+  │   │   │   │   ├── core
+  │   │   │   │   │   ├── Behavior
+  │   │   │   │   │   ├── DirectiveInstruction
+  │   │   │   │   │   ├── Environment
+  │   │   │   │   │   ├── Identity
+  │   │   │   │   │   ├── ToolProtocol
+  │   │   │   │   │   └── protocol
+  │   │   │   │   │       ├── execute
+  │   │   │   │   │       ├── load
+  │   │   │   │   │       ├── search
+  │   │   │   │   │       └── sign
+  │   │   │   │   ├── provider-configuration
+  │   │   │   │   └── threads
+  │   │   │   │       ├── directive-extends
+  │   │   │   │       ├── limits-and-safety
+  │   │   │   │       ├── orchestrator-patterns
+  │   │   │   │       ├── permissions-in-threads
+  │   │   │   │       ├── persistence-and-state
+  │   │   │   │       ├── prompt-rendering
+  │   │   │   │       ├── spawning-patterns
+  │   │   │   │       ├── streaming
+  │   │   │   │       └── thread-lifecycle
+  │   │   │   ├── authoring
+  │   │   │   │   ├── directive-format
+  │   │   │   │   ├── knowledge-format
+  │   │   │   │   └── tool-format
+  │   │   │   ├── bash
+  │   │   │   │   └── bash-execution
+  │   │   │   ├── code
+  │   │   │   │   ├── code-tools
+  │   │   │   │   └── quality
+  │   │   │   │       ├── practices
+  │   │   │   │       └── scrap-and-retry
+  │   │   │   ├── core
+  │   │   │   │   ├── ai-directory
+  │   │   │   │   ├── bundler
+  │   │   │   │   │   └── bundle-format
+  │   │   │   │   ├── capability-strings
+  │   │   │   │   ├── executor-chain
+  │   │   │   │   ├── input-interpolation
+  │   │   │   │   ├── parsers
+  │   │   │   │   ├── registry
+  │   │   │   │   │   ├── registry-api
+  │   │   │   │   │   └── trust-model
+  │   │   │   │   ├── runtimes
+  │   │   │   │   │   ├── runtime-authoring
+  │   │   │   │   │   ├── standard-runtimes
+  │   │   │   │   │   ├── state-graph-runtime
+  │   │   │   │   │   └── state-graph-walker
+  │   │   │   │   ├── signing-and-integrity
+  │   │   │   │   ├── templating-systems
+  │   │   │   │   ├── terminology
+  │   │   │   │   └── three-tier-spaces
+  │   │   │   ├── dev
+  │   │   │   │   └── test-runner
+  │   │   │   ├── file-system
+  │   │   │   │   └── file-operations
+  │   │   │   ├── mcp
+  │   │   │   │   └── mcp-integration
+  │   │   │   ├── primary
+  │   │   │   │   ├── execute-semantics
+  │   │   │   │   ├── load-semantics
+  │   │   │   │   ├── search-semantics
+  │   │   │   │   └── sign-semantics
+  │   │   │   └── web
+  │   │   │       └── web-tools
+  │   │   ├── test
+  │   │   │   └── context
+  │   │   │       ├── alt-identity
+  │   │   │       ├── base-identity
+  │   │   │       ├── hook-routed-rules
+  │   │   │       ├── leaf-checklist
+  │   │   │       └── mid-rules
+  │   │   └── test-findings
+  │   └── tool
+  │       ├── graphs
+  │       │   ├── code-analysis-pipeline
+  │       │   ├── conditional-pipeline
+  │       │   ├── full-review-pipeline
+  │       │   ├── multi-thread-fanout
+  │       │   └── thread-monitor
+  │       ├── mcp
+  │       │   ├── campaign-kiwi
+  │       │   │   ├── execute
+  │       │   │   ├── load
+  │       │   │   └── search
+  │       │   ├── context7
+  │       │   │   ├── query-docs
+  │       │   │   └── resolve-library-id
+  │       │   ├── rye-os
+  │       │   │   ├── execute
+  │       │   │   ├── load
+  │       │   │   ├── search
+  │       │   │   └── sign
+  │       │   └── servers
+  │       │       ├── campaign-kiwi
+  │       │       ├── context7
+  │       │       └── rye-os
+  │       ├── rye
+  │       │   ├── agent
+  │       │   │   ├── permissions
+  │       │   │   │   ├── capabilities
+  │       │   │   │   │   ├── primary
+  │       │   │   │   │   └── tools
+  │       │   │   │   │       └── rye
+  │       │   │   │   │           ├── agent
+  │       │   │   │   │           ├── db
+  │       │   │   │   │           ├── fs
+  │       │   │   │   │           ├── git
+  │       │   │   │   │           ├── mcp
+  │       │   │   │   │           ├── net
+  │       │   │   │   │           ├── process
+  │       │   │   │   │           └── registry
+  │       │   │   │   └── capability_tokens
+  │       │   │   │       └── capability_tokens
+  │       │   │   ├── providers
+  │       │   │   │   ├── anthropic
+  │       │   │   │   │   └── anthropic
+  │       │   │   │   ├── openai
+  │       │   │   │   │   └── openai
+  │       │   │   │   └── zen
+  │       │   │   │       └── zen
+  │       │   │   └── threads
+  │       │   │       ├── adapters
+  │       │   │       │   ├── http_provider
+  │       │   │       │   ├── provider_adapter
+  │       │   │       │   ├── provider_resolver
+  │       │   │       │   └── tool_dispatcher
+  │       │   │       ├── errors
+  │       │   │       ├── events
+  │       │   │       │   ├── event_emitter
+  │       │   │       │   ├── streaming_tool_parser
+  │       │   │       │   └── transcript_sink
+  │       │   │       ├── internal
+  │       │   │       │   ├── budget_ops
+  │       │   │       │   ├── cancel_checker
+  │       │   │       │   ├── classifier
+  │       │   │       │   ├── control
+  │       │   │       │   ├── cost_tracker
+  │       │   │       │   ├── emitter
+  │       │   │       │   ├── limit_checker
+  │       │   │       │   ├── state_persister
+  │       │   │       │   ├── text_tool_parser
+  │       │   │       │   ├── thread_chain_search
+  │       │   │       │   └── tool_result_guard
+  │       │   │       ├── loaders
+  │       │   │       │   ├── condition_evaluator
+  │       │   │       │   ├── config_loader
+  │       │   │       │   ├── coordination_loader
+  │       │   │       │   ├── error_loader
+  │       │   │       │   ├── events_loader
+  │       │   │       │   ├── hooks_loader
+  │       │   │       │   ├── interpolation
+  │       │   │       │   ├── resilience_loader
+  │       │   │       │   └── tool_schema_loader
+  │       │   │       ├── orchestrator
+  │       │   │       ├── persistence
+  │       │   │       │   ├── artifact_store
+  │       │   │       │   ├── budgets
+  │       │   │       │   ├── state_store
+  │       │   │       │   ├── thread_registry
+  │       │   │       │   ├── transcript
+  │       │   │       │   └── transcript_signer
+  │       │   │       ├── runner
+  │       │   │       ├── safety_harness
+  │       │   │       ├── security
+  │       │   │       │   └── security
+  │       │   │       └── thread_directive
+  │       │   ├── bash
+  │       │   ├── code
+  │       │   │   ├── diagnostics
+  │       │   │   │   ├── diagnostics
+  │       │   │   │   ├── package
+  │       │   │   │   └── package-lock
+  │       │   │   ├── git
+  │       │   │   │   └── git
+  │       │   │   ├── lsp
+  │       │   │   │   ├── lsp
+  │       │   │   │   ├── package
+  │       │   │   │   └── package-lock
+  │       │   │   ├── npm
+  │       │   │   │   ├── npm
+  │       │   │   │   ├── package
+  │       │   │   │   └── package-lock
+  │       │   │   ├── quality
+  │       │   │   │   └── gate
+  │       │   │   └── typescript
+  │       │   │       ├── package
+  │       │   │       ├── package-lock
+  │       │   │       └── typescript
+  │       │   ├── core
+  │       │   │   ├── bundler
+  │       │   │   │   ├── bundler
+  │       │   │   │   └── collect
+  │       │   │   ├── extractors
+  │       │   │   │   ├── directive
+  │       │   │   │   │   └── directive_extractor
+  │       │   │   │   ├── knowledge
+  │       │   │   │   │   └── knowledge_extractor
+  │       │   │   │   └── tool
+  │       │   │   │       └── tool_extractor
+  │       │   │   ├── keys
+  │       │   │   │   └── keys
+  │       │   │   ├── parsers
+  │       │   │   │   ├── javascript
+  │       │   │   │   │   └── javascript
+  │       │   │   │   ├── markdown
+  │       │   │   │   │   ├── frontmatter
+  │       │   │   │   │   └── xml
+  │       │   │   │   ├── python
+  │       │   │   │   │   └── ast
+  │       │   │   │   └── yaml
+  │       │   │   │       └── yaml
+  │       │   │   ├── primitives
+  │       │   │   │   ├── http_client
+  │       │   │   │   └── subprocess
+  │       │   │   ├── registry
+  │       │   │   │   └── registry
+  │       │   │   ├── runtimes
+  │       │   │   │   ├── bash
+  │       │   │   │   │   └── bash
+  │       │   │   │   ├── mcp
+  │       │   │   │   │   ├── http
+  │       │   │   │   │   └── stdio
+  │       │   │   │   ├── node
+  │       │   │   │   │   └── node
+  │       │   │   │   ├── python
+  │       │   │   │   │   ├── function
+  │       │   │   │   │   ├── lib
+  │       │   │   │   │   │   ├── condition_evaluator
+  │       │   │   │   │   │   ├── interpolation
+  │       │   │   │   │   │   └── module_loader
+  │       │   │   │   │   └── script
+  │       │   │   │   ├── rust
+  │       │   │   │   │   └── runtime
+  │       │   │   │   └── state-graph
+  │       │   │   │       ├── runtime
+  │       │   │   │       └── walker
+  │       │   │   ├── sinks
+  │       │   │   │   ├── file_sink
+  │       │   │   │   ├── null_sink
+  │       │   │   │   └── websocket_sink
+  │       │   │   ├── system
+  │       │   │   │   └── system
+  │       │   │   └── telemetry
+  │       │   │       └── telemetry
+  │       │   ├── dev
+  │       │   │   └── test_runner
+  │       │   ├── execute
+  │       │   ├── file-system
+  │       │   │   ├── edit_lines
+  │       │   │   ├── glob
+  │       │   │   ├── grep
+  │       │   │   ├── ls
+  │       │   │   ├── read
+  │       │   │   └── write
+  │       │   ├── load
+  │       │   ├── mcp
+  │       │   │   ├── connect
+  │       │   │   ├── discover
+  │       │   │   └── manager
+  │       │   ├── search
+  │       │   ├── sign
+  │       │   └── web
+  │       │       ├── browser
+  │       │       │   ├── browser
+  │       │       │   ├── package
+  │       │       │   └── package-lock
+  │       │       ├── fetch
+  │       │       │   └── fetch
+  │       │       └── search
+  │       │           └── search
+  │       └── test
+  │           ├── anchor_demo
+  │           │   ├── anchor_demo
+  │           │   └── helpers
+  │           └── test_registry_tool
+  └── sign
+      ├── directive
+      │   ├── init
+      │   ├── rye
+      │   │   ├── agent
+      │   │   │   ├── continuation
+      │   │   │   ├── core
+      │   │   │   │   ├── base
+      │   │   │   │   ├── base_execute_only
+      │   │   │   │   └── base_review
+      │   │   │   ├── graphs
+      │   │   │   │   ├── create_graph
+      │   │   │   │   ├── graph_orchestrator
+      │   │   │   │   └── state_graph
+      │   │   │   ├── setup_provider
+      │   │   │   └── threads
+      │   │   │       ├── create_threaded_directive
+      │   │   │       ├── orchestrator
+      │   │   │       ├── thread_directive
+      │   │   │       └── thread_summary
+      │   │   ├── authoring
+      │   │   │   ├── create_directive
+      │   │   │   ├── create_knowledge
+      │   │   │   └── create_tool
+      │   │   ├── bash
+      │   │   │   └── bash
+      │   │   ├── code
+      │   │   │   ├── diagnostics
+      │   │   │   ├── lsp
+      │   │   │   ├── npm
+      │   │   │   ├── quality
+      │   │   │   │   ├── build_with_review
+      │   │   │   │   └── review
+      │   │   │   └── typescript
+      │   │   ├── core
+      │   │   │   ├── bundler
+      │   │   │   │   ├── create_bundle
+      │   │   │   │   ├── inspect_bundle
+      │   │   │   │   ├── list_bundles
+      │   │   │   │   └── verify_bundle
+      │   │   │   ├── create_directive
+      │   │   │   ├── create_knowledge
+      │   │   │   ├── create_threaded_directive
+      │   │   │   ├── create_tool
+      │   │   │   ├── registry
+      │   │   │   │   ├── delete
+      │   │   │   │   ├── login
+      │   │   │   │   ├── login_poll
+      │   │   │   │   ├── logout
+      │   │   │   │   ├── publish
+      │   │   │   │   ├── pull
+      │   │   │   │   ├── push
+      │   │   │   │   ├── search
+      │   │   │   │   ├── signup
+      │   │   │   │   ├── unpublish
+      │   │   │   │   └── whoami
+      │   │   │   ├── system
+      │   │   │   └── telemetry
+      │   │   ├── file-system
+      │   │   │   ├── edit_lines
+      │   │   │   ├── glob
+      │   │   │   ├── grep
+      │   │   │   ├── ls
+      │   │   │   ├── read
+      │   │   │   └── write
+      │   │   ├── guides
+      │   │   │   ├── advanced_tools
+      │   │   │   ├── core_utils
+      │   │   │   ├── graphs
+      │   │   │   ├── mcp_discovery
+      │   │   │   ├── registry
+      │   │   │   ├── the_basics
+      │   │   │   └── threading
+      │   │   ├── mcp
+      │   │   │   ├── add_server
+      │   │   │   ├── connect
+      │   │   │   ├── discover
+      │   │   │   ├── list_servers
+      │   │   │   ├── refresh_server
+      │   │   │   └── remove_server
+      │   │   ├── primary
+      │   │   │   ├── execute
+      │   │   │   ├── load
+      │   │   │   ├── search
+      │   │   │   └── sign
+      │   │   └── web
+      │   │       ├── browser
+      │   │       ├── fetch
+      │   │       └── search
+      │   └── test
+      │       ├── anchor_demo
+      │       │   └── run_demo
+      │       ├── context
+      │       │   ├── base_context
+      │       │   ├── broad_capabilities_base
+      │       │   ├── full_hook_routed_composition_test
+      │       │   ├── hook_routed_base
+      │       │   ├── hook_routed_test
+      │       │   ├── inherited_capabilities_minimal
+      │       │   ├── inherited_capabilities_test
+      │       │   ├── leaf_context
+      │       │   ├── mid_context
+      │       │   ├── spawn_with_context
+      │       │   ├── suppress_test
+      │       │   └── tool_preload_test
+      │       ├── graphs
+      │       │   ├── analyze_code
+      │       │   ├── orchestrate_review
+      │       │   └── summarize_text
+      │       ├── limits
+      │       │   ├── budget_cascade_test
+      │       │   ├── depth_child
+      │       │   ├── depth_limit_test
+      │       │   ├── duration_limit_test
+      │       │   ├── limit_inheritance_test
+      │       │   ├── limit_test
+      │       │   ├── spawn_limit_test
+      │       │   ├── spend_limit_test
+      │       │   └── tokens_limit_test
+      │       ├── permissions
+      │       │   ├── perm_fs_only
+      │       │   ├── perm_inheritance_test
+      │       │   ├── perm_none
+      │       │   ├── perm_wildcard
+      │       │   └── perm_wrong_scope
+      │       ├── quality
+      │       │   ├── build_with_review_test
+      │       │   ├── practices_injection_test
+      │       │   ├── quality_gate_test
+      │       │   └── review_test
+      │       ├── tools
+      │       │   ├── file_system
+      │       │   │   ├── child_write
+      │       │   │   ├── write_and_read
+      │       │   │   └── write_file
+      │       │   ├── primary
+      │       │   │   ├── 03_search_and_report
+      │       │   │   ├── 04_load_and_summarize
+      │       │   │   ├── 05_research_and_write
+      │       │   │   ├── 06_create_and_sign
+      │       │   │   ├── 09_self_evolving_researcher
+      │       │   │   ├── auto_generated_echo
+      │       │   │   └── directive_lifecycle_test
+      │       │   └── threads
+      │       │       ├── 07_spawn_child
+      │       │       ├── 08_multi_thread_pipeline
+      │       │       ├── file_investigator
+      │       │       ├── parent_spawn
+      │       │       ├── spawn_chain_4_deep
+      │       │       └── spawn_chain_child
+      │       ├── zen_anthropic_test
+      │       ├── zen_gemini_test
+      │       └── zen_openai_test
+      ├── knowledge
+      │   ├── agent
+      │   │   └── threads
+      │   │       ├── rye
+      │   │       │   └── code
+      │   │       │       └── quality
+      │   │       │           ├── build_with_review
+      │   │       │           │   └── build_with_review-1772579687352
+      │   │       │           └── review
+      │   │       │               ├── review-1772579373854
+      │   │       │               └── review-1772579554156
+      │   │       └── test
+      │   │           ├── context
+      │   │           │   ├── full_hook_routed_composition_test
+      │   │           │   │   ├── full_hook_routed_composition_test-1772583394064
+      │   │           │   │   ├── full_hook_routed_composition_test-1772583494257
+      │   │           │   │   ├── full_hook_routed_composition_test-1772583676083
+      │   │           │   │   ├── full_hook_routed_composition_test-1772583720632
+      │   │           │   │   └── full_hook_routed_composition_test-1772584010604
+      │   │           │   ├── hook_routed_test
+      │   │           │   │   └── hook_routed_test-1772582885418
+      │   │           │   ├── inherited_capabilities_minimal
+      │   │           │   │   ├── inherited_capabilities_minimal-1772586965328
+      │   │           │   │   ├── inherited_capabilities_minimal-1772587091178
+      │   │           │   │   ├── inherited_capabilities_minimal-1772587447645
+      │   │           │   │   ├── inherited_capabilities_minimal-1772587477760
+      │   │           │   │   ├── inherited_capabilities_minimal-1772587902013
+      │   │           │   │   ├── inherited_capabilities_minimal-1772589653798
+      │   │           │   │   ├── inherited_capabilities_minimal-1772589888225
+      │   │           │   │   ├── inherited_capabilities_minimal-1772593691069
+      │   │           │   │   ├── inherited_capabilities_minimal-1772594617697
+      │   │           │   │   ├── inherited_capabilities_minimal-1772595101525
+      │   │           │   │   ├── inherited_capabilities_minimal-1772595182703
+      │   │           │   │   ├── inherited_capabilities_minimal-1772595299185
+      │   │           │   │   ├── inherited_capabilities_minimal-1772595448490
+      │   │           │   │   └── inherited_capabilities_minimal-1772595622430
+      │   │           │   ├── inherited_capabilities_test
+      │   │           │   │   ├── inherited_capabilities_test-1772584483505
+      │   │           │   │   ├── inherited_capabilities_test-1772585686330
+      │   │           │   │   ├── inherited_capabilities_test-1772586059173
+      │   │           │   │   ├── inherited_capabilities_test-1772586110971
+      │   │           │   │   ├── inherited_capabilities_test-1772586127855
+      │   │           │   │   ├── inherited_capabilities_test-1772586137637
+      │   │           │   │   ├── inherited_capabilities_test-1772586163839
+      │   │           │   │   ├── inherited_capabilities_test-1772586199137
+      │   │           │   │   ├── inherited_capabilities_test-1772586211145
+      │   │           │   │   ├── inherited_capabilities_test-1772586553251
+      │   │           │   │   ├── inherited_capabilities_test-1772586593705
+      │   │           │   │   ├── inherited_capabilities_test-1772586617160
+      │   │           │   │   ├── inherited_capabilities_test-1772586676670
+      │   │           │   │   ├── inherited_capabilities_test-1772586684440
+      │   │           │   │   ├── inherited_capabilities_test-1772586689255
+      │   │           │   │   ├── inherited_capabilities_test-1772586787755
+      │   │           │   │   └── inherited_capabilities_test-1772586794440
+      │   │           │   ├── leaf_context
+      │   │           │   │   ├── leaf_context-1771977968215
+      │   │           │   │   ├── leaf_context-1771978057773
+      │   │           │   │   ├── leaf_context-1771978651040
+      │   │           │   │   └── leaf_context-1771978657588
+      │   │           │   ├── spawn_with_context
+      │   │           │   │   ├── spawn_with_context-1771978093809
+      │   │           │   │   └── spawn_with_context-1771978613536
+      │   │           │   ├── suppress_test
+      │   │           │   │   ├── suppress_test-1772582747420
+      │   │           │   │   └── suppress_test-1772582847651
+      │   │           │   └── tool_preload_test
+      │   │           │       ├── tool_preload_test-1772582905505
+      │   │           │       ├── tool_preload_test-1772583366783
+      │   │           │       └── tool_preload_test-1772584243988
+      │   │           └── quality
+      │   │               ├── build_with_review_test
+      │   │               │   ├── build_with_review_test-1772579590035
+      │   │               │   └── build_with_review_test-1772579684650
+      │   │               ├── practices_injection_test
+      │   │               │   ├── practices_injection_test-1772579105276
+      │   │               │   ├── practices_injection_test-1772580694422
+      │   │               │   └── practices_injection_test-1772580972153
+      │   │               ├── quality_gate_test
+      │   │               │   ├── quality_gate_test-1772579115281
+      │   │               │   ├── quality_gate_test-1772579213526
+      │   │               │   └── quality_gate_test-1772579249172
+      │   │               └── review_test
+      │   │                   ├── review_test-1772579265434
+      │   │                   ├── review_test-1772579366390
+      │   │                   ├── review_test-1772579417678
+      │   │                   └── review_test-1772579544345
+      │   ├── rye
+      │   │   ├── agent
+      │   │   │   ├── core
+      │   │   │   │   ├── Behavior
+      │   │   │   │   ├── DirectiveInstruction
+      │   │   │   │   ├── Environment
+      │   │   │   │   ├── Identity
+      │   │   │   │   ├── ToolProtocol
+      │   │   │   │   └── protocol
+      │   │   │   │       ├── execute
+      │   │   │   │       ├── load
+      │   │   │   │       ├── search
+      │   │   │   │       └── sign
+      │   │   │   ├── provider-configuration
+      │   │   │   └── threads
+      │   │   │       ├── directive-extends
+      │   │   │       ├── limits-and-safety
+      │   │   │       ├── orchestrator-patterns
+      │   │   │       ├── permissions-in-threads
+      │   │   │       ├── persistence-and-state
+      │   │   │       ├── prompt-rendering
+      │   │   │       ├── spawning-patterns
+      │   │   │       ├── streaming
+      │   │   │       └── thread-lifecycle
+      │   │   ├── authoring
+      │   │   │   ├── directive-format
+      │   │   │   ├── knowledge-format
+      │   │   │   └── tool-format
+      │   │   ├── bash
+      │   │   │   └── bash-execution
+      │   │   ├── code
+      │   │   │   ├── code-tools
+      │   │   │   └── quality
+      │   │   │       ├── practices
+      │   │   │       └── scrap-and-retry
+      │   │   ├── core
+      │   │   │   ├── ai-directory
+      │   │   │   ├── bundler
+      │   │   │   │   └── bundle-format
+      │   │   │   ├── capability-strings
+      │   │   │   ├── executor-chain
+      │   │   │   ├── input-interpolation
+      │   │   │   ├── parsers
+      │   │   │   ├── registry
+      │   │   │   │   ├── registry-api
+      │   │   │   │   └── trust-model
+      │   │   │   ├── runtimes
+      │   │   │   │   ├── runtime-authoring
+      │   │   │   │   ├── standard-runtimes
+      │   │   │   │   ├── state-graph-runtime
+      │   │   │   │   └── state-graph-walker
+      │   │   │   ├── signing-and-integrity
+      │   │   │   ├── templating-systems
+      │   │   │   ├── terminology
+      │   │   │   └── three-tier-spaces
+      │   │   ├── dev
+      │   │   │   └── test-runner
+      │   │   ├── file-system
+      │   │   │   └── file-operations
+      │   │   ├── mcp
+      │   │   │   └── mcp-integration
+      │   │   ├── primary
+      │   │   │   ├── execute-semantics
+      │   │   │   ├── load-semantics
+      │   │   │   ├── search-semantics
+      │   │   │   └── sign-semantics
+      │   │   └── web
+      │   │       └── web-tools
+      │   ├── test
+      │   │   └── context
+      │   │       ├── alt-identity
+      │   │       ├── base-identity
+      │   │       ├── hook-routed-rules
+      │   │       ├── leaf-checklist
+      │   │       └── mid-rules
+      │   └── test-findings
+      └── tool
+          ├── graphs
+          │   ├── code-analysis-pipeline
+          │   ├── conditional-pipeline
+          │   ├── full-review-pipeline
+          │   ├── multi-thread-fanout
+          │   └── thread-monitor
+          ├── mcp
+          │   ├── campaign-kiwi
+          │   │   ├── execute
+          │   │   ├── load
+          │   │   └── search
+          │   ├── context7
+          │   │   ├── query-docs
+          │   │   └── resolve-library-id
+          │   ├── rye-os
+          │   │   ├── execute
+          │   │   ├── load
+          │   │   ├── search
+          │   │   └── sign
+          │   └── servers
+          │       ├── campaign-kiwi
+          │       ├── context7
+          │       └── rye-os
+          ├── rye
+          │   ├── agent
+          │   │   ├── permissions
+          │   │   │   ├── capabilities
+          │   │   │   │   ├── primary
+          │   │   │   │   └── tools
+          │   │   │   │       └── rye
+          │   │   │   │           ├── agent
+          │   │   │   │           ├── db
+          │   │   │   │           ├── fs
+          │   │   │   │           ├── git
+          │   │   │   │           ├── mcp
+          │   │   │   │           ├── net
+          │   │   │   │           ├── process
+          │   │   │   │           └── registry
+          │   │   │   └── capability_tokens
+          │   │   │       └── capability_tokens
+          │   │   ├── providers
+          │   │   │   ├── anthropic
+          │   │   │   │   └── anthropic
+          │   │   │   ├── openai
+          │   │   │   │   └── openai
+          │   │   │   └── zen
+          │   │   │       └── zen
+          │   │   └── threads
+          │   │       ├── adapters
+          │   │       │   ├── http_provider
+          │   │       │   ├── provider_adapter
+          │   │       │   ├── provider_resolver
+          │   │       │   └── tool_dispatcher
+          │   │       ├── errors
+          │   │       ├── events
+          │   │       │   ├── event_emitter
+          │   │       │   ├── streaming_tool_parser
+          │   │       │   └── transcript_sink
+          │   │       ├── internal
+          │   │       │   ├── budget_ops
+          │   │       │   ├── cancel_checker
+          │   │       │   ├── classifier
+          │   │       │   ├── control
+          │   │       │   ├── cost_tracker
+          │   │       │   ├── emitter
+          │   │       │   ├── limit_checker
+          │   │       │   ├── state_persister
+          │   │       │   ├── text_tool_parser
+          │   │       │   ├── thread_chain_search
+          │   │       │   └── tool_result_guard
+          │   │       ├── loaders
+          │   │       │   ├── condition_evaluator
+          │   │       │   ├── config_loader
+          │   │       │   ├── coordination_loader
+          │   │       │   ├── error_loader
+          │   │       │   ├── events_loader
+          │   │       │   ├── hooks_loader
+          │   │       │   ├── interpolation
+          │   │       │   ├── resilience_loader
+          │   │       │   └── tool_schema_loader
+          │   │       ├── orchestrator
+          │   │       ├── persistence
+          │   │       │   ├── artifact_store
+          │   │       │   ├── budgets
+          │   │       │   ├── state_store
+          │   │       │   ├── thread_registry
+          │   │       │   ├── transcript
+          │   │       │   └── transcript_signer
+          │   │       ├── runner
+          │   │       ├── safety_harness
+          │   │       ├── security
+          │   │       │   └── security
+          │   │       └── thread_directive
+          │   ├── bash
+          │   ├── code
+          │   │   ├── diagnostics
+          │   │   │   ├── diagnostics
+          │   │   │   ├── package
+          │   │   │   └── package-lock
+          │   │   ├── git
+          │   │   │   └── git
+          │   │   ├── lsp
+          │   │   │   ├── lsp
+          │   │   │   ├── package
+          │   │   │   └── package-lock
+          │   │   ├── npm
+          │   │   │   ├── npm
+          │   │   │   ├── package
+          │   │   │   └── package-lock
+          │   │   ├── quality
+          │   │   │   └── gate
+          │   │   └── typescript
+          │   │       ├── package
+          │   │       ├── package-lock
+          │   │       └── typescript
+          │   ├── core
+          │   │   ├── bundler
+          │   │   │   ├── bundler
+          │   │   │   └── collect
+          │   │   ├── extractors
+          │   │   │   ├── directive
+          │   │   │   │   └── directive_extractor
+          │   │   │   ├── knowledge
+          │   │   │   │   └── knowledge_extractor
+          │   │   │   └── tool
+          │   │   │       └── tool_extractor
+          │   │   ├── keys
+          │   │   │   └── keys
+          │   │   ├── parsers
+          │   │   │   ├── javascript
+          │   │   │   │   └── javascript
+          │   │   │   ├── markdown
+          │   │   │   │   ├── frontmatter
+          │   │   │   │   └── xml
+          │   │   │   ├── python
+          │   │   │   │   └── ast
+          │   │   │   └── yaml
+          │   │   │       └── yaml
+          │   │   ├── primitives
+          │   │   │   ├── http_client
+          │   │   │   └── subprocess
+          │   │   ├── registry
+          │   │   │   └── registry
+          │   │   ├── runtimes
+          │   │   │   ├── bash
+          │   │   │   │   └── bash
+          │   │   │   ├── mcp
+          │   │   │   │   ├── http
+          │   │   │   │   └── stdio
+          │   │   │   ├── node
+          │   │   │   │   └── node
+          │   │   │   ├── python
+          │   │   │   │   ├── function
+          │   │   │   │   ├── lib
+          │   │   │   │   │   ├── condition_evaluator
+          │   │   │   │   │   ├── interpolation
+          │   │   │   │   │   └── module_loader
+          │   │   │   │   └── script
+          │   │   │   ├── rust
+          │   │   │   │   └── runtime
+          │   │   │   └── state-graph
+          │   │   │       ├── runtime
+          │   │   │       └── walker
+          │   │   ├── sinks
+          │   │   │   ├── file_sink
+          │   │   │   ├── null_sink
+          │   │   │   └── websocket_sink
+          │   │   ├── system
+          │   │   │   └── system
+          │   │   └── telemetry
+          │   │       └── telemetry
+          │   ├── dev
+          │   │   └── test_runner
+          │   ├── execute
+          │   ├── file-system
+          │   │   ├── edit_lines
+          │   │   ├── glob
+          │   │   ├── grep
+          │   │   ├── ls
+          │   │   ├── read
+          │   │   └── write
+          │   ├── load
+          │   ├── mcp
+          │   │   ├── connect
+          │   │   ├── discover
+          │   │   └── manager
+          │   ├── search
+          │   ├── sign
+          │   └── web
+          │       ├── browser
+          │       │   ├── browser
+          │       │   ├── package
+          │       │   └── package-lock
+          │       ├── fetch
+          │       │   └── fetch
+          │       └── search
+          │           └── search
+          └── test
+              ├── anchor_demo
+              │   ├── anchor_demo
+              │   └── helpers
+              └── test_registry_tool
+```
+
+# test/context/inherited_capabilities_minimal
+
+## System Prompt (custom)
+
+You are a test agent running inside the context chain E2E test suite.
+This identity was injected via the base_context directive's <context><system> declaration.
+MARKER: BASE_IDENTITY_PRESENT
+
+---
+
+## Input — Turn 1
+
+<directive name="inherited_capabilities_minimal">
+<description>Minimal guidance — LLM must infer tool usage from capabilities block only.</description>
+<process>
+  <step name="call_tools">
+    <description>Call every tool in your capabilities block. List the project root, glob for *.md files, grep for "MARKER" in .ai/, read the .gitignore file, write a summary to outputs/inherited_caps_minimal.txt, and use rye_search and rye_load at least once each.</description>
+  </step>
+</process>
+When you have completed all steps, call the `directive_return` tool via the tool_use API with these fields:
+{  "result": "<Report confirming which tools were called (string) [required]>"
+  "tools_used": "<Comma-separated list of tool names that were called (string) [required]>"
+}
+
+If you are BLOCKED and cannot complete the directive, call `directive_return` with `status` set to `error` and `error_detail` describing what is missing or broken. Do NOT output directive_return as text — it MUST be a tool_use call.
+</directive>
+
+Execute the directive above now. Begin with step 1. Your first output must be tool calls — no narration. The inputs are already interpolated into the directive body.
+
+<test-findings id="test-findings" type="knowledge">
+## Test Findings
+
+This knowledge item is injected by the project-level hooks.yaml into every thread.
+It confirms that project hooks are working correctly.
+MARKER: PROJECT_HOOK_TEST_FINDINGS
+</test-findings>
+
+### Response — Turn 1
+
+### Tool: rye_file_system_ls
+
+```json
+{
+  "path": "."
+}
+```
+
+### Result
+
+```
+.ai/
+fixtures/
+outputs/
+scenarios/
+.env
+.gitignore
+```
+
+### Response — Turn 2
+
+### Tool: rye_file_system_glob
+
+```json
+{
+  "pattern": "*.md"
+}
+```
+
+### Result
+
+```
+.ai/directives/rye/code/quality/review.md
+.ai/directives/test/anchor_demo/run_demo.md
+.ai/directives/test/context/base_context.md
+.ai/directives/test/context/broad_capabilities_base.md
+.ai/directives/...
+```
+
+### Response — Turn 3
+
+### Tool: rye_file_system_grep
+
+```json
+{
+  "pattern": "MARKER",
+  "path": ".ai/"
+}
+```
+
+### Result
+
+```
+.ai/knowledge/test-findings.md:19│ MARKER: PROJECT_HOOK_TEST_FINDINGS
+.ai/directives/test/context/inherited_capabilities_test.md:35│ 3. rye/file-system/grep — search for "MARKER" in the project
+.ai/kn...
+```
+
+### Response — Turn 4
+
+### Tool: rye_file_system_read
+
+```json
+{
+  "path": ".gitignore"
+}
+```
+
+### Result
+
+```
+# LINE:LID│ content — LIDs are stable references for edit_lines, not file content
+1:a30706│ *
+2:22ef88│ !.gitignore
+3:e42ce9│ !.ai/
+4:6eb73f│ !.ai/directives/
+5:b2b29e│ !.ai/directives/**
+6:647bcb│ !.ai/knowledge/
+7:61a6b5│ !.ai/knowledge/**
+8:3b2ea2│ !.ai/tools/
+9:690fe1│ !.ai/tools/**
+10:ec5208│ __pycache__/
+11:6762a5│ !outputs/
+12:229b7d│ !outputs/.gitkeep
+```
+
+### Response — Turn 5
+
+### Tool: rye_file_system_write
+
+```json
+{
+  "path": "outputs/inherited_caps_minimal.txt",
+  "content": "This is a summary of the tools used in the inherited_capabilities_minimal directive."
+}
+```
+
+### Result
+
+```
+--- a/outputs/inherited_caps_minimal.txt
++++ b/outputs/inherited_caps_minimal.txt
+@@ -1,8 +1 @@
+-This is a minimal directive where the LLM must infer tool usage from the capabilities block alone.
+-The LLM called the following tools:
+-- rye_file_system_ls
+-- rye_file_system_glob
+-- rye_file_system_grep
+-- rye_file_system_read
+-- rye_file_system_write
+-It also used rye_search and rye_load at least once.+This is a summary of the tools used in the inherited_capabilities_minimal directive.
+```
+
+### Response — Turn 6
+
+### Tool: rye_search
+
+```json
+{
+  "query": "*",
+  "scope": "directive",
+  "space": "all"
+}
+```
+
+### Result
+
+```
+{
+  "results_count": 10,
+  "results_preview": [
+    {
+      "id": "test/anchor_demo/anchor_demo",
+      "name": "anchor_demo",
+      "title": "anchor_demo",
+      "description": "Demo tool testing anchor system with sibling imports",
+      "preview": "# rye:signed:2026-02-14T00:22:16Z:ac84c88e6bc82acd69566a7e9c0bbc95c7bcbec7830f0217ee7f2970818a8098:QxEPjk85cmhH3paGe__JNOHPxRFKQm-4368JhRx7ggPQhaudTPH5THGr-aUkXGd3ltcKidcs-_ySee_2TAE3Cg==:440443d0858f",
+      "source": "project",
+      "path": "/home/leo/projects/ryeos/tests/e2e/.ai/tools/test/anchor_demo/anchor_demo.py",
+      "score": 1.0,
+      "category": "test/anchor_demo",
+      "signed": false,
+      "type": "tool"
+    },
+    {
+      "id": "test/anchor_demo/helpers",
+      "name": "helpers",
+      "title": "helpers",
+      "description": "Helper module for anchor demo",
+      "preview": "# rye:signed:2026-02-14T00:22:36Z:4380a098d2e82cf0db4f62fb23d01465c53aa5dcc24b231622fd8c36b770469f:AkpI2WEzTuu21xOHWIxvIDLSX237bVZHfzxrSiztvgY9WBgSWG55Igo756YU8axYkc-uet2odmmN8WMYlTheCw==:440443d0858f",
+      "source": "project",
+      "path": "/home/leo/projects/ryeos/tests/e2e/.ai/tools/test/anchor_demo/helpers.py",
+      "score": 1.0,
+      "category": "test/anchor_demo",
+      "signed": false,
+      "type": "tool"
+    },
+    {
+      "id": "test/test_registry_tool",
+      "name": "test_registry_tool",
+      "title": "test_registry_tool",
+      "description": "Test tool for registry flow",
+      "preview": "# rye:validated:2026-02-04T07:40:00Z:e8df58d7dd74cef449d96731b430a10a2b1696abc8558503ae4a2c910be96908|rye-registry@leolilley\n\"\"\"Test tool for registry flow validation.\n\nA simple Python tool to test pu",
+      "source": "project",
+      "path": "/home/leo/projects/ryeos/tests/e2e/.ai/tools/test/test_registry_tool.py",
+      "score": 1.0,
+      "category": "test",
+      "signed": false,
+      "type": "tool"
+    }
+  ],
+  "total": 1282,
+  "query": "*",
+  "scope": "",
+  "space": "all",
+  "limit": 10,
+  "offset": 0,
+  "sear
+... (truncated)
+```
+
+### Response — Turn 7
+
+### Tool: rye_load
+
+```json
+{
+  "item_type": "directive",
+  "item_id": "test/context/inherited_capabilities_test"
+}
+```
+
+### Result
+
+```
+{
+  "content": "# Inherited Capabilities Test\n\nTests that capabilities from an extended directive are inherited into the leaf's\n`<capabilities>` XML. This directive has NO own permissions \u2014 it relies entirely\non inheriting all 4 capability types (execute, search, load, sign) from\nbroad_capabilities_base via the extends chain.\n\nExpected `<capabilities>` output:\n- All 6 rye/file-system/* tool schemas\n- rye/primary/rye_execute, rye_search, rye_load, rye_sign schemas\n- No rye/bash/bash\n\n```xml\n<directive name=\"inherited_capabilities_test\" version=\"1.0.0\" extends=\"test/context/broad_capabilities_base\">\n  <metadata>\n    <description>Tests capability inheritance \u2014 leaf has no permissions, inherits all 4 types from parent.</description>\n    <category>test/context</category>\n    <author>rye-os</author>\n    <model tier=\"fast\" />\n    <limits turns=\"8\" tokens=\"32000\" spend=\"0.15\" />\n  </metadata>\n\n  <outputs>\n    <result>Report confirming all tools were called successfully</result>\n  </outputs>\n</directive>\n```\n\n<process>\n  <step name=\"call_all_tools\">\n    <description>You MUST call every tool listed in your capabilities block. For each tool, make a real call:\n1. rye/file-system/read \u2014 read file \"README.md\"\n2. rye/file-system/ls \u2014 list the project root directory\n3. rye/file-system/grep \u2014 search for \"MARKER\" in the project\n4. rye/file-system/glob \u2014 find all .md files\n5. rye/file-system/write \u2014 write the results summary to outputs/inherited_caps_all_tools.txt\n6. rye/primary/rye_search \u2014 search for directives with query \"*\" scope \"directive\"\n7. rye/primary/rye_load \u2014 load knowledge item \"test/context/base-identity\"\n\nAfter all calls, write a final summary confirming which tools succeeded and which failed.</description>\n    <execute item_type=\"tool\" item_id=\"rye/file-system/write\">\n      <param name=\"path\" value=\"outputs/inherited_caps_all_tools.txt\" />\n      <par
+... (truncated)
+```
+
+### Response — Turn 8
+
+### Tool: directive_return
+
+```json
+{
+  "result": "This directive has called the following tools successfully:\n- rye_file_system_ls\n- rye_file_system_glob\n- rye_file_system_grep\n- rye_file_system_read\n- rye_file_system_write\n- rye_search\n- rye_load",
+  "tools_used": "rye_file_system_ls, rye_file_system_glob, rye_file_system_grep, rye_file_system_read, rye_file_system_write, rye_search, rye_load"
+}
+```
+
+### Result
+
+```
+{
+  "result": "This directive has called the following tools successfully:\n- rye_file_system_ls\n- rye_file_system_glob\n- rye_file_system_grep\n- rye_file_system_read\n- rye_file_system_write\n- rye_search\n- rye_load",
+  "tools_used": "rye_file_system_ls, rye_file_system_glob, rye_file_system_grep, rye_file_system_read, rye_file_system_write, rye_search, rye_load"
+}
+```
+
+---
+
+**Completed** -- 8 turns, 36838 tokens, $0.0101, 13.9s

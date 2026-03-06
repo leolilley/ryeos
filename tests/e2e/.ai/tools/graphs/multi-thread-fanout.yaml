@@ -1,4 +1,4 @@
-# rye:signed:2026-02-23T09:29:45Z:a2b15564164f2bb943bd1c7fbdf654fdee75f0a8e82e770d79d8d9c4685b68d9:J83-8jlD5Z_evVi90cc9q6-6RCt_pgTMVwTcBi7Zn61CSlZgd8CaBBWxWYzBdiqUj2-tQ3h5vtOApxd0ZywPBw==:9fbfabe975fa5a7f
+# rye:signed:2026-03-06T01:16:56Z:d45c0abb522c22e807f4640fc75d0a886af026abfa068696cf95f4cd298e40e5:PqcLOb-MA_UpDSr3njKJBIZCWcb2MlpfmP4cIlMr8aG6-JDrCErwWR-_VBydQ1MUKRl2SAOxSgDbByUc_PSYBw==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -24,7 +24,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir} && echo 'setup complete'"
       assign:
@@ -60,7 +60,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo '# Fan-Out Results' > ${inputs.output_dir}/combined.md && for f in ${inputs.output_dir}/summary_*.md; do echo '' >> ${inputs.output_dir}/combined.md && echo '---' >> ${inputs.output_dir}/combined.md && cat \"$f\" >> ${inputs.output_dir}/combined.md 2>/dev/null; done && echo 'collected' && cat ${inputs.output_dir}/combined.md"
       assign:
