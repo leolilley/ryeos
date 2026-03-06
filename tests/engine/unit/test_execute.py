@@ -1,12 +1,25 @@
 """Tests for execute tool."""
 
 import asyncio
+import importlib.util
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from rye.tools.execute import ExecuteTool, _resolve_input_refs, _interpolate_parsed
+from conftest import get_bundle_path
+from rye.tools.execute import ExecuteTool
+
+# Processors are data-driven core tools — load via bundle path
+_INTERPOLATE_PATH = get_bundle_path(
+    "core", "tools/rye/core/processors/inputs/interpolate.py"
+)
+_spec = importlib.util.spec_from_file_location("inputs_interpolate", _INTERPOLATE_PATH)
+_interpolate_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_interpolate_mod)
+
+_resolve_input_refs = _interpolate_mod._resolve_input_refs
+_interpolate_parsed = _interpolate_mod._interpolate_parsed
 
 
 @pytest.fixture

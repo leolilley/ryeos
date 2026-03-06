@@ -24,10 +24,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rye.constants import AI_DIR, ItemType
-from rye.directive_parser import parse_and_validate_directive
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
+from rye.utils.processor_router import ProcessorRouter
 from rye.utils.path_utils import (
     get_project_type_path,
     get_system_spaces,
@@ -37,9 +37,6 @@ from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.resolvers import get_user_space
 
 logger = logging.getLogger(__name__)
-
-# Re-export for backwards compatibility (used by tests)
-from rye.directive_parser import _resolve_input_refs, _interpolate_parsed  # noqa: F401
 
 
 class ExecuteTool:
@@ -63,6 +60,7 @@ class ExecuteTool:
         self.user_space = user_space or str(get_user_space())
         self.project_path = project_path
         self.parser_router = ParserRouter()
+        self.processor_router = ProcessorRouter()
 
         # Lazy-loaded executor (created per-project)
         self._executor: Optional[PrimitiveExecutor] = None
@@ -144,37 +142,48 @@ class ExecuteTool:
         if not file_path:
             return {"status": "error", "error": f"Directive not found: {item_id}"}
 
-        # 2. Parse and validate inputs (fast feedback)
+        # 2. Integrity check
         proj_path = Path(project_path) if project_path else None
-        validation = parse_and_validate_directive(
-            file_path=file_path,
-            item_id=item_id,
-            parameters=parameters,
-            project_path=proj_path,
-        )
-        if validation["status"] != "success":
+        try:
+            verify_item(file_path, ItemType.DIRECTIVE, project_path=proj_path)
+        except IntegrityError as exc:
+            return {"status": "error", "error": str(exc), "item_id": item_id}
+
+        # 3. Parse
+        content = file_path.read_text(encoding="utf-8")
+        parsed = self.parser_router.parse("markdown/xml", content)
+        if "error" in parsed:
+            return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
+
+        # 4. Validate inputs (data-driven processor)
+        processor_router = ProcessorRouter(proj_path)
+        validation = processor_router.run("inputs/validate", parsed, parameters)
+        if validation.get("status") == "error":
+            validation["item_id"] = item_id
             return validation
 
-        # 3. Dry run stops here
+        # 5. Interpolate placeholders (data-driven processor)
+        processor_router.run("inputs/interpolate", parsed, validation["inputs"])
+
+        # 6. Dry run stops here
         if dry_run:
             return {
                 "status": "validation_passed",
                 "type": ItemType.DIRECTIVE,
                 "item_id": item_id,
-                "data": validation["parsed"],
+                "data": parsed,
                 "inputs": validation["inputs"],
                 "message": "Directive validation passed (dry run)",
             }
 
-        # 4a. In-thread mode (default): return only the directive for
+        # 7a. In-thread mode (default): return only the directive for
         #     the LLM to follow.  Nothing else — extra fields distract.
         if not thread:
-            parsed = validation["parsed"]
             return {
                 "your_directions": parsed.get("body", ""),
             }
 
-        # 4b. Threaded mode: spawn managed thread via thread_directive tool
+        # 7b. Threaded mode: spawn managed thread via thread_directive tool
         #     Requires rye/agent infrastructure (thread_directive tool + LLM config)
         td_tool = "rye/agent/threads/thread_directive"
         if not self._find_item(project_path, ItemType.TOOL, td_tool):
