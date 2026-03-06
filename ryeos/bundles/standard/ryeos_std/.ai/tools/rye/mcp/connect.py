@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T03:05:59Z:4191694d0219313e98e76ca97347299ac36c1fe596e67ad8f1bea11ae05d449d:GQ0HhuH8_3S7hnBhLrjdGrlXs-YPKYHnxTDi8mD0-vuOsD5ykK_yGuFe3qCHaq7GVV2VQoLZlpeBrdj5TmejAg==:4b987fd4e40303ac
+# rye:signed:2026-03-05T23:56:31Z:9644659f63f7880a359cd5bbbba580928a7d4189913d26aca9f5ce75582526b1:25a4YItCKB35T9KwqPCbYVkHign-aPVj5Eelh4scbvlHZETuPR3bQfpmFnI5tMBriDufUHFr9v7b_g0fE9gJCQ==:4b987fd4e40303ac
 """
 MCP Connect Tool
 
@@ -257,8 +257,45 @@ async def call_stdio(
         }
 
 
+_ENVELOPE_KEYS = frozenset({"success", "tool", "content", "isError", "raw", "error", "error_type", "parsed"})
+
+
+def _try_parse_single_json_content(content_items: list) -> Any:
+    """Parse JSON from a single text content block.
+
+    MCP tools typically return structured data as JSON-encoded text inside
+    a content block.  When the response is a single text block containing
+    valid JSON, parse and return it so callers get structured data directly
+    instead of having to manually parse content[0].text.
+
+    Returns the parsed value on success, None otherwise.
+    """
+    if len(content_items) != 1:
+        return None
+    block = content_items[0]
+    if not isinstance(block, dict) or block.get("type") != "text":
+        return None
+    text = block.get("text")
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def _extract_result(tool_name: str, result: Any) -> Dict[str, Any]:
-    """Extract content from MCP tool result."""
+    """Extract content from MCP tool result.
+
+    When the MCP response is a single text content block containing valid
+    JSON, the parsed dict keys are promoted to the top level (alongside
+    the preserved ``content`` block) so consumers can access fields directly
+    — e.g. ``result["email"]["from_email"]`` instead of having to parse
+    ``result["content"][0]["text"]``.
+    """
     if hasattr(result, "content") and result.content:
         content_items = []
         for item in result.content:
@@ -271,12 +308,23 @@ def _extract_result(tool_name: str, result: Any) -> Dict[str, Any]:
             else:
                 content_items.append(str(item))
 
-        return {
+        out = {
             "success": True,
             "tool": tool_name,
             "content": content_items,
             "isError": getattr(result, "isError", False),
         }
+
+        parsed = _try_parse_single_json_content(content_items)
+        if isinstance(parsed, dict):
+            for k, v in parsed.items():
+                if k not in _ENVELOPE_KEYS and k not in out:
+                    out[k] = v
+            out["parsed"] = parsed
+        elif parsed is not None:
+            out["parsed"] = parsed
+
+        return out
     else:
         return {
             "success": True,
