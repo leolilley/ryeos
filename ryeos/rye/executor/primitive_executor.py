@@ -945,13 +945,15 @@ class PrimitiveExecutor:
             config["tool_path"] = str(tool_element.path)
 
             # Build params_json from parameters (excluding anchor context
-            # keys and non-serializable — these are execution metadata,
-            # not tool parameters)
+            # keys, runtime routing, and non-serializable metadata)
             _EXCLUDE_FROM_PARAMS = frozenset((
                 "env",
                 "tool_path", "tool_dir", "tool_parent",
                 "anchor_path", "runtime_lib",
                 "project_path", "user_space", "system_space",
+                "cwd", "timeout", "server", "tool_name",
+                "server_config_path", "resolved_config",
+                "fixed_params", "params_key",
             ))
             tool_params = {
                 k: v
@@ -959,6 +961,29 @@ class PrimitiveExecutor:
                 if k not in _EXCLUDE_FROM_PARAMS
                 and not k.startswith("__")
             }
+
+            # fixed_params: merge static params from tool config with
+            # LLM-provided params.  Fixed params cannot be overridden.
+            # If params_key is set, nest LLM params under that key
+            # (e.g. "params" for MCP execute wrappers).
+            fixed = config.get("fixed_params")
+            if isinstance(fixed, dict):
+                params_key = config.get("params_key")
+                if params_key:
+                    tool_params = {**fixed, params_key: tool_params}
+                else:
+                    overlap = fixed.keys() & tool_params.keys()
+                    if overlap:
+                        logger.warning(
+                            "Dropping caller params that collide with "
+                            "fixed_params: %s", sorted(overlap)
+                        )
+                        tool_params = {
+                            k: v for k, v in tool_params.items()
+                            if k not in fixed
+                        }
+                    tool_params = {**tool_params, **fixed}
+
             config["params_json"] = json.dumps(tool_params)
 
         # Template substitution for ${VAR} in config values
