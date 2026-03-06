@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T03:37:15Z:8020777b046a17554f284d51e89207d6ce1873af5e24f26091fadfb8cc893fb7:EMCIQgBZyTR-IQrngDafRh4AMd_lRqEh1gckwXQZ_l83-FbFuoZlnf7Q6N1hTUR0PaN8327IPIIH7Z_1rxB0Cg==:4b987fd4e40303ac
+# rye:signed:2026-03-06T02:08:14Z:78b52322270d95e43f421ea0ab791a1b738117d389686fd783d2e5469c84db67:aZQ1EXnDMuLDVq8eHwA1n3ZLC9qZYTWRJjfNoSw200hM2Git_6sM49OBcsEPXgW6jToPPac5h4NBK7tKTo2zDw==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -798,8 +798,12 @@ async def execute(params: Dict, project_path: str) -> Dict:
     directive_outputs = directive.get("outputs", [])
     if directive_outputs:
         harness._capabilities.append("rye.execute.tool.rye.agent.threads.directive_return")
+        harness.has_outputs = True
         if isinstance(directive_outputs, list):
-            harness.output_fields = [o["name"] for o in directive_outputs if o.get("name")]
+            harness.output_fields = [
+                o["name"] for o in directive_outputs
+                if o.get("name") and o.get("required")
+            ]
         elif isinstance(directive_outputs, dict):
             harness.output_fields = list(directive_outputs.keys())
 
@@ -973,10 +977,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
         thread_dir = proj_path / AI_DIR / "agent" / "threads" / thread_id
         spawn_log = str(thread_dir / "spawn.log")
 
-        # Write params to file — detached spawn has no stdin pipe
-        params_file = thread_dir / "spawn_params.json"
-        with open(params_file, "w") as f:
-            json.dump(child_params, f)
+        # Write params to thread dir for execution tracing
+        params_json = json.dumps(child_params)
+        trace_file = thread_dir / "spawn_params.json"
+        with open(trace_file, "w") as f:
+            f.write(params_json)
 
         spawn_result = await orchestrator_mod.spawn_detached(
             cmd=sys.executable,
@@ -985,10 +990,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 "--project-path", str(proj_path),
                 "--thread-id", thread_id,
                 "--pre-registered",
-                "--params-file", str(params_file),
             ],
             log_path=spawn_log,
             envs=_spawn_env(thread_id),
+            input_data=params_json,
         )
 
         if not spawn_result.get("success"):
@@ -1110,7 +1115,7 @@ if __name__ == "__main__":
             stream=sys.stderr,
         )
 
-    # Params come via stdin (script runtime delivers input_data via stdin pipe)
+    # Params come via stdin (script runtime or async spawn input_data)
     params = json.loads(sys.stdin.read())
     if args.thread_id:
         params["_thread_id"] = args.thread_id

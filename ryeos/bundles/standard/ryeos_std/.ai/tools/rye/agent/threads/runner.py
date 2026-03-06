@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T04:22:38Z:5754ff08c8945ef561702807a6a1f8678fa6b6d494a29c02bbd85df0200a5ad5:r2kxylQ8ioFIc47u1Z_pjpyCDZctLDAP02JBiYxiCzmebqDPNBeGUTptuhIM4rPln6GatCnhrJk4Dn_wiM2RAg==:4b987fd4e40303ac
+# rye:signed:2026-03-06T02:08:14Z:7611601f3611a18d232c101da6fd958c56edbd050c17f72272043dc121923de9:TdIZu2UZ3ykjZR-UYyN3wz9NMN7jxgOvJWlyJ58-UULGb2G13ZmV_dtg6EYRVZR3YM7ZaMB-amkPIywoVT-SDg==:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -400,7 +400,7 @@ async def run(
                 # expects structured outputs via directive_return. Empty
                 # responses after the LLM has already done work are treated
                 # as natural completion — not stalls worth nudging.
-                expects_return = bool(getattr(harness, "output_fields", None))
+                expects_return = getattr(harness, "has_outputs", False) or bool(getattr(harness, "output_fields", None))
                 nudge_count = getattr(harness, "_nudge_count", 0)
                 max_nudges = 2
 
