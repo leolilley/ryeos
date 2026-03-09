@@ -1,3 +1,3 @@
-from rye.protocols.remote_space import RemoteSpaceProvider
+from rye.protocols.registry_space import RegistrySpaceProvider
 
-__all__ = ["RemoteSpaceProvider"]
+__all__ = ["RegistrySpaceProvider"]

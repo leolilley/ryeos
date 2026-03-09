@@ -1,6 +1,6 @@
-"""Remote space provider protocol for extending search and load beyond local spaces.
+"""Registry space provider protocol for extending search and load beyond local spaces.
 
-Remote space providers allow tools (SearchTool, LoadTool) to access items
+Registry space providers allow tools (SearchTool, LoadTool) to access items
 from external sources (e.g., the Rye Registry) without hardcoding
 specific implementations.
 
@@ -11,13 +11,13 @@ providers in the dict returned by their `rye.bundles` entry point:
         return {
             "bundle_id": "ryeos-core",
             ...
-            "remote_space_providers": {
+            "registry_space_providers": {
                 "registry": "rye.core.registry.registry",
             },
         }
 
 The module path is relative to the bundle's .ai/tools/ directory.
-The module must export a `get_provider()` function returning a RemoteSpaceProvider.
+The module must export a `get_provider()` function returning a RegistrySpaceProvider.
 """
 
 import logging
@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-class RemoteSpaceProvider(ABC):
+class RegistrySpaceProvider(ABC):
     """Interface for remote item spaces (e.g., registry).
 
     Implementations provide search and pull capabilities for items

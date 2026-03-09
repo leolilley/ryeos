@@ -1,4 +1,4 @@
-"""Tests for registry load integration in LoadTool via RemoteSpaceProvider."""
+"""Tests for registry load integration in LoadTool via RegistrySpaceProvider."""
 
 import tempfile
 from pathlib import Path
@@ -20,7 +20,7 @@ def temp_project():
 
 
 def _mock_registry_provider(pull_result=None):
-    """Create a mock RemoteSpaceProvider for registry."""
+    """Create a mock RegistrySpaceProvider for registry."""
     provider = MagicMock()
     provider.provider_id = "registry"
     if pull_result is None:
@@ -45,14 +45,14 @@ def _mock_registry_provider(pull_result=None):
 
 @pytest.mark.asyncio
 class TestLoadFromRegistry:
-    """Test source=registry loads items via RemoteSpaceProvider."""
+    """Test source=registry loads items via RegistrySpaceProvider."""
 
     async def test_load_from_registry(self, temp_project):
         """source=registry pulls content via provider."""
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=provider,
         ):
             tool = LoadTool(str(temp_project))
@@ -78,7 +78,7 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=provider,
         ):
             tool = LoadTool(str(temp_project))
@@ -102,7 +102,7 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=provider,
         ):
             tool = LoadTool(str(temp_project))
@@ -127,7 +127,7 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=provider,
         ):
             tool = LoadTool(str(temp_project))
@@ -150,7 +150,7 @@ class TestLoadFromRegistry:
         )
 
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=provider,
         ):
             tool = LoadTool(str(temp_project))
@@ -167,7 +167,7 @@ class TestLoadFromRegistry:
     async def test_load_from_registry_no_provider(self, temp_project):
         """Missing provider returns clean error."""
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=None,
         ):
             tool = LoadTool(str(temp_project))
@@ -200,7 +200,7 @@ class TestLoadFromRegistry:
         })
 
         with patch(
-            "rye.tools.load.get_remote_provider",
+            "rye.tools.load.get_registry_provider",
             return_value=provider,
         ):
             tool = LoadTool(str(temp_project))

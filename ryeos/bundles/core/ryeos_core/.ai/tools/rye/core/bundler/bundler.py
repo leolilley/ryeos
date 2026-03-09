@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T22:32:56Z:2127dda2e0cbc338c7ddffd1c8a5fc6f417514b39e00310e11bf4632f9eb6558:Tde2ugj2YzQ008JItzz6e8pDG4l8Cy5sOShhQBzA4ZDtG5aueG2F26GR3ML7SJrqQdxkdNS8UkhcglznCcfHCw==:4b987fd4e40303ac
+# rye:signed:2026-03-09T22:23:59Z:c981f040c012b090f2fdcf55384e214dacd877d95ca689af114455d0cd556033:S97Te3o3U88t_NQ_GxBAgQVsdpEAUd9iYmsivotaoyRpSa42yfJH0sem2Knqd8xI-9aEMCEDa5W_MPIdcb6cCw==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -385,7 +385,7 @@ def _sign_manifest(content: str) -> str:
     content_hash = compute_content_hash(content)
     timestamp = generate_timestamp()
 
-    key_dir = get_user_space() / AI_DIR / "keys"
+    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
     private_pem, public_pem = ensure_keypair(key_dir)
 
     ed25519_sig = sign_hash(content_hash, private_pem)

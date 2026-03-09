@@ -9,7 +9,7 @@ from rye.constants import ItemType, AI_DIR
 from rye.utils.path_utils import get_project_type_path, get_system_spaces, get_user_space
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.integrity import verify_item, IntegrityError
-from rye.utils.remote_providers import get_remote_provider
+from rye.utils.registry_providers import get_registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class LoadTool:
         Pulls content and metadata from the remote provider. If a local
         destination is specified (project/user), writes the content to disk.
         """
-        provider = get_remote_provider(provider_id)
+        provider = get_registry_provider(provider_id)
         if not provider:
             return {
                 "status": "error",

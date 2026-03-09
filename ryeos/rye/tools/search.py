@@ -33,7 +33,7 @@ from rye.utils.path_utils import (
 )
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.parser_router import ParserRouter
-from rye.utils.remote_providers import get_remote_providers
+from rye.utils.registry_providers import get_registry_providers
 
 logger = logging.getLogger(__name__)
 
@@ -938,7 +938,7 @@ class SearchTool:
 
             # Include remote provider results when space is "registry" or "all"
             if opts.space in ("registry", "all"):
-                for provider in get_remote_providers().values():
+                for provider in get_registry_providers().values():
                     try:
                         remote_results = await provider.search(
                             query=opts.query,

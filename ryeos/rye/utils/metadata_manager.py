@@ -316,7 +316,7 @@ class MetadataManager:
     ) -> str:
         """Create Ed25519 signature for content.
 
-        Uses the keypair from ~/.ai/keys/ (created by `rye execute directive init`
+        Uses the keypair from ~/.ai/config/keys/signing/ (created by `rye execute directive init`
         or `rye/core/keys/keys generate`). Raises if no keypair exists.
         """
         strategy = cls.get_strategy(

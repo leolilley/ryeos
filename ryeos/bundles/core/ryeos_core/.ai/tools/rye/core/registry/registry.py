@@ -2515,10 +2515,10 @@ async def _unpublish_bundle(
 
 
 class RegistryProvider:
-    """RemoteSpaceProvider implementation for the Rye Registry.
+    """RegistrySpaceProvider implementation for the Rye Registry.
 
     Wraps the existing _search and _pull module functions behind the
-    RemoteSpaceProvider protocol. Discovered via bundle entry point.
+    RegistrySpaceProvider protocol. Discovered via bundle entry point.
     """
 
     @property
@@ -2625,7 +2625,7 @@ class RegistryProvider:
             return {"error": f"Pull failed: {e}"}
 
 
-# Register as a RemoteSpaceProvider — called by provider discovery
+# Register as a RegistrySpaceProvider — called by provider discovery
 def get_provider() -> RegistryProvider:
     """Return a RegistryProvider instance for remote space discovery."""
     return RegistryProvider()

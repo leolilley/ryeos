@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T03:23:27Z:139be71fcfb0c3cf1796442383b97dc6ed4f099b419afdafba422586619c8383:9qs9yPXRStYHcUF54teY83zP1zt0lfnqhdDM32uFIdU4s9K91mUHhFUadd1sMRnjiu4Eq82JkP9FxLAmK5AyBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-09T22:23:59Z:2a2bcfa945e7a3907987c5ec1789e36af6ee4cc02b8103035c2625f1de682139:Fk2NZEOuhtbcBbijR73ztv9FOfQfOy4OTe5mqGD1IdNoy07jTKqiSkLoonuJdlQHlYiuOc3C8bwsNcOREelsAQ==:4b987fd4e40303ac
 """Checkpoint signing for transcript integrity and JSON signing utilities.
 
 Signs transcript.jsonl at turn boundaries by appending checkpoint events
@@ -31,7 +31,7 @@ def _get_keypair():
     from rye.utils.path_utils import get_user_space
     from lillux.primitives.signing import ensure_keypair
 
-    key_dir = get_user_space() / AI_DIR / "keys"
+    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
     return ensure_keypair(key_dir)
 
 

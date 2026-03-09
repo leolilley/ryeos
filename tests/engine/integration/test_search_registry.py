@@ -1,4 +1,4 @@
-"""Tests for registry search integration in SearchTool via RemoteSpaceProvider."""
+"""Tests for registry search integration in SearchTool via RegistrySpaceProvider."""
 
 import tempfile
 from pathlib import Path
@@ -68,7 +68,7 @@ def _mock_registry_search_results():
 
 
 def _mock_registry_provider():
-    """Create a mock RemoteSpaceProvider for registry."""
+    """Create a mock RegistrySpaceProvider for registry."""
     provider = MagicMock()
     provider.provider_id = "registry"
     provider.search = AsyncMock(return_value=_mock_registry_search_results())
@@ -84,7 +84,7 @@ class TestRegistrySearchSpace:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={"registry": provider},
         ):
             tool = SearchTool("")
@@ -108,7 +108,7 @@ class TestRegistrySearchSpace:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={"registry": provider},
         ):
             tool = SearchTool("")
@@ -130,7 +130,7 @@ class TestRegistrySearchSpace:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={"registry": provider},
         ):
             tool = SearchTool("")
@@ -150,7 +150,7 @@ class TestRegistrySearchSpace:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={"registry": provider},
         ):
             tool = SearchTool("")
@@ -170,7 +170,7 @@ class TestRegistrySearchSpace:
         provider.search = AsyncMock(side_effect=Exception("Connection refused"))
 
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={"registry": provider},
         ):
             tool = SearchTool("")
@@ -188,7 +188,7 @@ class TestRegistrySearchSpace:
     async def test_no_providers_graceful(self, temp_project):
         """If no remote providers are discovered, search still works."""
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={},
         ):
             tool = SearchTool("")
@@ -206,7 +206,7 @@ class TestRegistrySearchSpace:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.search.get_remote_providers",
+            "rye.tools.search.get_registry_providers",
             return_value={"registry": provider},
         ):
             tool = SearchTool("")

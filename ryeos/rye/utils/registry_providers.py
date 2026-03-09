@@ -1,6 +1,6 @@
-"""Remote space provider discovery and management.
+"""Registry space provider discovery and management.
 
-Discovers RemoteSpaceProvider implementations declared by bundles
+Discovers RegistrySpaceProvider implementations declared by bundles
 via the ``rye.bundles`` entry point group.
 
 Bundles declare providers in their entry point dict::
@@ -8,14 +8,14 @@ Bundles declare providers in their entry point dict::
     def get_bundle() -> dict:
         return {
             ...
-            "remote_space_providers": {
+            "registry_space_providers": {
                 "registry": "rye/core/registry/registry",
             },
         }
 
 The value is a slash-separated module path relative to .ai/tools/.
 The module must export a ``get_provider()`` function returning a
-RemoteSpaceProvider instance.
+RegistrySpaceProvider instance.
 """
 
 import importlib.util
@@ -24,16 +24,16 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from rye.constants import AI_DIR
-from rye.protocols.remote_space import RemoteSpaceProvider
+from rye.protocols.registry_space import RegistrySpaceProvider
 from rye.utils.path_utils import get_system_spaces
 
 logger = logging.getLogger(__name__)
 
-_providers_cache: Optional[Dict[str, RemoteSpaceProvider]] = None
+_providers_cache: Optional[Dict[str, RegistrySpaceProvider]] = None
 
 
-def get_remote_providers() -> Dict[str, RemoteSpaceProvider]:
-    """Get all discovered remote space providers, keyed by provider_id.
+def get_registry_providers() -> Dict[str, RegistrySpaceProvider]:
+    """Get all discovered registry space providers, keyed by provider_id.
 
     Results are cached at module level after first discovery.
     """
@@ -41,7 +41,7 @@ def get_remote_providers() -> Dict[str, RemoteSpaceProvider]:
     if _providers_cache is not None:
         return _providers_cache
 
-    providers: Dict[str, RemoteSpaceProvider] = {}
+    providers: Dict[str, RegistrySpaceProvider] = {}
 
     for bundle in get_system_spaces():
         # Check if bundle entry point declared providers
@@ -52,23 +52,23 @@ def get_remote_providers() -> Dict[str, RemoteSpaceProvider]:
     return _providers_cache
 
 
-def get_remote_provider(provider_id: str) -> Optional[RemoteSpaceProvider]:
-    """Get a specific remote provider by ID, or None if not found."""
-    return get_remote_providers().get(provider_id)
+def get_registry_provider(provider_id: str) -> Optional[RegistrySpaceProvider]:
+    """Get a specific registry provider by ID, or None if not found."""
+    return get_registry_providers().get(provider_id)
 
 
-def clear_provider_cache() -> None:
+def clear_registry_provider_cache() -> None:
     """Clear the provider cache (useful for testing)."""
     global _providers_cache
     _providers_cache = None
 
 
 def _discover_bundle_providers(
-    bundle, providers: Dict[str, RemoteSpaceProvider]
+    bundle, providers: Dict[str, RegistrySpaceProvider]
 ) -> None:
     """Discover providers declared by a bundle.
 
-    Looks for ``remote_space_providers`` in the bundle's entry point
+    Looks for ``registry_space_providers`` in the bundle's entry point
     dict by re-loading the entry point function.
     """
     import importlib.metadata
@@ -83,7 +83,7 @@ def _discover_bundle_providers(
             if not isinstance(result, dict):
                 continue
 
-            declared = result.get("remote_space_providers")
+            declared = result.get("registry_space_providers")
             if not declared or not isinstance(declared, dict):
                 continue
 
@@ -104,7 +104,7 @@ def _discover_bundle_providers(
 
 def _load_provider_module(
     bundle_root: Path, module_path: str, provider_id: str
-) -> Optional[RemoteSpaceProvider]:
+) -> Optional[RegistrySpaceProvider]:
     """Load a provider module from a bundle and call get_provider().
 
     Args:

@@ -11,7 +11,7 @@ def get_bundle() -> dict:
         "version": version("ryeos-core"),
         "root_path": Path(__file__).parent,
         "categories": ["rye/core"],
-        "remote_space_providers": {
+        "registry_space_providers": {
             "registry": "rye/core/registry/registry",
         },
     }
