@@ -1,0 +1,136 @@
+# rye:signed:2026-03-10T04:14:30Z:355009ae2d725f74dcb16504c9e765c1620777fcd3fb35208bfd5ec818d8fab0:KMDuqRonCIexuoDEjJ5tseTELzoHVB2PGQwDMrZMVwvBfF7b63YfOIBp4TZ4T2kE0EgLjzLg89SduOWYFSzYDA==:4b987fd4e40303ac
+version: "1.0.0"
+tool_type: graph
+executor_id: rye/core/runtimes/state-graph/runtime
+category: graphs
+description: "Bash-only graph exercising CAS persistence, node caching, conditional routing, foreach, and on_error"
+permissions:
+  - rye.execute.tool.*
+
+config_schema:
+  type: object
+  properties:
+    output_dir:
+      type: string
+      default: "graph-output/cas-showcase"
+  required: []
+
+config:
+  start: setup
+  max_steps: 20
+  on_error: continue
+
+  nodes:
+    setup:
+      cache: true
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "mkdir -p ${inputs.output_dir} && echo 'initialized'"
+      assign:
+        initialized_at: "${_now}"
+        mode: "scan"
+      next: count_files
+
+    count_files:
+      cache: true
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "find /usr/bin -maxdepth 1 -type f | wc -l"
+      assign:
+        file_count: "${result.stdout}"
+      next: route_by_count
+
+    route_by_count:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "echo 'file_count=${state.file_count}'"
+      assign:
+        tasks:
+          - command: "uname -s"
+          - command: "uname -m"
+          - command: "date -u +%Y-%m-%dT%H:%M:%SZ"
+      next:
+        - to: fan_out
+          when:
+            path: state.file_count
+            op: gt
+            value: "10"
+        - to: simple_report
+
+    fan_out:
+      type: foreach
+      over: "${state.tasks}"
+      as: task
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "${task.command}"
+      collect: scan_results
+      next: trigger_error
+
+    trigger_error:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "cat /nonexistent/path 2>&1; exit 1"
+      on_error: recover
+      next: write_report
+
+    recover:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "echo 'recovered from intentional error'"
+      assign:
+        recovery: "on_error edge worked"
+      next: write_report
+
+    write_report:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: |
+            cat > ${inputs.output_dir}/report.json << JSONEOF
+            {
+              "initialized_at": "${state.initialized_at}",
+              "file_count": ${state.file_count},
+              "recovery": "${state.recovery}",
+              "scan_results_count": 3,
+              "status": "complete"
+            }
+            JSONEOF
+            cat ${inputs.output_dir}/report.json
+      assign:
+        final_report: "${result.stdout}"
+      next: done
+
+    simple_report:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/bash
+        params:
+          command: "echo '{\"file_count\": ${state.file_count}, \"status\": \"simple\"}'"
+      assign:
+        final_report: "${result.stdout}"
+      next: done
+
+    done:
+      type: return

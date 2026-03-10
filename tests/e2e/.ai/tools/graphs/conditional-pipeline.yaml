@@ -1,9 +1,14 @@
-# rye:signed:2026-03-06T01:16:22Z:6750f2b733932cddf60cf72bc7ce0cfce4c623e6b0bdf45bc9fa48544a6f5d5f:RA_TTeay2bHVU5XCmwDHKPgnztgW08rmH16uf0mQjwkgt2UUwSWE65jKpY0aDi7g0naDPMdbNxZrB79JCVZNAw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:14:30Z:5098d21758b10efb2440ca8d039b88e31cf76e2fcc347f3a4d498e072f6dd5b5:A5dkTHK2R82SWosqdkw8qy5cUJTOG70Bp8WIhcjd0ONOJFXUtTIITT47_5z9xTxU3xDnxS5IeqYMiCzWzFrICQ==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
 category: graphs
 description: "Test conditional branching, on_error recovery, and state accumulation"
+permissions:
+  - rye.execute.tool.*
+  - rye.execute.directive.*
+  - rye.search.*
+  - rye.load.*
 
 config_schema:
   type: object
@@ -23,7 +28,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir} && echo 'setup done'"
       assign:
@@ -36,7 +41,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo 'routing mode=${state.mode}'"
       next:
@@ -59,7 +64,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/analyze_code
+          directive_id: test/graphs/analyze_code
           inputs:
             code_snippet: |
               def fibonacci(n):
@@ -83,10 +88,11 @@ config:
 
     # Second pass: summarize the analysis
     run_summary:
+      cache: true
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "cat ${inputs.output_dir}/analysis.json 2>/dev/null || echo '{\"error\": \"not found\"}'"
       assign:
@@ -99,7 +105,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/summarize_text
+          directive_id: test/graphs/summarize_text
           inputs:
             text: "${state.analysis_content}"
             output_path: "${inputs.output_dir}/summary.md"
@@ -115,7 +121,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "cat /nonexistent/path/file.txt"
       on_error: recover_from_error
@@ -125,7 +131,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo 'recovered from error in trigger_error node'"
       assign:
@@ -136,7 +142,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo 'unknown mode: ${state.mode}'"
       assign:
@@ -147,7 +153,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: |
             cat > ${inputs.output_dir}/report.md << 'ENDREPORT'
