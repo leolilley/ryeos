@@ -1,4 +1,4 @@
-# rye:signed:2026-02-14T00:22:16Z:ac84c88e6bc82acd69566a7e9c0bbc95c7bcbec7830f0217ee7f2970818a8098:QxEPjk85cmhH3paGe__JNOHPxRFKQm-4368JhRx7ggPQhaudTPH5THGr-aUkXGd3ltcKidcs-_ySee_2TAE3Cg==:440443d0858f0199
+# rye:signed:2026-03-10T04:07:19Z:186450e22c28b23086a4cfdc235607cf130b3f77fe7164f8a2d35df4e53cbfb5:uI35E-cq-gM1_x1tDU12bMPmd95IEUiCXe03lFzqXuyO_T4d7o1V7lGL7Zdx_VoOSKP1Fpm82opa50RXR292AQ==:4b987fd4e40303ac
 """Anchor demo tool - tests the anchor system with multi-file imports.
 
 Imports a sibling helper module via PYTHONPATH injection from the

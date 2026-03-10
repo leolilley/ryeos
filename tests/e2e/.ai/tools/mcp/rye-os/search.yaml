@@ -1,4 +1,4 @@
-# rye:validated:2026-02-05T00:23:43Z:placeholder
+# rye:signed:2026-03-10T04:07:19Z:57544250c586a8cd07599648494c9a7e57a7ebd56388eaaf996e424414f165d9:L2aOc4hFmPbTTiTUAHqvFb1By381Sb5__Jhok01zoIz2VWCZ6AyqZ6sV9eXCL7ZLk-tQiVgL0powXlYA9P9yBw==:4b987fd4e40303ac
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/stdio
 category: mcp/rye-os

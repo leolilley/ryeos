@@ -1,4 +1,4 @@
-# rye:validated:2026-02-05T00:15:01Z:placeholder
+# rye:signed:2026-03-10T04:07:19Z:4f0e7664fb9ea6163761d3fff1015c1d9551ed3c6b32a3c7115bf8d710dc9bba:cG3ppxvDZ5jfBtZs5R-TkFKy9sa_T3agiWkXZ_s0NjAIXD5ZhjXw5saCztRcLeDpXhCickdaUhFYbpmnj5EzDA==:4b987fd4e40303ac
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
