@@ -1,9 +1,15 @@
-# rye:signed:2026-03-06T01:16:22Z:fb6983aed7e5d0142366cf235cdf8964ae0e2b5bd6568310f69b75dd29e1b30a:E1yLj8Fuw9ZwmOGs7zMfDNxDFnHiJ--3vXgnl9MqkMLLuLuSiCQEfzgM1uYzoB_8SG713vI4PyQQXj2lXnAnCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:35:37Z:8500aad691e30bcd121630422bf92e94e1bdce6e30b41337aeacb1d8d7253c40:80sdhFoPCG8qgdTMwIix_20wf_ql4aLsMjIVRhnTns0aDUGhiE5W98Xu1swG--WP_5HQ8ncl7SH_jUeb3VQoDA==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
 category: graphs
 description: "Complex pipeline: foreach analysis, conditional routing, nested LLM thread spawning via orchestrate_review, and nested graph execution"
+permissions:
+  - rye.execute.tool.*
+  - rye.execute.directive.*
+  - rye.search.*
+  - rye.load.*
+  - rye.sign.*
 
 config_schema:
   type: object
@@ -24,7 +30,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir}/samples ${inputs.output_dir}/analyses && echo 'setup done'"
       next: generate_samples
@@ -33,7 +39,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: |
             cat > ${inputs.output_dir}/samples/utils.py << 'PYEOF'
@@ -129,7 +135,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "cat ${file_info.path}"
       collect: file_contents
@@ -141,7 +147,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/analyze_code
+          directive_id: test/graphs/analyze_code
           inputs:
             code_snippet: "${state.file_contents.0.stdout}"
             output_path: "${state.files.0.analysis_path}"
@@ -158,7 +164,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/analyze_code
+          directive_id: test/graphs/analyze_code
           inputs:
             code_snippet: "${state.file_contents.1.stdout}"
             output_path: "${state.files.1.analysis_path}"
@@ -171,10 +177,11 @@ config:
 
     # ── Phase 3: Collect and evaluate ───────────────────────────────
     collect_analyses:
+      cache: true
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: |
             echo '{"analyses": [' > ${inputs.output_dir}/combined_analyses.json
@@ -198,7 +205,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo 'total_functions=${state.total_functions}'"
       next:
@@ -215,7 +222,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "cat ${inputs.output_dir}/samples/utils.py"
       assign:
@@ -228,7 +235,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/orchestrate_review
+          directive_id: test/graphs/orchestrate_review
           inputs:
             code_snippet: "${state.review_code}"
             output_dir: "${inputs.output_dir}"
@@ -245,7 +252,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "cat ${inputs.output_dir}/combined_analyses.json"
       assign:
@@ -258,7 +265,7 @@ config:
         item_type: tool
         item_id: rye/agent/threads/thread_directive
         params:
-          directive_name: test/graphs/summarize_text
+          directive_id: test/graphs/summarize_text
           inputs:
             text: "${state.summary_input}"
             output_path: "${inputs.output_dir}/quick_summary.md"
@@ -295,7 +302,7 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: "echo 'Nested graph failed, continuing with partial results'"
       assign:
@@ -307,10 +314,10 @@ config:
       action:
         primary: execute
         item_type: tool
-        item_id: rye/bash/bash
+        item_id: rye/bash
         params:
           command: |
-            cat > ${inputs.output_dir}/final_report.md << 'REPORTEOF'
+            cat > ${state.inputs.output_dir}/final_report.md << 'REPORTEOF'
             # Full Review Pipeline Report
 
             ## Pipeline Summary
@@ -320,19 +327,19 @@ config:
 
             ## Analysis Results
             REPORTEOF
-            echo '### utils.py' >> ${inputs.output_dir}/final_report.md
-            cat ${inputs.output_dir}/analyses/utils_analysis.json >> ${inputs.output_dir}/final_report.md 2>/dev/null
-            echo '' >> ${inputs.output_dir}/final_report.md
-            echo '### cache.py' >> ${inputs.output_dir}/final_report.md
-            cat ${inputs.output_dir}/analyses/cache_analysis.json >> ${inputs.output_dir}/final_report.md 2>/dev/null
-            echo '' >> ${inputs.output_dir}/final_report.md
-            echo '## Review / Summary' >> ${inputs.output_dir}/final_report.md
-            cat ${inputs.output_dir}/orchestrated_review.md >> ${inputs.output_dir}/final_report.md 2>/dev/null
-            cat ${inputs.output_dir}/quick_summary.md >> ${inputs.output_dir}/final_report.md 2>/dev/null
-            echo '' >> ${inputs.output_dir}/final_report.md
-            echo '## Nested Pipeline Output' >> ${inputs.output_dir}/final_report.md
-            cat ${inputs.output_dir}/nested-pipeline/report.md >> ${inputs.output_dir}/final_report.md 2>/dev/null
-            echo 'report complete' && cat ${inputs.output_dir}/final_report.md
+            echo '### utils.py' >> ${state.inputs.output_dir}/final_report.md
+            cat ${state.inputs.output_dir}/analyses/utils_analysis.json >> ${state.inputs.output_dir}/final_report.md 2>/dev/null
+            echo '' >> ${state.inputs.output_dir}/final_report.md
+            echo '### cache.py' >> ${state.inputs.output_dir}/final_report.md
+            cat ${state.inputs.output_dir}/analyses/cache_analysis.json >> ${state.inputs.output_dir}/final_report.md 2>/dev/null
+            echo '' >> ${state.inputs.output_dir}/final_report.md
+            echo '## Review / Summary' >> ${state.inputs.output_dir}/final_report.md
+            cat ${state.inputs.output_dir}/orchestrated_review.md >> ${state.inputs.output_dir}/final_report.md 2>/dev/null
+            cat ${state.inputs.output_dir}/quick_summary.md >> ${state.inputs.output_dir}/final_report.md 2>/dev/null
+            echo '' >> ${state.inputs.output_dir}/final_report.md
+            echo '## Nested Pipeline Output' >> ${state.inputs.output_dir}/final_report.md
+            cat ${state.inputs.output_dir}/nested-pipeline/report.md >> ${state.inputs.output_dir}/final_report.md 2>/dev/null
+            echo 'report complete' && cat ${state.inputs.output_dir}/final_report.md
       assign:
         final_report: "${result.stdout}"
       next: done
