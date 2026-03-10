@@ -1,8 +1,7 @@
-"""rye thread <directive_id> [--params '{...}'] [--model sonnet] [--max-spend 1.00] [--async]
+"""rye thread <directive_id> [--model sonnet] [--max-spend 1.00] [--async]
 
 Convenience alias for 'rye execute directive' with explicit thread-level flags.
-Separates thread flags (--model, --max-spend, --async, --max-turns) from
-directive inputs (--params).
+Directive inputs are read as JSON from stdin.
 """
 
 import sys
@@ -13,8 +12,6 @@ from rye_cli.output import run_async, print_result, parse_params
 def register(subparsers):
     p = subparsers.add_parser("thread", help="Spawn a directive thread")
     p.add_argument("directive_id", help="Directive ID (slash-separated path)")
-    p.add_argument("--params", default="{}", dest="params_json",
-                   help="Directive input parameters as JSON string")
 
     # Thread-level flags (known fixed set)
     p.add_argument("--model", help="LLM model to use")
@@ -29,7 +26,8 @@ def handle(args, project_path: str):
     from rye.tools.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
-    params = parse_params(args.params_json)
+    raw = sys.stdin.read().strip() if not sys.stdin.isatty() else "{}"
+    params = parse_params(raw)
 
     # Thread execution is always threaded
     params["thread"] = True

@@ -1,4 +1,8 @@
-"""rye execute <item_type> <item_id> [--params '{...}'] [--dry-run]"""
+"""rye execute <item_type> <item_id> [--dry-run]
+
+Parameters are read as JSON from stdin."""
+
+import sys
 
 from rye_cli.output import run_async, print_result, parse_params
 
@@ -8,8 +12,6 @@ def register(subparsers):
     p.add_argument("item_type", choices=["directive", "tool", "knowledge"],
                    help="Item type")
     p.add_argument("item_id", help="Item ID (slash-separated path)")
-    p.add_argument("--params", default="{}", dest="params_json",
-                   help="Parameters as JSON string (default: {})")
     p.add_argument("--dry-run", action="store_true",
                    help="Validate without executing")
     p.set_defaults(handler=handle)
@@ -19,7 +21,8 @@ def handle(args, project_path: str):
     from rye.tools.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
-    params = parse_params(args.params_json)
+    raw = sys.stdin.read().strip() if not sys.stdin.isatty() else "{}"
+    params = parse_params(raw)
 
     tool = ExecuteTool(str(get_user_space()))
     result = run_async(tool.handle(

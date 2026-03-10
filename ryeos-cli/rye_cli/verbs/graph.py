@@ -14,11 +14,9 @@ def register(subparsers):
     p = subparsers.add_parser("graph", help="State-graph operations")
     sub = p.add_subparsers(dest="subcommand", required=True)
 
-    # rye graph run <id> [--params] [--async]
+    # rye graph run <id> [--async]
     run_p = sub.add_parser("run", help="Run a graph end-to-end")
     run_p.add_argument("graph_id", help="Graph tool ID")
-    run_p.add_argument("--params", default="{}", dest="params_json",
-                       help="Input parameters as JSON string")
     run_p.add_argument("--async", action="store_true", dest="is_async",
                        help="Spawn in background, return run ID")
     run_p.add_argument("--capabilities", default="rye.execute.tool.*",
@@ -61,7 +59,8 @@ def _execute_graph(graph_id: str, params: dict, project_path: str):
 
 
 def handle_run(args, project_path: str):
-    params = parse_params(args.params_json)
+    raw = sys.stdin.read().strip() if not sys.stdin.isatty() else "{}"
+    params = parse_params(raw)
     params["capabilities"] = [c.strip() for c in args.capabilities.split(",")]
     params["depth"] = args.depth
 

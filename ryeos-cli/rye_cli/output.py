@@ -28,7 +28,7 @@ def parse_params(raw: str) -> Dict:
     try:
         params = json.loads(raw)
     except json.JSONDecodeError as e:
-        die(f"invalid JSON in --params: {e}")
+        die(f"invalid JSON in params: {e}")
     if not isinstance(params, dict):
-        die("--params must be a JSON object")
+        die("params must be a JSON object")
     return params
