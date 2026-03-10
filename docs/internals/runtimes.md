@@ -662,10 +662,9 @@ config:
     - "{server_config_path}"
     - "--tool"
     - "{tool_name}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 60
 
 config_schema:
@@ -717,10 +716,9 @@ config:
     - "{server_config_path}"
     - "--tool"
     - "{tool_name}"
-    - "--params"
-    - "{params_json}"
     - "--project-path"
     - "{project_path}"
+  input_data: "{params_json}"
   timeout: 60
 
 config_schema:

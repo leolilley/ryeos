@@ -287,16 +287,10 @@ require "optparse"
 # Parse CLI arguments
 options = {}
 OptionParser.new do |opts|
-  opts.on("--params JSON", String) { |v| options[:params] = v }
   opts.on("--project-path PATH", String) { |v| options[:project_path] = v }
 end.parse!
 
-# Load params from --params flag or stdin
-params = if options[:params]
-           JSON.parse(options[:params])
-         else
-           JSON.parse($stdin.read)
-         end
+params = JSON.parse($stdin.read)
 project_path = options[:project_path]
 
 begin
@@ -514,7 +508,7 @@ config:
 | Tool can't find libraries | Enable anchoring and set `PYTHONPATH`/`NODE_PATH`/`RUBYLIB` in `env_paths` |
 | Interpreter not found | Check `fallback` path exists, or set in `env` with static path |
 | Working directory wrong | Use `anchor.cwd: "{anchor_path}"` to set working directory |
-| Parameters not parsed | Tool must read params from stdin (or `--params` CLI fallback) and `--project-path` CLI arg |
+| Parameters not parsed | Tool must read params from stdin and `--project-path` CLI arg |
 | Timeout errors | Increase `config.timeout` in runtime YAML |
 | Output not JSON | Tool must return `print(json.dumps(...))` or equivalent |
 | `{params_json}` exceeds CLI arg limit | All standard runtimes now use `input_data: "{params_json}"` (stdin) by default, avoiding OS CLI arg size limits |

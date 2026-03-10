@@ -253,7 +253,7 @@ rye registry bundle pull ryeos-core
 
 ### Required Setup
 
-1. **Generate an API key**: `rye registry login` then `rye execute tool rye/core/registry/registry --params '{"action": "create_api_key"}'`
+1. **Generate an API key**: `rye registry login` then `echo '{"action": "create_api_key"}' | rye execute tool rye/core/registry/registry`
 2. **Add GitHub secret**: Add `RYE_REGISTRY_API_KEY` to the repository's `pypi` environment (Settings → Environments → pypi → Add secret)
 
 ## Troubleshooting

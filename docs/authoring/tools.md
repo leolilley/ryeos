@@ -150,17 +150,16 @@ def execute(params: dict, project_path: str) -> dict:
 
 The function can be sync or async — both are supported.
 
-### CLI Fallback
+### CLI Entry Point
 
-Tools also support direct CLI execution via `__main__`. The runtime passes params via stdin by default, but `--params` is supported as a CLI fallback:
+Tools also support direct CLI execution via `__main__`. The runtime passes params via stdin:
 
 ```python
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    params = json.loads(sys.stdin.read())
     result = execute(params, args.project_path)
     print(json.dumps(result))
 ```
@@ -254,28 +253,21 @@ Metadata is extracted by the `javascript/javascript` parser via regex, including
 
 ### CLI Entry Point
 
-The Node runtime passes parameters via stdin by default, with `--params` as a CLI fallback. Use `parseArgs` from `node:util`:
+The Node runtime passes parameters via stdin. Use `parseArgs` from `node:util`:
 
 ```typescript
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
   options: {
-    params: { type: "string" },
     "project-path": { type: "string" },
   },
 });
 
 async function main() {
-  let paramsJson: string;
-  if (values.params) {
-    paramsJson = values.params;
-  } else {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(chunk);
-    paramsJson = Buffer.concat(chunks).toString();
-  }
-  const params = JSON.parse(paramsJson);
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const params = JSON.parse(Buffer.concat(chunks).toString());
   const projectPath = values["project-path"]!;
   // ... use params and projectPath
 }
@@ -340,19 +332,13 @@ async function execute(params: Params, projectPath: string): Promise<Result> {
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  const paramsIdx = args.indexOf("--params");
   const projectPathIdx = args.indexOf("--project-path");
   const projectPath = args[projectPathIdx + 1];
 
   async function main() {
-    let paramsJson;
-    if (paramsIdx !== -1) {
-      paramsJson = args[paramsIdx + 1];
-    } else {
-      const chunks = [];
-      for await (const chunk of process.stdin) chunks.push(chunk);
-      paramsJson = Buffer.concat(chunks).toString();
-    }
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const paramsJson = Buffer.concat(chunks).toString();
     const result = await execute(JSON.parse(paramsJson), projectPath);
     console.log(JSON.stringify(result));
   }
@@ -419,19 +405,13 @@ async function execute(params, projectPath) {
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  const paramsIdx = args.indexOf("--params");
   const projectPathIdx = args.indexOf("--project-path");
   const projectPath = args[projectPathIdx + 1];
 
   async function main() {
-    let paramsJson;
-    if (paramsIdx !== -1) {
-      paramsJson = args[paramsIdx + 1];
-    } else {
-      const chunks = [];
-      for await (const chunk of process.stdin) chunks.push(chunk);
-      paramsJson = Buffer.concat(chunks).toString();
-    }
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const paramsJson = Buffer.concat(chunks).toString();
     const result = await execute(JSON.parse(paramsJson), projectPath);
     console.log(JSON.stringify(result));
   }
@@ -605,10 +585,9 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    params = json.loads(sys.stdin.read())
     result = execute(params, args.project_path)
     print(json.dumps(result))
 ```

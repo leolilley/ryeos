@@ -214,8 +214,8 @@ Use `ryeos-cli` when you want to invoke RYE from the terminal without an MCP cli
 
 ```bash
 rye search directive "lead generation"
-rye execute tool rye/bash --params '{"command": "ls"}'
-rye graph run my-project/graphs/pipeline --params '{"min_ccu": 50000}'
+echo '{"command": "ls"}' | rye execute tool rye/bash
+echo '{"min_ccu": 50000}' | rye graph run my-project/graphs/pipeline
 rye graph validate my-project/graphs/pipeline
 rye test my-project/tools/scraper --exclude-tags integration
 ```

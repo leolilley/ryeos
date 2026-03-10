@@ -12,7 +12,7 @@ status: implemented
 
 > **Status:** Implemented — `pip install ryeos-cli` (package at `ryeos-cli/`).
 > All verbs functional: `search`, `load`, `execute`, `sign`, `thread`, `graph` (run/step/validate), `test`.
-> Schema-driven flag expansion deferred — all verbs use `--params '{json}'` escape hatch for now.
+> Schema-driven flag expansion deferred — all verbs accept params via stdin for now.
 
 ## The Idea
 
@@ -171,7 +171,7 @@ The `graph` verb is a purpose-built interface for state-graph tools. Unlike `exe
 | CLI | What It Does | Walker Params |
 |-----|-------------|--------------|
 | `rye graph run <id>` | Run a graph end-to-end | `rye execute tool <id>` |
-| `rye graph run <id> --params '{...}'` | Run with input params | `parameters = json.loads(...)` |
+| `echo '{...}' \| rye graph run <id>` | Run with input params | `parameters = json.loads(stdin)` |
 | `rye graph run <id> --async` | Spawn in background, return run ID | `params.async = True` |
 | `rye graph step <id> --node X` | Execute one node only | `params.node = "X"` |
 | `rye graph step <id> --node X --resume-from <run_id>` | Step from checkpoint | `params.node = "X", resume = True, graph_run_id = "..."` |
@@ -189,7 +189,7 @@ rye graph run track-blox/graphs/scraper_pipeline
 # {"success": true, "state": {...}, "steps": 8}
 
 # Run with params
-rye graph run track-blox/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+echo '{"min_ccu": 50000}' | rye graph run track-blox/graphs/scraper_pipeline
 
 # Graph failed at node 5 — re-run just that node from the checkpoint
 rye graph step track-blox/graphs/scraper_pipeline \
@@ -215,7 +215,7 @@ rye graph validate track-blox/graphs/scraper_pipeline
 1. **Step mode** — execute one node with injected state (10x faster iteration on failures)
 2. **Validate mode** — static analysis without execution
 3. **Streaming progress** — stderr progress lines enabled by default (via walker's `_log_progress`)
-4. **Graph-aware flags** — `--node`, `--resume-from`, `--state`, `--params` as first-class flags instead of JSON parameter construction
+4. **Graph-aware flags** — `--node`, `--resume-from`, `--state` as first-class flags instead of JSON parameter construction
 
 The verb is a thin parameter translator — it constructs the same `walker.run_sync()` call that `rye execute tool` uses, just with graph-specific UX.
 
@@ -224,12 +224,12 @@ The verb is a thin parameter translator — it constructs the same `walker.run_s
 The `graph` verb imports `ryeos` directly (no MCP transport):
 
 ```
-rye graph run track-blox/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+echo '{"min_ccu": 50000}' | rye graph run track-blox/graphs/scraper_pipeline
     │
     ▼
 1. Parse subcommand: "run" → full execution
 2. Resolve graph tool: track-blox/graphs/scraper_pipeline → load YAML
-3. Map flags: --params → parameters dict
+3. Read stdin → parameters dict
 4. Call: walker.run_sync(graph_config, params, project_path)
 5. Stream: stderr progress (walker handles this), stdout JSON result
 ```
@@ -281,7 +281,7 @@ rye sign tool "my-project/*"                         # glob batch signing
 
 # Graph (state-graph specific operations)
 rye graph run track-blox/graphs/scraper_pipeline
-rye graph run track-blox/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+echo '{"min_ccu": 50000}' | rye graph run track-blox/graphs/scraper_pipeline
 rye graph run track-blox/graphs/scraper_pipeline --async
 rye graph step track-blox/graphs/scraper_pipeline --node store_results
 rye graph step track-blox/graphs/scraper_pipeline --node store_results --resume-from <run_id>
@@ -320,11 +320,11 @@ $ rye execute tool rye/agent/threads/internal/get_status --thread_id thread_abc1
 
 ### Parser Complexity
 
-The schema-driven parser needs to handle: string, integer, float, boolean, and list types. Nested objects (like `inputs` in thread_directive) add complexity. Is a full argparse-style parser worth it, or should the CLI accept `--params '{json}'` as an escape hatch for complex cases?
+The schema-driven parser needs to handle: string, integer, float, boolean, and list types. Nested objects (like `inputs` in thread_directive) add complexity. Is a full argparse-style parser worth it, or is stdin JSON sufficient for complex cases?
 
 ```bash
-# Escape hatch for complex params
-rye execute tool my/complex-tool --params '{"nested": {"key": "value"}, "list": [1, 2, 3]}'
+# Stdin for complex params
+echo '{"nested": {"key": "value"}, "list": [1, 2, 3]}' | rye execute tool my/complex-tool
 ```
 
 ### Discoverability

@@ -50,5 +50,5 @@ Every tool returns a dict with at minimum `success: bool`. On failure, an `error
 Or from the terminal via `ryeos-cli`:
 
 ```bash
-rye execute tool <namespace>/<tool_name> --params '{...}'
+echo '{...}' | rye execute tool <namespace>/<tool_name>
 ```

@@ -56,7 +56,7 @@ The CLI maps shell verbs directly to the four primitives — no MCP transport, n
 
 ```bash
 rye search directive "lead generation"
-rye execute tool rye/bash --params '{"command": "ls"}'
+echo '{"command": "ls"}' | rye execute tool rye/bash
 rye graph run my-project/graphs/pipeline
 rye test my-project/tools/scraper
 ```
