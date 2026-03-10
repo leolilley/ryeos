@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:78b52322270d95e43f421ea0ab791a1b738117d389686fd783d2e5469c84db67:aZQ1EXnDMuLDVq8eHwA1n3ZLC9qZYTWRJjfNoSw200hM2Git_6sM49OBcsEPXgW6jToPPac5h4NBK7tKTo2zDw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:19:21Z:c618880cf0712385b8e22534f010385a775843f4f21a91f57dcb8f7c35fab915:uYLtY_VWUMNK5ozkQXrN4oi7l2KDwYAz0y-HQSw1vr0js0RJoWa97b7PWVxbXUAbavcDBybMk83sPECZfd-dDQ==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -526,28 +526,30 @@ async def execute(params: Dict, project_path: str) -> Dict:
             return result
         directive = ParserRouter().parse("markdown_xml", result["content"])
     else:
-        # Use shared directive parser (avoids circular import with ExecuteTool
-        # now that execute directive spawns threads via this tool)
-        from rye.directive_parser import parse_and_validate_directive
+        # Data-driven: parse via ParserRouter, validate+interpolate via ProcessorRouter
+        from rye.utils.parser_router import ParserRouter
+        from rye.utils.processor_router import ProcessorRouter
         from rye.tools.execute import ExecuteTool
 
-        # Find the directive file using ExecuteTool's resolver
         exec_tool = ExecuteTool(user_space=user_space)
         file_path = exec_tool._find_item(project_path, "directive", directive_name)
         if not file_path:
             registry.update_status(thread_id, "error")
             return {"success": False, "error": f"Directive not found: {directive_name}", "thread_id": thread_id}
 
-        result = parse_and_validate_directive(
-            file_path=file_path,
-            item_id=directive_name,
-            parameters=inputs,
-            project_path=Path(project_path) if project_path else None,
-        )
-        if result["status"] != "success":
+        content = file_path.read_text(encoding="utf-8")
+        directive = ParserRouter().parse("markdown/xml", content)
+        if "error" in directive:
             registry.update_status(thread_id, "error")
-            return {"success": False, "error": result.get("error", "Directive validation failed"), "thread_id": thread_id}
-        directive = result["parsed"]
+            return {"success": False, "error": directive.get("error", "Directive parse failed"), "thread_id": thread_id}
+
+        proj_path_obj = Path(project_path) if project_path else None
+        processor_router = ProcessorRouter(proj_path_obj)
+        validation = processor_router.run("inputs/validate", directive, inputs)
+        if validation.get("status") == "error":
+            registry.update_status(thread_id, "error")
+            return {"success": False, "error": validation.get("error", "Directive validation failed"), "thread_id": thread_id}
+        processor_router.run("inputs/interpolate", directive, validation["inputs"])
 
     # 4. Resolve extends — fire resolve_extends hooks to route into extends chains
     hooks_loader = load_module("loaders/hooks_loader", anchor=_ANCHOR)
@@ -713,27 +715,28 @@ async def execute(params: Dict, project_path: str) -> Dict:
         )
 
         # Parse continuation directive (just parse + interpolate, don't spawn a thread)
-        from rye.directive_parser import parse_and_validate_directive
+        from rye.utils.parser_router import ParserRouter
+        from rye.utils.processor_router import ProcessorRouter
         from rye.tools.execute import ExecuteTool
         cont_exec_tool = ExecuteTool(user_space=user_space)
         cont_file = cont_exec_tool._find_item(project_path, "directive", cont_directive_id)
-        cont_result = {}
+        cont_prompt = cont_message
         if cont_file:
-            cont_result = parse_and_validate_directive(
-                file_path=cont_file,
-                item_id=cont_directive_id,
-                parameters={
+            cont_content = cont_file.read_text(encoding="utf-8")
+            cont_parsed = ParserRouter().parse("markdown/xml", cont_content)
+            if "error" not in cont_parsed:
+                cont_params = {
                     "original_directive": directive_name,
                     "original_directive_body": directive.get("body", ""),
                     "previous_thread_id": prev_tid,
                     "continuation_message": cont_message,
-                },
-                project_path=Path(project_path) if project_path else None,
-            )
-        if cont_result.get("status") == "success":
-            cont_prompt = cont_result["parsed"].get("body", cont_message)
-        else:
-            cont_prompt = cont_message
+                }
+                proj_path_obj = Path(project_path) if project_path else None
+                cont_processor = ProcessorRouter(proj_path_obj)
+                cont_validation = cont_processor.run("inputs/validate", cont_parsed, cont_params)
+                if cont_validation.get("status") != "error":
+                    cont_processor.run("inputs/interpolate", cont_parsed, cont_validation["inputs"])
+                    cont_prompt = cont_parsed.get("body", cont_message)
 
         trailing.append({"role": "user", "content": cont_prompt})
 
