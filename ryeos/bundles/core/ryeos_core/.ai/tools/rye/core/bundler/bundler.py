@@ -380,12 +380,12 @@ def _sign_manifest(content: str) -> str:
         compute_key_fingerprint,
     )
     from rye.utils.trust_store import TrustStore
-    from rye.utils.path_utils import get_user_space
+    from rye.utils.path_utils import get_signing_key_dir
 
     content_hash = compute_content_hash(content)
     timestamp = generate_timestamp()
 
-    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    key_dir = get_signing_key_dir()
     private_pem, public_pem = ensure_keypair(key_dir)
 
     ed25519_sig = sign_hash(content_hash, private_pem)

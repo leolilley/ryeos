@@ -3,9 +3,9 @@
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
 Walks a graph YAML tool definition, dispatching rye_execute calls for each
-node action.  State is persisted as a signed knowledge item after each step.
-Graph runs register in the thread registry for status tracking and
-wait_threads support.
+node action.  State is persisted as CAS execution_snapshot + state_snapshot
+objects after each step.  Graph runs register in the thread registry for
+status tracking and wait_threads support.
 
 Entry point: same pattern as thread_directive.py — argparse + asyncio.run().
 """
@@ -18,12 +18,11 @@ __tool_description__ = "State graph walker — traverses graph YAML tools"
 import argparse
 import asyncio
 import fnmatch
+import hashlib
 import json
 import logging
 import os
-import platform
 import re
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -150,14 +149,15 @@ class GraphTranscript:
     ) -> None:
         """Sign transcript JSONL at step boundary via TranscriptSigner.
 
-        If state is provided, emits a state_snapshot event before the
-        checkpoint so resume can reconstruct entirely from the jsonl.
+        If state is provided, stores it as a CAS state_snapshot object
+        and emits a state_checkpoint event with the hash pointer.
         """
         if state is not None:
-            self.write_event("state_snapshot", {
+            state_hash = self._store_state_snapshot(state)
+            self.write_event("state_checkpoint", {
                 "step": step,
                 "current_node": current_node,
-                "state": state,
+                "state_hash": state_hash or "",
             })
         transcript_signer = _try_load_module("persistence/transcript_signer")
         if transcript_signer is None:
@@ -167,13 +167,46 @@ class GraphTranscript:
         )
         signer.checkpoint(step)
 
+    def _store_state_snapshot(self, state: Dict) -> Optional[str]:
+        """Store state dict as CAS state_snapshot object. Returns hash or None."""
+        try:
+            from lillux.primitives import cas
+            from rye.cas.objects import StateSnapshot
+            from rye.cas.store import cas_root
+
+            root = cas_root(self._project_path)
+            snapshot = StateSnapshot(state=state)
+            return cas.store_object(snapshot.to_dict(), root)
+        except Exception:
+            logger.debug("Failed to store state snapshot in CAS", exc_info=True)
+            return None
+
     # -- Knowledge markdown (visual state + event history) --
+
+    def _load_execution_snapshot(self) -> Optional[Dict]:
+        """Load the latest execution_snapshot from CAS via ref."""
+        try:
+            from rye.cas.store import cas_root, read_ref
+            from lillux.primitives import cas
+
+            root = cas_root(self._project_path)
+            ref_path = (
+                self._project_path / AI_DIR / "objects" / "refs"
+                / "graphs" / f"{self._graph_run_id}.json"
+            )
+            snapshot_hash = read_ref(ref_path)
+            if not snapshot_hash:
+                return None
+            return cas.get_object(snapshot_hash, root)
+        except Exception:
+            logger.debug("Failed to load execution snapshot for render", exc_info=True)
+            return None
 
     def render_knowledge(
         self, status: str = "running", step_count: int = 0,
         total_elapsed_s: float = 0,
     ) -> Optional[Path]:
-        """Render signed knowledge markdown from JSONL events.
+        """Render signed knowledge markdown from CAS snapshot + JSONL events.
 
         Produces a markdown file with:
         1. YAML frontmatter (graph metadata)
@@ -181,11 +214,16 @@ class GraphTranscript:
         3. Step-by-step event history
         4. Footer with status summary
 
-        Overwritten from the JSONL source of truth at each step.
+        Reads execution_snapshot from CAS (via ref) for authoritative
+        node_receipts and system_version. Falls back to JSONL-only
+        if CAS is unavailable.
         """
         events = self._read_events()
         if not events:
             return None
+
+        # M5: Load execution snapshot from CAS for enrichment
+        snapshot = self._load_execution_snapshot()
 
         # Derive per-node state from events
         node_results: Dict[str, Dict] = {}
@@ -203,6 +241,9 @@ class GraphTranscript:
                     "action_id": p.get("action_id", ""),
                     "thread_id": p.get("thread_id", ""),
                     "step": p.get("step", 0),
+                    "cache_hit": p.get("cache_hit", False),
+                    "node_input_hash": p.get("node_input_hash", ""),
+                    "node_result_hash": p.get("node_result_hash", ""),
                 }
                 if current_running == node:
                     current_running = None
@@ -269,9 +310,16 @@ class GraphTranscript:
                 icon = "✅" if nr["status"] == "completed" else "❌"
                 dur = f'{nr["elapsed_s"]:.1f}s'
                 action = nr["action_id"]
-                details = (
-                    f'thread: `{nr["thread_id"]}`' if nr["thread_id"] else ""
-                )
+                detail_parts = []
+                if nr.get("thread_id"):
+                    detail_parts.append(f'thread: `{nr["thread_id"]}`')
+                if nr.get("cache_hit"):
+                    detail_parts.append("🔁 cached")
+                if nr.get("node_input_hash"):
+                    detail_parts.append(f'in: `{nr["node_input_hash"][:16]}`')
+                if nr.get("node_result_hash"):
+                    detail_parts.append(f'out: `{nr["node_result_hash"][:16]}`')
+                details = " ".join(detail_parts)
                 parts.append(
                     f'| {nr["step"]} | {node_name} | {icon}'
                     f" | {dur} | {action} | {details} |\n"
@@ -295,10 +343,13 @@ class GraphTranscript:
         }
         label = labels.get(status, status.title())
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        parts.append(
-            f"---\n\n**{label}** — {step_count} steps,"
-            f" {duration_str}, {now}\n"
-        )
+        footer = f"---\n\n**{label}** — {step_count} steps, {duration_str}, {now}\n"
+        if snapshot:
+            sys_ver = snapshot.get("system_version", "")
+            n_receipts = len(snapshot.get("node_receipts", []))
+            if sys_ver:
+                footer += f"\n`system_version: {sys_ver}` | `receipts: {n_receipts}`\n"
+        parts.append(footer)
 
         content = "".join(parts)
 
@@ -309,7 +360,7 @@ class GraphTranscript:
             / "agent" / "graphs" / self._graph_id
         )
         knowledge_dir.mkdir(parents=True, exist_ok=True)
-        knowledge_path = knowledge_dir / f"{self._graph_run_id}-transcript.md"
+        knowledge_path = knowledge_dir / f"{self._graph_run_id}.md"
 
         signature = MetadataManager.create_signature(ItemType.KNOWLEDGE, content)
         signed_content = signature + content
@@ -368,6 +419,8 @@ class GraphTranscript:
             thread_id = p.get("thread_id", "")
             next_node = p.get("next_node")
             error = p.get("error", "")
+            node_input_hash = p.get("node_input_hash", "")
+            node_result_hash = p.get("node_result_hash", "")
 
             if status != "error":
                 line = f"✅ completed ({elapsed_s:.1f}s)"
@@ -375,6 +428,8 @@ class GraphTranscript:
                 line = f"❌ error ({elapsed_s:.1f}s): {error}"
             if thread_id:
                 line += f" — thread: `{thread_id}`"
+            if node_input_hash or node_result_hash:
+                line += f" | input: `{node_input_hash[:16]}` result: `{node_result_hash[:16]}`"
             if next_node:
                 line += f" → `{next_node}`"
             return line + "\n\n"
@@ -789,6 +844,67 @@ def _find_error_edge(node: Dict) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _get_system_version() -> str:
+    """Return installed ryeos-core version, or dev fallback."""
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        return version("ryeos-core")
+    except PackageNotFoundError:
+        try:
+            return version("ryeos")
+        except PackageNotFoundError:
+            return "0.0.0-dev"
+
+
+def _compute_node_result_hash(result: Dict, project_path: str = "") -> str:
+    """Store NodeResult in CAS and return its hash.
+
+    Falls back to compute-only if CAS is unavailable.
+    """
+    from rye.cas.objects import NodeResult
+    node_result = NodeResult(result=result)
+
+    if project_path:
+        try:
+            from lillux.primitives import cas
+            from rye.cas.store import cas_root
+            root = cas_root(Path(project_path))
+            return cas.store_object(node_result.to_dict(), root)
+        except Exception:
+            logger.warning("Failed to store NodeResult in CAS", exc_info=True)
+            return ""
+
+    from lillux.primitives.integrity import compute_integrity
+    return compute_integrity(node_result.to_dict())
+
+
+def _store_node_receipt(
+    project_path: str,
+    node_input_hash: str,
+    node_result_hash: str,
+    cache_hit: bool,
+    elapsed_ms: int,
+) -> Optional[str]:
+    """Create and store a NodeReceipt as a CAS object. Returns hash or None."""
+    try:
+        from lillux.primitives import cas
+        from rye.cas.objects import NodeReceipt
+        from rye.cas.store import cas_root
+
+        receipt = NodeReceipt(
+            node_input_hash=node_input_hash,
+            node_result_hash=node_result_hash,
+            cache_hit=cache_hit,
+            elapsed_ms=elapsed_ms,
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        root = cas_root(Path(project_path))
+        return cas.store_object(receipt.to_dict(), root)
+    except Exception:
+        logger.warning("Failed to store NodeReceipt", exc_info=True)
+        return None
+
+
 async def _persist_state(
     project_path: str,
     graph_id: str,
@@ -797,46 +913,47 @@ async def _persist_state(
     current_node: Optional[str],
     status: str,
     step_count: int,
-) -> None:
-    """Write graph state as a signed knowledge item.
+    node_receipts: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Store graph state as CAS execution_snapshot + state_snapshot objects.
 
-    Atomic write (temp → rename) to prevent corruption.
+    Writes state_snapshot and execution_snapshot to CAS, updates mutable ref.
+    Returns execution_snapshot hash, or None on failure.
     """
-    proj = Path(project_path)
-    knowledge_dir = proj / AI_DIR / "knowledge" / "agent" / "graphs" / graph_id
-    knowledge_dir.mkdir(parents=True, exist_ok=True)
-    knowledge_path = knowledge_dir / f"{graph_run_id}.md"
+    try:
+        from lillux.primitives import cas
+        from rye.cas.objects import ExecutionSnapshot, StateSnapshot
+        from rye.cas.store import cas_root, write_ref
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID", "")
+        proj = Path(project_path)
+        root = cas_root(proj)
 
-    frontmatter = (
-        f"```yaml\n"
-        f"id: graphs/{graph_id}/{graph_run_id}\n"
-        f'title: "State: {graph_id} ({graph_run_id})"\n'
-        f"entry_type: graph_state\n"
-        f"category: graphs/{graph_id}\n"
-        f'version: "1.0.0"\n'
-        f"graph_id: {graph_id}\n"
-        f"graph_run_id: {graph_run_id}\n"
-        f"parent_thread_id: {parent_thread_id}\n"
-        f"status: {status}\n"
-        f"current_node: {current_node or ''}\n"
-        f"step_count: {step_count}\n"
-        f"updated_at: {now}\n"
-        f"tags: [graph_state]\n"
-        f"```\n\n"
-    )
+        # Store state as CAS object
+        state_snapshot = StateSnapshot(state=state)
+        state_hash = cas.store_object(state_snapshot.to_dict(), root)
 
-    body = json.dumps(state, indent=2, default=str)
-    content = frontmatter + body
+        # Store execution snapshot
+        snapshot = ExecutionSnapshot(
+            graph_run_id=graph_run_id,
+            graph_id=graph_id,
+            step=step_count,
+            status=status,
+            state_hash=state_hash,
+            system_version=_get_system_version(),
+            node_receipts=list(node_receipts or []),
+        )
+        snapshot_hash = cas.store_object(snapshot.to_dict(), root)
 
-    signature = MetadataManager.create_signature(ItemType.KNOWLEDGE, content)
-    signed_content = signature + content
+        # Update mutable ref
+        refs_dir = proj / AI_DIR / "objects" / "refs" / "graphs"
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        ref_path = refs_dir / f"{graph_run_id}.json"
+        write_ref(ref_path, snapshot_hash)
 
-    tmp_path = knowledge_path.with_suffix(".md.tmp")
-    tmp_path.write_text(signed_content, encoding="utf-8")
-    tmp_path.rename(knowledge_path)
+        return snapshot_hash
+    except Exception:
+        logger.warning("CAS state persistence failed for %s", graph_run_id, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +984,7 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
     _KNOWN_NODE_KEYS = frozenset({
         "type", "action", "next", "on_error", "assign",
         "over", "as", "collect", "parallel", "env_requires",
+        "cache",
     })
 
     has_return = False
@@ -1132,57 +1250,72 @@ def _follow_continuation_chain(
 def _load_resume_state(
     project_path: str, graph_id: str, graph_run_id: str
 ) -> Optional[Dict]:
-    """Load and verify a persisted graph state for resume.
+    """Load a persisted graph state for resume via CAS execution_snapshot ref.
 
-    Source of truth is the transcript.jsonl in the graph run directory.
-    Integrity is verified via the last checkpoint (same TranscriptSigner
-    used by thread transcripts). State is reconstructed from the last
-    state_snapshot event in the jsonl.
+    Reads the mutable ref at .ai/objects/refs/graphs/{run_id}.json,
+    loads the execution_snapshot, then loads the state_snapshot by hash.
+    Verifies transcript integrity before returning.
 
     Returns dict with 'state', 'current_node', 'step_count' on success.
-    Returns None if transcript not found or integrity check fails.
+    Returns None if ref not found or CAS objects missing.
     """
+    from rye.cas.store import read_ref, cas_root
+    from lillux.primitives import cas
+
     proj = Path(project_path)
+    root = cas_root(proj)
+
+    # Load execution snapshot via ref
+    ref_path = proj / AI_DIR / "objects" / "refs" / "graphs" / f"{graph_run_id}.json"
+    snapshot_hash = read_ref(ref_path)
+    if not snapshot_hash:
+        logger.warning("No CAS ref for %s — cannot resume", graph_run_id)
+        return None
+
+    snapshot = cas.get_object(snapshot_hash, root)
+    if not snapshot or not snapshot.get("state_hash"):
+        logger.warning("Invalid execution snapshot for %s", graph_run_id)
+        return None
+
+    state_obj = cas.get_object(snapshot["state_hash"], root)
+    if not state_obj or "state" not in state_obj:
+        logger.warning("State snapshot missing for %s", graph_run_id)
+        return None
+
+    # Verify transcript integrity
     jsonl_path = proj / AI_DIR / "agent" / "graphs" / graph_run_id / "transcript.jsonl"
-    if not jsonl_path.exists():
-        logger.warning("No transcript.jsonl for %s — cannot resume", graph_run_id)
-        return None
+    if jsonl_path.exists():
+        transcript_signer = _try_load_module("persistence/transcript_signer")
+        if transcript_signer is not None:
+            signer = transcript_signer.TranscriptSigner(graph_run_id, jsonl_path.parent)
+            verify_result = signer.verify(allow_unsigned_trailing=True)
+            if not verify_result.get("valid", False):
+                logger.warning(
+                    "Transcript integrity failed for %s: %s",
+                    graph_run_id, verify_result.get("error", "unknown"),
+                )
+                return None
 
-    # Verify transcript integrity via checkpoint signatures
-    transcript_signer = _try_load_module("persistence/transcript_signer")
-    if transcript_signer is None:
-        return None
-    signer = transcript_signer.TranscriptSigner(graph_run_id, jsonl_path.parent)
-    verify_result = signer.verify(allow_unsigned_trailing=True)
-    if not verify_result.get("valid", False):
-        logger.warning(
-            "Transcript integrity failed for %s: %s",
-            graph_run_id, verify_result.get("error", "unknown"),
-        )
-        return None
-
-    # Find the last state_snapshot event
-    last_snapshot = None
-    with open(jsonl_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("event_type") == "state_snapshot":
-                last_snapshot = event.get("payload", {})
-
-    if not last_snapshot or "state" not in last_snapshot:
-        logger.warning("No state_snapshot in transcript for %s", graph_run_id)
-        return None
+    # Extract current_node from the last state_checkpoint event in JSONL
+    current_node = None
+    if jsonl_path.exists():
+        with open(jsonl_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event_type") == "state_checkpoint":
+                    current_node = event.get("payload", {}).get("current_node")
 
     return {
-        "state": last_snapshot["state"],
-        "current_node": last_snapshot.get("current_node"),
-        "step_count": last_snapshot.get("step", 0),
+        "state": state_obj["state"],
+        "current_node": current_node,
+        "step_count": snapshot.get("step", 0),
+        "node_receipts": snapshot.get("node_receipts", []),
     }
 
 
@@ -1279,6 +1412,7 @@ async def execute(
         state = resumed["state"]
         current = resumed["current_node"]
         step_count = resumed["step_count"]
+        node_receipt_hashes: List[str] = list(resumed.get("node_receipts", []))
 
         if not current:
             return {
@@ -1292,6 +1426,7 @@ async def execute(
         await _persist_state(
             project_path, graph_id, graph_run_id,
             state, current, "running", step_count,
+            node_receipts=node_receipt_hashes,
         )
     else:
         # Fresh run
@@ -1302,6 +1437,7 @@ async def execute(
         state: Dict[str, Any] = {**initial_state, "inputs": params}
         current = cfg.get("start")
         step_count = 0
+        node_receipt_hashes: List[str] = []
 
         # Validate inputs
         config_schema = graph_config.get("config_schema")
@@ -1323,6 +1459,7 @@ async def execute(
         await _persist_state(
             project_path, graph_id, graph_run_id,
             state, current, "running", step_count,
+            node_receipts=node_receipt_hashes,
         )
 
         # Fire graph_started hooks (only on fresh runs)
@@ -1391,6 +1528,7 @@ async def execute(
             await _persist_state(
                 project_path, graph_id, graph_run_id,
                 state, current, "completed", step_count,
+                node_receipts=node_receipt_hashes,
             )
             if registry is not None:
                 registry.update_status(graph_run_id, "completed")
@@ -1434,6 +1572,7 @@ async def execute(
             await _persist_state(
                 project_path, graph_id, graph_run_id,
                 state, current, "running", step_count,
+                node_receipts=node_receipt_hashes,
             )
             if target_node:
                 return {
@@ -1479,6 +1618,7 @@ async def execute(
             await _persist_state(
                 project_path, graph_id, graph_run_id,
                 state, current, "running", step_count,
+                node_receipts=node_receipt_hashes,
             )
             if target_node:
                 return {
@@ -1527,11 +1667,66 @@ async def execute(
             action.get("item_type", "tool"),
             action.get("item_id", ""),
         )
+        cache_hit = False
+        node_cache_key = None
+        node_result_hash = ""
         if denied:
             result = denied
         else:
-            raw_result = await _dispatch_action(action, project_path)
-            result = _unwrap_result(raw_result)
+            # Node cache lookup (opt-in via `cache: true`)
+            if node.get("cache", False):
+                try:
+                    from rye.cas.node_cache import compute_cache_key, cache_lookup
+                    from rye.cas.config_snapshot import compute_agent_config_snapshot
+
+                    graph_hash_val = hashlib.sha256(
+                        json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str).encode()
+                    ).hexdigest()
+
+                    config_snap_hash, _ = compute_agent_config_snapshot(project_path)
+
+                    # lockfile_hash=None: lockfiles are tool-level, not
+                    # graph-node-level — graph nodes don't have their own lockfiles.
+                    node_cache_key = compute_cache_key(
+                        graph_hash=graph_hash_val,
+                        node_name=executed_node,
+                        interpolated_action=action,
+                        lockfile_hash=None,
+                        config_snapshot_hash=config_snap_hash,
+                    )
+
+                    cached = cache_lookup(node_cache_key, Path(project_path))
+                    if cached is not None:
+                        result = cached["result"]
+                        node_result_hash = cached["node_result_hash"]
+                        cache_hit = True
+                        logger.debug("Cache HIT for node %s (key=%s)", executed_node, node_cache_key[:16])
+                except Exception as exc:
+                    logger.warning("Cache check failed for node %s: %s", executed_node, exc, exc_info=True)
+
+            if not cache_hit:
+                raw_result = await _dispatch_action(action, project_path)
+                result = _unwrap_result(raw_result)
+
+                # Store in cache on successful execution
+                if node.get("cache", False) and node_cache_key and result.get("status") != "error":
+                    try:
+                        from rye.cas.node_cache import cache_store
+                        stored_hash = cache_store(
+                            node_cache_key, result, Path(project_path),
+                            executed_node, int((time.monotonic() - node_start) * 1000),
+                        )
+                        if stored_hash:
+                            node_result_hash = stored_hash
+                    except Exception:
+                        logger.debug("Cache store failed for node %s", executed_node, exc_info=True)
+
+        # Compute node_result_hash if not already set (non-cached or cache-off)
+        if not node_result_hash and result:
+            try:
+                node_result_hash = _compute_node_result_hash(result, project_path)
+            except Exception:
+                logger.warning("Failed to compute node_result_hash for %s", executed_node, exc_info=True)
 
         # Handle continuation chains for LLM nodes
         if (
@@ -1579,6 +1774,7 @@ async def execute(
                 await _persist_state(
                     project_path, graph_id, graph_run_id,
                     state, current, "running", step_count,
+                    node_receipts=node_receipt_hashes,
                 )
                 continue
             if error_mode == "fail":
@@ -1593,6 +1789,7 @@ async def execute(
                 await _persist_state(
                     project_path, graph_id, graph_run_id,
                     state, current, "error", step_count,
+                    node_receipts=node_receipt_hashes,
                 )
                 if registry is not None:
                     registry.update_status(graph_run_id, "error")
@@ -1624,6 +1821,20 @@ async def execute(
         current = _evaluate_edges(next_spec, state, result)
 
         node_elapsed = time.monotonic() - node_start
+        node_elapsed_ms = int(node_elapsed * 1000)
+
+        # M2: Store NodeReceipt for audit trail
+        receipt_hash = _store_node_receipt(
+            project_path,
+            node_input_hash=node_cache_key or "",
+            node_result_hash=node_result_hash,
+            cache_hit=cache_hit,
+            elapsed_ms=node_elapsed_ms,
+        )
+        if receipt_hash:
+            node_receipt_hashes.append(receipt_hash)
+
+        # m6: Full hashes in step_completed events
         graph_transcript.write_event("step_completed", {
             "step": step_count, "node": executed_node,
             "action_id": action_id,
@@ -1632,18 +1843,22 @@ async def execute(
             "next_node": current,
             "thread_id": result.get("thread_id", ""),
             "error": result.get("error", ""),
+            "cache_hit": cache_hit,
+            "node_input_hash": node_cache_key or "",
+            "node_result_hash": node_result_hash,
         })
         added_keys = set(state.keys()) - state_keys_before
         _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error" if result.get("status") == "error" else "ok", detail=f"+{', '.join(sorted(added_keys))}" if added_keys else "")
         graph_transcript.checkpoint(step_count, state=state, current_node=current)
-        graph_transcript.render_knowledge(
-            "running", step_count, time.monotonic() - graph_start_time,
-        )
 
-        # Persist + sign state after each step
+        # Persist state before rendering so render_knowledge sees latest snapshot
         await _persist_state(
             project_path, graph_id, graph_run_id,
             state, current, "running", step_count,
+            node_receipts=node_receipt_hashes,
+        )
+        graph_transcript.render_knowledge(
+            "running", step_count, time.monotonic() - graph_start_time,
         )
 
         # Fire after_step hooks
@@ -1672,7 +1887,7 @@ async def execute(
 
         # Cancellation check
         cancel_path = (
-            Path(project_path) / AI_DIR / "threads" / graph_run_id / "cancel"
+            Path(project_path) / AI_DIR / "agent" / "graphs" / graph_run_id / "cancel"
         )
         if cancel_path.exists():
             elapsed = time.monotonic() - graph_start_time
@@ -1684,8 +1899,10 @@ async def execute(
             await _persist_state(
                 project_path, graph_id, graph_run_id,
                 state, current, "cancelled", step_count,
+                node_receipts=node_receipt_hashes,
             )
-            registry.update_status(graph_run_id, "cancelled")
+            if registry is not None:
+                registry.update_status(graph_run_id, "cancelled")
             return {
                 "success": False,
                 "status": "cancelled",
@@ -1712,8 +1929,10 @@ async def execute(
     await _persist_state(
         project_path, graph_id, graph_run_id,
         state, current, "error", step_count,
+        node_receipts=node_receipt_hashes,
     )
-    registry.update_status(graph_run_id, "error")
+    if registry is not None:
+        registry.update_status(graph_run_id, "error")
     await _run_hooks(
         "graph_completed",
         {
@@ -1838,6 +2057,100 @@ async def _handle_foreach(
     return next_node, state
 
 
+def _foreach_cache_context(node: Dict, project_path: str) -> Optional[tuple]:
+    """Pre-compute cache context for foreach iterations if cache is enabled.
+
+    Returns (graph_hash, config_snap_hash) or None if cache disabled.
+    """
+    if not node.get("cache", False):
+        return None
+    try:
+        from rye.cas.config_snapshot import compute_agent_config_snapshot
+        config_snap_hash, _ = compute_agent_config_snapshot(project_path)
+        return ("foreach", config_snap_hash)
+    except Exception:
+        return None
+
+
+async def _foreach_dispatch_one(
+    node: Dict,
+    action: Dict,
+    exec_ctx: Dict,
+    project_path: str,
+    node_name: str,
+    cache_ctx: Optional[tuple],
+) -> tuple:
+    """Dispatch a single foreach iteration with optional caching.
+
+    Returns (collected_value, receipt_hash_or_None).
+    """
+    denied = _check_permission(
+        exec_ctx,
+        action.get("primary", "execute"),
+        action.get("item_type", "tool"),
+        action.get("item_id", ""),
+    )
+
+    cache_hit = False
+    node_cache_key = ""
+    node_result_hash = ""
+    iter_start = time.monotonic()
+
+    if denied:
+        result = denied
+    elif cache_ctx:
+        graph_hash_val, config_snap_hash = cache_ctx
+        try:
+            from rye.cas.node_cache import compute_cache_key, cache_lookup, cache_store
+            node_cache_key = compute_cache_key(
+                graph_hash=graph_hash_val,
+                node_name=node_name,
+                interpolated_action=action,
+                lockfile_hash=None,
+                config_snapshot_hash=config_snap_hash,
+            )
+            cached = cache_lookup(node_cache_key, Path(project_path))
+            if cached is not None:
+                result = cached["result"]
+                node_result_hash = cached["node_result_hash"]
+                cache_hit = True
+            else:
+                raw_result = await _dispatch_action(action, project_path)
+                result = _unwrap_result(raw_result)
+                if result.get("status") != "error":
+                    stored = cache_store(
+                        node_cache_key, result, Path(project_path),
+                        node_name, int((time.monotonic() - iter_start) * 1000),
+                    )
+                    if stored:
+                        node_result_hash = stored
+        except Exception:
+            raw_result = await _dispatch_action(action, project_path)
+            result = _unwrap_result(raw_result)
+    else:
+        raw_result = await _dispatch_action(action, project_path)
+        result = _unwrap_result(raw_result)
+
+    if not node_result_hash and result:
+        try:
+            node_result_hash = _compute_node_result_hash(result, project_path)
+        except Exception:
+            logger.warning("Failed to compute node_result_hash for foreach %s", node_name, exc_info=True)
+
+    elapsed_ms = int((time.monotonic() - iter_start) * 1000)
+    receipt_hash = _store_node_receipt(
+        project_path,
+        node_input_hash=node_cache_key,
+        node_result_hash=node_result_hash,
+        cache_hit=cache_hit,
+        elapsed_ms=elapsed_ms,
+    )
+
+    if result.get("status") == "error" or result.get("success") is False:
+        return result, receipt_hash
+    return result.get("thread_id", result), receipt_hash
+
+
 async def _foreach_sequential(
     node: Dict,
     items: List,
@@ -1849,6 +2162,7 @@ async def _foreach_sequential(
 ) -> List:
     """Execute foreach items one at a time."""
     collected: List[Any] = []
+    cache_ctx = _foreach_cache_context(node, project_path)
 
     for item in items:
         state[as_var] = item
@@ -1864,22 +2178,11 @@ async def _foreach_sequential(
                 action.get("params", {}), exec_ctx
             )
 
-        denied = _check_permission(
-            exec_ctx,
-            action.get("primary", "execute"),
-            action.get("item_type", "tool"),
-            action.get("item_id", ""),
+        value, _receipt = await _foreach_dispatch_one(
+            node, action, exec_ctx, project_path,
+            f"foreach_{as_var}", cache_ctx,
         )
-        if denied:
-            result = denied
-        else:
-            raw_result = await _dispatch_action(action, project_path)
-            result = _unwrap_result(raw_result)
-
-        if result.get("status") == "error" or result.get("success") is False:
-            collected.append(result)
-        else:
-            collected.append(result.get("thread_id", result))
+        collected.append(value)
 
     return collected
 
@@ -1893,6 +2196,7 @@ async def _foreach_parallel(
     project_path: str,
 ) -> List:
     """Dispatch all foreach items concurrently via asyncio.gather."""
+    cache_ctx = _foreach_cache_context(node, project_path)
 
     async def _run_one(item: Any) -> Any:
         interp_ctx: Dict[str, Any] = {
@@ -1909,17 +2213,11 @@ async def _foreach_parallel(
                 action.get("params", {}), exec_ctx
             )
 
-        denied = _check_permission(
-            exec_ctx,
-            action.get("primary", "execute"),
-            action.get("item_type", "tool"),
-            action.get("item_id", ""),
+        value, _receipt = await _foreach_dispatch_one(
+            node, action, exec_ctx, project_path,
+            f"foreach_{as_var}", cache_ctx,
         )
-        if denied:
-            return denied
-        raw_result = await _dispatch_action(action, project_path)
-        result = _unwrap_result(raw_result)
-        return result.get("thread_id", result)
+        return value
 
     return list(await asyncio.gather(*[_run_one(item) for item in items]))
 

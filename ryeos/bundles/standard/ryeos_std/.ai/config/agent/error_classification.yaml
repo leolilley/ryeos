@@ -1,6 +1,6 @@
-# rye:signed:2026-03-01T08:21:13Z:4a0108178063b64125aa5718679aba1bf0485857af753706f4ca634e1a782137:oTA53Hw770SZq_yZ_4YpDlzPnn43jDyLFR5jGRbLTYWN_Vb2c09tyaTLfSj4SElUv4vuOqk_XMy3qYfeLkNWBw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:36:57Z:c5a5f08dd812950350c7df8e65ff323bd50f1dcb86a2a7d6bb04bce35bc876dd:zShVTy0yB9U9chtPbokjG_EzPcLjktugvqWrG6lmjwGt-LzM2fJyM2v6H4HrWdXQlUPcHvgml16wq8h0kNhjBQ==:4b987fd4e40303ac
 # config/error_classification.yaml
-category: "rye/agent/threads/config"
+category: "agent"
 tool_type: "config"
 version: "1.0.0"
 description: "Error classification patterns, retry policies, and operators for thread error handling"

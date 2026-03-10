@@ -1,4 +1,4 @@
-# rye:signed:2026-03-04T03:05:59Z:cbf7b94102d0d220b48f750a4e59f4de54bdda2e24da58c089bbbb29ef8c6cc2:IHo-sWPuiLNZFaCjMi1coiel69cnFLGfKpuJUhAak8XhCntEw5n0wrSN3cR2ebOdJ-MbXPOb-kGofQiwrnBOCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:28:20Z:cbf7b94102d0d220b48f750a4e59f4de54bdda2e24da58c089bbbb29ef8c6cc2:IHo-sWPuiLNZFaCjMi1coiel69cnFLGfKpuJUhAak8XhCntEw5n0wrSN3cR2ebOdJ-MbXPOb-kGofQiwrnBOCQ==:4b987fd4e40303ac
 """Execute a directive, tool, or knowledge item via rye."""
 
 import argparse

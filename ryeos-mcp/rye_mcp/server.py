@@ -187,7 +187,7 @@ class RYEServer:
                         "properties": {
                             "item_type": {
                                 "type": "string",
-                                "enum": ItemType.ALL,
+                                "enum": ItemType.SIGNABLE,
                                 "description": ITEM_TYPE_DESC,
                             },
                             "item_id": {

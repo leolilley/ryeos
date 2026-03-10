@@ -1210,6 +1210,17 @@ class PrimitiveExecutor:
             return self._resolve_single_config(config_resolve)
         return {}
 
+    def _verify_config_file(self, config_path: Path) -> None:
+        """Verify config file integrity: warn-if-unsigned, reject-if-tampered."""
+        try:
+            verify_item(config_path, "config", allow_unsigned=True)
+        except IntegrityError:
+            raise
+        except Exception:
+            logger.warning(
+                "Config integrity check failed: %s", config_path, exc_info=True
+            )
+
     def _resolve_single_config(
         self, spec: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -1229,18 +1240,21 @@ class PrimitiveExecutor:
             for bundle in self.system_spaces:
                 system_path = bundle.root_path / AI_DIR / "config" / path
                 if system_path.exists():
+                    self._verify_config_file(system_path)
                     with open(system_path) as f:
                         layer = _yaml.safe_load(f) or {}
                     config = self._deep_merge_config(config, layer)
 
             user_path = self.user_space / AI_DIR / "config" / path
             if user_path.exists():
+                self._verify_config_file(user_path)
                 with open(user_path) as f:
                     layer = _yaml.safe_load(f) or {}
                 config = self._deep_merge_config(config, layer)
 
             project_path = self.project_path / AI_DIR / "config" / path
             if project_path.exists():
+                self._verify_config_file(project_path)
                 with open(project_path) as f:
                     layer = _yaml.safe_load(f) or {}
                 config = self._deep_merge_config(config, layer)
@@ -1258,6 +1272,7 @@ class PrimitiveExecutor:
 
             for candidate in candidates:
                 if candidate.exists():
+                    self._verify_config_file(candidate)
                     with open(candidate) as f:
                         return _yaml.safe_load(f) or {}
 

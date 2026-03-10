@@ -1,11 +1,11 @@
-# rye:signed:2026-03-04T03:23:27Z:5be2282842d6e826076874cec73b6e751fcf7dbf4402931bdb9d811fc8bdc313:AlXsZTMos0cVOjggnymVdKGKHoKCezl7HjmMTaGbz_lo0Zn6R31R7LOKGDWwCZP9DGobPnnVJB8ohMeugGrUCw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:28:20Z:5be2282842d6e826076874cec73b6e751fcf7dbf4402931bdb9d811fc8bdc313:AlXsZTMos0cVOjggnymVdKGKHoKCezl7HjmMTaGbz_lo0Zn6R31R7LOKGDWwCZP9DGobPnnVJB8ohMeugGrUCw==:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
 __tool_description__ = "Thread registry for tracking active threads"
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -69,7 +69,7 @@ class ThreadRegistry:
 
     def register(self, thread_id: str, directive: str, parent_id: str = None) -> None:
         """Register a new thread."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -87,7 +87,7 @@ class ThreadRegistry:
 
     def update_status(self, thread_id: str, status: str) -> None:
         """Update thread status."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             extra = ""
             params = [status, now, thread_id]
@@ -146,7 +146,7 @@ class ThreadRegistry:
         """Store thread result."""
         import json
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -158,7 +158,7 @@ class ThreadRegistry:
 
     def update_cost_snapshot(self, thread_id: str, cost: Dict[str, Any]) -> None:
         """Update cost columns from runner's cost dict (called post-turn)."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 UPDATE threads SET
@@ -172,7 +172,7 @@ class ThreadRegistry:
 
     def set_continuation(self, thread_id: str, continuation_thread_id: str) -> None:
         """Mark thread as continued with forward pointer."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 UPDATE threads SET
@@ -186,7 +186,7 @@ class ThreadRegistry:
     def set_chain_info(self, thread_id: str, chain_root_id: str,
                        continuation_of: str) -> None:
         """Set chain metadata for a continuation thread."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 UPDATE threads SET

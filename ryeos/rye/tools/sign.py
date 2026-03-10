@@ -197,6 +197,8 @@ class SignTool:
                 return await self._sign_tool(item_id, project_path, source)
             elif item_type == ItemType.KNOWLEDGE:
                 return await self._sign_knowledge(item_id, project_path, source)
+            elif item_type == "config":
+                return await self._sign_config(item_id, project_path, source)
             else:
                 return {"status": "error", "error": f"Unknown item type: {item_type}"}
 
@@ -497,6 +499,123 @@ class SignTool:
             "signature": sig_info,
             "warnings": validation_result.get("warnings", []),
             "message": "Knowledge entry validated and signed.",
+        }
+
+    async def _sign_config(
+        self, item_id: str, project_path: str, source: str
+    ) -> Dict[str, Any]:
+        """Validate and sign a config file.
+
+        Two-phase validation:
+        1. Metadata validation via config_extractor validation_schema
+           (name, category, version, description)
+        2. Content validation via .config-schema.yaml tools
+           (structural shape of config values)
+        """
+        proj = Path(project_path) if project_path else None
+        if source == "project" and proj:
+            base = proj / AI_DIR / "config"
+        elif source == "user":
+            base = Path(get_user_space()) / AI_DIR / "config"
+        else:
+            return {
+                "status": "error",
+                "error": f"Config signing not supported for source: {source}",
+            }
+
+        # item_id is the relative path under .ai/config/ without extension
+        file_path = None
+        for ext in (".yaml", ".yml"):
+            candidate = base / f"{item_id}{ext}"
+            if candidate.is_file():
+                file_path = candidate
+                break
+
+        if not file_path:
+            return {
+                "status": "error",
+                "error": f"Config not found: {item_id}",
+                "searched_in": str(base),
+            }
+
+        content = file_path.read_text(encoding="utf-8")
+        if not content.strip():
+            return {
+                "status": "error",
+                "error": "Config file is empty",
+                "path": str(file_path),
+            }
+
+        # Parse via parser router (same as tools)
+        parsed = self.parser_router.parse("yaml/yaml", content)
+        if "error" in parsed:
+            return {
+                "status": "error",
+                "error": "Failed to parse config file",
+                "details": parsed.get("error"),
+                "path": str(file_path),
+            }
+        parsed = parsed.get("data", parsed)
+
+        # Add name from filename
+        parsed["name"] = extract_filename(file_path)
+
+        # Apply extraction rules (category, version, description from top-level keys)
+        parsed = apply_field_mapping(
+            "config",
+            parsed,
+            project_path=proj,
+        )
+
+        # Phase 1: Metadata validation (name, category, version, description)
+        metadata_result = validate_parsed_data(
+            item_type="config",
+            parsed_data=parsed,
+            file_path=file_path,
+            location=source,
+            project_path=proj,
+        )
+
+        # Phase 2: Content validation (structural shape)
+        from rye.utils.config_validators import validate_config_content
+        content_result = validate_config_content(
+            config_name=file_path.name,
+            config_data=parsed,
+            project_path=proj,
+        )
+
+        issues = metadata_result["issues"] + content_result["issues"]
+        warnings = metadata_result.get("warnings", []) + content_result.get("warnings", [])
+
+        if issues:
+            return {
+                "status": "error",
+                "error": "Validation failed",
+                "issues": issues,
+                "path": str(file_path),
+            }
+
+        # Sign content
+        signed_content = MetadataManager.sign_content(
+            "config", content, file_path=file_path,
+            project_path=proj,
+        )
+        file_path.write_text(signed_content)
+
+        sig_info = MetadataManager.get_signature_info(
+            "config", signed_content,
+            file_path=file_path,
+            project_path=proj,
+        )
+
+        return {
+            "status": "signed",
+            "item_id": item_id,
+            "path": str(file_path),
+            "location": source,
+            "signature": sig_info,
+            "warnings": warnings,
+            "message": "Config validated and signed.",
         }
 
     def _find_item(

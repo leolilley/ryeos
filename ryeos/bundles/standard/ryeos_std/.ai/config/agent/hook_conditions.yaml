@@ -1,6 +1,6 @@
-# rye:signed:2026-03-02T09:01:57Z:65163b996c7e23a05cd9db32eb0e5fef26b5d8270b050236b5211aa6a4edfe7f:o9zibFhjQH9yEsxFjFAgyRq9ZZ0M6q2JE-q6jBdvKe0RtmWg5mzGCeTcPWgqnfyQqnfXpp5IMM_cPMdXG3yXDw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:36:57Z:064a711c71f00d9d89db552ca1ff536b87e1c6c4fa7ef9c44710ff3f0864aee4:NfqNglAigRqjLlM2LXDDUqGe07yffey_1kj0-nLgbuzHRX1neotWOeGzYSfUA8UKoPH8s3pZUqSIkjVlNitbDw==:4b987fd4e40303ac
 # config/hook_conditions.yaml
-category: "rye/agent/threads/config"
+category: "agent"
 tool_type: "config"
 version: "1.0.0"
 description: "Built-in and infrastructure hook definitions for thread lifecycle events"

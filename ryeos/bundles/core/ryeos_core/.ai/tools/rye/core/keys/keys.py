@@ -96,9 +96,9 @@ def execute(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 def _generate(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Generate an Ed25519 keypair (or return existing)."""
     from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
-    from rye.utils.path_utils import get_user_space
+    from rye.utils.path_utils import get_signing_key_dir
 
-    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    key_dir = get_signing_key_dir()
     force = params.get("force", False)
 
     if force and key_dir.exists():
@@ -131,7 +131,8 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Import a private key from an environment variable.
 
     Reads an Ed25519 private key PEM from an env var, derives the public key,
-    writes both to ~/.ai/config/keys/signing/, and optionally trusts the key in user space.
+    writes both to the signing key directory (via get_signing_key_dir()),
+    and optionally trusts the key in user space.
     Designed for CI/CD and serverless containers.
     """
     import os
@@ -173,7 +174,8 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     )
 
     # Write to key directory
-    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    from rye.utils.path_utils import get_signing_key_dir
+    key_dir = get_signing_key_dir()
     save_keypair(private_pem, public_pem, key_dir)
     fingerprint = compute_key_fingerprint(public_pem)
 
@@ -206,9 +208,9 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Show current key fingerprint and public key."""
     from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
-    from rye.utils.path_utils import get_user_space
+    from rye.utils.path_utils import get_signing_key_dir
 
-    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    key_dir = get_signing_key_dir()
 
     if not (key_dir / "private_key.pem").exists():
         return {
@@ -239,10 +241,10 @@ def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Add the current signing key to a space's config/keys/trusted."""
     from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
-    from rye.utils.path_utils import get_user_space
+    from rye.utils.path_utils import get_signing_key_dir
     from rye.utils.trust_store import TrustStore
 
-    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    key_dir = get_signing_key_dir()
 
     if not (key_dir / "private_key.pem").exists():
         return {

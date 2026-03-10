@@ -1,16 +1,17 @@
-# rye:signed:2026-03-04T03:32:45Z:d123a7fdec644e706b928711ee25e416f0be85975422ecd4752b6dae75c64bc8:LOlIYFkFDW63En6jFbYQg9TU9uF3mhyVM7_LMlHmYbKb7uJV9_qbcQx7aV8SXmAlSPOHSqE0VpK6Piu73M_PAg==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:28:20Z:14583d18817459c7fc21cfbb055c21211bbf5a969ab85c4d694e5eb957c70132:6L0odeGXtcbmFMUrunGKbjWi209AvdnHxcDXU08I2UTpW9DsTrapT831NpZhD8yopHHTqlc3pilLa_AEzGRBDA==:4b987fd4e40303ac
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
 __tool_description__ = "Thread configuration loader"
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
 from rye.constants import AI_DIR
 from rye.utils.path_utils import get_user_ai_path, get_system_spaces
+from rye.cas.config_snapshot import compute_config_hash
 
 
 class ConfigLoader:
@@ -44,12 +45,44 @@ class ConfigLoader:
             project_config = self._load_yaml(project_config_path)
             config = self._merge(config, project_config)
 
+        # Validate merged config against schema
+        self._validate(config)
+
         self._cache[cache_key] = config
         return config
 
     def _load_yaml(self, path: Path) -> Dict[str, Any]:
+        self._verify_config(path)
         with open(path) as f:
             return yaml.safe_load(f) or {}
+
+    def _verify_config(self, path: Path) -> None:
+        """Verify config integrity: warn-if-unsigned, reject-if-tampered."""
+        from rye.utils.integrity import verify_item, IntegrityError
+        try:
+            verify_item(path, "config", allow_unsigned=True)
+        except IntegrityError:
+            raise
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Config integrity check failed: %s", path, exc_info=True
+            )
+
+    def _validate(self, config: Dict[str, Any]) -> None:
+        """Validate merged config against content schema."""
+        try:
+            from rye.utils.config_validators import validate_config_content
+            result = validate_config_content(self.config_name, config)
+            if not result["valid"]:
+                import logging
+                log = logging.getLogger(__name__)
+                log.warning(
+                    "Config validation issues in %s: %s",
+                    self.config_name, "; ".join(result["issues"]),
+                )
+        except Exception:
+            pass  # Don't block loading on validation errors
 
     def _merge(self, base: Dict, override: Dict) -> Dict:
         """Deep merge override into base.
@@ -120,6 +153,16 @@ class ConfigLoader:
                 result.append(item)
 
         return result
+
+    def load_with_hash(self, project_path: Path) -> Tuple[Dict[str, Any], str]:
+        """Load config and return (config_dict, config_hash).
+
+        The hash is a SHA256 of the canonical JSON of the resolved config.
+        Used for cache key computation.
+        """
+        config = self.load(project_path)
+        config_hash = compute_config_hash({self.config_name: config})
+        return config, config_hash
 
     def clear_cache(self):
         self._cache.clear()

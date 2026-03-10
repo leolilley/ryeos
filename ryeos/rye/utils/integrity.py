@@ -36,6 +36,7 @@ def verify_item(
     item_type: str,
     *,
     project_path: Optional[Path] = None,
+    allow_unsigned: bool = False,
 ) -> str:
     """Verify signature matches content. Returns verified hash.
 
@@ -62,6 +63,9 @@ def verify_item(
             item_type, content, file_path=file_path, project_path=project_path
         )
         if not sig_info:
+            if allow_unsigned:
+                logger.debug("Unsigned config (allowed): %s", file_path)
+                return "unsigned"
             item_id = _infer_item_id(file_path, item_type, project_path)
             raise IntegrityError(
                 f"Unsigned item: {file_path}\n"

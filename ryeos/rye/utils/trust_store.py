@@ -27,7 +27,7 @@ from typing import FrozenSet, List, Optional
 from lillux.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 from rye.utils.metadata_manager import ToolMetadataStrategy, compute_content_hash
-from rye.utils.path_utils import get_user_space
+from rye.utils.path_utils import get_signing_key_dir, get_user_space
 
 # TOML uses # comments — same format as tools with # prefix
 _key_strategy = ToolMetadataStrategy()
@@ -136,7 +136,7 @@ class TrustStore:
         content_hash = compute_content_hash(content_for_hash)
         timestamp = generate_timestamp()
 
-        key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+        key_dir = get_signing_key_dir()
         private_pem, public_pem = ensure_keypair(key_dir)
         ed25519_sig = sign_hash(content_hash, private_pem)
         pubkey_fp = _fp(public_pem)
@@ -339,14 +339,63 @@ class TrustStore:
         return self.add_key(public_key_pem, owner=registry_name)
 
     def get_registry_key(self, registry_name: str = "rye-registry") -> Optional[bytes]:
-        """Get the pinned registry public key by scanning for owner match.
+        """Get the pinned registry public key with integrity verification."""
+        fp = self._find_key_fp_by_owner(registry_name)
+        if not fp:
+            return None
+        verified = self.get_key(fp)
+        if not verified:
+            return None
+        return verified.public_key_pem
 
-        Returns:
-            Registry public key PEM, or None if not pinned
+    def pin_remote_key(
+        self,
+        public_key_pem: bytes,
+        remote_name: str = "ryeos-remote",
+    ) -> str:
+        """Pin the remote server public key (TOFU).
+
+        Same pattern as pin_registry_key but for ryeos-remote.
         """
-        for info in self.list_keys():
-            if info.owner == registry_name:
-                return info.public_key_pem
+        fingerprint = compute_key_fingerprint(public_key_pem)
+        existing = self.get_key(fingerprint)
+        if existing:
+            return fingerprint
+        return self.add_key(public_key_pem, owner=remote_name)
+
+    def get_remote_key(self, remote_name: str = "ryeos-remote") -> Optional[bytes]:
+        """Get the pinned remote server public key with integrity verification."""
+        fp = self._find_key_fp_by_owner(remote_name)
+        if not fp:
+            return None
+        verified = self.get_key(fp)
+        if not verified:
+            return None
+        return verified.public_key_pem
+
+    def _find_key_fp_by_owner(self, owner: str) -> Optional[str]:
+        """Scan trust dirs for a verified key with the given owner.
+
+        Returns the fingerprint of the first owner match that passes
+        integrity verification via get_key(). Skips invalid/tampered files.
+        """
+        for _, trust_dir in self._search_dirs():
+            if not trust_dir.is_dir():
+                continue
+            for toml_file in trust_dir.glob("*.toml"):
+                try:
+                    info = TrustedKeyInfo.from_toml(toml_file)
+                    if info.owner == owner:
+                        # Verify integrity before returning
+                        verified = self.get_key(info.fingerprint)
+                        if verified:
+                            return info.fingerprint
+                        logger.warning(
+                            "Key %s for owner '%s' failed verification, skipping",
+                            info.fingerprint, owner,
+                        )
+                except Exception:
+                    continue
         return None
 
     def list_keys(self) -> List[TrustedKeyInfo]:

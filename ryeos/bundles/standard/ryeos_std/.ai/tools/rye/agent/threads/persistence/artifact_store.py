@@ -1,85 +1,135 @@
-# rye:signed:2026-03-04T03:23:27Z:752852983a0ce0134c940c05b417ea044d5481f4b109d5454f64b8e186816cf9:yv0ft2clQx4yAyg9iSKTFnGTqUjGiFUMZDLlUn65VE7aPd-JyMHgcvuiQsk9ndN_03GDOazDEXZBgD-26yvxDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T02:15:46Z:3dc054301d9ccd305203d2a7913a37d2f59c3af8202ede374b239281e56b091b:a2MP_ad2mDY-rKw2t_L7SXco6XA_2z1n72xM0dcwT6exXUBBwIDXFHewdlW2hJi96tcByG6K3g-tjCl9pWaxAA==:4b987fd4e40303ac
 """
-persistence/artifact_store.py: Filesystem-backed artifact store
+persistence/artifact_store.py: CAS-backed artifact store
 
-Stores full tool results that have been trimmed from the context window.
-Blobs are keyed by (thread_id, call_id) with content-hash deduplication.
+Stores full tool results as CAS blobs with content-hash deduplication.
+Maintains an ArtifactIndex CAS object per thread mapping call_id → blob_hash.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
-__tool_description__ = "Artifact store for out-of-band tool result persistence"
+__tool_description__ = "CAS-backed artifact store for out-of-band tool result persistence"
 
 import hashlib
 import json
-from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rye.constants import AI_DIR
+from lillux.primitives import cas
+from rye.cas.objects import ArtifactIndex
+from rye.cas.store import cas_root
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactStore:
-    """Filesystem-backed store for out-of-band tool result persistence."""
+    """CAS-backed store for out-of-band tool result persistence.
+
+    Artifacts are stored as CAS blobs (content-addressed by SHA256).
+    An ArtifactIndex object tracks call_id → {blob_hash, content_hash, tool_name}
+    per thread, stored as a CAS object with a mutable ref pointer.
+    """
 
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
         self.project_path = Path(project_path)
-        self.artifacts_dir = self.project_path / AI_DIR / "agent" / "threads" / thread_id / "artifacts"
+        self._root = cas_root(self.project_path)
+        self._index: Optional[Dict[str, Dict[str, str]]] = None
+
+    def _load_index(self) -> Dict[str, Dict[str, str]]:
+        """Load artifact index from CAS via ref. Returns entries dict."""
+        if self._index is not None:
+            return self._index
+
+        from rye.cas.store import read_ref
+        ref_path = self._ref_path()
+        index_hash = read_ref(ref_path)
+
+        if not index_hash:
+            self._index = {}
+            return self._index
+
+        obj = cas.get_object(index_hash, self._root)
+        if obj is None:
+            raise RuntimeError(f"Artifact index ref points to missing object: {index_hash}")
+        if obj.get("kind") != "artifact_index":
+            raise RuntimeError(f"Invalid artifact index kind: {obj.get('kind')}")
+        if obj.get("thread_id") != self.thread_id:
+            raise RuntimeError(
+                f"Artifact index thread mismatch: expected {self.thread_id}, got {obj.get('thread_id')}"
+            )
+
+        self._index = obj.get("entries", {})
+        return self._index
+
+    def _save_index(self) -> None:
+        """Store artifact index as CAS object and update ref."""
+        from rye.cas.store import write_ref
+        index = ArtifactIndex(
+            thread_id=self.thread_id,
+            entries=self._load_index(),
+        )
+        index_hash = cas.store_object(index.to_dict(), self._root)
+        write_ref(self._ref_path(), index_hash)
+
+    def _ref_path(self) -> Path:
+        from rye.constants import AI_DIR
+        return (
+            self.project_path / AI_DIR / "objects" / "refs"
+            / "artifacts" / f"{self.thread_id}.json"
+        )
 
     def store(self, call_id: str, tool_name: str, data: Any) -> str:
-        """Write artifact to disk and return its content hash.
+        """Store artifact as CAS blob. Returns content hash.
 
-        Uses atomic write (tmp + rename) and sha256 of deterministically
-        serialized data for the content hash.
+        Serializes data deterministically, stores as blob, updates index.
         """
         serialized = json.dumps(data, sort_keys=True, default=str)
         content_hash = hashlib.sha256(serialized.encode()).hexdigest()
 
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        blob_hash = cas.store_blob(serialized.encode(), self._root)
 
-        artifact = {
-            "call_id": call_id,
-            "tool_name": tool_name,
+        entries = self._load_index()
+        entries[call_id] = {
+            "blob_hash": blob_hash,
             "content_hash": content_hash,
-            "size_bytes": len(serialized.encode()),
-            "stored_at": datetime.utcnow().isoformat(),
-            "data": data,
+            "tool_name": tool_name,
         }
+        self._save_index()
 
-        target = self.artifacts_dir / f"{call_id}.json"
-        tmp = self.artifacts_dir / f"{call_id}.json.tmp"
-
-        with open(tmp, "w") as f:
-            json.dump(artifact, f, indent=2, default=str)
-
-        tmp.replace(target)
         return content_hash
 
     def retrieve(self, call_id: str) -> Optional[Dict]:
-        """Read artifact by call_id. Returns the full dict or None."""
-        path = self.artifacts_dir / f"{call_id}.json"
-        if not path.exists():
+        """Read artifact by call_id. Returns parsed data or None."""
+        entries = self._load_index()
+        entry = entries.get(call_id)
+        if not entry:
             return None
 
-        with open(path) as f:
-            return json.load(f)
+        blob_data = cas.get_blob(entry["blob_hash"], self._root)
+        if blob_data is None:
+            logger.warning("Artifact blob %s missing for call_id %s", entry["blob_hash"], call_id)
+            return None
+
+        data = json.loads(blob_data)
+        return {
+            "call_id": call_id,
+            "tool_name": entry.get("tool_name", ""),
+            "content_hash": entry["content_hash"],
+            "data": data,
+        }
 
     def has_content(self, content_hash: str) -> Optional[str]:
         """Check if any artifact in this thread has the given hash.
 
         Returns the call_id if found, None otherwise.
         """
-        if not self.artifacts_dir.exists():
-            return None
-
-        for path in self.artifacts_dir.glob("*.json"):
-            with open(path) as f:
-                artifact = json.load(f)
-            if artifact.get("content_hash") == content_hash:
-                return artifact["call_id"]
-
+        entries = self._load_index()
+        for call_id, entry in entries.items():
+            if entry.get("content_hash") == content_hash:
+                return call_id
         return None
 
 

@@ -1,6 +1,6 @@
-# rye:signed:2026-02-26T06:42:42Z:3677e140d6bc7ff918376259cb4ca6025ea06dba079dd59d9860eaf8d1f89ca1:02ZxLrGHu6VXFmeMbSGq8Rv_zUkD-P55L7Tf1uXuBYu47RQMnI24H7RGHqAio6AJbYhUgg9xqmc_MRwmYcPhCw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:36:57Z:e5d604f2b2f1f663f11005fd05eb98b096b73084a16a8b965baf59d749176fd1:UWgQe17vdIn2ytBLZ5-tSOd9WUbPCAH_zdgsI2_lY6kYYWonw5RUmDrUwBT5lkaLSuiODuGCSxD5Ucd6Yb_VDA==:4b987fd4e40303ac
 # config/budget_ledger_schema.yaml
-category: "rye/agent/threads/config"
+category: "agent"
 tool_type: "config"
 version: "1.0.0"
 description: "Schema definition for the budget ledger table used to track thread spending"

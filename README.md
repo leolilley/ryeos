@@ -1,3 +1,5 @@
+[![RYE OS](docs/assets/hero.png)](https://ryeos.net)
+
 # RYE OS
 
 > _"In Linux, everything is a file. In RYE, everything is data."_

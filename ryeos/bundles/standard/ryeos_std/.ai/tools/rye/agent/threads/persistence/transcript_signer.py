@@ -1,4 +1,4 @@
-# rye:signed:2026-03-09T22:23:59Z:2a2bcfa945e7a3907987c5ec1789e36af6ee4cc02b8103035c2625f1de682139:Fk2NZEOuhtbcBbijR73ztv9FOfQfOy4OTe5mqGD1IdNoy07jTKqiSkLoonuJdlQHlYiuOc3C8bwsNcOREelsAQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:28:20Z:773f65e158e69b345a4789523fb4df1026207111a2ec73feffe4bbf985d011f6:M37Sehfigg9_2uufUDsjPJKoPCSnfXrUGc2Y5u41wbL9rkSS7a2v46V9q6XlpCOyJPImwXje32Xjwv6fPIJJAA==:4b987fd4e40303ac
 """Checkpoint signing for transcript integrity and JSON signing utilities.
 
 Signs transcript.jsonl at turn boundaries by appending checkpoint events
@@ -27,11 +27,10 @@ logger = logging.getLogger(__name__)
 
 def _get_keypair():
     """Load or generate the user's Ed25519 keypair."""
-    from rye.constants import AI_DIR
-    from rye.utils.path_utils import get_user_space
+    from rye.utils.path_utils import get_signing_key_dir
     from lillux.primitives.signing import ensure_keypair
 
-    key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+    key_dir = get_signing_key_dir()
     return ensure_keypair(key_dir)
 
 

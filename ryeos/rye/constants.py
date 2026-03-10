@@ -17,6 +17,10 @@ class ItemType:
 
     ALL = [DIRECTIVE, TOOL, KNOWLEDGE]
 
+    # Items that can be signed (ALL + config files)
+    CONFIG = "config"
+    SIGNABLE = [DIRECTIVE, TOOL, KNOWLEDGE, CONFIG]
+
     # Type directory mappings
     TYPE_DIRS = {
         DIRECTIVE: "directives",

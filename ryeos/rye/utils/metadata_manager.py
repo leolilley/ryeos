@@ -134,17 +134,19 @@ class ToolMetadataStrategy(MetadataStrategy):
     """Strategy for tool metadata operations (language-aware)."""
 
     def __init__(
-        self, file_path: Optional[Path] = None, project_path: Optional[Path] = None
+        self, file_path: Optional[Path] = None, project_path: Optional[Path] = None,
+        item_type: str = "tool",
     ):
         self.file_path = file_path
         self.project_path = project_path
+        self._item_type = item_type
         self._sig_format = None
 
     def _get_signature_format(self) -> Dict[str, Any]:
         if self._sig_format is None:
             if self.file_path:
                 self._sig_format = get_signature_format(
-                    self.file_path, self.project_path, item_type="tool"
+                    self.file_path, self.project_path, item_type=self._item_type
                 )
             else:
                 self._sig_format = {"prefix": "#", "after_shebang": True}
@@ -287,6 +289,8 @@ class MetadataManager:
             return ToolMetadataStrategy(file_path=file_path, project_path=project_path)
         elif item_type == ItemType.KNOWLEDGE:
             return KnowledgeMetadataStrategy()
+        elif item_type == "config":
+            return ToolMetadataStrategy(file_path=file_path, project_path=project_path, item_type="config")
         else:
             raise ValueError(
                 f"Unknown item_type: {item_type}. Supported: {ItemType.ALL}"
@@ -316,7 +320,7 @@ class MetadataManager:
     ) -> str:
         """Create Ed25519 signature for content.
 
-        Uses the keypair from ~/.ai/config/keys/signing/ (created by `rye execute directive init`
+        Uses the keypair from get_signing_key_dir() (created by `rye execute directive init`
         or `rye/core/keys/keys generate`). Raises if no keypair exists.
         """
         strategy = cls.get_strategy(
@@ -326,14 +330,14 @@ class MetadataManager:
         content_hash = compute_content_hash(content_for_hash)
         timestamp = generate_timestamp()
 
-        from rye.utils.path_utils import get_user_space
+        from rye.utils.path_utils import get_signing_key_dir
         from lillux.primitives.signing import (
             load_keypair,
             sign_hash,
             compute_key_fingerprint,
         )
 
-        key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+        key_dir = get_signing_key_dir()
         try:
             private_pem, public_pem = load_keypair(key_dir)
         except FileNotFoundError:
@@ -362,13 +366,13 @@ class MetadataManager:
         )
         timestamp = generate_timestamp()
 
-        from rye.utils.path_utils import get_user_space
+        from rye.utils.path_utils import get_signing_key_dir
         from lillux.primitives.signing import (
             load_keypair,
             sign_hash,
             compute_key_fingerprint,
         )
-        key_dir = get_user_space() / AI_DIR / "config" / "keys" / "signing"
+        key_dir = get_signing_key_dir()
         try:
             private_pem, public_pem = load_keypair(key_dir)
         except FileNotFoundError:

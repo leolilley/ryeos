@@ -1,0 +1,16 @@
+# Default sync configuration for remote CAS operations.
+#
+# Loaded via 3-tier resolution (system → user → project).
+# Projects override with their own .ai/config/cas/remote.yaml.
+# Deep merge: project can add includes/excludes without restating system defaults.
+
+sync:
+  include:
+    - .ai/
+  exclude:
+    - .ai/objects/
+    - .ai/agent/
+    - node_modules/
+    - .venv/
+    - __pycache__/
+    - .git/

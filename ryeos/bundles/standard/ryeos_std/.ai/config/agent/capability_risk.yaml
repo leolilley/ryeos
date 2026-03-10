@@ -1,6 +1,6 @@
-# rye:signed:2026-02-26T06:42:42Z:4a81cbfbb5b97fa6f3131cf75f49a9163c33c3f645d481be4ca149db46e95d61:bGHvB0oc9BQD_yoFhBhvt5iuh5tV22443-1QU8EwLVM_oBhnnKsBE5cJ8dq12S2DhwzL3v_4vIOEAjApYeQ_Cw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T01:36:20Z:f25bbf0bd36d76ff42571604934a67e1ae79aad6db0485a758d33120efb5e9f4:OTLu9SDl-HfM2JKA9hAM9Lr11MzzphGZb0I8vRVBqSe5AvQWhS4FSX8okf-h77pa7k0ACvgnHOWnkS27OGI2Dw==:4b987fd4e40303ac
 # config/capability_risk.yaml
-category: "rye/agent/threads/config"
+category: "agent"
 tool_type: "config"
 version: "1.0.0"
 description: "Capability risk classifications and safety policies"

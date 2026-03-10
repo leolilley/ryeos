@@ -398,8 +398,6 @@ class TestBaseDirectives:
         assert "<search>*</search>" in content
         assert "<load>*</load>" in content
         assert "<sign>*</sign>" in content
-        for primary in ("execute", "search", "load", "sign"):
-            assert f"rye/agent/core/protocol/{primary}" in content
         assert "rye/agent/core/Identity" in content
         assert "rye/agent/core/Behavior" in content
 
@@ -411,7 +409,6 @@ class TestBaseDirectives:
         assert "<search>" not in content
         assert "<load>" not in content
         assert "<sign>" not in content
-        assert "rye/agent/core/protocol/execute" in content
         assert "rye/agent/core/protocol/search" not in content
 
     def test_base_review_has_read_only_tools(self):

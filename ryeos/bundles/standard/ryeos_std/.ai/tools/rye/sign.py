@@ -1,10 +1,11 @@
-# rye:signed:2026-03-04T03:05:59Z:bc5ae83661d551ae6713f4e37a2014171a5f84fd8fc4aa6ac92d0343d619d625:OtGr8lArsc6k9q1GpuLmIJIK7wmriVmhCzfmZU7Z3LPCEoHAJpGdlF2uFxe_liaykex4GgodE1OqNfnFWk4sCQ==:4b987fd4e40303ac
-"""Validate and sign a directive, tool, or knowledge item."""
+# rye:signed:2026-03-10T01:33:25Z:d65402d9deecf50171dc0d5bcd33b5873af001a3f5e0ebae7030696a44ef784d:6qFF6tw3J2V7kOtCs2m_4w0QHX2cykayOqq_xatzSDGF-mg5lCDN-OSiOTHj3hx8_JzmCavzzCnCsNO04nCWBQ==:4b987fd4e40303ac
+"""Validate and sign a directive, tool, knowledge, or config item."""
 
 import argparse
 import json
 import asyncio
 
+from rye.constants import ItemType
 from rye.primary_tool_descriptions import (
     ITEM_TYPE_DESC,
     SIGN_ITEM_ID_DESC,
@@ -22,7 +23,7 @@ CONFIG_SCHEMA = {
     "properties": {
         "item_type": {
             "type": "string",
-            "enum": ["directive", "tool", "knowledge"],
+            "enum": ItemType.SIGNABLE,
             "description": ITEM_TYPE_DESC,
         },
         "item_id": {

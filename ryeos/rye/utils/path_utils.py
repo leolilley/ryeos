@@ -116,6 +116,18 @@ def get_user_ai_path() -> Path:
     return get_user_space() / AI_DIR
 
 
+def get_signing_key_dir() -> Path:
+    """Get the signing key directory.
+
+    Checks RYE_SIGNING_KEY_DIR env var first (used by remote executor),
+    falls back to {USER_SPACE}/.ai/config/keys/signing/.
+    """
+    env_dir = os.getenv("RYE_SIGNING_KEY_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return get_user_space() / AI_DIR / "config" / "keys" / "signing"
+
+
 def _parse_bundle_entry_point(ep_name: str, result: Any) -> Optional[BundleInfo]:
     """Parse entry point result into BundleInfo.
 
