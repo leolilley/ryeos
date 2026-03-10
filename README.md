@@ -1,4 +1,4 @@
-[![RYE OS](docs/assets/hero.png)](https://ryeos.net)
+<!-- [![RYE OS](docs/assets/hero.png)](https://ryeos.net) -->
 
 # RYE OS
 
