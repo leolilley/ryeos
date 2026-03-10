@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:dd03255660ee4da621e55c6381615eb649c1705ab9fe6c2689aff329af8eea84:AfdrLpLrA4rPaDGqZtflgbBY44_VEF0GJoVscMgcJ2f8YCKHj709HQdDqSvqrY7ZA56W3l6TUPUYcQ7XKn-7AA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-10T04:44:35Z:dd03255660ee4da621e55c6381615eb649c1705ab9fe6c2689aff329af8eea84:AfdrLpLrA4rPaDGqZtflgbBY44_VEF0GJoVscMgcJ2f8YCKHj709HQdDqSvqrY7ZA56W3l6TUPUYcQ7XKn-7AA==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Graph Orchestrator
 
@@ -72,14 +72,14 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
     `rye_search(item_type="knowledge", query="entry_type:graph_state {input:graph_id}")`
     Returns a list of graph runs with their status, step count, and timestamps.
 
-    **cancel** — Cancel a running graph by writing a cancel sentinel file.
+    **cancel** — Cancel a running graph via SIGTERM signal.
     Requires {input:graph_run_id}.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/threads/{input:graph_run_id}/cancel", "content": "cancelled", "create_dirs": true})`
-    The walker checks for this file after each step and terminates gracefully.
+    `rye_execute(item_type="tool", item_id="rye/core/processes/cancel", parameters={"run_id": "{input:graph_run_id}"})`
+    The walker's SIGTERM handler triggers clean shutdown — persists CAS state, updates registry, writes transcript event.
 
-    **status** — Check the status of a graph run via the thread registry.
-    Requires {input:graph_run_id}. Uses the thread orchestrator since graph runs share the same registry.
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator", parameters={"operation": "get_status", "thread_id": "{input:graph_run_id}"})`
+    **status** — Check the status and liveness of a graph run.
+    Requires {input:graph_run_id}. Uses the process status tool which checks both registry status and PID liveness.
+    `rye_execute(item_type="tool", item_id="rye/core/processes/status", parameters={"run_id": "{input:graph_run_id}"})`
   </step>
 
   <step name="return_result">
@@ -87,8 +87,8 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
     - resume: graph execution result (graph_run_id, status, state, steps)
     - read_state: full persisted state with frontmatter and JSON body
     - list_runs: list of graph run summaries
-    - cancel: confirmation that cancel sentinel was written
-    - status: registry status for the graph run
+    - cancel: confirmation that SIGTERM was sent and process terminated
+    - status: registry status and PID liveness for the graph run
   </step>
 </process>
 

@@ -146,6 +146,36 @@ rye_execute(item_type="tool", item_id="rye/code/npm/npm",
 | ------ | ------------------------ | --------------------------------------------- |
 | system | `rye/core/system/system` | System info: env vars, paths, runtime details |
 
+### Process Management (`rye/core/processes/`)
+
+Tools for managing running processes (graphs and threads).
+
+| Tool   | Item ID                       | Description                           |
+| ------ | ----------------------------- | ------------------------------------- |
+| status | `rye/core/processes/status`   | Check if a process is alive by run_id |
+| cancel | `rye/core/processes/cancel`   | Cancel a running process via SIGTERM  |
+| list   | `rye/core/processes/list`     | List processes with optional filter   |
+
+**Examples:**
+
+```python
+# Check if a graph run is still alive
+rye_execute(item_type="tool", item_id="rye/core/processes/status",
+    parameters={"run_id": "my-pipeline-1709000000"})
+
+# Cancel a running graph (SIGTERM → clean CAS shutdown)
+rye_execute(item_type="tool", item_id="rye/core/processes/cancel",
+    parameters={"run_id": "my-pipeline-1709000000", "grace": 5})
+
+# List all active processes
+rye_execute(item_type="tool", item_id="rye/core/processes/list",
+    parameters={})
+
+# List completed processes
+rye_execute(item_type="tool", item_id="rye/core/processes/list",
+    parameters={"status": "completed"})
+```
+
 ### Dev Tools (`rye/dev/`)
 
 Development and testing utilities.

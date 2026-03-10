@@ -725,6 +725,34 @@ rye_execute(
 )
 ```
 
+**Process management** — check status, cancel, and list via dedicated tools:
+
+```python
+# Check if a specific graph run is alive
+rye_execute(
+    item_type="tool",
+    item_id="rye/core/processes/status",
+    parameters={"run_id": "<graph_run_id>"}
+)
+# Returns: {"alive": true, "pid": 12345, "status": "running", ...}
+
+# Cancel a running graph (SIGTERM → clean CAS shutdown + state persistence)
+rye_execute(
+    item_type="tool",
+    item_id="rye/core/processes/cancel",
+    parameters={"run_id": "<graph_run_id>"}
+)
+
+# List all active processes
+rye_execute(
+    item_type="tool",
+    item_id="rye/core/processes/list",
+    parameters={}
+)
+```
+
+Cancellation is signal-based: the walker registers a SIGTERM handler that sets a shutdown flag. Between steps, the flag is checked and triggers clean shutdown — CAS state is persisted as "cancelled", the registry is updated, and a `graph_cancelled` transcript event is written with the signal number. This means a cancelled graph can always be resumed from its last completed step.
+
 ### Cross-Process Wait
 
 When one graph waits for another (e.g., a foreach node with `parallel: true` iterations):
@@ -741,7 +769,7 @@ State-graph operations are available from the terminal via `ryeos-cli`:
 rye graph run my-project/graphs/scraper_pipeline
 
 # Run with input parameters
-rye graph run my-project/graphs/scraper_pipeline --params '{"min_ccu": 50000}'
+echo '{"min_ccu": 50000}' | rye graph run my-project/graphs/scraper_pipeline
 
 # Run in background (returns run ID immediately)
 rye graph run my-project/graphs/scraper_pipeline --async

@@ -53,6 +53,30 @@ Use `space: project` with `trust` to provision a signing key into a bundle's `.a
 
 ---
 
+## Process Management — `rye/core/processes/`
+
+Tools for managing running lillux processes (graphs and threads). All processes register in the thread registry; these tools query and control them.
+
+| Tool     | Item ID                       | Description                                            |
+| -------- | ----------------------------- | ------------------------------------------------------ |
+| `status` | `rye/core/processes/status`   | Check process liveness by run_id (registry + PID check)|
+| `cancel` | `rye/core/processes/cancel`   | Cancel via SIGTERM — triggers clean CAS shutdown        |
+| `list`   | `rye/core/processes/list`     | List processes, optionally filtered by status           |
+
+### `status`
+
+Takes `run_id`. Looks up PID from thread registry, then checks liveness via `SubprocessPrimitive.status(pid)`. Returns `{alive, pid, status, run_id, directive, created_at}`.
+
+### `cancel`
+
+Takes `run_id` and optional `grace` (default 5s). Sends SIGTERM via `SubprocessPrimitive.kill(pid, grace)`. For graph walkers, the SIGTERM triggers a signal handler that performs clean shutdown — persists CAS state as "cancelled", updates registry, writes transcript event, then exits. Updates registry status to "cancelled".
+
+### `list`
+
+Optional `status` filter (`running`, `completed`, `cancelled`, `error`, `killed`). Without filter, returns all active (non-terminal) processes. Returns an array of `{run_id, directive, status, pid, parent_id, created_at, updated_at}`.
+
+---
+
 ## Registry — `rye/core/registry/registry`
 
 Push, pull, search, and manage items in the Rye OS registry. Supports these actions:
@@ -124,11 +148,11 @@ YAML configs defining how each tool type is executed. Runtimes configure interpr
 | Runtime | Language | Execution | Args Template | Resolver | Use When |
 |---------|----------|-----------|---|---|---|
 | **python/function** | Python | In-process (fast) | `python -c "import,load,execute(params)"` | `local_binary` (binary: python3, candidates/search_paths in .venv, fallback to system) | Pure Python logic, compute-heavy, no subprocess needed — fastest option |
-| **python/script** | Python | Subprocess with isolation | `python tool.py --params {...} --project-path /path` | `local_binary` (binary: python3, candidates/search_paths in .venv, fallback to system) | Long-running, heavy I/O, subprocess isolation needed, can use shell commands |
-| **node/node** | JavaScript/TypeScript | Subprocess with Node resolution | `node tool.js --params {...} --project-path /path` | `local_binary` (binary: node, search_paths/search_roots in node_modules/.bin, fallback to system) | JavaScript tools, TypeScript via tsx, Node.js ecosystem dependencies |
+| **python/script** | Python | Subprocess with isolation | `python tool.py --project-path /path` (params via stdin) | `local_binary` (binary: python3, candidates/search_paths in .venv, fallback to system) | Long-running, heavy I/O, subprocess isolation needed, can use shell commands |
+| **node/node** | JavaScript/TypeScript | Subprocess with Node resolution | `node tool.js --project-path /path` (params via stdin) | `local_binary` (binary: node, search_paths/search_roots in node_modules/.bin, fallback to system) | JavaScript tools, TypeScript via tsx, Node.js ecosystem dependencies |
 | **bash/bash** | Bash/Shell | Direct `/bin/bash` execution | `/bin/bash -c "{command}"` | `env` (PATH passthrough, no resolution) | Shell scripts, system administration, jq pipes, CLI composition |
-| **mcp/stdio** | MCP (stdin/stdout) | Subprocess: spawn MCP, call via stdio | `python connect.py --server-config ... --tool ... --params {...}` | `local_binary` (binary: python3, for connect.py) | Local MCP servers, stdio transport, lightweight message passing |
-| **mcp/http** | MCP (HTTP/SSE) | HTTP request to MCP server | `python connect.py --server-config ... --tool ... --params {...}` | `local_binary` (binary: python3, for connect.py) | External HTTP MCP servers, long-lived connections, streaming tools |
+| **mcp/stdio** | MCP (stdin/stdout) | Subprocess: spawn MCP, call via stdio | `python connect.py --server-config ... --tool ...` (params via stdin) | `local_binary` (binary: python3, for connect.py) | Local MCP servers, stdio transport, lightweight message passing |
+| **mcp/http** | MCP (HTTP/SSE) | HTTP request to MCP server | `python connect.py --server-config ... --tool ...` (params via stdin) | `local_binary` (binary: python3, for connect.py) | External HTTP MCP servers, long-lived connections, streaming tools |
 | **state-graph/runtime** | YAML Graph | Subprocess: load graph, dispatch rye_execute per node | `python -c "load_graph,walk_nodes,rye_execute(...)"` | `local_binary` (binary: python3) with `mode: always` anchoring | Declarative workflows, condition branches, multi-step node execution |
 
 ### Interpreter Resolution Strategies
