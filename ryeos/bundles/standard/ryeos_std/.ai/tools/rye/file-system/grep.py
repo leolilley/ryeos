@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:d0619e08dac8504f9a7ccabd98e37cc84fc08412cf0ca20e1bd9526c7a1e68b9:3TMWQS2xDgPmS1hpiH1U7J1S3pDcj_taiiZi6MTGuP_TkxcEwoP6JxjFiQgnBHuGAsNNC1lOaeweWKudKBmWAg==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:a1ea2cc85d3736062f69ddbea3b2d3ae7ea2587bac8b0440de621370c698f2ee:JD8uFg86gSWmH3ldvmY_ESMCr9ZuS02vuBfazC86TycBjGXRc1vcoGiEhvubcKr6BTLs3apj2b8jBSNRYAoEDA==:4b987fd4e40303ac
 """Search file contents with regex, returning line IDs."""
 
 import argparse
@@ -267,8 +267,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

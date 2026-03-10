@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:32ef2396503910abfd012d02c7ee24febd12c8caefc6c7bc0eecf7dffe4aca4f:0cd-56QLmwif3IKMgFv40asTVW-0Y7BL4LwBroPRsScvJwyuavloAMNwAEz4retwBkRuCDL2nU9HHxxEcoT2DQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:200fa170929b7b2a34645e1630674d0d2b0ee26b32ddf85ac8859190ec9eb81d:F7afT_RA2gVNDjPgMtSNklhGq5F3yy5D4RJ-ogcecHkOhWQ5D5pE_R_U77gLrBaVujkG57nG_FyB_nr0yfm0CA==:4b987fd4e40303ac
 """Rye tool test runner — execute .test.yaml specs against real tools.
 
 Discovers test specs from .ai/tests/**/*.test.yaml, executes tools via
@@ -6,7 +6,7 @@ ExecuteTool.handle(), and evaluates assertions using condition_evaluator
 operators (resolve_path + apply_operator).
 
 Invocation:
-    rye execute tool rye/dev/test-runner --params '{"tool": "my/tool"}'
+    echo '{"tool": "my/tool"}' | rye execute tool rye/dev/test-runner
 
 Output:
     stdout: structured JSON (summary + per-test results)
@@ -532,8 +532,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result, default=str))

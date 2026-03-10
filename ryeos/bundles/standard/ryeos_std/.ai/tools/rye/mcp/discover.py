@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:ae608bc34f49969da81fd69313b44b6632d493b290d83a14510a2c9adc7e3420:dl0hnr_0GXWDHnOCwvPBQJGl57cT0gPC-GbADA52FLYBRg3RWlIQoN0tnxCQuEmJLwY3axUZRlEUO1P7qAD0DQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:3deb32c5492285d94b6fd05d551080a17a16e3a02ff41616eecec438fff1ab9b:fbLR09y1zxHiH-6GqIbq9t5d4l-54DuMELR4c-1yrfPwRznXu02I15cPepgAXBxhN5SPnZKM7rIXT5XEJ01_AQ==:4b987fd4e40303ac
 __tool_type__ = "python"
 __version__ = "1.3.0"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -263,8 +263,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="MCP Discover Tool")
     
-    # New unified params mode (used by rye executor)
-    parser.add_argument("--params", help="All parameters as JSON")
     parser.add_argument("--project-path", dest="project_path", help="Project path")
     
     # Legacy individual args mode (for direct CLI use)
@@ -293,10 +291,14 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(level=logging.INFO)
 
-    # Parse params - either from --params JSON or individual args
-    if args.params:
+    # Parse params - from stdin or individual CLI args
+    stdin_data = None
+    if not sys.stdin.isatty():
+        stdin_data = sys.stdin.read().strip()
+
+    if stdin_data:
         try:
-            params = json.loads(args.params)
+            params = json.loads(stdin_data)
             transport = params.pop("transport", None)
             if not transport:
                 print(json.dumps({"success": False, "error": "transport required in params"}))
@@ -305,9 +307,9 @@ if __name__ == "__main__":
             print(json.dumps({"success": False, "error": f"Invalid params JSON: {e}"}))
             sys.exit(1)
     else:
-        # Legacy mode - build params from individual args
+        # Individual args mode (for direct CLI use)
         if not args.transport:
-            print(json.dumps({"success": False, "error": "--transport or --params required"}))
+            print(json.dumps({"success": False, "error": "--transport or stdin params required"}))
             sys.exit(1)
         transport = args.transport
         params = {}

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:e68fb35441cc447ee2123931c9ab3a6bd05c7a8229f9fc015724c5f8c1b2bea3:zTuCPJr4-9ep4Gsb3hU6GoDry0xIyEeaaeKlQ-XkLGgzUtFsBxlt36GSknWeFRTOAzJLUaRmhU40hy860N1DCw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:60c41f9453ebb0139a3da200644026e0c6c102dc737fad548bcd92f59e756919:AqgYBHZIY5MEgKxMPEN7ZN9lPnodFGXkH4vMu7fZIz6feF_aMHpzmdMh5bf2WAO8iAcWf2H6qL5-lh4dY7r5CA==:4b987fd4e40303ac
 """Find files by glob pattern."""
 
 import argparse
@@ -117,8 +117,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

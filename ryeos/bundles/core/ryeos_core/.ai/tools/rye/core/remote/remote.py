@@ -1,4 +1,4 @@
-# rye:signed:2026-03-09T23:48:24Z:3380748183b2cc5ac46b781b4f26fe89575662c4e87fe66df535f6cf252f4e06:U5mLqBsBK6Q-3WwrDezlIZzTsTT45EQoSTG1GtKBUfCGZJiu0qINVH9V1MCGVL5vN8IztMwlqJbewCPdqcbdCw==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:14Z:b01aeff0af52fbfd5a861832c724d9718a061a07c89390966b433b58c5db8ad8:RQ0geuwnLgODYUhDEptfUfzW_JRQ8kw_ArMV9uvMiIzB3kU5kYGXBPcyYZXVffKy1ZzNjwerzcCSizizokPMCg==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 

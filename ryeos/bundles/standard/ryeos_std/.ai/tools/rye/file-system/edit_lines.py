@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:844180b3aab9a63904111c72cfd1be9f23938ac6bd0af64a336687a00372fb8b:LYjaadd52CMS-aefYTRIJtHFpqb2TeV53EfiNwaDSpEeKmxXBERkKAEjhtipBO7v-lwu7S7NQDTI6WMYsrPzBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:8dd6f2935c764bdd73a92644df2d5fb56d8e88994a41c2cd2c65ae58ef12855d:XY-DrgE3voTpaMz3PhCsRIHiGtAz5A9KaMs1ZFtYxss7Ci_bjgVhcdlfbC-aH1e2c38qjtNTkVlhwEN8kGWaCw==:4b987fd4e40303ac
 """Edit files by line ID (not string matching)."""
 
 import argparse
@@ -244,8 +244,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

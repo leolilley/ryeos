@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:09174c1f8385c5ebec3b2c0aebb678fe3d872e0769b818d2524bec0485d047c5:G2yJJo4AzDqRcbu99zLo7hlQ58PKBK7y2NrOoIoVl35F3g_YfNSQsWeWdRF2toy743X_5svGimcftkJG6pt2DA==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:2f5d545c7a1c51e6d6b76dcd6e1524f283c709d4f63eefd2838c4f6c74680b1f:uWNrYnWa3LA4YaSKxMDfGRVNSDTGOy_oexJMKuamy3dg22fO-FL5raEIW_vLCYvdHxpzhxqiSWyfprry-O4ZDQ==:4b987fd4e40303ac
 """List directory contents."""
 
 import argparse
@@ -107,8 +107,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

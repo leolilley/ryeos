@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:9644659f63f7880a359cd5bbbba580928a7d4189913d26aca9f5ce75582526b1:25a4YItCKB35T9KwqPCbYVkHign-aPVj5Eelh4scbvlHZETuPR3bQfpmFnI5tMBriDufUHFr9v7b_g0fE9gJCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:1b76c0eb78a44a58b863392814d4c1b0d502258048274bd25da5e99efc65429e:QyapEuhMX7va5FrQQwCQTc9RNw9nKgYDvmlHtWOiPjEsdxxO-oqrYGT_mHTxShg2TivnH4Fcme9FSMQcu3IFDA==:4b987fd4e40303ac
 """
 MCP Connect Tool
 
@@ -7,10 +7,10 @@ Loads server configuration from YAML, resolves environment variables,
 and uses the MCP SDK to make the call.
 
 Usage (with server config):
-    python connect.py --server-config /path/to/server.yaml --tool TOOL_NAME --params '{}' --project-path /path
+    echo '{}' | python connect.py --server-config /path/to/server.yaml --tool TOOL_NAME --project-path /path
 
 Usage (direct):
-    python connect.py --transport http --url URL --tool TOOL_NAME --params '{}' [--headers '{}']
+    echo '{}' | python connect.py --transport http --url URL --tool TOOL_NAME [--headers '{}']
 """
 
 __tool_type__ = "python"
@@ -437,7 +437,6 @@ if __name__ == "__main__":
 
     # Common
     parser.add_argument("--tool", required=True, help="Tool name to call")
-    parser.add_argument("--params", default="{}", help="Tool parameters (JSON)")
     parser.add_argument("--timeout", type=int, default=30, help="Timeout in seconds")
     parser.add_argument("--project-path", help="Project path for .env resolution")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -450,7 +449,7 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.INFO)
 
     try:
-        params = json.loads(parsed.params)
+        params = json.loads(sys.stdin.read())
     except json.JSONDecodeError as e:
         print(json.dumps({"success": False, "error": f"Invalid params JSON: {e}"}))
         sys.exit(1)

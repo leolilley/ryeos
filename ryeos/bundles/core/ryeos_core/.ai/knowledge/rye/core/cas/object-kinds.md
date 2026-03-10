@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-09T23:40:51Z:927a35c17acd7d5d544cc62e4add3826394602c98072c57b16585225d413d248:dQXRLiRXzDWgRMx_aXBNfv0yrgHyGb4Qc-w-pqwgNKkeBiXDR4NbS8XuEs91ZKb9fyujgDlvsHYjgHZbJJiGBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-10T04:07:14Z:927a35c17acd7d5d544cc62e4add3826394602c98072c57b16585225d413d248:dQXRLiRXzDWgRMx_aXBNfv0yrgHyGb4Qc-w-pqwgNKkeBiXDR4NbS8XuEs91ZKb9fyujgDlvsHYjgHZbJJiGBg==:4b987fd4e40303ac -->
 ```yaml
 name: object-kinds
 title: CAS Object Kinds

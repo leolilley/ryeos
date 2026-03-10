@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:9dad51e493618cd0d919a43cac05dd02b2aace20225372927bb9c9f7b6294623:C3hkTR6gCnZXsT0bT1ktodbixzY9_8-eooryvgTIX8NSwuUb7aogxrX148p7S0wXXlL5QSUwFTMzIXfloDybDA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-10T04:07:14Z:eab3d2aeb2fd97770aee5ec8accdee4e3086d9c24bf468c93ad76e9b8a871c28:vtzgyVUT_s5OOzqnzpmED8_FTZd6ikrq-2cg0XWChhkG-yoYuP0OW0rFVnNciSTEfcUya_FYOOxrBobzjDYRCA==:4b987fd4e40303ac -->
 
 ```yaml
 name: runtime-authoring
@@ -253,21 +253,7 @@ config:
   timeout: 300
 ```
 
-All standard runtimes use `input_data` to pipe parameters via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits. The tool reads JSON from stdin instead of parsing a `--params` CLI argument.
-
-**Legacy pattern — parameters in args (not recommended):**
-
-```yaml
-config:
-  command: "${RYE_RUBY}"
-  args:
-    - "{tool_path}"
-    - "--params"
-    - "{params_json}"
-    - "--project-path"
-    - "{project_path}"
-  timeout: 300
-```
+All runtimes use `input_data` to pipe parameters via stdin, avoiding OS `ARG_MAX` / `E2BIG` limits. The tool reads JSON from stdin instead of accepting a CLI argument.
 
 **Fields:**
 - `command` — Interpreter binary (typically from `env_config.interpreter.var`)
@@ -356,9 +342,6 @@ config:
     - "--project-path"
     - "{project_path}"
   input_data: "{params_json}"
-  # Legacy alternative: pass params in args (not recommended, subject to ARG_MAX limits):
-  #   args: ["{tool_path}", "--params", "{params_json}", "--project-path", "{project_path}"]
-  #   (and remove input_data above)
   timeout: 300
 
 config_schema:
@@ -405,12 +388,10 @@ if __FILE__ == $0
   project_path = nil
   
   OptionParser.new do |opts|
-    opts.on("--params JSON") { |v| params_json = v }
     opts.on("--project-path PATH") { |v| project_path = v }
   end.parse!
   
-  # Read params from stdin (standard), fall back to --params arg (legacy)
-  params = JSON.parse(params_json || $stdin.read)
+  params = JSON.parse($stdin.read)
   result = execute(params, project_path)
   puts JSON.generate(result)
 end
@@ -452,5 +433,5 @@ Common issues:
 |---------|-------|
 | "Command not found" | Verify `binary` name is in system PATH; check `fallback` |
 | "Module not found" | Verify `anchor` and `env_paths` are configured correctly |
-| "Parameter parsing fails" | Verify tool reads params from stdin (or `--params` arg for legacy); check `--project-path` arg |
+| "Parameter parsing fails" | Verify tool reads params from stdin; check `--project-path` arg |
 | "Signature verification fails" | Re-sign the tool: `rye_sign(item_type="tool", item_id="...")` |

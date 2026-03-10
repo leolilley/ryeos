@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-06T02:20:05Z:b93ee8656b0966d510a3c933a556a61eb1c70969356cefa66335bf9fe4e70ab3:8QW9aQYwYdQceXTaiVYl6N0vWd6bV07d49uzaR5btvcdQpLvaNUnbGuqUiZytSh8ULqzvVZIkJUwl8IHBR6BAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-10T04:07:14Z:99c424da9c120f365890fd5c38a0bcffa86535a5c62765272e072a1041bb9285:o2Y8rUdIaxFZLTIiFri3gZlkOJcOgUNB-vciI4G6sZZRSCqvxkM8h_g0M8cVTI5m7VQYMNObtGppGYv14WanAg==:4b987fd4e40303ac -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems
@@ -104,8 +104,6 @@ config:
     - "--project-path"
     - "{project_path}"
   input_data: "{params_json}"
-  # Legacy alternative: pass params in args (not recommended, subject to ARG_MAX limits):
-  # args: ["{tool_path}", "--params", "{params_json}", "--project-path", "{project_path}"]
 ```
 
 ## System 3: Context Interpolation

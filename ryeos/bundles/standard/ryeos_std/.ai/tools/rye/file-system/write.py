@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:19b5910b1b88ea8801cbd0af07f01f00e4b8c2f264cdf3dc30579fdecd0d0f02:WlT8dmTU7LtFsljoPkZxvcoPllPVPMQ_Gl7XoFplpIfdRQL8HAtOm5VrYRmiBjrZsQeF5R_vnvJwqCez-W29Cg==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:7e4bec78c3b02a99306be1c28318c543ff3094984cd02fe2cc573ae3a5d147a7:xDP9Hs4104f3sSVBFv6NgCV85TLYUyA61PeBeTGhlQtGi7J2yCGhZUwweWvE8OlS1s9EMLeTwbgv-HKp6XB2DA==:4b987fd4e40303ac
 """Create or overwrite a file, invalidating line ID cache."""
 
 import argparse
@@ -154,8 +154,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

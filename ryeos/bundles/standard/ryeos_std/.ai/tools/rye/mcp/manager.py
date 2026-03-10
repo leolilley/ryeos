@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:66182c36ead89362c0521f2585fc9ddb827d548e1ea663d414164aef627f09ed:B-25kC9kqk3DMYTLx3m_8kn5ZopFHBQwZVizsm1o5hgf3THy7BCPmfIt4wHdJneHQMjGTuTpwnYj4YuYHWvtDA==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:af46136c3f99423307e1e2caed8ec40f45a4b5d8f4e7ff36cab6709ddb806d4e:JSjeNE5NUGr8IIta_NM9687DTd8pr4gjt9Zi2SekDHAmSSoEUlitlRHMo7fnfLjGJHR6bdQ6SsVAUnmrBCJhCw==:4b987fd4e40303ac
 """
 MCP Manager Tool
 
@@ -560,7 +560,6 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="MCP Manager")
-    parser.add_argument("--params", help="Parameters as JSON (also accepts stdin)")
     parser.add_argument("--project-path", required=True, help="Project path")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
@@ -572,7 +571,7 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.INFO)
 
     try:
-        raw = args.params if args.params else sys.stdin.read()
+        raw = sys.stdin.read()
         params = json.loads(raw)
         action = params.pop("action", None)
         if not action:

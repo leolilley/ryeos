@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:4552af676edc5460e92695ac5d284c03a247f9e61dc81b15fc16f17e02c65dbf:iPQD50n4HIJWLYkBuUbQhnsi5cvkXPxrP5BFTnpWoWs8bOIdhMJJkPaBTuhX-JFV_lSRRkzhvzwtY3YJYiKUCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:bbecefc4ee5757d4acd629db45aa58b6ed4f2f3f496aa9350745cfad53564554:qE6bULWoMPMIa8PojPeblEaNBmyRBdbps0y0mDt6F2wTCZCmvptLRl4LYvCF4WQUgsNAJD2UJ9nuk25CR4IlBQ==:4b987fd4e40303ac
 """Search for directives, tools, or knowledge items."""
 
 import argparse
@@ -66,10 +66,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    import sys
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    params = json.loads(sys.stdin.read())
     result = execute(params, args.project_path)
     print(json.dumps(result))

@@ -1,9 +1,10 @@
-# rye:signed:2026-03-10T01:28:20Z:3f1501b5d312ff78d820eb5e5dbe655e47dc4f9ece10df8408692199f91ab41e:p1usWES1AD0q2WLRjg8LR1QRPdbfk_ww290Dfrv1oEZKqWeDS8C8rupXeFLuwSk-I3CH8Xk6NyW9E8DTO2u7CA==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:f58d2ecfba39313398fcc7c0a4b21e4ef6bcfc33fe413adcc630b2bf14f2f898:xt9mHPmcomfRULf53o_o2sjWQhQ0hGxtO5RMgv2-3Tb9MUreBNJand6pGEYIvwg3o7iswibUli9IJGuU8ZznDg==:4b987fd4e40303ac
 """Read a file with persistent line IDs for stable editing."""
 
 import argparse
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -234,8 +235,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))

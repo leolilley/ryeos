@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:f53b035a3711319f65833ee1f053c144cdb0b85c46d59a5339d778bed47f7dae:NtyFgndOdvLCVV3kU2yK0l2DHnGpmMUzuD83TkzxwqfC393ozQLSZ3ZACFewIpFX4fx1FPUg4fMmB1Ybi_rKBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-10T04:07:14Z:06135583feb69fcbdeb0d97479376fdd3b315b4f29fb6586bdc442210137e1cb:rENdxqAUid2NyR6W3sG4csvJb32ai5m9nYuJMTaNX_XfstuFg3OEFFTjvcSiLJwJhpvtqyYtShyngUmEWqNVBA==:4b987fd4e40303ac -->
 
 ```yaml
 name: standard-runtimes
@@ -141,10 +141,9 @@ CONFIG_SCHEMA = { ... }
 if __name__ == "__main__":
     import argparse, json, sys
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", default=None)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    params = json.loads(sys.stdin.read())
     result = execute(params, args.project_path)
     print(json.dumps(result))
 ```

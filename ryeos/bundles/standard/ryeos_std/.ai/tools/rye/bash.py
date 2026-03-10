@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T01:28:20Z:6c2d1663db28c00e6375cab535ac6901646711dead60fde6abf880d7443deeb7:15LdQvWI2kJvrOIbRbSydUDthLg1PyW-pyhxd82LO1-UgciI57PjEnCv9dFXtlIW3Qqgg9eiA9va2W6VMhieCg==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:07:13Z:dd70769b5aae2e7450685bc84bf83e20cbdd9570823bb3754de9218fd6e18373:21quWWhlNUAtQsQF5N7casah0brUF9gNndbJiVEMa2nD0ulgth_UIS6HzrY4zUVLANQgdK0iobElmlNWswAwAQ==:4b987fd4e40303ac
 """Execute shell commands."""
 
 import argparse
@@ -128,8 +128,8 @@ def execute(params: dict, project_path: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--params", required=True)
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()
-    result = execute(json.loads(args.params), args.project_path)
+    params = json.loads(sys.stdin.read())
+    result = execute(params, args.project_path)
     print(json.dumps(result))
