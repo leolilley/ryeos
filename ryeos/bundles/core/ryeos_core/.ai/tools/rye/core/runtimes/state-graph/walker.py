@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T22:32:56Z:ba6eb2ce9dd3277d5965b9443c3edc9adbc8f51d0ceb32f2645f00fa97461029:vGr5s3E5CMWPHPt503l7WIJzO0GwzvF8fcBgl8lmw-duIFNKciIob4qJiEMMIZyiWWfcEqsJzvtL_p5FGTEUBg==:4b987fd4e40303ac
+# rye:signed:2026-03-10T04:39:56Z:630845a1c45d98d2537912c2ec678327f9670b7bb5a8ece6faff72994e80899c:tNqEn8Q84hzCAUNvQr-L8ja6pJhabLOf3bKArRnQSwR-i_h3VWhf7yKC3K9lkbl2qx0xXmEMqp1IEZvEnOaKDw==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -44,6 +45,16 @@ import condition_evaluator
 import interpolation
 
 logger = logging.getLogger(__name__)
+
+_shutdown_requested = False
+
+
+def _sigterm_handler(signum, frame):
+    """SIGTERM handler — sets flag for clean shutdown between steps."""
+    global _shutdown_requested
+    _shutdown_requested = signum
+    logger.info("Received signal %d, requesting clean shutdown", signum)
+
 
 def _find_tools_root() -> Path:
     """Walk up from __file__ to find the .ai/tools boundary for this bundle."""
@@ -604,6 +615,20 @@ def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
     return None
+
+
+def _update_registry_pid(registry, run_id: str) -> None:
+    """Update registry PID to this process (the actual walker child)."""
+    import sqlite3
+    try:
+        with sqlite3.connect(registry.db_path) as conn:
+            conn.execute(
+                "UPDATE threads SET pid = ? WHERE thread_id = ?",
+                (os.getpid(), run_id),
+            )
+            conn.commit()
+    except Exception:
+        logger.debug("Failed to update registry PID for %s", run_id, exc_info=True)
 
 
 def _resolve_execution_context(
@@ -1177,6 +1202,18 @@ def _preflight_env_check(cfg: Dict, graph_config: Optional[Dict] = None) -> List
 # ---------------------------------------------------------------------------
 
 
+def _apply_input_defaults(params: Dict, config_schema: Optional[Dict]) -> Dict:
+    """Apply default values from config_schema to missing params."""
+    if not config_schema:
+        return params
+    props = config_schema.get("properties", {})
+    merged = dict(params)
+    for key, prop in props.items():
+        if key not in merged and "default" in prop:
+            merged[key] = prop["default"]
+    return merged
+
+
 def _validate_inputs(params: Dict, config_schema: Optional[Dict]) -> List[str]:
     """Validate input params against config_schema required fields."""
     if not config_schema:
@@ -1422,6 +1459,7 @@ async def execute(
 
         if thread_registry is not None:
             registry = thread_registry.get_registry(Path(project_path))
+            _update_registry_pid(registry, graph_run_id)
             registry.update_status(graph_run_id, "running")
         await _persist_state(
             project_path, graph_id, graph_run_id,
@@ -1434,13 +1472,14 @@ async def execute(
             graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
         # Merge initial state from config.state, then overlay inputs
         initial_state = cfg.get("state", {})
+        config_schema = graph_config.get("config_schema")
+        params = _apply_input_defaults(params, config_schema)
         state: Dict[str, Any] = {**initial_state, "inputs": params}
         current = cfg.get("start")
         step_count = 0
         node_receipt_hashes: List[str] = []
 
         # Validate inputs
-        config_schema = graph_config.get("config_schema")
         input_errors = _validate_inputs(params, config_schema)
         if input_errors:
             return {
@@ -1456,6 +1495,10 @@ async def execute(
             if not pre_registered:
                 registry.register(graph_run_id, graph_id, parent_thread_id)
                 registry.update_status(graph_run_id, "running")
+            else:
+                # Async child: update PID to this process (the actual walker)
+                # so process tools can find/kill the right PID
+                _update_registry_pid(registry, graph_run_id)
         await _persist_state(
             project_path, graph_id, graph_run_id,
             state, current, "running", step_count,
@@ -1885,14 +1928,12 @@ async def execute(
                 "step_count": step_count,
             }
 
-        # Cancellation check
-        cancel_path = (
-            Path(project_path) / AI_DIR / "agent" / "graphs" / graph_run_id / "cancel"
-        )
-        if cancel_path.exists():
+        # SIGTERM-based cancellation
+        if _shutdown_requested:
             elapsed = time.monotonic() - graph_start_time
             graph_transcript.write_event("graph_cancelled", {
                 "steps": step_count, "elapsed_s": elapsed,
+                "signal": _shutdown_requested,
             })
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge("cancelled", step_count, elapsed)
@@ -2238,6 +2279,7 @@ def run_sync(
 
     Same pattern as thread_directive.py async.
     """
+    signal.signal(signal.SIGTERM, _sigterm_handler)
     is_async = params.pop("async", False)
 
     if is_async:
@@ -2268,11 +2310,11 @@ def run_sync(
         # The __main__ block will load the graph YAML and call run_sync()
         # We need to add --graph-run-id and --pre-registered to signal
         # the child to call execute() directly instead of run_sync()
+        params_json = json.dumps(params)
         cmd = [
             sys.executable,
             str(walker_path),
             "--graph-path", graph_config.get("_file_path", ""),
-            "--params", json.dumps(params),
             "--project-path", project_path,
             "--graph-run-id", graph_run_id,
             "--pre-registered",
@@ -2298,6 +2340,7 @@ def run_sync(
             args=cmd[1:],
             log_path=str(log_path),
             envs=envs,
+            input_data=params_json,
         ))
 
         if not spawn_result.get("success"):
@@ -2328,11 +2371,12 @@ def run_sync(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--graph-path", required=True)
-    parser.add_argument("--params", default=None, help="Parameters as JSON (legacy, prefer stdin)")
     parser.add_argument("--project-path", required=True)
     parser.add_argument("--graph-run-id", default=None)
     parser.add_argument("--pre-registered", action="store_true")
     args = parser.parse_args()
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     if os.environ.get("RYE_DEBUG"):
         logging.basicConfig(
@@ -2342,7 +2386,7 @@ if __name__ == "__main__":
         )
 
     graph_config = _load_graph_yaml(args.graph_path)
-    params = json.loads(args.params) if args.params else json.loads(sys.stdin.read())
+    params = json.loads(sys.stdin.read())
 
     # If called from subprocess with --graph-run-id and --pre-registered,
     # call execute() directly (child process behavior)
