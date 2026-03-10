@@ -86,6 +86,7 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary tools      |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
 | `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the four primitives |
+| `ryeos-remote` | Remote execution server — CAS-native sync, materializer, Modal deployment |
 
 > **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
@@ -101,6 +102,16 @@ pip install ryeos-mcp[all]      # MCP server + all bundles
 ```
 
 Fully modular and extendable.
+
+## Remote Execution
+
+Run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage for sync — objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects. The remote executor has its own Ed25519 identity and signs execution artifacts independently.
+
+```bash
+pip install ryeos-remote          # server package (deployed on Modal)
+```
+
+See the [Remote Execution docs](docs/internals/remote-execution.md) for the full architecture.
 
 ## Documentation
 

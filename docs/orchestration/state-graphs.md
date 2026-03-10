@@ -765,6 +765,56 @@ rye graph validate my-project/graphs/scraper_pipeline
 
 Install the CLI: `pip install ryeos-cli`. See the [CLI documentation](../future/ryeos-cli.md) for the full verb reference.
 
+## CAS Persistence
+
+Graph execution persists immutable snapshots to the [Content-Addressed Store](../internals/cas.md) after each run. These objects form a complete audit trail — every intermediate state, every node result, and every execution decision is recorded and dereferenceable by hash.
+
+### Objects Produced
+
+| Object | When Created | Purpose |
+| --- | --- | --- |
+| `ExecutionSnapshot` | After each graph run | Immutable checkpoint — links graph_run_id, manifest hashes, system_version, state_hash, and node_receipts[] |
+| `NodeReceipt` | After each node | Audit record — `node_input_hash`, `node_result_hash`, `cache_hit`, `elapsed_ms`, `timestamp` |
+| `NodeResult` | After each node | The full result dict stored as a CAS object, dereferenceable by hash |
+| `StateSnapshot` | After each graph run | Graph state at completion, stored by hash |
+
+### Refs
+
+Mutable pointers at `.ai/objects/refs/graphs/<graph_run_id>.json` point to the latest `ExecutionSnapshot` hash for each run. Only refs are mutable — everything they point to is immutable.
+
+### Retrace
+
+Follow the chain to reconstruct any run:
+
+```
+ref → ExecutionSnapshot → node_receipts[] → NodeReceipt → NodeResult
+                        → state_hash → StateSnapshot
+```
+
+Cross-run provenance: same `node_input_hash` across runs = same inputs.
+
+## Node Caching
+
+Nodes can opt into execution caching with `cache: true`. When enabled, the walker computes a deterministic cache key from the interpolated action, graph hash, lockfile hash, and config snapshot hash. If the cache key matches a previous execution, the cached result is used without re-execution.
+
+```yaml
+nodes:
+  summarize:
+    cache: true
+    action:
+      primary: execute
+      item_type: tool
+      item_id: rye/agent/threads/thread_directive
+      params:
+        directive: summarize
+        context: "${state.document_text}"
+    assign:
+      summary: "${result.output}"
+    next: store_results
+```
+
+Default is `false` — safe for nodes with side effects or time-sensitive actions. Caches invalidate automatically when any input changes (graph YAML, config files, upstream state). See [Node Execution Cache](../internals/node-cache.md) for the full cache key composition and invalidation rules.
+
 ## What's Next
 
 - [Thread Lifecycle](./thread-lifecycle.md) — How threads are created, executed, and finalized
@@ -782,4 +832,7 @@ Install the CLI: `pip install ryeos-cli`. See the [CLI documentation](../future/
 | Interpolation       | `.ai/tools/rye/agent/threads/loaders/interpolation.py`       |
 | Condition evaluator | `.ai/tools/rye/agent/threads/loaders/condition_evaluator.py` |
 | Thread registry     | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` |
+| Node cache          | `ryeos/rye/cas/node_cache.py`                                |
+| Config snapshot     | `ryeos/rye/cas/config_snapshot.py`                           |
+| CAS object model    | `ryeos/rye/cas/objects.py`                                   |
 | Tool test runner | `.ai/tools/rye/dev/test_runner.py`                           |

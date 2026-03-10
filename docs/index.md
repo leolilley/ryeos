@@ -74,6 +74,9 @@ For contributors and those who want to understand how Rye OS works under the hoo
 - [Runtimes](internals/runtimes.md) — How runtimes configure tool execution, interpreter resolution, and the 7 standard runtimes
 - [Three-Tier Spaces](internals/three-tier-spaces.md) — Project, user, and system space resolution
 - [Integrity and Signing](internals/integrity-and-signing.md) — Content hashing, Ed25519, and lockfiles
+- [Content-Addressed Store](internals/cas.md) — Immutable objects, blobs, refs, and the CAS object model
+- [Remote Execution](internals/remote-execution.md) — CAS-native sync, materializer, server endpoints, and trust model
+- [Node Execution Cache](internals/node-cache.md) — Deterministic cache keys, config snapshots, and cache invalidation
 - [Lillux Primitives](internals/lillux-primitives.md) — The microkernel layer
 
 ## Registry

@@ -21,6 +21,7 @@ The bottom layer. Lillux provides stateless, async-first primitives for interact
 | `HttpClientPrimitive` | `lillux/primitives/http_client.py`   | Make HTTP requests with retry logic, auth headers, and SSE streaming             |
 | `signing`             | `lillux/primitives/signing.py`       | Ed25519 key generation, sign, verify — pure crypto, no policy                    |
 | `integrity`           | `lillux/primitives/integrity.py`     | Generic deterministic SHA256 hashing via `compute_integrity(data)`               |
+| `cas`                 | `lillux/primitives/cas.py`           | Content-addressed storage — `store_blob`, `store_object`, sharded by hash        |
 | `lockfile`            | `lillux/primitives/lockfile.py`      | Lockfile I/O — load/save JSON lockfiles with explicit paths                      |
 | `EnvResolver`         | `lillux/runtime/env_resolver.py`     | Resolve environment variables from `.env` files, venvs, version managers         |
 | `SchemaValidator`     | `lillux/schemas/schema_validator.py` | JSON Schema validation                                                           |
@@ -142,6 +143,10 @@ This means:
 - No hardcoded executor IDs in `PrimitiveExecutor` — only the two Lillux primitive mappings (`subprocess` and `http_client`) are registered in `PRIMITIVE_MAP`
 
 The only hardcoded knowledge in the system is the mapping from primitive IDs to Lillux classes. Everything above that is resolved from the filesystem at runtime.
+
+## Remote Execution
+
+Remote execution is a deployment mode — it runs the same executor and graph walker on a remote server, synced via content-addressed storage rather than git. The remote server (`services/ryeos-remote/`) provides CAS sync endpoints (`/objects/has`, `/objects/put`, `/objects/get`) and an `/execute` endpoint that materializes a temp `.ai/` directory from CAS manifests, runs the tool, and re-ingests outputs. The remote executor has its own Ed25519 signing identity — it never receives the user's private key. See [Remote Execution](remote-execution.md) and [Content-Addressed Store](cas.md) for details.
 
 ## Package and Bundle Distribution
 
