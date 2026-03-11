@@ -26,7 +26,7 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
         # Core engine (ryeos-core → ryeos-engine → lillux → lillux-proc)
-        "ryeos-core==0.1.17",
+        "ryeos-core==0.1.18",
         # Agent bundle (thread_directive, capability harness, etc.)
         "ryeos-std==0.1.17",
         # Server
