@@ -35,6 +35,7 @@ from rye.cas.objects import (
     ArtifactIndex,
     ExecutionSnapshot,
     ItemSource,
+    RuntimeOutputsBundle,
     SourceManifest,
 )
 from rye.cas.store import cas_root, read_ref, write_ref
@@ -50,7 +51,7 @@ from rye.constants import AI_DIR
 
 from ryeos_remote.auth import User, get_current_user
 from ryeos_remote.config import Settings, get_settings
-from ryeos_remote.server import app
+from ryeos_remote.server import app, _ingest_runtime_outputs
 
 # Load ArtifactStore from bundle via importlib (path has .ai/ dir)
 from conftest import PROJECT_ROOT, get_bundle_path
@@ -503,6 +504,113 @@ class TestInjectUserSecrets:
 
         # Clean up
         os.environ.pop("TEST_SECRET_KEY", None)
+
+
+# ============================================================================
+# Secrets Endpoints
+# ============================================================================
+
+
+class TestSecretsEndpoints:
+    """Tests for POST /secrets, GET /secrets, DELETE /secrets/{name}."""
+
+    def test_upsert_secrets(self, cas_env):
+        """POST /secrets upserts secrets via RPC."""
+        c, _, _ = cas_env
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = None
+        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
+        mock_client = MagicMock()
+        mock_client.rpc = mock_rpc
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            r = c.post("/secrets", json={
+                "secrets": [
+                    {"name": "API_KEY", "value": "secret123"},
+                    {"name": "OTHER_KEY", "value": "secret456"},
+                ],
+            })
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body["stored"]) == {"API_KEY", "OTHER_KEY"}
+        assert body["count"] == 2
+
+    def test_upsert_skips_empty(self, cas_env):
+        """POST /secrets skips entries with empty name or value."""
+        c, _, _ = cas_env
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = None
+        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
+        mock_client = MagicMock()
+        mock_client.rpc = mock_rpc
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            r = c.post("/secrets", json={
+                "secrets": [
+                    {"name": "", "value": "val"},
+                    {"name": "KEY", "value": ""},
+                    {"name": "GOOD", "value": "ok"},
+                ],
+            })
+        assert r.status_code == 200
+        assert r.json()["stored"] == ["GOOD"]
+
+    def test_list_secrets(self, cas_env):
+        """GET /secrets returns secret names only."""
+        c, _, _ = cas_env
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = [
+            {"name": "API_KEY", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
+            {"name": "DB_URL", "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"},
+        ]
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.order.return_value.execute.return_value = mock_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            r = c.get("/secrets")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["secrets"]) == 2
+        assert body["secrets"][0]["name"] == "API_KEY"
+
+    def test_delete_secret(self, cas_env):
+        """DELETE /secrets/{name} removes a secret."""
+        c, _, _ = cas_env
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = True
+        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
+        mock_client = MagicMock()
+        mock_client.rpc = mock_rpc
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            r = c.delete("/secrets/API_KEY")
+        assert r.status_code == 200
+        assert r.json()["deleted"] == "API_KEY"
+
+    def test_delete_secret_not_found(self, cas_env):
+        """DELETE /secrets/{name} returns 404 for missing secret."""
+        c, _, _ = cas_env
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = False
+        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
+        mock_client = MagicMock()
+        mock_client.rpc = mock_rpc
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            r = c.delete("/secrets/NONEXISTENT")
+        assert r.status_code == 404
 
 
 # ============================================================================
@@ -1221,3 +1329,254 @@ class TestRefs:
         write_ref(ref_path, "first")
         write_ref(ref_path, "second")
         assert read_ref(ref_path) == "second"
+
+
+# ============================================================================
+# RuntimeOutputsBundle — server-side ingestion
+# ============================================================================
+
+
+class TestIngestRuntimeOutputs:
+    """Tests for _ingest_runtime_outputs() — CAS ingestion of runtime files."""
+
+    def _setup_project(self, tmp_path):
+        """Create a fake materialized project with runtime output files."""
+        project = tmp_path / "project"
+        project.mkdir()
+
+        dst_root = project / AI_DIR / "objects"
+        dst_root.mkdir(parents=True)
+
+        # Graph transcript
+        graph_dir = project / AI_DIR / "agent" / "graphs" / "run-123"
+        graph_dir.mkdir(parents=True)
+        (graph_dir / "transcript.jsonl").write_text(
+            '{"event": "step_started", "node": "setup"}\n'
+        )
+
+        # Thread transcript + metadata
+        thread_dir = project / AI_DIR / "agent" / "threads" / "t-abc"
+        thread_dir.mkdir(parents=True)
+        (thread_dir / "transcript.jsonl").write_text(
+            '{"event": "cognition_in", "text": "hello"}\n'
+        )
+        (thread_dir / "thread.json").write_text(
+            '{"thread_id": "t-abc", "status": "completed"}\n'
+        )
+        (thread_dir / "capabilities.md").write_text("# Capabilities\n")
+
+        # Knowledge markdown
+        knowledge_dir = project / AI_DIR / "knowledge" / "agent" / "graphs" / "test"
+        knowledge_dir.mkdir(parents=True)
+        (knowledge_dir / "run-123.md").write_text("# Graph Report\n")
+
+        # Ref pointer
+        refs_dir = project / AI_DIR / "objects" / "refs" / "graphs"
+        refs_dir.mkdir(parents=True)
+        (refs_dir / "run-123.json").write_text('{"hash": "deadbeef"}')
+
+        return project, dst_root
+
+    def test_ingests_all_runtime_files(self, tmp_path):
+        project, dst_root = self._setup_project(tmp_path)
+
+        bundle_hash, new_hashes = _ingest_runtime_outputs(
+            project, dst_root, "thread-1", "snap-hash",
+        )
+
+        assert bundle_hash
+        assert len(new_hashes) > 0
+
+        # Bundle object should be in CAS
+        obj = cas.get_object(bundle_hash, dst_root)
+        assert obj is not None
+        assert obj["kind"] == "runtime_outputs_bundle"
+        assert obj["remote_thread_id"] == "thread-1"
+        assert obj["execution_snapshot_hash"] == "snap-hash"
+
+        files = obj["files"]
+        # Should have: 2 transcripts, thread.json, capabilities.md, knowledge, ref
+        assert len(files) == 6
+
+        # All blob hashes should be retrievable
+        for rel_path, blob_hash in files.items():
+            blob = cas.get_blob(blob_hash, dst_root)
+            assert blob is not None, f"Blob missing for {rel_path}"
+
+    def test_returns_all_hashes_for_pull(self, tmp_path):
+        """Bundle hash AND all blob hashes must be in new_hashes."""
+        project, dst_root = self._setup_project(tmp_path)
+
+        bundle_hash, new_hashes = _ingest_runtime_outputs(
+            project, dst_root, "thread-1", "snap-hash",
+        )
+
+        # Bundle object hash is included
+        assert bundle_hash in new_hashes
+
+        # All blob hashes are included
+        obj = cas.get_object(bundle_hash, dst_root)
+        for blob_hash in obj["files"].values():
+            assert blob_hash in new_hashes
+
+    def test_rejects_symlinks(self, tmp_path):
+        project, dst_root = self._setup_project(tmp_path)
+
+        # Create a symlink in agent dir pointing outside
+        agent_dir = project / AI_DIR / "agent" / "graphs" / "evil"
+        agent_dir.mkdir(parents=True)
+        target = tmp_path / "secret.txt"
+        target.write_text("sensitive data")
+        (agent_dir / "link.jsonl").symlink_to(target)
+
+        bundle_hash, new_hashes = _ingest_runtime_outputs(
+            project, dst_root, "thread-1", "snap-hash",
+        )
+
+        # Symlink should NOT be in the bundle
+        obj = cas.get_object(bundle_hash, dst_root)
+        for rel_path in obj["files"]:
+            assert "evil/link.jsonl" not in rel_path
+
+    def test_empty_project_returns_no_bundle(self, tmp_path):
+        project = tmp_path / "empty"
+        project.mkdir()
+        (project / AI_DIR / "objects").mkdir(parents=True)
+
+        bundle_hash, new_hashes = _ingest_runtime_outputs(
+            project, tmp_path / "cas", "thread-1", "snap-hash",
+        )
+
+        assert bundle_hash == ""
+        assert new_hashes == []
+
+    def test_bundle_object_schema(self, tmp_path):
+        """Verify RuntimeOutputsBundle dataclass produces correct dict."""
+        bundle = RuntimeOutputsBundle(
+            remote_thread_id="t-1",
+            execution_snapshot_hash="snap-1",
+            files={".ai/agent/test.jsonl": "abc123"},
+        )
+        d = bundle.to_dict()
+        assert d["kind"] == "runtime_outputs_bundle"
+        assert d["schema"] == 1
+        assert d["remote_thread_id"] == "t-1"
+        assert d["execution_snapshot_hash"] == "snap-1"
+        assert d["files"] == {".ai/agent/test.jsonl": "abc123"}
+
+
+# ============================================================================
+# RuntimeOutputsBundle — client-side materialization
+# ============================================================================
+
+
+# Load _materialize_runtime_outputs from core bundle
+_REMOTE_TOOL_PATH = get_bundle_path("core", "tools/rye/core/remote/remote.py")
+_rt_spec = importlib.util.spec_from_file_location("remote_tool", _REMOTE_TOOL_PATH)
+_rt_mod = importlib.util.module_from_spec(_rt_spec)
+_rt_spec.loader.exec_module(_rt_mod)
+_materialize_runtime_outputs = _rt_mod._materialize_runtime_outputs
+
+
+class TestMaterializeRuntimeOutputs:
+    """Tests for client-side materialization of RuntimeOutputsBundle."""
+
+    def _create_bundle_in_cas(self, project_path, files_content):
+        """Store file blobs + bundle object in local CAS. Returns bundle hash."""
+        root = cas_root(project_path)
+        root.mkdir(parents=True, exist_ok=True)
+
+        file_map = {}
+        for rel_path, content in files_content.items():
+            blob_hash = cas.store_blob(content.encode(), root)
+            file_map[rel_path] = blob_hash
+
+        bundle = RuntimeOutputsBundle(
+            remote_thread_id="rye-remote-test123",
+            execution_snapshot_hash="snap-abc",
+            files=file_map,
+        )
+        return cas.store_object(bundle.to_dict(), root)
+
+    def test_materializes_files_to_local_tree(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+
+        bundle_hash = self._create_bundle_in_cas(project, {
+            ".ai/agent/graphs/run-1/transcript.jsonl": '{"event": "started"}\n',
+            ".ai/agent/threads/t-1/thread.json": '{"status": "completed"}\n',
+            ".ai/knowledge/agent/graphs/test/run-1.md": "# Report\n",
+        })
+
+        count = _materialize_runtime_outputs(bundle_hash, project)
+        assert count == 3
+
+        assert (project / ".ai/agent/graphs/run-1/transcript.jsonl").exists()
+        assert (project / ".ai/agent/threads/t-1/thread.json").exists()
+        assert (project / ".ai/knowledge/agent/graphs/test/run-1.md").exists()
+
+        # Content should match
+        assert (project / ".ai/agent/graphs/run-1/transcript.jsonl").read_text() == '{"event": "started"}\n'
+
+    def test_refs_materialized(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+
+        bundle_hash = self._create_bundle_in_cas(project, {
+            ".ai/objects/refs/graphs/run-1.json": '{"hash": "abc"}',
+        })
+
+        count = _materialize_runtime_outputs(bundle_hash, project)
+        assert count == 1
+        assert (project / ".ai/objects/refs/graphs/run-1.json").read_text() == '{"hash": "abc"}'
+
+    def test_rejects_paths_outside_allowlist(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+
+        bundle_hash = self._create_bundle_in_cas(project, {
+            ".ai/agent/graphs/run-1/transcript.jsonl": "ok",
+            ".ai/tools/evil.py": "import os; os.system('rm -rf /')",
+            "src/main.py": "print('injected')",
+        })
+
+        count = _materialize_runtime_outputs(bundle_hash, project)
+        assert count == 1  # only the agent file
+        assert not (project / ".ai/tools/evil.py").exists()
+        assert not (project / "src/main.py").exists()
+
+    def test_rejects_path_traversal(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+
+        bundle_hash = self._create_bundle_in_cas(project, {
+            ".ai/agent/../../etc/passwd": "root:x:0:0",
+        })
+
+        count = _materialize_runtime_outputs(bundle_hash, project)
+        assert count == 0
+
+    def test_missing_bundle_returns_zero(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / AI_DIR / "objects").mkdir(parents=True)
+
+        count = _materialize_runtime_outputs("nonexistent_hash", project)
+        assert count == 0
+
+    def test_missing_blob_skips_file(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        root = cas_root(project)
+        root.mkdir(parents=True)
+
+        # Store bundle with a fake blob hash that doesn't exist
+        bundle = RuntimeOutputsBundle(
+            remote_thread_id="t-1",
+            execution_snapshot_hash="s-1",
+            files={".ai/agent/test/transcript.jsonl": "0" * 64},
+        )
+        bundle_hash = cas.store_object(bundle.to_dict(), root)
+
+        count = _materialize_runtime_outputs(bundle_hash, project)
+        assert count == 0  # blob missing, file skipped

@@ -229,3 +229,32 @@ class ArtifactIndex:
             "thread_id": self.thread_id,
             "entries": self.entries,
         }
+
+
+@dataclass(frozen=True)
+class RuntimeOutputsBundle:
+    """Maps runtime-produced files to CAS blobs for remote output sync.
+
+    After remote execution, runtime files (transcripts, thread.json,
+    capabilities.md, knowledge markdown, refs) are stored as CAS blobs.
+    This object records the mapping so clients can materialize them
+    back into the local project tree.
+
+    files: {relative_path_from_project_root: blob_hash}
+      e.g. ".ai/agent/graphs/run-123/transcript.jsonl" → "abc123..."
+    """
+
+    kind: str = field(default="runtime_outputs_bundle", init=False)
+    schema: int = field(default=SCHEMA_VERSION, init=False)
+    remote_thread_id: str = ""
+    execution_snapshot_hash: str = ""
+    files: Dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "kind": self.kind,
+            "remote_thread_id": self.remote_thread_id,
+            "execution_snapshot_hash": self.execution_snapshot_hash,
+            "files": self.files,
+        }

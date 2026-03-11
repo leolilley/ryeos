@@ -1,12 +1,15 @@
-# rye:signed:2026-03-11T09:35:05Z:5c57e113c68df81fd116ebce11df006fe5b5119d52f15a1727b9201a3a44a5de:er7PuadUjAiCjrOrgvbpVGWC8SciSB88uqoIvhR_CgDReFSC1WmWEzLDdCvW2tPeweYVtCx-z_ZSmbdDdE5sCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-11T10:48:17Z:74f78a0047806ed83d74f8a3d08c4fd6b32fcb6a88556423afc2e19d23f079bc:MrjIW4uhnYc4kl8c5pZ3pU5BS1OlnbWT6rcXw6ESrSUFXDbad8qn_80fiSLOzCDYxQzV80yXpHpLlO_rtyklBA==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 
 Actions:
-  push    - Build manifests, sync missing objects to remote.
-  pull    - Fetch new objects from remote (execution results).
-  status  - Show local vs remote manifest hashes.
-  execute - Push + trigger remote execution + pull results.
+  push           - Build manifests, sync missing objects to remote.
+  pull           - Fetch new objects from remote (execution results).
+  status         - Show local vs remote manifest hashes.
+  execute        - Push + trigger remote execution + pull results.
+  secrets_push   - Push secrets from .env file or env vars to remote vault.
+  secrets_list   - List secret names stored on remote (no values).
+  secrets_remove - Remove a named secret from remote vault.
 """
 
 __version__ = "1.0.0"
@@ -15,8 +18,11 @@ __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/remote"
 __tool_description__ = "Sync and execute against ryeos-remote server"
 
+import hashlib
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,7 +41,10 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["push", "pull", "status", "execute", "threads", "thread_status"]
+ACTIONS = [
+    "push", "pull", "status", "execute", "threads", "thread_status",
+    "secrets_push", "secrets_list", "secrets_remove",
+]
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -43,7 +52,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Remote operation: push, pull, status, execute, threads, thread_status",
+            "description": "Remote operation: push, pull, status, execute, threads, thread_status, secrets_push, secrets_list, secrets_remove",
         },
         "item_type": {
             "type": "string",
@@ -72,6 +81,19 @@ CONFIG_SCHEMA = {
         "project_name": {
             "type": "string",
             "description": "Filter threads by project name",
+        },
+        "env_file": {
+            "type": "string",
+            "description": "Path to .env file for secrets_push (reads KEY=VALUE pairs)",
+        },
+        "names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Secret names to push from env vars (for secrets_push without env_file)",
+        },
+        "secret_name": {
+            "type": "string",
+            "description": "Secret name for secrets_remove",
         },
     },
     "required": ["action"],
@@ -127,6 +149,25 @@ class RemoteHttpClient:
             },
             "body": body,
             "timeout": timeout,
+        }
+        result = await http.execute(config, {})
+        return {
+            "success": result.success,
+            "status_code": result.status_code,
+            "body": result.body,
+            "error": result.error,
+        }
+
+    async def delete(self, path: str) -> Dict:
+        http = await self._get_http()
+        config = {
+            "method": "DELETE",
+            "url": f"{self.base_url}{path}",
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            "timeout": 30,
         }
         result = await http.execute(config, {})
         return {
@@ -373,6 +414,103 @@ async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[s
     }
 
 
+# Allowlisted path prefixes for runtime output materialization.
+_RUNTIME_OUTPUT_PREFIXES = (
+    ".ai/agent/",
+    ".ai/knowledge/agent/",
+    ".ai/objects/refs/",
+)
+
+
+def _materialize_runtime_outputs(
+    bundle_hash: str,
+    project_path: Path,
+) -> int:
+    """Materialize a RuntimeOutputsBundle into the local project tree.
+
+    Reads the bundle object from local CAS, then for each file entry,
+    reads the blob and writes it to the corresponding local path.
+    Refs (.ai/objects/refs/) are written last so targets exist first.
+
+    Returns count of files materialized.
+    """
+    from lillux.primitives import cas
+
+    root = cas_root(project_path)
+    obj = cas.get_object(bundle_hash, root)
+    if obj is None:
+        logger.warning("RuntimeOutputsBundle %s not found in local CAS", bundle_hash[:16])
+        return 0
+
+    if obj.get("kind") != "runtime_outputs_bundle":
+        logger.warning("Expected runtime_outputs_bundle, got %s", obj.get("kind"))
+        return 0
+
+    files = obj.get("files", {})
+    if not files:
+        return 0
+
+    resolved_root = project_path.resolve()
+    count = 0
+
+    # Split into regular files and refs (refs written last)
+    regular_files = {}
+    ref_files = {}
+    for rel_path, blob_hash in files.items():
+        if rel_path.startswith(".ai/objects/refs/"):
+            ref_files[rel_path] = blob_hash
+        else:
+            regular_files[rel_path] = blob_hash
+
+    for batch in (regular_files, ref_files):
+        for rel_path, blob_hash in batch.items():
+            # Validate path: no absolute, no escapes, must match allowlist
+            if os.path.isabs(rel_path) or ".." in rel_path.split("/"):
+                logger.warning("Rejecting invalid path from bundle: %s", rel_path)
+                continue
+
+            if not any(rel_path.startswith(p) for p in _RUNTIME_OUTPUT_PREFIXES):
+                logger.warning("Path not in allowlist: %s", rel_path)
+                continue
+
+            target = (project_path / rel_path).resolve()
+            if not target.is_relative_to(resolved_root):
+                logger.warning("Path escapes project root: %s", rel_path)
+                continue
+
+            blob_data = cas.get_blob(blob_hash, root)
+            if blob_data is None:
+                logger.warning(
+                    "Blob %s for %s not found in local CAS",
+                    blob_hash[:16], rel_path,
+                )
+                continue
+
+            # Atomic write (tmp + rename)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=target.parent)
+            try:
+                os.write(fd, blob_data)
+                os.close(fd)
+                os.replace(tmp_path, target)
+                count += 1
+            except BaseException:
+                os.close(fd)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+    if count:
+        logger.info(
+            "Materialized %d runtime output files from bundle %s",
+            count, bundle_hash[:16],
+        )
+
+    return count
+
+
 async def _execute(project_path: Path, params: Dict) -> Dict:
     """Push + trigger remote execution + pull results.
 
@@ -437,8 +575,9 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     if isinstance(exec_body, str):
         exec_body = json.loads(exec_body)
 
-    # 4. Pull execution outputs
+    # 4. Pull execution outputs (CAS objects + runtime output blobs)
     snapshot_hash = exec_body.get("execution_snapshot_hash")
+    bundle_hash = exec_body.get("runtime_outputs_bundle_hash")
     pull_hashes = []
     if snapshot_hash:
         pull_hashes.append(snapshot_hash)
@@ -449,13 +588,22 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     else:
         pull_result = {"fetched": 0}
 
+    # 5. Materialize runtime outputs into local project tree
+    outputs_materialized = 0
+    if bundle_hash:
+        outputs_materialized = _materialize_runtime_outputs(
+            bundle_hash, project_path,
+        )
+
     return {
         "status": exec_body.get("status"),
         "thread_id": exec_body.get("thread_id"),
         "execution_snapshot_hash": snapshot_hash,
+        "runtime_outputs_bundle_hash": bundle_hash,
         "result": exec_body.get("result"),
         "objects_pushed": push_result.get("objects_synced", 0),
         "objects_pulled": pull_result.get("fetched", 0),
+        "outputs_materialized": outputs_materialized,
         "system_version": exec_body.get("system_version"),
     }
 
@@ -502,6 +650,140 @@ async def _thread_status(project_path: Path, params: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Secrets management
+# ---------------------------------------------------------------------------
+
+
+def _parse_env_file(env_path: Path) -> Dict[str, str]:
+    """Parse a .env file into a dict of KEY=VALUE pairs.
+
+    Skips comments and blank lines. Does not expand variables.
+    """
+    secrets = {}
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        secrets[key] = value
+    return secrets
+
+
+async def _secrets_push(project_path: Path, params: Dict) -> Dict:
+    """Push secrets from .env file or env vars to remote vault.
+
+    The LLM never sees secret values — it only provides key names
+    or an .env file path, and this function reads values directly.
+    """
+    env_file = params.get("env_file")
+    names = params.get("names", [])
+
+    # Resolve secrets locally before connecting to remote
+    secrets_to_push: Dict[str, str] = {}
+
+    if env_file:
+        env_path = Path(env_file)
+        if not env_path.is_absolute():
+            env_path = project_path / env_path
+        if not env_path.is_file():
+            return {"error": f"File not found: {env_path}"}
+        secrets_to_push = _parse_env_file(env_path)
+    elif names:
+        for name in names:
+            value = os.environ.get(name, "")
+            if value:
+                secrets_to_push[name] = value
+            else:
+                logger.warning("Env var %s not set, skipping", name)
+    else:
+        return {
+            "error": "Provide either env_file (path to .env) or names (list of env var names)",
+        }
+
+    if not secrets_to_push:
+        return {"error": "No secrets found to push"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    payload = [{"name": k, "value": v} for k, v in secrets_to_push.items()]
+    resp = await client.post("/secrets", {"secrets": payload})
+    if not resp["success"]:
+        return {"error": f"Failed to push secrets: {resp['error']}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+
+    return {
+        "stored": body.get("stored", []),
+        "count": body.get("count", 0),
+        "message": f"Pushed {body.get('count', 0)} secrets to remote",
+    }
+
+
+async def _secrets_list(project_path: Path, params: Dict) -> Dict:
+    """List secret names stored on remote (values are never returned)."""
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    resp = await client.get("/secrets")
+    if not resp["success"]:
+        return {"error": f"Failed to list secrets: {resp['error']}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+
+    secrets = body.get("secrets", [])
+    return {
+        "secrets": [s["name"] for s in secrets],
+        "count": len(secrets),
+    }
+
+
+async def _secrets_remove(project_path: Path, params: Dict) -> Dict:
+    """Remove a named secret from remote vault."""
+    secret_name = params.get("secret_name")
+    if not secret_name:
+        return {"error": "secret_name is required for secrets_remove"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    resp = await client.delete(f"/secrets/{secret_name}")
+    if not resp["success"]:
+        return {"error": f"Failed to remove secret: {resp['error']}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+
+    return {
+        "deleted": body.get("deleted", secret_name),
+        "message": f"Removed secret '{secret_name}' from remote",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -512,6 +794,9 @@ _ACTION_MAP = {
     "execute": _execute,
     "threads": _threads,
     "thread_status": _thread_status,
+    "secrets_push": _secrets_push,
+    "secrets_list": _secrets_list,
+    "secrets_remove": _secrets_remove,
 }
 
 

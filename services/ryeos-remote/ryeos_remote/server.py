@@ -1,7 +1,8 @@
 """CAS-native remote execution server.
 
 Endpoints: /health, /public-key, /objects/has, /objects/put, /objects/get,
-           /push, /execute, /threads, /threads/{thread_id}
+           /push, /execute, /threads, /threads/{thread_id},
+           /secrets (POST, GET), /secrets/{name} (DELETE)
 """
 
 import datetime
@@ -24,7 +25,7 @@ from ryeos_remote.config import Settings, get_settings
 from lillux.primitives import cas
 from lillux.primitives.integrity import compute_integrity
 
-from rye.cas.objects import ExecutionSnapshot
+from rye.cas.objects import ExecutionSnapshot, RuntimeOutputsBundle
 from rye.cas.sync import (
     handle_has_objects,
     handle_put_objects,
@@ -105,6 +106,10 @@ class ExecuteRequest(BaseModel):
     item_id: str
     parameters: Dict[str, Any] = {}
     thread: str = "inline"
+
+
+class SecretsUpsertRequest(BaseModel):
+    secrets: List[Dict[str, str]]
 
 
 # --- Helpers ---
@@ -201,6 +206,98 @@ def _copy_cas_objects(src_root: Path, dst_root: Path) -> List[str]:
     return new_hashes
 
 
+# Allowlisted path prefixes for runtime outputs (relative to project root).
+_RUNTIME_OUTPUT_PREFIXES = (
+    ".ai/agent/",
+    ".ai/knowledge/agent/",
+    ".ai/objects/refs/",
+)
+
+
+def _ingest_runtime_outputs(
+    project_path: Path,
+    dst_root: Path,
+    thread_id: str,
+    snapshot_hash: str,
+) -> tuple[str, List[str]]:
+    """Ingest runtime-produced files into CAS as blobs + RuntimeOutputsBundle.
+
+    Walks allowlisted paths under the materialized project, stores each
+    regular file as a CAS blob, builds a RuntimeOutputsBundle mapping
+    {relative_path: blob_hash}, stores it as a CAS object.
+
+    Returns (bundle_hash, all_new_hashes) where all_new_hashes includes
+    the bundle object hash and all referenced blob hashes.
+
+    Rejects symlinks and paths that escape the project root.
+    """
+    files: Dict[str, str] = {}
+    new_hashes: List[str] = []
+
+    resolved_root = project_path.resolve()
+
+    for prefix in _RUNTIME_OUTPUT_PREFIXES:
+        prefix_path = project_path / prefix
+        if not prefix_path.is_dir():
+            continue
+
+        for dirpath, _, filenames in os.walk(prefix_path):
+            for filename in filenames:
+                file_path = Path(dirpath) / filename
+
+                # Reject symlinks (prevents exfiltration of server files)
+                if file_path.is_symlink():
+                    logger.warning(
+                        "Skipping symlink in runtime outputs: %s", file_path
+                    )
+                    continue
+
+                # Validate path stays under project root
+                try:
+                    resolved = file_path.resolve()
+                    if not resolved.is_relative_to(resolved_root):
+                        logger.warning(
+                            "Path escapes project root: %s", file_path
+                        )
+                        continue
+                except (ValueError, OSError):
+                    continue
+
+                if not file_path.is_file():
+                    continue
+
+                rel_path = str(file_path.relative_to(project_path))
+
+                try:
+                    raw = file_path.read_bytes()
+                    blob_hash = cas.store_blob(raw, dst_root)
+                    files[rel_path] = blob_hash
+                    new_hashes.append(blob_hash)
+                except Exception:
+                    logger.warning(
+                        "Failed to ingest runtime output: %s",
+                        rel_path, exc_info=True,
+                    )
+
+    if not files:
+        return "", []
+
+    bundle = RuntimeOutputsBundle(
+        remote_thread_id=thread_id,
+        execution_snapshot_hash=snapshot_hash,
+        files=files,
+    )
+    bundle_hash = cas.store_object(bundle.to_dict(), dst_root)
+    new_hashes.append(bundle_hash)
+
+    logger.info(
+        "Ingested %d runtime output files (%s) for %s",
+        len(files), bundle_hash[:16], thread_id,
+    )
+
+    return bundle_hash, new_hashes
+
+
 def _inject_user_secrets(user: User, settings: Settings) -> list[tuple[str, str | None]]:
     """Fetch user secrets from Vault and inject into os.environ.
 
@@ -271,6 +368,7 @@ def _complete_thread(
     thread_id: str,
     state: str,
     snapshot_hash: Optional[str] = None,
+    runtime_outputs_bundle_hash: Optional[str] = None,
 ) -> None:
     """Update thread state to completed/error."""
     try:
@@ -278,6 +376,8 @@ def _complete_thread(
         update = {"state": state, "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         if snapshot_hash:
             update["snapshot_hash"] = snapshot_hash
+        if runtime_outputs_bundle_hash:
+            update["runtime_outputs_bundle_hash"] = runtime_outputs_bundle_hash
         sb.table("threads").update(update).eq(
             "thread_id", thread_id
         ).execute()
@@ -534,8 +634,6 @@ async def execute(
         project_cas = paths.project_path / ".ai" / "objects"
         new_hashes = _copy_cas_objects(project_cas, root)
 
-        _check_user_quota(user, settings)
-
         # Use walker's real execution_snapshot if available
         snapshot_hash = _find_execution_snapshot_hash(paths.project_path)
         if not snapshot_hash:
@@ -552,17 +650,27 @@ async def execute(
             snapshot_hash = cas.store_object(snapshot.to_dict(), root)
             new_hashes.append(snapshot_hash)
 
+        # Ingest runtime outputs (transcripts, knowledge, refs) into CAS
+        bundle_hash, output_hashes = _ingest_runtime_outputs(
+            paths.project_path, root, thread_id, snapshot_hash,
+        )
+        new_hashes.extend(output_hashes)
+
+        _check_user_quota(user, settings)
+
         exec_status = result.get("status", "unknown")
         _complete_thread(
             settings, thread_id,
             state="completed" if exec_status == "success" else "error",
             snapshot_hash=snapshot_hash,
+            runtime_outputs_bundle_hash=bundle_hash or None,
         )
 
         return {
             "status": exec_status,
             "thread_id": thread_id,
             "execution_snapshot_hash": snapshot_hash,
+            "runtime_outputs_bundle_hash": bundle_hash or None,
             "new_object_hashes": new_hashes,
             "result": result,
             "system_version": get_system_version(),
@@ -625,3 +733,66 @@ async def get_thread(
     if not result.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Thread {thread_id} not found")
     return result.data[0]
+
+
+# --- Secrets management ---
+
+
+@app.post("/secrets")
+async def upsert_secrets(
+    req: SecretsUpsertRequest,
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Upsert user secrets into the vault for remote execution."""
+    sb = _get_supabase(settings)
+    stored = []
+    for entry in req.secrets:
+        name = entry.get("name", "")
+        value = entry.get("value", "")
+        if not name or not value:
+            continue
+        try:
+            sb.rpc(
+                "upsert_user_secret",
+                {"p_user_id": user.id, "p_name": name, "p_value": value},
+            ).execute()
+            stored.append(name)
+        except Exception:
+            logger.warning("Failed to upsert secret %s", name, exc_info=True)
+    return {"stored": stored, "count": len(stored)}
+
+
+@app.get("/secrets")
+async def list_secrets(
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """List user's secret names (values are never returned)."""
+    sb = _get_supabase(settings)
+    result = (
+        sb.table("user_secrets")
+        .select("name, created_at, updated_at")
+        .eq("user_id", user.id)
+        .order("name")
+        .execute()
+    )
+    return {"secrets": result.data or []}
+
+
+@app.delete("/secrets/{name}")
+async def delete_secret(
+    name: str,
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Delete a user secret by name."""
+    sb = _get_supabase(settings)
+    result = sb.rpc(
+        "delete_user_secret",
+        {"p_user_id": user.id, "p_name": name},
+    ).execute()
+    deleted = result.data if result.data else False
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Secret '{name}' not found")
+    return {"deleted": name}
