@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,11 +53,9 @@ from ryeos_remote.config import Settings, get_settings
 from ryeos_remote.server import app
 
 # Load ArtifactStore from bundle via importlib (path has .ai/ dir)
-from pathlib import Path as _Path
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent.parent
-_ARTIFACT_STORE_PATH = (
-    _PROJECT_ROOT / "ryeos" / "bundles" / "standard" / "ryeos_std"
-    / ".ai" / "tools" / "rye" / "agent" / "threads" / "persistence" / "artifact_store.py"
+from conftest import PROJECT_ROOT, get_bundle_path
+_ARTIFACT_STORE_PATH = get_bundle_path(
+    "standard", "tools/rye/agent/threads/persistence/artifact_store.py"
 )
 _as_spec = importlib.util.spec_from_file_location("artifact_store", _ARTIFACT_STORE_PATH)
 _as_mod = importlib.util.module_from_spec(_as_spec)
@@ -74,7 +73,6 @@ def _make_settings(cas_base, signing_dir, **overrides):
     kwargs = dict(
         supabase_url="http://localhost",
         supabase_service_key="fake",
-        supabase_jwt_secret="fake",
         cas_base_path=str(cas_base),
         signing_key_dir=str(signing_dir),
     )
@@ -368,6 +366,143 @@ class TestExecute:
             "parameters": {},
         })
         assert r.status_code == 404
+
+
+# ============================================================================
+# Thread Enforcement
+# ============================================================================
+
+
+class TestExecuteThreadValidation:
+    """Server-side thread enforcement on /execute endpoint."""
+
+    def test_directive_inline_rejected(self, cas_env):
+        """Directive + thread=inline → 400 (directives must fork on remote)."""
+        c, root, tmp_path = cas_env
+        ph, uh = _build_manifests(tmp_path, root)
+
+        r = c.post("/execute", json={
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "item_type": "directive",
+            "item_id": "test_dir",
+            "parameters": {},
+            "thread": "inline",
+        })
+        assert r.status_code == 400
+        assert "fork" in r.json()["detail"].lower()
+
+    def test_tool_fork_rejected(self, cas_env):
+        """Tool + thread=fork → 400 (tools must run inline on remote)."""
+        c, root, tmp_path = cas_env
+        ph, uh = _build_manifests(tmp_path, root)
+
+        r = c.post("/execute", json={
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "item_type": "tool",
+            "item_id": "x",
+            "parameters": {},
+            "thread": "fork",
+        })
+        assert r.status_code == 400
+        assert "inline" in r.json()["detail"].lower()
+
+    def test_tool_inline_accepted(self, cas_env):
+        """Tool + thread=inline → accepted (not rejected by thread validation)."""
+        c, root, tmp_path = cas_env
+        ph, uh = _build_manifests(tmp_path, root)
+
+        r = c.post("/execute", json={
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "item_type": "tool",
+            "item_id": "x",
+            "parameters": {},
+            "thread": "inline",
+        })
+        # Should be 200 (may fail in execution, but not rejected by thread validation)
+        assert r.status_code == 200
+
+    def test_thread_defaults_to_inline(self, cas_env):
+        """Omitting thread field → defaults to 'inline' (tool should work)."""
+        c, root, tmp_path = cas_env
+        ph, uh = _build_manifests(tmp_path, root)
+
+        r = c.post("/execute", json={
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "item_type": "tool",
+            "item_id": "x",
+            "parameters": {},
+            # thread field omitted — defaults to "inline"
+        })
+        # Should not be rejected (default inline is valid for tools)
+        assert r.status_code == 200
+
+    def test_directive_fork_not_rejected_by_thread_validation(self, cas_env):
+        """Directive + thread=fork → passes thread validation (may fail for other reasons)."""
+        c, root, tmp_path = cas_env
+        ph, uh = _build_manifests(tmp_path, root)
+
+        r = c.post("/execute", json={
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "item_type": "directive",
+            "item_id": "test_dir",
+            "parameters": {},
+            "thread": "fork",
+        })
+        # Not rejected by thread validation — may get 200 (with error in result)
+        # or 404 if directive not found, but NOT 400 for thread mismatch
+        assert r.status_code != 400 or "fork" not in r.json().get("detail", "").lower()
+
+
+# ============================================================================
+# _inject_user_secrets
+# ============================================================================
+
+
+class TestInjectUserSecrets:
+    """Test _inject_user_secrets uses correct RPC response field."""
+
+    def test_uses_decrypted_value_field(self, tmp_path, monkeypatch):
+        """Verify _inject_user_secrets reads 'decrypted_value' not 'decrypted_secret'."""
+        from unittest.mock import MagicMock, patch
+        from ryeos_remote.server import _inject_user_secrets
+
+        cas_base = tmp_path / "cas"
+        signing_dir = tmp_path / "signing"
+        cas_base.mkdir()
+        signing_dir.mkdir()
+
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+
+        # Mock Supabase RPC to return rows with 'decrypted_value' key
+        mock_rpc_result = MagicMock()
+        mock_rpc_result.data = [
+            {"name": "TEST_SECRET_KEY", "decrypted_value": "secret123"},
+        ]
+        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_rpc_result)))
+        mock_client = MagicMock()
+        mock_client.rpc = mock_rpc
+
+        with patch("supabase.create_client", return_value=mock_client):
+            injected = _inject_user_secrets(user, settings)
+
+        # Should have injected the secret
+        assert len(injected) == 1
+        assert injected[0][0] == "TEST_SECRET_KEY"
+        assert os.environ.get("TEST_SECRET_KEY") == "secret123"
+
+        # Clean up
+        os.environ.pop("TEST_SECRET_KEY", None)
 
 
 # ============================================================================
@@ -926,10 +1061,7 @@ class TestRemoteKeyVerification:
                 }
 
         # Import and call _verify_remote_key
-        _remote_path = (
-            _PROJECT_ROOT / "ryeos" / "bundles" / "core" / "ryeos_core"
-            / ".ai" / "tools" / "rye" / "core" / "remote" / "remote.py"
-        )
+        _remote_path = get_bundle_path("core", "tools/rye/core/remote/remote.py")
         _r_spec = importlib.util.spec_from_file_location("remote_tool", _remote_path)
         _r_mod = importlib.util.module_from_spec(_r_spec)
         _r_spec.loader.exec_module(_r_mod)
@@ -955,10 +1087,7 @@ class TestRemoteKeyVerification:
                     "error": "Connection refused",
                 }
 
-        _remote_path = (
-            _PROJECT_ROOT / "ryeos" / "bundles" / "core" / "ryeos_core"
-            / ".ai" / "tools" / "rye" / "core" / "remote" / "remote.py"
-        )
+        _remote_path = get_bundle_path("core", "tools/rye/core/remote/remote.py")
         _r_spec = importlib.util.spec_from_file_location("remote_tool_fetch", _remote_path)
         _r_mod = importlib.util.module_from_spec(_r_spec)
         _r_spec.loader.exec_module(_r_mod)

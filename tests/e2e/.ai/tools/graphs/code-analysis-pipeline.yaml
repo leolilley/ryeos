@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T06:52:28Z:9448f0e8ecd6a2657d70dc9efb3865b47404e8a40f0cfca5ea7f0ecdf3352010:q2SD3mPb38jG_RHJqllSP-BcylqY4cl1_1QyD2BjFoIIXOAeYuHetfuvE1_pYHsD8nWb29cCKa2z7Deys5vlAQ==:4b987fd4e40303ac
+# rye:signed:2026-03-11T09:47:33Z:31e3242581ffe492e005529ef4b6568ecbf95362f408a7167edbc5e45650bb07:Mblj0igImPBI07C-XUHQe1KzbBLekz60v90lPaIEZQRr9PUozunVCgl0OZuof2tUgO0tdV14WeSccccoNcG1BA==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -28,7 +28,6 @@ config:
 
   nodes:
     read_file:
-      cache_result: true
       action:
         primary: execute
         item_type: tool
@@ -58,7 +57,6 @@ config:
       next: read_analysis
 
     read_analysis:
-      cache_result: true
       action:
         primary: execute
         item_type: tool

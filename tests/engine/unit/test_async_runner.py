@@ -37,16 +37,18 @@ class TestRun:
             item_id="my/tool",
             project_path=str(tmp_path),
             parameters={"key": "val"},
+            target="local",
             thread="inline",
         )
 
     @pytest.mark.asyncio
-    async def test_forwards_thread_param(self, tmp_path):
+    async def test_forwards_target_and_thread_params(self, tmp_path):
         payload = {
             "item_type": "tool",
             "item_id": "my/tool",
             "parameters": {},
-            "thread": "remote",
+            "target": "remote",
+            "thread": "inline",
         }
 
         mock_handle = AsyncMock(return_value={"status": "success"})
@@ -55,7 +57,8 @@ class TestRun:
             await _run(payload, str(tmp_path))
 
         call_kwargs = mock_handle.call_args.kwargs
-        assert call_kwargs["thread"] == "remote"
+        assert call_kwargs["target"] == "remote"
+        assert call_kwargs["thread"] == "inline"
 
     @pytest.mark.asyncio
     async def test_defaults_empty_parameters(self, tmp_path):

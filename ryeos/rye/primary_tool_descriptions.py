@@ -60,7 +60,7 @@ EXECUTE_TOOL_DESC = (
     '<example>User says "rye execute init" → call with item_id="init", parameters={}</example>'
     '<example>Spawn directive as thread: item_type="directive", item_id="my/workflow", parameters={"target": "value"}, thread="fork"</example>'
     '<example>Spawn async thread: item_type="directive", item_id="my/workflow", parameters={"target": "value"}, thread="fork", async=true</example>'
-    '<example>Execute remotely: item_type="directive", item_id="my/workflow", parameters={"target": "staging"}, thread="remote"</example>'
+    '<example>Execute remotely: item_type="directive", item_id="my/workflow", parameters={"target": "staging"}, target="remote"</example>'
     "</examples>"
 )
 
@@ -95,7 +95,18 @@ EXECUTE_THREAD_DESC = (
     "<rules>"
     '<rule>"inline" (default) — returns your_directions for the calling agent to follow directly</rule>'
     '<rule>"fork" — spawn as a managed thread with its own LLM loop</rule>'
-    '<rule>"remote" — execute on ryeos-remote server. Configure via .ai/config/cas/remote.yaml: add a "default" entry under remotes: with url and key_env (env var name holding the API key). Use "remote:name" to target a specific remote.</rule>'
+    "</rules>"
+)
+
+EXECUTE_TARGET_DESC = (
+    "<description>"
+    "Where to execute: locally or on a remote server (ignored for knowledge)."
+    "</description>"
+    "<rules>"
+    '<rule>"local" (default) — execute in the current environment</rule>'
+    '<rule>"remote" — execute on ryeos-remote server. Configure via .ai/config/cas/remote.yaml: '
+    'add a "default" entry under remotes: with url and key_env (env var name holding the API key). '
+    'Use "remote:name" to target a specific remote.</rule>'
     "</rules>"
 )
 

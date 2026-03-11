@@ -7,18 +7,22 @@ Routes execution through PrimitiveExecutor for tools, which handles:
     - ENV_CONFIG resolution for runtimes
     - Space compatibility validation
 
-Directives support three execution modes controlled by ``parameters.thread``:
-    - **Inline** (default, ``thread="inline"``): Parse, validate inputs,
-      interpolate placeholders, and return the directive content with an
-      ``your_directions`` field for the calling agent to follow in-context.
-    - **Fork** (``thread="fork"``): Spawn a managed thread via
-      ``rye/agent/threads/thread_directive`` (LLM loop, safety harness,
-      budgets, registry tracking).  ``async``, ``model``, and
-      ``limit_overrides`` are also passed through parameters.
-    - **Remote** (``thread="remote"`` or ``thread="remote:name"``): Push
-      execution to a remote ryeos server via ``rye/core/remote/remote``.
-      Requires the remote execution tool to be installed.  An optional
-      ``:<name>`` suffix selects a named remote (e.g. ``"remote:gpu"``).
+Execution matrix (sync):
+
+    +--------+--------+-----------+------+-----------+
+    | target | thread | directive | tool | knowledge |
+    +--------+--------+-----------+------+-----------+
+    | local  | inline |  ✓        |  ✓   |  ✓        |
+    | local  | fork   |  ✓        |  ✗   |  ✗        |
+    | remote | fork   |  ✓        |  ✗   |  ✗        |
+    | remote | inline |  ✗        |  ✓   |  ✗        |
+    +--------+--------+-----------+------+-----------+
+
+Validation ownership:
+    - Invalid (target, thread, item_type) triples: rejected by
+      ``_validate_execution()`` in ``handle()``
+    - remote tool validates thread matches item_type before POST
+    - server re-validates as defense-in-depth
 """
 
 import logging
@@ -76,55 +80,61 @@ class ExecuteTool:
         project_path = kwargs["project_path"]
         parameters: Dict[str, Any] = kwargs.get("parameters", {})
         dry_run = kwargs.get("dry_run", False)
+        target = kwargs.get("target", "local")
         thread = kwargs.get("thread", "inline")
         async_exec = kwargs.get("async", False)
 
-        logger.debug(f"Execute: {item_type} item_id={item_id}")
+        # Parse target (validates format, extracts remote name)
+        try:
+            target_mode, remote_name = self._parse_target(target)
+        except ValueError as e:
+            return {"status": "error", "error": str(e), "item_id": item_id}
 
-        # Step 5 validation: reject invalid async combinations
-        if async_exec and dry_run:
-            return {
-                "status": "error",
-                "error": "async + dry_run is not supported. Validation is instant, nothing to detach.",
-                "item_id": item_id,
-            }
-        if async_exec and item_type == ItemType.KNOWLEDGE:
-            return {
-                "status": "error",
-                "error": "async + knowledge is not supported. Knowledge loading is immediate.",
-                "item_id": item_id,
-            }
-        if async_exec and item_type == ItemType.DIRECTIVE and thread == "inline":
-            return {
-                "status": "error",
-                "error": (
-                    "async + directive + inline is not supported. "
-                    "Inline directives return text for the agent to follow — "
-                    "there is nothing to detach. Use thread=\"fork\" for async directives."
-                ),
-                "item_id": item_id,
-            }
+        logger.debug(
+            f"Execute: {item_type} item_id={item_id} target={target} "
+            f"thread={thread} async={async_exec}"
+        )
+
+        # Validate the full execution triple
+        err = self._validate_execution(item_type, target_mode, thread, async_exec, dry_run)
+        if err:
+            return {"status": "error", "error": err, "item_id": item_id}
 
         try:
             start = time.time()
 
-            if item_type == ItemType.DIRECTIVE:
+            if target_mode == "remote":
+                result = await self._dispatch_remote(
+                    item_type=item_type,
+                    item_id=item_id,
+                    project_path=project_path,
+                    parameters=parameters,
+                    thread=thread,
+                    remote_name=remote_name,
+                    async_exec=async_exec,
+                )
+            elif async_exec:
+                result = await self._launch_async(
+                    item_type=item_type,
+                    item_id=item_id,
+                    project_path=project_path,
+                    parameters=parameters,
+                    target="local",
+                    thread=thread,
+                )
+            elif item_type == ItemType.DIRECTIVE:
                 result = await self._run_directive(
                     item_id, project_path, parameters, dry_run,
-                    thread=thread, async_exec=async_exec,
+                    thread=thread,
                 )
             elif item_type == ItemType.TOOL:
                 result = await self._run_tool(
                     item_id, project_path, parameters, dry_run,
-                    thread=thread, async_exec=async_exec,
                 )
             elif item_type == ItemType.KNOWLEDGE:
                 result = await self._run_knowledge(item_id, project_path)
             else:
-                return {
-                    "status": "error",
-                    "error": f"Unknown item type: {item_type}",
-                }
+                return {"status": "error", "error": f"Unknown item type: {item_type}"}
 
             duration_ms = int((time.time() - start) * 1000)
             if "metadata" not in result:
@@ -140,6 +150,208 @@ class ExecuteTool:
             logger.error(f"Execute error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}
 
+    @staticmethod
+    def _validate_execution(
+        item_type: str,
+        target: str,
+        thread: str,
+        async_exec: bool,
+        dry_run: bool,
+    ) -> Optional[str]:
+        """Validate the (item_type, target, thread) execution triple.
+
+        Returns an error message string if invalid, None if valid.
+        """
+        if thread not in ("inline", "fork"):
+            return f'Unknown thread mode: {thread!r}. Must be "inline" or "fork".'
+
+        if target not in ("local", "remote"):
+            return f'Unknown target: {target!r}. Must be "local", "remote", or "remote:<name>".'
+
+        VALID_SYNC = {
+            ("directive", "local", "inline"),
+            ("directive", "local", "fork"),
+            ("directive", "remote", "fork"),
+            ("tool", "local", "inline"),
+            ("tool", "remote", "inline"),
+            ("knowledge", "local", "inline"),
+        }
+
+        triple = (item_type, target, thread)
+        if triple not in VALID_SYNC:
+            if item_type == "knowledge" and (target != "local" or thread != "inline"):
+                return (
+                    f'Knowledge items only support target="local" + thread="inline". '
+                    "Knowledge loading is immediate and always local+inline."
+                )
+            if item_type == "tool" and thread == "fork":
+                return (
+                    'thread="fork" is not supported for tools. '
+                    "Fork spawns a managed LLM thread, which only applies to directives. "
+                    'Use thread="inline" (default).'
+                )
+            if item_type == "directive" and target == "remote" and thread == "inline":
+                return (
+                    'Directives on remote must use thread="fork". '
+                    "The remote server needs to spawn an LLM thread to follow directive steps."
+                )
+            if item_type == "tool" and target == "remote" and thread == "fork":
+                return (
+                    'Tools on remote must use thread="inline". '
+                    "Fork spawns a managed LLM thread, which only applies to directives."
+                )
+            return f"Invalid execution combination: item_type={item_type!r}, target={target!r}, thread={thread!r}."
+
+        if async_exec:
+            if dry_run:
+                return "async + dry_run is not supported. Validation is instant, nothing to detach."
+            if item_type == "knowledge":
+                return "async + knowledge is not supported. Knowledge loading is immediate."
+            if item_type == "directive" and thread == "inline" and target == "local":
+                return (
+                    "async + directive + inline is not supported. "
+                    "Inline directives return text for the agent to follow — "
+                    'there is nothing to detach. Use thread="fork" for async directives.'
+                )
+
+        if dry_run and target == "remote":
+            return "dry_run + remote is not supported. Dry run validates locally."
+
+        return None
+
+    @staticmethod
+    def _parse_target(target: str) -> tuple:
+        """Parse target string into ``(target_mode, remote_name)``.
+
+        Returns:
+            A 2-tuple ``(target_mode, remote_name)`` where *target_mode* is
+            ``"local"`` or ``"remote"``, and *remote_name* is the named remote
+            suffix (``None`` when unspecified or when target is "local").
+
+        Raises:
+            ValueError: If target is "remote:" with an empty suffix.
+
+        Examples::
+            "local"        -> ("local", None)
+            "remote"       -> ("remote", None)
+            "remote:gpu"   -> ("remote", "gpu")
+        """
+        if target.startswith("remote:"):
+            name = target[len("remote:"):]
+            if not name:
+                raise ValueError(
+                    'Invalid target "remote:" — remote name cannot be empty. '
+                    'Use "remote" for the default remote or "remote:<name>" for a named remote.'
+                )
+            return ("remote", name)
+        if target == "remote":
+            return ("remote", None)
+        if target == "local":
+            return ("local", None)
+        raise ValueError(
+            f'Unknown target: {target!r}. Must be "local", "remote", or "remote:<name>".'
+        )
+
+    async def _dispatch_remote(
+        self,
+        *,
+        item_type: str,
+        item_id: str,
+        project_path: str,
+        parameters: Dict[str, Any],
+        thread: str,
+        remote_name: Optional[str],
+        async_exec: bool = False,
+    ) -> Dict[str, Any]:
+        """Dispatch execution to a remote ryeos server.
+
+        Pushes CAS objects and triggers remote execution via the
+        ``rye/core/remote/remote`` tool.
+        """
+        if item_type == ItemType.DIRECTIVE:
+            model = parameters.pop("model", None)
+            limit_overrides = parameters.pop("limit_overrides", None)
+
+            file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
+            if not file_path:
+                return {"status": "error", "error": f"Directive not found: {item_id}"}
+
+            proj_path = Path(project_path) if project_path else None
+            try:
+                verify_item(file_path, ItemType.DIRECTIVE, project_path=proj_path)
+            except IntegrityError as exc:
+                return {"status": "error", "error": str(exc), "item_id": item_id}
+
+            content = file_path.read_text(encoding="utf-8")
+            parsed = self.parser_router.parse("markdown/xml", content)
+            if "error" in parsed:
+                return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
+
+            processor_router = ProcessorRouter(proj_path)
+            validation = processor_router.run("inputs/validate", parsed, parameters)
+            if validation.get("status") == "error":
+                validation["item_id"] = item_id
+                return validation
+
+            processor_router.run("inputs/interpolate", parsed, validation["inputs"])
+            send_params = validation["inputs"]
+        else:
+            send_params = parameters
+
+        if async_exec:
+            return await self._launch_async(
+                item_type=item_type,
+                item_id=item_id,
+                project_path=project_path,
+                parameters=send_params,
+                target=f"remote:{remote_name}" if remote_name else "remote",
+                thread=thread,
+            )
+
+        remote_tool = "rye/core/remote/remote"
+        if not self._find_item(project_path, ItemType.TOOL, remote_tool):
+            return {
+                "status": "error",
+                "error": (
+                    f"Remote execution requires the remote tool ('{remote_tool}' not found). "
+                    'Install ryeos-core or use target="local".'
+                ),
+                "item_id": item_id,
+            }
+
+        remote_params = {
+            "action": "execute",
+            "item_type": item_type,
+            "item_id": item_id,
+            "parameters": send_params,
+            "thread": thread,
+        }
+        if remote_name is not None:
+            remote_params["remote"] = remote_name
+
+        remote_result = await self._run_tool(
+            remote_tool, project_path, remote_params, dry_run=False,
+        )
+
+        if remote_result.get("status") == "success" and remote_result.get("data"):
+            data = remote_result["data"]
+            if isinstance(data, dict) and "stdout" in data:
+                import json as _json
+                try:
+                    data = _json.loads(data["stdout"])
+                except (ValueError, TypeError):
+                    data = {"raw": data["stdout"]}
+            return {
+                "status": data.get("status", "success"),
+                "type": item_type,
+                "item_id": item_id,
+                "execution_mode": "remote",
+                **{k: v for k, v in data.items() if k not in ("status", "success")},
+                "metadata": remote_result.get("metadata", {}),
+            }
+
+        return remote_result
+
     async def _run_directive(
         self,
         item_id: str,
@@ -148,11 +360,10 @@ class ExecuteTool:
         dry_run: bool,
         *,
         thread: str = "inline",
-        async_exec: bool = False,
     ) -> Dict[str, Any]:
         """Run a directive — parse, validate, and dispatch to execution mode.
 
-        Three modes controlled by the ``thread`` parameter:
+        Two modes controlled by the ``thread`` parameter:
 
         - **Inline** (default, ``"inline"``): Parse, validate inputs,
           interpolate placeholders, and return the directive content with an
@@ -164,13 +375,8 @@ class ExecuteTool:
           harness, budgets).  ``model`` and ``limit_overrides`` are read
           from ``parameters``.
 
-        - **Remote** (``"remote"``): After validation, push execution to
-          a remote ryeos server via ``rye/core/remote/remote``.
-
         Validation is always done eagerly for fast feedback on bad inputs.
         """
-        # Extract fork-specific flags from parameters (consumed, not forwarded
-        # to directive inputs)
         model = parameters.pop("model", None)
         limit_overrides = parameters.pop("limit_overrides", None)
         # 1. Find the directive file
@@ -212,19 +418,16 @@ class ExecuteTool:
                 "message": "Directive validation passed (dry run)",
             }
 
-        # Parse thread mode (supports "remote:name" syntax)
-        mode, remote_name = self._parse_thread(thread)
-
         # 7a. Inline mode (default): return only the directive for
         #     the LLM to follow.  Nothing else — extra fields distract.
-        if mode == "inline":
+        if thread == "inline":
             return {
                 "your_directions": parsed.get("body", ""),
             }
 
         # 7b. Fork mode: spawn managed thread via thread_directive tool
         #     Requires rye/agent infrastructure (thread_directive tool + LLM config)
-        if mode == "fork":
+        if thread == "fork":
             td_tool = "rye/agent/threads/thread_directive"
             if not self._find_item(project_path, ItemType.TOOL, td_tool):
                 return {
@@ -242,8 +445,6 @@ class ExecuteTool:
                 "directive_id": item_id,
                 "inputs": validation["inputs"],
             }
-            if async_exec:
-                td_params["async"] = True
             if model:
                 td_params["model"] = model
             if limit_overrides:
@@ -281,177 +482,25 @@ class ExecuteTool:
 
             return thread_result
 
-        # 7c. Remote mode: push to ryeos-remote, execute there, pull results
-        if mode == "remote":
-            # Async + remote directive: wrap in detached process
-            if async_exec:
-                return await self._launch_async(
-                    item_type=ItemType.DIRECTIVE,
-                    item_id=item_id,
-                    project_path=project_path,
-                    parameters=validation["inputs"],
-                    thread=thread,
-                )
-
-            remote_tool = "rye/core/remote/remote"
-            if not self._find_item(project_path, ItemType.TOOL, remote_tool):
-                return {
-                    "status": "error",
-                    "error": (
-                        "thread=\"remote\" requires the remote execution tool "
-                        f"(tool '{remote_tool}' not found). "
-                        "Install ryeos-core or use thread=\"inline\" or thread=\"fork\"."
-                    ),
-                    "item_id": item_id,
-                }
-
-            remote_params = {
-                "action": "execute",
-                "item_type": ItemType.DIRECTIVE,
-                "item_id": item_id,
-                "parameters": validation["inputs"],
-            }
-            if remote_name is not None:
-                remote_params["remote"] = remote_name
-
-            remote_result = await self._run_tool(
-                remote_tool,
-                project_path,
-                remote_params,
-                dry_run=False,
-            )
-
-            # Normalise — remote tool returns its own format
-            if remote_result.get("status") == "success" and remote_result.get("data"):
-                data = remote_result["data"]
-                if isinstance(data, dict) and "stdout" in data:
-                    import json as _json
-                    try:
-                        data = _json.loads(data["stdout"])
-                    except (ValueError, TypeError):
-                        data = {"raw": data["stdout"]}
-                return {
-                    "status": data.get("status", "success"),
-                    "type": ItemType.DIRECTIVE,
-                    "item_id": item_id,
-                    "execution_mode": "remote",
-                    **{k: v for k, v in data.items() if k not in ("status", "success")},
-                    "metadata": remote_result.get("metadata", {}),
-                }
-
-            return remote_result
-
-        return {
-            "status": "error",
-            "error": f"Unknown thread mode: '{thread}'. Must be 'inline', 'fork', 'remote', or 'remote:<name>'.",
-            "item_id": item_id,
-        }
-
     async def _run_tool(
         self,
         item_id: str,
         project_path: str,
         parameters: Dict[str, Any],
         dry_run: bool,
-        *,
-        thread: str = "inline",
-        async_exec: bool = False,
     ) -> Dict[str, Any]:
         """Run a tool via PrimitiveExecutor with chain resolution.
 
-        Execution modes:
-            - **Inline** (default): Execute locally via PrimitiveExecutor.
-            - **Remote** (``thread="remote"``): Push execution to a remote
-              ryeos server via ``rye/core/remote/remote``.
-            - **Fork** not supported for tools (returns error).
-
-        When ``async_exec`` is True for inline/remote tools, execution is
-        wrapped in a detached child process via ``launch_detached()`` +
-        ``async_runner.py``.  The parent returns immediately with a thread_id.
-
-        Execution flow (inline):
+        Execution flow:
             1. Get or create PrimitiveExecutor for project
             2. Build executor chain (tool → runtime → primitive)
             3. Validate chain (space compatibility, I/O matching)
             4. Resolve ENV_CONFIG through chain
             5. Execute via root Lillux primitive
         """
-        # Parse thread mode (supports "remote:name" syntax)
-        mode, remote_name = self._parse_thread(thread)
-
-        if mode == "fork":
-            return {
-                "status": "error",
-                "error": (
-                    'thread="fork" is not supported for tools. '
-                    "Fork spawns a managed LLM thread, which only applies to directives. "
-                    'Use thread="inline" (default) or thread="remote".'
-                ),
-                "item_id": item_id,
-            }
-
-        # Async tool execution: spawn detached process, return immediately
-        if async_exec:
-            return await self._launch_async(
-                item_type=ItemType.TOOL,
-                item_id=item_id,
-                project_path=project_path,
-                parameters=parameters,
-                thread=thread,
-            )
-
-        # Remote mode: push to ryeos-remote server
-        if mode == "remote":
-            remote_tool = "rye/core/remote/remote"
-            if not self._find_item(project_path, ItemType.TOOL, remote_tool):
-                return {
-                    "status": "error",
-                    "error": (
-                        'thread="remote" requires the remote execution tool '
-                        f"(tool '{remote_tool}' not found). "
-                        'Install ryeos-core or use thread="inline".'
-                    ),
-                    "item_id": item_id,
-                }
-
-            remote_params = {
-                "action": "execute",
-                "item_type": ItemType.TOOL,
-                "item_id": item_id,
-                "parameters": parameters,
-            }
-            if remote_name is not None:
-                remote_params["remote"] = remote_name
-
-            remote_result = await self._run_tool(
-                remote_tool, project_path, remote_params, dry_run=False,
-            )
-
-            # Normalise — remote tool returns its own format
-            if remote_result.get("status") == "success" and remote_result.get("data"):
-                data = remote_result["data"]
-                if isinstance(data, dict) and "stdout" in data:
-                    import json as _json
-                    try:
-                        data = _json.loads(data["stdout"])
-                    except (ValueError, TypeError):
-                        data = {"raw": data["stdout"]}
-                return {
-                    "status": data.get("status", "success"),
-                    "type": ItemType.TOOL,
-                    "item_id": item_id,
-                    "execution_mode": "remote",
-                    **{k: v for k, v in data.items() if k not in ("status", "success")},
-                    "metadata": remote_result.get("metadata", {}),
-                }
-
-            return remote_result
-
-        # Get executor for this project
         executor = self._get_executor(project_path)
 
         if dry_run:
-            # Validate chain without executing
             try:
                 chain = await executor._build_chain(item_id)
                 if not chain:
@@ -513,6 +562,7 @@ class ExecuteTool:
         item_id: str,
         project_path: str,
         parameters: Dict[str, Any],
+        target: str = "local",
         thread: str = "inline",
     ) -> Dict[str, Any]:
         """Launch execution in a detached child process, return immediately.
@@ -540,6 +590,7 @@ class ExecuteTool:
             "item_type": item_type,
             "item_id": item_id,
             "parameters": parameters,
+            "target": target,
             "thread": thread,
         }
 
@@ -585,26 +636,6 @@ class ExecuteTool:
             "state": "running",
             "pid": spawn_result["pid"],
         }
-
-    @staticmethod
-    def _parse_thread(thread: str) -> tuple:
-        """Parse thread string into ``(mode, remote_name)``.
-
-        Returns:
-            A 2-tuple ``(mode, remote_name)`` where *mode* is one of
-            ``"inline"``, ``"fork"``, or ``"remote"``, and *remote_name*
-            is the named remote suffix (``None`` when unspecified).
-
-        Examples::
-
-            "inline"       -> ("inline", None)
-            "fork"         -> ("fork", None)
-            "remote"       -> ("remote", None)
-            "remote:gpu"   -> ("remote", "gpu")
-        """
-        if thread.startswith("remote:"):
-            return ("remote", thread[len("remote:"):])
-        return (thread, None)
 
     @staticmethod
     def _get_registry(project_path: Path):

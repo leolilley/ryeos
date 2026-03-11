@@ -27,11 +27,8 @@ from rye.constants import AI_DIR
 # Load walker module from bundle (path contains .ai/)
 # ---------------------------------------------------------------------------
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_WALKER_DIR = (
-    _PROJECT_ROOT / "ryeos" / "bundles" / "core" / "ryeos_core"
-    / ".ai" / "tools" / "rye" / "core" / "runtimes" / "state-graph"
-)
+from conftest import get_bundle_path
+_WALKER_DIR = get_bundle_path("core", "tools/rye/core/runtimes/state-graph")
 
 # Load walker once at module level so patch.object targets the same module
 if str(_WALKER_DIR) not in sys.path:

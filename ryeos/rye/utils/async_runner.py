@@ -35,6 +35,7 @@ async def _run(payload: dict, project_path: str) -> dict:
         item_id=payload["item_id"],
         project_path=project_path,
         parameters=payload.get("parameters", {}),
+        target=payload.get("target", "local"),
         thread=payload.get("thread", "inline"),
         # Never re-async — we ARE the async child
     )

@@ -1,5 +1,6 @@
 """Tests for remote_config — named remote resolution."""
 
+import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +8,8 @@ from unittest.mock import patch
 import pytest
 
 from conftest import get_bundle_path
+
+_REMOTE_PATH = get_bundle_path("core", "tools/rye/core/remote/remote.py")
 
 # remote_config lives in a bundle tool dir
 _REMOTE_TOOL_DIR = str(get_bundle_path("core", "tools/rye/core/remote"))
@@ -166,3 +169,58 @@ class TestRemoteToolIntegration:
             client = remote_mod._get_client("gpu", None)
             assert client.base_url == "https://gpu.example.com"
             assert client.api_key == "test-key"
+
+
+@pytest.mark.asyncio
+class TestRemoteExecuteThreadValidation:
+    """Tests for _execute thread validation in the remote tool."""
+
+    def _load_remote(self):
+        """Load remote.py module from bundle."""
+        spec = importlib.util.spec_from_file_location("remote_exec_test", _REMOTE_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    async def test_missing_thread_returns_error(self):
+        """_execute with no thread param → error."""
+        mod = self._load_remote()
+        result = await mod._execute(Path("/tmp/fake"), {
+            "item_type": "tool",
+            "item_id": "test/tool",
+            "parameters": {},
+        })
+        assert "error" in result
+        assert "thread" in result["error"].lower()
+
+    async def test_empty_thread_returns_error(self):
+        """_execute with thread='' → error."""
+        mod = self._load_remote()
+        result = await mod._execute(Path("/tmp/fake"), {
+            "item_type": "tool",
+            "item_id": "test/tool",
+            "parameters": {},
+            "thread": "",
+        })
+        assert "error" in result
+        assert "thread" in result["error"].lower()
+
+    async def test_missing_item_type_returns_error(self):
+        """_execute with no item_type → error."""
+        mod = self._load_remote()
+        result = await mod._execute(Path("/tmp/fake"), {
+            "item_id": "test/tool",
+            "thread": "inline",
+        })
+        assert "error" in result
+        assert "item_type" in result["error"]
+
+    async def test_missing_item_id_returns_error(self):
+        """_execute with no item_id → error."""
+        mod = self._load_remote()
+        result = await mod._execute(Path("/tmp/fake"), {
+            "item_type": "tool",
+            "thread": "inline",
+        })
+        assert "error" in result
+        assert "item_id" in result["error"]

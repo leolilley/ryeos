@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:8f087db0dc93e42fb3e100a99cb0864154397f634bd169d822ffbe3b15f777dd:uRfk7pNRLBghb7FAjOS0cHm5uwM5C5N4flemXuraL5X7NNHKHHTAolm32WUhzdmD_Cxl4M-oQLxAx-yZcFI5BQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T08:29:37Z:99bf1a3c40c20310248470011d9d0fa27e422525b6ccc4c5b3651392adbb859a:sVAv2wow9LzZLZ3DUxtZvhcvbGqauGO-9jDFVQQWzZEQfuwfPTogl1WRLDgHGjlbtppqVSUevn1SQz2byqYFDg==:4b987fd4e40303ac -->
 <!-- -->
 
 # Analyze Code
@@ -23,7 +23,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
       The code to analyze.
     </input>
     <input name="output_path" type="string" required="true">
-      Where to write the JSON analysis file.
+      Project-relative path for the JSON analysis file (e.g. "analysis-result.json").
     </input>
   </inputs>
 
@@ -48,7 +48,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
     - The number of function/method definitions (def, async def, function, etc.)
     - A 2-3 sentence summary of what the code does
 
-    Write the result as a JSON object to `{input:output_path}` with keys: `language`, `function_count`, `summary`.
+    Write the result as a JSON object to `{project_path}/{input:output_path}` with keys: `language`, `function_count`, `summary`.
   </step>
 
   <step name="return_result">

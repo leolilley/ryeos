@@ -104,6 +104,7 @@ class ExecuteRequest(BaseModel):
     item_type: str
     item_id: str
     parameters: Dict[str, Any] = {}
+    thread: str = "inline"
 
 
 # --- Helpers ---
@@ -218,7 +219,7 @@ def _inject_user_secrets(user: User, settings: Settings) -> list[tuple[str, str 
         for row in result.data or []:
             name = row["name"]
             old_value = os.environ.get(name)
-            os.environ[name] = row["decrypted_secret"]
+            os.environ[name] = row["decrypted_value"]
             injected.append((name, old_value))
 
         if injected:
@@ -472,6 +473,17 @@ async def execute(
             "Provide either (project_manifest_hash + user_manifest_hash) or project_name",
         )
 
+    if req.item_type == "directive" and req.thread != "fork":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Directives must use thread=fork on remote, got thread={req.thread!r}",
+        )
+    if req.item_type == "tool" and req.thread != "inline":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Tools must use thread=inline on remote, got thread={req.thread!r}",
+        )
+
     root = _user_cas_root(user, settings)
     paths: ExecutionPaths | None = None
     thread_id = f"rye-remote-{uuid.uuid4().hex[:12]}"
@@ -515,6 +527,7 @@ async def execute(
             item_id=req.item_id,
             project_path=str(paths.project_path),
             parameters=req.parameters,
+            thread=req.thread,
         )
 
         # Ingest execution outputs into user CAS before cleanup

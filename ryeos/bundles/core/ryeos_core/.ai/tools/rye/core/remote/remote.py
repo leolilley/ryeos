@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T05:12:49Z:755c4ca8d7afd7555bf4447d5904dfce2ccd675e01c67d891f8c188daeb892b1:D46Qe268MhEU49bStiODTTMXCsojuBhxcAxgZ4lJ5YsAJ8PphSpBPYNtA175cS282ayhMhT_z-cpo5NReBUTAw==:4b987fd4e40303ac
+# rye:signed:2026-03-11T09:35:05Z:5c57e113c68df81fd116ebce11df006fe5b5119d52f15a1727b9201a3a44a5de:er7PuadUjAiCjrOrgvbpVGWC8SciSB88uqoIvhR_CgDReFSC1WmWEzLDdCvW2tPeweYVtCx-z_ZSmbdDdE5sCQ==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 
@@ -384,9 +384,28 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     item_type = params.get("item_type")
     item_id = params.get("item_id")
     exec_params = params.get("parameters", {})
+    thread = params.get("thread")
 
     if not item_type or not item_id:
         return {"error": "item_type and item_id are required for execute"}
+    if not thread:
+        return {"error": "thread is required for execute"}
+
+    # Validate thread/item_type before hitting the server
+    if item_type == "directive" and thread != "fork":
+        return {
+            "error": (
+                f"Directives must use thread=fork on remote, got thread={thread!r}. "
+                "The remote server needs to spawn an LLM thread to follow directive steps."
+            ),
+        }
+    if item_type == "tool" and thread != "inline":
+        return {
+            "error": (
+                f"Tools must use thread=inline on remote, got thread={thread!r}. "
+                "Tools execute directly — fork spawns an LLM thread, which only applies to directives."
+            ),
+        }
 
     # 1. Verify remote server key (before push — fail early)
     remote_name = params.get("remote")
@@ -408,6 +427,7 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
         "item_type": item_type,
         "item_id": item_id,
         "parameters": exec_params,
+        "thread": thread,
     }, timeout=300)
 
     if not exec_resp["success"]:

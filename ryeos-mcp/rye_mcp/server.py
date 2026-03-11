@@ -23,6 +23,7 @@ from rye.primary_tool_descriptions import (
     EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
     EXECUTE_PARAMETERS_DESC,
+    EXECUTE_TARGET_DESC,
     EXECUTE_THREAD_DESC,
     EXECUTE_TOOL_DESC,
     ITEM_ID_DESC,
@@ -107,9 +108,14 @@ class RYEServer:
                                 "default": False,
                                 "description": EXECUTE_DRY_RUN_DESC,
                             },
+                            "target": {
+                                "type": "string",
+                                "default": "local",
+                                "description": EXECUTE_TARGET_DESC,
+                            },
                             "thread": {
                                 "type": "string",
-                                "enum": ["inline", "fork", "remote"],
+                                "enum": ["inline", "fork"],
                                 "default": "inline",
                                 "description": EXECUTE_THREAD_DESC,
                             },

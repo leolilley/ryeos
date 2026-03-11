@@ -27,6 +27,8 @@ image = (
     .pip_install(
         # Core engine (ryeos-core → ryeos-engine → lillux → lillux-proc)
         "ryeos-core==0.1.17",
+        # Agent bundle (thread_directive, capability harness, etc.)
+        "ryeos-std==0.1.17",
         # Server
         "fastapi>=0.109.0",
         "uvicorn[standard]>=0.27.0",

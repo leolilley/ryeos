@@ -250,6 +250,236 @@ class TestAsyncValidation:
 
 
 @pytest.mark.asyncio
+class TestThreadItemTypeValidation:
+    """Test target/thread/item_type validation in handle() — rejects bad combos early."""
+
+    async def test_tool_fork_rejected(self, temp_project):
+        """tool + thread=fork → error (fork is for directives only)."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            thread="fork",
+        )
+        assert result["status"] == "error"
+        assert "fork" in result["error"]
+        assert result["item_id"] == "mytool"
+
+    async def test_knowledge_remote_rejected(self, temp_project):
+        """knowledge + target=remote → error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="knowledge",
+            item_id="entry",
+            project_path=str(temp_project),
+            target="remote",
+        )
+        assert result["status"] == "error"
+        assert "knowledge" in result["error"].lower()
+
+    async def test_knowledge_fork_rejected(self, temp_project):
+        """knowledge + thread=fork → error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="knowledge",
+            item_id="entry",
+            project_path=str(temp_project),
+            thread="fork",
+        )
+        assert result["status"] == "error"
+        assert "knowledge" in result["error"].lower()
+
+    async def test_unknown_thread_rejected(self, temp_project):
+        """Unknown thread value → error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            thread="banana",
+        )
+        assert result["status"] == "error"
+        assert "banana" in result["error"]
+
+    async def test_unknown_target_rejected(self, temp_project):
+        """Unknown target value → error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            target="banana",
+        )
+        assert result["status"] == "error"
+        assert "banana" in result["error"]
+
+    async def test_remote_empty_suffix_rejected(self, temp_project):
+        """target='remote:' with empty suffix → error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            target="remote:",
+        )
+        assert result["status"] == "error"
+        assert "empty" in result["error"].lower()
+
+    async def test_dry_run_remote_rejected(self, temp_project):
+        """dry_run + target=remote → error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            target="remote",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert "dry_run" in result["error"].lower() or "remote" in result["error"].lower()
+
+    async def test_tool_inline_allowed(self, temp_project):
+        """tool + thread=inline → not rejected by validation (may fail later)."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            thread="inline",
+        )
+        if result.get("status") == "error":
+            assert "fork" not in result.get("error", "")
+            assert "not supported" not in result.get("error", "").lower()
+
+    async def test_directive_inline_allowed(self, temp_project):
+        """directive + thread=inline → allowed, returns your_directions."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="directive",
+            item_id="workflow",
+            project_path=str(temp_project),
+            thread="inline",
+        )
+        assert "your_directions" in result
+
+    async def test_knowledge_inline_allowed(self, temp_project):
+        """knowledge + thread=inline (default) → allowed."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="knowledge",
+            item_id="entry",
+            project_path=str(temp_project),
+            thread="inline",
+        )
+        if result.get("status") == "error":
+            assert "not supported" not in result.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+class TestRemoteThreadForwarding:
+    """Verify remote target sets correct thread in params for the remote tool."""
+
+    async def test_directive_remote_forwards_fork(self, temp_project):
+        """Directive + target=remote → remote_params.thread = 'fork'."""
+        from unittest.mock import AsyncMock, patch
+
+        tool = ExecuteTool("")
+
+        original_find = tool._find_item
+        def mock_find(pp, it, iid):
+            if iid == "rye/core/remote/remote":
+                return Path("/fake/remote.py")
+            return original_find(pp, it, iid)
+
+        captured_params = {}
+        async def mock_run_tool(item_id, project_path, parameters, dry_run, **kw):
+            if item_id == "rye/core/remote/remote":
+                captured_params.update(parameters)
+                return {"status": "success", "data": {"status": "success", "thread_id": "t-123"}}
+            return {"status": "error", "error": "unexpected"}
+
+        with patch.object(tool, "_find_item", side_effect=mock_find), \
+             patch.object(tool, "_run_tool", side_effect=mock_run_tool):
+            await tool.handle(
+                item_type="directive",
+                item_id="workflow",
+                project_path=str(temp_project),
+                target="remote",
+                thread="fork",
+            )
+
+        assert captured_params.get("thread") == "fork"
+        assert captured_params.get("action") == "execute"
+        assert captured_params.get("item_type") == "directive"
+
+    async def test_tool_remote_forwards_inline(self, temp_project):
+        """Tool + target=remote → remote_params.thread = 'inline'."""
+        from unittest.mock import AsyncMock, patch
+
+        tool = ExecuteTool("")
+
+        original_find = tool._find_item
+        def mock_find(pp, it, iid):
+            if iid == "rye/core/remote/remote":
+                return Path("/fake/remote.py")
+            return original_find(pp, it, iid)
+
+        captured_params = {}
+        async def mock_run_tool(item_id, project_path, parameters, dry_run, **kw):
+            if item_id == "rye/core/remote/remote":
+                captured_params.update(parameters)
+                return {"status": "success", "data": {"status": "success", "result": {}}}
+            return {"status": "error", "error": "unexpected"}
+
+        with patch.object(tool, "_find_item", side_effect=mock_find), \
+             patch.object(tool, "_run_tool", side_effect=mock_run_tool):
+            await tool.handle(
+                item_type="tool",
+                item_id="mytool",
+                project_path=str(temp_project),
+                target="remote",
+                thread="inline",
+            )
+
+        assert captured_params.get("thread") == "inline"
+        assert captured_params.get("action") == "execute"
+        assert captured_params.get("item_type") == "tool"
+
+    async def test_directive_remote_named_forwards_remote_name(self, temp_project):
+        """Directive + target=remote:gpu → remote_params has remote='gpu'."""
+        from unittest.mock import patch
+
+        tool = ExecuteTool("")
+
+        original_find = tool._find_item
+        def mock_find(pp, it, iid):
+            if iid == "rye/core/remote/remote":
+                return Path("/fake/remote.py")
+            return original_find(pp, it, iid)
+
+        captured_params = {}
+        async def mock_run_tool(item_id, project_path, parameters, dry_run, **kw):
+            if item_id == "rye/core/remote/remote":
+                captured_params.update(parameters)
+                return {"status": "success", "data": {"status": "success", "thread_id": "t-456"}}
+            return {"status": "error", "error": "unexpected"}
+
+        with patch.object(tool, "_find_item", side_effect=mock_find), \
+             patch.object(tool, "_run_tool", side_effect=mock_run_tool):
+            await tool.handle(
+                item_type="directive",
+                item_id="workflow",
+                project_path=str(temp_project),
+                target="remote:gpu",
+                thread="fork",
+            )
+
+        assert captured_params.get("thread") == "fork"
+        assert captured_params.get("remote") == "gpu"
+
+
+@pytest.mark.asyncio
 class TestLaunchAsync:
     """Test _launch_async spawns detached process and returns handle."""
 
@@ -390,20 +620,25 @@ class TestInterpolateParsed:
         assert parsed["body"] == "hello"
 
 
-class TestParseThread:
-    """Tests for ExecuteTool._parse_thread()."""
+class TestParseTarget:
+    """Tests for ExecuteTool._parse_target()."""
 
-    def test_inline(self):
-        assert ExecuteTool._parse_thread("inline") == ("inline", None)
-
-    def test_fork(self):
-        assert ExecuteTool._parse_thread("fork") == ("fork", None)
+    def test_local(self):
+        assert ExecuteTool._parse_target("local") == ("local", None)
 
     def test_remote_default(self):
-        assert ExecuteTool._parse_thread("remote") == ("remote", None)
+        assert ExecuteTool._parse_target("remote") == ("remote", None)
 
     def test_remote_named(self):
-        assert ExecuteTool._parse_thread("remote:gpu") == ("remote", "gpu")
+        assert ExecuteTool._parse_target("remote:gpu") == ("remote", "gpu")
 
     def test_remote_named_with_dashes(self):
-        assert ExecuteTool._parse_thread("remote:my-gpu-server") == ("remote", "my-gpu-server")
+        assert ExecuteTool._parse_target("remote:my-gpu-server") == ("remote", "my-gpu-server")
+
+    def test_remote_empty_suffix_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            ExecuteTool._parse_target("remote:")
+
+    def test_unknown_target_raises(self):
+        with pytest.raises(ValueError, match="Unknown target"):
+            ExecuteTool._parse_target("banana")
