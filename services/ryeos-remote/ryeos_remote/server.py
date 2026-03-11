@@ -49,6 +49,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # m1: Enforce batch size limits (reads actual body, not just Content-Length header)
 @app.middleware("http")
 async def enforce_request_size(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
     settings = get_settings()
     limit = settings.max_request_bytes
 

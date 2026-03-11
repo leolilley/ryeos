@@ -26,14 +26,13 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
         # Core engine (ryeos-core → ryeos-engine → lillux → lillux-proc)
-        "ryeos-core",
+        "ryeos-core==0.1.17",
         # Server
         "fastapi>=0.109.0",
         "uvicorn[standard]>=0.27.0",
         "pydantic-settings>=2.1.0",
         # Auth
         "supabase>=2.3.0",
-        "python-jose[cryptography]>=3.3.0",
     )
     .add_local_dir("ryeos_remote", remote_path="/app/ryeos_remote", copy=True)
     .env({

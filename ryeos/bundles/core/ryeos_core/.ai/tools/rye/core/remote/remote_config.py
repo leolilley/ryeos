@@ -1,3 +1,4 @@
+# rye:signed:2026-03-11T08:01:01Z:0c2d797ab7f4fdc7f01f93ce16bb79beac0ab5c66a7963b36213aaeb81b34df8:oe6FTaTktXCppaA9FkQp9JXdM5db8HBZvm_QdnqJGz0pvbI3_KO074z2wTbwdKcSQOQmuxju4WJFqHx2izd2AA==:4b987fd4e40303ac
 """Named remote resolution for multi-remote execution.
 
 Resolves remote connection details (URL + API key) via 3-tier config
@@ -5,6 +6,11 @@ resolution (system → user → project).
 
 Config path: .ai/config/cas/remote.yaml
 """
+
+__version__ = "1.0.0"
+__tool_type__ = "python"
+__category__ = "rye/core/remote"
+__tool_description__ = "Named remote config resolution library"
 
 import logging
 import os

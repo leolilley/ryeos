@@ -13,8 +13,6 @@ class Settings(BaseSettings):
     # Supabase (auth + secrets)
     supabase_url: str
     supabase_service_key: str
-    supabase_jwt_secret: str
-
     # CAS storage
     cas_base_path: str = "/cas"
 

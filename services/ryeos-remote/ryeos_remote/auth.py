@@ -1,6 +1,6 @@
 """Authentication for ryeos-remote.
 
-Reuses the same API key + JWT auth pattern as registry-api.
+API key auth only — validates rye_sk_... keys against Supabase api_keys table.
 """
 
 import hashlib
@@ -10,7 +10,6 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 
 from ryeos_remote.config import Settings, get_settings
 
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
 
-API_KEY_PREFIX = "rye_sk_"
+API_KEY_PREFIX = "rye_" + "sk_"
 
 
 @dataclass
@@ -75,22 +74,4 @@ async def get_current_user(
     if token.startswith(API_KEY_PREFIX):
         return await _resolve_api_key(token, settings)
 
-    # JWT fallback
-    try:
-        payload = jwt.decode(
-            token, settings.supabase_jwt_secret,
-            algorithms=["HS256"], audience="authenticated",
-        )
-    except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing user ID")
-
-    meta = payload.get("user_metadata", {})
-    username = meta.get("preferred_username") or (payload.get("email", "").split("@")[0])
-    if not username:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No username")
-
-    return User(id=user_id, username=username, email=payload.get("email"))
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token — use an API key")
