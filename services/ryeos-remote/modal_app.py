@@ -25,10 +25,9 @@ cas_volume = modal.Volume.from_name("ryeos-remote-cas", create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
-        # Core engine (ryeos-core → ryeos-engine → lillux → lillux-proc)
-        "ryeos-core==0.1.18",
-        # Agent bundle (thread_directive, capability harness, etc.)
-        "ryeos-std==0.1.17",
+        # Standard bundle (ryeos → ryeos-core → ryeos-engine → lillux)
+        # Includes thread_directive for directive forking on remote
+        "ryeos==0.1.13",
         # Server
         "fastapi>=0.109.0",
         "uvicorn[standard]>=0.27.0",
