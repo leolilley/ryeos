@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T05:44:17Z:6baad923fa0e89d9155c0ceab6ca0017d3a2566ff0756111f4575f945b677978:aYE2wqGNPZY3iLqdVwm23D0vvD3Nz8HuPiiOVh5VRPVpiZ4Yvu2RcxNl1vq51NoE4-V-H1MwZWS5dC3tEPOdBA==:4b987fd4e40303ac
+# rye:signed:2026-03-11T06:52:28Z:f76c932100e424d8912a4332d5a61c4d025aec6e171552ba616917238e6adf6a:I0u_XwYyKo1SCB05QIqMk6kG4fRhQ1D5lgrIPHgOKfjIG2LveR-fRUOJF0Mo19igG3ngS7SpU5g_p8pepIZFDw==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -351,6 +351,7 @@ class GraphTranscript:
         labels = {
             "completed": "✅ Completed", "error": "❌ Error",
             "cancelled": "⏹ Cancelled", "running": "🔄 Running",
+            "completed_with_errors": "⚠️ Completed with errors",
         }
         label = labels.get(status, status.title())
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -926,6 +927,7 @@ def _store_node_receipt(
     node_result_hash: str,
     cache_hit: bool,
     elapsed_ms: int,
+    error: Optional[str] = None,
 ) -> Optional[str]:
     """Create and store a NodeReceipt as a CAS object. Returns hash or None."""
     try:
@@ -939,6 +941,7 @@ def _store_node_receipt(
             cache_hit=cache_hit,
             elapsed_ms=elapsed_ms,
             timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            error=error,
         )
         root = cas_root(Path(project_path))
         return cas.store_object(receipt.to_dict(), root)
@@ -956,6 +959,7 @@ async def _persist_state(
     status: str,
     step_count: int,
     node_receipts: Optional[List[str]] = None,
+    errors: Optional[List[Dict]] = None,
 ) -> Optional[str]:
     """Store graph state as CAS execution_snapshot + state_snapshot objects.
 
@@ -983,6 +987,7 @@ async def _persist_state(
             state_hash=state_hash,
             system_version=_get_system_version(),
             node_receipts=list(node_receipts or []),
+            errors=list(errors or []),
         )
         snapshot_hash = cas.store_object(snapshot.to_dict(), root)
 
@@ -1026,7 +1031,7 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
     _KNOWN_NODE_KEYS = frozenset({
         "type", "action", "next", "on_error", "assign",
         "over", "as", "collect", "parallel", "env_requires",
-        "cache", "remote",
+        "cache_result", "remote",
     })
 
     has_return = False
@@ -1467,6 +1472,7 @@ async def execute(
         current = resumed["current_node"]
         step_count = resumed["step_count"]
         node_receipt_hashes: List[str] = list(resumed.get("node_receipts", []))
+        suppressed_errors: List[Dict] = []
 
         if not current:
             return {
@@ -1495,6 +1501,7 @@ async def execute(
         current = cfg.get("start")
         step_count = 0
         node_receipt_hashes: List[str] = []
+        suppressed_errors: List[Dict] = []
 
         # Validate inputs
         input_errors = _validate_inputs(params, config_schema)
@@ -1572,6 +1579,7 @@ async def execute(
         # Return node — terminate
         if node.get("type") == "return":
             elapsed = time.monotonic() - graph_start_time
+            final_status = "completed_with_errors" if suppressed_errors else "completed"
             graph_transcript.write_event("step_started", {
                 "step": step_count, "node": executed_node, "node_type": "return",
             })
@@ -1581,17 +1589,18 @@ async def execute(
             })
             _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=elapsed, status="return")
             graph_transcript.write_event("graph_completed", {
-                "status": "completed", "steps": step_count, "elapsed_s": elapsed,
+                "status": final_status, "steps": step_count, "elapsed_s": elapsed,
             })
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
-            graph_transcript.render_knowledge("completed", step_count, elapsed)
+            graph_transcript.render_knowledge(final_status, step_count, elapsed)
             await _persist_state(
                 project_path, graph_id, graph_run_id,
-                state, current, "completed", step_count,
+                state, current, final_status, step_count,
                 node_receipts=node_receipt_hashes,
+                errors=suppressed_errors,
             )
             if registry is not None:
-                registry.update_status(graph_run_id, "completed")
+                registry.update_status(graph_run_id, final_status)
             await _run_hooks(
                 "graph_completed",
                 {"graph_id": graph_id, "state": state, "steps": step_count},
@@ -1604,12 +1613,19 @@ async def execute(
             output_template = node.get("output", {})
             interp_ctx: Dict[str, Any] = {"state": state, "inputs": params, **_builtins()}
             output = interpolation.interpolate(output_template, interp_ctx) if output_template else {}
-            return {
+            result_dict = {
                 "success": True,
+                "status": final_status,
                 "output": output,
                 "steps": step_count,
                 "graph_run_id": graph_run_id,
             }
+            if suppressed_errors:
+                result_dict["errors_suppressed"] = len(suppressed_errors)
+                result_dict["errors"] = suppressed_errors
+            if registry is not None:
+                registry.set_result(graph_run_id, result_dict)
+            return result_dict
 
         # Foreach node — iterate
         if node.get("type") == "foreach":
@@ -1733,8 +1749,8 @@ async def execute(
         if denied:
             result = denied
         else:
-            # Node cache lookup (opt-in via `cache: true`)
-            if node.get("cache", False):
+            # Node cache lookup (opt-in via `cache_result: true`)
+            if node.get("cache_result", False):
                 try:
                     from rye.cas.node_cache import compute_cache_key, cache_lookup
                     from rye.cas.config_snapshot import compute_agent_config_snapshot
@@ -1771,7 +1787,7 @@ async def execute(
                 result = _unwrap_result(raw_result)
 
                 # Store in cache on successful execution
-                if node.get("cache", False) and node_cache_key and result.get("status") != "error":
+                if node.get("cache_result", False) and node_cache_key and result.get("status") != "error":
                     try:
                         from rye.cas.node_cache import cache_store
                         stored_hash = cache_store(
@@ -1863,7 +1879,12 @@ async def execute(
                     "node": executed_node,
                     "state": state,
                 }
-            # error_mode == "continue" — skip assign, proceed to edges
+            # error_mode == "continue" — track suppressed error, skip assign
+            suppressed_errors.append({
+                "step": step_count,
+                "node": executed_node,
+                "error": str(result.get("error", "unknown")),
+            })
 
         # Assign result values to state (skipped on error in "continue" mode)
         if result.get("status") != "error":
@@ -1886,12 +1907,14 @@ async def execute(
         node_elapsed_ms = int(node_elapsed * 1000)
 
         # M2: Store NodeReceipt for audit trail
+        node_error = str(result.get("error", "")) if result.get("status") == "error" else None
         receipt_hash = _store_node_receipt(
             project_path,
             node_input_hash=node_cache_key or "",
             node_result_hash=node_result_hash,
             cache_hit=cache_hit,
             elapsed_ms=node_elapsed_ms,
+            error=node_error or None,
         )
         if receipt_hash:
             node_receipt_hashes.append(receipt_hash)
@@ -2122,7 +2145,7 @@ def _foreach_cache_context(node: Dict, project_path: str) -> Optional[tuple]:
 
     Returns (graph_hash, config_snap_hash) or None if cache disabled.
     """
-    if not node.get("cache", False):
+    if not node.get("cache_result", False):
         return None
     try:
         from rye.cas.config_snapshot import compute_agent_config_snapshot

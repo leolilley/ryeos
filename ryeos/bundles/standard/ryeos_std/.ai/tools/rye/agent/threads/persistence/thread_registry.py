@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T05:44:17Z:1d30307f584d1a20f4ec6d316994f07c3de492d5b5b16c728e0a98e8c526b738:ownSGZKGanPCeI4WN8vM3RQqb38X4SBehQbByv5-Nk-BqWBSNxnRyuUoU46uSg0b2oy7w718N7-Dm2y-4gk0Bg==:4b987fd4e40303ac
+# rye:signed:2026-03-11T06:29:29Z:c71db5893f79c9ca1f8f7d68d0b584a9327616ce0be20f0dee5e77c64b1d4907:w-f51cmX5tBhzniK2ZI4aQ4RdJqC74tZLdO_jRTExg0kDYrKTPEU9BK91DVBgOfiWWrLcW4V3CySZYgiusZPAg==:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -101,7 +101,7 @@ class ThreadRegistry:
         with sqlite3.connect(self.db_path) as conn:
             extra = ""
             params = [status, now, thread_id]
-            if status in ("completed", "error", "cancelled", "continued"):
+            if status in ("completed", "completed_with_errors", "error", "cancelled", "continued"):
                 extra = ", completed_at = ?"
                 params.insert(2, now)
             conn.execute(
@@ -127,7 +127,7 @@ class ThreadRegistry:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT * FROM threads
-                WHERE status NOT IN ('completed', 'error', 'cancelled', 'released')
+                WHERE status NOT IN ('completed', 'completed_with_errors', 'error', 'cancelled', 'released')
                 ORDER BY created_at DESC
             """)
             return [dict(row) for row in cursor.fetchall()]

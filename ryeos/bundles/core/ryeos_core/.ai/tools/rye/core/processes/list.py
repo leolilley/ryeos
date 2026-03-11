@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:35:37Z:46a404bfbe6e56be0364708fc794674128d067747974986532280b1963e0ac6f:xoWvtLIXIRMA0HzUCOiJEbA4yhYWAULfQ_v2i4MQidHejvJPWZpAOZrYZesuvcuQAe47hVXsmHEV9nZv4fVyDg==:4b987fd4e40303ac
+# rye:signed:2026-03-11T06:29:29Z:13343cd1529a02c102fccbea0f1e488d7366c822553c807fd02b9f7f779335f9:qHWgLpB2NYp7KGjPwDws5pSfWa3NGpZOzAu4btyG12XZcrFfNeqEEynxEFzn0KuGryPc6NNIbxlQNR1xJl8BAg==:4b987fd4e40303ac
 """List running processes from thread registry."""
 
 import argparse
@@ -19,7 +19,7 @@ CONFIG_SCHEMA = {
         "status": {
             "type": "string",
             "description": "Filter by status (running/completed/cancelled/error/killed). Omit for all active.",
-            "enum": ["running", "completed", "cancelled", "error", "killed"],
+            "enum": ["running", "completed", "completed_with_errors", "cancelled", "error", "killed"],
         },
     },
 }
@@ -45,7 +45,7 @@ def execute(params: dict, project_path: str) -> dict:
         else:
             cursor = conn.execute("""
                 SELECT * FROM threads
-                WHERE status NOT IN ('completed', 'error', 'cancelled', 'killed')
+                WHERE status NOT IN ('completed', 'completed_with_errors', 'error', 'cancelled', 'killed')
                 ORDER BY created_at DESC
             """)
         rows = cursor.fetchall()
@@ -53,7 +53,7 @@ def execute(params: dict, project_path: str) -> dict:
     runs = []
     for row in rows:
         r = dict(row)
-        runs.append({
+        entry = {
             "run_id": r.get("thread_id"),
             "directive": r.get("directive"),
             "status": r.get("status"),
@@ -61,7 +61,17 @@ def execute(params: dict, project_path: str) -> dict:
             "parent_id": r.get("parent_id"),
             "created_at": r.get("created_at"),
             "updated_at": r.get("updated_at"),
-        })
+        }
+        if r.get("status") == "completed_with_errors":
+            stored_result = r.get("result")
+            if stored_result:
+                try:
+                    parsed = json.loads(stored_result) if isinstance(stored_result, str) else stored_result
+                    if isinstance(parsed, dict) and "errors_suppressed" in parsed:
+                        entry["errors_suppressed"] = parsed["errors_suppressed"]
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        runs.append(entry)
 
     return {"success": True, "runs": runs, "count": len(runs)}
 

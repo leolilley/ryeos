@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:35:37Z:2e4ecc6beb380b0ea1704a6c7fb9853f1334a1c6c75ea05c41d0723a34e6bce3:krpKrZ1uL-GMb80CwzxBq1mLHsSbtyfScsNU7nA4xUcBoczrVnZMccOwK4G4FNRMWQWApWodaw9xQyq4IDGECA==:4b987fd4e40303ac
+# rye:signed:2026-03-11T06:29:29Z:aa502f920554401f72929f86bc50e2bcaf6aef65848c2239d8cdb7c3e0afcbc5:m18hurV9YsT1gxSsZKcZO5SBYv8iAzdTQFKFG0sGvADXwCLyb1fTRp597m7d2WTKmBcPzD7Fh58JF3mmGeEWAA==:4b987fd4e40303ac
 """Check status of a running process by run_id."""
 
 import argparse
@@ -90,6 +90,16 @@ async def _execute_async(params: dict, project_path: str) -> dict:
         result["alive"] = pid_status["alive"]
     else:
         result["alive"] = False
+
+    if status == "completed_with_errors":
+        stored_result = thread.get("result")
+        if stored_result:
+            try:
+                parsed = json.loads(stored_result) if isinstance(stored_result, str) else stored_result
+                if isinstance(parsed, dict) and "errors_suppressed" in parsed:
+                    result["errors_suppressed"] = parsed["errors_suppressed"]
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     return result
 

@@ -144,9 +144,10 @@ class NodeReceipt:
     cache_hit: bool = False
     elapsed_ms: int = 0
     timestamp: str = ""
+    error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "schema": self.schema,
             "kind": self.kind,
             "node_input_hash": self.node_input_hash,
@@ -155,6 +156,9 @@ class NodeReceipt:
             "elapsed_ms": self.elapsed_ms,
             "timestamp": self.timestamp,
         }
+        if self.error is not None:
+            d["error"] = self.error
+        return d
 
 
 @dataclass(frozen=True)
@@ -172,9 +176,10 @@ class ExecutionSnapshot:
     status: str = ""
     state_hash: str = ""
     node_receipts: List[str] = field(default_factory=list)
+    errors: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "schema": self.schema,
             "kind": self.kind,
             "graph_run_id": self.graph_run_id,
@@ -187,6 +192,9 @@ class ExecutionSnapshot:
             "state_hash": self.state_hash,
             "node_receipts": self.node_receipts,
         }
+        if self.errors:
+            d["errors"] = self.errors
+        return d
 
 
 @dataclass(frozen=True)
