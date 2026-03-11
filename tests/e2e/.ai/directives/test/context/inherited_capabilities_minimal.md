@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-04T03:35:33Z:9dd9b8d29872ceb33f3c84d559695017c0a655894e65adcfe14d18dbc3649810:JdDbylu808dH8KlirZ37gKs_JZ3KtOQTYsJ28KZ-GrylCGxfGaORmgzBXtK_nwXu_yRGgT-MQi6KfqAxWfizCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T07:13:35Z:9dd9b8d29872ceb33f3c84d559695017c0a655894e65adcfe14d18dbc3649810:JdDbylu808dH8KlirZ37gKs_JZ3KtOQTYsJ28KZ-GrylCGxfGaORmgzBXtK_nwXu_yRGgT-MQi6KfqAxWfizCw==:4b987fd4e40303ac -->
 # Inherited Capabilities Minimal Test
 
 Minimal-guidance version of inherited_capabilities_test. The LLM must

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-04T00:05:20Z:61376db74910d0e5f571813fc63a470063411c8569e9fc61889ed6cf0e20c709:zTmtj8n-_hjF7R-PdyTwn0m_fBRJnpcvJDbi5IssxY4ByVhqQGCeIpjLaYi3JIBJ1HAYn4D5YhDn_FcE5gBdAA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T07:13:35Z:61376db74910d0e5f571813fc63a470063411c8569e9fc61889ed6cf0e20c709:zTmtj8n-_hjF7R-PdyTwn0m_fBRJnpcvJDbi5IssxY4ByVhqQGCeIpjLaYi3JIBJ1HAYn4D5YhDn_FcE5gBdAA==:4b987fd4e40303ac -->
 # Hook-Routed Base Context
 
 A context base that directives get routed into via resolve_extends hooks.

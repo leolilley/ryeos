@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:5691296c5e0feade2915b6b4bb3e66da20492b08cdfb99af15147024502db2c9:3cYvLmYl0jJtlK--ObcDLvMbfo7BMHap1P2vWXrql7_GZGJXwX9PfCM0MF9wzXKagDTPxzvh2xEealUjIvryDQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:abf7d7f9168b11d0e737d9613b2ef5cb7fee09c2cdc2f3a6375310426386eb7c:d6-TWAIwRhn-mdrHLRKCh0PZhVpidDlscnmQZo6zOa_dprDhWwEIeJTep5TIeVcVCkrdCP0Va1F2E_FQIkazBw==:4b987fd4e40303ac -->
 # Depth Limit Test
 
 Test that depth limit enforcement prevents infinitely recursive thread spawning. Sets depth=1 so: root (depth=1) → child (depth=0, can run but can't spawn) → grandchild (depth=-1, rejected).
@@ -25,19 +25,9 @@ Test that depth limit enforcement prevents infinitely recursive thread spawning.
 
 <process>
   <step name="write_root_marker">
-    <description>Write a marker file to confirm root thread ran.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="depth_root.txt" />
-      <param name="content" value="Root thread at depth 0" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Root thread at depth 0" to `depth_root.txt`.
   </step>
-
   <step name="spawn_depth_child">
-    <description>Spawn test/limits/depth_child which will try to spawn its own child. Pass parent_depth=0 so child is depth 1.</description>
-    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-      <param name="directive_name" value="test/limits/depth_child" />
-      <param name="inputs" value='{"level": "1"}' />
-    </execute>
+    Spawn child directive `test/limits/depth_child` with input level="1".
   </step>
 </process>

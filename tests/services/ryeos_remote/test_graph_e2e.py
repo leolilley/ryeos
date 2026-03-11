@@ -102,7 +102,7 @@ def _cached_graph():
             "start": "compute",
             "nodes": {
                 "compute": {
-                    "cache": True,
+                    "cache_result": True,
                     "action": {
                         "primary": "execute",
                         "item_type": "tool",

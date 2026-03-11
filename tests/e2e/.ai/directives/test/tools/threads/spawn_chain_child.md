@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:30Z:c6c19f29be39554fcb1ac78dbc517728dc6ae5b5f3808e060cfd157d66621d89:UBRwtjaJnO_yPVdQQq8z8sqpn6IYwQdLQxQIzgwXSlLDCS6hpc-tYmewIiWB-RPwkuVRz6zx9xhSxksySVbbDA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:c6c19f29be39554fcb1ac78dbc517728dc6ae5b5f3808e060cfd157d66621d89:gWqv7uJBN4fUz22zVCrsconx3vZe0QtkORJYgkyktEMwEw0REij5IQ3J_50dLHXnl--TyxPAAYQnu55vxA_3AA==:4b987fd4e40303ac -->
 # Spawn Chain Child
 
 Recursive child for spawn chain test. Writes a marker at its level, then spawns the next level if not at max.
@@ -34,19 +34,9 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
 
 <process>
   <step name="write_level_marker">
-    <description>Write marker file for this level.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="chain_L{input:level}.txt" />
-      <param name="content" value="Level {input:level} — child thread" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Level {input:level} — child thread" to `chain_L{input:level}.txt`.
   </step>
-
   <step name="maybe_spawn_next">
-    <description>If level &lt; max_level, spawn the next level child. Pass level+1 and max_level through. If level >= max_level, just report completion.</description>
-    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-      <param name="directive_name" value="test/tools/threads/spawn_chain_child" />
-      <param name="inputs" value='{"level": "NEXT_LEVEL", "max_level": "{input:max_level}"}' />
-    </execute>
+    If {input:level} is less than {input:max_level}, spawn another child thread running `test/tools/threads/spawn_chain_child` with level incremented by 1 and the same max_level. If at max_level, report completion.
   </step>
 </process>

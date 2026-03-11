@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:30Z:e8b1cd2d8a65ebd51518c05ad5cd4e351089d01e0eb9c278e67e6ce5de43ea1d:o3JE5rKWHj1seShWzRMAh3ajew_yTiln8derG8qROjrRxY2uX1JJMdWcljzf41MYoaixKrk5zxpsmjlV9Ko7Dw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:e8b1cd2d8a65ebd51518c05ad5cd4e351089d01e0eb9c278e67e6ce5de43ea1d:8RSKLYsB0BViMqXe8OWUxM9d20db5LQL1nLEX6i80xiYQWeN04gMxDvdKC8DqHMoJ8EQmMTHaLLcVKBd2y0NBQ==:4b987fd4e40303ac -->
 # Spawn Chain 4 Levels Deep
 
 End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tests budget cascading, limit inheritance, permission inheritance, and depth tracking across 4 levels.
@@ -25,19 +25,9 @@ End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tes
 
 <process>
   <step name="write_root">
-    <description>Write root marker file.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="chain_L0.txt" />
-      <param name="content" value="Level 0 — root thread" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Level 0 — root thread" to `chain_L0.txt`.
   </step>
-
   <step name="spawn_level_1">
-    <description>Spawn level 1 child.</description>
-    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-      <param name="directive_name" value="test/tools/threads/spawn_chain_child" />
-      <param name="inputs" value='{"level": "1", "max_level": "3"}' />
-    </execute>
+    Spawn a child thread running directive `test/tools/threads/spawn_chain_child` with inputs level="1" and max_level="3".
   </step>
 </process>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:0704c2b447e8ebaa944c0a2285dfa33819d1ccf688e0babb3246d4d0e52d30c5:YeDus6ZM55eMfTIvsHaejxPOZmt3K3nMMdLDRoQsCBc-vcr1-JrSpbIFRFNefTFPpomIvpRnhkbpgk4iudI8DA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:0f0536204d7ba1d8c45a894f6dae3bc3479440908f2f8a25eef1d279cedd9471:gOzcJlFlq_IWZ0YABH4EtQuXVqKvXBz7Ze1wozJBFZP8w3xorls1YZzu4ywI5xkWtneFaEHoLRsVX3wIbE5tDg==:4b987fd4e40303ac -->
 # Permission Test: Wrong Scope
 
 Has permission for rye.core.* tools but tries to use rye/file-system — should be denied.
@@ -23,11 +23,6 @@ Has permission for rye.core.* tools but tries to use rye/file-system — should 
 
 <process>
   <step name="write_denied">
-    <description>Write a file — should be denied (wrong permission scope).</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="perm_test_wrong.txt" />
-      <param name="content" value="Should never appear" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Should never appear" to `perm_test_wrong.txt` — this should be denied since only rye.core.* permission is granted, not rye.file-system.*.
   </step>
 </process>

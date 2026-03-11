@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:8a02f494e9af52a543c8e9db455d6f659926322b982c681be1ef290a93e30fd0:CDIw00NfpFpRZV9AH-hHQhwHZEdHQCq7eXo1CbQ5AX_ZbEapx2UBami0_n9LOQxbSk68nW59rWvFFdKgQI1FBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:f7314560d83972166b3f647cbff91e917b012ece4072eb80c7aef6e5ca3fae77:VK9JYmIIEco1EI4mnUqGJINuBicvIq4noA01EUIPsvEHcKKf4vXb3kFUWFgSV0I1H60rAWqTGv1tcMCIp8QfAg==:4b987fd4e40303ac -->
 # Write File
 
 Simple single-step directive that writes a greeting message to a specified file path.
@@ -34,10 +34,8 @@ Simple single-step directive that writes a greeting message to a specified file 
 
 <process>
   <step name="write_message">
-    Write the greeting message to the output file:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_path}", "content": "{input:message}"})`
+    Write the greeting message "{input:message}" to `{input:output_path}`.
   </step>
-
   <step name="return_result">
     Return the path of the written file and the message that was written.
   </step>

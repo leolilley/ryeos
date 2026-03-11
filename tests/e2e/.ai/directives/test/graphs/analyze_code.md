@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T09:06:00Z:8f087db0dc93e42fb3e100a99cb0864154397f634bd169d822ffbe3b15f777dd:apGaesEULaKglHURFOZS333fI6TOljpPVoF4HCkomIcItEQikmtLVatd1agi_Cs8HkA_DsYQRczazVIg7-ZWCQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:8f087db0dc93e42fb3e100a99cb0864154397f634bd169d822ffbe3b15f777dd:uRfk7pNRLBghb7FAjOS0cHm5uwM5C5N4flemXuraL5X7NNHKHHTAolm32WUhzdmD_Cxl4M-oQLxAx-yZcFI5BQ==:4b987fd4e40303ac -->
 <!-- -->
 
 # Analyze Code
@@ -36,20 +36,22 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
 ```
 
 <process>
-  <step name="write_analysis">
+  <step name="analyze_code">
     Here is the code to analyze:
 
     ```
     {input:code_snippet}
     ```
 
-    Analyze it and determine: the programming language, the number of function/method definitions (def, async def, function, etc.), and a 2-3 sentence summary of what the code does.
+    Analyze the code and determine:
+    - The programming language
+    - The number of function/method definitions (def, async def, function, etc.)
+    - A 2-3 sentence summary of what the code does
 
-    Then write the result as a JSON object to `{input:output_path}`:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_path}", "content": "{\"language\": \"...\", \"function_count\": N, \"summary\": \"...\"}"})`
+    Write the result as a JSON object to `{input:output_path}` with keys: `language`, `function_count`, `summary`.
   </step>
 
   <step name="return_result">
-    Return `language`, `function_count`, and `summary` using directive_return with the values you determined.
+    Return `language`, `function_count`, and `summary` using directive_return.
   </step>
 </process>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-04T00:59:21Z:df826eeb553fcdf403b549dd24bec3c157addfb6ba4d3045fd4c995b02911643:yQgyEuK92h95o8om-9bOc8RZrVenHujleyVfV2vFNwCZGYdhCRP1nySqHxnxGWd2oUQhUSMC0kuTeYQ-npeTAA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T07:13:35Z:df826eeb553fcdf403b549dd24bec3c157addfb6ba4d3045fd4c995b02911643:yQgyEuK92h95o8om-9bOc8RZrVenHujleyVfV2vFNwCZGYdhCRP1nySqHxnxGWd2oUQhUSMC0kuTeYQ-npeTAA==:4b987fd4e40303ac -->
 # Inherited Capabilities Test
 
 Tests that capabilities from an extended directive are inherited into the leaf's

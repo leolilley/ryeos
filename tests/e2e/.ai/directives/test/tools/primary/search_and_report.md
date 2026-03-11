@@ -1,4 +1,4 @@
-<!-- rye:validated:2026-02-10T03:00:00Z:placeholder -->
+<!-- rye:signed:2026-03-11T07:14:55Z:6967a5eca52850e819885eecf8ffb64b9b619338427d135edcf3c2234a1a2b08:3rgBqvLoRUh8H0Em0xKFxK11pYEitfgE0JRD6pvH_7znmh7yDy7izNYuGmYK8iiqzBCrvb7I6DFXb7QbFwW6Bw==:4b987fd4e40303ac -->
 
 # Search and Report
 
@@ -36,16 +36,9 @@ Multi-step directive that searches the knowledge base for entries on a topic, th
 
 <process>
   <step name="search_knowledge">
-    <description>Search the knowledge base for entries related to the topic.</description>
-    <search item_type="knowledge" query="{input:topic}" />
+    Search the knowledge base for entries related to "{input:topic}".
   </step>
-
   <step name="write_report">
-    <description>Compile the search findings into a summary and write it to the report file.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="{input:report_path}" />
-      <param name="content" value="# Report: {input:topic}\n\nSummary of knowledge base findings on the topic." />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Compile the search findings into a summary and write it to `{input:report_path}`.
   </step>
 </process>

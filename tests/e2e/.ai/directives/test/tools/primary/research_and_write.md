@@ -1,4 +1,4 @@
-<!-- rye:validated:2026-02-10T03:00:00Z:placeholder -->
+<!-- rye:signed:2026-03-11T07:14:55Z:1c14a5c825934a9eb03a864003eaa32f2a96080d098869e76c01a93303b611b9:9Annt0g4V4To4n2MPpOCtk9z4tis1Af-fuFrRdSnApV9EO4nU75PqAOlddyngN_Eg3-6Y2iy0IZSZUujmd2JCA==:4b987fd4e40303ac -->
 
 # Research and Write Report
 
@@ -43,37 +43,12 @@ Research a topic by searching knowledge, loading the best match, then writing a 
 
 <process>
   <step name="search_knowledge">
-    <description>Search the knowledge base for entries relevant to the topic</description>
-    <search item_type="knowledge" query="{input:topic}" />
+    Search the knowledge base for entries relevant to "{input:topic}".
   </step>
-
   <step name="load_reference">
-    <description>Load the rye-architecture knowledge entry as reference context</description>
-    <load item_type="knowledge" item_id="rye-architecture" />
+    Load the `rye-architecture` knowledge entry for reference context.
   </step>
-
   <step name="write_report">
-    <description>Write a research report combining search results and loaded knowledge to the report path</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="{input:report_path}" />
-      <param name="content" value="# Research Report: {input:topic}
-
-## Overview
-Research findings on: {input:topic}
-
-## Search Results
-(entries found via knowledge search for the topic)
-
-## Reference Context
-(context from rye-architecture knowledge entry)
-
-## Analysis
-(synthesized findings combining search results and reference material)
-
-## Recommendations
-(actionable recommendations based on research)
-" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write a research report combining search results and loaded knowledge to `{input:report_path}`.
   </step>
 </process>

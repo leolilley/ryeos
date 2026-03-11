@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:939ee57c40b5e8c5b98ad65f25e76ba930370b2c05226021b5d5d0271440ffd9:rpf3WJhRar-Q5Tt4tdU0UVZIvlkKQ_WZj6zOXuHxfPQyE4r00VCdORECAWg3ThYHbOano1KIa-bWw9s-ONlOBg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:0eeb5687c87db7661d9464de6a0a02b200607b1fa8674dc75d3d38d17c22a838:OrfDnKTQnA1R-GLPiie1PxwM4poKZ0zcoenX3QHFmyPuPHvFSa_WVuOQmKfR-0DdA8HEqTxNS_84-xzQX2LdAQ==:4b987fd4e40303ac -->
 # Depth Child
 
 Child directive spawned by depth_limit_test. Writes a marker then tries to spawn its own child — which should fail if depth limit is reached.
@@ -31,19 +31,9 @@ Child directive spawned by depth_limit_test. Writes a marker then tries to spawn
 
 <process>
   <step name="write_child_marker">
-    <description>Write a marker file for this child level.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="depth_child_{input:level}.txt" />
-      <param name="content" value="Child thread at level {input:level}" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Child thread at level {input:level}" to `depth_child_{input:level}.txt`.
   </step>
-
   <step name="try_spawn_grandchild">
-    <description>Try to spawn another child. This should fail if depth limit is reached.</description>
-    <execute item_type="tool" item_id="rye/agent/threads/thread_directive">
-      <param name="directive_name" value="test/tools/file_system/write_file" />
-      <param name="inputs" value='{"message": "Grandchild should not run", "output_path": "depth_grandchild.txt"}' />
-    </execute>
+    Try to spawn child directive `test/tools/file_system/write_file` with message "Grandchild should not run" and output_path "depth_grandchild.txt". This should fail if depth limit is reached.
   </step>
 </process>

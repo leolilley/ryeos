@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:30Z:25c332af547bd9b20bc005b007fe17fd34cd27cfffdd18efd17fad0957c225f3:k0Bz-y4Hkpl7dfZ5rMDdbMihIWClF8nqsOxUH_s3l4gGwPoa2Zg-_lQLU9EqZAMVIi-UVtLtQfAiLc5pum-sAA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:25c332af547bd9b20bc005b007fe17fd34cd27cfffdd18efd17fad0957c225f3:0UNsQOVfUhpLEBVoObjo-K8zXdBQ_ULDQyUCTLyNFl-tn2ImuIvS0UHwT4F-Vun2nLJZm9TSSX94JqrRxfe3Bw==:4b987fd4e40303ac -->
 # Tokens Limit Test
 
 Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM response exceeds it.
@@ -25,11 +25,6 @@ Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM 
 
 <process>
   <step name="write_file">
-    <description>Write a file. The LLM prompt + response tokens will exceed 500 total.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="tokens_test.txt" />
-      <param name="content" value="Should hit token limit" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Should hit token limit" to `tokens_test.txt`.
   </step>
 </process>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:a97d1036228b167535aa59da5a358333ccbfb252bb935bfe93daaca1f30ed151:6MNmApGOH5sJNT-1_56ASUYQLOtX1L0Ux1R2FpLz488Np2gxIog_0iolxTgVbHuo0-ejLoPaWH3I02-mWQ3zAg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:7b1c5987ecac0e27b09fded7e0911d0a742823b510e442fc522c40172ee30259:40K6C_-CW358DSsYA-GjHS0OZe5vq2EL1qBtnLfWyQTlUqyPAY3kXRju61oUsRF0FhsS3FHxl6YqI-vv0qm7CA==:4b987fd4e40303ac -->
 # Permission Test: No Permissions
 
 No permissions block declared. All tool calls should be denied (fail-closed).
@@ -20,11 +20,6 @@ No permissions block declared. All tool calls should be denied (fail-closed).
 
 <process>
   <step name="write_denied">
-    <description>Write a test file — should be denied (no permissions).</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="perm_test_none.txt" />
-      <param name="content" value="Should never appear" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Should never appear" to `perm_test_none.txt` — this should be denied since no permissions are declared.
   </step>
 </process>

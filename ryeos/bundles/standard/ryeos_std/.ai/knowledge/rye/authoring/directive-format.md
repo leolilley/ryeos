@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:92084e8dce2b8c2c341ab8d9fa2feef63692d92d4db1e464d63032fe8ccc05d7:oqB2Fbr9kFVHV8jyvRXWwtJII79JQZvj2QI6yGwv8Arr_Lh51pVqdzTIkeg3bhOIXSpaBl9VSl2PEPi8OBUaDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T07:20:18Z:871ff38704df8ea74298eda270dba66dedc1c09ebbc7ab6f6cfc2e33eeed1a9d:r2ZASHX7-w2OwcA-RgbvVbKnxNRopbFF8pXyYRPk-vco5J3-Tzitxv8ZPDBipf2h7aptUmLmvgaQ8dA6XgkBCA==:4b987fd4e40303ac -->
 
 ```yaml
 name: directive-format
@@ -565,7 +565,7 @@ Process steps go **after** the XML fence. They contain natural language instruct
 
   <step name="write_file">
     <description>Write the directive file.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
+    <execute item_type="tool" item_id="rye/file-system/write">
       <param name="path" value=".ai/directives/{input:category}/{input:name}.md" />
     </execute>
   </step>

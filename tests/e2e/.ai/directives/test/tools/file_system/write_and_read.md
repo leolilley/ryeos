@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:3b7a7313ded20331f5271da19f03c83d84c2b6a00a14b7943fee80b904864179:RY4gUKGoRuyPKf5uEY9ESHZgffXPQ4fz7KXUl8KECHbQQ50Z_05f1ulyAyDVtjdyMMjbPrrD1uyGQSTBMVkNBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:e3f1b69c28369a7d9c11ce8e019e23b418829134adcfde64510a5f1db49e3d4d:T_mHI4hoDGCqLvrakhVAgS1KlvxcrjNpTd-uxjfmP50GTIn1V2mYWBAHGZ1cqVDIzUEOqc8W9DrPz40NzB01Cg==:4b987fd4e40303ac -->
 
 # Write and Read
 
@@ -35,18 +35,9 @@ Two-step directive that writes content to a file, then reads it back to verify t
 
 <process>
   <step name="write_content">
-    <description>Write the provided content to the target file.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="{input:file_path}" />
-      <param name="content" value="{input:content}" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write the content "{input:content}" to `{input:file_path}`.
   </step>
-
   <step name="read_and_verify">
-    <description>Read the file back and confirm the contents match the original input.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_read">
-      <param name="path" value="{input:file_path}" />
-    </execute>
+    Read `{input:file_path}` back and confirm the contents match the original input.
   </step>
 </process>

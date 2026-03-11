@@ -1,4 +1,4 @@
-<!-- rye:validated:2026-02-10T03:00:00Z:placeholder -->
+<!-- rye:signed:2026-03-11T07:14:55Z:7a25e241cc82ad50e403efe1d7e2eb08045eb031cfe14f999f36ad8d7529f82a:7U41QbkoUlf6r-gXk-TktjXpYdlSHMqhXc6RbdMg_rDflzRjyDWXbeovn2CcyVoIlTs5KgX9hkWFJY9IuurwCQ==:4b987fd4e40303ac -->
 
 # Create and Sign Knowledge Entry
 
@@ -43,25 +43,9 @@ Create a new knowledge entry file with YAML frontmatter, then sign it for valida
 
 <process>
   <step name="write_entry">
-    <description>Create the knowledge entry file with YAML frontmatter and content body</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value=".ai/knowledge/{input:entry_id}.md" />
-      <param name="content" value="---
-id: {input:entry_id}
-title: {input:title}
-version: '1.0.0'
----
-
-# {input:title}
-
-{input:content}
-" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Create the knowledge entry file at `.ai/knowledge/{input:entry_id}.md` with YAML frontmatter containing id, title, version, and the provided content as markdown body.
   </step>
-
   <step name="sign_entry">
-    <description>Validate and sign the newly created knowledge entry</description>
-    <sign item_type="knowledge" item_id="{input:entry_id}" />
+    Sign the newly created knowledge entry `{input:entry_id}`.
   </step>
 </process>

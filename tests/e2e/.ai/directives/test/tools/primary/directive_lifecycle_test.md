@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:460d2cdbb4f4bab9f42cee2ca1f6574c62f573fc87c295a8ac394944a7c16894:rhH0RxSySCRn8O2EaPfErut7li1oYgvICiUNSPGFgaaLffGN1HpSgjvRUwlDCbxNZD0X43-nLXLQtSUu88YeBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:18f8b44fb717d21afc3cf132e9b068a03598e6b7a1b251d06a09b0cab0dd582f:u38HxRBl2U499AY5sL9Xoic1vCvRc_1qfUWz6vuVXYZRb5ntAanRPoBheevW9nVygklkS3tWk_8Joz7wClxSBQ==:4b987fd4e40303ac -->
 # Directive Lifecycle Test
 
 Test creating, signing, loading, and searching for a directive.
@@ -13,7 +13,6 @@ Test creating, signing, loading, and searching for a directive.
     <limits turns="10" tokens="4096" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <execute><tool>rye.primary-tools.*</tool></execute>
       <search><directive>*</directive></search>
       <load><directive>*</directive></load>
       <sign><directive>*</directive></sign>
@@ -34,36 +33,15 @@ Test creating, signing, loading, and searching for a directive.
 
 <process>
   <step name="create_directive">
-    <description>Create a new test directive file using fs_write. Write a valid directive markdown file.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value=".ai/directives/test/{input:test_directive_name}.md" />
-      <param name="content" value="DYNAMIC" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Create a new test directive file at `.ai/directives/test/{input:test_directive_name}.md` with a valid directive markdown structure containing metadata, a simple echo step, and basic permissions.
   </step>
-
   <step name="sign_directive">
-    <description>Sign the newly created directive.</description>
-    <execute item_type="tool" item_id="rye/primary-tools/rye_sign">
-      <param name="item_type" value="directive" />
-      <param name="item_id" value="test/{input:test_directive_name}" />
-    </execute>
+    Sign the newly created directive `test/{input:test_directive_name}`.
   </step>
-
   <step name="load_directive">
-    <description>Load the signed directive to verify it.</description>
-    <execute item_type="tool" item_id="rye/primary-tools/rye_load">
-      <param name="item_type" value="directive" />
-      <param name="item_id" value="test/{input:test_directive_name}" />
-    </execute>
+    Load the signed directive `test/{input:test_directive_name}` to verify it was created correctly.
   </step>
-
   <step name="search_directives">
-    <description>Search for the directive by name.</description>
-    <execute item_type="tool" item_id="rye/primary-tools/rye_search">
-      <param name="query" value="{input:test_directive_name}" />
-      <param name="item_type" value="directive" />
-      <param name="limit" value="5" />
-    </execute>
+    Search for directives matching "{input:test_directive_name}" to verify it appears in search results.
   </step>
 </process>

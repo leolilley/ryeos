@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-24T23:52:30Z:8c2f436cdc2416826fb17ad5313f11a6f9ecfea4915a27061f02eb3ceae42f28:fgriEvHzH8493K1x2TmsrbsCgpcGoESZNPPUvLEe8IC8IiQZdQqR--blTLwen-GZpyzk5rofK5ihxOo_vM9dBA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:8c2f436cdc2416826fb17ad5313f11a6f9ecfea4915a27061f02eb3ceae42f28:a0lmqRtHbxg00XKkKJH67xtObZi10KGwy1YBrEolX3BksRmOLQcyAoINNzm_7aBnGadnjPzUboCDVuH_t-KeBQ==:4b987fd4e40303ac -->
 # Duration Limit Test
 
 Test that the duration_seconds limit triggers escalation. Set duration_seconds=1 so the thread exceeds it during its first LLM call.
@@ -25,11 +25,6 @@ Test that the duration_seconds limit triggers escalation. Set duration_seconds=1
 
 <process>
   <step name="write_file">
-    <description>Write a file. The LLM call will take more than 1 second, triggering the duration limit.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="duration_test.txt" />
-      <param name="content" value="Should hit duration limit" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Should hit duration limit" to `duration_test.txt`.
   </step>
 </process>

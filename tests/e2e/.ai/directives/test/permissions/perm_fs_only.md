@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:8671a0e8b4409c78f79b455c6df844e58ef8ffee5d1baaf1423b5fa63f9f1d9c:6HwFroD61dZFVBxq_d1-vAPJXHtz-XYUFf8jA_4gWcv2z-2KA-vaCoGqrgo_zTslvTnh5te1D6Kex3bxbXzwDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:902c883794a4746e8cfb210d3445cf45a719e0863b797fe622f6940e0599a302:huDTDrA-QAffPNTaFc2c4SZVWf081bvkT5GfmomUieHL7p7tF9uAW9D980GFR5hyUA_1aY4C16N39oO6LLCuDA==:4b987fd4e40303ac -->
 # Permission Test: FS Only
 
 Has file-system execute permission only. Write should succeed, search should be denied.
@@ -23,16 +23,9 @@ Has file-system execute permission only. Write should succeed, search should be 
 
 <process>
   <step name="write_allowed">
-    <description>Write a test file — this should succeed.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="perm_test_allowed.txt" />
-      <param name="content" value="Permission allowed write" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Permission allowed write" to `perm_test_allowed.txt` — this should succeed.
   </step>
   <step name="search_denied">
-    <description>Search for knowledge — this should be denied by permissions.</description>
-    <search item_type="knowledge" query="test">
-    </search>
+    Search for knowledge entries matching "test" — this should be denied by permissions.
   </step>
 </process>

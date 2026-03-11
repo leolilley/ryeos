@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T09:36:19Z:0cfde65873b8fec596dcf0f7c52916993e448c60ef9a1311c7b6a144a8d7da5f:XrGIkdJaWVZmRf1sitAQMPNh10YTmSx_U2iLmmlPEZL_0OASebTW_Ts7cGRnYkGKEYMHHQ9bbRmvjEBy8lIcDg==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:0cfde65873b8fec596dcf0f7c52916993e448c60ef9a1311c7b6a144a8d7da5f:yVBpXNlaWl53SHBW-wiD_kKHryVkfsjZFqimLGwMq6ahuu9np5EIszMSzvGpN6LAlmsKohS6VDdV6O0jkz1WDQ==:4b987fd4e40303ac -->
 <!-- -->
 
 # Summarize Text
@@ -44,11 +44,10 @@ Takes text content and writes a concise summary to a file.
 
     Write a concise 2-3 sentence summary of this text. Count the words in the original text.
 
-    Then write the summary to `{input:output_path}`:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_path}", "content": "<your summary text>"})`
+    Write the summary to `{input:output_path}`.
   </step>
 
   <step name="return_result">
-    Return `summary` and `word_count` using directive_return with the values you determined.
+    Return `summary` and `word_count` using directive_return.
   </step>
 </process>

@@ -1,4 +1,4 @@
-<!-- rye:validated:2026-02-10T03:00:00Z:placeholder -->
+<!-- rye:signed:2026-03-11T07:14:55Z:4f690989663e730a975f271dcfb17e644b45f80016b1e1e0ada2afb83a26064f:e_9mqmyzwHor0TGly0rdvA1lm-y-oMqtoeMVhSGbxIhjNyajNTzdhmTDPofHGp5pEJTrHkz1IcnCVwfL282dDw==:4b987fd4e40303ac -->
 
 # Load and Summarize Directive
 
@@ -40,29 +40,9 @@ Load a directive to inspect its structure, then write a summary of its metadata 
 
 <process>
   <step name="load_directive">
-    <description>Load the target directive to inspect its full structure and metadata</description>
-    <load item_type="directive" item_id="{input:directive_id}" />
+    Load the directive `{input:directive_id}` to inspect its structure and metadata.
   </step>
-
   <step name="write_summary">
-    <description>Write a structured summary of the directive's name, description, permissions, and steps to the output path</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="{input:output_path}" />
-      <param name="content" value="# Directive Summary: {input:directive_id}
-
-## Name
-{input:directive_id}
-
-## Description
-(extracted from loaded directive metadata)
-
-## Permissions
-(extracted from loaded directive permissions block)
-
-## Steps
-(extracted from loaded directive process steps)
-" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write a structured summary of the directive's name, description, permissions, and steps to `{input:output_path}`.
   </step>
 </process>

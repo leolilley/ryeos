@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-23T09:06:00Z:ef1d32354fc54be67f3f900d9f728ac9b11cef9d26a1eee090bc09f881dc6138:67L_42OF8tGW1gapsbCCocSO8AtXnHOu8WCNAIvcLf2pf-YP2MgHNucPhefrbgqR4pDVJoCbgq6jtJacSnwCCw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:ef1d32354fc54be67f3f900d9f728ac9b11cef9d26a1eee090bc09f881dc6138:YBn3X67p2qLA7l7ECp9wjL1pRtwwavTskqb5IoGHgXuVywEQu4nVpzMzLKLdby3Ru6Tmy8wnk6aZSZmaLX6iBg==:4b987fd4e40303ac -->
 <!-- -->
 
 # Orchestrate Review
@@ -46,35 +46,27 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
     {input:code_snippet}
     ```
 
-    First, spawn a nested LLM thread to analyze this code by calling:
-
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "test/graphs/analyze_code", "inputs": {"code_snippet": "<paste the code above here>", "output_path": "{input:output_dir}/orchestrated_analysis.json"}, "limit_overrides": {"turns": 6, "spend": 0.05}})`
+    Spawn a nested thread to analyze the code using the `test/graphs/analyze_code` directive with the code above as `code_snippet` and output path `{input:output_dir}/orchestrated_analysis.json`. Use limit overrides: turns=6, spend=0.05.
 
     Wait for the result. Note the thread_id from the response.
   </step>
 
   <step name="read_analysis">
-    Now read the analysis file that was written:
-
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "{input:output_dir}/orchestrated_analysis.json"})`
+    Read the analysis file from `{input:output_dir}/orchestrated_analysis.json`.
   </step>
 
   <step name="summarize">
-    Take the analysis JSON you just read and spawn another nested LLM thread to summarize it:
-
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "test/graphs/summarize_text", "inputs": {"text": "<paste the analysis JSON content here>", "output_path": "{input:output_dir}/orchestrated_summary.md"}, "limit_overrides": {"turns": 4, "spend": 0.03}})`
+    Spawn another nested thread to summarize the analysis JSON using the `test/graphs/summarize_text` directive with the analysis content as `text` and output path `{input:output_dir}/orchestrated_summary.md`. Use limit overrides: turns=4, spend=0.03.
 
     Wait for the result. Note the thread_id.
   </step>
 
   <step name="write_review">
-    Now write a comprehensive review to `{input:output_dir}/orchestrated_review.md` that includes:
+    Write a comprehensive review to `{input:output_dir}/orchestrated_review.md` that includes:
     1. The original code (from the input)
     2. The analysis results (from the analysis thread)
     3. The summary (from the summary thread)
     4. Your own assessment and recommendations
-
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir}/orchestrated_review.md", "content": "<your comprehensive review>"})`
   </step>
 
   <step name="return_result">

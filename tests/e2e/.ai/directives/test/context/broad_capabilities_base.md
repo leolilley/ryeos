@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-04T00:54:38Z:9bd37d2f834176fcff11619ce8334821483c127db214253f5c96f43968f85393:Mgs7v5OsD4kAF3_D9cigZ741LBqkauRz--0VNvuq4xQIYg6gc9-4uJCtczPa17nDmZOZ0zli8s-sdlAWMKCSCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T07:13:35Z:9bd37d2f834176fcff11619ce8334821483c127db214253f5c96f43968f85393:Mgs7v5OsD4kAF3_D9cigZ741LBqkauRz--0VNvuq4xQIYg6gc9-4uJCtczPa17nDmZOZ0zli8s-sdlAWMKCSCg==:4b987fd4e40303ac -->
 # Broad Capabilities Base
 
 Context base directive with all 4 capability types: execute, search, load, sign.

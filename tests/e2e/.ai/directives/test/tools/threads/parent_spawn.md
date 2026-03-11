@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:d3cd826dacbba4c33f66edc7a0a802d671161613b83338489dec1c43db32bab6:2UyEKoNa6uKLW8whUr3HSr5oUedHeyhs5Y-WR3brCkCkd1z9dqMLcPgQd6Wc5cDv4cN-4KoPy0TRk5qRvZd2Cw==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:b89f254d735e8a258229384d5c61a5cd2cd0ca3eb49e65b6c246fc9344a6697f:QFc9Wlf0V5WtbxM3twimjqC1MTXzV0MqyRfounTuk7Mw5n7dfYkPh0B4pCk4LRtfwTwHzjPZFO9-qvUQwDl7DA==:4b987fd4e40303ac -->
 # Parent Spawn
 
 Parent directive that writes its own file, then spawns a child thread to write a second file. Tests recursive thread spawning — should produce two thread folders.

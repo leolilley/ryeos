@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:8ef96f85e031dd38730317933ae6c70c8e9ecc4125c075fc35363249c1c6643a:PEkv5ddusaC_kWpw_DihdzeiOf19WZAKP6UDSkm1-uJ0DDedtQxbDlLw-KZBvC43-GYAu-dtVvvg1pjqXQd1BA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:b26a09891d190959087dffa30b446f70fd3d921d5b39c41a395dc8dc4ec1ff6f:sw4wFOCB7IJWDN7OdZNz6QdIFCDWcAhWUFnr4j-oGYtqIKYwHIyevWwOCbM3NmvKliuUFwpXFBruQdzDxf0CCQ==:4b987fd4e40303ac -->
 # File Investigator
 
 Creates a mystery file, then investigates it — reads it back, lists the directory, writes a report summarizing findings.

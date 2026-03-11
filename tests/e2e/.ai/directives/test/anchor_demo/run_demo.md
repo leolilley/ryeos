@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:8ae90d8c80c6f5a6d27514eb7b8dd123664fa969ff3d4d4e7255a8d2d9789374:zfA1Ef5s0knYAqgnQkPeOBWxWBZn0DEk0rMzRQBaAE1THlnOoovjq6JAQU9GIUDIQJIohXuZnAmZvEWu5xDXCA==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:b2bf3f7541cfb0c40497888720c1d0b6c44f819f518c4eba93b16bbe82355a4a:9ZgvFAo7mS4l5kLRbFjKVh_EU1aohHRWAaIoBXp8Wr2qqFFD6qoKNzpg8p6zSDCXUiOvIPeVxeaIJJqv4N-kAg==:4b987fd4e40303ac -->
 # Run Anchor Demo
 
 Execute the anchor_demo tool to verify the anchor system works.

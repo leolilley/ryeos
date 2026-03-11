@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-02-22T02:31:19Z:475b82971017d43cd02f029eb2869622a0dd6213533cfe1ac1da45e42b62f75b:6QPrp489hsxzhq52O7H_tUC6aupR4zBL6Qj3elB_VIUEwPjQu-8dBYA6M-6s8_W1Xs5jV7aKch7Gednn_p8CBQ==:9fbfabe975fa5a7f -->
+<!-- rye:signed:2026-03-11T07:13:35Z:8978e13e86ec2e3b4a89ce752ec6767d1f526e30f6059b5e94313d7525477f7b:bzgw1HEM0WQxoXcWvJjUdG_pJsHKQIhVPT8Rpjcddvhl2CjgUm0b_w9qobnvsFO6mg9SBTLcyz2sfZZqo9F_AQ==:4b987fd4e40303ac -->
 # Permission Test: Wildcard
 
 Wildcard permissions — all actions should be allowed.
@@ -21,11 +21,6 @@ Wildcard permissions — all actions should be allowed.
 
 <process>
   <step name="write_allowed">
-    <description>Write a test file — should succeed with wildcard.</description>
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
-      <param name="path" value="perm_test_wildcard.txt" />
-      <param name="content" value="Wildcard permission write" />
-      <param name="mode" value="overwrite" />
-    </execute>
+    Write "Wildcard permission write" to `perm_test_wildcard.txt` — this should succeed with wildcard permissions.
   </step>
 </process>
