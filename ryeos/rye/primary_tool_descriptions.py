@@ -36,14 +36,12 @@ EXECUTE_TOOL_DESC = (
     "Executing a tool runs it. Executing knowledge returns context."
     "</description>"
     "<threading>"
-    "To spawn a directive as a managed thread (with its own LLM loop), pass thread=true in parameters. "
+    "To spawn a directive as a managed thread (with its own LLM loop), pass thread=\"fork\" as a top-level parameter. "
     "Threading parameters (all in the parameters object):"
-    "<param>thread: true — spawn as managed thread instead of returning your_directions</param>"
-    "<param>async: true — return immediately with thread_id (fire-and-forget). false (default) blocks until complete.</param>"
     "<param>model: string — override the LLM model for the thread</param>"
     "<param>limit_overrides: object — override limits e.g. {\"turns\": 10, \"spend\": 0.10}</param>"
-    "Directive inputs go directly in parameters alongside thread/async/model/limit_overrides. "
-    "Example: parameters={\"thread\": true, \"async\": true, \"niche\": \"plumbers\", \"city\": \"Dunedin\"} "
+    "Directive inputs go directly in parameters alongside model/limit_overrides. "
+    "Example: parameters={\"niche\": \"plumbers\", \"city\": \"Dunedin\"} "
     "The framework auto-injects parent_thread_id, parent_depth, and parent_capabilities — never pass these manually."
     "</threading>"
     "<rules>"
@@ -60,8 +58,9 @@ EXECUTE_TOOL_DESC = (
     "<examples>"
     '<example>User says "rye execute init project" → call with item_id="init", parameters={"project_type": "project"}</example>'
     '<example>User says "rye execute init" → call with item_id="init", parameters={}</example>'
-    '<example>Spawn directive as thread: item_type="directive", item_id="my/workflow", parameters={"thread": true, "target": "value"}</example>'
-    '<example>Spawn async thread: item_type="directive", item_id="my/workflow", parameters={"thread": true, "async": true, "target": "value"}</example>'
+    '<example>Spawn directive as thread: item_type="directive", item_id="my/workflow", parameters={"target": "value"}, thread="fork"</example>'
+    '<example>Spawn async thread: item_type="directive", item_id="my/workflow", parameters={"target": "value"}, thread="fork", async=true</example>'
+    '<example>Execute remotely: item_type="directive", item_id="my/workflow", parameters={"target": "staging"}, thread="remote"</example>'
     "</examples>"
 )
 
@@ -78,7 +77,7 @@ EXECUTE_PARAMETERS_DESC = (
     "<examples>"
     '<example>{"name": "my_tool"}</example>'
     '<example>{"space": "project"}</example>'
-    '<example>{"thread": true, "async": true, "model": "sonnet"}</example>'
+    '<example>{"model": "sonnet"}</example>'
     "</examples>"
 )
 
@@ -86,6 +85,24 @@ EXECUTE_DRY_RUN_DESC = (
     "<description>"
     "Validate without executing. Directives: parse and check inputs. "
     "Tools: build and validate the executor chain."
+    "</description>"
+)
+
+EXECUTE_THREAD_DESC = (
+    "<description>"
+    "Execution mode for directives and tools (ignored for knowledge)."
+    "</description>"
+    "<rules>"
+    '<rule>"inline" (default) — returns your_directions for the calling agent to follow directly</rule>'
+    '<rule>"fork" — spawn as a managed thread with its own LLM loop</rule>'
+    '<rule>"remote" — execute on ryeos-remote server. Configure via .ai/config/cas/remote.yaml: add a "default" entry under remotes: with url and key_env (env var name holding the API key). Use "remote:name" to target a specific remote.</rule>'
+    "</rules>"
+)
+
+EXECUTE_ASYNC_DESC = (
+    "<description>"
+    "Return immediately with thread_id (fire-and-forget). "
+    "false (default) blocks until complete. Applies to fork and remote modes."
     "</description>"
 )
 

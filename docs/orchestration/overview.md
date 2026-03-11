@@ -89,8 +89,11 @@ Internally, this delegates to `thread_directive` — but the LLM never calls tha
 | `async`           | bool   | no       | Return immediately with `thread_id` (default: `false`) |
 | `model`           | string | no       | Override LLM model |
 | `limit_overrides` | object | no       | Override limits: `turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth` |
+| `thread`          | string | no       | Thread mode: `"inline"` (default), `"fork"`, `"remote"`, or `"remote:name"` |
 
 Synchronous execution blocks until the child completes and returns its result. Asynchronous execution (`async: true`) forks the process and returns a `thread_id` immediately — the parent can then continue spawning more children and wait for all of them later.
+
+Remote execution (`thread="remote"` or `thread="remote:gpu"`) pushes the directive to a remote ryeos server for execution. This is useful for compute-heavy workloads or when you need GPU access. Named remotes are configured in `cas/remote.yaml`.
 
 ## The Hierarchy
 
@@ -163,6 +166,7 @@ Call the scoring tool → return score. No reasoning, no knowledge loading.
 - [Thread Lifecycle](./thread-lifecycle.md) — How threads are created, executed, and finalized
 - [Spawning Children](./spawning-children.md) — How to spawn, coordinate, and collect results
 - [Safety and Limits](./safety-and-limits.md) — Cost controls and the SafetyHarness
+- [Remote Execution](../internals/remote-execution.md) — Running tools and directives on remote servers
 - [Permissions and Capabilities](./permissions-and-capabilities.md) — Capability tokens and fail-closed security
 - [Continuation and Resumption](./continuation-and-resumption.md) — Context limits and thread handoffs
 - [Building a Pipeline](./building-a-pipeline.md) — Step-by-step tutorial

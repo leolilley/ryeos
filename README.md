@@ -86,7 +86,7 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary tools      |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
 | `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the four primitives |
-| `ryeos-remote` | Remote execution server — CAS-native sync, materializer, Modal deployment |
+| `ryeos-remote` | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
 
 > **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
@@ -110,6 +110,26 @@ Run tools and state graphs on a remote server without exposing your private sign
 ```bash
 pip install ryeos-remote          # server package (deployed on Modal)
 ```
+
+Named remotes are configured in `cas/remote.yaml`:
+
+```yaml
+remotes:
+  default:
+    url: "https://ryeos-remote--execute.modal.run"
+    key_env: "RYE_REMOTE_API_KEY"
+  gpu:
+    url: "https://gpu-worker--execute.modal.run"
+    key_env: "GPU_REMOTE_API_KEY"
+```
+
+Target a remote via the `thread` parameter:
+
+```python
+rye_execute(item_type="tool", item_id="my/heavy-compute", thread="remote:gpu")
+```
+
+State graph nodes can also specify per-node remotes for hybrid local/remote workflows.
 
 See the [Remote Execution docs](docs/internals/remote-execution.md) for the full architecture.
 

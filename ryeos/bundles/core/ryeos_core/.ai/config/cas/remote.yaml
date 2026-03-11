@@ -1,8 +1,24 @@
-# Default sync configuration for remote CAS operations.
+# Remote CAS configuration.
 #
 # Loaded via 3-tier resolution (system → user → project).
 # Projects override with their own .ai/config/cas/remote.yaml.
-# Deep merge: project can add includes/excludes without restating system defaults.
+# Deep merge: project can add remotes/includes/excludes without restating defaults.
+
+# project_name: my-project   # stable identifier for push refs + webhooks
+#                             # Falls back to directory basename if unset.
+
+# Named remotes (like git remotes).
+# Each entry: name → {url, key_env}.
+# "default" is used when no remote name is specified.
+# key_env references an env var name (never store keys in config).
+#
+# remotes:
+#   default:
+#     url: https://ryeos-remote--mcp-server.modal.run
+#     key_env: RYE_REMOTE_API_KEY
+#   gpu:
+#     url: https://ryeos-gpu--mcp-server.modal.run
+#     key_env: RYE_GPU_API_KEY
 
 sync:
   include:

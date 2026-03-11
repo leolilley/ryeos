@@ -55,7 +55,7 @@ Use `space: project` with `trust` to provision a signing key into a bundle's `.a
 
 ## Process Management — `rye/core/processes/`
 
-Tools for managing running lillux processes (graphs and threads). All processes register in the thread registry; these tools query and control them.
+Tools for managing running processes — graphs, threads, and async tool executions. All processes register in the ThreadRegistry (SQLite at `.ai/agent/threads/registry.db`); these tools query and control them.
 
 | Tool     | Item ID                       | Description                                            |
 | -------- | ----------------------------- | ------------------------------------------------------ |
@@ -74,6 +74,31 @@ Takes `run_id` and optional `grace` (default 5s). Sends SIGTERM via `SubprocessP
 ### `list`
 
 Optional `status` filter (`running`, `completed`, `cancelled`, `error`, `killed`). Without filter, returns all active (non-terminal) processes. Returns an array of `{run_id, directive, status, pid, parent_id, created_at, updated_at}`.
+
+---
+
+## Remote Execution — `rye/core/remote/`
+
+Execute tools and directives on remote ryeos servers. Uses content-addressed storage (CAS) for sync — objects are synced by hash, execution happens in a temp-materialized `.ai/` directory on the remote.
+
+### `remote` — `rye/core/remote/remote`
+
+| Action | Description |
+|--------|-------------|
+| `push` | Build manifests, sync missing objects, publish project ref |
+| `pull` | Fetch new objects from remote (execution results) |
+| `execute` | Push → remote execution → pull results (end-to-end) |
+| `status` | Show local manifest hashes, system version, configured remotes |
+| `threads` | List remote executions |
+| `thread_status` | Get status of a specific remote thread |
+
+Named remotes are configured in `cas/remote.yaml`. TOFU key pinning verifies remote server identity.
+
+### `remote_config` — `rye/core/remote/remote_config`
+
+Resolve named remotes from `cas/remote.yaml` config. Provides `resolve_remote(name, project_path)` → `RemoteConfig(name, url, api_key)` and `list_remotes(project_path)`.
+
+See [Remote Execution](../internals/remote-execution.md) for the full architecture.
 
 ---
 

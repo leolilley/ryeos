@@ -906,15 +906,17 @@ class TestRemoteKeyVerification:
         """Different key from server → hard error dict returned."""
         ts = self._setup_user(tmp_path, monkeypatch)
 
-        # Pin a key
+        # Pin a key using the URL-specific owner format
         _, first_pub = generate_keypair()
-        ts.pin_remote_key(first_pub, remote_name="ryeos-remote")
+        ts.pin_remote_key(first_pub, remote_name="remote:default:mock.example.com")
 
         # Simulate server returning a DIFFERENT key
         _, second_pub = generate_keypair()
         second_pem = second_pub.decode("utf-8")
 
         class MockClient:
+            base_url = "https://mock.example.com"
+
             async def get(self, path):
                 return {
                     "success": True,
@@ -943,6 +945,8 @@ class TestRemoteKeyVerification:
         self._setup_user(tmp_path, monkeypatch)
 
         class MockClient:
+            base_url = "https://mock.example.com"
+
             async def get(self, path):
                 return {
                     "success": False,

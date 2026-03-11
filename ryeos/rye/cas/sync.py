@@ -58,28 +58,32 @@ def handle_put_objects(
     errors: List[Dict[str, str]] = []
 
     for entry in entries:
-        obj = ObjectEntry.from_dict(entry)
-        raw = base64.b64decode(obj.data)
+        try:
+            obj = ObjectEntry.from_dict(entry)
+            raw = base64.b64decode(obj.data)
 
-        # Verify claimed hash
-        if obj.kind == "blob":
-            actual = hashlib.sha256(raw).hexdigest()
-        else:
-            actual = compute_integrity(json.loads(raw.decode("utf-8")))
+            # Verify claimed hash
+            if obj.kind == "blob":
+                actual = hashlib.sha256(raw).hexdigest()
+            else:
+                actual = compute_integrity(json.loads(raw.decode("utf-8")))
 
-        if actual != obj.hash:
-            errors.append({
-                "hash": obj.hash,
-                "error": f"hash mismatch: claimed {obj.hash[:16]}… got {actual[:16]}…",
-            })
+            if actual != obj.hash:
+                errors.append({
+                    "hash": obj.hash,
+                    "error": f"hash mismatch: claimed {obj.hash[:16]}… got {actual[:16]}…",
+                })
+                continue
+
+            # Store
+            if obj.kind == "blob":
+                cas.store_blob(raw, root)
+            else:
+                cas.store_object(json.loads(raw.decode("utf-8")), root)
+            stored.append(obj.hash)
+        except Exception as exc:
+            errors.append({"hash": entry.get("hash", "unknown"), "error": str(exc)})
             continue
-
-        # Store
-        if obj.kind == "blob":
-            cas.store_blob(raw, root)
-        else:
-            cas.store_object(json.loads(raw.decode("utf-8")), root)
-        stored.append(obj.hash)
 
     result: Dict[str, Any] = {"stored": stored}
     if errors:

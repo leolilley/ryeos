@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:a916e7e565c1713d72a0874fa6387b1da96966e4fd4e2e2957dc56ad8e236b58:vUm32KGDbaIEt5kg8qyiATJTh1qWANT2zyBPRhCVXs7C5BiwYCY6-s1VwojkID-aTcYFQiFPJF9itlS0d_osCA==:4b987fd4e40303ac
+# rye:signed:2026-03-11T05:44:17Z:1d30307f584d1a20f4ec6d316994f07c3de492d5b5b16c728e0a98e8c526b738:ownSGZKGanPCeI4WN8vM3RQqb38X4SBehQbByv5-Nk-BqWBSNxnRyuUoU46uSg0b2oy7w718N7-Dm2y-4gk0Bg==:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -82,6 +82,16 @@ class ThreadRegistry:
             conn.execute(
                 "UPDATE threads SET pid = ? WHERE thread_id = ?",
                 (os.getpid(), thread_id),
+            )
+            conn.commit()
+
+    def update_pid(self, thread_id: str, pid: int) -> None:
+        """Update the child process PID after spawn."""
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE threads SET pid = ?, updated_at = ? WHERE thread_id = ?",
+                (pid, now, thread_id),
             )
             conn.commit()
 

@@ -1,14 +1,11 @@
 """Config content validation — loads .config-schema.yaml tools and validates config dicts.
 
-Discovers .config-schema.yaml files via 3-tier resolution, matches them
-to config files by `target_config`, and recursively validates content
-structure against the schema.
+Schema tools live under .ai/tools/ and declare which config they validate
+via ``target_config`` (a path relative to .ai/config/, e.g. ``cas/remote.yaml``).
+Schemas are discovered once via rglob across 3-tier tools roots and cached.
 
 Separate from validators.py which handles extractor-driven METADATA validation.
 This module handles config CONTENT schema validation.
-
-Schema tools live at:
-    .ai/tools/rye/agent/config-schemas/{name}.config-schema.yaml
 """
 
 import logging
@@ -19,56 +16,51 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _schemas_lock = threading.RLock()
-_schemas_cache: Optional[Dict[str, Dict[str, Any]]] = None
+_schemas_cache: Dict[tuple, Dict[str, Dict[str, Any]]] = {}
 
 
-def _get_config_schema_search_paths(
+def _get_tools_roots(
     project_path: Optional[Path] = None,
 ) -> List[Path]:
-    """Get search paths for .config-schema.yaml tools in precedence order.
-
-    Returns paths in order: system → user → project (last wins for overrides).
-    """
-    from rye.constants import AI_DIR
+    """Get .ai/tools/ roots in precedence order (system → user → project)."""
+    from rye.constants import AI_DIR, ItemType
     from rye.utils.path_utils import get_system_spaces, get_user_ai_path
 
-    schema_subdir = Path("tools") / "rye" / "agent" / "config-schemas"
-    paths: List[Path] = []
+    tools_dir = ItemType.TYPE_DIRS[ItemType.TOOL]
+    roots: List[Path] = []
 
-    # System (all bundles, lowest priority)
     for bundle in get_system_spaces():
-        p = bundle.root_path / AI_DIR / schema_subdir
+        p = bundle.root_path / AI_DIR / tools_dir
         if p.is_dir():
-            paths.append(p)
+            roots.append(p)
 
-    # User
-    user_p = get_user_ai_path() / schema_subdir
+    user_p = get_user_ai_path() / tools_dir
     if user_p.is_dir():
-        paths.append(user_p)
+        roots.append(user_p)
 
-    # Project (highest priority)
     if project_path:
-        proj_p = project_path / AI_DIR / schema_subdir
+        proj_p = project_path / AI_DIR / tools_dir
         if proj_p.is_dir():
-            paths.append(proj_p)
+            roots.append(proj_p)
 
-    return paths
+    return roots
 
 
 def _load_config_schemas(
     project_path: Optional[Path] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Load all .config-schema.yaml files via 3-tier resolution.
+    """Discover all config schemas across tools roots.
 
-    Returns dict keyed by target_config filename (e.g., "agent.yaml").
-    Later entries override earlier ones (project > user > system).
+    Scans for ``*.config-schema.yaml`` under each ``.ai/tools/`` root,
+    indexes by ``target_config`` field.  Later tiers override earlier
+    (project > user > system).
     """
     import yaml
 
     schemas: Dict[str, Dict[str, Any]] = {}
 
-    for d in _get_config_schema_search_paths(project_path):
-        for f in sorted(d.glob("*.config-schema.yaml")):
+    for root in _get_tools_roots(project_path):
+        for f in sorted(root.rglob("*.config-schema.yaml")):
             try:
                 data = yaml.safe_load(f.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
@@ -83,47 +75,42 @@ def _load_config_schemas(
     return schemas
 
 
-def get_config_content_schema(
-    config_name: str,
+def _get_schemas(
     project_path: Optional[Path] = None,
-) -> Optional[Dict[str, Any]]:
-    """Get the content schema for a config file (thread-safe).
-
-    Args:
-        config_name: Config filename, e.g., "agent.yaml"
-        project_path: Project root for 3-tier resolution
-
-    Returns:
-        Schema dict or None if no schema defined for this config.
-    """
-    global _schemas_cache
-
+) -> Dict[str, Dict[str, Any]]:
+    """Get cached schema index (thread-safe, keyed by resolved roots)."""
+    roots = _get_tools_roots(project_path)
+    cache_key = tuple(str(p.resolve()) for p in roots)
     with _schemas_lock:
-        if _schemas_cache is None:
-            _schemas_cache = _load_config_schemas(project_path)
-        return _schemas_cache.get(config_name)
+        if cache_key not in _schemas_cache:
+            _schemas_cache[cache_key] = _load_config_schemas(project_path)
+        return _schemas_cache[cache_key]
 
 
 def validate_config_content(
-    config_name: str,
+    config_id: str,
     config_data: Dict[str, Any],
     project_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Validate a config dict against its content schema.
 
     Args:
-        config_name: Config filename (e.g., "agent.yaml")
-        config_data: Config dict (merged or single-source)
-        project_path: Project root for schema discovery
+        config_id: Config item ID (relative path under .ai/config/
+            without extension), e.g. ``"agent/agent"``, ``"cas/remote"``.
+        config_data: Config dict to validate.
+        project_path: Project root for schema discovery.
 
     Returns:
         {"valid": bool, "issues": [...], "warnings": [...]}
     """
-    schema = get_config_content_schema(config_name, project_path)
+    schemas = _get_schemas(project_path)
+    # config_id "agent/agent" → target_config "agent/agent.yaml"
+    target_key = f"{config_id}.yaml"
+    schema = schemas.get(target_key)
     if schema is None:
         return {"valid": True, "issues": [], "warnings": []}
 
-    issues = _validate_object(config_data, schema, path=config_name)
+    issues = _validate_object(config_data, schema, path=config_id)
     return {
         "valid": len(issues) == 0,
         "issues": issues,
@@ -135,7 +122,7 @@ def clear_config_schemas_cache() -> None:
     """Clear the schema cache (for testing)."""
     global _schemas_cache
     with _schemas_lock:
-        _schemas_cache = None
+        _schemas_cache = {}
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +140,6 @@ def _validate_type(value: Any, expected_type: str) -> bool:
         "boolean": bool,
         "array": list,
     }
-    # null is always acceptable for optional fields
     if value is None:
         return True
     expected = type_map.get(expected_type)

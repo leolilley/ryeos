@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # rye_execute
 
-Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are validated and returned in-thread by default (set `thread=true` to spawn a managed thread), tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context.
+Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are validated and returned in-thread by default (set `thread="fork"` to spawn a managed thread), tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context.
 
 ## Parameters
 
@@ -20,10 +20,10 @@ Execute directives, tools, or knowledge items. Routes execution based on `item_t
 | `project_path` | string | yes      | —       | Absolute path to the project root                                                        |
 | `parameters`   | dict   | no       | `{}`    | Parameters to pass to the item                                                           |
 | `dry_run`      | bool   | no       | `false` | Validate without executing                                                               |
-| `thread`       | bool   | no       | `false` | For directives: spawn a managed thread instead of returning content in-thread             |
-| `async`        | bool   | no       | `false` | For directives (requires `thread=true`): return immediately with `thread_id` instead of waiting |
-| `model`        | string | no       | —       | For directives (requires `thread=true`): override LLM model for thread execution         |
-| `limit_overrides` | object | no    | —       | For directives (requires `thread=true`): override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
+| `thread`       | string | no       | `"inline"` | Thread mode — `"inline"` (default, return content in-thread), `"fork"` (spawn a managed LLM thread, directives only), `"remote"` (remote server execution), or `"remote:name"` (named remote, e.g. `"remote:gpu"`) |
+| `async`        | bool   | no       | `false` | Return immediately with thread_id instead of waiting. Works with directive+fork, directive+remote, tool+inline, and tool+remote combinations. |
+| `model`        | string | no       | —       | For directives: override LLM model for thread execution         |
+| `limit_overrides` | object | no    | —       | For directives: override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`) |
 
 ## Item Resolution
 
@@ -41,17 +41,23 @@ File extensions are tried automatically based on item type. Directives and knowl
 
 ### Directives
 
-Two execution modes controlled by the `thread` parameter:
+Three execution modes controlled by the `thread` parameter:
 
-#### In-thread mode (default, `thread=false`)
+#### Inline mode (default, `thread="inline"`)
 
 Validates inputs, interpolates placeholders, and returns the parsed directive content with an `instructions` field. The calling agent follows the steps in its own context. No LLM infrastructure required.
 
-#### Threaded mode (`thread=true`)
+#### Fork mode (`thread="fork"`)
 
 Validates inputs, then spawns a managed thread to execute the directive. The thread runs with its own LLM loop, safety harness, and budgets. If `async: true`, returns immediately with `thread_id` and `pid` instead of blocking.
 
-**Input validation (both modes):**
+#### Remote mode (`thread="remote"` or `thread="remote:name"`)
+
+Validates inputs, then pushes execution to a remote ryeos server via the `rye/core/remote/remote` tool. The remote server materializes a `.ai/` directory from CAS manifests, runs the executor, and returns results. Use the `"remote:name"` syntax to target a specific named remote (e.g., `"remote:gpu"`). Named remotes are configured in `cas/remote.yaml`.
+
+If `async: true`, the execution is wrapped in a detached child process via `_launch_async()` → `async_runner.py`, which re-enters `ExecuteTool.handle()` with the remote thread mode.
+
+**Input validation (all modes):**
 
 1. Declared inputs with `default` values are applied first
 2. Required inputs without values produce an error with the full `declared_inputs` list
@@ -70,16 +76,11 @@ Validates inputs, then spawns a managed thread to execute the directive. The thr
 
 ```json
 {
-  "status": "success",
-  "type": "directive",
-  "item_id": "rye/core/create_directive",
-  "your_directions": "<DIRECTIVE_INSTRUCTION constant>",
-  "body": "<interpolated directive body>",
-  "outputs": [{ "name": "result", "type": "string" }]
+  "your_directions": "<interpolated directive body>"
 }
 ```
 
-**Threaded response (`thread=true`):**
+**Fork response (`thread="fork"`):**
 
 ```json
 {
@@ -92,7 +93,7 @@ Validates inputs, then spawns a managed thread to execute the directive. The thr
 }
 ```
 
-**Threaded async response (`thread=true, async=true`):**
+**Fork async response (`thread="fork", async=true`):**
 
 ```json
 {
@@ -105,6 +106,23 @@ Validates inputs, then spawns a managed thread to execute the directive. The thr
   "pid": 42857
 }
 ```
+
+**Async response (tool or remote directive):**
+
+```json
+{
+  "status": "success",
+  "async": true,
+  "thread_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "type": "tool",
+  "item_id": "rye/bash",
+  "execution_mode": "inline",
+  "state": "running",
+  "pid": 42857
+}
+```
+
+Async execution for tools and remote directives uses `_launch_async()`, which generates a UUID-based thread_id, registers in the ThreadRegistry (SQLite), spawns `async_runner.py` as a detached child process via `launch_detached()`, and returns immediately. Results are stored in the ThreadRegistry via `registry.set_result()`. Thread log dir is at `.ai/agent/threads/{thread_id}/`.
 
 **Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without executing or spawning a thread.
 
@@ -131,6 +149,14 @@ Executes through the PrimitiveExecutor with recursive chain resolution:
   "metadata": { "duration_ms": 45 }
 }
 ```
+
+**Remote mode (`thread="remote"`):**
+
+Tools can also be executed on a remote server. The execute tool pushes CAS objects, triggers remote execution via the `rye/core/remote/remote` tool, and pulls results back. Fork mode (`thread="fork"`) is not supported for tools — fork spawns managed LLM threads, which only apply to directives.
+
+**Async mode (`async: true`):**
+
+Any tool execution (inline or remote) can be made async. The tool is wrapped in a detached child process that runs `async_runner.py`. The parent returns immediately with a `thread_id` and `pid`. Results are stored in the ThreadRegistry.
 
 **Dry run:** Builds and validates the executor chain without executing. Returns chain details and validated pairs on success, or specific chain validation errors on failure.
 
@@ -172,6 +198,16 @@ Set `RYE_DEV_MODE=1` to downgrade integrity failures to warnings during developm
 For tool execution, the `PrimitiveExecutor` supports a `trace` mode that returns detailed event logs alongside the result. Trace events show which files were resolved, which spaces were searched, what was shadowed, integrity verification results per chain element, and environment variable contributions.
 
 See [Executor Chain — Chain Trace Mode](../internals/executor-chain.md#chain-trace-mode) for details.
+
+## Async Validation Rules
+
+Three combinations are rejected before dispatch:
+
+| Combination | Why rejected |
+|---|---|
+| `async + dry_run` | Validation is instant — nothing to detach |
+| `async + knowledge` | Knowledge loading is immediate — nothing to detach |
+| `async + directive + inline` | Inline directives return text for the agent to follow — there is nothing to detach. Use `thread="fork"` for async directives. |
 
 ## Error Responses
 
@@ -234,7 +270,7 @@ rye_execute(
     item_id="my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
-    thread=True
+    thread="fork"
 )
 ```
 
@@ -247,9 +283,58 @@ rye_execute(
     item_id="my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
-    thread=True,
+    thread="fork",
     limit_overrides={"turns": 30, "spend": 3.00},
     async=True
+)
+```
+
+### Execute a directive on a remote server
+
+```python
+rye_execute(
+    item_type="directive",
+    item_id="my-project/run_pipeline",
+    project_path="/home/user/my-project",
+    parameters={"location": "Dunedin"},
+    thread="remote"
+)
+```
+
+### Execute a directive on a named remote
+
+```python
+rye_execute(
+    item_type="directive",
+    item_id="my-project/run_pipeline",
+    project_path="/home/user/my-project",
+    parameters={"location": "Dunedin"},
+    thread="remote:gpu"
+)
+```
+
+### Execute a tool asynchronously
+
+```python
+# Returns immediately with thread_id — result stored in ThreadRegistry
+rye_execute(
+    item_type="tool",
+    item_id="rye/bash",
+    project_path="/home/user/my-project",
+    parameters={"command": "python train.py --epochs 100"},
+    async=True
+)
+```
+
+### Execute a tool on a remote server
+
+```python
+rye_execute(
+    item_type="tool",
+    item_id="my-project/heavy-compute",
+    project_path="/home/user/my-project",
+    parameters={"data": "input.csv"},
+    thread="remote:gpu"
 )
 ```
 

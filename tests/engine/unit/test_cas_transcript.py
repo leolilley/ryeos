@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from conftest import get_bundle_path
+
+_WALKER_DIR = str(get_bundle_path("core", "tools/rye/core/runtimes/state-graph"))
+
 
 class TestPersistStateCAS:
     """Test CAS-based state persistence."""
@@ -19,11 +23,7 @@ class TestPersistStateCAS:
             project = Path(tmpdir)
             (project / ".ai" / "objects").mkdir(parents=True)
 
-            walker_dir = str(
-                Path(__file__).resolve().parents[3]
-                / "ryeos" / "bundles" / "core" / "ryeos_core"
-                / ".ai" / "tools" / "rye" / "core" / "runtimes" / "state-graph"
-            )
+            walker_dir = _WALKER_DIR
             sys.path.insert(0, walker_dir)
             try:
                 from walker import _persist_state
@@ -68,11 +68,7 @@ class TestPersistStateCAS:
             project = Path(tmpdir)
             (project / ".ai" / "objects").mkdir(parents=True)
 
-            walker_dir = str(
-                Path(__file__).resolve().parents[3]
-                / "ryeos" / "bundles" / "core" / "ryeos_core"
-                / ".ai" / "tools" / "rye" / "core" / "runtimes" / "state-graph"
-            )
+            walker_dir = _WALKER_DIR
             sys.path.insert(0, walker_dir)
             try:
                 from walker import _persist_state
@@ -109,11 +105,7 @@ class TestCheckpointCAS:
             project = Path(tmpdir)
             (project / ".ai" / "objects").mkdir(parents=True)
 
-            walker_dir = str(
-                Path(__file__).resolve().parents[3]
-                / "ryeos" / "bundles" / "core" / "ryeos_core"
-                / ".ai" / "tools" / "rye" / "core" / "runtimes" / "state-graph"
-            )
+            walker_dir = _WALKER_DIR
             sys.path.insert(0, walker_dir)
             try:
                 from walker import GraphTranscript

@@ -1,11 +1,10 @@
-# rye:signed:2026-03-10T04:07:13Z:4c28b504c6b80ed05fac0b4229aa4a17668b699685da511cf5df039ab3443495:DcQYDTAOrk7HPXnKB6INYbSEYnluL8JGH9RAAAesSI0WimQDV1Er77WGwQNjS4l5Qa7h8LzY4G-Nd-H3MoDhDQ==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: config-schema
 executor_id: null
-category: rye/agent/config-schemas
+category: agent
 description: "Schema for resilience.yaml — retry policies, limits, checkpoints, and concurrency"
 
-target_config: agent/resilience.yaml
+target_config: resilience.yaml
 
 schema:
   type: object

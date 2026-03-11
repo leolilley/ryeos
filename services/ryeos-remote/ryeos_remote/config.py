@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Remote signing key
     signing_key_dir: str = "/cas/signing"
 
+    # Remote identity (server-asserted, set via RYE_REMOTE_NAME env var)
+    rye_remote_name: str = "default"
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000

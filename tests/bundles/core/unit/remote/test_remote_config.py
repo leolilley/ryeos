@@ -1,0 +1,168 @@
+"""Tests for remote_config — named remote resolution."""
+
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from conftest import get_bundle_path
+
+# remote_config lives in a bundle tool dir
+_REMOTE_TOOL_DIR = str(get_bundle_path("core", "tools/rye/core/remote"))
+if _REMOTE_TOOL_DIR not in sys.path:
+    sys.path.insert(0, _REMOTE_TOOL_DIR)
+
+from remote_config import (
+    RemoteConfig,
+    resolve_remote,
+    get_project_name,
+    list_remotes,
+)
+
+
+def _patch_config(config):
+    """Patch _load_remote_config to return a fixed dict."""
+    return patch("remote_config._load_remote_config", return_value=config)
+
+
+class TestResolveRemote:
+    """Tests for resolve_remote()."""
+
+    def test_named_remote_from_config(self, monkeypatch):
+        monkeypatch.setenv("RYE_GPU_API_KEY", "gpu-secret")
+        config = {
+            "remotes": {
+                "gpu": {"url": "https://gpu.example.com", "key_env": "RYE_GPU_API_KEY"},
+            },
+        }
+        with _patch_config(config):
+            rc = resolve_remote("gpu")
+        assert rc == RemoteConfig(name="gpu", url="https://gpu.example.com", api_key="gpu-secret")
+
+    def test_default_remote_from_config(self, monkeypatch):
+        monkeypatch.setenv("RYE_REMOTE_API_KEY", "default-key")
+        config = {
+            "remotes": {
+                "default": {"url": "https://default.example.com", "key_env": "RYE_REMOTE_API_KEY"},
+            },
+        }
+        with _patch_config(config):
+            rc = resolve_remote()
+        assert rc.name == "default"
+        assert rc.url == "https://default.example.com"
+
+    def test_no_remotes_configured(self):
+        with _patch_config({}):
+            with pytest.raises(ValueError, match="not found"):
+                resolve_remote()
+
+    def test_named_remote_not_found(self):
+        with _patch_config({"remotes": {"default": {"url": "x", "key_env": "K"}}}):
+            with pytest.raises(ValueError, match="'gpu' not found"):
+                resolve_remote("gpu")
+
+    def test_named_remote_missing_url(self, monkeypatch):
+        monkeypatch.setenv("K", "val")
+        with _patch_config({"remotes": {"gpu": {"key_env": "K"}}}):
+            with pytest.raises(ValueError, match="no url configured"):
+                resolve_remote("gpu")
+
+    def test_named_remote_missing_key_env(self, monkeypatch):
+        monkeypatch.delenv("MY_KEY", raising=False)
+        config = {"remotes": {"gpu": {"url": "https://gpu.example.com", "key_env": "MY_KEY"}}}
+        with _patch_config(config):
+            with pytest.raises(ValueError, match="MY_KEY"):
+                resolve_remote("gpu")
+
+    def test_malformed_entry_not_dict(self):
+        config = {"remotes": {"gpu": "https://example.com"}}
+        with _patch_config(config):
+            with pytest.raises(ValueError, match="must be a mapping"):
+                resolve_remote("gpu")
+
+    def test_remotes_not_dict(self):
+        config = {"remotes": "bad"}
+        with _patch_config(config):
+            with pytest.raises(ValueError, match="not found"):
+                resolve_remote()
+
+    def test_env_vars_ignored_without_config(self, monkeypatch):
+        """Env vars alone are not sufficient — config must declare remotes."""
+        monkeypatch.setenv("RYE_REMOTE_URL", "https://env.example.com")
+        monkeypatch.setenv("RYE_REMOTE_API_KEY", "env-key")
+        with _patch_config({}):
+            with pytest.raises(ValueError, match="not found"):
+                resolve_remote()
+
+
+class TestGetProjectName:
+
+    def test_from_config(self):
+        with _patch_config({"project_name": "my-project"}):
+            assert get_project_name() == "my-project"
+
+    def test_fallback_to_dirname(self, tmp_path):
+        with _patch_config({}):
+            assert get_project_name(tmp_path) == tmp_path.name
+
+    def test_fallback_no_path(self):
+        with _patch_config({}):
+            assert get_project_name() == "unknown"
+
+    def test_non_string_fallback(self, tmp_path):
+        with _patch_config({"project_name": 123}):
+            assert get_project_name(tmp_path) == tmp_path.name
+
+
+class TestListRemotes:
+
+    def test_lists_configured_remotes(self, monkeypatch):
+        monkeypatch.setenv("K1", "val")
+        monkeypatch.delenv("K2", raising=False)
+        config = {
+            "remotes": {
+                "default": {"url": "https://a.com", "key_env": "K1"},
+                "gpu": {"url": "https://b.com", "key_env": "K2"},
+            },
+        }
+        with _patch_config(config):
+            result = list_remotes()
+        assert result["default"]["key_set"] is True
+        assert result["gpu"]["key_set"] is False
+
+    def test_empty_config_returns_empty(self):
+        with _patch_config({}):
+            result = list_remotes()
+        assert result == {}
+
+    def test_malformed_entry_skipped(self, monkeypatch):
+        monkeypatch.delenv("K", raising=False)
+        config = {
+            "remotes": {
+                "bad": "string",
+                "good": {"url": "https://x.com", "key_env": "K"},
+            },
+        }
+        with _patch_config(config):
+            result = list_remotes()
+        assert "bad" not in result
+        assert "good" in result
+        assert result["good"]["url"] == "https://x.com"
+
+
+class TestRemoteToolIntegration:
+    """Verify remote.py uses resolve_remote for client creation."""
+
+    def test_get_client_uses_resolve_remote(self, monkeypatch):
+        """_get_client() calls resolve_remote() and creates RemoteHttpClient."""
+        monkeypatch.setenv("MY_KEY", "test-key")
+        config = {"remotes": {"gpu": {"url": "https://gpu.example.com", "key_env": "MY_KEY"}}}
+        with _patch_config(config):
+            import importlib
+            import remote as remote_mod
+
+            importlib.reload(remote_mod)
+            client = remote_mod._get_client("gpu", None)
+            assert client.base_url == "https://gpu.example.com"
+            assert client.api_key == "test-key"

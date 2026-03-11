@@ -1,0 +1,22 @@
+version: "1.0.0"
+tool_type: config-schema
+executor_id: null
+category: rye/core
+description: "Schema for cas/remote.yaml — named remotes and sync policy"
+
+target_config: cas/remote.yaml
+
+schema:
+  type: object
+  properties:
+    project_name:
+      type: string
+    remotes:
+      type: object
+    sync:
+      type: object
+      properties:
+        include:
+          type: array
+        exclude:
+          type: array

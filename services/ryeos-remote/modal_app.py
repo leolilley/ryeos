@@ -11,6 +11,9 @@ Usage:
 Secrets required (Modal dashboard → Secrets):
   ryeos-remote:
     - SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_JWT_SECRET
+
+Packages: ryeos-core (from PyPI) provides the engine, CAS, and core bundle.
+Only ryeos_remote/ is copied locally (server, auth, config).
 """
 
 import modal
@@ -22,28 +25,21 @@ cas_volume = modal.Volume.from_name("ryeos-remote-cas", create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
+        # Core engine (ryeos-core → ryeos-engine → lillux → lillux-proc)
+        "ryeos-core",
         # Server
         "fastapi>=0.109.0",
         "uvicorn[standard]>=0.27.0",
-        "pydantic>=2.5.0",
         "pydantic-settings>=2.1.0",
         # Auth
         "supabase>=2.3.0",
         "python-jose[cryptography]>=3.3.0",
-        # Core engine
-        "cryptography>=41.0",
-        "httpx>=0.26.0",
-        "pyyaml>=6.0",
-        "packaging>=21.0",
     )
     .add_local_dir("ryeos_remote", remote_path="/app/ryeos_remote", copy=True)
-    .add_local_dir(
-        "../../lillux/kernel/lillux", remote_path="/app/lillux", copy=True,
-    )
-    .add_local_dir("../../ryeos/rye", remote_path="/app/rye", copy=True)
     .env({
         "CAS_BASE_PATH": "/cas",
         "SIGNING_KEY_DIR": "/cas/signing",
+        "RYE_REMOTE_NAME": "default",
         "PYTHONPATH": "/app",
     })
 )

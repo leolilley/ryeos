@@ -76,7 +76,13 @@ thread_id = result["thread_id"]
 
 Use asynchronous execution when spawning multiple children that can run in parallel. The parent collects all `thread_id`s and waits for them in batch.
 
-**How async works internally:** When `execute directive` is called with `async: true`, it delegates to `thread_directive` internally, which calls `spawn_detached()` to launch the child as a subprocess. The child re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags, rebuilding all state from scratch (no inherited in-process state). Detached spawning uses the `lillux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with the `thread_id` and `pid`.
+**How async works internally:** There are two async paths depending on the execution mode:
+
+- **Directive + fork + async:** `execute directive` delegates to `thread_directive`, which spawns itself as a detached child process via `launch_detached()` (using the `lillux-proc spawn` Rust binary). The child rebuilds all state from scratch — no inherited in-process state. The parent returns immediately with the `thread_id` and `pid`.
+
+- **Tool + async or remote + async:** `execute` calls `_launch_async()`, which generates a UUID-based thread_id, registers in the ThreadRegistry (SQLite), and spawns `async_runner.py` as a detached child via `launch_detached()`. The child reads the execution payload from stdin, calls `ExecuteTool.handle()`, and updates the ThreadRegistry on completion. Results are stored via `registry.set_result()`.
+
+Both paths use `spawn_thread()` from `rye/utils/detached.py` for the full lifecycle: register → running → spawn → update PID → error-on-failure.
 
 ## Parent Context Auto-Injection
 
@@ -294,6 +300,42 @@ rye_execute(
 ```
 
 Uses `lillux-proc kill` (cross-platform Rust binary) to terminate the process, with a POSIX `os.kill` fallback. Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then escalates to `SIGKILL` if the process is still alive.
+
+## Remote Execution
+
+Directives and tools can be dispatched to a remote ryeos server instead of running locally:
+
+```python
+rye_execute(
+    item_type="directive",
+    item_id="my-project/heavy-analysis",
+    parameters={"data": "large-dataset"},
+    thread="remote:gpu",
+    limit_overrides={"turns": 20, "spend": 1.00}
+)
+```
+
+The remote server materializes a `.ai/` directory from CAS manifests, runs the executor, and returns results. Objects are synced by hash — only missing objects cross the wire.
+
+Named remotes are configured in `cas/remote.yaml`. Use `"remote:name"` to target a specific server (e.g., `"remote:gpu"` for GPU workloads). See [Remote Execution](../internals/remote-execution.md) for the full architecture.
+
+### Per-Node Remote Dispatch
+
+State graph nodes can specify a `remote` field to dispatch individual nodes to different servers:
+
+```yaml
+nodes:
+  train_model:
+    remote: gpu
+    action:
+      primary: execute
+      item_type: tool
+      item_id: ml/train
+      params:
+        epochs: 100
+```
+
+This enables hybrid workflows where some nodes run locally and others run on specialized hardware.
 
 ## What's Next
 

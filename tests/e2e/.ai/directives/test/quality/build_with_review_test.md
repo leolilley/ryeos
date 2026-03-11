@@ -35,7 +35,7 @@ End-to-end test for the build_with_review orchestrator — verifies the full bui
   <step name="spawn_build_with_review">
     Spawn the build_with_review orchestrator directive.
     Use a simple build directive (test/quality/quality_gate_test) as the target — this directive writes a file and runs gates, giving the reviewer something to evaluate.
-    `rye_execute(item_type="directive", item_id="rye/code/quality/build_with_review", parameters={"thread": true, "directive_id": "test/quality/quality_gate_test", "parameters": {}, "max_retries": 1})`
+    `rye_execute(item_type="directive", item_id="rye/code/quality/build_with_review", parameters={"thread": "fork", "directive_id": "test/quality/quality_gate_test", "parameters": {}, "max_retries": 1})`
     Wait for the orchestrator to complete.
   </step>
 

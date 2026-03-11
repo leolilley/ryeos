@@ -1,11 +1,10 @@
-# rye:signed:2026-03-10T04:07:13Z:d7a8f1ba9dd9032b6fa8c3aaaff7b0ac10c4b6e759dbbdf55a9503406307bc82:J_3Y-1e0gca4ytPogWhODFHd7V3O9UpX9UgX8LH0CyJf1Z9vmfnRmP0BI6mvnXas8Ii_TPfyPqjFXMJYV6D3BQ==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: config-schema
 executor_id: null
-category: rye/agent/config-schemas
+category: agent
 description: "Schema for agent.yaml — provider settings and output token limits"
 
-target_config: agent/agent.yaml
+target_config: agent.yaml
 
 schema:
   type: object

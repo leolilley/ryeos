@@ -117,7 +117,7 @@ class TestExecuteTool:
         assert "metadata" in result
 
     async def test_execute_directive_threaded(self, temp_project):
-        """Execute directive with thread=True — attempts to spawn thread.
+        """Execute directive with thread="fork" — attempts to spawn thread.
 
         In a test environment without the full thread infrastructure,
         this errors because thread_directive tool can't be found.
@@ -127,7 +127,7 @@ class TestExecuteTool:
             item_type="directive",
             item_id="workflow",
             project_path=str(temp_project),
-            parameters={"thread": True},
+            thread="fork",
         )
 
         # thread_directive tool won't exist in the temp project
@@ -209,6 +209,117 @@ class TestExecuteTool:
         assert "error" in result
 
 
+@pytest.mark.asyncio
+class TestAsyncValidation:
+    """Test Step 5 validation: rejected async combinations."""
+
+    async def test_async_dry_run_rejected(self, temp_project):
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="tool",
+            item_id="mytool",
+            project_path=str(temp_project),
+            dry_run=True,
+            **{"async": True},
+        )
+        assert result["status"] == "error"
+        assert "dry_run" in result["error"]
+
+    async def test_async_knowledge_rejected(self, temp_project):
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="knowledge",
+            item_id="entry",
+            project_path=str(temp_project),
+            **{"async": True},
+        )
+        assert result["status"] == "error"
+        assert "knowledge" in result["error"]
+
+    async def test_async_directive_inline_rejected(self, temp_project):
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_type="directive",
+            item_id="workflow",
+            project_path=str(temp_project),
+            thread="inline",
+            **{"async": True},
+        )
+        assert result["status"] == "error"
+        assert "inline" in result["error"]
+
+
+@pytest.mark.asyncio
+class TestLaunchAsync:
+    """Test _launch_async spawns detached process and returns handle."""
+
+    async def test_tool_async_no_registry_uses_launch_detached(self, temp_project):
+        """Without registry, falls back to raw launch_detached."""
+        from unittest.mock import AsyncMock, patch
+
+        mock_spawn = AsyncMock(return_value={"success": True, "pid": 9999})
+        tool = ExecuteTool("")
+
+        with patch("rye.utils.detached.launch_detached", mock_spawn):
+            result = await tool.handle(
+                item_type="tool",
+                item_id="mytool",
+                project_path=str(temp_project),
+                **{"async": True},
+            )
+
+        assert result["status"] == "success"
+        assert result["async"] is True
+        assert result["pid"] == 9999
+        assert result["type"] == "tool"
+        assert result["item_id"] == "mytool"
+        assert result["state"] == "running"
+        assert "thread_id" in result
+
+    async def test_tool_async_with_registry_uses_spawn_thread(self, temp_project):
+        """With registry available, uses spawn_thread for proper lifecycle."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_registry = MagicMock()
+        mock_spawn = AsyncMock(return_value={"success": True, "pid": 42})
+        tool = ExecuteTool("")
+
+        with patch.object(ExecuteTool, "_get_registry", return_value=mock_registry), \
+             patch("rye.utils.detached.spawn_thread", mock_spawn) as mock_st:
+            result = await tool.handle(
+                item_type="tool",
+                item_id="mytool",
+                project_path=str(temp_project),
+                **{"async": True},
+            )
+
+        assert result["status"] == "success"
+        assert result["pid"] == 42
+        # spawn_thread was called with the registry
+        mock_st.assert_awaited_once()
+        call_kwargs = mock_st.call_args.kwargs
+        assert call_kwargs["registry"] is mock_registry
+        assert call_kwargs["directive"] == "tool/mytool"
+        assert "thread_id" in call_kwargs
+
+    async def test_tool_async_spawn_failure(self, temp_project):
+        from unittest.mock import AsyncMock, patch
+
+        mock_spawn = AsyncMock(return_value={"success": False, "error": "no lillux-proc"})
+        tool = ExecuteTool("")
+
+        with patch("rye.utils.detached.launch_detached", mock_spawn):
+            result = await tool.handle(
+                item_type="tool",
+                item_id="mytool",
+                project_path=str(temp_project),
+                **{"async": True},
+            )
+
+        assert result["status"] == "error"
+        assert "spawn" in result["error"]
+
+
 class TestResolveInputRefs:
     """Unit tests for {input:key} interpolation."""
 
@@ -277,3 +388,22 @@ class TestInterpolateParsed:
         parsed = {"body": "hello"}
         _interpolate_parsed(parsed, {"x": "y"})
         assert parsed["body"] == "hello"
+
+
+class TestParseThread:
+    """Tests for ExecuteTool._parse_thread()."""
+
+    def test_inline(self):
+        assert ExecuteTool._parse_thread("inline") == ("inline", None)
+
+    def test_fork(self):
+        assert ExecuteTool._parse_thread("fork") == ("fork", None)
+
+    def test_remote_default(self):
+        assert ExecuteTool._parse_thread("remote") == ("remote", None)
+
+    def test_remote_named(self):
+        assert ExecuteTool._parse_thread("remote:gpu") == ("remote", "gpu")
+
+    def test_remote_named_with_dashes(self):
+        assert ExecuteTool._parse_thread("remote:my-gpu-server") == ("remote", "my-gpu-server")

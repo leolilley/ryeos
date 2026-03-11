@@ -579,7 +579,7 @@ class SignTool:
         # Phase 2: Content validation (structural shape)
         from rye.utils.config_validators import validate_config_content
         content_result = validate_config_content(
-            config_name=file_path.name,
+            config_id=item_id,
             config_data=parsed,
             project_path=proj,
         )

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:14Z:b01aeff0af52fbfd5a861832c724d9718a061a07c89390966b433b58c5db8ad8:RQ0geuwnLgODYUhDEptfUfzW_JRQ8kw_ArMV9uvMiIzB3kU5kYGXBPcyYZXVffKy1ZzNjwerzcCSizizokPMCg==:4b987fd4e40303ac
+# rye:signed:2026-03-11T05:12:49Z:755c4ca8d7afd7555bf4447d5904dfce2ccd675e01c67d891f8c188daeb892b1:D46Qe268MhEU49bStiODTTMXCsojuBhxcAxgZ4lJ5YsAJ8PphSpBPYNtA175cS282ayhMhT_z-cpo5NReBUTAw==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 
@@ -17,7 +17,6 @@ __tool_description__ = "Sync and execute against ryeos-remote server"
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,7 +35,7 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["push", "pull", "status", "execute"]
+ACTIONS = ["push", "pull", "status", "execute", "threads", "thread_status"]
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -44,7 +43,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Remote operation: push, pull, status, execute",
+            "description": "Remote operation: push, pull, status, execute, threads, thread_status",
         },
         "item_type": {
             "type": "string",
@@ -57,6 +56,22 @@ CONFIG_SCHEMA = {
         "parameters": {
             "type": "object",
             "description": "Parameters for remote execute",
+        },
+        "remote": {
+            "type": "string",
+            "description": "Named remote to target (from cas/remote.yaml). Defaults to 'default'.",
+        },
+        "thread_id": {
+            "type": "string",
+            "description": "Thread ID for thread_status action",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Max threads to return for threads action (default: 20)",
+        },
+        "project_name": {
+            "type": "string",
+            "description": "Filter threads by project name",
         },
     },
     "required": ["action"],
@@ -122,26 +137,11 @@ class RemoteHttpClient:
         }
 
 
-def _get_api_key() -> Optional[str]:
-    """Get remote API key from environment."""
-    return os.environ.get("RYE_REMOTE_API_KEY")
-
-
-def _get_client() -> RemoteHttpClient:
-    """Create HTTP client with auth."""
-    remote_url = os.environ.get("RYE_REMOTE_URL", "")
-    if not remote_url:
-        raise ValueError(
-            "RYE_REMOTE_URL not set. "
-            "Set it via: export RYE_REMOTE_URL=https://your-remote-server"
-        )
-    api_key = _get_api_key()
-    if not api_key:
-        raise ValueError(
-            "RYE_REMOTE_API_KEY not set. "
-            "Set it via: export RYE_REMOTE_API_KEY=your_key"
-        )
-    return RemoteHttpClient(remote_url, api_key)
+def _get_client(remote_name=None, project_path=None) -> RemoteHttpClient:
+    """Create HTTP client using named remote config."""
+    from remote_config import resolve_remote
+    config = resolve_remote(remote_name, project_path)
+    return RemoteHttpClient(config.url, config.api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +150,22 @@ def _get_client() -> RemoteHttpClient:
 
 
 async def _push(project_path: Path, params: Dict) -> Dict:
-    """Build manifests, sync missing objects to remote.
+    """Build manifests, sync missing objects to remote, publish project ref.
 
     Flow:
       1. Build project + user manifests (local CAS)
       2. Collect all transitive object hashes
       3. POST /objects/has → get missing list
       4. Export missing objects, POST /objects/put
+      5. POST /push → upsert project ref on remote
     """
-    client = _get_client()
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
     root = cas_root(project_path)
 
     # Build manifests
@@ -185,34 +192,54 @@ async def _push(project_path: Path, params: Dict) -> Dict:
         has_body = json.loads(has_body)
     missing = has_body.get("missing", [])
 
-    if not missing:
-        return {
-            "project_manifest_hash": ph,
-            "user_manifest_hash": uh,
-            "objects_synced": 0,
-            "total_objects": len(all_hashes),
-            "message": "Remote is up to date",
-        }
+    objects_synced = 0
+    if missing:
+        # Export and upload missing objects
+        entries = export_objects(missing, root)
+        put_resp = await client.post("/objects/put", {
+            "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
+        })
+        if not put_resp["success"]:
+            return {"error": f"Failed to upload objects: {put_resp['error']}"}
 
-    # Export and upload missing objects
-    entries = export_objects(missing, root)
-    put_resp = await client.post("/objects/put", {
-        "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
-    })
-    if not put_resp["success"]:
-        return {"error": f"Failed to upload objects: {put_resp['error']}"}
+        put_body = put_resp["body"]
+        if isinstance(put_body, str):
+            put_body = json.loads(put_body)
+        objects_synced = len(put_body.get("stored", []))
 
-    put_body = put_resp["body"]
-    if isinstance(put_body, str):
-        put_body = json.loads(put_body)
+    # Publish project ref on remote
+    from remote_config import get_project_name
+    proj_name = get_project_name(project_path)
+    sys_ver = get_system_version()
 
-    return {
+    push_resp = await client.post("/push", {
+        "project_name": proj_name,
         "project_manifest_hash": ph,
         "user_manifest_hash": uh,
-        "objects_synced": len(put_body.get("stored", [])),
+        "system_version": sys_ver,
+    })
+
+    push_body = push_resp.get("body", {})
+    if isinstance(push_body, str):
+        push_body = json.loads(push_body)
+
+    ref_published = push_resp["success"]
+    if not ref_published:
+        logger.warning("Failed to publish project ref: %s", push_resp.get("error"))
+
+    result = {
+        "project_manifest_hash": ph,
+        "user_manifest_hash": uh,
+        "project_name": proj_name,
+        "remote_name": push_body.get("remote_name", remote_name or "default"),
+        "objects_synced": objects_synced,
         "total_objects": len(all_hashes),
-        "message": f"Synced {len(missing)} objects to remote",
+        "ref_published": ref_published,
+        "message": f"Synced {len(missing)} objects to remote" if missing else "Remote is up to date",
     }
+    if not ref_published:
+        result["ref_warning"] = f"Objects uploaded but project ref not published: {push_resp.get('error')}"
+    return result
 
 
 async def _pull(project_path: Path, params: Dict) -> Dict:
@@ -225,7 +252,13 @@ async def _pull(project_path: Path, params: Dict) -> Dict:
     if not hashes:
         return {"error": "No hashes specified. Provide hashes to pull."}
 
-    client = _get_client()
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
     root = cas_root(project_path)
 
     get_resp = await client.post("/objects/get", {"hashes": hashes})
@@ -249,7 +282,7 @@ async def _pull(project_path: Path, params: Dict) -> Dict:
 
 
 async def _status(project_path: Path, params: Dict) -> Dict:
-    """Show local manifest hashes and system version."""
+    """Show local manifest hashes, system version, and configured remotes."""
     root = cas_root(project_path)
 
     ph, pm = build_manifest(project_path, "project")
@@ -264,7 +297,7 @@ async def _status(project_path: Path, params: Dict) -> Dict:
         + [ph, uh]
     ))
 
-    return {
+    result = {
         "project_manifest_hash": ph,
         "user_manifest_hash": uh,
         "system_version": get_system_version(),
@@ -274,8 +307,19 @@ async def _status(project_path: Path, params: Dict) -> Dict:
         "user_items": len(um.get("items", {})),
     }
 
+    from remote_config import list_remotes
+    remote_name = params.get("remote")
+    if remote_name:
+        # Show status for a specific remote
+        result["remotes"] = {remote_name: list_remotes(project_path).get(remote_name, {"error": "not found"})}
+    else:
+        # Show all configured remotes
+        result["remotes"] = list_remotes(project_path)
 
-async def _verify_remote_key(client: "RemoteHttpClient") -> Optional[Dict]:
+    return result
+
+
+async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[str] = None) -> Optional[Dict]:
     """Fetch remote public key and verify against pinned fingerprint.
 
     TOFU: pins on first contact. Hard-fails on fingerprint mismatch or
@@ -302,11 +346,15 @@ async def _verify_remote_key(client: "RemoteHttpClient") -> Optional[Dict]:
 
     remote_fp = compute_key_fingerprint(remote_pem)
     trust_store = TrustStore()
-    pinned_key = trust_store.get_remote_key()
+    from urllib.parse import urlparse
+    host = urlparse(client.base_url).netloc
+    name = remote_name or "default"
+    owner = f"remote:{name}:{host}"
+    pinned_key = trust_store.get_remote_key(remote_name=owner)
 
     if pinned_key is None:
         # TOFU: first contact, pin the key
-        trust_store.pin_remote_key(remote_pem)
+        trust_store.pin_remote_key(remote_pem, remote_name=owner)
         logger.info("Pinned remote server key (TOFU): %s", remote_fp)
         return None
 
@@ -341,13 +389,14 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
         return {"error": "item_type and item_id are required for execute"}
 
     # 1. Verify remote server key (before push — fail early)
-    client = _get_client()
-    key_err = await _verify_remote_key(client)
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+    key_err = await _verify_remote_key(client, remote_name)
     if key_err:
         return key_err
 
     # 2. Push
-    push_result = await _push(project_path, {})
+    push_result = await _push(project_path, {"remote": remote_name})
     if "error" in push_result:
         return push_result
 
@@ -376,18 +425,60 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     new_object_hashes = exec_body.get("new_object_hashes", [])
     pull_hashes.extend(new_object_hashes)
     if pull_hashes:
-        pull_result = await _pull(project_path, {"hashes": pull_hashes})
+        pull_result = await _pull(project_path, {"hashes": pull_hashes, "remote": remote_name})
     else:
         pull_result = {"fetched": 0}
 
     return {
         "status": exec_body.get("status"),
+        "thread_id": exec_body.get("thread_id"),
         "execution_snapshot_hash": snapshot_hash,
         "result": exec_body.get("result"),
         "objects_pushed": push_result.get("objects_synced", 0),
         "objects_pulled": pull_result.get("fetched", 0),
         "system_version": exec_body.get("system_version"),
     }
+
+
+async def _threads(project_path: Path, params: Dict) -> Dict:
+    """List remote executions from the server."""
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    limit = params.get("limit", 20)
+    proj_name = params.get("project_name")
+
+    path = f"/threads?limit={limit}"
+    if proj_name:
+        path += f"&project_name={proj_name}"
+
+    resp = await client.get(path)
+    if not resp["success"]:
+        return {"error": f"Failed to list threads: {resp.get('error')}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    return body
+
+
+async def _thread_status(project_path: Path, params: Dict) -> Dict:
+    """Get status of a specific remote thread."""
+    thread_id = params.get("thread_id")
+    if not thread_id:
+        return {"error": "thread_id is required for thread_status"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    resp = await client.get(f"/threads/{thread_id}")
+    if not resp["success"]:
+        return {"error": f"Failed to get thread: {resp.get('error')}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +490,8 @@ _ACTION_MAP = {
     "pull": _pull,
     "status": _status,
     "execute": _execute,
+    "threads": _threads,
+    "thread_status": _thread_status,
 }
 
 

@@ -45,6 +45,8 @@ thread_directive (entry point)
               └── Repeat until: no tool calls (completion) | limit hit | error
 ```
 
+For async tool execution (not directive+fork), the entry point is `_launch_async()` in `ExecuteTool`, which spawns `async_runner.py` as a detached child process. The child reads the execution payload from stdin, calls `ExecuteTool.handle()`, and updates the ThreadRegistry on completion.
+
 ---
 
 ## Entry Points
@@ -79,13 +81,13 @@ Execute a directive in a managed thread with a full LLM loop. This is the primar
 8. **Build safety harness** — with limits, hooks, permissions, capability tokens
 9. **Reserve budget** — in the hierarchical budget ledger
 10. **Resolve LLM provider** — maps model name/tier to provider config (Anthropic, OpenAI)
-11. **Run** — either synchronously or fork to background (async)
+11. **Run** — synchronously, fork to background (async), or dispatch to remote server (`thread="remote"`)
 12. **Finalize** — report spend, cascade to parent budget, update registry, write `thread.json`
 
 #### Synchronous vs Async
 
 - **Sync** (default): blocks until the thread completes, returns the full result
-- **Async** (`async: true`): forks a child process via `os.fork()`, returns immediately with `thread_id` and `pid`. The child process daemonizes (`os.setsid()`) and runs to completion independently.
+- **Async** (`async: true`): spawns a detached child process via `launch_detached()` (using lillux-proc's `SubprocessPrimitive.spawn()` for cross-platform support). Returns immediately with `thread_id` and `pid`. The child rebuilds all state from scratch — no inherited in-process state.
 
 #### Output
 
@@ -378,10 +380,11 @@ All thread state is persisted to disk under `.ai/agent/threads/<thread_id>/`.
 
 ### Thread Registry (`persistence/thread_registry`)
 
-Tracks all threads in `.ai/agent/threads/registry.json`:
+Tracks all threads in `.ai/agent/threads/registry.db` (SQLite):
 
 - Registration (thread_id, directive, parent_id, timestamp)
 - Status updates (created → running → completed/error/cancelled/continued)
+- PID tracking (update child process PID after spawn)
 - Continuation chain links (old_thread → new_thread)
 - Cost snapshots (updated each turn)
 - Spawn tracking (which threads spawned which)

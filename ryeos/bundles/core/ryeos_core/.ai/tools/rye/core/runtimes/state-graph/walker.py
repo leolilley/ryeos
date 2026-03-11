@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:39:56Z:630845a1c45d98d2537912c2ec678327f9670b7bb5a8ece6faff72994e80899c:tNqEn8Q84hzCAUNvQr-L8ja6pJhabLOf3bKArRnQSwR-i_h3VWhf7yKC3K9lkbl2qx0xXmEMqp1IEZvEnOaKDw==:4b987fd4e40303ac
+# rye:signed:2026-03-11T05:44:17Z:6baad923fa0e89d9155c0ceab6ca0017d3a2566ff0756111f4575f945b677978:aYE2wqGNPZY3iLqdVwm23D0vvD3Nz8HuPiiOVh5VRPVpiZ4Yvu2RcxNl1vq51NoE4-V-H1MwZWS5dC3tEPOdBA==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -506,16 +506,32 @@ def _load_graph_yaml(graph_path: str) -> Dict:
     return yaml.safe_load("\n".join(clean))
 
 
+def _node_thread(node: Dict) -> str:
+    """Resolve a node's execution thread from its ``remote`` field.
+
+    Returns ``"remote:<name>"`` when set, ``"inline"`` otherwise.
+    """
+    remote = node.get("remote")
+    if remote:
+        return f"remote:{remote}"
+    return "inline"
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
 
-async def _dispatch_action(action: Dict, project_path: str) -> Dict:
+async def _dispatch_action(
+    action: Dict, project_path: str, *, thread: str = "inline",
+) -> Dict:
     """Dispatch a node action through the appropriate primary tool.
 
     Same action dict format as ToolDispatcher.dispatch().  All core tool
     handles are async — we await them directly.
+
+    When *thread* is set (e.g. ``"remote:gpu"``), it is forwarded to
+    ``ExecuteTool.handle()`` so execution routes to a named remote.
     """
     tools = _tools_instance()
     primary = action.get("primary", "execute")
@@ -530,6 +546,7 @@ async def _dispatch_action(action: Dict, project_path: str) -> Dict:
                 item_id=item_id,
                 project_path=project_path,
                 parameters=params,
+                thread=thread,
             )
         elif primary == "search":
             return await tools["search"].handle(
@@ -1009,7 +1026,7 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
     _KNOWN_NODE_KEYS = frozenset({
         "type", "action", "next", "on_error", "assign",
         "over", "as", "collect", "parallel", "env_requires",
-        "cache",
+        "cache", "remote",
     })
 
     has_return = False
@@ -1748,7 +1765,9 @@ async def execute(
                     logger.warning("Cache check failed for node %s: %s", executed_node, exc, exc_info=True)
 
             if not cache_hit:
-                raw_result = await _dispatch_action(action, project_path)
+                raw_result = await _dispatch_action(
+                    action, project_path, thread=_node_thread(node),
+                )
                 result = _unwrap_result(raw_result)
 
                 # Store in cache on successful execution
@@ -2156,7 +2175,8 @@ async def _foreach_dispatch_one(
                 node_result_hash = cached["node_result_hash"]
                 cache_hit = True
             else:
-                raw_result = await _dispatch_action(action, project_path)
+                thread = _node_thread(node)
+                raw_result = await _dispatch_action(action, project_path, thread=thread)
                 result = _unwrap_result(raw_result)
                 if result.get("status") != "error":
                     stored = cache_store(
@@ -2166,10 +2186,10 @@ async def _foreach_dispatch_one(
                     if stored:
                         node_result_hash = stored
         except Exception:
-            raw_result = await _dispatch_action(action, project_path)
+            raw_result = await _dispatch_action(action, project_path, thread=_node_thread(node))
             result = _unwrap_result(raw_result)
     else:
-        raw_result = await _dispatch_action(action, project_path)
+        raw_result = await _dispatch_action(action, project_path, thread=_node_thread(node))
         result = _unwrap_result(raw_result)
 
     if not node_result_hash and result:
@@ -2295,21 +2315,11 @@ def run_sync(
         # Register before subprocess so child process sees it
         parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID")
         registry = thread_registry.get_registry(Path(project_path))
-        registry.register(graph_run_id, graph_id, parent_thread_id)
-        registry.update_status(graph_run_id, "running")
-
-        # Prepare log file for child process
-        log_dir = Path(project_path) / AI_DIR / "agent" / "graphs" / graph_run_id
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "spawn.log"
 
         # Get path to walker.py for __main__ invocation
         walker_path = Path(__file__).resolve()
 
         # Prepare subprocess arguments
-        # The __main__ block will load the graph YAML and call run_sync()
-        # We need to add --graph-run-id and --pre-registered to signal
-        # the child to call execute() directly instead of run_sync()
         params_json = json.dumps(params)
         cmd = [
             sys.executable,
@@ -2320,31 +2330,20 @@ def run_sync(
             "--pre-registered",
         ]
 
-        # Forward env vars so child process can find packages and API keys
-        envs = {}
-        for key in os.environ:
-            if key.startswith(("PYTHON", "RYE_", "USER_SPACE", "ZEN_", "ANTHROPIC_",
-                               "OPENAI_", "GOOGLE_", "CONTEXT7_")):
-                envs.setdefault(key, os.environ[key])
-        for key in ("HOME", "PATH", "LANG", "TERM"):
-            if key in os.environ:
-                envs.setdefault(key, os.environ[key])
-
-        # Cross-platform detached spawn via orchestrator helper
-        orchestrator = _try_load_module("orchestrator")
-        if orchestrator is None:
-            registry.update_status(graph_run_id, "error")
-            return {"success": False, "error": "Agent bundle required for async mode"}
-        spawn_result = asyncio.run(orchestrator.spawn_detached(
-            cmd=cmd[0],
-            args=cmd[1:],
-            log_path=str(log_path),
-            envs=envs,
+        # Shared engine-layer detached spawn with lifecycle management
+        from rye.utils.detached import spawn_thread
+        log_dir = Path(project_path) / AI_DIR / "agent" / "graphs" / graph_run_id
+        spawn_result = asyncio.run(spawn_thread(
+            registry=registry,
+            thread_id=graph_run_id,
+            directive=graph_id,
+            cmd=cmd,
+            log_dir=log_dir,
             input_data=params_json,
+            parent_id=parent_thread_id,
         ))
 
         if not spawn_result.get("success"):
-            registry.update_status(graph_run_id, "error")
             return {
                 "success": False,
                 "error": f"Failed to spawn child process: {spawn_result.get('error')}",

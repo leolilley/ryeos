@@ -11,15 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from conftest import get_bundle_path
+
 # ---------------------------------------------------------------------------
 # Load walker module for signal handler tests
 # ---------------------------------------------------------------------------
 
-_WALKER_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "ryeos" / "bundles" / "core" / "ryeos_core"
-    / ".ai" / "tools" / "rye" / "core" / "runtimes" / "state-graph"
-)
+_WALKER_DIR = get_bundle_path("core", "tools/rye/core/runtimes/state-graph")
 
 if str(_WALKER_DIR) not in sys.path:
     sys.path.insert(0, str(_WALKER_DIR))
@@ -33,11 +31,7 @@ _spec.loader.exec_module(_walker)
 # Load process tools
 # ---------------------------------------------------------------------------
 
-_TOOLS_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "ryeos" / "bundles" / "core" / "ryeos_core"
-    / ".ai" / "tools" / "rye" / "core" / "processes"
-)
+_TOOLS_DIR = get_bundle_path("core", "tools/rye/core/processes")
 
 
 def _load_tool(name):

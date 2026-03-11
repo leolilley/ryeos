@@ -6,12 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from conftest import get_bundle_path
+
 # Load walker module from the core bundle
-_WALKER_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "ryeos" / "bundles" / "core" / "ryeos_core"
-    / ".ai" / "tools" / "rye" / "core" / "runtimes" / "state-graph"
-)
+_WALKER_DIR = get_bundle_path("core", "tools/rye/core/runtimes/state-graph")
 
 if str(_WALKER_DIR) not in sys.path:
     sys.path.insert(0, str(_WALKER_DIR))
@@ -22,6 +20,7 @@ _spec.loader.exec_module(_walker)
 
 _apply_input_defaults = _walker._apply_input_defaults
 _validate_inputs = _walker._validate_inputs
+_node_thread = _walker._node_thread
 
 
 class TestApplyInputDefaults:
@@ -130,3 +129,22 @@ class TestValidateInputsWithDefaults:
         errors = _validate_inputs(params, schema)
         assert len(errors) == 1
         assert "file_path" in errors[0]
+
+
+class TestNodeThread:
+    """Test _node_thread resolves node remote field to thread string."""
+
+    def test_no_remote_returns_inline(self):
+        assert _node_thread({}) == "inline"
+
+    def test_remote_field_returns_remote_thread(self):
+        assert _node_thread({"remote": "gpu"}) == "remote:gpu"
+
+    def test_remote_default(self):
+        assert _node_thread({"remote": "default"}) == "remote:default"
+
+    def test_remote_none_returns_inline(self):
+        assert _node_thread({"remote": None}) == "inline"
+
+    def test_remote_empty_returns_inline(self):
+        assert _node_thread({"remote": ""}) == "inline"

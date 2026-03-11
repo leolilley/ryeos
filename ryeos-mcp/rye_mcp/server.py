@@ -20,8 +20,10 @@ from mcp.types import Tool, TextContent
 
 from rye.constants import ItemType, Action
 from rye.primary_tool_descriptions import (
+    EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
     EXECUTE_PARAMETERS_DESC,
+    EXECUTE_THREAD_DESC,
     EXECUTE_TOOL_DESC,
     ITEM_ID_DESC,
     ITEM_TYPE_DESC,
@@ -104,6 +106,17 @@ class RYEServer:
                                 "type": "boolean",
                                 "default": False,
                                 "description": EXECUTE_DRY_RUN_DESC,
+                            },
+                            "thread": {
+                                "type": "string",
+                                "enum": ["inline", "fork", "remote"],
+                                "default": "inline",
+                                "description": EXECUTE_THREAD_DESC,
+                            },
+                            "async": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": EXECUTE_ASYNC_DESC,
                             },
                         },
                         "required": ["item_type", "item_id", "project_path"],

@@ -44,7 +44,7 @@ End-to-end test for the review directive — verifies the full review flow with 
 
   <step name="spawn_review">
     Spawn the review directive as a managed thread, passing the test file as a changed file.
-    `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": true, "changed_files": ["{input:output_dir|outputs}/review_target.py"]})`
+    `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": "fork", "changed_files": ["{input:output_dir|outputs}/review_target.py"]})`
     Wait for the thread to complete.
   </step>
 

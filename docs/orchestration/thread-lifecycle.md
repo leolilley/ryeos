@@ -40,6 +40,15 @@ thread_id = f"{directive_name}-{int(time.time())}"
 
 This makes thread IDs human-readable (you can see which directive spawned them) and unique (epoch seconds prevent collisions for typical usage).
 
+For async tool execution (via `_launch_async()`), thread IDs are UUID v4 strings:
+
+```python
+thread_id = str(uuid.uuid4())
+# Example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+Both formats are tracked in the same ThreadRegistry.
+
 ## The Full Execution Flow
 
 `thread_directive.execute()` runs these steps in order:
@@ -255,6 +264,7 @@ The `ThreadRegistry` class provides these operations:
 | Method | Purpose |
 |--------|---------|
 | `register(thread_id, directive, parent_id)` | Create thread entry with status `created` |
+| `update_pid(thread_id, pid)` | Update child process PID after spawn |
 | `update_status(thread_id, status)` | Transition to a new state |
 | `get_thread(thread_id)` | Get full thread record |
 | `set_result(thread_id, result)` | Store final result (JSON serialized) |

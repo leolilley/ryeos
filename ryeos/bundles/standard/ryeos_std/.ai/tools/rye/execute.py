@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:403016feb14bf3b26b31caaadc4bd0b3f50720391c25ddc425259cf0a1585641:IglSk90bc7vkKo70uQsPBEQ4SrgLeOC_AbX3r04Ls13Zckd3TwAAAAs7cI5KEwzdqRpV5uWtrsPjUKH_le9KDA==:4b987fd4e40303ac
+# rye:signed:2026-03-10T05:41:11Z:88662038b2e5c187295d92c967445dfc2d642805b2756d30570be127090533d1:oyadwCPW44eREN4vmFXwb8Z95UsH__Ayk6dp7bfT-S-D55AIArWYboudxbkaaW9BDUPvs2kNIfWfJj4JcvRuDQ==:4b987fd4e40303ac
 """Execute a directive, tool, or knowledge item via rye."""
 
 import argparse
@@ -6,8 +6,10 @@ import json
 import asyncio
 
 from rye.primary_tool_descriptions import (
+    EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
     EXECUTE_PARAMETERS_DESC,
+    EXECUTE_THREAD_DESC,
     ITEM_ID_DESC,
     ITEM_TYPE_DESC,
 )
@@ -40,6 +42,17 @@ CONFIG_SCHEMA = {
             "description": EXECUTE_DRY_RUN_DESC,
             "default": False,
         },
+        "thread": {
+            "type": "string",
+            "enum": ["inline", "fork", "remote"],
+            "description": EXECUTE_THREAD_DESC,
+            "default": "inline",
+        },
+        "async": {
+            "type": "boolean",
+            "description": EXECUTE_ASYNC_DESC,
+            "default": False,
+        },
     },
     "required": ["item_type", "item_id"],
 }
@@ -63,6 +76,8 @@ def execute(params: dict, project_path: str) -> dict:
             project_path=project_path,
             parameters=raw_params,
             dry_run=params.get("dry_run", False),
+            thread=params.get("thread", "inline"),
+            **{"async": params.get("async", False)},
         ))
         return result
     except Exception as e:

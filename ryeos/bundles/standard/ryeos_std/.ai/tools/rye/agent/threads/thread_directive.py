@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:19:21Z:c618880cf0712385b8e22534f010385a775843f4f21a91f57dcb8f7c35fab915:uYLtY_VWUMNK5ozkQXrN4oi7l2KDwYAz0y-HQSw1vr0js0RJoWa97b7PWVxbXUAbavcDBybMk83sPECZfd-dDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-11T05:44:17Z:6fdc758245782b66d57cfefc74ab51650943a7fbb58ef267f5403751fd3d553c:cZ-eLtjXL4B0YFg9SPWYkMTGtIFvmLkMvotGc5uL6lCuzMNQ8R8zIIZV_msCSgU_KGXl5R9fZtwC8-70fMdUBQ==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -98,25 +98,6 @@ def _build_primary_tools() -> list:
             })
     return schemas
 
-
-def _spawn_env(thread_id: str) -> Dict[str, str]:
-    """Build env dict for async subprocess spawn.
-
-    lillux-proc daemonizes with a clean env — only explicitly passed vars survive.
-    Forward everything the child needs to bootstrap and run.
-    """
-    # Always needed
-    envs = {"RYE_PARENT_THREAD_ID": thread_id}
-    # Forward vars the child needs (PYTHONPATH for imports, USER_SPACE for
-    # key resolution, PATH for finding binaries, API keys, HOME, etc.)
-    for key in os.environ:
-        if key.startswith(("PYTHON", "RYE_", "USER_SPACE", "ZEN_", "ANTHROPIC_",
-                           "OPENAI_", "GOOGLE_", "CONTEXT7_")):
-            envs.setdefault(key, os.environ[key])
-    for key in ("HOME", "PATH", "LANG", "TERM"):
-        if key in os.environ:
-            envs.setdefault(key, os.environ[key])
-    return envs
 
 
 def _generate_thread_id(directive_name: str) -> str:
@@ -958,14 +939,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
         limits=limits, capabilities=harness._capabilities,
     )
 
-    # 13. Set env var so children discover this thread as parent
-    # Save and restore to prevent leaking into sibling/subsequent top-level threads
-    _prev_parent_env = os.environ.get("RYE_PARENT_THREAD_ID")
-    os.environ["RYE_PARENT_THREAD_ID"] = thread_id
-
+    # 13. Async spawn — child re-enters execute() and runs through the sync path.
+    # Parent thread ID is forwarded explicitly in child_params so the child
+    # discovers its actual parent, not itself (RYE_PARENT_THREAD_ID env is
+    # only set for the sync path below, where in-process grandchildren need it).
     if params.get("async"):
-        # Spawn detached subprocess that re-executes this script.
-        # Child rebuilds all state via execute() and runs through the sync path.
         child_params = {"directive_id": directive_name, "inputs": inputs}
         if params.get("model"):
             child_params["model"] = params["model"]
@@ -973,33 +951,37 @@ async def execute(params: Dict, project_path: str) -> Dict:
             child_params["limit_overrides"] = params["limit_overrides"]
         if params.get("previous_thread_id"):
             child_params["previous_thread_id"] = params["previous_thread_id"]
-        if params.get("parent_thread_id"):
-            child_params["parent_thread_id"] = params["parent_thread_id"]
+        # Forward resolved parent (explicit param or env) so the child
+        # doesn't resolve itself as its own parent.
+        if parent_thread_id:
+            child_params["parent_thread_id"] = parent_thread_id
 
-        orchestrator_mod = load_module("orchestrator", anchor=_ANCHOR)
         thread_dir = proj_path / AI_DIR / "agent" / "threads" / thread_id
-        spawn_log = str(thread_dir / "spawn.log")
 
         # Write params to thread dir for execution tracing
         params_json = json.dumps(child_params)
         trace_file = thread_dir / "spawn_params.json"
+        trace_file.parent.mkdir(parents=True, exist_ok=True)
         with open(trace_file, "w") as f:
             f.write(params_json)
 
-        spawn_result = await orchestrator_mod.spawn_detached(
-            cmd=sys.executable,
-            args=[
+        from rye.utils.detached import launch_detached
+        spawn_result = await launch_detached(
+            [
+                sys.executable,
                 str(Path(__file__).resolve()),
                 "--project-path", str(proj_path),
                 "--thread-id", thread_id,
                 "--pre-registered",
             ],
-            log_path=spawn_log,
-            envs=_spawn_env(thread_id),
+            thread_id=thread_id,
+            log_dir=thread_dir,
             input_data=params_json,
         )
 
-        if not spawn_result.get("success"):
+        if spawn_result.get("success"):
+            registry.update_pid(thread_id, spawn_result["pid"])
+        else:
             registry.update_status(thread_id, "error")
             return {
                 "success": False,
@@ -1015,7 +997,12 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "pid": spawn_result["pid"],
         }
 
-    # 14. Run thread synchronously
+    # 14. Set env var so in-process children discover this thread as parent
+    # Only needed for sync execution — async children get parent via child_params.
+    _prev_parent_env = os.environ.get("RYE_PARENT_THREAD_ID")
+    os.environ["RYE_PARENT_THREAD_ID"] = thread_id
+
+    # 15. Run thread synchronously
     # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
     try:
         result = await runner.run(

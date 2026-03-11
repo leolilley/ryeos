@@ -63,14 +63,14 @@ Orchestrator pattern — runs a build directive, then reviews the output. Retrie
        so the build agent understands what to avoid.
 
     3. Spawn the build directive as a thread:
-       `rye_execute(item_type="directive", item_id="{input:directive_id}", parameters={"thread": true, ...built_params})`
+       `rye_execute(item_type="directive", item_id="{input:directive_id}", parameters={"thread": "fork", ...built_params})`
        Wait for the thread to complete. Record the thread_id.
 
     4. Get the list of changed files from git:
        `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "status"})`
 
     5. Spawn the review directive:
-       `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": true, "thread_id": "<build_thread_id>", "changed_files": <changed_files>})`
+       `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": "fork", "thread_id": "<build_thread_id>", "changed_files": <changed_files>})`
        Wait for the review thread to complete.
 
     6. Check the review verdict:
