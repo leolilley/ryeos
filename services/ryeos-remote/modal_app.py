@@ -27,7 +27,7 @@ image = (
     .pip_install(
         # Standard bundle (ryeos → ryeos-core → ryeos-engine → lillux)
         # Includes thread_directive for directive forking on remote
-        "ryeos==0.1.13",
+        "ryeos==0.1.14",
         # Server
         "fastapi>=0.109.0",
         "uvicorn[standard]>=0.27.0",
