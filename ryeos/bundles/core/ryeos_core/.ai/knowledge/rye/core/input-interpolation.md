@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:707a27b5a059c4d591d203bd7c1b1801f93da6a1e7fc82af1f3bc68c2b437705:21L4m9d9FjIqbPdHZPt4_Ah3WfJ9jgFhImwx3G5wVyITGLZK7vzVe0aFuNVb5k7BZ7dKR8L70riFivHuU7S9Cg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T07:20:18Z:5dabc0be78d4cae294446382a629e83c474b39cbb1db0a2719d4887af622253f:lwhYG91sSABfs4R0nqSGwZcbQM4ByIA0sn5b_1hpvldFeCxANz4fiTr7OMB7Il6DvYbj5BHKdD2FkeI7ueH9BQ==:4b987fd4e40303ac -->
 ```yaml
 name: input-interpolation
 title: Input Interpolation
@@ -91,7 +91,7 @@ Inputs are declared in the directive's XML metadata fence:
 
   <step name="write_file">
     Write to .ai/directives/{input:category}/{input:name}.md
-    <execute item_type="tool" item_id="rye/file-system/fs_write">
+    <execute item_type="tool" item_id="rye/file-system/write">
       <param name="path" value=".ai/directives/{input:category}/{input:name}.md" />
     </execute>
   </step>

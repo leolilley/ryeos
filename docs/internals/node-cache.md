@@ -11,7 +11,7 @@ version: "1.0.0"
 
 ## Overview
 
-Node execution cache skips re-execution when inputs haven't changed. Opt-in per node via `cache: true` in graph YAML. Default is `false` (safe — external actions are not cached). Cache keys are deterministic hashes of the interpolated action plus config state.
+Node execution cache skips re-execution when inputs haven't changed. Opt-in per node via `cache_result: true` in graph YAML. Default is `false` (safe — external actions are not cached). Cache keys are deterministic hashes of the interpolated action plus config state.
 
 ## Cache Key Composition
 
@@ -40,12 +40,12 @@ The `config_snapshot_hash` comes from `compute_agent_config_snapshot()` in `rye/
 
 ## Enabling Caching
 
-Add `cache: true` to any node in a graph YAML:
+Add `cache_result: true` to any node in a graph YAML:
 
 ```yaml
 nodes:
   summarize:
-    cache: true
+    cache_result: true
     action:
       primary: execute
       item_type: tool
@@ -113,8 +113,8 @@ Config files included: `agent.yaml`, `resilience.yaml`, `coordination.yaml`, `ho
 | `gate` | No | Pure routing, no execution cost |
 | `return` | No | Terminal, no execution |
 | `foreach` | Per-iteration | Each iteration cached separately |
-| Action → pure tool | Yes (if `cache: true`) | Deterministic tool with no side effects |
-| Action → `thread_directive` | Yes (if `cache: true`) | Include config_snapshot_hash in key |
+| Action → pure tool | Yes (if `cache_result: true`) | Deterministic tool with no side effects |
+| Action → `thread_directive` | Yes (if `cache_result: true`) | Include config_snapshot_hash in key |
 | Action → external API | No | Side effects, time-sensitive |
 
 ## Cache Invalidation

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:35:37Z:8500aad691e30bcd121630422bf92e94e1bdce6e30b41337aeacb1d8d7253c40:80sdhFoPCG8qgdTMwIix_20wf_ql4aLsMjIVRhnTns0aDUGhiE5W98Xu1swG--WP_5HQ8ncl7SH_jUeb3VQoDA==:4b987fd4e40303ac
+# rye:signed:2026-03-11T06:48:33Z:c0c5d8e5cf6624842d225551f3a81b8f775e36c66b8295e14215051d20bf0ba1:x5JdrSMKmkt4Ft9OZtS5KFJO5CMEW_5nlCSiwLJP0fL2Br1XS5SVZgJIs5eylrA-nlItXeK2x2NQXfqanYkpBw==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -177,7 +177,6 @@ config:
 
     # ── Phase 3: Collect and evaluate ───────────────────────────────
     collect_analyses:
-      cache: true
       action:
         primary: execute
         item_type: tool

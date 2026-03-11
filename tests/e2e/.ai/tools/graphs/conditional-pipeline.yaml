@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:14:30Z:5098d21758b10efb2440ca8d039b88e31cf76e2fcc347f3a4d498e072f6dd5b5:A5dkTHK2R82SWosqdkw8qy5cUJTOG70Bp8WIhcjd0ONOJFXUtTIITT47_5z9xTxU3xDnxS5IeqYMiCzWzFrICQ==:4b987fd4e40303ac
+# rye:signed:2026-03-11T06:52:28Z:e66cbf330a1d8a59fbdb5e622cfe911d14a02b93f554c781cb44a042e9fe68a1:nGdVWBsGme8kRFYqmFT5zLooGAbzGINIyR0w87iorY8PJI-3AS1aCNGirFK_BQgrdRefWRniw6jByc08hYkPAg==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -88,7 +88,7 @@ config:
 
     # Second pass: summarize the analysis
     run_summary:
-      cache: true
+      cache_result: true
       action:
         primary: execute
         item_type: tool

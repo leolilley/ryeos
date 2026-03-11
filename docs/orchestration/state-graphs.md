@@ -823,12 +823,12 @@ Cross-run provenance: same `node_input_hash` across runs = same inputs.
 
 ## Node Caching
 
-Nodes can opt into execution caching with `cache: true`. When enabled, the walker computes a deterministic cache key from the interpolated action, graph hash, lockfile hash, and config snapshot hash. If the cache key matches a previous execution, the cached result is used without re-execution.
+Nodes can opt into execution caching with `cache_result: true`. When enabled, the walker computes a deterministic cache key from the interpolated action, graph hash, lockfile hash, and config snapshot hash. If the cache key matches a previous execution, the cached result is used without re-execution.
 
 ```yaml
 nodes:
   summarize:
-    cache: true
+    cache_result: true
     action:
       primary: execute
       item_type: tool

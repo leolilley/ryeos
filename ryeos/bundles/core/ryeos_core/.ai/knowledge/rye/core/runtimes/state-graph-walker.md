@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:98fa3e4f9d43cecacc37e25256c3b8f6ec24b595af59eacf5eb537faba9d5ed1:U7ZJHmQB_IYTB2yAPNfCs2B6uoZQR5wDP-nSgUzqvCHcf6Fz2bUjBsyNHH8yIPKsW79RP3knMG9kKNSBqRV6DQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-11T06:53:16Z:76be10a81fcbc4bfb59b33712fd0576efa318d32ae1cc662109dd14bf65d16c6:vl9oDVqgfUnftP6aa5Xh6cLDPIIGCUWPl4hdPkVw1LUg2cRiDrKpJ8xailFGjo3RZzldCGA70VykeZlC4uJkDw==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -53,8 +53,8 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
    c. If hook returns retry → re-execute node (up to max_retries)
    d. Set state._last_error
    e. Check on_error edge → route to recovery node
-   f. Check error_mode: "fail" → terminate, "continue" → skip assign
-9. Apply assign — interpolate each expression, write to state
+   f. Check error_mode: "fail" → terminate, "continue" → track error in suppressed_errors list, skip assign
+   9. Apply assign — interpolate each expression, write to state
 10. Evaluate edges via _evaluate_edges()
 11. Persist state (signed knowledge item, atomic write)
 12. Fire "after_step" hooks
@@ -63,7 +63,7 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
 14. Loop back to step 1
 ```
 
-Terminates on: `type: return` node, missing `next` (edge dead-end), `max_steps` exceeded, error with `fail` mode, or cancellation.
+Terminates on: `type: return` node, missing `next` (edge dead-end), `max_steps` exceeded, error with `fail` mode, or cancellation. On return, if any errors were suppressed via `on_error: continue`, the final status is `completed_with_errors` (not `completed`), and the result includes `errors_suppressed` count and `errors` list.
 
 ## Dispatch Pipeline
 
@@ -199,6 +199,46 @@ my_node:
 
 After iteration, the `as` variable is cleaned up from state.
 
+## Node Result Caching (`cache_result`)
+
+Nodes can opt into result caching with `cache_result: true`. This caches the **return value only** — the unwrapped result dict from the action dispatch. It does **not** replay filesystem side effects.
+
+```yaml
+my_node:
+  cache_result: true  # ← caches return value, NOT side effects
+  action:
+    primary: execute
+    item_type: tool
+    item_id: rye/bash
+    params:
+      command: "echo hello"
+```
+
+**When to use:** Pure computation nodes where the action has no side effects — the result is fully captured in the return value (e.g., hash computations, API lookups, read-only file reads).
+
+**When NOT to use:** Nodes that write files, mutate state on disk, or produce outputs consumed by downstream nodes via the filesystem. A cache hit returns the prior result but skips re-execution, so files won't be created/updated.
+
+Cache key is computed from: `graph_hash + node_name + interpolated_action + lockfile_hash + config_snapshot_hash`. Cache entries are stored as CAS objects in `.ai/objects/cache/nodes/`.
+
+## Error Visibility (`completed_with_errors`)
+
+When a graph uses `on_error: continue` and one or more nodes fail, the walker tracks every suppressed error in a runtime `suppressed_errors` list. At graph completion:
+
+- **Status** is set to `completed_with_errors` (not `completed`)
+- **Result dict** includes `errors_suppressed` (count) and `errors` (list of `{step, node, error}` dicts)
+- **Execution snapshot** (CAS) includes the `errors` list
+- **Node receipts** (CAS) include `error` field for failed nodes
+- **Thread registry** stores `completed_with_errors` as a terminal status
+- **`processes/status`** surfaces `errors_suppressed` count
+- **`processes/list`** includes `errors_suppressed` in per-run summaries
+- **`processes/steps`** returns the full step-by-step summary with error/cache_hit per node
+
+Use `processes/steps` to inspect a graph run without parsing raw JSONL:
+
+```
+rye execute tool rye/core/processes/steps --run_id <graph_run_id>
+```
+
 ## State Persistence
 
 `_persist_state()` writes state as a signed knowledge item:
@@ -318,4 +358,5 @@ Checked against `os.environ` before execution starts. Returns list of missing va
 | `.ai/tools/rye/agent/threads/loaders/error_loader.py` | Error classification for hook context |
 | `.ai/tools/rye/agent/threads/loaders/hooks_loader.py` | Builtin + infra hook loading |
 | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` | Run registration + status tracking |
+| `.ai/tools/rye/core/processes/steps.py` | Step-by-step transcript summary |
 | `ryeos-cli/rye_cli/verbs/graph.py` | CLI integration |
