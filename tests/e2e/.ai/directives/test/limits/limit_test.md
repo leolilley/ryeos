@@ -14,7 +14,7 @@ Test that the default_escalate_limit hook fires when turns limit is exceeded.
   </metadata>
   <permissions>
     <execute><tool>rye.file-system.*</tool></execute>
-    <execute><tool>rye.primary-tools.*</tool></execute>
+    <execute><tool>rye.primary-actions.*</tool></execute>
   </permissions>
   <outputs>
     <success>Should be escalated due to turns limit.</success>

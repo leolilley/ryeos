@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T06:52:28Z:f76c932100e424d8912a4332d5a61c4d025aec6e171552ba616917238e6adf6a:I0u_XwYyKo1SCB05QIqMk6kG4fRhQ1D5lgrIPHgOKfjIG2LveR-fRUOJF0Mo19igG3ngS7SpU5g_p8pepIZFDw==:4b987fd4e40303ac
+# rye:signed:2026-03-12T00:19:18Z:963cf1747eab9c6b9d08e1389e26b821ca572858a5fd06c815a19053a293bd24:Xqf3mHKhp3U2b9BKwRCsoQNfE0vzdC3Yde0SmgsDOVFxXIX9HDHlb8QHfBVdZMhgT5feD-0lT6NzJ0PMcRTpAw==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -526,7 +526,7 @@ def _node_thread(node: Dict) -> str:
 async def _dispatch_action(
     action: Dict, project_path: str, *, thread: str = "inline",
 ) -> Dict:
-    """Dispatch a node action through the appropriate primary tool.
+    """Dispatch a node action through the appropriate primary action.
 
     Same action dict format as ToolDispatcher.dispatch().  All core tool
     handles are async — we await them directly.

@@ -202,7 +202,7 @@ class TestFormatToolSignature:
         assert "count*" not in sig
 
 
-_MOCK_PRIMARY_TOOLS = [{
+_MOCK_PRIMARY_ACTIONS = [{
     "name": "rye_execute",
     "_item_id": "rye/execute",
     "schema": {"type": "object", "properties": {
@@ -258,7 +258,7 @@ class TestPreloadToolSchemas:
                 with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
                     result = _tsl.preload_tool_schemas(
                         ["rye.execute.tool.rye.bash.*"], tool_project,
-                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
         assert result["tool_defs"]
@@ -269,8 +269,8 @@ class TestPreloadToolSchemas:
         assert bash_def["name"] == "rye_bash_bash"
         assert bash_def["_primary"] == "execute"
 
-    def test_non_tool_caps_without_primary_tools(self, tool_project):
-        """Without primary_tools arg, search/load/sign caps produce no output."""
+    def test_non_tool_caps_without_primary_actions(self, tool_project):
+        """Without primary_actions arg, search/load/sign caps produce no output."""
         result = _tsl.preload_tool_schemas(
             ["rye.search.*", "rye.load.knowledge.*"], tool_project,
         )
@@ -291,7 +291,7 @@ class TestPreloadToolSchemas:
                     result = _tsl.preload_tool_schemas(
                         ["rye.execute.tool.rye.bash.*", "rye.execute.tool.rye.file-system.*"],
                         tool_project, max_tokens=10,
-                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
         # Very tight budget — can't fit everything
@@ -305,7 +305,7 @@ class TestPreloadToolSchemas:
                 with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
                     result = _tsl.preload_tool_schemas(
                         ["rye.execute.tool.rye.file-system.read"], tool_project,
-                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
         ids = _tool_ids(result["tool_defs"])
@@ -324,14 +324,14 @@ class TestPreloadToolSchemas:
                             "rye.execute.tool.rye.bash.*",
                         ],
                         tool_project,
-                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
         ids = _tool_ids(result["tool_defs"])
         assert ids.count("rye/bash/bash") == 1
 
-    def test_primary_tools_registered_with_correct_primary(self, tool_project):
-        """Primary tools (search, load, sign) get _primary matching their action."""
+    def test_primary_actions_registered_with_correct_primary(self, tool_project):
+        """Primary actions (search, load, sign) get _primary matching their action."""
         from unittest.mock import patch
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
@@ -340,7 +340,7 @@ class TestPreloadToolSchemas:
                     result = _tsl.preload_tool_schemas(
                         ["rye.execute.tool.rye.bash.*", "rye.search.*", "rye.load.*"],
                         tool_project,
-                        primary_tools=_MOCK_PRIMARY_TOOLS,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
         by_name = {t["name"]: t for t in result["tool_defs"]}

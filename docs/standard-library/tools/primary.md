@@ -1,13 +1,13 @@
 ```yaml
 id: tools-primary
-title: "Primary Tools"
+title: "Primary Actions"
 description: The four core MCP tools — search, load, execute, sign — that everything in Rye OS builds on
 category: standard-library/tools
 tags: [tools, primary, search, load, execute, sign, mcp]
 version: "1.0.0"
 ```
 
-# Primary Tools
+# Primary Actions
 
 **Namespace:** `rye/`
 **Runtime:** `python/script`

@@ -14,7 +14,7 @@ Test that spawn limit enforcement works. This directive has a low spawns limit.
   </metadata>
   <permissions>
     <execute><tool>rye.file-system.*</tool></execute>
-    <execute><tool>rye.primary-tools.*</tool></execute>
+    <execute><tool>rye.primary-actions.*</tool></execute>
   </permissions>
   <outputs>
     <success>Directive should complete. Spawn limit is tested programmatically.</success>

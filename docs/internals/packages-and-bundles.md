@@ -155,7 +155,7 @@ Use `ryeos-core` when you want the engine plus core items but don't need the ful
 **Entry point:** `ryeos = "ryeos_std.bundle:get_bundle"`
 **Categories:** `["rye"]`
 
-The standard installation. A data-only bundle that ships the standard library: bash tool, file-system operations, MCP tools, agent thread system, primary tool wrappers, and creation directives. Since it depends on `ryeos-core`, installing `ryeos` gives you the engine + core + standard items.
+The standard installation. A data-only bundle that ships the standard library: bash tool, file-system operations, MCP tools, agent thread system, primary action wrappers, and creation directives. Since it depends on `ryeos-core`, installing `ryeos` gives you the engine + core + standard items.
 
 Web and code tools are available as optional extras (`ryeos[web]`, `ryeos[code]`) or as standalone packages.
 

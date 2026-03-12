@@ -83,7 +83,7 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `lillux`       | Microkernel — subprocess, HTTP, signing, integrity primitives       |
 | `ryeos-engine` | Execution engine — resolver, executor, metadata                     |
 | `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only) |
-| `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary tools      |
+| `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions    |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
 | `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the four primitives |
 | `ryeos-remote` | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |

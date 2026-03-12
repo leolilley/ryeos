@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:6dfef20f9c49624b0ebfdd1d3671f9edaf8fd385452b694bd8391e0045b0dbd9:hvcbUfMrm6zjXCOaS_n1LTQStg8db4MedCoHr-gIw9uOMikdnOxaAC9CKj8Ft-SyJ0dMJIenNHAPDW_Sy6O2Bw==:4b987fd4e40303ac
+# rye:signed:2026-03-12T00:19:18Z:ab4e395c544c964a2fc3b60bf78b6e4b54cb8ade8db6f926af2571cfa0397310:e7fei8VzXPsjppIKplPYGFSHk82xcb748S4uO6C1KV3jE2S14p08ecqVoHzASUQQGDBT93Br3ghTq9pV0spADQ==:4b987fd4e40303ac
 # PROTECTED: Core RYE tool - do not override
 """
 Capability Token System
@@ -377,7 +377,7 @@ def attenuate_token(
 #   rye.*  (god mode)
 # ---------------------------------------------------------------------------
 
-PRIMARY_TOOLS = ("execute", "search", "load", "sign")
+PRIMARY_ACTIONS = ("execute", "search", "load", "sign")
 ITEM_TYPES = ("tool", "directive", "knowledge")
 
 PRIMARY_IMPLIES = {
@@ -390,7 +390,7 @@ def item_id_to_cap(primary: str, item_type: str, item_id: str) -> str:
     """Convert item_id to capability string.
 
     Args:
-        primary: Primary tool (execute, search, load, sign)
+        primary: Primary action (execute, search, load, sign)
         item_type: Item type (tool, directive, knowledge)
         item_id: Item ID with / separators (e.g., "rye/file-system/fs_write")
 
@@ -420,7 +420,7 @@ def parse_capability(cap: str) -> Optional[Dict[str, Any]]:
         return {"primary": "*", "item_type": "*", "specifics": "*", "is_wildcard": True}
 
     primary = parts[0]
-    if primary not in PRIMARY_TOOLS:
+    if primary not in PRIMARY_ACTIONS:
         return None
 
     if len(parts) == 1:
@@ -503,7 +503,7 @@ def expand_capabilities(caps) -> Set[str]:
 
             # God mode implies everything
             if primary == "*":
-                for p in PRIMARY_TOOLS:
+                for p in PRIMARY_ACTIONS:
                     new_cap = f"rye.{p}.*"
                     if new_cap not in expanded:
                         expanded.add(new_cap)
@@ -552,11 +552,11 @@ def check_all_capabilities(granted_caps, required_caps) -> Tuple[bool, List[str]
     return (len(missing) == 0, missing)
 
 
-def get_primary_tools_for_caps(caps) -> Set[str]:
-    """Determine which primary tools (execute/search/load/sign) are needed.
+def get_primary_actions_for_caps(caps) -> Set[str]:
+    """Determine which primary actions (execute/search/load/sign) are needed.
 
-    Parses each capability, extracts the primary tool name.
-    Returns set of primary tool names.
+    Parses each capability, extracts the primary action name.
+    Returns set of primary action names.
     """
     expanded = expand_capabilities(caps)
     primaries: Set[str] = set()
@@ -565,7 +565,7 @@ def get_primary_tools_for_caps(caps) -> Set[str]:
         if not parsed:
             continue
         if parsed["primary"] == "*":
-            primaries.update(PRIMARY_TOOLS)
+            primaries.update(PRIMARY_ACTIONS)
         else:
             primaries.add(parsed["primary"])
     return primaries

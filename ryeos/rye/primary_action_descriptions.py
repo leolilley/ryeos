@@ -1,7 +1,7 @@
-"""Primary tool descriptions — single source of truth.
+"""Primary action descriptions — single source of truth.
 
 Used by rye-mcp/server.py (MCP transport layer) and
-rye/rye/.ai/tools/rye/primary/ (in-thread primary tools).
+rye/rye/.ai/tools/rye/primary/ (in-thread primary actions).
 """
 
 # ---------------------------------------------------------------------------

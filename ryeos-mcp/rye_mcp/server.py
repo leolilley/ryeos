@@ -19,7 +19,7 @@ from mcp.server.lowlevel import NotificationOptions
 from mcp.types import Tool, TextContent
 
 from rye.constants import ItemType, Action
-from rye.primary_tool_descriptions import (
+from rye.primary_action_descriptions import (
     EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
     EXECUTE_PARAMETERS_DESC,

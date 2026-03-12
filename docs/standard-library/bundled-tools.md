@@ -12,7 +12,7 @@ version: "1.0.0"
 Rye OS ships a standard library of tools inside the `ryeos` package at `ryeos/rye/.ai/tools/rye/`. These live in the **system space** and are always available — no installation required. Tools are organized into two tiers: **agent-facing tools** that users interact with directly, and **infrastructure tools** that power the system internally.
 
 Tools are distributed across multiple bundles:
-- **Standard bundle** (`ryeos`) — file-system, bash, MCP, primary tools, agent system, infrastructure
+- **Standard bundle** (`ryeos`) — file-system, bash, MCP, primary actions, agent system, infrastructure
 - **Web bundle** (`ryeos-web`, or `pip install ryeos[web]`) — browser automation, fetch, search
 - **Code bundle** (`ryeos-code`, or `pip install ryeos[code]`) — npm, diagnostics, typescript, LSP
 
@@ -392,7 +392,7 @@ Output sinks for streaming events:
 - **bundler.py** — Create and verify `.ai/` bundles
 - **collect.yaml** — Collection config
 
-### Primary Tools (`rye/`)
+### Primary Actions (`rye/`)
 
 Wrappers around the 4 MCP tools, used inside threads:
 

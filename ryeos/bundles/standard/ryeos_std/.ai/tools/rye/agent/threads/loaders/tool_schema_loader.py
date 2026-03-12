@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:6998af8f0dfbe9b2bbc19d06cd4c2562f89f72af820f6a43da4333efc7e97aa2:66NVXku7JoY2gn5XtqviWttFL0hotbf6MyMEZtjDYjwp3efisO1v2LzGjpAjRFruitL_MTQSDmyNJu2XLsoCCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-12T00:19:18Z:b9f229e702247d2e8b40b4a301c1ab72c031034cf89d7f061a154ae450a74ebb:veyfiFTItM9bNcLOojG_maxpwuKuxH6Rp1dGBpmO2RKRUyghbaR35vdbLfPxmgvDDpsVCSkKblw759Zw0KixDg==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -450,11 +450,11 @@ def preload_tool_schemas(
     capabilities: list,
     project_path: Path,
     max_tokens: int = 2000,
-    primary_tools: Optional[List[dict]] = None,
+    primary_actions: Optional[List[dict]] = None,
 ) -> dict:
     """Build dynamic tool definitions from resolved capability strings.
 
-    Resolves ALL tools uniformly — primary tools (search, load, sign) and
+    Resolves ALL tools uniformly — primary actions (search, load, sign) and
     non-primary tools (file-system/ls, bash, etc.) are treated as peers.
     Each tool gets a flattened API name and a _primary field for dispatch routing.
 
@@ -493,19 +493,19 @@ def preload_tool_schemas(
     if not tool_patterns and not granted_actions:
         return {"tool_defs": [], "capabilities_summary": []}
 
-    # Step 2: Build tool defs for primary tools (search, load, sign).
+    # Step 2: Build tool defs for primary actions (search, load, sign).
     # rye_execute is NOT registered as an agent tool — its functionality
     # is exposed via individual tool defs with _primary="execute".
     tool_defs: List[dict] = []
     seen: set = set()
     capabilities_summary: List[str] = []
 
-    if primary_tools:
+    if primary_actions:
         for action in _PRIMARY_ACTIONS:
             if action not in granted_actions:
                 continue
             primary_name = f"rye_{action}"
-            for t in primary_tools:
+            for t in primary_actions:
                 if t["name"] == primary_name:
                     tool_id = t["_item_id"]
                     api_name = _tool_id_to_api_name(tool_id)

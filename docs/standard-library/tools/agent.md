@@ -514,7 +514,7 @@ Define what each capability string allows:
 
 | File            | Domain                          |
 | --------------- | ------------------------------- |
-| `primary.yaml`  | Core primary tool capabilities  |
+| `primary.yaml`  | Core primary action capabilities |
 | `agent.yaml`    | Agent/thread tool capabilities  |
 | `fs.yaml`       | File system capabilities        |
 | `db.yaml`       | Database capabilities           |

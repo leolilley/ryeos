@@ -32,7 +32,7 @@ check_all_capabilities = capability_tokens_module.check_all_capabilities
 item_id_to_cap = capability_tokens_module.item_id_to_cap
 parse_capability = capability_tokens_module.parse_capability
 cap_matches = capability_tokens_module.cap_matches
-get_primary_tools_for_caps = capability_tokens_module.get_primary_tools_for_caps
+get_primary_actions_for_caps = capability_tokens_module.get_primary_actions_for_caps
 attenuate_token = capability_tokens_module.attenuate_token
 is_system_capability = capability_tokens_module.is_system_capability
 load_capabilities = capability_tokens_module.load_capabilities
@@ -331,9 +331,9 @@ class TestCapabilityParsing:
         cap = item_id_to_cap("execute", "tool", "rye/file-system/fs_write")
         assert cap == "rye.execute.tool.rye.file-system.fs_write"
     
-    def test_get_primary_tools(self):
+    def test_get_primary_actions(self):
         caps = ["rye.execute.tool.rye.file-system.*"]
-        primaries = get_primary_tools_for_caps(caps)
+        primaries = get_primary_actions_for_caps(caps)
         assert "execute" in primaries
         assert "search" in primaries
         assert "load" in primaries

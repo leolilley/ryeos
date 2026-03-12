@@ -1,7 +1,7 @@
 [project]
 name = "ryeos"
 version = "0.1.14"
-description = "RYE Standard Bundle — agent, bash, file-system, MCP, and primary tools"
+description = "RYE Standard Bundle — agent, bash, file-system, MCP, and primary actions"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Leo Lilley", email = "leo.lml.lilley@gmail.com"}]

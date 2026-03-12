@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:039ff536780ef616b1643ffa44144719b912a00f22c593f6ca299196830d9637:KP93U3A18mkW4HJr6dvMFwPOBLH29BnpOfzBFWQVXVpC9KBrfI0Rd-2MZQBHDPoBae9xSjxCBNmWRq-HWn2pDA==:4b987fd4e40303ac
+# rye:signed:2026-03-12T00:19:18Z:9adf78218eb75990c65f3e9f6b1465c0977d8a2326cc0ed114904dac98f7d9e0:O7QAD4fBdKCS1TcFZpYVDafDmCNrHLSt04h0kIq3VaaPzIUodf7_9D6Ts2b80mnoI33a8pOdD_DEl-H_92ONAw==:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
@@ -23,7 +23,7 @@ _THREADS_ROOT = Path(__file__).resolve().parent.parent
 
 
 class ToolDispatcher:
-    """Dispatch primary tool actions to core RYE tools.
+    """Dispatch primary actions to core RYE tools.
 
     Translates hook/action dict format to core tool handle() kwargs.
 

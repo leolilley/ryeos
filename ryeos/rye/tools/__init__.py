@@ -1,4 +1,4 @@
-"""RYE MCP Tools - The 5 primary tools exposed to LLMs."""
+"""RYE MCP Tools - The 4 primary actions exposed to LLMs."""
 
 from rye.tools.search import SearchTool
 from rye.tools.load import LoadTool
