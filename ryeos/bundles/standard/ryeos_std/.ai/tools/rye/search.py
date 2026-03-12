@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:bbecefc4ee5757d4acd629db45aa58b6ed4f2f3f496aa9350745cfad53564554:qE6bULWoMPMIa8PojPeblEaNBmyRBdbps0y0mDt6F2wTCZCmvptLRl4LYvCF4WQUgsNAJD2UJ9nuk25CR4IlBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-12T01:43:41Z:dd6c555d4f6a5511e1f5a4b420d3f0df8786f981bc379ff115c3da3cf6f838e9:0Qbnqnnmx2F-2v6wNyEPbkBZEzRpeKU0ajQs0OMQwkD-K4ySrriTFJKH_X8d0svNkHCN-jt_DWgP-iTFFnQvAQ==:4b987fd4e40303ac
 """Search for directives, tools, or knowledge items."""
 
 import argparse
@@ -7,11 +7,11 @@ import sys
 import asyncio
 from pathlib import Path
 
-from rye.primary_tool_descriptions import (
+from rye.primary_action_descriptions import (
     SEARCH_LIMIT_DESC,
     SEARCH_QUERY_DESC,
     SEARCH_SCOPE_DESC,
-    SEARCH_SPACE_DESC,
+    SEARCH_SOURCE_DESC,
 )
 
 __version__ = "1.0.0"
@@ -31,11 +31,11 @@ CONFIG_SCHEMA = {
             "type": "string",
             "description": SEARCH_SCOPE_DESC,
         },
-        "space": {
+        "source": {
             "type": "string",
-            "enum": ["project", "user", "system", "all"],
+            "enum": ["project", "user", "system", "local", "registry", "all"],
             "default": "all",
-            "description": SEARCH_SPACE_DESC,
+            "description": SEARCH_SOURCE_DESC,
         },
         "limit": {
             "type": "integer",
@@ -56,7 +56,7 @@ def execute(params: dict, project_path: str) -> dict:
             query=params["query"],
             scope=params["scope"],
             project_path=project_path,
-            space=params.get("space", "all"),
+            source=params.get("source", "all"),
             limit=params.get("limit", 10),
         ))
         return result

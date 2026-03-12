@@ -1,4 +1,4 @@
-# rye:signed:2026-03-12T00:19:18Z:b9f229e702247d2e8b40b4a301c1ab72c031034cf89d7f061a154ae450a74ebb:veyfiFTItM9bNcLOojG_maxpwuKuxH6Rp1dGBpmO2RKRUyghbaR35vdbLfPxmgvDDpsVCSkKblw759Zw0KixDg==:4b987fd4e40303ac
+# rye:signed:2026-03-12T01:26:50Z:8aee044bef0a32ab97a4d0cf36bac2c0d608ad82ea69e8412c1534463e8f463a:LOoc13ROc1gLiIq9p0dgysZQLLsnDDHFo6vNGQniTzySEWSyRHu9pJ0UX2ye24391OgqsGSm6214of18xbiUCQ==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -149,7 +149,7 @@ def _tool_id_to_api_name(tool_id: str) -> str:
 def _strip_xml_markup(text: str) -> str:
     """Strip XML/HTML tags and truncate to first sentence.
 
-    Primary tool CONFIG_SCHEMA descriptions contain nested markup like
+    Primary action CONFIG_SCHEMA descriptions contain nested markup like
     <description>...</description><examples>...</examples><rules>...</rules>.
     Extract just the first sentence for compact capabilities output.
     """
@@ -455,7 +455,7 @@ def preload_tool_schemas(
     """Build dynamic tool definitions from resolved capability strings.
 
     Resolves ALL tools uniformly — primary actions (search, load, sign) and
-    non-primary tools (file-system/ls, bash, etc.) are treated as peers.
+    resolved tools (file-system/ls, bash, etc.) are treated as peers.
     Each tool gets a flattened API name and a _primary field for dispatch routing.
 
     The _primary field comes from the capability action:
@@ -535,14 +535,14 @@ def preload_tool_schemas(
                         capabilities_summary.append(api_name)
                     break
 
-    # Step 3: Resolve non-primary tool schemas for execute.tool patterns
+    # Step 3: Resolve executable tool schemas for execute.tool patterns
     resolver = ToolResolver(project_path)
     search_paths = resolver.get_search_paths()
     extensions = get_tool_extensions(project_path)
     router = ParserRouter(project_path)
     parsers_map = get_parsers_map(project_path)
     tool_patterns.sort(key=_pattern_specificity, reverse=True)
-    non_primary_tools: List[dict] = []
+    resolved_tools: List[dict] = []
 
     for pattern in tool_patterns:
         matches = _resolve_tools_for_pattern(
@@ -550,16 +550,16 @@ def preload_tool_schemas(
         )
         for m in matches:
             seen.add(m["tool_id"])
-        non_primary_tools.extend(matches)
+        resolved_tools.extend(matches)
 
-    # Step 4: Build tool defs for non-primary tools within token budget.
+    # Step 4: Build tool defs for resolved tools within token budget.
     max_chars = max_tokens * _CHARS_PER_TOKEN
     current_chars = 0
-    # Estimate chars already used by primary tool defs
+    # Estimate chars already used by primary action defs
     for td in tool_defs:
         current_chars += len(str(td.get("schema", {}))) + len(td.get("description", ""))
 
-    for entry in non_primary_tools:
+    for entry in resolved_tools:
         tool_id = entry["tool_id"]
         api_name = _tool_id_to_api_name(tool_id)
         meta = entry["metadata"]

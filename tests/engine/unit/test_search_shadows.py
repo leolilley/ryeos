@@ -120,7 +120,7 @@ class TestSearchShadowDetection:
             scope="rye.search.directive.*",
             query="*",
             project_path=str(multi_space_project),
-            space="all",
+            source="all",
         )
 
         assert "error" not in result

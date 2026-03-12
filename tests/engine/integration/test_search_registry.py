@@ -77,10 +77,10 @@ def _mock_registry_provider():
 
 @pytest.mark.asyncio
 class TestRegistrySearchSpace:
-    """Test space=registry and space=all include registry results."""
+    """Test source=registry and source=all include registry results."""
 
     async def test_space_registry_calls_provider(self, temp_project):
-        """space=registry only returns registry results, no local."""
+        """source=registry only returns registry results, no local."""
         provider = _mock_registry_provider()
 
         with patch(
@@ -92,7 +92,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="bootstrap",
                 project_path=str(temp_project),
-                space="registry",
+                source="registry",
             )
 
         assert "error" not in result
@@ -104,7 +104,7 @@ class TestRegistrySearchSpace:
         assert any(r["id"] == "acme/core/bootstrap" for r in result["results"])
 
     async def test_space_all_includes_registry(self, temp_project):
-        """space=all merges local and registry results."""
+        """source=all merges local and registry results."""
         provider = _mock_registry_provider()
 
         with patch(
@@ -116,7 +116,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="bootstrap",
                 project_path=str(temp_project),
-                space="all",
+                source="all",
                 limit=100,
             )
 
@@ -126,7 +126,7 @@ class TestRegistrySearchSpace:
         assert "registry" in sources
 
     async def test_space_local_excludes_registry(self, temp_project):
-        """space=local searches all local spaces but not registry."""
+        """source=local searches all local spaces but not registry."""
         provider = _mock_registry_provider()
 
         with patch(
@@ -138,7 +138,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="local_item",
                 project_path=str(temp_project),
-                space="local",
+                source="local",
             )
 
         assert "error" not in result
@@ -146,7 +146,7 @@ class TestRegistrySearchSpace:
         assert all(r["source"] != "registry" for r in result["results"])
 
     async def test_space_project_excludes_registry(self, temp_project):
-        """space=project does not call registry."""
+        """source=project does not call registry."""
         provider = _mock_registry_provider()
 
         with patch(
@@ -158,7 +158,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="local_item",
                 project_path=str(temp_project),
-                space="project",
+                source="project",
             )
 
         assert "error" not in result
@@ -178,7 +178,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="local_item",
                 project_path=str(temp_project),
-                space="all",
+                source="all",
             )
 
         assert "error" not in result
@@ -196,7 +196,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="local_item",
                 project_path=str(temp_project),
-                space="all",
+                source="all",
             )
 
         assert "error" not in result
@@ -214,7 +214,7 @@ class TestRegistrySearchSpace:
                 scope="directive",
                 query="bootstrap",
                 project_path=str(temp_project),
-                space="registry",
+                source="registry",
             )
 
         assert len(result["results"]) == 1

@@ -1,11 +1,11 @@
-# rye:signed:2026-03-10T04:07:13Z:0918db59d96596ad820643a308213b917683204aca3f8c986f1e428caf999c05:RzzGIWYZZGwaqbrflLbdyN7LbxcQ6iZlaFTly40oHSwIdYy6Xn82bX0v5vfYTGCfHuVhxp0Iq5hNO_4w38rMBg==:4b987fd4e40303ac
+# rye:signed:2026-03-12T01:20:23Z:47c4e354dd363f312fc9672740c7d7ec7cf0d3924233ee93277eb32c6786f124:CXPBcYq6VVaHKj2-8lsHK17W3g9YH815Ya33SxaHGnshy43hiJQBMhnomNjeIaqe-W4gtWssDBHoqBH04vNMCw==:4b987fd4e40303ac
 """Load item content for inspection."""
 
 import argparse
 import json
 import asyncio
 
-from rye.primary_tool_descriptions import (
+from rye.primary_action_descriptions import (
     ITEM_ID_DESC,
     ITEM_TYPE_DESC,
     LOAD_DESTINATION_DESC,
@@ -32,13 +32,17 @@ CONFIG_SCHEMA = {
         },
         "source": {
             "type": "string",
-            "enum": ["project", "user", "system"],
+            "enum": ["project", "user", "system", "registry"],
             "description": LOAD_SOURCE_DESC,
         },
         "destination": {
             "type": "string",
             "enum": ["project", "user"],
             "description": LOAD_DESTINATION_DESC,
+        },
+        "version": {
+            "type": "string",
+            "description": "Version to pull (registry source only).",
         },
     },
     "required": ["item_type", "item_id"],
@@ -58,6 +62,8 @@ def execute(params: dict, project_path: str) -> dict:
         }
         if "destination" in params:
             kwargs["destination"] = params["destination"]
+        if "version" in params:
+            kwargs["version"] = params["version"]
         result = asyncio.run(tool.handle(**kwargs))
         return result
     except Exception as e:

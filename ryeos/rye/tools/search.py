@@ -170,7 +170,7 @@ class SearchOptions:
 
     query: str = ""
     scope: str = ""  # Capability format: rye.search.directive.rye.core.*
-    space: str = "all"  # project | user | system | all
+    source: str = "all"  # project | user | system | all
     project_path: str = ""
     limit: int = 10
     offset: int = 0
@@ -900,7 +900,7 @@ class SearchTool:
         opts = SearchOptions(
             query=kwargs.get("query", ""),
             scope=scope,
-            space=kwargs.get("space", "all"),
+            source=kwargs.get("source", "all"),
             project_path=kwargs["project_path"],
             limit=kwargs.get("limit", 10),
             offset=kwargs.get("offset", 0),
@@ -915,7 +915,7 @@ class SearchTool:
             return {"error": "scope must specify an item_type (e.g., rye.search.directive.*)"}
 
         logger.debug(
-            f"Search: scope={opts.scope}, space={opts.space}, query={opts.query}"
+            f"Search: scope={opts.scope}, source={opts.source}, query={opts.query}"
         )
 
         try:
@@ -930,14 +930,14 @@ class SearchTool:
             )
             # Search local spaces unless registry-only
             results = []
-            if opts.space != "registry":
+            if opts.source != "registry":
                 results = self._search_items(
                     search_paths, opts, item_type, namespace_filter,
                     query_ast, field_weights, extractor
                 )
 
             # Include remote provider results when space is "registry" or "all"
-            if opts.space in ("registry", "all"):
+            if opts.source in ("registry", "all"):
                 for provider in get_registry_providers().values():
                     try:
                         remote_results = await provider.search(
@@ -962,7 +962,7 @@ class SearchTool:
                 "total": total,
                 "query": opts.query,
                 "scope": opts.scope,
-                "space": opts.space,
+                "source": opts.source,
                 "limit": opts.limit,
                 "offset": opts.offset,
                 "search_type": "keyword",
@@ -992,17 +992,17 @@ class SearchTool:
         project_path = Path(opts.project_path) if opts.project_path else None
         paths: List[Tuple[Path, str]] = []
 
-        if opts.space in ("project", "local", "all") and project_path:
+        if opts.source in ("project", "local", "all") and project_path:
             d = get_project_type_path(project_path, item_type)
             if d.exists():
                 paths.append((d, "project"))
 
-        if opts.space in ("user", "local", "all"):
+        if opts.source in ("user", "local", "all"):
             d = get_user_type_path(item_type)
             if d.exists():
                 paths.append((d, "user"))
 
-        if opts.space in ("system", "local", "all"):
+        if opts.source in ("system", "local", "all"):
             for bundle in get_system_spaces():
                 type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
                 type_root = bundle.root_path / AI_DIR / type_folder
@@ -1217,4 +1217,3 @@ class SearchTool:
                 key=lambda x: (x.get("name", "").lower(), *_tie_key(x)),
             )
         return results
-

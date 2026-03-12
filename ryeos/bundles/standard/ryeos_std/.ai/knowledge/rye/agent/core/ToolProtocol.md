@@ -17,7 +17,7 @@ tags:
 
 ## Tool Protocol
 
-You have four primary tools. They are the Rye OS interface.
+You have four primary actions. They are the Rye OS interface.
 
 ### rye_execute — Run items
 

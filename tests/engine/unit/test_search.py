@@ -91,7 +91,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="create",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -104,7 +104,7 @@ class TestSearchTool:
             scope="rye.search.tool.*",
             query="scraper",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -116,7 +116,7 @@ class TestSearchTool:
             scope="rye.search.knowledge.*",
             query="api",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -128,7 +128,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -140,7 +140,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            space="project",
+            source="project",
             limit=1,
         )
 
@@ -153,7 +153,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="test",
             project_path="/nonexistent/path",
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -165,7 +165,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="create OR bootstrap",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -177,7 +177,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="NOT bootstrap",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -191,7 +191,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query='"Create a new tool"',
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -203,7 +203,7 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="boot*",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -216,7 +216,7 @@ class TestSearchTool:
             query="",
             fields={"name": "bootstrap"},
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "error" not in result
@@ -229,14 +229,14 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            space="project",
+            source="project",
             limit=100,
         )
         page2 = await tool.handle(
             scope="rye.search.directive.*",
             query="",
             project_path=str(temp_project),
-            space="project",
+            source="project",
             limit=1,
             offset=1,
         )
@@ -250,14 +250,14 @@ class TestSearchTool:
             scope="rye.search.directive.*",
             query="create",
             project_path=str(temp_project),
-            space="project",
+            source="project",
         )
 
         assert "results" in result
         assert "total" in result
         assert "query" in result
         assert "scope" in result
-        assert "space" in result
+        assert "source" in result
         assert "limit" in result
         assert "offset" in result
         assert "search_type" in result

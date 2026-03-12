@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:bc83b6787c8b64083d09a054fab18a8e886edfbecb55136626a72fbab9399d96:aHdoDvJGmCknOux5lE6d81XGIXv2LMa2c0ZwmQ6r0aG4oKqz7o16qFppedJ_ISxGH7454u0KmqbGFy7lXVCbDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-12T01:20:23Z:cf91b660c0562afd765f9922591db051ce356be5e76e5adb4619c2901261d356:j_epJJKKYcnbGzORUXlMCq2E318FZLnCe0vCR0JSYkV3sJzV22nN8QHpl0lCK0h-t2rlWhIUArd4cwnWtUexCw==:4b987fd4e40303ac
 """Validate and sign a directive, tool, knowledge, or config item."""
 
 import argparse
@@ -6,7 +6,7 @@ import json
 import asyncio
 
 from rye.constants import ItemType
-from rye.primary_tool_descriptions import (
+from rye.primary_action_descriptions import (
     ITEM_TYPE_DESC,
     SIGN_ITEM_ID_DESC,
     SIGN_SOURCE_DESC,

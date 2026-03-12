@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T05:44:17Z:6fdc758245782b66d57cfefc74ab51650943a7fbb58ef267f5403751fd3d553c:cZ-eLtjXL4B0YFg9SPWYkMTGtIFvmLkMvotGc5uL6lCuzMNQ8R8zIIZV_msCSgU_KGXl5R9fZtwC8-70fMdUBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-12T01:21:39Z:4427ac9b97a54f207bbba298a95357fa449e42607653e7d1cd27c9bf18532260:veIFXdhSfSxKuIYbLi45BrM_WhSw8Dym2m00Xl3BiwmDV0ubHA2ZfkflU1OVFsP1aFMaWniXbO0vFixj10eiBg==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -67,18 +67,18 @@ CONFIG_SCHEMA = {
 }
 
 
-_PRIMARY_TOOL_NAMES = ("rye_execute", "rye_search", "rye_load", "rye_sign")
+_PRIMARY_ACTION_NAMES = ("rye_execute", "rye_search", "rye_load", "rye_sign")
 
 
-def _build_primary_tools() -> list:
-    """Load primary tool schemas for passing to tool_schema_loader.
+def _build_primary_actions() -> list:
+    """Load primary action schemas for passing to tool_schema_loader.
 
-    Primary tools use variable refs in CONFIG_SCHEMA (imported from
-    primary_tool_descriptions.py) that the AST parser can't evaluate,
+    Primary actions use variable refs in CONFIG_SCHEMA (imported from
+    primary_action_descriptions.py) that the AST parser can't evaluate,
     so we load them via load_module to get the resolved schemas.
     """
     schemas = []
-    for name in _PRIMARY_TOOL_NAMES:
+    for name in _PRIMARY_ACTION_NAMES:
         # Strip rye_ prefix to get the file stem under rye/
         file_stem = name[4:]  # rye_execute → execute
         py_file = _TOOLS_ROOT / "rye" / f"{file_stem}.py"
@@ -769,11 +769,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
     resilience_loader = load_module("loaders/resilience_loader", anchor=_ANCHOR)
     preload_config = resilience_loader.get_resilience_loader().get_tool_preload_config(proj_path)
     tool_schema_loader = load_module("loaders/tool_schema_loader", anchor=_ANCHOR)
-    primary_tools = _build_primary_tools()
+    primary_actions = _build_primary_actions()
     preload_result = tool_schema_loader.preload_tool_schemas(
         harness._capabilities, proj_path,
         max_tokens=preload_config.get("max_tokens", 2000),
-        primary_tools=primary_tools,
+        primary_actions=primary_actions,
     ) if preload_config.get("enabled", True) else {"tool_defs": [], "capabilities_summary": []}
     harness.available_tools = preload_result["tool_defs"]
     harness.capabilities_tree = preload_result.get("capabilities_tree", "")
@@ -839,7 +839,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         return {
             "success": False,
             "error": (
-                f"No tool schemas found in {_PRIMARY_TOOLS_DIR}. "
+                f"No tool schemas found in {_PRIMARY_ACTIONS_DIR}. "
                 "Thread cannot execute without tools."
             ),
             "thread_id": thread_id,

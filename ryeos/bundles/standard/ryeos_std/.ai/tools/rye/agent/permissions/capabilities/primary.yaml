@@ -1,15 +1,15 @@
-# rye:signed:2026-03-10T04:07:13Z:9b8750c50e65baa13e3f0ee3d54bf0c5babb4e35ad217c02c242a07483ec0c19:5TMJlIwvF3Y5iI83Ub5NU-XiWWnAJLUds3adudw6bJx403N0O3KFFQWRqxi3QWKC275FfmmAafTIjLTJp6lLBw==:4b987fd4e40303ac
+# rye:signed:2026-03-12T01:21:47Z:8818e6918c37d351e2ed473fcb78e1c4f7404ed38b4d4ed3d7bfd4be30c63aee:jVfGn0KmBC-YsRN2n9mFqN5qm20kKklTHf0Xkgu3ktqYCatzWa5IJBxuFB18ZmeMICr0vpc6AwiRbgQLVmTZDA==:4b987fd4e40303ac
 name: primary
 category: "rye/agent/permissions/capabilities"
 tool_type: "config"
 version: "2.0.0"
 description: "Primary rye capability structure: rye.{primary}.{item_type}.{specifics}"
 
-primary_tools:
-  execute: "rye/primary-tools/rye_execute"
-  search: "rye/primary-tools/rye_search"
-  load: "rye/primary-tools/rye_load"
-  sign: "rye/primary-tools/rye_sign"
+primary_actions:
+  execute: "rye/primary-actions/rye_execute"
+  search: "rye/primary-actions/rye_search"
+  load: "rye/primary-actions/rye_load"
+  sign: "rye/primary-actions/rye_sign"
 
 implies:
   execute: [search, load]

@@ -35,7 +35,7 @@ from rye.primary_action_descriptions import (
     SEARCH_LIMIT_DESC,
     SEARCH_QUERY_DESC,
     SEARCH_SCOPE_DESC,
-    SEARCH_SPACE_DESC,
+    SEARCH_SOURCE_DESC,
     SEARCH_TOOL_DESC,
     SIGN_ITEM_ID_DESC,
     SIGN_SOURCE_DESC,
@@ -146,11 +146,11 @@ class RYEServer:
                                 "type": "string",
                                 "description": PROJECT_PATH_DESC,
                             },
-                            "space": {
+                            "source": {
                                 "type": "string",
                                 "enum": ["project", "user", "system", "local", "registry", "all"],
                                 "default": "all",
-                                "description": SEARCH_SPACE_DESC,
+                                "description": SEARCH_SOURCE_DESC,
                             },
                             "limit": {
                                 "type": "integer",

@@ -161,8 +161,8 @@ SEARCH_QUERY_DESC = (
     "</rules>"
 )
 
-SEARCH_SPACE_DESC = (
-    '<description>Which spaces to search: "project", "user", "system", "local" (all local spaces), '
+SEARCH_SOURCE_DESC = (
+    '<description>Which sources to search: "project", "user", "system", "local" (all local spaces), '
     '"registry" (published items only), or "all" (local + registry, default).</description>'
 )
 

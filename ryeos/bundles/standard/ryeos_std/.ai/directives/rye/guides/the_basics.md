@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:cf1eb75bf45bdf65f8b47323294e9f6f4c013cb3d4f8c5a63bf0b54239362ad3:1FxMOPQRw8q04lWzKmHn4mjteukRmzqAhF_wOTgN0nCC4qeBwK2i7T5T4o4CpkmBahPImTYtQE5i0NMwwV8KCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-12T01:25:41Z:0b6d79a374a5f9128db3cc42964ea82b941b4ddb3f77ffdbc483f7f995d741b1:cvauNEbmklpGcwMsrXGJuQY4gnD8FqgZqezJ0g_nlwWvTh8De_9dytyEHuMwsBsdD0VxJtP6djdaMHZLXeI_AQ==:4b987fd4e40303ac -->
 
 # The Basics
 
@@ -11,7 +11,7 @@ This guide introduces you to the primary items and tools that power Rye.
 ```xml
 <directive name="the_basics" version="1.0.0">
   <metadata>
-    <description>Guide 2: Introduction to the three primary items (directives, knowledge, tools) and four primary tools (execute, load, search, sign) across three-tier space resolution (project → user → system).</description>
+    <description>Guide 2: Introduction to the three primary items (directives, knowledge, tools) and four primary actions (execute, load, search, sign) across three-tier space resolution (project → user → system).</description>
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
@@ -28,7 +28,7 @@ This guide introduces you to the primary items and tools that power Rye.
   </inputs>
 
   <outputs>
-    <output name="understanding">User understands three primary items, four primary tools, and how they interact</output>
+    <output name="understanding">User understands three primary items, four primary actions, and how they interact</output>
   </outputs>
 </directive>
 ```
@@ -46,9 +46,9 @@ Every piece of automation in Rye is one of three types:
 
 All three live in `.ai/` directories and resolve across three spaces: **project** (your `.ai/`) → **user** (shared cross-project) → **system** (Rye built-ins). Project shadows user shadows system.
 
-## Four Primary Tools
+## Four Primary Actions
 
-Every interaction with items uses one of four tools:
+Every interaction with items uses one of four actions:
 
 | Tool      | What it does                              |
 | --------- | ----------------------------------------- |
@@ -59,7 +59,7 @@ Every interaction with items uses one of four tools:
 
 ## How They Connect
 
-Each item type works with all four primary tools. All commands are prefaced with `rye`:
+Each item type works with all four primary actions. All commands are prefaced with `rye`:
 
 | Command             | Example                                            |
 | ------------------- | -------------------------------------------------- |
