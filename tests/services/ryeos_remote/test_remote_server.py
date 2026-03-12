@@ -11,6 +11,7 @@ import importlib.util
 import json
 import logging
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +36,7 @@ from rye.cas.objects import (
     ArtifactIndex,
     ExecutionSnapshot,
     ItemSource,
+    ProjectSnapshot,
     RuntimeOutputsBundle,
     SourceManifest,
 )
@@ -51,7 +53,16 @@ from rye.constants import AI_DIR
 
 from ryeos_remote.auth import User, get_current_user
 from ryeos_remote.config import Settings, get_settings
-from ryeos_remote.server import app, _ingest_runtime_outputs
+from ryeos_remote.server import (
+    app,
+    _ingest_runtime_outputs,
+    _load_manifest_from_snapshot,
+    _try_advance_head,
+    _fold_back,
+    _store_conflict_record,
+    _update_snapshot_cache,
+    MAX_FOLD_BACK_RETRIES,
+)
 
 # Load ArtifactStore from bundle via importlib (path has .ai/ dir)
 from conftest import PROJECT_ROOT, get_bundle_path
@@ -1580,3 +1591,890 @@ class TestMaterializeRuntimeOutputs:
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 0  # blob missing, file skipped
+
+
+# ============================================================================
+# Step D: Checkout-based Execution + Fold-Back
+# ============================================================================
+
+
+def _create_snapshot_chain(root, items=None, files=None, parent_hashes=None, source="push"):
+    """Create a ProjectSnapshot backed by a real manifest in CAS.
+
+    Returns (snapshot_hash, manifest_hash).
+    """
+    items = items or {}
+    files = files or {}
+    parent_hashes = parent_hashes or []
+
+    manifest = SourceManifest(space="project", items=items, files=files)
+    manifest_hash = cas.store_object(manifest.to_dict(), root)
+
+    user_manifest = SourceManifest(space="user")
+    user_manifest_hash = cas.store_object(user_manifest.to_dict(), root)
+
+    snapshot = ProjectSnapshot(
+        project_manifest_hash=manifest_hash,
+        user_manifest_hash=user_manifest_hash,
+        parent_hashes=parent_hashes,
+        source=source,
+    )
+    snapshot_hash = cas.store_object(snapshot.to_dict(), root)
+    return snapshot_hash, manifest_hash
+
+
+class TestLoadManifestFromSnapshot:
+    def test_loads_manifest(self, tmp_path):
+        root = tmp_path / "cas"
+        root.mkdir()
+
+        snapshot_hash, manifest_hash = _create_snapshot_chain(root)
+        manifest = _load_manifest_from_snapshot(snapshot_hash, root)
+        assert manifest["kind"] == "source_manifest"
+        assert manifest["space"] == "project"
+
+    def test_missing_snapshot_raises(self, tmp_path):
+        root = tmp_path / "cas"
+        root.mkdir()
+
+        with pytest.raises(FileNotFoundError, match="Snapshot"):
+            _load_manifest_from_snapshot("0" * 64, root)
+
+    def test_missing_manifest_raises(self, tmp_path):
+        root = tmp_path / "cas"
+        root.mkdir()
+
+        # Create a snapshot pointing to a non-existent manifest
+        snapshot = ProjectSnapshot(
+            project_manifest_hash="0" * 64,
+            user_manifest_hash="0" * 64,
+        )
+        snapshot_hash = cas.store_object(snapshot.to_dict(), root)
+
+        with pytest.raises(FileNotFoundError, match="Manifest"):
+            _load_manifest_from_snapshot(snapshot_hash, root)
+
+
+class TestTryAdvanceHead:
+    def test_advances_on_matching_revision(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = [{"snapshot_hash": "new_hash"}]  # update succeeded
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            result = _try_advance_head(settings, user, "my-project", "new_hash", 5)
+
+        assert result is True
+
+    def test_fails_on_revision_mismatch(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+
+        from unittest.mock import MagicMock, patch
+
+        mock_result = MagicMock()
+        mock_result.data = []  # update returned no rows (revision mismatch)
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
+            result = _try_advance_head(settings, user, "my-project", "new_hash", 5)
+
+        assert result is False
+
+
+class TestFoldBack:
+    """Tests for _fold_back: fast-forward, three-way merge, conflicts, retry."""
+
+    def _make_env(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+        root = settings.user_cas_root(user.id)
+        root.mkdir(parents=True)
+        cache = settings.cache_root(user.id)
+        cache.mkdir(parents=True)
+        return settings, user, root, cache
+
+    @pytest.mark.asyncio
+    async def test_fast_forward(self, tmp_path):
+        """HEAD unchanged → fast-forward."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        base_hash, _ = _create_snapshot_chain(root)
+        exec_hash, _ = _create_snapshot_chain(root, parent_hashes=[base_hash], source="execution")
+
+        from unittest.mock import MagicMock, patch
+
+        # _resolve_project_ref returns current HEAD = base (unchanged)
+        mock_ref = {
+            "snapshot_hash": base_hash,
+            "snapshot_revision": 1,
+            "user_manifest_hash": cas.get_object(base_hash, root)["user_manifest_hash"],
+        }
+
+        # _try_advance_head succeeds (first call)
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = [{"ok": True}]
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+             patch("ryeos_remote.server._update_snapshot_cache"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "fast-forward"
+        assert result["snapshot_hash"] == exec_hash
+
+    @pytest.mark.asyncio
+    async def test_three_way_merge(self, tmp_path):
+        """HEAD moved → three-way merge, no conflicts."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        # Base: file_a.txt
+        blob_a = cas.store_blob(b"content a", root)
+        base_hash, _ = _create_snapshot_chain(root, files={"file_a.txt": blob_a})
+
+        # HEAD moved: added file_b.txt (ours)
+        blob_b = cas.store_blob(b"content b", root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"file_a.txt": blob_a, "file_b.txt": blob_b},
+            parent_hashes=[base_hash],
+        )
+
+        # Execution: added file_c.txt (theirs)
+        blob_c = cas.store_blob(b"content c", root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"file_a.txt": blob_a, "file_c.txt": blob_c},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import MagicMock, patch, call
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = [{"ok": True}]
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+             patch("ryeos_remote.server._update_snapshot_cache"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "merge"
+        # Verify merged snapshot has both parents
+        merged = cas.get_object(result["snapshot_hash"], root)
+        assert merged["kind"] == "project_snapshot"
+        assert merged["source"] == "merge"
+        assert len(merged["parent_hashes"]) == 2
+        assert merged["parent_hashes"][0] == head_hash
+        assert merged["parent_hashes"][1] == exec_hash
+
+        # Verify merged manifest contains all 3 files
+        merged_manifest = cas.get_object(merged["project_manifest_hash"], root)
+        assert "file_a.txt" in merged_manifest["files"]
+        assert "file_b.txt" in merged_manifest["files"]
+        assert "file_c.txt" in merged_manifest["files"]
+
+    @pytest.mark.asyncio
+    async def test_conflict_detected(self, tmp_path):
+        """Both sides modify same file differently → conflict."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        blob_base = cas.store_blob(b"base content", root)
+        base_hash, _ = _create_snapshot_chain(root, files={"shared.txt": blob_base})
+
+        blob_ours = cas.store_blob(b"ours content", root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"shared.txt": blob_ours},
+            parent_hashes=[base_hash],
+        )
+
+        blob_theirs = cas.store_blob(b"theirs content", root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"shared.txt": blob_theirs},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import MagicMock, patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._store_conflict_record"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "conflict"
+        assert result["snapshot_hash"] == head_hash  # HEAD unchanged
+        assert result["unmerged_snapshot"] == exec_hash
+        assert "shared.txt" in result["conflicts"]
+
+    @pytest.mark.asyncio
+    async def test_delete_modify_conflict(self, tmp_path):
+        """One side deletes, other modifies → conflict."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        blob_base = cas.store_blob(b"original", root)
+        base_hash, _ = _create_snapshot_chain(root, files={"target.txt": blob_base})
+
+        # HEAD: delete target.txt
+        head_hash, _ = _create_snapshot_chain(
+            root, files={}, parent_hashes=[base_hash],
+        )
+
+        # Execution: modify target.txt
+        blob_mod = cas.store_blob(b"modified", root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"target.txt": blob_mod},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._store_conflict_record"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "conflict"
+        assert "target.txt" in result["conflicts"]
+        assert result["conflicts"]["target.txt"]["type"] in ("delete/modify", "modify/delete")
+
+    @pytest.mark.asyncio
+    async def test_add_add_conflict(self, tmp_path):
+        """Both sides add same new file with different content → conflict."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        base_hash, _ = _create_snapshot_chain(root)
+
+        blob_ours = cas.store_blob(b"ours version", root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"new_file.txt": blob_ours},
+            parent_hashes=[base_hash],
+        )
+
+        blob_theirs = cas.store_blob(b"theirs version", root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"new_file.txt": blob_theirs},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._store_conflict_record"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "conflict"
+        assert "new_file.txt" in result["conflicts"]
+        assert result["conflicts"]["new_file.txt"]["type"] == "add/add"
+
+    @pytest.mark.asyncio
+    async def test_text_merge_non_overlapping(self, tmp_path):
+        """Both sides modify same file but different lines → auto-resolved."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        base_text = "line1\nline2\nline3\nline4\n"
+        blob_base = cas.store_blob(base_text.encode(), root)
+        base_hash, _ = _create_snapshot_chain(root, files={"doc.txt": blob_base})
+
+        # HEAD modifies line1
+        ours_text = "LINE1_MODIFIED\nline2\nline3\nline4\n"
+        blob_ours = cas.store_blob(ours_text.encode(), root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"doc.txt": blob_ours}, parent_hashes=[base_hash],
+        )
+
+        # Execution modifies line4
+        theirs_text = "line1\nline2\nline3\nLINE4_MODIFIED\n"
+        blob_theirs = cas.store_blob(theirs_text.encode(), root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"doc.txt": blob_theirs},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import MagicMock, patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = [{"ok": True}]
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+             patch("ryeos_remote.server._update_snapshot_cache"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "merge"
+        # Verify merged content has both changes
+        merged = cas.get_object(result["snapshot_hash"], root)
+        merged_manifest = cas.get_object(merged["project_manifest_hash"], root)
+        merged_blob_hash = merged_manifest["files"]["doc.txt"]
+        merged_content = cas.get_blob(merged_blob_hash, root).decode()
+        assert "LINE1_MODIFIED" in merged_content
+        assert "LINE4_MODIFIED" in merged_content
+
+    @pytest.mark.asyncio
+    async def test_text_merge_conflict_same_lines(self, tmp_path):
+        """Both sides modify same lines → conflict (not auto-resolved)."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        base_text = "line1\nline2\nline3\n"
+        blob_base = cas.store_blob(base_text.encode(), root)
+        base_hash, _ = _create_snapshot_chain(root, files={"doc.txt": blob_base})
+
+        ours_text = "OURS_LINE1\nline2\nline3\n"
+        blob_ours = cas.store_blob(ours_text.encode(), root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"doc.txt": blob_ours}, parent_hashes=[base_hash],
+        )
+
+        theirs_text = "THEIRS_LINE1\nline2\nline3\n"
+        blob_theirs = cas.store_blob(theirs_text.encode(), root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"doc.txt": blob_theirs},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._store_conflict_record"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "conflict"
+        assert "doc.txt" in result["conflicts"]
+        assert result["conflicts"]["doc.txt"]["type"] == "content"
+
+    @pytest.mark.asyncio
+    async def test_binary_conflict(self, tmp_path):
+        """Non-UTF-8 blobs can't text-merge → conflict."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        blob_base = cas.store_blob(b"\x00\x01\x02\x03", root)
+        base_hash, _ = _create_snapshot_chain(root, files={"data.bin": blob_base})
+
+        blob_ours = cas.store_blob(b"\x00\x01\xff\x03", root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"data.bin": blob_ours}, parent_hashes=[base_hash],
+        )
+
+        blob_theirs = cas.store_blob(b"\x00\x01\x02\xfe", root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"data.bin": blob_theirs},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._store_conflict_record"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "conflict"
+        assert "data.bin" in result["conflicts"]
+
+    @pytest.mark.asyncio
+    async def test_large_file_merge_skip(self, tmp_path):
+        """Blobs > 1MB can't text-merge → conflict."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        # 1.1 MB blobs
+        base_data = b"A" * (1_100_000)
+        blob_base = cas.store_blob(base_data, root)
+        base_hash, _ = _create_snapshot_chain(root, files={"big.txt": blob_base})
+
+        ours_data = b"B" * (1_100_000)
+        blob_ours = cas.store_blob(ours_data, root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"big.txt": blob_ours}, parent_hashes=[base_hash],
+        )
+
+        theirs_data = b"C" * (1_100_000)
+        blob_theirs = cas.store_blob(theirs_data, root)
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"big.txt": blob_theirs},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._store_conflict_record"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "conflict"
+
+    @pytest.mark.asyncio
+    async def test_retry_exhaustion(self, tmp_path):
+        """_try_advance_head always fails → retry_exhausted after MAX retries."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        base_hash, _ = _create_snapshot_chain(root)
+        exec_hash, _ = _create_snapshot_chain(root, parent_hashes=[base_hash], source="execution")
+
+        from unittest.mock import MagicMock, patch
+
+        # HEAD unchanged, but _try_advance_head always fails (concurrent writer)
+        mock_ref = {
+            "snapshot_hash": base_hash,
+            "snapshot_revision": 1,
+            "user_manifest_hash": cas.get_object(base_hash, root)["user_manifest_hash"],
+        }
+
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = []  # always fails
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+             patch("asyncio.sleep", return_value=None):  # skip actual delays
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "retry_exhausted"
+        assert result["unmerged_snapshot"] == exec_hash
+
+    @pytest.mark.asyncio
+    async def test_both_sides_same_change(self, tmp_path):
+        """Both sides make identical change → auto-resolved (not a conflict)."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        blob_base = cas.store_blob(b"original", root)
+        base_hash, _ = _create_snapshot_chain(root, files={"shared.txt": blob_base})
+
+        blob_same = cas.store_blob(b"same change", root)
+        head_hash, _ = _create_snapshot_chain(
+            root, files={"shared.txt": blob_same}, parent_hashes=[base_hash],
+        )
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={"shared.txt": blob_same},
+            parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import MagicMock, patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = [{"ok": True}]
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+             patch("ryeos_remote.server._update_snapshot_cache"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "merge"
+        merged = cas.get_object(result["snapshot_hash"], root)
+        merged_manifest = cas.get_object(merged["project_manifest_hash"], root)
+        assert merged_manifest["files"]["shared.txt"] == blob_same
+
+    @pytest.mark.asyncio
+    async def test_both_sides_delete(self, tmp_path):
+        """Both sides delete same file → auto-resolved (file removed)."""
+        settings, user, root, cache = self._make_env(tmp_path)
+
+        blob_base = cas.store_blob(b"to delete", root)
+        base_hash, _ = _create_snapshot_chain(root, files={"gone.txt": blob_base})
+
+        # Both sides remove gone.txt
+        head_hash, _ = _create_snapshot_chain(
+            root, files={}, parent_hashes=[base_hash],
+        )
+        exec_hash, _ = _create_snapshot_chain(
+            root, files={}, parent_hashes=[base_hash], source="execution",
+        )
+
+        from unittest.mock import MagicMock, patch
+
+        mock_ref = {
+            "snapshot_hash": head_hash,
+            "snapshot_revision": 2,
+            "user_manifest_hash": cas.get_object(head_hash, root)["user_manifest_hash"],
+        }
+
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = [{"ok": True}]
+        mock_table = MagicMock()
+        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+             patch("ryeos_remote.server._update_snapshot_cache"):
+            result = await _fold_back(
+                user, settings, "test-project",
+                base_hash, exec_hash, root, cache, "thread-1",
+            )
+
+        assert result["merge_type"] == "merge"
+        merged = cas.get_object(result["snapshot_hash"], root)
+        merged_manifest = cas.get_object(merged["project_manifest_hash"], root)
+        assert "gone.txt" not in merged_manifest.get("files", {})
+
+
+class TestExecuteWithCheckout:
+    """Integration tests for /execute with project_name (checkout path)."""
+
+    def test_noop_execution(self, cas_env):
+        """Manifest unchanged after execution → no-op, skip fold-back."""
+        c, root, tmp_path = cas_env
+
+        from unittest.mock import MagicMock, patch
+
+        ph, uh = _build_manifests(tmp_path, root)
+
+        # Create a ProjectSnapshot
+        snapshot = ProjectSnapshot(
+            project_manifest_hash=ph,
+            user_manifest_hash=uh,
+            source="push",
+        )
+        snapshot_hash = cas.store_object(snapshot.to_dict(), root)
+
+        mock_ref = {
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "snapshot_hash": snapshot_hash,
+            "snapshot_revision": 1,
+        }
+
+        mock_sb = MagicMock()
+        # _register_thread and _complete_thread
+        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
+        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
+             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+            r = c.post("/execute", json={
+                "project_name": "test-project",
+                "item_type": "tool",
+                "item_id": "x",
+                "parameters": {},
+            })
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["merge_type"] == "no-op"
+        assert body["snapshot_hash"] == snapshot_hash
+
+    def test_checkout_fast_forward(self, cas_env):
+        """Execution modifies project → fast-forward fold-back."""
+        c, root, tmp_path = cas_env
+
+        from unittest.mock import MagicMock, patch
+
+        ph, uh = _build_manifests(tmp_path, root)
+
+        snapshot = ProjectSnapshot(
+            project_manifest_hash=ph,
+            user_manifest_hash=uh,
+            source="push",
+        )
+        snapshot_hash = cas.store_object(snapshot.to_dict(), root)
+
+        mock_ref = {
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "snapshot_hash": snapshot_hash,
+            "snapshot_revision": 1,
+        }
+
+        # For _try_advance_head in fold-back
+        mock_advance_result = MagicMock()
+        mock_advance_result.data = [{"ok": True}]
+
+        mock_sb = MagicMock()
+        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
+        mock_sb.table.return_value.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
+
+        # Patch ExecuteTool to simulate a tool that modifies the project
+        original_handle = None
+
+        async def mock_handle(self, item_type, item_id, project_path, parameters, thread):
+            # Write a new file to trigger manifest change
+            new_file = Path(project_path) / AI_DIR / "knowledge" / "new_knowledge.md"
+            new_file.parent.mkdir(parents=True, exist_ok=True)
+            new_file.write_text("# New Knowledge\n")
+            return {"status": "success", "body": "done"}
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
+             patch("ryeos_remote.server._inject_user_secrets", return_value=[]), \
+             patch("ryeos_remote.server._update_snapshot_cache"), \
+             patch.object(
+                 __import__("rye.tools.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                 "handle", mock_handle,
+             ):
+            r = c.post("/execute", json={
+                "project_name": "test-project",
+                "item_type": "tool",
+                "item_id": "x",
+                "parameters": {},
+            })
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["merge_type"] == "fast-forward"
+        assert body["snapshot_hash"] != snapshot_hash  # new snapshot
+
+    def test_missing_snapshot_rejected(self, cas_env):
+        """Project ref with no snapshot_hash → 400."""
+        c, root, tmp_path = cas_env
+
+        from unittest.mock import patch
+
+        mock_ref = {
+            "project_manifest_hash": "a" * 64,
+            "user_manifest_hash": "b" * 64,
+            "system_version": get_system_version(),
+            "snapshot_hash": None,
+            "snapshot_revision": 0,
+        }
+
+        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref):
+            r = c.post("/execute", json={
+                "project_name": "test-project",
+                "item_type": "tool",
+                "item_id": "x",
+                "parameters": {},
+            })
+
+        assert r.status_code == 400
+        assert "snapshot" in r.json()["detail"].lower()
+
+    def test_tempdir_fallback_with_explicit_hashes(self, cas_env):
+        """Explicit manifest hashes → tempdir path (not checkout)."""
+        c, root, tmp_path = cas_env
+        ph, uh = _build_manifests(tmp_path, root)
+
+        r = c.post("/execute", json={
+            "project_manifest_hash": ph,
+            "user_manifest_hash": uh,
+            "system_version": get_system_version(),
+            "item_type": "tool",
+            "item_id": "x",
+            "parameters": {},
+        })
+        assert r.status_code == 200
+        body = r.json()
+        # Tempdir path returns execution_snapshot_hash, not merge_type
+        assert "execution_snapshot_hash" in body
+        assert "merge_type" not in body
+
+
+class TestStoreConflictRecord:
+    def test_stores_conflict(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+
+        from unittest.mock import MagicMock, patch
+
+        mock_sb = MagicMock()
+        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
+
+        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+            _store_conflict_record(
+                settings, user, "project",
+                thread_id="thread-1",
+                conflicts={"file.txt": {"type": "content"}},
+                unmerged_snapshot="snap123",
+            )
+
+        mock_sb.table.assert_called_with("threads")
+
+    def test_handles_error_gracefully(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+
+        from unittest.mock import patch
+
+        with patch("ryeos_remote.server._get_supabase", side_effect=Exception("db error")):
+            # Should not raise — logs warning instead
+            _store_conflict_record(
+                settings, user, "project",
+                thread_id="thread-1",
+                conflicts={},
+                unmerged_snapshot="snap123",
+            )
+
+
+class TestUpdateSnapshotCache:
+    def test_caches_snapshot(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+        root = settings.user_cas_root(user.id)
+        root.mkdir(parents=True)
+        cache = settings.cache_root(user.id)
+        cache.mkdir(parents=True)
+
+        snapshot_hash, _ = _create_snapshot_chain(root)
+
+        _update_snapshot_cache(
+            settings, user, "project",
+            snapshot_hash, root, cache,
+        )
+
+        cached = cache / "snapshots" / snapshot_hash
+        assert cached.exists()
+
+    def test_handles_error_gracefully(self, tmp_path):
+        cas_base = tmp_path / "cas"
+        cas_base.mkdir()
+        signing_dir = tmp_path / "signing"
+        signing_dir.mkdir()
+        settings = _make_settings(cas_base, signing_dir)
+        user = User(id="test-user", username="tester")
+        root = settings.user_cas_root(user.id)
+        root.mkdir(parents=True)
+        cache = settings.cache_root(user.id)
+        cache.mkdir(parents=True)
+
+        # Non-existent snapshot → ensure_snapshot_cached will raise
+        _update_snapshot_cache(
+            settings, user, "project",
+            "0" * 64, root, cache,
+        )
+        # Should not raise — logs warning instead
+
+
+class TestSettingsCacheExecRoots:
+    def test_cache_root(self):
+        s = _make_settings("/cas", "/signing")
+        assert s.cache_root("user-1") == Path("/cas/user-1/cache")
+
+    def test_exec_root(self):
+        s = _make_settings("/cas", "/signing")
+        assert s.exec_root("user-1") == Path("/cas/user-1/executions")

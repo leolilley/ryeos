@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     def user_cas_root(self, user_id: str) -> Path:
         return Path(self.cas_base_path) / user_id / ".ai" / "objects"
 
+    def cache_root(self, user_id: str) -> Path:
+        return Path(self.cas_base_path) / user_id / "cache"
+
+    def exec_root(self, user_id: str) -> Path:
+        return Path(self.cas_base_path) / user_id / "executions"
+
 
 @lru_cache
 def get_settings() -> Settings:

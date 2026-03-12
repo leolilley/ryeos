@@ -5,11 +5,14 @@ Endpoints: /health, /public-key, /objects/has, /objects/put, /objects/get,
            /secrets (POST, GET), /secrets/{name} (DELETE)
 """
 
+import asyncio
 import datetime
 import hashlib
 import json
 import logging
 import os
+import random
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,7 +28,7 @@ from ryeos_remote.config import Settings, get_settings
 from lillux.primitives import cas
 from lillux.primitives.integrity import compute_integrity
 
-from rye.cas.objects import ExecutionSnapshot, ProjectSnapshot, RuntimeOutputsBundle
+from rye.cas.objects import ExecutionSnapshot, ProjectSnapshot, RuntimeOutputsBundle, SourceManifest
 from rye.cas.sync import (
     handle_has_objects,
     handle_put_objects,
@@ -37,6 +40,15 @@ from rye.cas.materializer import (
     get_system_version,
     materialize,
 )
+from rye.cas.checkout import (
+    cleanup_execution_space,
+    create_execution_space,
+    ensure_snapshot_cached,
+    ensure_user_space_cached,
+)
+from rye.cas.manifest import build_manifest
+from rye.cas.merge import three_way_merge
+from rye.constants import AI_DIR
 from rye.tools.execute import ExecuteTool
 
 logger = logging.getLogger(__name__)
@@ -209,9 +221,9 @@ def _copy_cas_objects(src_root: Path, dst_root: Path) -> List[str]:
 
 # Allowlisted path prefixes for runtime outputs (relative to project root).
 _RUNTIME_OUTPUT_PREFIXES = (
-    ".ai/agent/",
-    ".ai/knowledge/agent/",
-    ".ai/objects/refs/",
+    f"{AI_DIR}/agent/",
+    f"{AI_DIR}/knowledge/agent/",
+    f"{AI_DIR}/objects/refs/",
 )
 
 
@@ -469,7 +481,7 @@ def _resolve_project_ref(
 
 def _find_execution_snapshot_hash(project_path: Path) -> Optional[str]:
     """Find the walker's real execution_snapshot hash from graph refs."""
-    refs_dir = project_path / ".ai" / "objects" / "refs" / "graphs"
+    refs_dir = project_path / AI_DIR / "objects" / "refs" / "graphs"
     if not refs_dir.is_dir():
         return None
     refs = sorted(
@@ -631,25 +643,7 @@ async def execute(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    # Resolve manifest hashes: either explicit or via project_name
-    if req.project_manifest_hash and req.user_manifest_hash:
-        project_manifest_hash = req.project_manifest_hash
-        user_manifest_hash = req.user_manifest_hash
-        project_name = req.project_name
-        if req.system_version:
-            _check_system_version(req.system_version)
-    elif req.project_name:
-        ref = _resolve_project_ref(settings, user, req.project_name)
-        project_manifest_hash = ref["project_manifest_hash"]
-        user_manifest_hash = ref["user_manifest_hash"]
-        project_name = req.project_name
-        _check_system_version(ref["system_version"])
-    else:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Provide either (project_manifest_hash + user_manifest_hash) or project_name",
-        )
-
+    # Validate thread mode
     if req.item_type == "directive" and req.thread != "fork":
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -661,13 +655,35 @@ async def execute(
             f"Tools must use thread=inline on remote, got thread={req.thread!r}",
         )
 
+    # Route: checkout-based (project_name only) vs tempdir (explicit hashes)
+    if req.project_manifest_hash and req.user_manifest_hash:
+        return await _execute_tempdir(req, user, settings)
+    elif req.project_name:
+        return await _execute_with_checkout(req, user, settings)
+    else:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Provide either (project_manifest_hash + user_manifest_hash) or project_name",
+        )
+
+
+async def _execute_tempdir(
+    req: ExecuteRequest,
+    user: User,
+    settings: Settings,
+):
+    """Tempdir-based execution — existing flow for explicit manifest hashes."""
+    project_manifest_hash = req.project_manifest_hash
+    user_manifest_hash = req.user_manifest_hash
+    project_name = req.project_name
+    if req.system_version:
+        _check_system_version(req.system_version)
+
     root = _user_cas_root(user, settings)
     paths: ExecutionPaths | None = None
     thread_id = f"rye-remote-{uuid.uuid4().hex[:12]}"
-
     injected_keys: list[tuple[str, str | None]] = []
 
-    # Register thread before execution
     _register_thread(
         settings, user, thread_id,
         item_type=req.item_type,
@@ -684,16 +700,9 @@ async def execute(
             root,
         )
 
-        # Set signing key dir for remote executor
         os.environ["RYE_SIGNING_KEY_DIR"] = settings.signing_key_dir
-
-        # Inject user secrets into env for tool execution.
-        # Safe under max_inputs=1 — no concurrent requests share this process.
-        # Intentionally temporary: superseded by payload-based secrets
-        # when the async Function.spawn() worker lands (Phase 1, Step 3).
         injected_keys = _inject_user_secrets(user, settings)
 
-        # Wire ExecuteTool against materialized paths
         tool = ExecuteTool(
             user_space=str(paths.user_space),
             project_path=str(paths.project_path),
@@ -707,14 +716,11 @@ async def execute(
             thread=req.thread,
         )
 
-        # Ingest execution outputs into user CAS before cleanup
-        project_cas = paths.project_path / ".ai" / "objects"
+        project_cas = paths.project_path / AI_DIR / "objects"
         new_hashes = _copy_cas_objects(project_cas, root)
 
-        # Use walker's real execution_snapshot if available
         snapshot_hash = _find_execution_snapshot_hash(paths.project_path)
         if not snapshot_hash:
-            # Fallback: create synthetic snapshot for non-graph executions
             snapshot = ExecutionSnapshot(
                 graph_run_id=thread_id,
                 graph_id=f"{req.item_type}/{req.item_id}",
@@ -727,7 +733,6 @@ async def execute(
             snapshot_hash = cas.store_object(snapshot.to_dict(), root)
             new_hashes.append(snapshot_hash)
 
-        # Ingest runtime outputs (transcripts, knowledge, refs) into CAS
         bundle_hash, output_hashes = _ingest_runtime_outputs(
             paths.project_path, root, thread_id, snapshot_hash,
         )
@@ -759,7 +764,6 @@ async def execute(
         _complete_thread(settings, thread_id, state="error")
         raise
     finally:
-        # Restore previous env values or remove injected secrets
         for key, old_value in injected_keys:
             if old_value is None:
                 os.environ.pop(key, None)
@@ -767,6 +771,367 @@ async def execute(
                 os.environ[key] = old_value
         if paths:
             cleanup(paths)
+
+
+# --- Checkout-based execution (Step D) ---
+
+MAX_FOLD_BACK_RETRIES = 5
+FOLD_BACK_BASE_JITTER_MS = 50
+
+
+async def _execute_with_checkout(
+    req: ExecuteRequest,
+    user: User,
+    settings: Settings,
+):
+    """Checkout-based execution — isolated mutable copy from snapshot cache."""
+    ref = _resolve_project_ref(settings, user, req.project_name)
+    base_snapshot_hash = ref["snapshot_hash"]
+    if not base_snapshot_hash:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Project '{req.project_name}' has no snapshot. Re-push to create one.",
+        )
+    if req.system_version:
+        _check_system_version(req.system_version)
+    else:
+        _check_system_version(ref["system_version"])
+
+    root = _user_cas_root(user, settings)
+    cache = settings.cache_root(user.id)
+    exec_root = settings.exec_root(user.id)
+    thread_id = f"rye-remote-{uuid.uuid4().hex[:12]}"
+    exec_space: Path | None = None
+    injected_keys: list[tuple[str, str | None]] = []
+
+    _register_thread(
+        settings, user, thread_id,
+        item_type=req.item_type,
+        item_id=req.item_id,
+        project_manifest_hash=ref["project_manifest_hash"],
+        user_manifest_hash=ref["user_manifest_hash"],
+        project_name=req.project_name,
+    )
+
+    try:
+        # Checkout mutable copy from snapshot cache
+        exec_space = create_execution_space(
+            base_snapshot_hash, thread_id, root, cache, exec_root,
+        )
+        user_space = ensure_user_space_cached(
+            ref["user_manifest_hash"], root, cache,
+        )
+
+        os.environ["RYE_SIGNING_KEY_DIR"] = settings.signing_key_dir
+        injected_keys = _inject_user_secrets(user, settings)
+
+        tool = ExecuteTool(
+            user_space=str(user_space),
+            project_path=str(exec_space),
+        )
+
+        result = await tool.handle(
+            item_type=req.item_type,
+            item_id=req.item_id,
+            project_path=str(exec_space),
+            parameters=req.parameters,
+            thread=req.thread,
+        )
+
+        # Promote execution-local CAS into user CAS
+        exec_cas = exec_space / AI_DIR / "objects"
+        new_hashes = _copy_cas_objects(exec_cas, root)
+
+        # Ingest runtime outputs (transcripts, knowledge, refs) into CAS
+        exec_snapshot_hash = _find_execution_snapshot_hash(exec_space)
+        if not exec_snapshot_hash:
+            es = ExecutionSnapshot(
+                graph_run_id=thread_id,
+                graph_id=f"{req.item_type}/{req.item_id}",
+                project_manifest_hash=ref["project_manifest_hash"],
+                user_manifest_hash=ref["user_manifest_hash"],
+                system_version=get_system_version(),
+                step=1,
+                status=result.get("status", "unknown"),
+            )
+            exec_snapshot_hash = cas.store_object(es.to_dict(), root)
+            new_hashes.append(exec_snapshot_hash)
+
+        bundle_hash, output_hashes = _ingest_runtime_outputs(
+            exec_space, root, thread_id, exec_snapshot_hash,
+        )
+        new_hashes.extend(output_hashes)
+
+        # Build new manifest from execution space, compare to base
+        exec_manifest_hash, _ = build_manifest(
+            exec_space, "project", project_path=exec_space,
+        )
+        # Promote manifest objects into user CAS
+        exec_manifest_cas = exec_space / AI_DIR / "objects"
+        new_hashes.extend(_copy_cas_objects(exec_manifest_cas, root))
+
+        base_snapshot_obj = cas.get_object(base_snapshot_hash, root)
+        base_manifest_hash = base_snapshot_obj["project_manifest_hash"]
+
+        if exec_manifest_hash == base_manifest_hash:
+            # No-op — manifest unchanged, skip fold-back
+            exec_status = result.get("status", "unknown")
+            _complete_thread(
+                settings, thread_id,
+                state="completed" if exec_status == "success" else "error",
+                snapshot_hash=exec_snapshot_hash,
+                runtime_outputs_bundle_hash=bundle_hash or None,
+            )
+            return {
+                "status": exec_status,
+                "thread_id": thread_id,
+                "snapshot_hash": base_snapshot_hash,
+                "merge_type": "no-op",
+                "execution_snapshot_hash": exec_snapshot_hash,
+                "runtime_outputs_bundle_hash": bundle_hash or None,
+                "new_object_hashes": new_hashes,
+                "result": result,
+                "system_version": get_system_version(),
+            }
+
+        # Create execution ProjectSnapshot
+        proj_snapshot = ProjectSnapshot(
+            project_manifest_hash=exec_manifest_hash,
+            user_manifest_hash=ref["user_manifest_hash"],
+            parent_hashes=[base_snapshot_hash],
+            source="execution",
+            source_detail=f"{req.item_type}/{req.item_id}",
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            metadata={"thread_id": thread_id},
+        )
+        proj_snapshot_hash = cas.store_object(proj_snapshot.to_dict(), root)
+        new_hashes.append(proj_snapshot_hash)
+
+        # Fold back into HEAD
+        fold_result = await _fold_back(
+            user, settings, req.project_name,
+            base_snapshot_hash, proj_snapshot_hash,
+            root, cache, thread_id,
+        )
+
+        _check_user_quota(user, settings)
+
+        exec_status = result.get("status", "unknown")
+        _complete_thread(
+            settings, thread_id,
+            state="completed" if exec_status == "success" else "error",
+            snapshot_hash=fold_result["snapshot_hash"],
+            runtime_outputs_bundle_hash=bundle_hash or None,
+        )
+
+        return {
+            "status": exec_status,
+            "thread_id": thread_id,
+            "snapshot_hash": fold_result["snapshot_hash"],
+            "merge_type": fold_result["merge_type"],
+            "execution_snapshot_hash": exec_snapshot_hash,
+            "runtime_outputs_bundle_hash": bundle_hash or None,
+            "new_object_hashes": new_hashes,
+            "result": result,
+            "system_version": get_system_version(),
+            **({k: fold_result[k] for k in ("conflicts", "unmerged_snapshot") if k in fold_result}),
+        }
+    except FileNotFoundError as e:
+        _complete_thread(settings, thread_id, state="error")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    except Exception:
+        _complete_thread(settings, thread_id, state="error")
+        raise
+    finally:
+        for key, old_value in injected_keys:
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+        if exec_space:
+            cleanup_execution_space(exec_space)
+
+
+def _load_manifest_from_snapshot(
+    snapshot_hash: str, cas_root: Path,
+) -> dict:
+    """Load the SourceManifest dict referenced by a ProjectSnapshot."""
+    snapshot = cas.get_object(snapshot_hash, cas_root)
+    if snapshot is None:
+        raise FileNotFoundError(f"Snapshot {snapshot_hash} not found in CAS")
+    manifest = cas.get_object(snapshot["project_manifest_hash"], cas_root)
+    if manifest is None:
+        raise FileNotFoundError(
+            f"Manifest {snapshot['project_manifest_hash']} not found in CAS"
+        )
+    return manifest
+
+
+async def _fold_back(
+    user: User,
+    settings: Settings,
+    project_name: str,
+    base_snapshot_hash: str,
+    exec_snapshot_hash: str,
+    cas_root: Path,
+    cache_root: Path,
+    thread_id: str,
+) -> dict:
+    """Merge execution snapshot into HEAD.
+
+    Fast-forward if HEAD hasn't moved, otherwise three-way merge.
+    Bounded retry loop with jitter for contention.
+    """
+    current_head = base_snapshot_hash  # fallback for retry_exhausted
+
+    for attempt in range(MAX_FOLD_BACK_RETRIES):
+        ref = _resolve_project_ref(settings, user, project_name)
+        current_head = ref["snapshot_hash"]
+        current_rev = ref["snapshot_revision"]
+
+        if current_head == base_snapshot_hash:
+            # Fast-forward — HEAD hasn't moved
+            if _try_advance_head(
+                settings, user, project_name,
+                exec_snapshot_hash, current_rev,
+            ):
+                _update_snapshot_cache(
+                    settings, user, project_name,
+                    exec_snapshot_hash, cas_root, cache_root,
+                )
+                return {"snapshot_hash": exec_snapshot_hash, "merge_type": "fast-forward"}
+        else:
+            # HEAD moved — three-way merge
+            base_manifest = _load_manifest_from_snapshot(base_snapshot_hash, cas_root)
+            head_manifest = _load_manifest_from_snapshot(current_head, cas_root)
+            exec_manifest = _load_manifest_from_snapshot(exec_snapshot_hash, cas_root)
+
+            merge_result = three_way_merge(
+                base_manifest, head_manifest, exec_manifest, cas_root,
+            )
+
+            if merge_result.has_conflicts:
+                _store_conflict_record(
+                    settings, user, project_name,
+                    thread_id=thread_id,
+                    conflicts=merge_result.conflicts,
+                    unmerged_snapshot=exec_snapshot_hash,
+                )
+                return {
+                    "snapshot_hash": current_head,
+                    "merge_type": "conflict",
+                    "conflicts": merge_result.conflicts,
+                    "unmerged_snapshot": exec_snapshot_hash,
+                }
+
+            # Build merged manifest
+            merged_manifest = SourceManifest(
+                space="project",
+                items=merge_result.merged_items,
+                files=merge_result.merged_files,
+            )
+            merged_manifest_hash = cas.store_object(
+                merged_manifest.to_dict(), cas_root,
+            )
+
+            merge_snapshot = ProjectSnapshot(
+                project_manifest_hash=merged_manifest_hash,
+                user_manifest_hash=ref["user_manifest_hash"],
+                parent_hashes=[current_head, exec_snapshot_hash],
+                source="merge",
+                timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                metadata={"base": base_snapshot_hash, "thread_id": thread_id},
+            )
+            merge_snapshot_hash = cas.store_object(
+                merge_snapshot.to_dict(), cas_root,
+            )
+
+            if _try_advance_head(
+                settings, user, project_name,
+                merge_snapshot_hash, current_rev,
+            ):
+                _update_snapshot_cache(
+                    settings, user, project_name,
+                    merge_snapshot_hash, cas_root, cache_root,
+                )
+                return {"snapshot_hash": merge_snapshot_hash, "merge_type": "merge"}
+
+        # CAS update raced — back off with jitter and retry
+        jitter = FOLD_BACK_BASE_JITTER_MS * (2 ** attempt) + random.randint(0, 50)
+        await asyncio.sleep(jitter / 1000)
+
+    # Exhausted retries
+    return {
+        "snapshot_hash": current_head,
+        "merge_type": "retry_exhausted",
+        "unmerged_snapshot": exec_snapshot_hash,
+    }
+
+
+def _try_advance_head(
+    settings: Settings,
+    user: User,
+    project_name: str,
+    new_snapshot_hash: str,
+    expected_rev: int,
+) -> bool:
+    """Optimistic CAS on snapshot_revision. Returns True if update succeeded."""
+    sb = _get_supabase(settings)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    result = (
+        sb.table("project_refs")
+        .update({
+            "snapshot_hash": new_snapshot_hash,
+            "snapshot_revision": expected_rev + 1,
+            "head_updated_at": now,
+        })
+        .eq("user_id", user.id)
+        .eq("remote_name", settings.rye_remote_name)
+        .eq("project_name", project_name)
+        .eq("snapshot_revision", expected_rev)
+        .execute()
+    )
+    return bool(result.data)
+
+
+def _update_snapshot_cache(
+    settings: Settings,
+    user: User,
+    project_name: str,
+    new_snapshot_hash: str,
+    cas_root: Path,
+    cache_root: Path,
+) -> None:
+    """Update snapshot cache to reflect new HEAD."""
+    try:
+        ensure_snapshot_cached(new_snapshot_hash, cas_root, cache_root)
+    except Exception:
+        logger.warning(
+            "Failed to cache snapshot %s for %s",
+            new_snapshot_hash[:16], project_name, exc_info=True,
+        )
+
+
+def _store_conflict_record(
+    settings: Settings,
+    user: User,
+    project_name: str,
+    thread_id: str,
+    conflicts: dict,
+    unmerged_snapshot: str,
+) -> None:
+    """Store merge conflict record in Supabase for later resolution."""
+    try:
+        sb = _get_supabase(settings)
+        sb.table("threads").update({
+            "merge_conflicts": conflicts,
+            "unmerged_snapshot_hash": unmerged_snapshot,
+        }).eq("thread_id", thread_id).execute()
+    except Exception:
+        logger.warning(
+            "Failed to store conflict record for thread %s",
+            thread_id, exc_info=True,
+        )
 
 
 @app.get("/threads")
