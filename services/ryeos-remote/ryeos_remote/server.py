@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.gzip import GZipMiddleware
 
-from ryeos_remote.auth import User, get_current_user
+from ryeos_remote.auth import User, get_current_user, require_scope
 from ryeos_remote.config import Settings, get_settings
 
 RESERVED_ENV_NAMES = frozenset({
@@ -544,6 +544,7 @@ async def objects_has(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
+    require_scope(user, "remote:objects")
     root = _user_cas_root(user, settings)
     return handle_has_objects(req.hashes, root)
 
@@ -554,6 +555,7 @@ async def objects_put(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
+    require_scope(user, "remote:objects")
     _check_user_quota(user, settings)
     root = _user_cas_root(user, settings)
     result = handle_put_objects(req.entries, root)
@@ -568,6 +570,7 @@ async def objects_get(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
+    require_scope(user, "remote:objects")
     root = _user_cas_root(user, settings)
     return handle_get_objects(req.hashes, root)
 
@@ -579,6 +582,7 @@ async def push(
     settings: Settings = Depends(get_settings),
 ):
     """Finalize a push — verify manifests, create snapshot, advance HEAD."""
+    require_scope(user, "remote:push")
     root = _user_cas_root(user, settings)
 
     # Shallow check: verify both manifest hashes exist as CAS objects
@@ -666,6 +670,7 @@ async def execute(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
+    require_scope(user, "remote:execute")
     # Validate thread mode
     if req.item_type == "directive" and req.thread != "fork":
         raise HTTPException(
@@ -1165,6 +1170,7 @@ async def list_threads(
     settings: Settings = Depends(get_settings),
 ):
     """List user's remote executions on this remote."""
+    require_scope(user, "remote:threads")
     sb = _get_supabase(settings)
     query = (
         sb.table("threads")
@@ -1187,6 +1193,7 @@ async def get_thread(
     settings: Settings = Depends(get_settings),
 ):
     """Get status of a specific thread."""
+    require_scope(user, "remote:threads")
     sb = _get_supabase(settings)
     result = (
         sb.table("threads")
@@ -1210,6 +1217,7 @@ async def upsert_secrets(
     settings: Settings = Depends(get_settings),
 ):
     """Upsert user secrets into the vault for remote execution."""
+    require_scope(user, "remote:secrets")
     sb = _get_supabase(settings)
     stored = []
     for entry in req.secrets:
@@ -1234,6 +1242,7 @@ async def list_secrets(
     settings: Settings = Depends(get_settings),
 ):
     """List user's secret names (values are never returned)."""
+    require_scope(user, "remote:secrets")
     sb = _get_supabase(settings)
     result = (
         sb.table("user_secrets")
@@ -1252,6 +1261,7 @@ async def delete_secret(
     settings: Settings = Depends(get_settings),
 ):
     """Delete a user secret by name."""
+    require_scope(user, "remote:secrets")
     sb = _get_supabase(settings)
     result = sb.rpc(
         "delete_user_secret",

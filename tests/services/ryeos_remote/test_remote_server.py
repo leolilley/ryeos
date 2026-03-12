@@ -51,7 +51,7 @@ from rye.cas.sync import (
 )
 from rye.constants import AI_DIR
 
-from ryeos_remote.auth import User, get_current_user
+from ryeos_remote.auth import User, get_current_user, require_scope
 from ryeos_remote.config import Settings, get_settings
 from ryeos_remote.server import (
     app,
@@ -2506,3 +2506,38 @@ class TestSettingsCacheExecRoots:
     def test_exec_root(self):
         s = _make_settings("/cas", "/signing")
         assert s.exec_root("user-1") == Path("/cas/user-1/executions")
+
+
+# ============================================================================
+# Scope Enforcement
+# ============================================================================
+
+
+class TestRequireScope:
+    def test_require_scope_exact_match(self):
+        user = User(id="u1", username="tester", scopes=["remote:execute", "registry:read"])
+        require_scope(user, "remote:execute")  # should not raise
+
+    def test_require_scope_wildcard_match(self):
+        user = User(id="u1", username="tester", scopes=["remote:*"])
+        require_scope(user, "remote:execute")  # should not raise
+        require_scope(user, "remote:push")  # should not raise
+
+    def test_require_scope_missing(self):
+        user = User(id="u1", username="tester", scopes=["registry:read"])
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            require_scope(user, "remote:execute")
+        assert exc_info.value.status_code == 403
+        assert "remote:execute" in exc_info.value.detail
+
+    def test_require_scope_wrong_service(self):
+        user = User(id="u1", username="tester", scopes=["registry:read", "registry:write"])
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            require_scope(user, "remote:execute")
+        assert exc_info.value.status_code == 403
+
+    def test_require_scope_none(self):
+        user = User(id="u1", username="tester", scopes=None)
+        require_scope(user, "remote:execute")  # should not raise (unrestricted)

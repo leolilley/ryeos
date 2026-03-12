@@ -25,6 +25,7 @@ class User:
     id: str
     username: str
     email: Optional[str] = None
+    scopes: list[str] | None = None
 
 
 async def _resolve_api_key(token: str, settings: Settings) -> User:
@@ -35,7 +36,7 @@ async def _resolve_api_key(token: str, settings: Settings) -> User:
 
     result = (
         supabase.table("api_keys")
-        .select("id, user_id, revoked_at, expires_at")
+        .select("id, user_id, scopes, revoked_at, expires_at")
         .eq("key_hash", key_hash)
         .execute()
     )
@@ -62,7 +63,29 @@ async def _resolve_api_key(token: str, settings: Settings) -> User:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
 
     u = user_result.data[0]
-    return User(id=u["id"], username=u["username"], email=u.get("email"))
+    return User(id=u["id"], username=u["username"], email=u.get("email"), scopes=record.get("scopes"))
+
+
+def require_scope(user: User, required: str) -> None:
+    """Raise 403 if user's key doesn't have the required scope.
+
+    Scope format: 'service:action' (e.g., 'remote:execute', 'remote:*', 'registry:read').
+    A scope of 'service:*' grants all actions for that service.
+    Keys with no scopes get default backward-compatible access.
+    """
+    if user.scopes is None:
+        return  # No scopes = unrestricted (shouldn't happen with DB default)
+
+    service, _, action = required.partition(":")
+
+    # Check for exact match or wildcard
+    if required in user.scopes or f"{service}:*" in user.scopes:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"API key missing required scope: {required}",
+    )
 
 
 async def get_current_user(
