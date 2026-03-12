@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import uuid
 from pathlib import Path
 
 from lillux.primitives import cas
@@ -38,10 +39,8 @@ def ensure_snapshot_cached(
     if cached.exists() and marker.exists():
         return cached
 
-    # Materialize into staging dir, then atomic rename
-    staging = cache_root / "snapshots" / f".staging-{snapshot_hash}"
-    if staging.exists():
-        shutil.rmtree(staging)
+    # Materialize into staging dir with unique name, then atomic rename
+    staging = cache_root / "snapshots" / f".staging-{snapshot_hash}-{uuid.uuid4().hex[:12]}"
     staging.mkdir(parents=True)
 
     snapshot = cas.get_object(snapshot_hash, cas_root)
@@ -61,11 +60,16 @@ def ensure_snapshot_cached(
 
     materialize_manifest_dict(manifest, staging, cas_root)
 
-    # Mark complete, then atomic rename
+    # Mark complete, then try to rename into place
     (staging / ".snapshot_complete").write_text(snapshot_hash)
-    if cached.exists():
-        shutil.rmtree(cached)
-    staging.rename(cached)
+    try:
+        staging.rename(cached)
+    except OSError:
+        # Another concurrent materialization beat us — clean up our staging
+        shutil.rmtree(staging, ignore_errors=True)
+        if cached.exists() and (cached / ".snapshot_complete").exists():
+            return cached
+        raise
 
     return cached
 
@@ -99,18 +103,21 @@ def ensure_user_space_cached(
     if cached.exists() and marker.exists():
         return cached
 
-    # Materialize into staging dir
-    staging = cache_root / "user" / f".staging-{user_manifest_hash}"
-    if staging.exists():
-        shutil.rmtree(staging)
+    # Materialize into staging dir with unique name
+    staging = cache_root / "user" / f".staging-{user_manifest_hash}-{uuid.uuid4().hex[:12]}"
     staging.mkdir(parents=True)
 
     materialize_manifest(user_manifest_hash, staging, cas_root)
 
     (staging / ".user_space_complete").write_text(user_manifest_hash)
-    if cached.exists():
-        shutil.rmtree(cached)
-    staging.rename(cached)
+    try:
+        staging.rename(cached)
+    except OSError:
+        # Another concurrent materialization beat us — clean up our staging
+        shutil.rmtree(staging, ignore_errors=True)
+        if cached.exists() and (cached / ".user_space_complete").exists():
+            return cached
+        raise
 
     return cached
 

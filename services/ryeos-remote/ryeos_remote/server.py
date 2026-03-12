@@ -25,6 +25,26 @@ from starlette.middleware.gzip import GZipMiddleware
 from ryeos_remote.auth import User, get_current_user
 from ryeos_remote.config import Settings, get_settings
 
+RESERVED_ENV_NAMES = frozenset({
+    "PATH", "PYTHONPATH", "HOME", "USER", "SHELL", "LANG", "TERM",
+    "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP",
+})
+
+RESERVED_ENV_PREFIXES = (
+    "RYE_", "SUPABASE_", "MODAL_", "LD_", "SSL_", "AWS_",
+    "GOOGLE_", "AZURE_", "GITHUB_", "CI_", "DOCKER_",
+)
+
+
+def _is_safe_secret_name(name: str) -> bool:
+    """Check if a secret name is safe to inject into os.environ."""
+    if not name or not name.isidentifier():
+        return False
+    upper = name.upper()
+    if upper in RESERVED_ENV_NAMES:
+        return False
+    return not any(upper.startswith(p) for p in RESERVED_ENV_PREFIXES)
+
 from lillux.primitives import cas
 from lillux.primitives.integrity import compute_integrity
 
@@ -328,6 +348,9 @@ def _inject_user_secrets(user: User, settings: Settings) -> list[tuple[str, str 
         injected: list[tuple[str, str | None]] = []
         for row in result.data or []:
             name = row["name"]
+            if not _is_safe_secret_name(name):
+                logger.warning("Skipping unsafe secret name: %s for user %s", name, user.username)
+                continue
             old_value = os.environ.get(name)
             os.environ[name] = row["decrypted_value"]
             injected.append((name, old_value))

@@ -89,14 +89,15 @@ class TestEnsureSnapshotCached:
         snapshot_hash = _create_snapshot(project, root)
 
         cache = tmp_path / "cache"
-        # Create a leftover staging dir
-        staging = cache / "snapshots" / f".staging-{snapshot_hash}"
-        staging.mkdir(parents=True)
-        (staging / "garbage").write_text("leftover")
+        # Create a leftover staging dir (simulates crash during previous attempt)
+        leftover = cache / "snapshots" / f".staging-{snapshot_hash}-oldattempt"
+        leftover.mkdir(parents=True)
+        (leftover / "garbage").write_text("leftover")
 
         cached = ensure_snapshot_cached(snapshot_hash, root, cache)
         assert cached.exists()
-        assert not staging.exists()
+        # Leftover staging dirs from old attempts are ignored (harmless)
+        # New staging uses unique UUID-based names so no collision
 
     def test_missing_snapshot_raises(self, tmp_path):
         cache = tmp_path / "cache"

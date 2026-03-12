@@ -56,6 +56,7 @@ from ryeos_remote.config import Settings, get_settings
 from ryeos_remote.server import (
     app,
     _ingest_runtime_outputs,
+    _is_safe_secret_name,
     _load_manifest_from_snapshot,
     _try_advance_head,
     _fold_back,
@@ -2468,6 +2469,33 @@ class TestUpdateSnapshotCache:
             "0" * 64, root, cache,
         )
         # Should not raise — logs warning instead
+
+
+class TestSecretNameValidation:
+    def test_inject_safe_secret_name(self):
+        assert _is_safe_secret_name("MY_API_KEY") is True
+
+    def test_reject_reserved_name_path(self):
+        assert _is_safe_secret_name("PATH") is False
+
+    def test_reject_reserved_prefix_supabase(self):
+        assert _is_safe_secret_name("SUPABASE_URL") is False
+
+    def test_reject_reserved_prefix_modal(self):
+        assert _is_safe_secret_name("MODAL_TOKEN") is False
+
+    def test_reject_reserved_prefix_aws(self):
+        assert _is_safe_secret_name("AWS_SECRET_ACCESS_KEY") is False
+
+    def test_reject_empty_name(self):
+        assert _is_safe_secret_name("") is False
+
+    def test_reject_non_identifier(self):
+        assert _is_safe_secret_name("my-key") is False
+
+    def test_case_insensitive_reserved(self):
+        assert _is_safe_secret_name("path") is False
+        assert _is_safe_secret_name("Supabase_Url") is False
 
 
 class TestSettingsCacheExecRoots:
