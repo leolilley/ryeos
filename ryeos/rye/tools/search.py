@@ -1174,7 +1174,7 @@ class SearchTool:
                 item["shadowed_by"] = seen[iid].get("source", "")
                 if "shadows" not in seen[iid]:
                     seen[iid]["shadows"] = []
-                seen[iid]["shadows"].append({"space": src})
+                seen[iid]["shadows"].append({"source": src})
 
     # ------------------------------------------------------------------
     # Sorting with tie-breaking

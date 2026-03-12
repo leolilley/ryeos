@@ -75,7 +75,7 @@ class TestSearchShadowDetection:
 
         # First occurrence should have shadows list
         assert "shadows" in results[0]
-        assert results[0]["shadows"] == [{"space": "system"}]
+        assert results[0]["shadows"] == [{"source": "system"}]
 
         # Second occurrence (shadowed) should have shadowed_by
         assert results[1].get("shadowed_by") == "project"
