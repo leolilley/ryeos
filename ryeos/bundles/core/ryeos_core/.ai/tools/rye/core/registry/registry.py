@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:14Z:beee87ef1e9f0ae74e496ed204de9fb820eeecea107112d9e0ec729aee7b5326:mfMMAo2uWjrF4dg0AVBxWAyfX32hUj7Du249_OGoVjGwLoMSzcRe0yT4E90yuHnnfOOTwBFdEijv5Bf2aOYIBw==:4b987fd4e40303ac
+# rye:signed:2026-03-12T05:30:24Z:73e25364470e2e9b4161b7b716f044710ee915c3f4b3cded172c56b3acc0da36:UK9Vq9koIDFi_p7XZkKe6KrdxKd_PXji9L1cGMC0RRE3CrTL53JnO3TuJjkw5pDz5hKErgJgtVWyvwCymhntAg==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -115,8 +115,6 @@ ACTIONS = [
     "push_bundle",
     "pull_bundle",
     "search_bundle",
-    "publish_bundle",
-    "unpublish_bundle",
 ]
 
 # Registry configuration from environment
@@ -629,16 +627,6 @@ async def _execute_action(
                 namespace=params.get("namespace"),
                 include_mine=params.get("include_mine", True),
                 limit=params.get("limit", 20),
-            )
-            http_calls = 1
-        elif action == "publish_bundle":
-            result = await _publish_bundle(
-                bundle_id=params.get("bundle_id"),
-            )
-            http_calls = 1
-        elif action == "unpublish_bundle":
-            result = await _unpublish_bundle(
-                bundle_id=params.get("bundle_id"),
             )
             http_calls = 1
         else:
@@ -2145,20 +2133,28 @@ async def _push_bundle(
     except ImportError:
         pass  # Integrity module not available, skip verification
 
-    # Read and verify each file
+    # Read and verify each file via CAS
+    from lillux.primitives.cas import has as has_object
+
     files: Dict[str, Dict[str, Any]] = {}
     file_entries = manifest.get("files", {})
     if isinstance(file_entries, dict):
         file_iter = list(file_entries.items())
     else:
-        # Fallback for list format
         file_iter = [(e if isinstance(e, str) else e.get("path", ""), e if isinstance(e, dict) else {}) for e in file_entries]
 
-    for rel_path, meta in file_iter:
-        expected_sha = meta.get("sha256") if isinstance(meta, dict) else None
+    proj_root = Path(project_path) if project_path else Path(".")
+    cas_root = proj_root / AI_DIR / "objects"
 
-        # rel_path is relative to project root (e.g. ".ai/tools/..."), not to .ai/
-        proj_root = Path(project_path) if project_path else Path(".")
+    for rel_path, meta in file_iter:
+        object_hash = meta.get("object_hash") if isinstance(meta, dict) else None
+
+        if object_hash and not has_object(object_hash, cas_root):
+            return {
+                "error": f"CAS object missing for {rel_path}",
+                "object_hash": object_hash,
+            }
+
         file_path = proj_root / rel_path
         if not file_path.exists():
             return {
@@ -2167,21 +2163,11 @@ async def _push_bundle(
             }
 
         content = file_path.read_text()
-        computed_sha = hashlib.sha256(content.encode()).hexdigest()
-
-        if expected_sha and computed_sha != expected_sha:
-            return {
-                "error": f"SHA256 mismatch for {rel_path}",
-                "expected": expected_sha,
-                "computed": computed_sha,
-            }
-
-        # Check if file has an inline signature
         inline_signed = "rye:signed:" in content
 
         files[rel_path] = {
             "content": content,
-            "sha256": computed_sha,
+            "object_hash": object_hash or "",
             "inline_signed": inline_signed,
         }
 
@@ -2325,8 +2311,9 @@ async def _pull_bundle(
         except ImportError:
             pass  # Integrity module not available, skip verification
 
-        # Verify each file's SHA256 against manifest entries
+        # Ingest pulled files into local CAS and verify object_hash entries
         import yaml
+        from rye.cas.store import ingest_item
 
         try:
             manifest = yaml.safe_load(manifest_content)
@@ -2338,22 +2325,24 @@ async def _pull_bundle(
             if isinstance(file_entries, dict):
                 file_iter = list(file_entries.items())
             else:
-                # Fallback for list format
                 file_iter = [(e if isinstance(e, str) else e.get("path", ""), e if isinstance(e, dict) else {}) for e in file_entries]
 
             for rel_path, meta in file_iter:
-                expected_sha = meta.get("sha256") if isinstance(meta, dict) else None
-                if expected_sha and rel_path:
-                    file_path = proj_root / rel_path
-                    if file_path.exists():
-                        computed_sha = hashlib.sha256(file_path.read_text().encode()).hexdigest()
-                        if computed_sha != expected_sha:
-                            return {
-                                "error": f"SHA256 mismatch for {rel_path}",
-                                "expected": expected_sha,
-                                "computed": computed_sha,
-                                "files_written": files_written,
-                            }
+                if not rel_path:
+                    continue
+                file_path = proj_root / rel_path
+                if file_path.exists():
+                    from rye.cas.store import _guess_item_type
+                    item_type = _guess_item_type(rel_path)
+                    ref = ingest_item(item_type, file_path, proj_root)
+                    # Verify ingested hash matches manifest
+                    expected_hash = meta.get("object_hash") if isinstance(meta, dict) else None
+                    if expected_hash and ref.object_hash != expected_hash:
+                        return {
+                            "error": f"Hash mismatch after pull for {rel_path}: "
+                                     f"expected {expected_hash}, got {ref.object_hash}",
+                            "hint": "Registry returned corrupted content",
+                        }
 
         return {
             "status": "pulled",
@@ -2417,96 +2406,6 @@ async def _search_bundle(
     except Exception as e:
         await http.close()
         return {"error": f"Search failed: {e}"}
-
-
-async def _publish_bundle(
-    bundle_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Make a bundle public."""
-    if not bundle_id:
-        return {
-            "error": "Required: bundle_id",
-            "usage": "publish_bundle(bundle_id='ryeos-core')",
-        }
-
-    token = await _resolve_auth_token(scope="registry:write")
-    if not token:
-        return {
-            "error": "Authentication required",
-            "solution": "Run 'registry login' first",
-        }
-
-    config = RegistryConfig.from_env()
-    http = RegistryHttpClient(config)
-
-    try:
-        result = await http.post(
-            f"/v1/bundle/{bundle_id}/visibility",
-            body={"visibility": "public"},
-            auth_token=token,
-        )
-        await http.close()
-
-        if not result["success"]:
-            return {
-                "error": f"Publish failed: {result.get('error', 'Unknown error')}",
-                "status_code": result.get("status_code"),
-            }
-
-        return {
-            "status": "published",
-            "bundle_id": bundle_id,
-            "visibility": "public",
-        }
-
-    except Exception as e:
-        await http.close()
-        return {"error": f"Publish failed: {e}"}
-
-
-async def _unpublish_bundle(
-    bundle_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Make a bundle private."""
-    if not bundle_id:
-        return {
-            "error": "Required: bundle_id",
-            "usage": "unpublish_bundle(bundle_id='ryeos-core')",
-        }
-
-    token = await _resolve_auth_token(scope="registry:write")
-    if not token:
-        return {
-            "error": "Authentication required",
-            "solution": "Run 'registry login' first",
-        }
-
-    config = RegistryConfig.from_env()
-    http = RegistryHttpClient(config)
-
-    try:
-        result = await http.post(
-            f"/v1/bundle/{bundle_id}/visibility",
-            body={"visibility": "private"},
-            auth_token=token,
-        )
-        await http.close()
-
-        if not result["success"]:
-            return {
-                "error": f"Unpublish failed: {result.get('error', 'Unknown error')}",
-                "status_code": result.get("status_code"),
-            }
-
-        return {
-            "status": "unpublished",
-            "bundle_id": bundle_id,
-            "visibility": "private",
-        }
-
-    except Exception as e:
-        await http.close()
-        return {"error": f"Unpublish failed: {e}"}
 
 
 # =============================================================================

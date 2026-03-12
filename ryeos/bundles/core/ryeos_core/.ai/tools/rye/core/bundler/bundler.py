@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:14Z:2ecf6883e7d20edcef6b196953a8663927ca466cba304e631af2b7877d374ef8:dgMG2lMmQrv6Ykh1NyqxPsHCuyM1Fe1dPDcnk7uvaG0lHAEzQ6MDE-STanv4pZApydasB729uJk73gP8IOz_Dg==:4b987fd4e40303ac
+# rye:signed:2026-03-12T05:30:24Z:89f7350d7a036bf4e8ebde5d1c9e515bd00effa8e93d428128f84fb9fe87abae:Yc_KKRW33FuerB-0AX7RuJMOX3QDG5nE197aE8U6gs25-tP6BfMUnuPQ2tt99lYnJuyhYZSUK90LIV_aEUFJDA==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -25,7 +25,6 @@ __category__ = "rye/core/bundler"
 __tool_description__ = "Create, verify, and inspect bundle manifests"
 
 import asyncio
-import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -171,19 +170,30 @@ def validate_bundle_manifest(
         result["valid"] = True
         return result
 
-    # 3. Verify file hashes
+    # 3. Verify file hashes by re-ingesting and comparing
     base_path = (
         project_path if project_path else manifest_path.parent.parent.parent.parent
     )
 
     for rel_path, meta in file_entries.items():
+        object_hash = meta.get("object_hash")
+        if not object_hash:
+            result["files_tampered"].append(rel_path)
+            continue
+
         file_path = base_path / rel_path
         if not file_path.exists():
             result["files_missing"].append(rel_path)
             continue
 
-        actual_hash = _sha256_file(file_path)
-        if actual_hash != meta.get("sha256"):
+        # Re-ingest file and compare hash to manifest
+        try:
+            current_meta = _ingest_file(file_path, base_path, rel_path)
+        except Exception:
+            result["files_tampered"].append(rel_path)
+            continue
+
+        if current_meta["object_hash"] != object_hash:
             result["files_tampered"].append(rel_path)
             continue
 
@@ -212,15 +222,6 @@ def validate_bundle_manifest(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _sha256_file(path: Path) -> str:
-    """Compute SHA256 hex digest of a file."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _classify_file(rel_path: str) -> str:
@@ -274,6 +275,19 @@ def _load_collect_config(project_path: Path) -> Dict[str, Any]:
     return {}
 
 
+def _ingest_file(file_path: Path, project_path: Path, rel_path: str) -> Dict[str, Any]:
+    """Ingest a single file into CAS and return its metadata entry."""
+    from rye.cas.store import ingest_item
+
+    item_type = _classify_file(rel_path)
+    ref = ingest_item(item_type, file_path, project_path)
+    return {
+        "path": rel_path,
+        "object_hash": ref.object_hash,
+        "inline_signed": _has_inline_signature(file_path),
+    }
+
+
 def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, Any]]:
     """Walk all item directories for a bundle and collect file metadata.
 
@@ -297,13 +311,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
             if any(d in file_path.parts for d in exclude_dirs):
                 continue
             rel = str(file_path.relative_to(project_path))
-            files.append(
-                {
-                    "path": rel,
-                    "sha256": _sha256_file(file_path),
-                    "inline_signed": _has_inline_signature(file_path),
-                }
-            )
+            files.append(_ingest_file(file_path, project_path, rel))
 
     # Extra directories (config/keys/trusted, etc.)
     for dir_name in _EXTRA_DIRS:
@@ -317,13 +325,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
             if any(d in file_path.parts for d in exclude_dirs):
                 continue
             rel = str(file_path.relative_to(project_path))
-            files.append(
-                {
-                    "path": rel,
-                    "sha256": _sha256_file(file_path),
-                    "inline_signed": _has_inline_signature(file_path),
-                }
-            )
+            files.append(_ingest_file(file_path, project_path, rel))
 
     # Plans and lockfiles (use slug: bundle_id with / -> _)
     bundle_slug = bundle_id.replace("/", "_")
@@ -334,13 +336,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
             if not file_path.is_file():
                 continue
             rel = str(file_path.relative_to(project_path))
-            files.append(
-                {
-                    "path": rel,
-                    "sha256": _sha256_file(file_path),
-                    "inline_signed": _has_inline_signature(file_path),
-                }
-            )
+            files.append(_ingest_file(file_path, project_path, rel))
 
     lockfiles_dir = project_path / AI_DIR / "lockfiles"
     if lockfiles_dir.is_dir():
@@ -348,13 +344,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
         for file_path in sorted(lockfiles_dir.iterdir()):
             if file_path.is_file() and file_path.name.startswith(prefix):
                 rel = str(file_path.relative_to(project_path))
-                files.append(
-                    {
-                        "path": rel,
-                        "sha256": _sha256_file(file_path),
-                        "inline_signed": _has_inline_signature(file_path),
-                    }
-                )
+                files.append(_ingest_file(file_path, project_path, rel))
 
     return files
 
@@ -440,7 +430,7 @@ async def _create(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
         },
         "files": {
             f["path"]: {
-                "sha256": f["sha256"],
+                "object_hash": f["object_hash"],
                 "inline_signed": f["inline_signed"],
             }
             for f in files
@@ -521,7 +511,7 @@ async def _create_package(project_path: Path, params: Dict[str, Any]) -> Dict[st
         },
         "files": {
             f["path"]: {
-                "sha256": f["sha256"],
+                "object_hash": f["object_hash"],
                 "inline_signed": f["inline_signed"],
             }
             for f in files
@@ -574,16 +564,10 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
             if any(d in file_path.parts for d in exclude_dirs):
                 continue
 
-            # Compute path relative to package root (not type dir)
             rel = str(file_path.relative_to(package_path))
-            files.append(
-                {
-                    "path": rel,
-                    "sha256": _sha256_file(file_path),
-                    "inline_signed": _has_inline_signature(file_path),
-                    "item_type": item_type,
-                }
-            )
+            entry = _ingest_file(file_path, package_path, rel)
+            entry["item_type"] = item_type
+            files.append(entry)
 
     # Walk extra directories (config/keys/trusted, etc.)
     for dir_name in _EXTRA_DIRS:
@@ -596,14 +580,9 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
                 continue
 
             rel = str(file_path.relative_to(package_path))
-            files.append(
-                {
-                    "path": rel,
-                    "sha256": _sha256_file(file_path),
-                    "inline_signed": _has_inline_signature(file_path),
-                    "item_type": "asset",
-                }
-            )
+            entry = _ingest_file(file_path, package_path, rel)
+            entry["item_type"] = "asset"
+            files.append(entry)
 
     return files
 
@@ -630,7 +609,7 @@ async def _verify(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
         manifest_valid = False
         manifest_error = str(e)
 
-    # 2. Verify each file's hash
+    # 2. Verify each file's hash by re-ingesting and comparing
     data = _parse_manifest(manifest_path)
     file_entries = data.get("files", {})
 
@@ -639,13 +618,24 @@ async def _verify(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
     files_tampered: List[str] = []
 
     for rel_path, meta in file_entries.items():
+        object_hash = meta.get("object_hash")
+        if not object_hash:
+            files_tampered.append(rel_path)
+            continue
+
         file_path = project_path / rel_path
         if not file_path.exists():
             files_missing.append(rel_path)
             continue
 
-        actual_hash = _sha256_file(file_path)
-        if actual_hash != meta["sha256"]:
+        # Re-ingest file and compare hash to manifest
+        try:
+            current_meta = _ingest_file(file_path, project_path, rel_path)
+        except Exception:
+            files_tampered.append(rel_path)
+            continue
+
+        if current_meta["object_hash"] != object_hash:
             files_tampered.append(rel_path)
             continue
 

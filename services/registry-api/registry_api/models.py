@@ -199,7 +199,7 @@ class BundlePushRequest(BaseModel):
     bundle_id: str = Field(..., min_length=1, max_length=256)
     version: Optional[str] = None
     manifest: str = Field(..., min_length=1)
-    files: Dict[str, Any] = Field(..., description="Map of rel_path -> {content, sha256, inline_signed}")
+    files: Dict[str, Any] = Field(..., description="Map of rel_path -> {content, object_hash, inline_signed}")
 
 
 class BundlePushResponse(BaseModel):

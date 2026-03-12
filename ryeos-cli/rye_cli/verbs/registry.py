@@ -29,8 +29,6 @@ def register(subparsers):
     push_p.add_argument("item_type", choices=["directive", "tool", "knowledge"])
     push_p.add_argument("item_id", help="Namespaced item ID (e.g., leolilley/utils/tool)")
     push_p.add_argument("--version", help="Version override")
-    push_p.add_argument("--visibility", default="private",
-                        choices=["public", "private"], help="Initial visibility")
     push_p.set_defaults(handler=_handle_push)
 
     pull_p = sub.add_parser("pull", help="Pull item from registry")
@@ -90,16 +88,6 @@ def register(subparsers):
     bs.add_argument("--limit", type=int, default=20, help="Max results")
     bs.set_defaults(handler=_handle_bundle_search)
 
-    # bundle publish
-    bpub = bundle_sub.add_parser("publish", help="Make bundle public")
-    bpub.add_argument("bundle_id", help="Bundle identifier")
-    bpub.set_defaults(handler=_handle_bundle_publish)
-
-    # bundle unpublish
-    bunpub = bundle_sub.add_parser("unpublish", help="Make bundle private")
-    bunpub.add_argument("bundle_id", help="Bundle identifier")
-    bunpub.set_defaults(handler=_handle_bundle_unpublish)
-
 
 # ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -142,7 +130,6 @@ def _handle_push(args, project_path: str):
         "action": "push",
         "item_type": args.item_type,
         "item_id": args.item_id,
-        "visibility": args.visibility,
     }
     if args.version:
         params["version"] = args.version
@@ -236,17 +223,3 @@ def _handle_bundle_search(args, project_path: str):
     print_result(result)
 
 
-def _handle_bundle_publish(args, project_path: str):
-    result = _registry_execute(project_path, {
-        "action": "publish_bundle",
-        "bundle_id": args.bundle_id,
-    })
-    print_result(result)
-
-
-def _handle_bundle_unpublish(args, project_path: str):
-    result = _registry_execute(project_path, {
-        "action": "unpublish_bundle",
-        "bundle_id": args.bundle_id,
-    })
-    print_result(result)

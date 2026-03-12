@@ -733,7 +733,7 @@ async def push_bundle(
             "name": bundle_id.split("/")[-1] if "/" in bundle_id else bundle_id,
             "description": "",
             "author_id": user.id,
-            "visibility": "private",
+            "visibility": "public",
         }).execute()
         bundle_uuid = create_result.data[0]["id"]
 
@@ -911,12 +911,12 @@ async def set_bundle_visibility(
     body: dict,
     user: User = Depends(get_current_user),
 ):
-    """Set bundle visibility (public/private/unlisted)."""
+    """Set bundle visibility (public/unlisted)."""
     visibility = body.get("visibility")
-    if visibility not in ["public", "private", "unlisted"]:
+    if visibility not in ["public", "unlisted"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": f"Invalid visibility: {visibility}"},
+            detail={"error": f"Invalid visibility: {visibility}. Must be 'public' or 'unlisted'."},
         )
 
     supabase = get_supabase()
