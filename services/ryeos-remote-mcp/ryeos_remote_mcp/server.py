@@ -222,25 +222,6 @@ async def rest_sign(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
-# ---------------------------------------------------------------------------
-# CAS sync passthrough
-# ---------------------------------------------------------------------------
-
-
-async def rest_cas_proxy(request: Request) -> JSONResponse:
-    action = request.path_params["action"]
-    body = await request.json()
-    token = _extract_token(request)
-    result = await _proxy_to_modal(f"/objects/{action}", body, token or None)
-    return JSONResponse(result)
-
-
-async def rest_push_proxy(request: Request) -> JSONResponse:
-    body = await request.json()
-    token = _extract_token(request)
-    result = await _proxy_to_modal("/push", body, token or None)
-    return JSONResponse(result)
-
 
 # ---------------------------------------------------------------------------
 # Health
@@ -270,8 +251,6 @@ app = Starlette(
         Route("/search", rest_search, methods=["POST"]),
         Route("/load", rest_load, methods=["POST"]),
         Route("/sign", rest_sign, methods=["POST"]),
-        Route("/objects/{action}", rest_cas_proxy, methods=["POST"]),
-        Route("/push", rest_push_proxy, methods=["POST"]),
         Route("/health", health, methods=["GET"]),
     ],
     lifespan=lifespan,
