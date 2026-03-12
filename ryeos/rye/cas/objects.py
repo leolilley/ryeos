@@ -232,6 +232,44 @@ class ArtifactIndex:
 
 
 @dataclass(frozen=True)
+class ProjectSnapshot:
+    """A point-in-time commit of project state with parent lineage.
+
+    Like a git commit: wraps a manifest hash with parent pointer(s).
+    Zero parents = initial push. One parent = normal commit.
+    Two parents = merge commit (concurrent execution fold-back).
+
+    parent_hashes ordering convention:
+      [0] = previous HEAD (first parent / mainline)
+      [1] = merged branch (execution snapshot being folded in)
+    get_history() follows parent_hashes[0] for mainline traversal.
+    """
+
+    kind: str = field(default="project_snapshot", init=False)
+    schema: int = field(default=SCHEMA_VERSION, init=False)
+    project_manifest_hash: str = ""
+    user_manifest_hash: str = ""
+    parent_hashes: List[str] = field(default_factory=list)
+    source: str = ""  # "push", "execution", "merge"
+    source_detail: str = ""
+    timestamp: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "kind": self.kind,
+            "project_manifest_hash": self.project_manifest_hash,
+            "user_manifest_hash": self.user_manifest_hash,
+            "parent_hashes": self.parent_hashes,
+            "source": self.source,
+            "source_detail": self.source_detail,
+            "timestamp": self.timestamp,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeOutputsBundle:
     """Maps runtime-produced files to CAS blobs for remote output sync.
 
