@@ -1,6 +1,6 @@
 [project]
 name = "ryeos"
-version = "0.1.15"
+version = "0.1.16"
 description = "RYE Standard Bundle — agent, bash, file-system, MCP, and primary actions"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,6 +13,7 @@ classifiers = [
 
 dependencies = [
     "ryeos-core",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
