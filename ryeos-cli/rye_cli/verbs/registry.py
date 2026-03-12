@@ -46,17 +46,6 @@ def register(subparsers):
     search_p.add_argument("--limit", type=int, default=20, help="Max results")
     search_p.set_defaults(handler=_handle_search)
 
-    # ── Visibility ────────────────────────────────────────────────────
-    pub_p = sub.add_parser("publish", help="Make item public")
-    pub_p.add_argument("item_type", choices=["directive", "tool", "knowledge"])
-    pub_p.add_argument("item_id", help="Namespaced item ID")
-    pub_p.set_defaults(handler=_handle_visibility, action="publish")
-
-    unpub_p = sub.add_parser("unpublish", help="Make item private")
-    unpub_p.add_argument("item_type", choices=["directive", "tool", "knowledge"])
-    unpub_p.add_argument("item_id", help="Namespaced item ID")
-    unpub_p.set_defaults(handler=_handle_visibility, action="unpublish")
-
     # ── Bundle operations ─────────────────────────────────────────────
     bundle_p = sub.add_parser("bundle", help="Bundle operations")
     bundle_sub = bundle_p.add_subparsers(dest="bundle_action", required=True)
@@ -159,15 +148,6 @@ def _handle_search(args, project_path: str):
     if args.item_type:
         params["item_type"] = args.item_type
     result = _registry_execute(project_path, params)
-    print_result(result)
-
-
-def _handle_visibility(args, project_path: str):
-    result = _registry_execute(project_path, {
-        "action": args.action,
-        "item_type": args.item_type,
-        "item_id": args.item_id,
-    })
     print_result(result)
 
 

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-12T05:30:24Z:73e25364470e2e9b4161b7b716f044710ee915c3f4b3cded172c56b3acc0da36:UK9Vq9koIDFi_p7XZkKe6KrdxKd_PXji9L1cGMC0RRE3CrTL53JnO3TuJjkw5pDz5hKErgJgtVWyvwCymhntAg==:4b987fd4e40303ac
+# rye:signed:2026-03-12T09:02:28Z:dd16427ddf89b621d8583fc43ea370d4f66a045c79c95807ff1bf62e063a3e6f:3K7bhLGEFq0LNyPaJebfyY6dXEHKzrgyL1ndfDL_eV7FNo6Q02YrjFosu9aG6RrhtOi0Bu_7f5v-OvHAFWGyDw==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 
@@ -15,9 +15,10 @@ Identity model:
 Provides operations for interacting with the Rye Registry:
 - Auth via OAuth PKCE flow (GitHub, etc.)
 - Push/pull items to/from registry
-- Publish/unpublish to control visibility
 
 Uses Railway API for item operations, Supabase for auth.
+Items default to public visibility on push. Use the server-side
+visibility endpoint to set unlisted if needed.
 
 Actions:
   Auth:
@@ -31,8 +32,6 @@ Actions:
     - pull: Download item from registry to local (item_id=namespace/category/name)
     - push: Upload local item to registry (item_id=namespace/category/name)
     - delete: Remove item from registry
-    - publish: Make item public (visibility='public')
-    - unpublish: Make item private (visibility='private')
 """
 
 __version__ = "1.1.0"
@@ -109,8 +108,6 @@ ACTIONS = [
     "pull",
     "push",
     "delete",
-    "publish",
-    "unpublish",
     # Bundles
     "push_bundle",
     "pull_bundle",
@@ -582,7 +579,7 @@ async def _execute_action(
                 item_type=params.get("item_type"),
                 item_id=params.get("item_id"),
                 version=params.get("version"),
-                visibility=params.get("visibility", "private"),
+                visibility=params.get("visibility", "public"),
                 project_path=project_path,
             )
             http_calls = 2  # push typically makes 2 HTTP requests (check + create)
@@ -591,18 +588,6 @@ async def _execute_action(
                 item_type=params.get("item_type"),
                 item_id=params.get("item_id"),
                 version=params.get("version"),
-            )
-            http_calls = 1
-        elif action == "publish":
-            result = await _publish(
-                item_type=params.get("item_type"),
-                item_id=params.get("item_id"),
-            )
-            http_calls = 1
-        elif action == "unpublish":
-            result = await _unpublish(
-                item_type=params.get("item_type"),
-                item_id=params.get("item_id"),
             )
             http_calls = 1
 
@@ -1647,7 +1632,7 @@ async def _push(
     item_type: Optional[str],
     item_id: Optional[str],
     version: Optional[str] = None,
-    visibility: str = "private",
+    visibility: str = "public",
     project_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -1666,7 +1651,7 @@ async def _push(
                  Example: "leolilley/test/provider_test_tool"
                  Local file resolved from category/name (e.g., test/provider_test_tool)
         version: Version string (semver). If omitted, extracted from parsed content.
-        visibility: "public", "private", or "unlisted"
+        visibility: "public" or "unlisted"
     """
     if not item_type or not item_id:
         return {
@@ -1934,138 +1919,6 @@ async def _delete(
     except Exception as e:
         await http.close()
         return {"error": f"Delete failed: {e}"}
-
-
-async def _publish(
-    item_type: Optional[str],
-    item_id: Optional[str],
-) -> Dict[str, Any]:
-    """
-    Make item public (set visibility to 'public').
-
-    Args:
-        item_type: "directive", "tool", or "knowledge"
-        item_id: Item identifier (namespace/category/name format)
-    """
-    if not item_type or not item_id:
-        return {
-            "error": "Required: item_type, item_id",
-            "usage": "publish(item_type='directive', item_id='leolilley/core/bootstrap')",
-        }
-    
-    # Validate item_id format
-    try:
-        parse_item_id(item_id)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    if item_type not in ["directive", "tool", "knowledge"]:
-        return {
-            "error": f"Invalid item_type: {item_type}",
-            "valid": ["directive", "tool", "knowledge"],
-        }
-
-    # Check auth
-    token = await _resolve_auth_token(scope="registry:write")
-    if not token:
-        return {
-            "error": "Authentication required",
-            "solution": "Run 'registry login' first",
-        }
-
-    config = RegistryConfig.from_env()
-    http = RegistryHttpClient(config)
-
-    try:
-        result = await http.post(
-            f"/v1/visibility/{item_type}/{item_id}",
-            body={"visibility": "public"},
-            auth_token=token,
-        )
-        await http.close()
-
-        if not result["success"]:
-            return {
-                "error": f"Publish failed: {result.get('error', 'Unknown error')}",
-                "status_code": result.get("status_code"),
-            }
-
-        return {
-            "status": "published",
-            "item_type": item_type,
-            "item_id": item_id,
-            "visibility": "public",
-        }
-
-    except Exception as e:
-        await http.close()
-        return {"error": f"Publish failed: {e}"}
-
-
-async def _unpublish(
-    item_type: Optional[str],
-    item_id: Optional[str],
-) -> Dict[str, Any]:
-    """
-    Make item private (set visibility to 'private').
-
-    Args:
-        item_type: "directive", "tool", or "knowledge"
-        item_id: Item identifier (namespace/category/name format)
-    """
-    if not item_type or not item_id:
-        return {
-            "error": "Required: item_type, item_id",
-            "usage": "unpublish(item_type='directive', item_id='leolilley/core/bootstrap')",
-        }
-    
-    # Validate item_id format
-    try:
-        parse_item_id(item_id)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    if item_type not in ["directive", "tool", "knowledge"]:
-        return {
-            "error": f"Invalid item_type: {item_type}",
-            "valid": ["directive", "tool", "knowledge"],
-        }
-
-    # Check auth
-    token = await _resolve_auth_token(scope="registry:write")
-    if not token:
-        return {
-            "error": "Authentication required",
-            "solution": "Run 'registry login' first",
-        }
-
-    config = RegistryConfig.from_env()
-    http = RegistryHttpClient(config)
-
-    try:
-        result = await http.post(
-            f"/v1/visibility/{item_type}/{item_id}",
-            body={"visibility": "private"},
-            auth_token=token,
-        )
-        await http.close()
-
-        if not result["success"]:
-            return {
-                "error": f"Unpublish failed: {result.get('error', 'Unknown error')}",
-                "status_code": result.get("status_code"),
-            }
-
-        return {
-            "status": "unpublished",
-            "item_type": item_type,
-            "item_id": item_id,
-            "visibility": "private",
-        }
-
-    except Exception as e:
-        await http.close()
-        return {"error": f"Unpublish failed: {e}"}
 
 
 # =============================================================================

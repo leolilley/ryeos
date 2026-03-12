@@ -305,7 +305,7 @@ async def _upsert_item(
             "name": name,
             "author_id": user_id,
             "description": metadata.get("description", ""),
-            "visibility": metadata.get("visibility", "private"),
+            "visibility": metadata.get("visibility", "public"),
         }
         
         # Type-specific fields
@@ -541,12 +541,12 @@ async def set_visibility(
     body: dict,
     user: User = Depends(get_current_user),
 ):
-    """Set item visibility (public/private/unlisted)."""
+    """Set item visibility (public/unlisted)."""
     visibility = body.get("visibility")
-    if visibility not in ["public", "private", "unlisted"]:
+    if visibility not in ["public", "unlisted"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": f"Invalid visibility: {visibility}"},
+            detail={"error": f"Invalid visibility: {visibility}. Must be 'public' or 'unlisted'."},
         )
     
     if item_type not in ["directive", "tool", "knowledge"]:
