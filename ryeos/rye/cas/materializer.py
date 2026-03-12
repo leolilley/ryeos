@@ -85,18 +85,26 @@ def _safe_target(root: Path, rel_path: str) -> Path:
     return target
 
 
-def _materialize_manifest(
+def materialize_manifest(
     manifest_hash: str,
     target_root: Path,
     cas_root_path: Path,
 ) -> None:
-    """Materialize a single manifest into target_root."""
+    """Materialize a single manifest (by hash) into target_root."""
     manifest = cas.get_object(manifest_hash, cas_root_path)
     if manifest is None:
         raise FileNotFoundError(
             f"Manifest object {manifest_hash} not found in CAS"
         )
+    materialize_manifest_dict(manifest, target_root, cas_root_path)
 
+
+def materialize_manifest_dict(
+    manifest: dict,
+    target_root: Path,
+    cas_root_path: Path,
+) -> None:
+    """Materialize a manifest dict into target_root."""
     # items: .ai/ paths → item_source objects (unwrap blob via materialize_item)
     for rel_path, item_source_hash in manifest.get("items", {}).items():
         target_path = _safe_target(target_root, rel_path)
@@ -112,6 +120,10 @@ def _materialize_manifest(
             )
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(blob_data)
+
+
+# Keep private alias for internal callers
+_materialize_manifest = materialize_manifest
 
 
 def get_system_version() -> str:
