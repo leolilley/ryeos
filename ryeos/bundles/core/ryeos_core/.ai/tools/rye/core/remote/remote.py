@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T10:48:17Z:74f78a0047806ed83d74f8a3d08c4fd6b32fcb6a88556423afc2e19d23f079bc:MrjIW4uhnYc4kl8c5pZ3pU5BS1OlnbWT6rcXw6ESrSUFXDbad8qn_80fiSLOzCDYxQzV80yXpHpLlO_rtyklBA==:4b987fd4e40303ac
+# rye:signed:2026-03-12T04:27:11Z:ea8acaef811fccc2631bdee004ec15b8a3daeaf1e396d954cdef629fd34799ac:y8X8I7FmLRyuB8mweUFUd78KhX8lzYk0_6TvkqC5eF96TxXGDBLHh8jQq0hSn-B_KMZePjdk5m0YwUEmeUmRDQ==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 
@@ -186,6 +186,36 @@ def _get_client(remote_name=None, project_path=None) -> RemoteHttpClient:
 
 
 # ---------------------------------------------------------------------------
+# Local snapshot ref tracking
+# ---------------------------------------------------------------------------
+
+
+def _remote_ref_path(project_path: Path, remote_name: str) -> Path:
+    """Path to the local file tracking a remote's HEAD snapshot hash."""
+    return project_path / AI_DIR / "objects" / "refs" / "remotes" / f"{remote_name}.json"
+
+
+def _load_remote_snapshot_hash(project_path: Path, remote_name: str) -> Optional[str]:
+    """Load the last-known snapshot_hash for a remote. Returns None if not tracked."""
+    ref_file = _remote_ref_path(project_path, remote_name)
+    if not ref_file.exists():
+        return None
+    try:
+        data = json.loads(ref_file.read_text())
+        return data.get("snapshot_hash")
+    except Exception:
+        logger.warning("Failed to read remote ref %s", ref_file, exc_info=True)
+        return None
+
+
+def _store_remote_snapshot_hash(project_path: Path, remote_name: str, snapshot_hash: str) -> None:
+    """Store the remote's HEAD snapshot_hash locally for next push."""
+    ref_file = _remote_ref_path(project_path, remote_name)
+    ref_file.parent.mkdir(parents=True, exist_ok=True)
+    ref_file.write_text(json.dumps({"snapshot_hash": snapshot_hash}))
+
+
+# ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 
@@ -252,12 +282,17 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     from remote_config import get_project_name
     proj_name = get_project_name(project_path)
     sys_ver = get_system_version()
+    effective_remote = remote_name or "default"
+
+    # Load expected_snapshot_hash from local ref tracking
+    expected_snapshot_hash = _load_remote_snapshot_hash(project_path, effective_remote)
 
     push_resp = await client.post("/push", {
         "project_name": proj_name,
         "project_manifest_hash": ph,
         "user_manifest_hash": uh,
         "system_version": sys_ver,
+        "expected_snapshot_hash": expected_snapshot_hash,
     })
 
     push_body = push_resp.get("body", {})
@@ -268,11 +303,18 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     if not ref_published:
         logger.warning("Failed to publish project ref: %s", push_resp.get("error"))
 
+    # Store returned snapshot_hash for next push
+    if ref_published and push_body.get("snapshot_hash"):
+        _store_remote_snapshot_hash(
+            project_path, effective_remote, push_body["snapshot_hash"],
+        )
+
     result = {
         "project_manifest_hash": ph,
         "user_manifest_hash": uh,
         "project_name": proj_name,
-        "remote_name": push_body.get("remote_name", remote_name or "default"),
+        "remote_name": push_body.get("remote_name", effective_remote),
+        "snapshot_hash": push_body.get("snapshot_hash"),
         "objects_synced": objects_synced,
         "total_objects": len(all_hashes),
         "ref_published": ref_published,

@@ -25,7 +25,7 @@ from ryeos_remote.config import Settings, get_settings
 from lillux.primitives import cas
 from lillux.primitives.integrity import compute_integrity
 
-from rye.cas.objects import ExecutionSnapshot, RuntimeOutputsBundle
+from rye.cas.objects import ExecutionSnapshot, ProjectSnapshot, RuntimeOutputsBundle
 from rye.cas.sync import (
     handle_has_objects,
     handle_put_objects,
@@ -95,6 +95,7 @@ class PushRequest(BaseModel):
     project_manifest_hash: str
     user_manifest_hash: str
     system_version: str
+    expected_snapshot_hash: Optional[str] = None  # None = first push
 
 
 class ExecuteRequest(BaseModel):
@@ -392,37 +393,66 @@ def _upsert_project_ref(
     project_manifest_hash: str,
     user_manifest_hash: str,
     system_version: str,
+    snapshot_hash: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> None:
-    """Upsert project_refs row (last-writer-wins)."""
-    try:
-        sb = _get_supabase(settings)
-        sb.table("project_refs").upsert({
-            "user_id": user.id,
-            "remote_name": settings.rye_remote_name,
-            "project_name": project_name,
-            "project_manifest_hash": project_manifest_hash,
-            "user_manifest_hash": user_manifest_hash,
-            "system_version": system_version,
-            "pushed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        }).execute()
-    except Exception:
-        logger.warning("Failed to upsert project ref %s", project_name, exc_info=True)
+    """Upsert project_refs row with optional optimistic lock on snapshot_revision.
+
+    If expected_revision is provided, uses compare-and-swap on snapshot_revision
+    to prevent concurrent HEAD advances from clobbering each other.
+    Raises HTTPException(409) if the revision has moved.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    sb = _get_supabase(settings)
+    row = {
+        "user_id": user.id,
+        "remote_name": settings.rye_remote_name,
+        "project_name": project_name,
+        "project_manifest_hash": project_manifest_hash,
+        "user_manifest_hash": user_manifest_hash,
+        "system_version": system_version,
+        "pushed_at": now,
+    }
+    if snapshot_hash is not None:
+        row["snapshot_hash"] = snapshot_hash
+        row["head_updated_at"] = now
+
+    if expected_revision is not None:
+        row["snapshot_revision"] = expected_revision + 1
+        # Optimistic CAS: update only if revision matches
+        result = (
+            sb.table("project_refs")
+            .update(row)
+            .eq("user_id", user.id)
+            .eq("remote_name", settings.rye_remote_name)
+            .eq("project_name", project_name)
+            .eq("snapshot_revision", expected_revision)
+            .execute()
+        )
+        if not result.data:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "HEAD revision moved during push. Pull and retry.",
+            )
+    else:
+        sb.table("project_refs").upsert(row).execute()
 
 
 def _resolve_project_ref(
     settings: Settings,
     user: User,
     project_name: str,
-) -> Dict[str, str]:
-    """Look up project_refs to resolve manifest hashes.
+) -> Dict[str, Any]:
+    """Look up project_refs to resolve manifest hashes and snapshot state.
 
-    Returns dict with project_manifest_hash, user_manifest_hash, system_version.
+    Returns dict with project_manifest_hash, user_manifest_hash, system_version,
+    snapshot_hash, snapshot_revision.
     Raises HTTPException if not found.
     """
     sb = _get_supabase(settings)
     result = (
         sb.table("project_refs")
-        .select("project_manifest_hash, user_manifest_hash, system_version")
+        .select("project_manifest_hash, user_manifest_hash, system_version, snapshot_hash, snapshot_revision")
         .eq("user_id", user.id)
         .eq("remote_name", settings.rye_remote_name)
         .eq("project_name", project_name)
@@ -513,7 +543,7 @@ async def push(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    """Finalize a push — verify manifest objects exist, upsert project ref."""
+    """Finalize a push — verify manifests, create snapshot, advance HEAD."""
     root = _user_cas_root(user, settings)
 
     # Shallow check: verify both manifest hashes exist as CAS objects
@@ -531,13 +561,59 @@ async def push(
     if req.system_version:
         _check_system_version(req.system_version)
 
-    _upsert_project_ref(
-        settings, user,
-        project_name=req.project_name,
+    # Resolve current HEAD (if any)
+    sb = _get_supabase(settings)
+    ref_result = (
+        sb.table("project_refs")
+        .select("snapshot_hash, snapshot_revision")
+        .eq("user_id", user.id)
+        .eq("remote_name", settings.rye_remote_name)
+        .eq("project_name", req.project_name)
+        .execute()
+    )
+    ref = ref_result.data[0] if ref_result.data else None
+    current_head = ref["snapshot_hash"] if ref else None
+    current_rev = ref["snapshot_revision"] if ref else 0
+
+    # Reject if client is behind (expected_snapshot_hash mismatch)
+    if req.expected_snapshot_hash is not None or current_head is not None:
+        if req.expected_snapshot_hash != current_head:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"HEAD has moved: expected={req.expected_snapshot_hash}, "
+                f"actual={current_head}. Pull and re-push.",
+            )
+
+    # Create ProjectSnapshot
+    snapshot = ProjectSnapshot(
         project_manifest_hash=req.project_manifest_hash,
         user_manifest_hash=req.user_manifest_hash,
-        system_version=req.system_version,
+        parent_hashes=[current_head] if current_head else [],
+        source="push",
+        timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
+    snapshot_hash = cas.store_object(snapshot.to_dict(), root)
+
+    # Advance HEAD
+    if ref is not None:
+        _upsert_project_ref(
+            settings, user,
+            project_name=req.project_name,
+            project_manifest_hash=req.project_manifest_hash,
+            user_manifest_hash=req.user_manifest_hash,
+            system_version=req.system_version,
+            snapshot_hash=snapshot_hash,
+            expected_revision=current_rev,
+        )
+    else:
+        _upsert_project_ref(
+            settings, user,
+            project_name=req.project_name,
+            project_manifest_hash=req.project_manifest_hash,
+            user_manifest_hash=req.user_manifest_hash,
+            system_version=req.system_version,
+            snapshot_hash=snapshot_hash,
+        )
 
     return {
         "status": "ok",
@@ -545,6 +621,7 @@ async def push(
         "project_name": req.project_name,
         "project_manifest_hash": req.project_manifest_hash,
         "user_manifest_hash": req.user_manifest_hash,
+        "snapshot_hash": snapshot_hash,
     }
 
 
