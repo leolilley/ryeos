@@ -1,5 +1,3 @@
-# Build from project root: docker build -f services/registry-api/Dockerfile .
-#
 # The registry API is the server side. It needs:
 # - ryeos-core (engine + parsers/extractors for validation)
 # - lillux primitives (signing, integrity)
@@ -13,11 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy registry-api
-COPY services/registry-api/pyproject.toml services/registry-api/README.md /app/registry-api/
-COPY services/registry-api/registry_api /app/registry-api/registry_api
+COPY pyproject.toml README.md /app/
+COPY registry_api /app/registry_api
 
 # Install packages — ryeos-core (includes engine + parsers/extractors) and lillux from PyPI
-WORKDIR /app/registry-api
 RUN pip install --no-cache-dir ryeos-core -e .
 
 # Expose port
