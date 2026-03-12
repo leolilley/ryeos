@@ -28,10 +28,12 @@ from ryeos_remote.config import Settings, get_settings
 RESERVED_ENV_NAMES = frozenset({
     "PATH", "PYTHONPATH", "HOME", "USER", "SHELL", "LANG", "TERM",
     "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP",
+    # Internal RYE vars set by the server — block individually, not by prefix
+    "RYE_SIGNING_KEY_DIR", "RYE_KERNEL_PYTHON", "RYE_REMOTE_NAME",
 })
 
 RESERVED_ENV_PREFIXES = (
-    "RYE_", "SUPABASE_", "MODAL_", "LD_", "SSL_", "AWS_",
+    "SUPABASE_", "MODAL_", "LD_", "SSL_", "AWS_",
     "GOOGLE_", "AZURE_", "GITHUB_", "CI_", "DOCKER_",
 )
 
