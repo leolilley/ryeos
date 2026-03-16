@@ -1,0 +1,23 @@
+# Email agent configuration — bundle defaults
+# Override per-project: .ai/config/email/email.yaml
+schema_version: "1.0.0"
+
+provider:
+  # No default — user sets in project space
+  # Set to "campaign-kiwi", "gmail", etc.
+  default: null
+
+agent:
+  inbox: null
+  name: null
+  forward_to: null
+
+owner_emails: []
+
+suppress_patterns:
+  - "noreply@*"
+  - "no-reply@*"
+  - "notifications@*"
+  - "mailer-daemon@*"
+  - "postmaster@*"
+  - "auto-*@*"

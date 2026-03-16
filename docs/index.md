@@ -57,12 +57,21 @@ Thread-based orchestration is the flagship capability — AI agents coordinating
 
 ## Standard Library
 
-Everything that ships with Rye OS — the standard bundle, plus optional web and code bundles:
+The core tools and infrastructure that ship with every Rye OS installation:
 
 - [Overview](standard-library/overview.md) — Full catalog of bundled items
 - [Bundled Directives](standard-library/bundled-directives.md) — Item creation and thread management directives
-- [Bundled Tools](standard-library/bundled-tools.md) — File system, bash, web, MCP, orchestration engine, and more
+- [Bundled Tools](standard-library/bundled-tools.md) — File system, bash, MCP, orchestration engine, and more
 - [Bundled Knowledge](standard-library/bundled-knowledge.md) — Metadata references for AI agents
+
+## Bundles
+
+Optional extension bundles that add domain-specific tools:
+
+- [Overview](bundles/index.md) — How bundles work, installation, and the full list
+- [Web](bundles/web/index.md) — Search, fetch, and browser automation (`ryeos-web`)
+- [Code](bundles/code/index.md) — NPM, diagnostics, TypeScript, LSP (`ryeos-code`)
+- [Email](bundles/email/index.md) — Provider-agnostic inbound routing, sending, and drafting (`ryeos-email`)
 
 ## Internals
 

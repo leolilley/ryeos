@@ -1,7 +1,7 @@
 ```yaml
 id: bundled-tools
 title: "Bundled Tools"
-description: All tools that ship with Rye OS — from file operations to the orchestration engine
+description: Core tools that ship with the ryeos standard bundle — file operations, bash, MCP, and the orchestration engine
 category: standard-library
 tags: [tools, bundled, standard-library, catalog]
 version: "1.0.0"
@@ -11,18 +11,15 @@ version: "1.0.0"
 
 Rye OS ships a standard library of tools inside the `ryeos` package at `ryeos/rye/.ai/tools/rye/`. These live in the **system space** and are always available — no installation required. Tools are organized into two tiers: **agent-facing tools** that users interact with directly, and **infrastructure tools** that power the system internally.
 
-Tools are distributed across multiple bundles:
-- **Standard bundle** (`ryeos`) — file-system, bash, MCP, primary actions, agent system, infrastructure
-- **Web bundle** (`ryeos-web`, or `pip install ryeos[web]`) — browser automation, fetch, search
-- **Code bundle** (`ryeos-code`, or `pip install ryeos[code]`) — npm, diagnostics, typescript, LSP
-
 All tools are invoked via `rye_execute(item_type="tool", item_id="<item_id>", parameters={...})`.
+
+Additional tools are available through [optional bundles](../bundles/index.md) installed separately.
 
 ---
 
 ## Agent-Facing Tools
 
-These are the tools you'll use most often — file I/O, shell access, web, MCP, and the orchestration engine.
+These are the tools you'll use most often — file I/O, shell access, MCP, and the orchestration engine.
 
 ### File System (`rye/file-system/`)
 
@@ -64,34 +61,6 @@ rye_execute(item_type="tool", item_id="rye/bash",
     parameters={"command": "git status --short"})
 ```
 
-### Web (`rye/web/`) — requires `ryeos-web` or `ryeos[web]`
-
-| Tool    | Item ID                      | Description                              |
-| ------- | ---------------------------- | ---------------------------------------- |
-| fetch   | `rye/web/fetch/fetch`        | Fetch and extract content from web pages |
-| search  | `rye/web/search/search`      | Search the web                           |
-| browser | `rye/web/browser/browser`    | Browser automation via playwright-cli    |
-
-**Browser commands:** `open`, `goto`, `screenshot`, `snapshot`, `click`, `fill`, `type`, `select`, `hover`, `resize`, `console`, `network`, `eval`, `press`, `tab-list`, `tab-new`, `tab-select`, `tab-close`, `close`, `close-all`
-
-```python
-# Open a page
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
-    parameters={"command": "open", "args": ["http://localhost:3000"]})
-
-# Take a screenshot
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
-    parameters={"command": "screenshot"})
-
-# Click an element by ref
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
-    parameters={"command": "click", "args": ["e15"]})
-
-# Fetch a web page
-rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
-    parameters={"url": "https://docs.example.com/api"})
-```
-
 ### MCP Client (`rye/mcp/`)
 
 Tools for connecting to external MCP servers.
@@ -111,33 +80,6 @@ Tools for connecting to external MCP servers.
 ```python
 rye_execute(item_type="tool", item_id="rye/core/registry/registry",
     parameters={"action": "search", "query": "deployment"})
-```
-
-### Code Tools (`rye/code/`) — requires `ryeos-code` or `ryeos[code]`
-
-Development tools for package management, type checking, diagnostics, and LSP code intelligence. Node.js dependencies (`node_modules`) are NOT shipped — they are installed on first use via the node runtime's anchor system.
-
-| Tool        | Item ID                              | Description                                         |
-| ----------- | ------------------------------------ | --------------------------------------------------- |
-| npm         | `rye/code/npm/npm`                   | NPM/NPX operations — install, run, build, exec      |
-| diagnostics | `rye/code/diagnostics/diagnostics`   | Run linters and type checkers (ruff, mypy, eslint…)  |
-| typescript  | `rye/code/typescript/typescript`     | TypeScript type checker — tsc --noEmit               |
-| lsp         | `rye/code/lsp/lsp`                   | LSP client — go to definition, references, hover…    |
-
-**Actions:** `install`, `run`, `build`, `test`, `init`, `exec`
-
-```python
-# Install packages
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
-    parameters={"action": "install", "args": ["react", "react-dom"], "working_dir": "frontend"})
-
-# Run a script
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
-    parameters={"action": "run", "args": ["build"], "working_dir": "frontend"})
-
-# Execute via npx
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
-    parameters={"action": "exec", "args": ["vite", "build"], "working_dir": "frontend"})
 ```
 
 ### System (`rye/core/system/`)

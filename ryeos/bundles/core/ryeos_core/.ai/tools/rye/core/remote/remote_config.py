@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T08:01:01Z:0c2d797ab7f4fdc7f01f93ce16bb79beac0ab5c66a7963b36213aaeb81b34df8:oe6FTaTktXCppaA9FkQp9JXdM5db8HBZvm_QdnqJGz0pvbI3_KO074z2wTbwdKcSQOQmuxju4WJFqHx2izd2AA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T04:06:19Z:1f2a842203595e6db4b0e8a0e9cc26ddcf0588f079ed6a8c968338af415fd297:Gacjt1ILTqcEoTfreyV0blCBgOrvgmRnfRHWHHyOBCRQib5hOlHapsQelXPL5fODsI4Qsy3iqh5LvExOWGNiCQ==:4b987fd4e40303ac
 """Named remote resolution for multi-remote execution.
 
 Resolves remote connection details (URL + API key) via 3-tier config
@@ -83,10 +83,10 @@ def resolve_remote(
     return RemoteConfig(name=name, url=url, api_key=api_key)
 
 
-def get_project_name(project_path: Optional[Path] = None) -> str:
-    """Get stable project name from config, falling back to dir basename."""
+def get_project_path(project_path: Optional[Path] = None) -> str:
+    """Get stable project path identifier from config, falling back to dir basename."""
     config = _load_remote_config(project_path)
-    name = config.get("project_name")
+    name = config.get("project_path")
     if name and isinstance(name, str):
         return name
     if project_path:

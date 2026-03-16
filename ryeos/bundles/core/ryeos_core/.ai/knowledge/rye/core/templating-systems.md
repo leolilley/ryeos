@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:99c424da9c120f365890fd5c38a0bcffa86535a5c62765272e072a1041bb9285:o2Y8rUdIaxFZLTIiFri3gZlkOJcOgUNB-vciI4G6sZZRSCqvxkM8h_g0M8cVTI5m7VQYMNObtGppGYv14WanAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T08:42:30Z:99c424da9c120f365890fd5c38a0bcffa86535a5c62765272e072a1041bb9285:o2Y8rUdIaxFZLTIiFri3gZlkOJcOgUNB-vciI4G6sZZRSCqvxkM8h_g0M8cVTI5m7VQYMNObtGppGYv14WanAg==:4b987fd4e40303ac -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:d46d88ef3fb425de6fbfe225dbf753dd0d0872120011425942244fd06cc6ca32:flGtB5OKviMXvnVpIa5Mgz_YqGzmQzXDB3MtFvqp-S_PZcUG5T95eQTz1cOcypN3BJHntPNg5ieCMIgNLtWABg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T08:42:30Z:e9686c4bd697acda1b4641778c5632fedc60a4090dc3649a5ed40bee6c453796:auRm1ntpikkkK-6KYqy7bfDAQNKSwHhqXCxGXEQfVdU2TFVUcV2u3IGK_C_vCPm37py923WoMyfV3Ux1KCdiCA==:4b987fd4e40303ac -->
 
 ```yaml
 name: bundle-format
@@ -188,11 +188,11 @@ bundle:
   description: Core Rye OS bundle
 files:
   .ai/tools/rye/core/registry/registry.py:
-    sha256: a66665d3ef686944...
+    object_hash: a66665d3ef686944...
     inline_signed: true
     item_type: tool
   .ai/directives/rye/core/create_directive.md:
-    sha256: 7c8a91b2f3d40e...
+    object_hash: 7c8a91b2f3d40e...
     inline_signed: true
     item_type: directive
 ```
@@ -205,7 +205,7 @@ files:
 | `bundle.version`           | Semver version string                               |
 | `bundle.entrypoint`        | Default item to run                                 |
 | `bundle.description`       | Human-readable description                          |
-| `files.<path>.sha256`      | SHA256 hex digest of the file's content             |
+| `files.<path>.object_hash` | CAS object hash (from `ingest_item()`) of the file  |
 | `files.<path>.inline_signed` | Whether the file has its own Ed25519 signature    |
 | `files.<path>.item_type`   | Item type (`tool`, `directive`, `knowledge`)         |
 
@@ -216,7 +216,7 @@ files:
 | Layer                  | Check                                                              |
 | ---------------------- | ------------------------------------------------------------------ |
 | **Manifest signature** | `verify_item(manifest_path, ItemType.TOOL)` — Ed25519 on manifest |
-| **Per-file SHA256**    | Compute `SHA256(file)` and compare to manifest's recorded hash     |
+| **Per-file object_hash** | Re-ingest file via CAS (`ingest_item()`), compare computed `object_hash` to manifest's recorded hash |
 | **Inline signatures**  | If `inline_signed: true`, also `verify_item()` on that file       |
 | **Missing files**      | Files in manifest but not on disk are flagged                      |
 
@@ -233,7 +233,26 @@ Verification report format:
 }
 ```
 
-Non-signable assets (images, data files) are covered by manifest per-file SHA256. Signable items (`.py`, `.md`, `.yaml`) get dual protection: manifest hash + inline Ed25519.
+Non-signable assets (images, data files) are covered by manifest per-file CAS `object_hash` verification. Signable items (`.py`, `.md`, `.yaml`) get dual protection: manifest hash + inline Ed25519.
+
+## Lockfile Format
+
+When a bundle is installed via `rye install`, a `.bundle-lock.json` is written to `.ai/bundles/{bundle_id}/`:
+
+```json
+{
+  "bundle_id": "my-bundle",
+  "version": "1.0.0",
+  "manifest_hash": "a1b2c3...",
+  "installed_at": "2026-03-15T12:00:00Z",
+  "files": [
+    ".ai/tools/utilities/web-scraper.py",
+    ".ai/directives/utilities/setup.md"
+  ]
+}
+```
+
+`rye uninstall` reads this lockfile to remove exactly the files that were installed, then cleans up empty parent directories and the bundle metadata directory.
 
 ## Bundled Tools vs Package Dependencies
 

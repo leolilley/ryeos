@@ -2,8 +2,8 @@
 id: tools-code
 title: "Code Tools"
 description: Development tools — NPM, diagnostics, TypeScript type checking, and LSP code intelligence
-category: standard-library/tools
-tags: [tools, code, npm, diagnostics, typescript, lsp]
+category: bundles
+tags: [tools, code, npm, diagnostics, typescript, lsp, ryeos-code, bundle]
 version: "1.0.0"
 ```
 

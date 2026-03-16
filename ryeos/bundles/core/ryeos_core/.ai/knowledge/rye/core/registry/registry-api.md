@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:b8e97959d1e250673243d4a763a632389a5121eb085db9096eb2441dbc7d9ae9:Tz8A_Mr8lz7j1EbcukYs5bUaFwtpZAY2GnVw0ldiIqH6y3L6PXyv5rBOwSy5Ttiws5CG7GplsGl2VvewXg1pDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T08:42:30Z:7fbe851ec5f1c873eb1e284c54e3dc7f197fb081309094152d4ab9cae640bf1f:qQiIdDigjoOH-NBK37YfzUu-mo4D2bR9bPmUKUAK-1IG2nU9og0xMpwmtC61dmFmZ_re71J3pv4LsbNlhPnrDQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api
@@ -156,7 +156,7 @@ GET /v1/search?query=web+scraper&item_type=tool&namespace=leolilley&limit=20&off
 | `namespace`    | No       | Filter by namespace                                 |
 | `limit`        | No       | Max results (default 20)                            |
 | `offset`       | No       | Pagination offset                                   |
-| `include_mine` | No       | Include own private items (requires auth)           |
+| `include_mine` | No       | Include own unlisted items (requires auth)          |
 
 **Visibility:** Only public items by default. Authenticated users can add `include_mine=true`.
 
@@ -168,17 +168,17 @@ GET /v1/search?query=web+scraper&item_type=tool&namespace=leolilley&limit=20&off
 PATCH /v1/items/{item_type}/{item_id}/visibility
 ```
 
-| Action      | Sets visibility to | Effect                 |
-| ----------- | ------------------ | ---------------------- |
-| `publish`   | `public`           | Visible to all users   |
-| `unpublish` | `private`          | Visible only to owner  |
+| Action      | Sets visibility to | Effect                             |
+| ----------- | ------------------ | ---------------------------------- |
+| `publish`   | `public`           | Visible in search, accessible      |
+| `unpublish` | `unlisted`         | Not in search, accessible by ID    |
 
 ## Bundle Operations
 
 ### Bundle Push
 
 `POST /v1/bundle/push` — stores manifest and all files as JSONB. Each version tracks:
-- Content hash (SHA256 of manifest)
+- Content hash (CAS `object_hash` of manifest)
 - `is_latest` flag
 
 ### Bundle Pull
@@ -199,12 +199,14 @@ Same query parameters as item search but scoped to bundles. Only public bundles 
 POST /v1/bundle/{bundle_id}/visibility
 ```
 
-Same pattern as item visibility but scoped to bundles. Bundle push creates bundles as `private` by default — must `publish_bundle` to make public.
+Same pattern as item visibility but scoped to bundles.
 
-| Action      | Sets visibility to | Effect                 |
-| ----------- | ------------------ | ---------------------- |
-| `publish`   | `public`           | Visible to all users   |
-| `unpublish` | `private`          | Visible only to owner  |
+| Action      | Sets visibility to | Effect                             |
+| ----------- | ------------------ | ---------------------------------- |
+| `publish`   | `public`           | Visible in search, accessible      |
+| `unpublish` | `unlisted`         | Not in search, accessible by ID    |
+
+New bundles default to `public` on push.
 
 ### Bundle Pull Client Flow
 
@@ -212,7 +214,8 @@ Same pattern as item visibility but scoped to bundles. Bundle push creates bundl
 2. Write manifest to `.ai/bundles/{bundle_id}/manifest.yaml`
 3. Write each file to its relative path
 4. `verify_item(manifest_path, ItemType.TOOL)` — manifest Ed25519 check
-5. `validate_bundle_manifest()` — per-file SHA256 comparison
+5. `validate_bundle_manifest()` — re-ingests files via CAS, compares `object_hash`
+6. Write `.bundle-lock.json` — records installed files for clean uninstall
 
 ### Client Bundle Actions
 
@@ -221,8 +224,6 @@ Same pattern as item visibility but scoped to bundles. Bundle push creates bundl
 | `push_bundle`     | Push a bundle (manifest + files) to the registry |
 | `pull_bundle`     | Pull a bundle from the registry to local space   |
 | `search_bundle`   | Search bundles in registry                       |
-| `publish_bundle`  | Make bundle public (set visibility to 'public')  |
-| `unpublish_bundle`| Make bundle private (set visibility to 'private')|
 
 ## Download Counting
 
@@ -298,6 +299,15 @@ rye_execute(item_id="rye/core/registry/registry",
 rye_execute(item_id="rye/core/registry/registry",
             parameters={"action": "publish_bundle", "bundle_id": "my-bundle"})
 ```
+
+### CLI Install/Uninstall
+
+```bash
+rye install my-bundle[@version]    # Pull + verify + materialize
+rye uninstall my-bundle            # Remove installed files via lockfile
+```
+
+Items are merged into `.ai/tools/`, `.ai/directives/`, etc. — found via normal space resolution.
 
 ### Pull-and-Use Pattern
 

@@ -52,13 +52,16 @@ pip install ryeos[all]
 pip install ryeos-cli
 ```
 
-The CLI maps shell verbs directly to the four primitives — no MCP transport, no JSON-RPC:
+The CLI maps shell verbs directly to the four primitives plus convenience verbs — no MCP transport, no JSON-RPC:
 
 ```bash
 rye search directive "lead generation"
 echo '{"command": "ls"}' | rye execute tool rye/bash
 rye graph run my-project/graphs/pipeline
 rye test my-project/tools/scraper
+rye install my-bundle@1.0.0
+rye uninstall my-bundle
+rye registry bundle search "utilities"
 ```
 
 See the [CLI documentation](../future/ryeos-cli.md) for the full verb reference.

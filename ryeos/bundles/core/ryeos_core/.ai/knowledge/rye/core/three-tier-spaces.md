@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:b13722f5419000a31117c75043c58615471a1449a1db8e1ae67f517e8f019977:NwyCIDrc9gmsbb_z1wVJyyOex48XpZ3ZjxhVouU8gz7C1ELPTAW-MYoHhV6R1FUpQucCscKhxAln26Z037NBBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T08:42:30Z:7b8251408a3d6f38db9bdc1bd34be44bd57dff75bc745c518ac40bfc3997b517:zzc9yxv0aycLbMaout7c2ppTdYmi1Gd9H6a5HgS5dlYzIDHvtrVQlj20KlROeH0kh0oYr4L9b1Bs5jqLXUKgBg==:4b987fd4e40303ac -->
  -->
 ```yaml
 name: three-tier-spaces
@@ -177,6 +177,15 @@ Restrict to a single space:
 ```python
 rye_search(scope="directive", query="create", project_path=".", space="system")
 ```
+
+## Installed Bundles
+
+`rye install` merges registry bundle items into the target space's `.ai/` layout. Items are found via normal project → user → system resolution — **no special bundle scanning**.
+
+- Items go to `.ai/tools/`, `.ai/directives/`, `.ai/knowledge/`, etc.
+- Bundle metadata lives at `.ai/bundles/{bundle_id}/` (manifest.yaml + `.bundle-lock.json`)
+- Lockfile tracks installed files for clean `rye uninstall`
+- No nested `.ai/` inside bundles
 
 ## Space Compatibility in Chains
 

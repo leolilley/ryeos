@@ -81,12 +81,19 @@ def get_object(hash_hex: str, root: Path) -> Optional[dict]:
     return None
 
 
+def has_blob(hash_hex: str, root: Path) -> bool:
+    """Check if a hash exists as a blob (not an object)."""
+    return _shard_path(root, "blobs", hash_hex).exists()
+
+
+def has_object(hash_hex: str, root: Path) -> bool:
+    """Check if a hash exists as an object (not a blob)."""
+    return _shard_path(root, "objects", hash_hex, ext=".json").exists()
+
+
 def has(hash_hex: str, root: Path) -> bool:
     """Check if a hash exists as either a blob or an object."""
-    return (
-        _shard_path(root, "blobs", hash_hex).exists()
-        or _shard_path(root, "objects", hash_hex, ext=".json").exists()
-    )
+    return has_blob(hash_hex, root) or has_object(hash_hex, root)
 
 
 def has_many(hashes: List[str], root: Path) -> Dict[str, bool]:

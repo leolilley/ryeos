@@ -19,7 +19,7 @@ if _REMOTE_TOOL_DIR not in sys.path:
 from remote_config import (
     RemoteConfig,
     resolve_remote,
-    get_project_name,
+    get_project_path,
     list_remotes,
 )
 
@@ -99,23 +99,23 @@ class TestResolveRemote:
                 resolve_remote()
 
 
-class TestGetProjectName:
+class TestGetProjectPath:
 
     def test_from_config(self):
-        with _patch_config({"project_name": "my-project"}):
-            assert get_project_name() == "my-project"
+        with _patch_config({"project_path": "my-project"}):
+            assert get_project_path() == "my-project"
 
     def test_fallback_to_dirname(self, tmp_path):
         with _patch_config({}):
-            assert get_project_name(tmp_path) == tmp_path.name
+            assert get_project_path(tmp_path) == tmp_path.name
 
     def test_fallback_no_path(self):
         with _patch_config({}):
-            assert get_project_name() == "unknown"
+            assert get_project_path() == "unknown"
 
     def test_non_string_fallback(self, tmp_path):
-        with _patch_config({"project_name": 123}):
-            assert get_project_name(tmp_path) == tmp_path.name
+        with _patch_config({"project_path": 123}):
+            assert get_project_path(tmp_path) == tmp_path.name
 
 
 class TestListRemotes:

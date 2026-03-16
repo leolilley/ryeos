@@ -25,6 +25,7 @@ ryeos/               → pip: ryeos-engine  (ships rye/ module, no .ai/ data)
     standard/        → pip: ryeos         (ryeos_std/.ai/rye/{agent,bash,...}/*)
     web/             → pip: ryeos-web     (ryeos_web/.ai/rye/web/*)
     code/            → pip: ryeos-code    (ryeos_code/.ai/rye/code/*)
+    email/           → pip: ryeos-email  (ryeos_email/.ai/rye/email/*)
 
 ryeos-mcp/           → pip: ryeos-mcp    (rye_mcp/ module)
 ryeos-cli/           → pip: ryeos-cli   (rye_cli/ module)
@@ -208,7 +209,7 @@ The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so an
 **Dependencies:** `ryeos`, `pyyaml`
 **Bundle:** none — inherits bundles from its `ryeos` dependency
 
-The terminal-native CLI. Maps shell verbs (`search`, `load`, `execute`, `sign`, `thread`, `graph`, `test`) directly to the four RYE primitives — no MCP transport. Imports `ryeos` directly as a Python library for zero-overhead invocation.
+The terminal-native CLI. Maps shell verbs (`search`, `load`, `execute`, `sign`, `thread`, `graph`, `test`, `registry`, `install`, `uninstall`) directly to the four RYE primitives — no MCP transport. Imports `ryeos` directly as a Python library for zero-overhead invocation.
 
 Use `ryeos-cli` when you want to invoke RYE from the terminal without an MCP client — CI scripts, graph operations, test running, or interactive development.
 
@@ -385,6 +386,7 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 | `ryeos/bundles/standard/` | `ryeos` | `ryeos-core` | `ryeos` | standard `rye/*` |
 | `ryeos/bundles/web/` | `ryeos-web` | `ryeos` | `ryeos-web` | `rye/web/*` |
 | `ryeos/bundles/code/` | `ryeos-code` | `ryeos` | `ryeos-code` | `rye/code/*` |
+| `ryeos/bundles/email/` | `ryeos-email` | `ryeos` | `ryeos-email` | `rye/email/*` |
 | `ryeos-mcp/` | `ryeos-mcp` | `ryeos`, `mcp` | — | — |
 | `ryeos-cli/` | `ryeos-cli` | `ryeos`, `pyyaml` | — | — |
 | `services/registry-api/` | — | `fastapi`, `supabase`, `httpx`, etc. | — | — |

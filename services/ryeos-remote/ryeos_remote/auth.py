@@ -1,11 +1,15 @@
 """Authentication for ryeos-remote.
 
-API key auth only — validates rye_sk_... keys against Supabase api_keys table.
+Dual auth: API key (bearer) and HMAC (webhook).
+- Bearer: validates rye_sk_... keys against Supabase api_keys table.
+- Webhook: HMAC-SHA256 signature verification via webhook_bindings table.
 """
 
 import hashlib
+import hmac as hmac_mod
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -98,3 +102,117 @@ async def get_current_user(
         return await _resolve_api_key(token, settings)
 
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token — use an API key")
+
+
+# ---------------------------------------------------------------------------
+# HMAC webhook verification
+# ---------------------------------------------------------------------------
+
+WEBHOOK_TIMESTAMP_MAX_FUTURE_SECONDS = 30
+WEBHOOK_TIMESTAMP_MAX_AGE_SECONDS = 300
+
+
+def verify_timestamp(timestamp: str) -> None:
+    """Reject stale or future webhook timestamps."""
+    if not timestamp:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+    now = int(time.time())
+    if ts > now + WEBHOOK_TIMESTAMP_MAX_FUTURE_SECONDS:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+    if now - ts > WEBHOOK_TIMESTAMP_MAX_AGE_SECONDS:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+
+
+def verify_hmac(timestamp: str, raw_body: bytes, secret: str, signature: str) -> None:
+    """Verify HMAC-SHA256 signature over timestamp.raw_body."""
+    if not signature or not signature.startswith("sha256="):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+    received = signature[7:]
+    if len(received) != 64:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+    signed = timestamp.encode() + b"." + raw_body
+    expected = hmac_mod.new(
+        secret.encode(),
+        signed,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac_mod.compare_digest(expected, received):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
+
+
+# ---------------------------------------------------------------------------
+# Replay protection (DB-backed for horizontal scaling)
+# ---------------------------------------------------------------------------
+
+REPLAY_TTL_SECONDS = 600  # 10 minutes
+
+
+def check_replay(hook_id: str, delivery_id: str, settings=None) -> None:
+    """Reject duplicate webhook deliveries using persistent DB store.
+
+    Uses webhook_deliveries_replay table with (hook_id, delivery_id) unique key.
+    Insert succeeds → first delivery. Insert conflicts → duplicate.
+    """
+    if not delivery_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "X-Webhook-Delivery-Id header required",
+        )
+
+    if settings is None:
+        from ryeos_remote.config import get_settings
+        settings = get_settings()
+
+    from supabase import create_client
+    sb = create_client(settings.supabase_url, settings.supabase_service_key)
+
+    # Check if already processed
+    existing = (
+        sb.table("webhook_deliveries_replay")
+        .select("delivery_id")
+        .eq("hook_id", hook_id)
+        .eq("delivery_id", delivery_id)
+        .execute()
+    )
+    if existing.data:
+        raise HTTPException(
+            status.HTTP_200_OK,
+            "Already processed",
+        )
+
+    # Insert — if concurrent insert races, the unique constraint catches it
+    try:
+        sb.table("webhook_deliveries_replay").insert({
+            "hook_id": hook_id,
+            "delivery_id": delivery_id,
+        }).execute()
+    except Exception:
+        # Unique constraint violation = concurrent duplicate
+        raise HTTPException(
+            status.HTTP_200_OK,
+            "Already processed",
+        )
+
+
+# ---------------------------------------------------------------------------
+# ResolvedExecution — normalized result from dual-auth
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ResolvedExecution:
+    """Normalized execution request after auth resolution.
+
+    Both bearer and webhook paths produce this. The /execute handler
+    doesn't know or care which auth path was used.
+    """
+    user: User
+    item_type: str
+    item_id: str
+    project_path: str
+    parameters: dict
+    thread: str

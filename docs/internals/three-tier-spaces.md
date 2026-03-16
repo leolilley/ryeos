@@ -236,6 +236,44 @@ system_entries = [
 
 Each bundle gets a space label like `system:ryeos-core` or `system:my-tools`.
 
+## Installed Bundles
+
+`rye install` installs registry bundles by merging their items into the existing space layout. **No special bundle scanning** — installed items are found via normal project → user → system resolution.
+
+### How Installation Works
+
+1. Pull the bundle from the registry (`pull_bundle`)
+2. Materialize items into the target space's `.ai/tools/`, `.ai/directives/`, `.ai/knowledge/`, etc.
+3. Write a lockfile at `.ai/bundles/{bundle_id}/.bundle-lock.json`
+4. Verify bundle signatures via the bundler
+
+### Lockfile Format
+
+```json
+{
+  "bundle_id": "my-bundle",
+  "version": "1.0.0",
+  "manifest_hash": "a1b2c3...",
+  "installed_at": "2026-03-15T12:00:00Z",
+  "files": [
+    ".ai/tools/utilities/web-scraper.py",
+    ".ai/directives/utilities/setup.md"
+  ]
+}
+```
+
+### Uninstallation
+
+`rye uninstall <bundle_id>` reads the lockfile, removes each listed file, cleans up empty parent directories, and removes the bundle metadata directory.
+
+### Key Design Decision
+
+Items are NOT placed inside a nested `.ai/` under `.ai/bundles/`. Instead, they're merged into the top-level `.ai/tools/`, `.ai/directives/`, etc. This means:
+
+- Normal space resolution finds them without any bundle-aware logic
+- No changes to resolvers, executors, or the signing system
+- Bundle metadata (manifest + lockfile) lives at `.ai/bundles/{bundle_id}/`
+
 ## Space Compatibility in Executor Chains
 
 The space system directly affects what chains are valid. `ChainValidator` enforces:

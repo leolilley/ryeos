@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-10T04:07:14Z:927a35c17acd7d5d544cc62e4add3826394602c98072c57b16585225d413d248:dQXRLiRXzDWgRMx_aXBNfv0yrgHyGb4Qc-w-pqwgNKkeBiXDR4NbS8XuEs91ZKb9fyujgDlvsHYjgHZbJJiGBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T08:42:30Z:6cf1548d491df70dc1169e02941feb0ff1edf529ef909898d9587ef664b8b096:-Ek4awu5TAta8cWEwtgPO1ewAEoSH4PcbPH4CNsjNDnw5JUQ1bFMabZ6DQ2Icy_e8ASwk6C0JJjkceM80cjPDw==:4b987fd4e40303ac -->
 ```yaml
 name: object-kinds
 title: CAS Object Kinds
@@ -86,6 +86,22 @@ Graph state at a point in time.
 Per-thread mapping for artifact retrieval.
 - `thread_id` — owning thread
 - `entries` — `{call_id: {name: blob_hash}}` mapping
+
+### 10. ProjectSnapshot (`project_snapshot`)
+Point-in-time project state commit with parent lineage (like a git commit).
+- `project_manifest_hash` — the project's SourceManifest hash
+- `user_manifest_hash` — the user space manifest hash
+- `parent_hashes` — list of parent snapshot hashes (`[0]` = mainline, `[1]` = merged branch)
+- `source` — "push", "execution", or "merge"
+- `source_detail` — e.g., "tool/my-tool" for execution snapshots
+- `timestamp` — ISO 8601
+- `metadata` — arbitrary dict (thread_id, etc.)
+
+### 11. RuntimeOutputsBundle (`runtime_outputs_bundle`)
+Maps runtime-produced files to CAS blobs for remote output sync.
+- `remote_thread_id` — thread that produced the outputs
+- `execution_snapshot_hash` — associated execution snapshot
+- `files` — `{relative_path: blob_hash}` mapping
 
 ## Schema Evolution
 

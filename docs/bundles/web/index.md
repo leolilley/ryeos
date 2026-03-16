@@ -2,8 +2,8 @@
 id: tools-web
 title: "Web Tools"
 description: Search the web and fetch page content with format conversion
-category: standard-library/tools
-tags: [tools, web, search, fetch, browser]
+category: bundles
+tags: [tools, web, search, fetch, browser, ryeos-web, bundle]
 version: "1.0.0"
 ```
 

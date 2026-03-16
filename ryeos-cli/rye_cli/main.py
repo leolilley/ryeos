@@ -9,7 +9,7 @@ No MCP transport — imports ryeos directly as a Python library.
 import argparse
 import sys
 
-from rye_cli.verbs import search, load, execute, sign, thread, graph, test, registry, install
+from rye_cli.verbs import search, load, execute, sign, thread, graph, test, registry, install, uninstall
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.register(sub)
     registry.register(sub)
     install.register(sub)
+    uninstall.register(sub)
 
     return parser
 

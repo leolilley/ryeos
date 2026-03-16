@@ -9,9 +9,11 @@ version: "1.0.0"
 
 # Standard Library Overview
 
-Rye OS ships a **standard library** of directives, tools, and knowledge entries inside the `ryeos` package at `ryeos/rye/.ai/`. These items live in the **system space** — the lowest-priority tier — and are available to every project automatically, without any setup or installation. Additional bundles (`ryeos-web`, `ryeos-code`) extend the standard library with web and code tools.
+Rye OS ships a **standard library** of directives, tools, and knowledge entries inside the `ryeos` package at `ryeos/rye/.ai/`. These items live in the **system space** — the lowest-priority tier — and are available to every project automatically, without any setup or installation.
 
 When you install Rye OS, every project immediately has access to file-system tools, shell execution, item creation directives, thread orchestration, and more. You never need to copy these files into your project.
+
+Additional functionality is available through [optional bundles](../bundles/index.md) (`ryeos-web`, `ryeos-code`, `ryeos-email`) installed separately.
 
 ## Override Mechanism
 
@@ -55,12 +57,12 @@ Tools are organized by namespace under `.ai/tools/rye/`. For detailed documentat
 | --- | --- | --- | --- | --- |
 | [File System](tools/file-system.md) | `rye/file-system/` | 6 | `ryeos` | Read, write, edit (via line IDs), glob, grep, ls |
 | [Bash](tools/bash.md) | `rye/` | 1 | `ryeos` | Shell command execution |
-| [Web](tools/web.md) | `rye/web/` | 3 | `ryeos-web` | Web search, page fetching, browser automation |
-| [Code](tools/code.md) | `rye/code/` | 4 | `ryeos-code` | NPM, diagnostics, TypeScript, LSP |
 | [MCP Client](tools/mcp.md) | `rye/mcp/` | 3 | `ryeos` | Connect to external MCP servers |
 | [Primary Actions](tools/primary.md) | `rye/` | 4 | `ryeos` | Search, load, execute, sign items |
 | [Agent System](tools/agent.md) | `rye/agent/` | 40+ | `ryeos` | Thread orchestration, LLM loops, budgets, permissions |
 | [Infrastructure](tools/infrastructure.md) | `rye/core/` | 20+ | `ryeos` | Parsers, runtimes, extractors, sinks, bundler, registry |
+
+Additional tools are available through [optional bundles](../bundles/index.md): [Web](../bundles/web/index.md) (`ryeos-web`), [Code](../bundles/code/index.md) (`ryeos-code`), [Email](../bundles/email/index.md) (`ryeos-email`).
 
 ### Knowledge
 

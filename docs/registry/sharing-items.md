@@ -38,7 +38,7 @@ Parsing rule: first segment = namespace, last segment = name, everything in betw
 
 ### Visibility
 
-Items and bundles are either `public` (visible to all users) or `private` (visible only to the owner). Visibility is controlled via the `publish` and `unpublish` actions for both individual items and bundles.
+Items and bundles have two visibility levels: `public` (visible to all users) and `unlisted` (accessible by direct ID but not returned in search results). New bundles default to `public` on push. Visibility is controlled via the `publish` and `unpublish` actions for individual items.
 
 ## The Registry Tool
 
@@ -120,7 +120,7 @@ item_type: tool        # optional filter
 namespace: leolilley   # optional filter
 ```
 
-Search matches against item names and descriptions. By default only public items are returned. Authenticated users can include their own private items with `include_mine=true`.
+Search matches against item names and descriptions. By default only public items are returned. Authenticated users can include their own unlisted items with `include_mine=true`.
 
 #### Delete
 
@@ -133,17 +133,6 @@ item_id: leolilley/utilities/my-tool
 ```
 
 Only the namespace owner can delete items.
-
-#### Publish / Unpublish
-
-Control visibility:
-
-```
-action: publish     # Make public (visibility='public')
-action: unpublish   # Make private (visibility='private')
-item_type: tool
-item_id: leolilley/utilities/my-tool
-```
 
 #### Push Bundle
 
@@ -179,18 +168,6 @@ limit: 20              # optional, default 20
 
 Search matches against bundle names and descriptions. Only public bundles are returned by default.
 
-#### Publish / Unpublish Bundle
-
-Control bundle visibility, just like individual items:
-
-```
-action: publish_bundle     # Make public (visibility='public')
-action: unpublish_bundle   # Make private (visibility='private')
-bundle_id: leolilley/my-bundle
-```
-
-Only the namespace owner can change bundle visibility.
-
 ## Registry API Service
 
 **Location:** `services/registry-api/registry_api/`
@@ -211,7 +188,6 @@ A separate FastAPI application that handles server-side operations. Deployed ind
 | POST   | `/v1/bundle/push`                            | Push a bundle (manifest + files)                   | Required |
 | GET    | `/v1/bundle/pull/{bundle_id}`                | Pull a bundle                                      | Required |
 | GET    | `/v1/bundle/search`                          | Search bundles by query                            | Optional |
-| PATCH  | `/v1/bundle/{bundle_id}/visibility`          | Set bundle visibility (publish/unpublish)          | Required |
 
 ### Push Flow (Server-Side)
 
@@ -236,13 +212,13 @@ Search performs case-insensitive matching on `name` and `description` fields. Ca
 
 Bundles are versioned collections of items (manifest + files) that can be pushed and pulled as a unit. Like individual items, bundles support visibility control and search.
 
-**Push:** Stores the manifest and all bundle files as JSONB in Supabase. Each version tracks a content hash (SHA256 of manifest) and an `is_latest` flag.
+**Push:** Stores the manifest and all bundle files as JSONB in Supabase. Each version tracks a content hash (object_hash (CAS-based) of manifest) and an `is_latest` flag.
 
 **Pull:** Returns the manifest and all files for a specific version (or latest). Increments download count on each pull.
 
 **Search:** Queries bundles by name and description with optional namespace filtering. Only public bundles are returned by default.
 
-**Publish / Unpublish:** Sets bundle visibility to `public` or `private`, the same model used for individual items.
+Bundle visibility is `public` or `unlisted`. New bundles default to `public` on push.
 
 ### Database Tables
 
@@ -299,10 +275,6 @@ The registry exposes its Ed25519 public key at `GET /v1/public-key` (PEM format)
            item_id="myuser/utilities/web-scraper",
            version="1.0.0")
 
-5. Make it public:
-   execute(tool="rye/core/registry/registry", action="publish",
-           item_type="tool",
-           item_id="myuser/utilities/web-scraper")
 ```
 
 ### Using a registry item in another project
@@ -328,7 +300,7 @@ The registry exposes its Ed25519 public key at `GET /v1/public-key` (PEM format)
 
 ### Publishing a bundle (CLI)
 
-The full build → push → publish workflow using the CLI:
+The full build → push workflow using the CLI (bundles default to public on push):
 
 ```bash
 # Build a bundle manifest from a package directory
@@ -336,9 +308,6 @@ rye registry bundle build ryeos/bundles/core --bundle-id ryeos-core
 
 # Push the bundle to the registry
 rye registry bundle push ryeos-core
-
-# Make the bundle publicly discoverable
-rye registry bundle publish ryeos-core
 ```
 
 ### Searching and pulling bundles (CLI)
@@ -355,7 +324,22 @@ rye registry bundle pull ryeos-core
 
 # Pull a specific version
 rye registry bundle pull ryeos-core --version 1.2.0
-
-# Make a bundle private again
-rye registry bundle unpublish ryeos-core
 ```
+
+### Installing and uninstalling bundles (CLI)
+
+```bash
+# Install a bundle from the registry (pull + verify + materialize)
+rye install my-bundle
+rye install my-bundle@1.0.0
+rye install namespace/my-bundle
+
+# Install to project space (default is user space)
+rye install my-bundle --space project
+
+# Uninstall a bundle (removes installed files + metadata)
+rye uninstall my-bundle
+rye uninstall my-bundle --space project
+```
+
+Installation writes a lockfile at `.ai/bundles/{bundle_id}/.bundle-lock.json` tracking installed files. Uninstallation reads this lockfile to remove exactly what was installed.

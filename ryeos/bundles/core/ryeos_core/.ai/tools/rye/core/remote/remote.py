@@ -1,4 +1,4 @@
-# rye:signed:2026-03-12T06:34:03Z:ea8acaef811fccc2631bdee004ec15b8a3daeaf1e396d954cdef629fd34799ac:y8X8I7FmLRyuB8mweUFUd78KhX8lzYk0_6TvkqC5eF96TxXGDBLHh8jQq0hSn-B_KMZePjdk5m0YwUEmeUmRDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-16T04:16:04Z:60f318854534c3d93c3ad037b0117a3adac87317a728616c65779bd1bea84119:2wnlKmgjYtRKucc-MHmHWCgdWcjTZrXw2aCLE_3d-2h0IuG8w70vX066s_LAn8xPuIupmifwXe1l9Bj5p2sKAA==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 
@@ -78,9 +78,9 @@ CONFIG_SCHEMA = {
             "type": "integer",
             "description": "Max threads to return for threads action (default: 20)",
         },
-        "project_name": {
+        "project_path": {
             "type": "string",
-            "description": "Filter threads by project name",
+            "description": "Filter threads by project path",
         },
         "env_file": {
             "type": "string",
@@ -278,19 +278,44 @@ async def _push(project_path: Path, params: Dict) -> Dict:
             put_body = json.loads(put_body)
         objects_synced = len(put_body.get("stored", []))
 
-    # Publish project ref on remote
-    from remote_config import get_project_name
-    proj_name = get_project_name(project_path)
+    from remote_config import get_project_path
+    proj_name = get_project_path(project_path)
     sys_ver = get_system_version()
     effective_remote = remote_name or "default"
+
+    # Push user space first — project snapshot references user_manifest_hash
+    user_space_pushed = False
+    user_space_resp = await client.post("/push/user-space", {
+        "user_manifest_hash": uh,
+    })
+    if user_space_resp["success"]:
+        user_space_pushed = True
+    else:
+        # 409 = revision moved, retry with current revision
+        status_code = user_space_resp.get("status_code", 0)
+        if status_code == 409:
+            us_ref = await client.get("/user-space")
+            if us_ref["success"]:
+                ref_body = us_ref["body"]
+                if isinstance(ref_body, str):
+                    ref_body = json.loads(ref_body)
+                current_rev = ref_body.get("snapshot_revision")
+                if current_rev is not None:
+                    retry_resp = await client.post("/push/user-space", {
+                        "user_manifest_hash": uh,
+                        "expected_revision": current_rev,
+                    })
+                    user_space_pushed = retry_resp["success"]
+        if not user_space_pushed:
+            logger.warning("Failed to push user space: %s", user_space_resp.get("error"))
 
     # Load expected_snapshot_hash from local ref tracking
     expected_snapshot_hash = _load_remote_snapshot_hash(project_path, effective_remote)
 
+    # Publish project ref on remote (user space already pushed above)
     push_resp = await client.post("/push", {
-        "project_name": proj_name,
+        "project_path": proj_name,
         "project_manifest_hash": ph,
-        "user_manifest_hash": uh,
         "system_version": sys_ver,
         "expected_snapshot_hash": expected_snapshot_hash,
     })
@@ -312,12 +337,13 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     result = {
         "project_manifest_hash": ph,
         "user_manifest_hash": uh,
-        "project_name": proj_name,
+        "project_path": proj_name,
         "remote_name": push_body.get("remote_name", effective_remote),
         "snapshot_hash": push_body.get("snapshot_hash"),
         "objects_synced": objects_synced,
         "total_objects": len(all_hashes),
         "ref_published": ref_published,
+        "user_space_pushed": user_space_pushed,
         "message": f"Synced {len(missing)} objects to remote" if missing else "Remote is up to date",
     }
     if not ref_published:
@@ -600,10 +626,10 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
         return push_result
 
     # 3. Execute on remote (longer timeout for execution)
+    from remote_config import get_project_path
+    proj_name = get_project_path(project_path)
     exec_resp = await client.post("/execute", {
-        "project_manifest_hash": push_result["project_manifest_hash"],
-        "user_manifest_hash": push_result["user_manifest_hash"],
-        "system_version": get_system_version(),
+        "project_path": proj_name,
         "item_type": item_type,
         "item_id": item_id,
         "parameters": exec_params,
@@ -656,11 +682,11 @@ async def _threads(project_path: Path, params: Dict) -> Dict:
     client = _get_client(remote_name, project_path)
 
     limit = params.get("limit", 20)
-    proj_name = params.get("project_name")
+    proj_name = params.get("project_path")
 
     path = f"/threads?limit={limit}"
     if proj_name:
-        path += f"&project_name={proj_name}"
+        path += f"&project_path={proj_name}"
 
     resp = await client.get(path)
     if not resp["success"]:

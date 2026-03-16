@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T06:53:16Z:76be10a81fcbc4bfb59b33712fd0576efa318d32ae1cc662109dd14bf65d16c6:vl9oDVqgfUnftP6aa5Xh6cLDPIIGCUWPl4hdPkVw1LUg2cRiDrKpJ8xailFGjo3RZzldCGA70VykeZlC4uJkDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T08:42:30Z:76be10a81fcbc4bfb59b33712fd0576efa318d32ae1cc662109dd14bf65d16c6:vl9oDVqgfUnftP6aa5Xh6cLDPIIGCUWPl4hdPkVw1LUg2cRiDrKpJ8xailFGjo3RZzldCGA70VykeZlC4uJkDw==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"

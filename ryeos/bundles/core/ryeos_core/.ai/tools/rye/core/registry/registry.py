@@ -2197,6 +2197,19 @@ async def _pull_bundle(
                             "hint": "Registry returned corrupted content",
                         }
 
+        # Write lockfile for upgrade/uninstall tracking
+        import json
+        from datetime import datetime, timezone
+        lock_data = {
+            "bundle_id": bundle_id,
+            "version": pulled_version or "latest",
+            "manifest_hash": None,
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "files": files_written,
+        }
+        lock_path = bundle_dir / ".bundle-lock.json"
+        lock_path.write_text(json.dumps(lock_data, indent=2))
+
         return {
             "status": "pulled",
             "bundle_id": bundle_id,

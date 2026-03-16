@@ -7,6 +7,7 @@ All hashing uses compute_integrity() (canonical JSON → SHA256).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -296,3 +297,29 @@ class RuntimeOutputsBundle:
             "execution_snapshot_hash": self.execution_snapshot_hash,
             "files": self.files,
         }
+
+
+# --- History traversal ---
+
+
+def get_history(snapshot_hash: str, cas_root: Path, limit: int = 50) -> List[dict]:
+    """Walk first-parent chain from a snapshot, return list of snapshot dicts.
+
+    Follows parent_hashes[0] (mainline). For full DAG traversal
+    (including merge parents), use a BFS/DFS over all parent_hashes.
+
+    Each entry includes its own hash as "_hash" for client convenience.
+    """
+    from lillux.primitives import cas
+
+    history: List[dict] = []
+    current: Optional[str] = snapshot_hash
+    while current and len(history) < limit:
+        obj = cas.get_object(current, cas_root)
+        if obj is None:
+            break
+        obj["_hash"] = current
+        history.append(obj)
+        parents = obj.get("parent_hashes", [])
+        current = parents[0] if parents else None
+    return history

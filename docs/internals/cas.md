@@ -46,7 +46,9 @@ Kernel-level, type-agnostic. Same layer as `integrity.py` and `signing.py`. Lill
 | `store_object(data: dict, root: Path) -> str` | Canonical JSON via `compute_integrity()`, store as `.json`. Return integrity hash. |
 | `get_blob(hash: str, root: Path) -> bytes \| None` | Read blob by hash. |
 | `get_object(hash: str, root: Path) -> dict \| None` | Read object by hash. |
-| `has(hash: str, root: Path) -> bool` | Check existence (blob or object). |
+| `has(hash: str, root: Path) -> bool` | Check existence (blob or object). Delegates to `has_blob()` and `has_object()`. |
+| `has_blob(hash: str, root: Path) -> bool` | Check if hash exists as a blob specifically (not objects). |
+| `has_object(hash: str, root: Path) -> bool` | Check if hash exists as an object specifically (not blobs). |
 | `has_many(hashes: list[str], root: Path) -> dict[str, bool]` | Batch existence check. |
 
 ### Rules
@@ -133,6 +135,8 @@ All objects are JSON dicts with a `schema` version (currently `1`) and a `kind` 
 | `execution_snapshot` | `graph_run_id, graph_id, project_manifest_hash, user_manifest_hash, system_version, step, status, state_hash, node_receipts[]` | Immutable run checkpoint |
 | `state_snapshot` | `state: {...}` | Graph state at a point in time |
 | `artifact_index` | `thread_id, entries: {call_id: {blob_hash, ...}}` | Per-thread artifact mapping |
+| `project_snapshot` | `project_manifest_hash, user_manifest_hash, parent_hashes[], source, source_detail, timestamp, metadata` | Point-in-time project state commit with parent lineage (like a git commit) |
+| `runtime_outputs_bundle` | `remote_thread_id, execution_snapshot_hash, files: {path: blob_hash}` | Maps runtime-produced files to CAS blobs for remote output sync |
 
 ### Example: item_source
 
@@ -170,6 +174,24 @@ All objects are JSON dicts with a `schema` version (currently `1`) and a `kind` 
   "node_receipts": ["receipt_hash_1", "receipt_hash_2", "receipt_hash_3"]
 }
 ```
+
+### Example: project_snapshot
+
+```json
+{
+  "schema": 1,
+  "kind": "project_snapshot",
+  "project_manifest_hash": "a1b2c3...",
+  "user_manifest_hash": "d4e5f6...",
+  "parent_hashes": ["prev_head_hash"],
+  "source": "push",
+  "source_detail": "",
+  "timestamp": "2026-03-10T12:00:00Z",
+  "metadata": {}
+}
+```
+
+Parent conventions: `[0]` = previous HEAD (mainline), `[1]` = merged branch (for merge commits). Zero parents = initial push. `get_history()` follows `parent_hashes[0]` for mainline traversal.
 
 ## Refs (Mutable Pointers)
 

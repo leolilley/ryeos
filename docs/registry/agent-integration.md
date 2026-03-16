@@ -44,7 +44,7 @@ rye_execute(
 )
 ```
 
-The registry search hits `GET /v1/search?query=web+scraper&item_type=tool` on the server, performing case-insensitive matching on item names and descriptions. By default only public items are returned; authenticated users can include their own private items with `include_mine=true`.
+The registry search hits `GET /v1/search?query=web+scraper&item_type=tool` on the server, performing case-insensitive matching on item names and descriptions. By default only public items are returned; authenticated users can include their own unlisted items with `include_mine=true`.
 
 ### Why Search Is Explicit
 
@@ -243,7 +243,20 @@ rye_execute(
 2. **Write manifest** — Saved to `.ai/bundles/ryeos-core/manifest.yaml`
 3. **Write all files** — Each file is written to its relative path (e.g., `.ai/tools/rye/core/registry/registry.py`)
 4. **Verify manifest** — `verify_item(manifest_path, ItemType.TOOL)` checks the manifest's Ed25519 signature
-5. **Verify per-file hashes** — The bundler's `validate_bundle_manifest()` computes SHA256 of each file and compares to the manifest's recorded hash
+5. **Verify per-file hashes** — The bundler's `validate_bundle_manifest()` re-ingests each file via CAS and compares the `object_hash` to the manifest's recorded hash
+6. **Write lockfile** — Creates `.ai/bundles/{bundle_id}/.bundle-lock.json` recording installed files for clean uninstall
+
+### CLI Installation (Preferred)
+
+For bundle installation from the CLI, use `rye install` which handles the full flow:
+
+```bash
+rye install ryeos-core           # Install latest
+rye install ryeos-core@1.0.0     # Specific version
+rye install --space project ryeos-core  # Install to project
+```
+
+`rye install` runs: pull → verify → report. Items are materialized into the target space's `.ai/tools/`, `.ai/directives/`, etc. — found via normal space resolution, not special bundle scanning.
 
 ### Step 3: Verify the Bundle
 
@@ -280,11 +293,11 @@ Bundle verification is layered:
 | Layer                | What's Checked                                                          |
 | -------------------- | ----------------------------------------------------------------------- |
 | **Manifest signature** | The manifest YAML has an inline `rye:signed:` Ed25519 signature       |
-| **Per-file SHA256**  | Every file listed in the manifest has a `sha256` field compared to disk |
+| **Per-file object_hash** | Every file listed in the manifest has an `object_hash` (CAS-based) re-ingested from disk and compared |
 | **Inline signatures** | Files marked `inline_signed: true` also have their individual Ed25519 signatures verified via `verify_item()` |
 | **Missing files**    | Any file in the manifest not found on disk is flagged                   |
 
-This means even non-signable assets (images, data files) are covered by the manifest's per-file SHA256 hashes, while signable items (`.py`, `.md`, `.yaml`) have dual protection.
+This means even non-signable assets (images, data files) are covered by the manifest's per-file CAS `object_hash` verification, while signable items (`.py`, `.md`, `.yaml`) have dual protection.
 
 ## Current Limitations
 

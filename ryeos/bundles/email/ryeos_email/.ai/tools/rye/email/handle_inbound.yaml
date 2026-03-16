@@ -1,0 +1,93 @@
+# rye:signed:2026-03-16T08:41:36Z:e78b57c655ac7186cff302e40efb15119e7b1646e45fe0eb4a62f29ccde44f65:X9sKeRRR8IOK360SJuqHj8CXWXeYQWn2fXAARsbSn-5PgQy-GeHj3gh4FsbLgRT1VbcbhXBh8IoOQfMBK-UECA==:4b987fd4e40303ac
+# rye:unsigned
+tool_id: handle_inbound
+tool_type: graph
+executor_id: rye/core/runtimes/state-graph/runtime
+version: "1.1.0"
+description: "Inbound email processing — route, classify, respond"
+category: rye/email
+
+config_schema:
+  type: object
+  required: [email_id, from_address, to_address, subject, body]
+  properties:
+    email_id: { type: string }
+    from_address: { type: string }
+    to_address: { type: string }
+    subject: { type: string }
+    body: { type: string }
+    thread_id: { type: string }
+    in_reply_to: { type: string }
+
+config:
+  start: route
+  max_steps: 6
+
+  nodes:
+    route:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/email/router
+        params:
+          from_address: "${inputs.from_address}"
+          to_address: "${inputs.to_address}"
+          subject: "${inputs.subject}"
+          body: "${inputs.body}"
+          thread_id: "${inputs.thread_id}"
+          in_reply_to: "${inputs.in_reply_to}"
+      assign:
+        action: "${result.action}"
+        forward_to: "${result.forward_to}"
+        agent_inbox: "${result.agent_inbox}"
+      next:
+        - to: draft_reply
+          when: { path: "state.action", op: "eq", value: "auto_reply" }
+        - to: forward_email
+          when: { path: "state.action", op: "eq", value: "forward" }
+        - to: done   # suppress — no action
+
+    draft_reply:
+      action:
+        primary: execute
+        item_type: directive
+        item_id: rye/email/draft_response
+        params:
+          email_body: "${inputs.body}"
+          email_subject: "${inputs.subject}"
+          from_name: "${inputs.from_address}"
+          thread_id: "${inputs.thread_id}"
+      assign:
+        draft_body: "${result.draft_body}"
+        draft_subject: "${result.draft_subject}"
+      on_error: forward_email
+      next: send_reply
+
+    send_reply:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/email/send
+        params:
+          to: "${inputs.from_address}"
+          subject: "${state.draft_subject}"
+          body: "${state.draft_body}"
+      assign:
+        sent_email_id: "${result.email_id}"
+      next: done
+
+    forward_email:
+      action:
+        primary: execute
+        item_type: tool
+        item_id: rye/email/forward
+        params:
+          email_id: "${inputs.email_id}"
+          forward_to: "${state.forward_to}"
+          classification: "unknown_sender"
+      assign:
+        forwarded_email_id: "${result.forwarded_email_id}"
+      next: done
+
+    done:
+      type: return

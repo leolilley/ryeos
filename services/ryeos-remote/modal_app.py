@@ -34,6 +34,8 @@ image = (
         "pydantic-settings>=2.1.0",
         # Auth
         "supabase>=2.3.0",
+        # MCP transport
+        "mcp>=1.9.0",
     )
     .add_local_dir("ryeos_remote", remote_path="/app/ryeos_remote", copy=True)
     .env({
@@ -57,5 +59,40 @@ image = (
 def remote_server():
     """ryeos-remote — CAS-native execution server."""
     from ryeos_remote.server import app as fastapi_app
+    from ryeos_remote.mcp import get_mcp_app
 
+    fastapi_app.mount("/mcp", get_mcp_app())
     return fastapi_app
+
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("ryeos-remote")],
+    volumes={"/cas": cas_volume},
+    timeout=300,
+    schedule=modal.Cron("0 19 * * *"),  # 7am NZST
+)
+async def daily_digest():
+    """Run daily email digest directive on schedule."""
+    import os
+
+    from ryeos_remote.auth import User
+    from ryeos_remote.config import Settings
+    from ryeos_remote.server import _execute_from_head
+
+    settings = Settings()
+
+    user_id = os.environ["DAILY_DIGEST_USER_ID"]
+    project_path = os.environ["DAILY_DIGEST_PROJECT_PATH"]
+
+    user = User(id=user_id, scopes=["remote:execute"])
+
+    await _execute_from_head(
+        user=user,
+        settings=settings,
+        project_path=project_path,
+        item_type="directive",
+        item_id="rye/email/daily_digest",
+        parameters={},
+        thread="fork",
+    )

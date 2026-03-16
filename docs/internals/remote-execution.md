@@ -11,7 +11,7 @@ version: "1.0.0"
 
 Remote execution lets you run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage (CAS) for sync — no git, no file diffs. Objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects.
 
-The remote server is a FastAPI app at `services/ryeos-remote/` deployed on Modal. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
+The remote server is a FastAPI app at `services/ryeos-remote/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-remote-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 4 tools (execute, search, load, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
 
 ## End-to-End Flow
 
@@ -34,16 +34,15 @@ LOCAL                                          REMOTE
 5. POST /objects/put ──────────────────────→  Store in user CAS
    (only missing objects)                     Verify hashes
 
-5b. POST /push ────────────────────────→  Upsert project ref
-    {project_name, manifest hashes,        (user × remote × project)
-     system_version}
+5b. POST /push ────────────────────────→  Deep manifest graph validation
+    {project_path, manifest hashes,        Create ProjectSnapshot
+     system_version}                       Advance HEAD (optimistic CAS)
 
-6. POST /execute ─────────────────────────→  Auth + load secrets
-   {project_manifest, user_manifest,          Materialize temp .ai/
-    item_type, item_id, params}               Run executor/walker
-                                              Per-node cache check
-                                              Store results in CAS
-                                              Sign with remote key
+6. POST /execute ─────────────────────────→  Resolve HEAD snapshot
+   {project_path, item_type,                 Create mutable checkout
+    item_id, params}                          from snapshot cache
+                                              Run executor
+                                              Fold-back via three-way merge
                      ←─────────────────────  Return snapshot + new hashes
 
 7. POST /objects/get ─────────────────────→  Fetch by hash
@@ -55,7 +54,9 @@ LOCAL                                          REMOTE
    Optional: re-sign for user provenance
 ```
 
-Steps 1–3 happen locally before any network call. Steps 4–5 are the sync phase — only missing objects cross the wire. Step 6 is the actual execution. Steps 7–8 pull results back and render them.
+Note: `/push` performs deep manifest graph validation via `_validate_manifest_graph()` — verifying the full transitive object graph before creating the snapshot.
+
+Steps 1–3 happen locally before any network call. Steps 4–5 are the sync phase — only missing objects cross the wire. Step 5b creates a `ProjectSnapshot` with parent lineage and advances HEAD. Step 6 resolves the HEAD snapshot, creates a mutable checkout, runs the executor, and folds back changes via three-way merge. Steps 7–8 pull results back and render them.
 
 ## Sync Protocol
 
@@ -117,22 +118,61 @@ FastAPI app at `services/ryeos-remote/ryeos_remote/server.py`.
 | `/objects/has` | POST | Yes | Batch existence check in user's CAS |
 | `/objects/put` | POST | Yes | Upload objects to user's CAS (quota-checked) |
 | `/objects/get` | POST | Yes | Download objects from user's CAS |
-| `/execute` | POST | Yes | Execute from manifest hashes |
-| `/push` | POST | Yes | Register/update project ref (manifests + system version) |
-| `/threads` | GET | Yes | List user's executions on this remote (optional `project_name` filter) |
+| `/push` | POST | Yes | Validate manifest graph, create ProjectSnapshot, advance HEAD |
+| `/push/user-space` | POST | Yes | Push user space independently (optimistic CAS) |
+| `/user-space` | GET | Yes | Get current user space ref |
+| `/execute` | POST | Yes (dual) | Execute via snapshot checkout (bearer or webhook HMAC) |
+| `/search` | POST | Yes | Search items (wraps execute with rye/search) |
+| `/load` | POST | Yes | Load/inspect items (wraps execute with rye/load) |
+| `/sign` | POST | Yes | Sign items (wraps execute with rye/sign) |
+| `/threads` | GET | Yes | List user's executions (optional `project_path` filter) |
 | `/threads/{thread_id}` | GET | Yes | Get specific thread status |
+| `/history` | GET | Yes | Walk first-parent snapshot chain from project HEAD |
+| `/secrets` | POST | Yes | Upsert user secrets |
+| `/secrets` | GET | Yes | List secret names |
+| `/secrets/{name}` | DELETE | Yes | Delete a secret |
+| `/webhook-bindings` | POST | Yes | Create webhook binding (returns hook_id + hmac_secret) |
+| `/webhook-bindings` | GET | Yes | List user's webhook bindings |
+| `/webhook-bindings/{hook_id}` | DELETE | Yes | Revoke a webhook binding |
 
-### `/execute` Flow
+### `/execute` Flow (Snapshot-Based)
 
-1. **Version check** — verify system version compatibility (major.minor match required). Returns 409 on mismatch so the client knows to upgrade.
-2. **Materialize** — build temp project + user space from manifest hashes via `materialize()`.
-3. **Register thread** — create a thread record in the `threads` table before execution begins. Update state on completion (success or failure).
-4. **Wire executor** — create `ExecuteTool` against materialized paths.
-5. **Run** — execute the tool or walk the state graph.
-6. **Ingest results** — re-ingest execution outputs into user CAS via `_copy_cas_objects()`. This is integrity-verified (recomputes hashes), not a raw file copy.
-7. **Quota check** — post-execute quota enforcement.
-8. **Return** — `{status, execution_snapshot_hash, new_object_hashes[], result, system_version, thread_id}`.
-9. **Cleanup** — remove temp dirs. Always runs, even on error.
+`/execute` uses dual-auth via `resolve_execution()`:
+
+- **Bearer API key** → caller controls `item_type`, `item_id`, `project_path`, `parameters`
+- **Webhook HMAC** → binding controls what executes, caller provides only `parameters`
+
+Execution via `_execute_from_head()`:
+
+1. **Resolve HEAD** — look up `project_refs` for latest `snapshot_hash` + `snapshot_revision`.
+2. **Resolve user space** — look up `user_space_refs` independently (handles `None` gracefully).
+3. **Create execution space** — `create_execution_space()` produces a mutable checkout from the snapshot cache.
+4. **Cache user space** — `ensure_user_space_cached()` for user-level items.
+5. **Inject secrets** — fetch from vault, inject as env vars. Validates names against `RESERVED_ENV_NAMES` and `RESERVED_ENV_PREFIXES` (blocks PATH, PYTHONPATH, SUPABASE_*, MODAL_*, AWS_*, etc.).
+6. **Run executor** — `ExecuteTool` against the materialized checkout.
+7. **Promote CAS objects** — `_copy_cas_objects()` re-ingests execution-local CAS into user CAS (integrity-verified).
+8. **Ingest runtime outputs** — transcripts, knowledge, refs stored as `RuntimeOutputsBundle`.
+9. **Build post-execution manifest** — compare to base manifest.
+10. **No-op check** — if manifest unchanged, skip fold-back.
+11. **Create execution ProjectSnapshot** — parent = base snapshot.
+12. **Fold-back** — merge into HEAD via `_fold_back()`.
+13. **Cleanup** — remove execution space, restore env vars.
+
+### Fold-Back / Three-Way Merge
+
+After execution, changes must be merged back into HEAD. `_fold_back()` implements a bounded retry loop:
+
+- **Fast-forward** — HEAD hasn't moved since checkout → advance HEAD directly via optimistic CAS on `snapshot_revision`.
+- **Three-way merge** — HEAD moved → `three_way_merge(base, head, exec, cas_root)` resolves changes:
+  - Both sides agree → take the change
+  - One side changed → take that change
+  - Both deleted → accept
+  - Delete vs modify → conflict
+  - Both modified differently → attempt text merge (UTF-8 only, <1MB)
+- **Conflict** — unresolvable conflicts stored as `conflict_record` on the thread row.
+- **Retry exhaustion** — `MAX_FOLD_BACK_RETRIES=5` with exponential jitter (`FOLD_BACK_BASE_JITTER_MS=50`).
+
+Merge commits create a `ProjectSnapshot` with two parents: `[0]` = current HEAD, `[1]` = execution snapshot.
 
 ## Trust Model
 
@@ -157,6 +197,17 @@ Bearer token auth via `services/ryeos-remote/ryeos_remote/auth.py`. Two methods:
 
 Both methods resolve to a `user_id` that scopes all CAS operations.
 
+### Webhook Authentication
+
+Webhook auth uses HMAC-SHA256 verification via `webhook_bindings`:
+
+1. **Binding lookup** — `hook_id` from request body → look up in `webhook_bindings` table (must be active, not revoked).
+2. **Timestamp verification** — `X-Webhook-Timestamp` header must be within 5 minutes (not stale) and not >30s in the future.
+3. **HMAC verification** — `X-Webhook-Signature` header (`sha256=<hex>`) verified against `HMAC-SHA256(timestamp.raw_body, hmac_secret)`.
+4. **Replay protection** — `X-Webhook-Delivery-Id` checked against `webhook_deliveries_replay` table (persistent, DB-backed). Unique constraint handles concurrent races.
+
+Webhook callers can only provide `parameters` — the binding controls `item_type`, `item_id`, and `project_path`.
+
 ## Quotas and Limits
 
 | Limit | Default | Enforced At |
@@ -172,6 +223,13 @@ Secrets are injected as environment variables per-request. They never appear in 
 
 Managed via the remote tool's secret actions: `secrets_set`, `secrets_import`, `secrets_list`, `secrets_delete`. Stored server-side, scoped to the authenticated user.
 
+Secret names are validated before injection via `_is_safe_secret_name()`:
+
+- Must be a valid Python identifier
+- Blocked: `RESERVED_ENV_NAMES` (PATH, HOME, PYTHONPATH, TMPDIR, RYE_SIGNING_KEY_DIR, RYE_KERNEL_PYTHON, RYE_REMOTE_NAME, etc.)
+- Blocked: `RESERVED_ENV_PREFIXES` (SUPABASE_, MODAL_, LD_, SSL_, AWS_, GOOGLE_, AZURE_, GITHUB_, CI_, DOCKER_)
+- Unsafe names are logged and skipped (not rejected — other secrets still inject)
+
 ## Client Tool
 
 Bundled at `.ai/tools/rye/core/remote/remote.py`.
@@ -185,7 +243,7 @@ Bundled at `.ai/tools/rye/core/remote/remote.py`.
 | `threads` | List remote executions from the server |
 | `thread_status` | Get status of a specific remote thread by thread_id |
 
-Remotes are configured as named entries in `cas/remote.yaml` (under `.ai/config/`). Use `resolve_remote(name, project_path)` to resolve a named remote to its URL and API key. The default remote name is `"default"`. Environment variable fallbacks (`RYE_REMOTE_URL`/`RYE_REMOTE_API_KEY`) have been removed — all remotes must be declared in config.
+Remotes are configured as named entries in `cas/remote.yaml` (under `.ai/config/`). Use `resolve_remote(name, project_path)` to resolve a named remote to its URL and API key. The default remote name is `"default"`. All remotes must be declared in config.
 
 ## Named Remotes
 
@@ -219,9 +277,31 @@ The walker also supports per-node remote dispatch — individual graph nodes can
 
 ## Project Refs
 
-The `/push` endpoint registers a project ref on the remote — a record of the latest manifest hashes for a user × remote × project combination. This enables the `/execute` endpoint to accept a `project_name` instead of explicit manifest hashes, resolving the latest pushed state automatically.
+The `/push` endpoint registers a project ref and creates a `ProjectSnapshot` with parent lineage. The ref tracks the latest state for a user × remote × project combination.
 
-Project refs are stored in the `project_refs` Supabase table with columns: `user_id`, `remote_name`, `project_name`, `project_manifest_hash`, `user_manifest_hash`, `system_version`, `pushed_at`. Primary key: `(user_id, remote_name, project_name)`.
+Project refs are stored in the `project_refs` Supabase table:
+- Primary key: `(user_id, remote_name, project_path)`
+- Columns: `project_manifest_hash`, `system_version`, `pushed_at`, `snapshot_hash`, `snapshot_revision` (bigint, optimistic CAS counter), `head_updated_at`
+
+The `/push` endpoint performs deep manifest graph validation via `_validate_manifest_graph()` — verifying the full transitive object graph (manifest kind/schema/space, all item references point to valid `item_source` objects with existing content blobs, all file references point to existing blobs).
+
+### User Space Refs
+
+User space is managed independently from project refs via `user_space_refs`:
+- Primary key: `(user_id, remote_name)`
+- Columns: `user_manifest_hash`, `snapshot_revision`, `pushed_at`
+- `/push/user-space` — optimistic CAS update (409 on revision conflict)
+- `/user-space` — get current user space ref
+
+## Snapshot History
+
+The `/history` endpoint walks the first-parent chain from a project's HEAD snapshot:
+
+```
+GET /history?project_path=my-project&limit=50
+```
+
+Returns a list of `ProjectSnapshot` objects following `parent_hashes[0]` (mainline). Each entry includes its hash as `_hash`. Useful for auditing push and execution history.
 
 ## Implementation Files
 
@@ -236,5 +316,7 @@ Project refs are stored in the `project_refs` Supabase table with columns: `user
 | Remote config | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/remote/remote_config.py` |
 | Config schema | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/remote.config-schema.yaml` |
 | CAS primitives | `lillux/kernel/lillux/primitives/cas.py` |
-| Detached launcher | `ryeos/rye/utils/detached.py` |
-| Async runner | `ryeos/rye/utils/async_runner.py` |
+| Checkout/spaces | `ryeos/rye/cas/checkout.py` |
+| Three-way merge | `ryeos/rye/cas/merge.py` |
+| MCP transport | `services/ryeos-remote/ryeos_remote/mcp.py` |
+| Object model | `ryeos/rye/cas/objects.py` |

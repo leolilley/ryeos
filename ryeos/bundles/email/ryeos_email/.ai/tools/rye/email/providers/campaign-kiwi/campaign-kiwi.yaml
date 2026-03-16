@@ -1,0 +1,35 @@
+# rye:signed:2026-03-16T08:41:36Z:eaf3d46e6e1abbdd0628ef6f0978c74ed329615d8aa0637ce0ddf0f9a4c8927a:NO8-Wbi6s5CiLVXCyaFO8mz2nuabegotFD6DHTsKW1v3h0XUjf90FUJLzVdf-kvQwdh5B16f1vUGrfXTTxXEBQ==:4b987fd4e40303ac
+# rye:unsigned
+tool_id: campaign-kiwi
+tool_type: email_provider
+executor_id: null
+version: "1.0.0"
+description: "Campaign Kiwi email provider — SES-backed sending via CK MCP"
+category: rye/email/providers/campaign-kiwi
+
+mcp_server: campaign-kiwi-remote
+
+actions:
+  send:
+    steps:
+      - tool: primary_email.create
+        params_map:
+          to: to
+          subject: subject
+          body: body
+          from_inbox: from
+          from_name: from_name
+      - tool: primary_email.approve
+        params_map:
+          email_id: "$prev.email_id"
+      - tool: scheduler.schedule
+        params_map:
+          email_id: "$prev.email_id"
+          email_type: primary
+  get:
+    tool: primary_email.get
+    params_map:
+      email_id: email_id
+  list:
+    tool: primary_email.list
+    params_map: {}

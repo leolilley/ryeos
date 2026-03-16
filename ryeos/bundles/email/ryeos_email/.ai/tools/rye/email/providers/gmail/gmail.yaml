@@ -1,0 +1,26 @@
+# rye:signed:2026-03-16T08:41:36Z:be5debbe92a4ba15a47da44f4852f50a083cbc08d7ae10b742982e988074d3cc:cdi_x3mOK433XVQS5A4yF9UdTUMyG4Ha4aaxKH-XmWJhl0-r0T9jzWZh2ScCdnn2WYVKN3fk8TFyL12zirLwAA==:4b987fd4e40303ac
+# rye:unsigned
+tool_id: gmail
+tool_type: email_provider
+executor_id: null
+version: "1.0.0"
+description: "Gmail via Google Workspace MCP"
+category: rye/email/providers/gmail
+
+mcp_server: google-workspace
+
+actions:
+  send:
+    tool: gmail.send
+    params_map:
+      to: to
+      subject: subject
+      body: body
+      from: from
+  get:
+    tool: gmail.get
+    params_map:
+      email_id: email_id
+  list:
+    tool: gmail.list
+    params_map: {}
