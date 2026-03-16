@@ -22,7 +22,7 @@ class IntegrityError(Exception):
 
 def _infer_item_id(file_path: Path, item_type: str, project_path: Optional[Path]) -> str:
     """Best-effort extraction of item_id from file path."""
-    type_dir = ItemType.TYPE_DIRS.get(item_type, item_type)
+    type_dir = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
     parts = file_path.parts
     for i, part in enumerate(parts):
         if part == ".ai" and i + 1 < len(parts) and parts[i + 1] == type_dir:

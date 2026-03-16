@@ -155,7 +155,8 @@ class TestUninstallVerb:
         args.bundle_id = "nonexistent"
         args.space = "user"
 
-        _handle_uninstall(args, str(tmp_path / "project"))
+        with pytest.raises(SystemExit):
+            _handle_uninstall(args, str(tmp_path / "project"))
 
         output = capsys.readouterr().out
         assert "not installed" in output or "error" in output.lower()

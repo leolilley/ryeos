@@ -49,7 +49,7 @@ def multi_space_project(_setup_user_space):
 
         from rye.utils.trust_store import TrustStore
         store = TrustStore(project_path=project_root)
-        store.add_key(public_pem, owner="local", space="project")
+        store.add_key(public_pem, owner="local", space="project", version="1.0.0")
 
         for f in directives_dir.glob("*.md"):
             content = f.read_text()

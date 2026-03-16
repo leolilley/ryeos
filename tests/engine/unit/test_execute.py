@@ -78,7 +78,7 @@ def main():
         
         # Trust the signing key in this project so verification passes
         store = TrustStore(project_path=project_root)
-        store.add_key(public_pem_signing, owner="local", space="project")
+        store.add_key(public_pem_signing, owner="local", space="project", version="1.0.0")
 
         for directive_file in (ai_dir / "directives").glob("*.md"):
             content = directive_file.read_text()

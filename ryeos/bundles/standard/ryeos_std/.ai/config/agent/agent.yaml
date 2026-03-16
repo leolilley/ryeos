@@ -1,6 +1,9 @@
+# rye:signed:2026-03-16T11:28:51Z:3a9157b183696f3ce7b38fafed072a6d024a15383437297b5a590eee38b0de55:eBuFbVg6ewhf3Go_8YnehXuGoST2JY4sBBn2mRq0-zLwbNTEWagoYQLjO88oK0y8J6ynSilzlxNLIwyGAe5zCg==:4b987fd4e40303ac
 # Agent configuration — system defaults
 # Override per-user: {USER_SPACE}/.ai/config/agent/agent.yaml
 # Override per-project: .ai/config/agent/agent.yaml
+category: "agent"
+version: "1.0.0"
 schema_version: "1.0.0"
 
 provider:

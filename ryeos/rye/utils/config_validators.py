@@ -8,6 +8,7 @@ Separate from validators.py which handles extractor-driven METADATA validation.
 This module handles config CONTENT schema validation.
 """
 
+import fnmatch
 import logging
 import threading
 from pathlib import Path
@@ -104,9 +105,30 @@ def validate_config_content(
         {"valid": bool, "issues": [...], "warnings": [...]}
     """
     schemas = _get_schemas(project_path)
-    # config_id "agent/agent" → target_config "agent/agent.yaml"
-    target_key = f"{config_id}.yaml"
-    schema = schemas.get(target_key)
+    # Build candidate target keys from config_id + known extensions
+    from rye.utils.extensions import get_item_extensions
+    try:
+        extensions = get_item_extensions("config", project_path)
+    except ValueError:
+        extensions = [".yaml", ".yml"]
+    candidate_keys = [f"{config_id}{ext}" for ext in extensions]
+
+    # Try exact match first
+    schema = None
+    for key in candidate_keys:
+        schema = schemas.get(key)
+        if schema is not None:
+            break
+    # Fall back to glob patterns in target_config keys (e.g. "keys/trusted/*.toml")
+    if schema is None:
+        for key in candidate_keys:
+            for pattern, s in schemas.items():
+                if "*" in pattern or "?" in pattern:
+                    if fnmatch.fnmatch(key, pattern):
+                        schema = s
+                        break
+            if schema is not None:
+                break
     if schema is None:
         return {"valid": True, "issues": [], "warnings": []}
 

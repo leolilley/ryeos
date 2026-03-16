@@ -1,8 +1,11 @@
+# rye:signed:2026-03-16T11:29:10Z:64886b5c2b0e1d3436e2a67854ab5121b8f6adbe6b53ace160309ef4cd5c6833:NDniJMiolu4nvgwYdMSOLIDa0fMKTpyO1UywLiq5GpwRs3PGPWXWVSMbkCatSCDsyPFC7YL3TdJfs734t-IjAw==:4b987fd4e40303ac
 # Remote CAS configuration.
 #
 # Loaded via 3-tier resolution (system → user → project).
 # Projects override with their own .ai/config/cas/remote.yaml.
 # Deep merge: project can add remotes/includes/excludes without restating defaults.
+category: "cas"
+version: "1.0.0"
 
 # project_name: my-project   # stable identifier for push refs + webhooks
 #                             # Falls back to directory basename if unset.

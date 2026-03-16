@@ -140,7 +140,24 @@ class TestMergeHooks:
       item_id: "user/style"
 """
         )
+        # Trust the env signing key so bundle config integrity checks pass.
+        from tests.conftest import get_env_signing_pubkey
+        from lillux.primitives.signing import generate_keypair, save_keypair
+        real_signing_pubkey = get_env_signing_pubkey()
+
         monkeypatch.setenv("USER_SPACE", str(user_space))
+
+        # The trust store needs a signing keypair to sign key files on add_key
+        signing_dir = user_space / ".ai" / "config" / "keys" / "signing"
+        priv, pub = generate_keypair()
+        save_keypair(priv, pub, signing_dir)
+
+        from rye.utils.trust_store import TrustStore
+        store = TrustStore()
+        # Trust the ephemeral key first (self-signed), then the env signer
+        store.add_key(pub, owner="test-ephemeral", space="user", version="1.0.0")
+        if real_signing_pubkey:
+            store.add_key(real_signing_pubkey, owner="env-signer", space="user", version="1.0.0")
 
         # Set up project hooks
         project_dir = tmp_path / "project"

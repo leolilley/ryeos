@@ -1159,7 +1159,7 @@ class TestTrustStore:
         from rye.utils.trust_store import TrustStore
         ts = TrustStore(project_path=tmp_path / "project")
         # Trust the signing key so signed trust entries pass integrity
-        ts.add_key(public_pem, owner="local", space="user")
+        ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
         return ts
 
     def test_tofu_first_pin(self, tmp_path, monkeypatch):
@@ -1245,7 +1245,7 @@ class TestRemoteKeyVerification:
 
         from rye.utils.trust_store import TrustStore
         ts = TrustStore(project_path=tmp_path / "project")
-        ts.add_key(public_pem, owner="local", space="user")
+        ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
         return ts
 
     @pytest.mark.asyncio

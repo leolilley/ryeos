@@ -233,7 +233,7 @@ async def signed_project(temp_project, _setup_user_space):
     
     # Trust the signing key in this project
     store = TrustStore(project_path=temp_project)
-    store.add_key(public_pem_signing, owner="local", space="project")
+    store.add_key(public_pem_signing, owner="local", space="project", version="1.0.0")
     
     # Sign all directives
     for directive in ["test_fs_read", "test_fs_write", "test_spawn", "test_no_perms"]:

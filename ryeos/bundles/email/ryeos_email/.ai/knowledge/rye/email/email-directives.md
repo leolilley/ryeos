@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:53:44Z:d543dac2f966b87559af6b4f45ba60285059cdf3f7ea06703a208647e7272874:gFwaq1I8uQJINmZdhtq6ml9mAALnqt804eZCKHThyoF9T-UQw1TTnzQJ4a_ZXoLjenaEVFSQiZxf5N2w0hnYDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T11:23:58Z:d543dac2f966b87559af6b4f45ba60285059cdf3f7ea06703a208647e7272874:gFwaq1I8uQJINmZdhtq6ml9mAALnqt804eZCKHThyoF9T-UQw1TTnzQJ4a_ZXoLjenaEVFSQiZxf5N2w0hnYDQ==:4b987fd4e40303ac -->
 ```yaml
 name: email-directives
 title: Email Bundle — Tools, Directives & Provider Abstraction

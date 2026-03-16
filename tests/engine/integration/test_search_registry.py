@@ -38,7 +38,7 @@ def temp_project(_setup_user_space):
         _, public_pem = load_keypair(signing_key_dir)
 
         store = TrustStore(project_path=project_root)
-        store.add_key(public_pem, owner="local", space="project")
+        store.add_key(public_pem, owner="local", space="project", version="1.0.0")
 
         for f in (ai_dir / "directives").glob("*.md"):
             content = f.read_text()

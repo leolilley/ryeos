@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:44Z:095138272452334ef075e14a726d54d904fb0808eeeaeea80c00b244fec42072:TV2mZPRkw3UzL6GFHCBnn4dwzYEPQbUzLQW0x9Gn2rw85-yqFIviqiJMkQVJ34vwk6bt1cELECt-_rmla4XtCg==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:58Z:095138272452334ef075e14a726d54d904fb0808eeeaeea80c00b244fec42072:TV2mZPRkw3UzL6GFHCBnn4dwzYEPQbUzLQW0x9Gn2rw85-yqFIviqiJMkQVJ34vwk6bt1cELECt-_rmla4XtCg==:4b987fd4e40303ac
 """Forward an email to a private address with agent context."""
 
 import argparse

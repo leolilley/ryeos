@@ -1,8 +1,11 @@
+# rye:signed:2026-03-16T11:29:10Z:b24e112ebe3f092f00187feca6b5e7c972a792907095c34d22d3ccc226dafb47:HT5-rTvmhUnNn-vB7Y-9zXSHHMRzOaIBmLr-eRc3zktBidetDLGmPCqPqpf-7_nyQayZp74UYGJ1WbXuCucHDg==:4b987fd4e40303ac
 # CAS manifest policy — exclusion rules for source manifest builder.
 #
 # The engine loads this via 3-tier resolution (system → user → project).
 # Hard excludes are a floor: projects can ADD patterns but never remove
 # the system defaults (union, never subtract).
+category: "cas"
+version: "1.0.0"
 
 manifest:
   # Directories under .ai/ to skip (runtime state / CAS itself)

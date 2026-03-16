@@ -32,8 +32,63 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  # ── Re-sign with CI key and run tests ────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard \
+                      -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
+                      -e ryeos-mcp -e ryeos-cli
+          pip install pytest pytest-asyncio pyyaml
+
+      - name: Import CI signing key
+        env:
+          RYE_SIGNING_KEY: ${{ secrets.RYE_SIGNING_KEY }}
+          RYE_SIGNING_PUBKEY: ${{ secrets.RYE_SIGNING_PUBKEY }}
+        run: |
+          mkdir -p ~/.ai/config/keys/signing
+          echo "$RYE_SIGNING_KEY" > ~/.ai/config/keys/signing/private_key.pem
+          chmod 600 ~/.ai/config/keys/signing/private_key.pem
+          echo "$RYE_SIGNING_PUBKEY" > ~/.ai/config/keys/signing/public_key.pem
+          # Trust the CI key in user space
+          python -c "
+          import os
+          from rye.utils.trust_store import TrustStore
+          pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
+          store = TrustStore()
+          store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
+          "
+
+      - name: Re-sign all bundle items with CI key
+        run: |
+          BUNDLES=(
+            "ryeos/bundles/core/ryeos_core"
+            "ryeos/bundles/standard/ryeos_std"
+            "ryeos/bundles/web/ryeos_web"
+            "ryeos/bundles/code/ryeos_code"
+            "ryeos/bundles/email/ryeos_email"
+          )
+          for bundle in "${BUNDLES[@]}"; do
+            for item_type in directive tool knowledge config; do
+              rye -p "$bundle" sign "$item_type" '*' 2>/dev/null || true
+            done
+          done
+
+      - name: Run tests
+        run: python -m pytest tests/ -x -q
+
   # ── Build & publish each Python package individually ─────────────
   publish-python:
+    needs: test
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -81,22 +136,47 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install build tools
+      - name: Install build tools and runtime
         if: steps.check.outputs.skip == 'false'
-        run: pip install build
+        run: |
+          pip install build
+          pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos-cli
+
+      - name: Import CI signing key
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        env:
+          RYE_SIGNING_KEY: ${{ secrets.RYE_SIGNING_KEY }}
+          RYE_SIGNING_PUBKEY: ${{ secrets.RYE_SIGNING_PUBKEY }}
+        run: |
+          mkdir -p ~/.ai/config/keys/signing
+          echo "$RYE_SIGNING_KEY" > ~/.ai/config/keys/signing/private_key.pem
+          chmod 600 ~/.ai/config/keys/signing/private_key.pem
+          echo "$RYE_SIGNING_PUBKEY" > ~/.ai/config/keys/signing/public_key.pem
+          python -c "
+          import os
+          from rye.utils.trust_store import TrustStore
+          pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
+          store = TrustStore()
+          store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
+          "
+
+      - name: Re-sign and rebuild bundle manifest with CI key
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        run: |
+          PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
+          # Re-sign all items with CI key
+          for item_type in directive tool knowledge config; do
+            rye -p "$PACKAGE_DIR" sign "$item_type" '*' 2>/dev/null || true
+          done
+          # Rebuild manifest so hashes match the re-signed files
+          rye -p "$PACKAGE_DIR" registry bundle build --bundle-id ${{ matrix.package }}
+          # Verify the rebuilt manifest
+          rye -p "$PACKAGE_DIR" registry bundle verify ${{ matrix.package }}
 
       - name: Build wheel
         if: steps.check.outputs.skip == 'false'
         run: python -m build --wheel
         working-directory: ${{ matrix.path }}
-
-      - name: Verify bundle signatures
-        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
-        run: |
-          pip install -e ryeos -e ryeos/bundles/core -e ryeos-cli
-          # Find the inner package dir containing .ai/ (e.g. ryeos_core/, ryeos_std/)
-          PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
-          rye -p "$PACKAGE_DIR" registry bundle verify ${{ matrix.package }}
 
       - name: Publish to PyPI
         if: steps.check.outputs.skip == 'false'
@@ -152,10 +232,25 @@ jobs:
       - name: Install from local checkout
         if: steps.check.outputs.skip == 'false'
         run: |
-          pip install -e ryeos
-          pip install -e ryeos/bundles/core
-          pip install -e ryeos/bundles/standard
-          pip install -e ryeos-cli
+          pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
+
+      - name: Import CI signing key
+        if: steps.check.outputs.skip == 'false'
+        env:
+          RYE_SIGNING_KEY: ${{ secrets.RYE_SIGNING_KEY }}
+          RYE_SIGNING_PUBKEY: ${{ secrets.RYE_SIGNING_PUBKEY }}
+        run: |
+          mkdir -p ~/.ai/config/keys/signing
+          echo "$RYE_SIGNING_KEY" > ~/.ai/config/keys/signing/private_key.pem
+          chmod 600 ~/.ai/config/keys/signing/private_key.pem
+          echo "$RYE_SIGNING_PUBKEY" > ~/.ai/config/keys/signing/public_key.pem
+          python -c "
+          import os
+          from rye.utils.trust_store import TrustStore
+          pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
+          store = TrustStore()
+          store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
+          "
 
       - name: Find package directory
         if: steps.check.outputs.skip == 'false'
@@ -164,9 +259,13 @@ jobs:
           PKG_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           echo "dir=$PKG_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Build bundle manifest
+      - name: Re-sign and rebuild bundle manifest with CI key
         if: steps.check.outputs.skip == 'false'
-        run: rye registry bundle build ${{ steps.pkg.outputs.dir }} --bundle-id ${{ matrix.bundle }}
+        run: |
+          for item_type in directive tool knowledge config; do
+            rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
+          done
+          rye -p "${{ steps.pkg.outputs.dir }}" registry bundle build --bundle-id ${{ matrix.bundle }}
 
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'

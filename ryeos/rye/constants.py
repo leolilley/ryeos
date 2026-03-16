@@ -21,11 +21,17 @@ class ItemType:
     CONFIG = "config"
     SIGNABLE = [DIRECTIVE, TOOL, KNOWLEDGE, CONFIG]
 
-    # Type directory mappings
+    # Type directory mappings (execute/load/search — NO config)
     TYPE_DIRS = {
         DIRECTIVE: "directives",
         TOOL: "tools",
         KNOWLEDGE: "knowledge",
+    }
+
+    # Extended mapping for signing and integrity (includes config)
+    SIGNABLE_DIRS = {
+        **TYPE_DIRS,
+        CONFIG: "config",
     }
 
     # File extensions to search per item type (tools use dynamic lookup)
@@ -44,4 +50,3 @@ class Action:
     EXECUTE = "execute"
 
     ALL = [SEARCH, SIGN, LOAD, EXECUTE]
-

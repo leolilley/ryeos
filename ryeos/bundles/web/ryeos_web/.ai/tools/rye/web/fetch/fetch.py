@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:45Z:ac138a3aea08f7567da3a2ae8d23781bc268dae9228931e53e3b70bffc26e6c6:BCvPZR7xGnUJNYhC70j3NUMaBto1uEz7C0_slSQXdYBsBeRLd_fndM8U4WMW_YVluFqRH86acemQxVlvMD65Bw==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:58Z:ac138a3aea08f7567da3a2ae8d23781bc268dae9228931e53e3b70bffc26e6c6:BCvPZR7xGnUJNYhC70j3NUMaBto1uEz7C0_slSQXdYBsBeRLd_fndM8U4WMW_YVluFqRH86acemQxVlvMD65Bw==:4b987fd4e40303ac
 """Fetch URL content with optional format conversion."""
 
 import json

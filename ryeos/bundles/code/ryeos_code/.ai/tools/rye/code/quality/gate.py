@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:45Z:5e6339f087bab4cbc03374dbee278fadc4d81973673730ffe08b5ec75dd9f36b:B6VAJaRS-Lu9HsFI--aseX9wjB15E8sPc8nxy8ztuaYSE4oBK6NQpN0xUeW6Gihh6e9odAlfHCEQL3kjxbQQCw==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:58Z:5e6339f087bab4cbc03374dbee278fadc4d81973673730ffe08b5ec75dd9f36b:B6VAJaRS-Lu9HsFI--aseX9wjB15E8sPc8nxy8ztuaYSE4oBK6NQpN0xUeW6Gihh6e9odAlfHCEQL3kjxbQQCw==:4b987fd4e40303ac
 # rye:unsigned
 
 """Quality gate runner — executes project-configured quality checks and returns structured pass/fail."""

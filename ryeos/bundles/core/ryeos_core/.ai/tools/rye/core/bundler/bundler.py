@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:44Z:89f7350d7a036bf4e8ebde5d1c9e515bd00effa8e93d428128f84fb9fe87abae:Yc_KKRW33FuerB-0AX7RuJMOX3QDG5nE197aE8U6gs25-tP6BfMUnuPQ2tt99lYnJuyhYZSUK90LIV_aEUFJDA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:39Z:16bee7cf72ffe9a4ab4577d4d129e9d1aedfc8df54b34b391bc0ed2cb2d96944:U-5vfed8-2TQdOXIV9GigYekXSI5J1UawlteacVg0LvA5vNF-rH9iubb43CjojcIoeonh8V3wTf-Gfmv3K0dBQ==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -42,7 +42,7 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["create", "create-package", "verify", "inspect", "list"]
+ACTIONS = ["create", "create-package", "verify", "verify-signatures", "inspect", "list"]
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -383,7 +383,7 @@ def _sign_manifest(content: str) -> str:
 
     trust_store = TrustStore()
     if not trust_store.is_trusted(pubkey_fp):
-        trust_store.add_key(public_pem, owner="local")
+        trust_store.add_key(public_pem, owner="local", version=__version__)
 
     sig_line = f"# rye:signed:{timestamp}:{content_hash}:{ed25519_sig}:{pubkey_fp}\n"
     return sig_line + content

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:44Z:622a15c3ae500c04a7b83366a0059c973b42aa70fed7315ec0c6cbb3b918b658:Tx6e-zbvFXsEiLsnNgpQa54OZ82_xvs8CK4msfcQDAGwMkv0P9bFyk51KHsO0S7ouGI5j7QbgR7p_dkJsCv7Cw==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:39Z:bcdb6c5543f136acb6ea0601efc86b9c7f17be651748bbf50469e97ab6bcfd34:RwDPD04Y-PJXv6U5y43fhD70GwhKcQPBRYO95ic7vUdabUwmDKUATxG2b6Ur2CO5bz_sYd3vWctN19Mgv1XbDA==:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -8,6 +8,7 @@ description: "Config extractor - extracts metadata from YAML config files"
 extensions:
   - .yaml
   - .yml
+  - .toml
 
 parser: yaml/yaml
 
@@ -54,5 +55,5 @@ validation_schema:
       required: true
       type: semver
     description:
-      required: true
+      required: false
       type: string

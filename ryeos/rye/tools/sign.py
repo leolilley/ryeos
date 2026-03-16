@@ -22,9 +22,10 @@ from rye.utils.path_utils import (
     extract_filename,
     get_project_type_path,
     get_system_spaces,
+    get_type_folder,
     get_user_type_path,
 )
-from rye.utils.extensions import get_tool_extensions, get_item_extensions, get_parsers_map
+from rye.utils.extensions import get_item_extensions, get_parsers_map, get_tool_extensions
 from rye.utils.resolvers import get_user_space
 from rye.utils.validators import apply_field_mapping, validate_parsed_data
 
@@ -80,15 +81,12 @@ class SignTool:
         self, item_type: str, project_path: str, source: str
     ) -> Optional[Path]:
         """Get the base directory for computing relative path IDs."""
-        type_dir = ItemType.TYPE_DIRS.get(item_type)
-        if not type_dir:
-            return None
         if source == "project":
             return get_project_type_path(Path(project_path), item_type)
         elif source == "user":
             return get_user_type_path(item_type)
         elif source == "system":
-            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            type_folder = get_type_folder(item_type)
             for bundle in get_system_spaces():
                 p = bundle.root_path / AI_DIR / type_folder
                 if p.exists():
@@ -100,7 +98,7 @@ class SignTool:
         self, item_type: str, pattern: str, project_path: str, source: str
     ) -> List[Path]:
         """Resolve glob pattern to list of item file paths."""
-        type_dir = ItemType.TYPE_DIRS.get(item_type)
+        type_dir = ItemType.SIGNABLE_DIRS.get(item_type)
         if not type_dir:
             return []
 
@@ -110,7 +108,7 @@ class SignTool:
             base_dir = get_user_type_path(item_type)
         elif source == "system":
             all_items = []
-            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            type_folder = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
             for bundle in get_system_spaces():
                 sys_dir = bundle.root_path / AI_DIR / type_folder
                 if not sys_dir.exists():
@@ -144,31 +142,26 @@ class SignTool:
                 and path.name not in exclude_files
             )
 
+        proj = Path(project_path) if project_path else None
         if item_type == ItemType.TOOL:
-            tool_extensions = get_tool_extensions(
-                Path(project_path) if project_path else None
-            )
-            items = []
-            for tool_ext in tool_extensions:
-                if "/" in pattern:
-                    glob_pattern = f"{pattern}{tool_ext}" if not pattern.endswith(tool_ext) else pattern
-                else:
-                    glob_pattern = f"**/{pattern}{tool_ext}" if pattern != "*" else f"**/*{tool_ext}"
-                for path in base_dir.glob(glob_pattern):
-                    if _is_included(path):
-                        items.append(path)
-            return items
+            extensions = get_tool_extensions(proj)
+        elif item_type == ItemType.CONFIG:
+            extensions = get_item_extensions(ItemType.CONFIG, proj)
+        elif item_type in (ItemType.DIRECTIVE, ItemType.KNOWLEDGE):
+            extensions = get_item_extensions(item_type, proj)
         else:
-            ext = ".md"
+            raise ValueError(f"Unknown item type for glob: {item_type}")
+
+        items = []
+        for ext in extensions:
             if "/" in pattern:
                 glob_pattern = f"{pattern}{ext}" if not pattern.endswith(ext) else pattern
             else:
                 glob_pattern = f"**/{pattern}{ext}" if pattern != "*" else f"**/*{ext}"
-            items = []
             for path in base_dir.glob(glob_pattern):
                 if _is_included(path):
                     items.append(path)
-            return items
+        return items
 
     async def handle(self, **kwargs) -> Dict[str, Any]:
         """Handle sign request."""
@@ -239,6 +232,8 @@ class SignTool:
                     result = await self._sign_tool(item_id, project_path, source)
                 elif item_type == ItemType.KNOWLEDGE:
                     result = await self._sign_knowledge(item_id, project_path, source)
+                elif item_type == "config":
+                    result = await self._sign_config(item_id, project_path, source)
                 else:
                     result = {"status": "error", "error": f"Unknown item type: {item_type}"}
 
@@ -524,8 +519,9 @@ class SignTool:
             }
 
         # item_id is the relative path under .ai/config/ without extension
+        config_extensions = get_item_extensions("config", proj)
         file_path = None
-        for ext in (".yaml", ".yml"):
+        for ext in config_extensions:
             candidate = base / f"{item_id}{ext}"
             if candidate.is_file():
                 file_path = candidate
@@ -546,8 +542,22 @@ class SignTool:
                 "path": str(file_path),
             }
 
-        # Parse via parser router (same as tools)
-        parsed = self.parser_router.parse("yaml/yaml", content)
+        # Parse via parser router — data-driven dispatch by extension
+        parsers_map = get_parsers_map(proj)
+        parser_name = parsers_map.get(file_path.suffix)
+        if not parser_name:
+            # Fallback: YAML for .yaml/.yml, TOML for .toml
+            fallback = {".yaml": "yaml/yaml", ".yml": "yaml/yaml", ".toml": "toml/toml"}
+            parser_name = fallback.get(file_path.suffix)
+        if not parser_name:
+            return {
+                "status": "error",
+                "error": f"No parser registered for extension: {file_path.suffix}",
+                "path": str(file_path),
+            }
+
+        warnings: list = []
+        parsed = self.parser_router.parse(parser_name, content)
         if "error" in parsed:
             return {
                 "status": "error",
@@ -627,7 +637,7 @@ class SignTool:
             item_id: Relative path from .ai/<type>/ without extension.
                     e.g., "rye/core/registry/registry" -> .ai/tools/rye/core/registry/registry.py
         """
-        type_dir = ItemType.TYPE_DIRS.get(item_type)
+        type_dir = ItemType.SIGNABLE_DIRS.get(item_type)
         if not type_dir:
             return None
 
@@ -638,7 +648,7 @@ class SignTool:
         elif source == "system":
             extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
 
-            type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            type_folder = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
             for bundle in get_system_spaces():
                 base = bundle.root_path / AI_DIR / type_folder
                 if not base.exists():

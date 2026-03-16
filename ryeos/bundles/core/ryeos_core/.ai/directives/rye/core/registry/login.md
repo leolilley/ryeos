@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:53:44Z:313ba38e0aae8691be261f2c2cdf66908d84feb315c39b7e6cf51c5094dbb3f7:CYrDjPSMjxWwrAtHfzqDn79X_E-bke37u9PFb29c4slAiTtsg-q7B3huZ1YW1O__4BSbtJXrj6s2qnfGJv-NAQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T11:23:39Z:313ba38e0aae8691be261f2c2cdf66908d84feb315c39b7e6cf51c5094dbb3f7:CYrDjPSMjxWwrAtHfzqDn79X_E-bke37u9PFb29c4slAiTtsg-q7B3huZ1YW1O__4BSbtJXrj6s2qnfGJv-NAQ==:4b987fd4e40303ac -->
 # Registry Login
 
 Start the device authentication flow for the registry.

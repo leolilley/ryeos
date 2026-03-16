@@ -80,18 +80,36 @@ from lillux.primitives.signing import (
 )
 
 
+def get_env_signing_pubkey() -> bytes | None:
+    """Read the real signing public key from the current (un-monkeypatched) user space.
+
+    Returns the PEM bytes of whatever key signed bundle items on disk.
+    In CI this is the CI key; locally it's the dev's personal key.
+    Returns None if no signing key is configured.
+    """
+    from rye.utils.path_utils import get_user_space
+    from rye.constants import AI_DIR
+
+    pubkey_path = get_user_space() / AI_DIR / "config" / "keys" / "signing" / "public_key.pem"
+    if pubkey_path.is_file():
+        return pubkey_path.read_bytes()
+    return None
+
+
 @pytest.fixture
 def _setup_user_space(tmp_path, monkeypatch):
     """Set up a temporary USER_SPACE with Ed25519 keys and trust store for all tests."""
+    # Capture BEFORE monkeypatching USER_SPACE.
+    real_signing_pubkey = get_env_signing_pubkey()
+
     user_space = tmp_path / "user_space"
     user_space.mkdir()
 
     monkeypatch.setenv("USER_SPACE", str(user_space))
 
     from rye.utils.signature_formats import clear_signature_formats_cache
-    clear_signature_formats_cache()
-
     from rye.constants import AI_DIR
+    clear_signature_formats_cache()
 
     # Generate and save keypair for signing (in ~/.ai/config/keys/signing)
     signing_key_dir = user_space / AI_DIR / "config" / "keys" / "signing"
@@ -106,7 +124,13 @@ def _setup_user_space(tmp_path, monkeypatch):
     # Add both public keys to user space trust store
     from rye.utils.trust_store import TrustStore
     store = TrustStore(project_path=user_space)
-    store.add_key(public_pem, owner="local", space="user")
-    store.add_key(public_pem_general, owner="local", space="user")
+    store.add_key(public_pem, owner="local", space="user", version="1.0.0")
+    store.add_key(public_pem_general, owner="local", space="user", version="1.0.0")
+
+    # Trust the real signing key so bundle items signed on disk are verified.
+    # In CI: this is the CI key (also in bundle trust stores).
+    # Locally: this is the dev's personal key.
+    if real_signing_pubkey:
+        store.add_key(real_signing_pubkey, owner="env-signer", space="user", version="1.0.0")
 
     yield user_space

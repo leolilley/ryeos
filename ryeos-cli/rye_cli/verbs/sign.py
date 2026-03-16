@@ -5,7 +5,7 @@ from rye_cli.output import run_async, print_result
 
 def register(subparsers):
     p = subparsers.add_parser("sign", help="Sign an item with Ed25519")
-    p.add_argument("item_type", choices=["directive", "tool", "knowledge"],
+    p.add_argument("item_type", choices=["directive", "tool", "knowledge", "config"],
                    help="Item type")
     p.add_argument("item_id", help="Item ID or glob pattern (e.g., 'my-project/*')")
     p.add_argument("--source", default="project", choices=["project", "user"],

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:53:44Z:83359e779791dd373f5c0bf1a16713cdc405a7e3446f6fd327af9d93f38aa2d1:F1IJj8z1AjsADOEqUQ7CYs9NiWOgeLQAI03qrG859UCVIOYYeA36mhvsZrmMa_UkOAgNXRI8zGbvoeqrgXzgAQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T11:23:58Z:83359e779791dd373f5c0bf1a16713cdc405a7e3446f6fd327af9d93f38aa2d1:F1IJj8z1AjsADOEqUQ7CYs9NiWOgeLQAI03qrG859UCVIOYYeA36mhvsZrmMa_UkOAgNXRI8zGbvoeqrgXzgAQ==:4b987fd4e40303ac -->
 # Draft Response
 
 Generate a reply to an email thread.

@@ -1,5 +1,8 @@
+# rye:signed:2026-03-16T11:29:10Z:aedb565a85c36a5825cab4489f2cb9944192fcb5a962fe98976a1b47d0e82f12:MvUzYozpl3Q2xu2Q4dg1KHhK0HPfq1UdwIso2v5JNv-aFq29_J6B_JEdVp8Venn9jPSwWAtOxgpWgInENf8TDA==:4b987fd4e40303ac
 # Email agent configuration — bundle defaults
 # Override per-project: .ai/config/email/email.yaml
+category: "email"
+version: "1.0.0"
 schema_version: "1.0.0"
 
 provider:

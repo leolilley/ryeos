@@ -44,6 +44,7 @@ class TrustedKeyInfo:
     fingerprint: str
     owner: str
     public_key_pem: bytes
+    version: str = ""
     attestation: Optional[str] = None
     source: str = ""  # "project", "user", or "system:{bundle_id}"
 
@@ -52,6 +53,8 @@ class TrustedKeyInfo:
         pem_str = self.public_key_pem.decode("utf-8").strip()
         attestation = self.attestation or ""
         lines = [
+            f'version = "{self.version}"',
+            f'category = "keys/trusted"',
             f'fingerprint = "{self.fingerprint}"',
             f'owner = "{self.owner}"',
             f'attestation = "{attestation}"',
@@ -83,6 +86,7 @@ class TrustedKeyInfo:
             fingerprint=raw["fingerprint"],
             owner=raw.get("owner", "unknown"),
             public_key_pem=(pem_str + "\n").encode("utf-8"),
+            version=raw.get("version", "1.0.0"),
             attestation=attestation,
             source=source,
         )
@@ -120,31 +124,18 @@ class TrustStore:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _sign_key_content(content: str) -> str:
+    def _sign_key_content(content: str, file_path: Path | None = None) -> str:
         """Sign trusted key TOML content by prepending a signature comment.
 
-        Uses the user's Ed25519 keypair (auto-generated on first use).
+        Uses MetadataManager.sign_content for consistent signing across all
+        item types. The file_path is needed to resolve the correct signature
+        format for TOML files.
         """
-        from lillux.primitives.signing import (
-            ensure_keypair,
-            sign_hash,
-            compute_key_fingerprint as _fp,
+        from rye.utils.metadata_manager import MetadataManager
+
+        return MetadataManager.sign_content(
+            "config", content, file_path=file_path,
         )
-        from rye.utils.metadata_manager import generate_timestamp
-
-        content_for_hash = _key_strategy.extract_content_for_hash(content)
-        content_hash = compute_content_hash(content_for_hash)
-        timestamp = generate_timestamp()
-
-        key_dir = get_signing_key_dir()
-        private_pem, public_pem = ensure_keypair(key_dir)
-        ed25519_sig = sign_hash(content_hash, private_pem)
-        pubkey_fp = _fp(public_pem)
-
-        sig_line = _key_strategy.format_signature(
-            timestamp, content_hash, ed25519_sig, pubkey_fp
-        )
-        return _key_strategy.insert_signature(content, sig_line)
 
     def _verify_key_integrity(
         self,
@@ -266,6 +257,7 @@ class TrustStore:
         public_key_pem: bytes,
         owner: str = "local",
         *,
+        version: str,
         attestation: Optional[str] = None,
         space: str = "user",
     ) -> str:
@@ -274,6 +266,7 @@ class TrustStore:
         Args:
             public_key_pem: Ed25519 public key in PEM format
             owner: Registry username or "local" for self-generated keys
+            version: Semver version for the key document
             attestation: Registry attestation signature (optional)
             space: Where to write: "user" (default) or "project"
 
@@ -293,10 +286,11 @@ class TrustStore:
             fingerprint=fingerprint,
             owner=owner,
             public_key_pem=public_key_pem,
+            version=version,
             attestation=attestation,
         )
         key_file = trust_dir / f"{fingerprint}.toml"
-        content = self._sign_key_content(info.to_toml())
+        content = self._sign_key_content(info.to_toml(), file_path=key_file)
         key_file.write_text(content, encoding="utf-8")
         logger.info("Trusted key %s (owner=%s)", fingerprint, owner)
         return fingerprint
@@ -318,6 +312,7 @@ class TrustStore:
         self,
         public_key_pem: bytes,
         registry_name: str = "rye-registry",
+        version: str = "1.0.0",
     ) -> str:
         """Pin the registry public key (TOFU).
 
@@ -328,6 +323,7 @@ class TrustStore:
         Args:
             public_key_pem: Registry's Ed25519 public key PEM
             registry_name: Registry identifier (default: "rye-registry")
+            version: Semver version for the key document
 
         Returns:
             Fingerprint of the pinned key
@@ -336,7 +332,7 @@ class TrustStore:
         existing = self.get_key(fingerprint)
         if existing:
             return fingerprint
-        return self.add_key(public_key_pem, owner=registry_name)
+        return self.add_key(public_key_pem, owner=registry_name, version=version)
 
     def get_registry_key(self, registry_name: str = "rye-registry") -> Optional[bytes]:
         """Get the pinned registry public key with integrity verification."""
@@ -352,6 +348,7 @@ class TrustStore:
         self,
         public_key_pem: bytes,
         remote_name: str = "ryeos-remote",
+        version: str = "1.0.0",
     ) -> str:
         """Pin the remote server public key (TOFU).
 
@@ -361,7 +358,7 @@ class TrustStore:
         existing = self.get_key(fingerprint)
         if existing:
             return fingerprint
-        return self.add_key(public_key_pem, owner=remote_name)
+        return self.add_key(public_key_pem, owner=remote_name, version=version)
 
     def get_remote_key(self, remote_name: str = "ryeos-remote") -> Optional[bytes]:
         """Get the pinned remote server public key with integrity verification."""

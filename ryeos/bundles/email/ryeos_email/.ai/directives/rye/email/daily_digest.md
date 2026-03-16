@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:53:44Z:9e8f188e4169e6b71031788b2991476a988a6d69255ee195394d02807e4b8b83:gec07NSx67sMMvh9XL2TqQf_2WLfbiTBxxHTaQ6RLklphPxV73ak4TQOdBNZ_7LzRnj3zCvxRim1GaV7fdj_BA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T11:23:58Z:9e8f188e4169e6b71031788b2991476a988a6d69255ee195394d02807e4b8b83:gec07NSx67sMMvh9XL2TqQf_2WLfbiTBxxHTaQ6RLklphPxV73ak4TQOdBNZ_7LzRnj3zCvxRim1GaV7fdj_BA==:4b987fd4e40303ac -->
 # Daily Digest
 
 Generate a summary of email activity and send it.

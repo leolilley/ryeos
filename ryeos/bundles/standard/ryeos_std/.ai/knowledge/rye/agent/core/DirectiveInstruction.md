@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:53:45Z:51a9664eec54062f017be39969b590857ce0eac386f9366d2157379b1936c9b5:6vIozJCqYinYVS9ewvRuEktSUvP5hvdVoL69lYMx84qAfRT7MwUlN6AkdJDzzKHU9K2sWyhjSdy9aTDV4OmFBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T11:23:45Z:51a9664eec54062f017be39969b590857ce0eac386f9366d2157379b1936c9b5:6vIozJCqYinYVS9ewvRuEktSUvP5hvdVoL69lYMx84qAfRT7MwUlN6AkdJDzzKHU9K2sWyhjSdy9aTDV4OmFBQ==:4b987fd4e40303ac -->
 ```yaml
 name: DirectiveInstruction
 title: Directive Execution Instruction

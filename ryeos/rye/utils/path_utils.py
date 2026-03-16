@@ -52,7 +52,7 @@ class BundleInfo:
         (e.g., .ai/tools/rye/core/). Otherwise returns the top-level
         type directory (e.g., .ai/tools/).
         """
-        folder_name = ItemType.TYPE_DIRS.get(item_type, item_type)
+        folder_name = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
         base = self.root_path / AI_DIR / folder_name
         if self.categories:
             return [base / cat for cat in self.categories]
@@ -277,8 +277,14 @@ def get_extractor_search_paths(project_path: Optional[Path] = None) -> List[Path
 
 
 def get_type_folder(item_type: str) -> str:
-    """Get folder name for item type."""
-    return ItemType.TYPE_DIRS.get(item_type, item_type)
+    """Get folder name for item type.
+
+    Uses SIGNABLE_DIRS so config items resolve correctly in signing
+    and path-validation contexts.  Execute/load/search gate on
+    TYPE_DIRS before calling path helpers, so config never leaks
+    into those flows.
+    """
+    return ItemType.SIGNABLE_DIRS.get(item_type, item_type)
 
 
 def extract_category_path(

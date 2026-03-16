@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:44Z:55b58879bcbeb7ee65f191bc98724b417be315202899b4dacc6b1e8140ebfb14:mKUG9iRgXB_VjT0Ra2xjRbkuzoN0po4v8sQX6F2N4pDjFHgn_1xP575u2eQyLYRd2wjj9kw6ZzJLJIKfrILRDA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:39Z:6f01e2be07751dff3072b49a1d5b778c3366c11e892966a654d2d5476a946a80:5yYx5ixf01MyLO8zhZz8-uOlSfbwMO6ScNSOMJpZprI-K8cPTr33naW4YZ3pDpsHc-XWysRdyQIsddRLYFxCCQ==:4b987fd4e40303ac
 """Key management tool — generate, inspect, and trust Ed25519 signing keys.
 
 The user's signing identity. Handles keypair generation, fingerprint display,
@@ -61,6 +61,10 @@ CONFIG_SCHEMA = {
         "auto_trust": {
             "type": "boolean",
             "description": "Automatically trust the imported key in user space. Default: true.",
+        },
+        "version": {
+            "type": "string",
+            "description": "Semver version for the trusted key document. Default: 1.0.0.",
         },
     },
     "required": ["action"],
@@ -198,7 +202,7 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
             result["trusted"] = True
             result["trust_message"] = f"Key {fingerprint} already trusted in {existing.source} space."
         else:
-            store.add_key(public_pem, owner="local", space="user")
+            store.add_key(public_pem, owner="local", version=__version__, space="user")
             result["trusted"] = True
             result["trust_message"] = f"Key {fingerprint} trusted in user space."
 
@@ -257,6 +261,7 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
     space = params.get("space", "user")
     owner = params.get("owner", "local")
+    version = params.get("version", "1.0.0")
 
     store = TrustStore(project_path=Path(project_path))
 
@@ -271,7 +276,7 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
             "message": f"Key {fingerprint} already trusted in {space} space.",
         }
 
-    result_fp = store.add_key(public_pem, owner=owner, space=space)
+    result_fp = store.add_key(public_pem, owner=owner, version=version, space=space)
 
     # Determine where it was written
     if space == "project":

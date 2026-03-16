@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:53:44Z:13343cd1529a02c102fccbea0f1e488d7366c822553c807fd02b9f7f779335f9:qHWgLpB2NYp7KGjPwDws5pSfWa3NGpZOzAu4btyG12XZcrFfNeqEEynxEFzn0KuGryPc6NNIbxlQNR1xJl8BAg==:4b987fd4e40303ac
+# rye:signed:2026-03-16T11:23:39Z:13343cd1529a02c102fccbea0f1e488d7366c822553c807fd02b9f7f779335f9:qHWgLpB2NYp7KGjPwDws5pSfWa3NGpZOzAu4btyG12XZcrFfNeqEEynxEFzn0KuGryPc6NNIbxlQNR1xJl8BAg==:4b987fd4e40303ac
 """List running processes from thread registry."""
 
 import argparse
