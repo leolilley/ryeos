@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T08:42:30Z:518e70899db6d94d0b5980616aa1f3f1c76fdb092574f12dfd41b06e07dfc505:ztj47VWIC9vf6P1wTiSm9NjaDpbYRGI4qNEc4ANaEIFn6qXjHKGBCtC-gbgOIDfxTSG43Xlrk1BLAMyNirvgDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:27:24Z:518e70899db6d94d0b5980616aa1f3f1c76fdb092574f12dfd41b06e07dfc505:ztj47VWIC9vf6P1wTiSm9NjaDpbYRGI4qNEc4ANaEIFn6qXjHKGBCtC-gbgOIDfxTSG43Xlrk1BLAMyNirvgDw==:4b987fd4e40303ac -->
 ```yaml
 name: remote-architecture
 title: CAS Remote Architecture

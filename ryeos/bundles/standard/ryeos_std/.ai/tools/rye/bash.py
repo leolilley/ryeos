@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:07:13Z:dd70769b5aae2e7450685bc84bf83e20cbdd9570823bb3754de9218fd6e18373:21quWWhlNUAtQsQF5N7casah0brUF9gNndbJiVEMa2nD0ulgth_UIS6HzrY4zUVLANQgdK0iobElmlNWswAwAQ==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:27:24Z:dd70769b5aae2e7450685bc84bf83e20cbdd9570823bb3754de9218fd6e18373:21quWWhlNUAtQsQF5N7casah0brUF9gNndbJiVEMa2nD0ulgth_UIS6HzrY4zUVLANQgdK0iobElmlNWswAwAQ==:4b987fd4e40303ac
 """Execute shell commands."""
 
 import argparse

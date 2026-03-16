@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T08:42:30Z:71617b5eee64e397f2e83fa2686bf50871a48c7c66eae3befb0512e74a3a78e7:cWMYFbMQy7kVF06brvAK1ANanwALuYHvbv87Qqhf2E1rQvDuXKMuEU9URburNqvznpPVPOFO8x4yQxuNmDElDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:27:24Z:71617b5eee64e397f2e83fa2686bf50871a48c7c66eae3befb0512e74a3a78e7:cWMYFbMQy7kVF06brvAK1ANanwALuYHvbv87Qqhf2E1rQvDuXKMuEU9URburNqvznpPVPOFO8x4yQxuNmDElDw==:4b987fd4e40303ac -->
 
 ```yaml
 name: ai-directory

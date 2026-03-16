@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T08:41:36Z:4a2f7cfeaef06151201b1dc9b14ce7742ec29d83d209367692b2dcf7272df81e:bDMZmoQFfHmYn4ysPt2b2_r_qBmAZGFQmLDDz0czeRzTMpeDIoswHJrTxgwrXolHAM6k93tSH_agASHbHkh0AA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:27:24Z:4a2f7cfeaef06151201b1dc9b14ce7742ec29d83d209367692b2dcf7272df81e:bDMZmoQFfHmYn4ysPt2b2_r_qBmAZGFQmLDDz0czeRzTMpeDIoswHJrTxgwrXolHAM6k93tSH_agASHbHkh0AA==:4b987fd4e40303ac
 """Deterministic email router — classifies inbound emails without LLM."""
 
 import argparse

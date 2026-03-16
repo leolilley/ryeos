@@ -1,6 +1,6 @@
 [project]
 name = "ryeos"
-version = "0.1.17"
+version = "0.1.18"
 description = "RYE Standard Bundle — agent, bash, file-system, MCP, and primary actions"
 requires-python = ">=3.10"
 license = "MIT"

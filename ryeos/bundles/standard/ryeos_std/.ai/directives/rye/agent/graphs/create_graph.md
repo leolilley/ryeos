@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-06T02:04:39Z:bacb3f1afc41a26407eb9a6631a76af6d097508b9d04415e4d189c0146904def:hQ8c_0uSgZqsDkEivYn8560KwGtYBDkVpOZMborLH6HkqUxjVCmSsY4y_x-YXfXoV9kK59r4dGhg266k1C6EBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:27:24Z:bacb3f1afc41a26407eb9a6631a76af6d097508b9d04415e4d189c0146904def:hQ8c_0uSgZqsDkEivYn8560KwGtYBDkVpOZMborLH6HkqUxjVCmSsY4y_x-YXfXoV9kK59r4dGhg266k1C6EBQ==:4b987fd4e40303ac -->
 # Create Graph Tool
 
 Create a declarative state graph tool — a YAML workflow definition with nodes, edges, and state management.

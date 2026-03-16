@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T08:41:36Z:b4f60f324d757eba5b321ab6e09452b5891b028b10f30cd9a482189babc15d34:x0I2dEhIDFyUifATbbftAOiE-BiLok5boL4L8C8PdbqTggZ-8HjHKKzzJrBQ_6AUPjEvg9y3hu9hUPfcV48jDg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:27:24Z:b4f60f324d757eba5b321ab6e09452b5891b028b10f30cd9a482189babc15d34:x0I2dEhIDFyUifATbbftAOiE-BiLok5boL4L8C8PdbqTggZ-8HjHKKzzJrBQ_6AUPjEvg9y3hu9hUPfcV48jDg==:4b987fd4e40303ac -->
 # Send Email
 
 Send an email via the configured email provider.

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T08:41:36Z:f5622fcbe33fbeba8bf66868e20a1f0e97f2d5033a72536d20ea58646444b5e4:vqdUBqB-E_2V5EeWKbHwzA5bI782LHns0ecqkAEXTgoPrxWkW2BQiaqwRUPnNTpxlrWCU9fFG-XlgYl_Lc3MAA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:27:24Z:f5622fcbe33fbeba8bf66868e20a1f0e97f2d5033a72536d20ea58646444b5e4:vqdUBqB-E_2V5EeWKbHwzA5bI782LHns0ecqkAEXTgoPrxWkW2BQiaqwRUPnNTpxlrWCU9fFG-XlgYl_Lc3MAA==:4b987fd4e40303ac
 """Send an email via the configured email provider."""
 
 import argparse

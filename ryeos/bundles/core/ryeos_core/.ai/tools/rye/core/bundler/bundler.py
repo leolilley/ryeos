@@ -1,4 +1,4 @@
-# rye:signed:2026-03-12T05:30:24Z:89f7350d7a036bf4e8ebde5d1c9e515bd00effa8e93d428128f84fb9fe87abae:Yc_KKRW33FuerB-0AX7RuJMOX3QDG5nE197aE8U6gs25-tP6BfMUnuPQ2tt99lYnJuyhYZSUK90LIV_aEUFJDA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:27:24Z:89f7350d7a036bf4e8ebde5d1c9e515bd00effa8e93d428128f84fb9fe87abae:Yc_KKRW33FuerB-0AX7RuJMOX3QDG5nE197aE8U6gs25-tP6BfMUnuPQ2tt99lYnJuyhYZSUK90LIV_aEUFJDA==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -42,7 +42,7 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["create", "create-package", "verify", "inspect", "list"]
+ACTIONS = ["create", "create-package", "verify", "verify-signatures", "inspect", "list"]
 
 CONFIG_SCHEMA = {
     "type": "object",

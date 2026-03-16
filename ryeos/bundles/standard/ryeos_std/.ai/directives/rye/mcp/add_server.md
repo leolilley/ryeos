@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-03T22:32:56Z:9bedc1e2c8923e788a451c6fe5030bef5bd507211cd00bff9449e8150f5a6794:thO-2xez_rYyS0T_68mkhN41YFSTPosZLmfZ2jg1riD-XXyCPzH4_3BbL0yDbVhJiNUOn6PZ9ULgCo0kurrCBw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:27:24Z:9bedc1e2c8923e788a451c6fe5030bef5bd507211cd00bff9449e8150f5a6794:thO-2xez_rYyS0T_68mkhN41YFSTPosZLmfZ2jg1riD-XXyCPzH4_3BbL0yDbVhJiNUOn6PZ9ULgCo0kurrCBw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # MCP Add Server
 

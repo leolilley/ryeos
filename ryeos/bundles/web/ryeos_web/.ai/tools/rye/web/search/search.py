@@ -1,4 +1,4 @@
-# rye:signed:2026-03-03T22:32:56Z:ba32192273e24b1a1a7c3691a8aa1712fd5d46e57787365d34f7385ea52db10f:gNKeW7dn2wPnUng-yCWdUc3H6Znfgtf-6jKUutQX8BTMycc8CfNcAMf4Mduogd_HrCby0RHYPW131yDa8wnbCw==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:27:24Z:fadfd907f733b459a96f45a3c9e387c01b1b7b171ba81b504afc5175aa70d658:Wm_FXvyRYBm1OmJZASuqGzMvYsRVVVqqNSXLNPahHzrKbK9ioF7hKoh_4hyCE7N2KcRUO1EopPS53YSDMPKyCw==:4b987fd4e40303ac
 """Web search via configurable provider."""
 
 import json
