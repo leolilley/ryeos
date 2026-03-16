@@ -35,6 +35,9 @@ def get_tool_extensions(
 
     Returns:
         List of supported extensions (e.g., ['.py', '.js', '.yaml'])
+
+    Raises:
+        ValueError: If no extensions could be loaded from any extractor.
     """
     global _extensions_cache
 
@@ -57,7 +60,14 @@ def get_tool_extensions(
             ext_list = _extract_extensions_from_file(file_path)
             extensions.update(ext_list)
 
-    _extensions_cache = list(extensions) if extensions else [".py"]
+    if not extensions:
+        raise ValueError(
+            f"No tool extensions found. "
+            f"Expected *_extractor.yaml/.py files in: "
+            f"{[str(p) for p in search_paths]}"
+        )
+
+    _extensions_cache = list(extensions)
     logger.debug(f"Loaded tool extensions: {_extensions_cache}")
     return _extensions_cache
 
@@ -66,12 +76,7 @@ _TYPE_EXTRACTOR_GLOB = {
     "tool": "tool/*_extractor.*",
     "directive": "directive/*_extractor.*",
     "knowledge": "knowledge/*_extractor.*",
-}
-
-_TYPE_DEFAULTS = {
-    "tool": [".py"],
-    "directive": [".md"],
-    "knowledge": [".md"],
+    "config": "config/*_extractor.*",
 }
 
 
@@ -84,13 +89,20 @@ def get_item_extensions(
 
     Reads the `extensions` field from the type-specific extractor YAML
     (e.g., knowledge/knowledge_extractor.yaml) across the 3-tier space.
+
+    Raises:
+        ValueError: If no extractor glob pattern is configured for the item type,
+            or if no extensions could be loaded from any extractor.
     """
     if item_type in _type_extensions_cache and not force_reload:
         return _type_extensions_cache[item_type]
 
     glob_pattern = _TYPE_EXTRACTOR_GLOB.get(item_type)
     if not glob_pattern:
-        return _TYPE_DEFAULTS.get(item_type, [".md"])
+        raise ValueError(
+            f"No extractor glob pattern configured for item type {item_type!r}. "
+            f"Known types: {list(_TYPE_EXTRACTOR_GLOB.keys())}"
+        )
 
     extensions = set()
     for extractors_dir in get_extractor_search_paths(project_path):
@@ -101,9 +113,16 @@ def get_item_extensions(
                 continue
             extensions.update(_extract_extensions_from_file(file_path))
 
-    result = list(extensions) if extensions else _TYPE_DEFAULTS.get(item_type, [".md"])
-    _type_extensions_cache[item_type] = result
-    return result
+    if not extensions:
+        search_paths = get_extractor_search_paths(project_path)
+        raise ValueError(
+            f"No extensions found for item type {item_type!r}. "
+            f"Expected extractors matching {glob_pattern!r} in: "
+            f"{[str(p) for p in search_paths]}"
+        )
+
+    _type_extensions_cache[item_type] = list(extensions)
+    return _type_extensions_cache[item_type]
 
 
 def _extract_extensions_from_file(file_path: Path) -> List[str]:
