@@ -49,7 +49,7 @@ jobs:
                       -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
                       -e ryeos-mcp -e ryeos-cli \
                       -e services/ryeos-remote
-          pip install pytest pytest-asyncio pyyaml httpx
+          pip install pytest pytest-asyncio
 
       - name: Import CI signing key
         env:
