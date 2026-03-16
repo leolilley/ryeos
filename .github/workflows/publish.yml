@@ -164,11 +164,18 @@ jobs:
       - name: Re-sign and rebuild bundle manifest with CI key
         if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
         run: |
-          PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
-          # Re-sign all items with CI key
+          # Re-sign ryeos-core first (provides bundler/verify tools used by all bundles)
+          CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           for item_type in directive tool knowledge config; do
-            rye -p "$PACKAGE_DIR" sign "$item_type" '*' 2>/dev/null || true
+            rye -p "$CORE_DIR" sign "$item_type" '*' 2>/dev/null || true
           done
+          # Re-sign target bundle items with CI key
+          PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
+          if [ "$PACKAGE_DIR" != "$CORE_DIR" ]; then
+            for item_type in directive tool knowledge config; do
+              rye -p "$PACKAGE_DIR" sign "$item_type" '*' 2>/dev/null || true
+            done
+          fi
           # Rebuild manifest so hashes match the re-signed files
           rye registry bundle build "$PACKAGE_DIR" --bundle-id ${{ matrix.package }}
           # Verify the rebuilt manifest
@@ -263,9 +270,17 @@ jobs:
       - name: Re-sign and rebuild bundle manifest with CI key
         if: steps.check.outputs.skip == 'false'
         run: |
+          # Re-sign ryeos-core first (provides bundler tools used by all bundles)
+          CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           for item_type in directive tool knowledge config; do
-            rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
+            rye -p "$CORE_DIR" sign "$item_type" '*' 2>/dev/null || true
           done
+          # Re-sign target bundle items
+          if [ "${{ steps.pkg.outputs.dir }}" != "$CORE_DIR" ]; then
+            for item_type in directive tool knowledge config; do
+              rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
+            done
+          fi
           rye registry bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }}
 
       - name: Push bundle to registry
