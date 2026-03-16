@@ -46,6 +46,7 @@ The workflow has two jobs:
 | ryeos        | `ryeos/bundles/standard` |
 | ryeos-web    | `ryeos/bundles/web`      |
 | ryeos-code   | `ryeos/bundles/code`     |
+| ryeos-email  | `ryeos/bundles/email`    |
 | ryeos-mcp    | `ryeos-mcp`              |
 | ryeos-cli    | `ryeos-cli`              |
 
@@ -63,7 +64,8 @@ The workflow has two jobs:
 | ryeos-core | `ryeos/bundles/core`     |
 | ryeos      | `ryeos/bundles/standard` |
 | ryeos-web  | `ryeos/bundles/web`      |
-| ryeos-code | `ryeos/bundles/code`     |
+| ryeos-code  | `ryeos/bundles/code`     |
+| ryeos-email | `ryeos/bundles/email`    |
 
 Both Python and Rust jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
 
@@ -127,6 +129,7 @@ No secrets or protection rules are needed — OIDC handles authentication.
 | ryeos-code   | Active |
 | ryeos-mcp    | Active |
 | ryeos-cli    | Active |
+| ryeos-email  | Pending — register before first publish |
 
 ## Version Bumping
 
@@ -142,6 +145,7 @@ ryeos/bundles/core/pyproject.toml             → ryeos-core
 ryeos/bundles/standard/pyproject.toml         → ryeos
 ryeos/bundles/web/pyproject.toml              → ryeos-web
 ryeos/bundles/code/pyproject.toml             → ryeos-code
+ryeos/bundles/email/pyproject.toml            → ryeos-email
 ryeos-mcp/pyproject.toml                      → ryeos-mcp
 ryeos-cli/pyproject.toml                      → ryeos-cli
 lillux/kernel/pyproject.toml                  → lillux
@@ -211,7 +215,7 @@ Layer 2 — lillux                          (depends on lillux-proc)
 Layer 3 — ryeos-engine                    (depends on lillux)
 Layer 4 — ryeos-core                      (depends on ryeos-engine)
 Layer 5 — ryeos                           (depends on ryeos-core)
-Layer 6 — ryeos-web, ryeos-code, ryeos-mcp, ryeos-cli (depend on ryeos)
+Layer 6 — ryeos-web, ryeos-code, ryeos-email, ryeos-mcp, ryeos-cli (depend on ryeos)
 ```
 
 For a **first-time publish** of all packages, you may need to run the workflow multiple times — later layers will fail if their dependencies haven't been uploaded yet. Subsequent releases (where deps already exist on PyPI) publish cleanly in a single run.

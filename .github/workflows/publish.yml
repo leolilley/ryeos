@@ -21,6 +21,7 @@ on:
           - ryeos
           - ryeos-web
           - ryeos-code
+          - ryeos-email
           - ryeos-mcp
           - ryeos-cli
 
@@ -50,6 +51,8 @@ jobs:
             path: ryeos/bundles/web
           - package: ryeos-code
             path: ryeos/bundles/code
+          - package: ryeos-email
+            path: ryeos/bundles/email
           - package: ryeos-mcp
             path: ryeos-mcp
           - package: ryeos-cli
@@ -113,6 +116,9 @@ jobs:
           - bundle: ryeos-code
             path: ryeos/bundles/code
             package: ryeos-code
+          - bundle: ryeos-email
+            path: ryeos/bundles/email
+            package: ryeos-email
     runs-on: ubuntu-latest
     environment: pypi
     steps:
