@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:27:24Z:dd6c555d4f6a5511e1f5a4b420d3f0df8786f981bc379ff115c3da3cf6f838e9:0Qbnqnnmx2F-2v6wNyEPbkBZEzRpeKU0ajQs0OMQwkD-K4ySrriTFJKH_X8d0svNkHCN-jt_DWgP-iTFFnQvAQ==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:53:45Z:dd6c555d4f6a5511e1f5a4b420d3f0df8786f981bc379ff115c3da3cf6f838e9:0Qbnqnnmx2F-2v6wNyEPbkBZEzRpeKU0ajQs0OMQwkD-K4ySrriTFJKH_X8d0svNkHCN-jt_DWgP-iTFFnQvAQ==:4b987fd4e40303ac
 """Search for directives, tools, or knowledge items."""
 
 import argparse

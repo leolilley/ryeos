@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:27:24Z:698dedad6b3397149a947787a3927bb16792e8772985a3ed045c500ae88a1cb1:cUPiC_-79y6H7nDP5AQ4oW0WXZ0Gl-MBK9NfVhsn9UdSkj477oXJiuD2kLdPUoWIid_wPfy6VoMnHls8QAjVAQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:53:44Z:698dedad6b3397149a947787a3927bb16792e8772985a3ed045c500ae88a1cb1:cUPiC_-79y6H7nDP5AQ4oW0WXZ0Gl-MBK9NfVhsn9UdSkj477oXJiuD2kLdPUoWIid_wPfy6VoMnHls8QAjVAQ==:4b987fd4e40303ac -->
 # Forward Email
 
 Forward an email to a private address with agent context and suggested response.

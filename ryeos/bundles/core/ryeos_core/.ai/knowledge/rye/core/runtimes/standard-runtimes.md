@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:27:24Z:06135583feb69fcbdeb0d97479376fdd3b315b4f29fb6586bdc442210137e1cb:rENdxqAUid2NyR6W3sG4csvJb32ai5m9nYuJMTaNX_XfstuFg3OEFFTjvcSiLJwJhpvtqyYtShyngUmEWqNVBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:53:44Z:06135583feb69fcbdeb0d97479376fdd3b315b4f29fb6586bdc442210137e1cb:rENdxqAUid2NyR6W3sG4csvJb32ai5m9nYuJMTaNX_XfstuFg3OEFFTjvcSiLJwJhpvtqyYtShyngUmEWqNVBA==:4b987fd4e40303ac -->
 
 ```yaml
 name: standard-runtimes

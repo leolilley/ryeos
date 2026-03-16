@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:27:24Z:293513316872f6533a1abff00314e9c6dcd3838269e840e9894470cda80d8ec5:c_qzBh55w1RBuv3Tp_xJkC36Tk1Hs33sUdDZ7yBksmUT4ggbX3OzSWFgPMapMc9c11CqygdI2V6Wj-YowPa1Cw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:53:44Z:293513316872f6533a1abff00314e9c6dcd3838269e840e9894470cda80d8ec5:c_qzBh55w1RBuv3Tp_xJkC36Tk1Hs33sUdDZ7yBksmUT4ggbX3OzSWFgPMapMc9c11CqygdI2V6Wj-YowPa1Cw==:4b987fd4e40303ac -->
 # Process Reply
 
 When a reply is received to a forwarded email, parse the response and send it through the correct domain/inbox.

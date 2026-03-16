@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T09:27:24Z:8691bced5af8a19f96eb9001804a0dcd0a496a475e3ee3663a4b5f813a127302:6uSymr08NxjLyuJ2DNlIq6b6MApxors6N3LzRRYNqQLmLfFj3-buV1Sysr9Yb7lTAeKZwiLTm3GEfNFQU2CsCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-16T09:53:44Z:8691bced5af8a19f96eb9001804a0dcd0a496a475e3ee3663a4b5f813a127302:6uSymr08NxjLyuJ2DNlIq6b6MApxors6N3LzRRYNqQLmLfFj3-buV1Sysr9Yb7lTAeKZwiLTm3GEfNFQU2CsCw==:4b987fd4e40303ac -->
 # Handle Inbound Email
 
 Process an inbound email: classify it, take appropriate action based on handling rules.

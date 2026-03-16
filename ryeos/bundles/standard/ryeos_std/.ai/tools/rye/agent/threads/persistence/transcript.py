@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T09:27:24Z:eb18faaa427c905115c76d6d1bec9787ae8853f4cff833380c00bf7cd2ee2864:s-TMEqZbAP4wwxf6XuEdfAvZxk550ZefuRmGYezxnPIWP_xbYfqKiCvhyvroKJsn2Rx5wlRk0aTk2MMXUs4CCA==:4b987fd4e40303ac
+# rye:signed:2026-03-16T09:53:45Z:eb18faaa427c905115c76d6d1bec9787ae8853f4cff833380c00bf7cd2ee2864:s-TMEqZbAP4wwxf6XuEdfAvZxk550ZefuRmGYezxnPIWP_xbYfqKiCvhyvroKJsn2Rx5wlRk0aTk2MMXUs4CCA==:4b987fd4e40303ac
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 

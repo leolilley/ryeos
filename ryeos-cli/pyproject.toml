@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-cli"
-version = "0.1.4"
+version = "0.1.5"
 description = "Terminal-native CLI for RYE OS — maps shell verbs to the four primitives"
 requires-python = ">=3.10"
 license = "MIT"
