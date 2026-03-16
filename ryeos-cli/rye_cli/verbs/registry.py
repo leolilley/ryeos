@@ -70,6 +70,12 @@ def register(subparsers):
     bpull.add_argument("--version", help="Specific version to pull")
     bpull.set_defaults(handler=_handle_bundle_pull)
 
+    # bundle verify
+    bv = bundle_sub.add_parser("verify", help="Verify bundle signatures")
+    bv.add_argument("bundle_id", help="Bundle identifier")
+    bv.add_argument("--package-path", help="Package path (default: project path)")
+    bv.set_defaults(handler=_handle_bundle_verify)
+
     # bundle search
     bs = bundle_sub.add_parser("search", help="Search bundles in registry")
     bs.add_argument("query", help="Search query")
@@ -191,6 +197,25 @@ def _handle_bundle_pull(args, project_path: str):
     print_result(result)
 
 
+def _handle_bundle_verify(args, project_path: str):
+    from pathlib import Path
+
+    effective_path = project_path
+    if args.package_path:
+        effective_path = str(Path(args.package_path).resolve())
+
+    params = {
+        "action": "verify",
+        "bundle_id": args.bundle_id,
+    }
+    result = _bundler_execute(effective_path, params)
+    print_result(result)
+
+    if result.get("status") != "verified":
+        import sys
+        sys.exit(1)
+
+
 def _handle_bundle_search(args, project_path: str):
     params = {
         "action": "search_bundle",
@@ -201,5 +226,4 @@ def _handle_bundle_search(args, project_path: str):
         params["namespace"] = args.namespace
     result = _registry_execute(project_path, params)
     print_result(result)
-
 

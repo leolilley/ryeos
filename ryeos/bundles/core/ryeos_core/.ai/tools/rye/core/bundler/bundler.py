@@ -42,7 +42,7 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["create", "create-package", "verify", "verify-signatures", "inspect", "list"]
+ACTIONS = ["create", "create-package", "verify", "inspect", "list"]
 
 CONFIG_SCHEMA = {
     "type": "object",

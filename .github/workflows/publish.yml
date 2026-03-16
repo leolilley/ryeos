@@ -90,6 +90,14 @@ jobs:
         run: python -m build --wheel
         working-directory: ${{ matrix.path }}
 
+      - name: Verify bundle signatures
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        run: |
+          pip install -e ryeos -e ryeos-cli
+          # Find the inner package dir containing .ai/ (e.g. ryeos_core/, ryeos_std/)
+          PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
+          rye -p "$PACKAGE_DIR" registry bundle verify ${{ matrix.package }}
+
       - name: Publish to PyPI
         if: steps.check.outputs.skip == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
