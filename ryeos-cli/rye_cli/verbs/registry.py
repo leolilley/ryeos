@@ -211,7 +211,8 @@ def _handle_bundle_verify(args, project_path: str):
     result = _bundler_execute(effective_path, params)
     print_result(result)
 
-    if result.get("status") != "verified":
+    data = result.get("data", result)
+    if data.get("status") != "verified":
         import sys
         sys.exit(1)
 
@@ -226,4 +227,3 @@ def _handle_bundle_search(args, project_path: str):
         params["namespace"] = args.namespace
     result = _registry_execute(project_path, params)
     print_result(result)
-
