@@ -12,9 +12,11 @@ def run_async(coro: Coroutine) -> Any:
 
 
 def print_result(result: Dict, compact: bool = False) -> None:
-    """Print a result dict as JSON to stdout."""
+    """Print a result dict as JSON to stdout. Exit 1 on error status."""
     indent = None if compact else 2
     print(json.dumps(result, indent=indent, default=str))
+    if result.get("status") == "error" or result.get("error"):
+        sys.exit(1)
 
 
 def die(msg: str, code: int = 1) -> None:

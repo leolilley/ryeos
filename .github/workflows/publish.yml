@@ -93,7 +93,7 @@ jobs:
       - name: Verify bundle signatures
         if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
         run: |
-          pip install -e ryeos -e ryeos-cli
+          pip install -e ryeos -e ryeos/bundles/core -e ryeos-cli
           # Find the inner package dir containing .ai/ (e.g. ryeos_core/, ryeos_std/)
           PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           rye -p "$PACKAGE_DIR" registry bundle verify ${{ matrix.package }}
@@ -157,15 +157,22 @@ jobs:
           pip install -e ryeos/bundles/standard
           pip install -e ryeos-cli
 
+      - name: Find package directory
+        if: steps.check.outputs.skip == 'false'
+        id: pkg
+        run: |
+          PKG_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
+          echo "dir=$PKG_DIR" >> "$GITHUB_OUTPUT"
+
       - name: Build bundle manifest
         if: steps.check.outputs.skip == 'false'
-        run: rye registry bundle build ${{ matrix.path }} --bundle-id ${{ matrix.bundle }}
+        run: rye registry bundle build ${{ steps.pkg.outputs.dir }} --bundle-id ${{ matrix.bundle }}
 
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'
         env:
           RYE_REGISTRY_API_KEY: ${{ secrets.RYE_REGISTRY_API_KEY }}
-        run: rye -p ${{ matrix.path }} registry bundle push ${{ matrix.bundle }}
+        run: rye -p ${{ steps.pkg.outputs.dir }} registry bundle push ${{ matrix.bundle }}
 
   # ── Build & publish Rust packages individually ───────────────────
   publish-rust:
