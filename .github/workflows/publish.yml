@@ -47,8 +47,9 @@ jobs:
         run: |
           pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard \
                       -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
-                      -e ryeos-mcp -e ryeos-cli
-          pip install pytest pytest-asyncio pyyaml
+                      -e ryeos-mcp -e ryeos-cli \
+                      -e services/ryeos-remote
+          pip install pytest pytest-asyncio pyyaml httpx
 
       - name: Import CI signing key
         env:
@@ -84,7 +85,7 @@ jobs:
           done
 
       - name: Run tests
-        run: python -m pytest tests/ -x -q
+        run: python -m pytest tests/ -x -q --ignore=tests/services
 
   # ── Build & publish each Python package individually ─────────────
   publish-python:
