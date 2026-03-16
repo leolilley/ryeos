@@ -170,7 +170,7 @@ jobs:
             rye -p "$PACKAGE_DIR" sign "$item_type" '*' 2>/dev/null || true
           done
           # Rebuild manifest so hashes match the re-signed files
-          rye -p "$PACKAGE_DIR" registry bundle build --bundle-id ${{ matrix.package }}
+          rye registry bundle build "$PACKAGE_DIR" --bundle-id ${{ matrix.package }}
           # Verify the rebuilt manifest
           rye -p "$PACKAGE_DIR" registry bundle verify ${{ matrix.package }}
 
@@ -266,7 +266,7 @@ jobs:
           for item_type in directive tool knowledge config; do
             rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
           done
-          rye -p "${{ steps.pkg.outputs.dir }}" registry bundle build --bundle-id ${{ matrix.bundle }}
+          rye registry bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }}
 
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'
