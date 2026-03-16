@@ -34,9 +34,11 @@ git push origin v0.1.2
 
 ### How It Works
 
-The workflow has two jobs:
+The workflow has four jobs that run in sequence:
 
-**`publish-python`** — builds and publishes Python packages (hatchling):
+**`test`** — imports the CI signing key, re-signs all bundle items, and runs the full test suite. This validates that the CI key is correctly trusted and all signatures verify before any publishing happens.
+
+**`publish-python`** (needs `test`) — builds and publishes Python packages (hatchling). For bundle packages, it imports the CI key, re-signs items, rebuilds the bundle manifest, verifies signatures, then builds the wheel so the published package contains CI-signed files:
 
 | Package      | Build path               |
 | ------------ | ------------------------ |
@@ -50,26 +52,38 @@ The workflow has two jobs:
 | ryeos-mcp    | `ryeos-mcp`              |
 | ryeos-cli    | `ryeos-cli`              |
 
-**`publish-rust`** — builds and publishes Rust binaries (maturin):
+**`publish-bundles`** (needs `publish-python`) — pushes data bundles to the Rye Registry. Each job imports the CI key, re-signs items, and rebuilds the manifest before pushing:
+
+| Bundle      | Package path             |
+| ----------- | ------------------------ |
+| ryeos-core  | `ryeos/bundles/core`     |
+| ryeos       | `ryeos/bundles/standard` |
+| ryeos-web   | `ryeos/bundles/web`      |
+| ryeos-code  | `ryeos/bundles/code`     |
+| ryeos-email | `ryeos/bundles/email`    |
+
+**`publish-rust`** — builds and publishes Rust binaries (maturin), no signing needed:
 
 | Package      | Build path     |
 | ------------ | -------------- |
 | lillux-proc  | `lillux/proc`  |
 | lillux-watch | `lillux/watch` |
 
-**`publish-bundles`** — builds and pushes data bundles to the Rye Registry (runs after `publish-python`):
+Python and Rust jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
 
-| Bundle     | Package path             |
-| ---------- | ------------------------ |
-| ryeos-core | `ryeos/bundles/core`     |
-| ryeos      | `ryeos/bundles/standard` |
-| ryeos-web  | `ryeos/bundles/web`      |
-| ryeos-code  | `ryeos/bundles/code`     |
-| ryeos-email | `ryeos/bundles/email`    |
+Each publishing job uses the `pypi` GitHub environment and `id-token: write` permission for OIDC authentication.
 
-Both Python and Rust jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
+### CI Signing
 
-Each job uses the `pypi` GitHub environment and `id-token: write` permission for OIDC authentication.
+Bundle items (directives, tools, knowledge, configs) are signed with Ed25519 for integrity. Developers sign with their personal key locally, but published packages use a dedicated CI key (`6ea18199041a1ea8`).
+
+Each CI job that handles bundles:
+1. Imports the CI keypair from `RYE_SIGNING_KEY` and `RYE_SIGNING_PUBKEY` secrets
+2. Trusts the CI key in the runner's user space
+3. Re-signs all bundle items with the CI key
+4. Rebuilds the bundle manifest (so file hashes match re-signed content)
+
+The CI public key is shipped in each bundle's trust store (`.ai/config/keys/trusted/6ea18199041a1ea8.toml`), so end users automatically trust CI-signed items.
 
 ### Selective Publishing
 
@@ -129,7 +143,7 @@ No secrets or protection rules are needed — OIDC handles authentication.
 | ryeos-code   | Active |
 | ryeos-mcp    | Active |
 | ryeos-cli    | Active |
-| ryeos-email  | Pending — register before first publish |
+| ryeos-email  | Active |
 
 ## Version Bumping
 
