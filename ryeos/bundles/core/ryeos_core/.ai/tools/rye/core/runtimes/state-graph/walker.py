@@ -1,4 +1,4 @@
-# rye:signed:2026-03-17T03:40:35Z:10347c2e7924c36328fada3d0c4bb361fccd615b84da1b2cc599315422b1476f:tI4guGIXOc_eZuprzsdaKOkRypJfjN2KCxhzdwsMssWr6NzcL3aF7rLu9O1yca8HqQylHbIqMUsWti_qZ55xAA==:4b987fd4e40303ac
+# rye:signed:2026-03-17T04:35:42Z:0c2cf32bdf18fae5f074627662a998720894a5bd34f6cf6ef5091db8a458bbf5:Vw37A3U9XTbRs7ruHJGmoNehYvDRomz-o00iHFhnlPheDvqq_XIaO3ieXD3TcFu2tP0zQV351uDlAt7GRaEPBg==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -539,6 +539,12 @@ async def _dispatch_action(
     item_type = action.get("item_type", "tool")
     item_id = action.get("item_id", "")
     params = action.get("params", {})
+
+    # Directives need an LLM thread — the walker has no LLM, so inline
+    # would just return your_directions with no one to follow them.
+    # Only upgrade "inline" → "fork"; preserve explicit remote routing.
+    if primary == "execute" and item_type == "directive" and thread == "inline":
+        thread = "fork"
 
     try:
         if primary == "execute":
