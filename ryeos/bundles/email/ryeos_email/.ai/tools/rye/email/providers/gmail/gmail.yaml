@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:58Z:be5debbe92a4ba15a47da44f4852f50a083cbc08d7ae10b742982e988074d3cc:cdi_x3mOK433XVQS5A4yF9UdTUMyG4Ha4aaxKH-XmWJhl0-r0T9jzWZh2ScCdnn2WYVKN3fk8TFyL12zirLwAA==:4b987fd4e40303ac
+# rye:signed:2026-03-17T02:33:40Z:a4ac9f142ed65c3fdd99abc44ab79479f96a3eff26de1919a01468c5dfecc3ac:aGtNpI6iLSbLR2GfU9XacoIVdB8D0IeLuP4EFEjkmnRkAvRUlYyr2k6hbmo36MhYLEuRaNSq6_rCZbdR2m4KAw==:4b987fd4e40303ac
 # rye:unsigned
 tool_id: gmail
 tool_type: email_provider
@@ -11,16 +11,11 @@ mcp_server: google-workspace
 
 actions:
   send:
-    tool: gmail.send
-    params_map:
-      to: to
-      subject: subject
-      body: body
-      from: from
+    action: send
+    type: gmail
   get:
-    tool: gmail.get
-    params_map:
-      email_id: email_id
+    action: get
+    type: gmail
   list:
-    tool: gmail.list
-    params_map: {}
+    action: list
+    type: gmail

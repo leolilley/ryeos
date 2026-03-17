@@ -1,4 +1,4 @@
-# rye:signed:2026-03-17T02:20:17Z:0c3e3e8c93e54a1032526f74f3f91d7c50cb246c965ae3f7053e7590533c7b58:LTAoE8wOKZ25c4OctHrwTuP2JtI-3MU8DkkHOJaVnURPd4p7RU-KI0CTCmSrQwS0RZi_GBeFDoFBzCSkH64pDA==:4b987fd4e40303ac
+# rye:signed:2026-03-17T02:33:40Z:301bafc9f9b248732868f64d0453f23ba4eb641862ba9477aca3b538b7296802:uLN4xAzkeV2L6RgFSZrcJCIF7JrdyK0p_O_XsesZ1WVnkGxY3mNwRDEGnnWdqKSf8GYz0Mzv8K3me1I0USQcBQ==:4b987fd4e40303ac
 """Send an email via the configured email provider."""
 
 import argparse
@@ -180,7 +180,10 @@ async def _execute_mcp(
     if result.get("status") == "error":
         return {"success": False, "error": result.get("error", "MCP call failed")}
 
-    return result.get("data", result)
+    data = result.get("data", result)
+    if isinstance(data, dict):
+        data.setdefault("success", True)
+    return data
 
 
 def _load_provider(project_path: str, provider_name: str) -> dict:

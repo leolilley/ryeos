@@ -85,7 +85,7 @@ jobs:
           done
 
       - name: Run tests
-        run: python -m pytest tests/ -x -q --ignore=tests/services
+        run: python -m pytest tests/ -x -q
 
   # ── Build & publish each Python package individually ─────────────
   publish-python:

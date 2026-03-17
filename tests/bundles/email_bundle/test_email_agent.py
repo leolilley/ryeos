@@ -597,12 +597,12 @@ class TestProviderYAMLs:
         send = actions["send"]
         assert "steps" in send
         assert len(send["steps"]) == 3
-        assert send["steps"][0]["tool"] == "primary_email.create"
-        assert send["steps"][1]["tool"] == "primary_email.approve"
-        assert send["steps"][2]["tool"] == "scheduler.schedule"
-
-        # Approve references $prev.email_id
-        assert send["steps"][1]["params_map"]["email_id"] == "$prev.email_id"
+        assert send["steps"][0]["type"] == "primary_email"
+        assert send["steps"][0]["action"] == "create"
+        assert send["steps"][1]["type"] == "primary_email"
+        assert send["steps"][1]["action"] == "approve"
+        assert send["steps"][2]["type"] == "scheduler"
+        assert send["steps"][2]["action"] == "schedule"
 
     def test_gmail_provider(self):
         with open(TOOLS_DIR / "providers" / "gmail" / "gmail.yaml") as f:
@@ -621,7 +621,8 @@ class TestProviderYAMLs:
         # Send is single-step (no "steps" key)
         send = actions["send"]
         assert "steps" not in send
-        assert send["tool"] == "gmail.send"
+        assert send["action"] == "send"
+        assert send["type"] == "gmail"
 
 
 # ===================================================================
@@ -692,48 +693,43 @@ class TestDraftResponseDirective:
 
 
 # ===================================================================
-# Test 12: Resolve params helper
+# Test 12: Build step params helper
 # ===================================================================
 
 
-class TestResolveParams:
-    """Test the _resolve_params helper used by send and forward tools."""
+class TestBuildStepParams:
+    """Test the _build_step_params helper used by send tool."""
 
     def setup_method(self):
         self.send = _load_tool("send")
 
-    def test_maps_send_params(self):
-        result = self.send._resolve_params(
-            {"to": "to", "subject": "subject"},
-            {"to": "alice@example.com", "subject": "Hi"},
-            {},
+    def test_create_step_params(self):
+        result = self.send._build_step_params(
+            "create", "primary_email",
+            {"to": "alice@example.com", "subject": "Hi", "body": "Hello"},
+            "leo@agentkiwi.nz", "Kiwi", None,
         )
-        assert result == {"to": "alice@example.com", "subject": "Hi"}
+        assert result["to_emails"] == ["alice@example.com"]
+        assert result["from_email"] == "leo@agentkiwi.nz"
+        assert result["from_name"] == "Kiwi"
+        assert result["subject"] == "Hi"
+        assert result["body_text"] == "Hello"
 
-    def test_maps_prev_result(self):
-        result = self.send._resolve_params(
-            {"email_id": "$prev.email_id"},
-            {},
-            {"email_id": "em_789"},
+    def test_approve_step_params(self):
+        result = self.send._build_step_params(
+            "approve", "primary_email",
+            {"to": "x", "subject": "x", "body": "x"},
+            "leo@agentkiwi.nz", "Kiwi", "em_123",
         )
-        assert result == {"email_id": "em_789"}
+        assert result == {"entity_id": "em_123"}
 
-    def test_literal_values_pass_through(self):
-        result = self.send._resolve_params(
-            {"email_type": "primary"},
-            {},
-            {},
+    def test_schedule_step_params(self):
+        result = self.send._build_step_params(
+            "schedule", "scheduler",
+            {"to": "x", "subject": "x", "body": "x"},
+            "leo@agentkiwi.nz", "Kiwi", "em_123",
         )
-        assert result == {"email_type": "primary"}
-
-    def test_mixed_sources(self):
-        result = self.send._resolve_params(
-            {"to": "to", "email_id": "$prev.email_id", "type": "primary"},
-            {"to": "bob@example.com"},
-            {"email_id": "em_999"},
-        )
-        assert result == {
-            "to": "bob@example.com",
-            "email_id": "em_999",
-            "type": "primary",
-        }
+        assert result["email_ids"] == ["em_123"]
+        assert result["email_type"] == "primary"
+        assert result["scheduled_time"] == "immediate"
+        assert result["dry_run"] is False
