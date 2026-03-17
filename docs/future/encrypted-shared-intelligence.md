@@ -489,14 +489,14 @@ For `.ai/` items, sealing is a two-step process — **sign-then-encrypt**:
 rye:sealed:TIMESTAMP:OUTER_HASH:OUTER_SIG:FP:GROUP_ID:EPOCH_HASH:NONCE
 ```
 
-| Field        | Purpose                                                                  |
-| ------------ | ------------------------------------------------------------------------ |
-| `OUTER_HASH` | SHA256 of the **ciphertext** (not plaintext)                             |
+| Field        | Purpose                                                                              |
+| ------------ | ------------------------------------------------------------------------------------ |
+| `OUTER_HASH` | SHA256 of the **ciphertext** (not plaintext)                                         |
 | `OUTER_SIG`  | Ed25519 signature of the ciphertext hash (allows integrity check without decryption) |
-| `FP`         | Fingerprint of the sealer (may differ from the inner plaintext signer)   |
-| `GROUP_ID`   | Which group's key encrypts this item                                     |
-| `EPOCH_HASH` | CAS hash of the `group-epoch/v1` object (not an integer)                 |
-| `NONCE`      | XChaCha20 nonce (192-bit CSPRNG, hex-encoded)                            |
+| `FP`         | Fingerprint of the sealer (may differ from the inner plaintext signer)               |
+| `GROUP_ID`   | Which group's key encrypts this item                                                 |
+| `EPOCH_HASH` | CAS hash of the `group-epoch/v1` object (not an integer)                             |
+| `NONCE`      | XChaCha20 nonce (192-bit CSPRNG, hex-encoded)                                        |
 
 The inner `rye:signed:` line (embedded in the plaintext before encryption) authenticates the author and content. The outer seal signature authenticates the ciphertext — you can verify an item is authentic and untampered without being able to read it. Two signatures, two purposes.
 
@@ -696,14 +696,14 @@ The current model handles this correctly: capability routing is by name (`thread
 
 What changes from the current model:
 
-| Current (remote.yaml)                 | Future (node-advertisement/v1)                       |
-| ------------------------------------- | ---------------------------------------------------- |
-| URL + key_env in config file          | Signed CAS object, discoverable via sync             |
-| TOFU key pinning via `/public-key`    | Key in the advertisement, pinned in peer record      |
-| Capability by name ("gpu")            | Structured capabilities (`runtimes`, `resources`)    |
-| Bearer token auth (API key / JWT)     | Per-request signatures (see Authentication)          |
+| Current (remote.yaml)                 | Future (node-advertisement/v1)                                          |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| URL + key_env in config file          | Signed CAS object, discoverable via sync                                |
+| TOFU key pinning via `/public-key`    | Key in the advertisement, pinned in peer record                         |
+| Capability by name ("gpu")            | Structured capabilities (`runtimes`, `resources`)                       |
+| Bearer token auth (API key / JWT)     | Per-request signatures (see Authentication)                             |
 | Secrets stored server-side (Supabase) | Secrets as sealed envelopes (HPKE to node's box key, with `enc` output) |
-| One user per remote (user_id scoping) | Multi-user via project policy grants                 |
+| One user per remote (user_id scoping) | Multi-user via project policy grants                                    |
 
 The current `remote.yaml` becomes a local cache of node advertisements — the same pattern as peer records caching identity documents. The source of truth is the signed advertisement, not the config file.
 

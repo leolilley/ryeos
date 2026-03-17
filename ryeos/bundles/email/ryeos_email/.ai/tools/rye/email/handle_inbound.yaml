@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:58Z:e78b57c655ac7186cff302e40efb15119e7b1646e45fe0eb4a62f29ccde44f65:X9sKeRRR8IOK360SJuqHj8CXWXeYQWn2fXAARsbSn-5PgQy-GeHj3gh4FsbLgRT1VbcbhXBh8IoOQfMBK-UECA==:4b987fd4e40303ac
+# rye:signed:2026-03-17T03:40:35Z:d672bea4e79b77e52977295f31fa094b137d9a96eb7bef14921cb7d3f7f4932a:8J6S4j4_wzRaP6_y7XrukTqVisw3zzKrK_es5cRye5q2cKAtanUO8yEJlyEX_KjXmk3US_VHvyASRM-JRBFSBA==:4b987fd4e40303ac
 # rye:unsigned
 tool_id: handle_inbound
 tool_type: graph
@@ -6,6 +6,12 @@ executor_id: rye/core/runtimes/state-graph/runtime
 version: "1.1.0"
 description: "Inbound email processing — route, classify, respond"
 category: rye/email
+
+permissions:
+  - "rye.execute.tool.rye.email.router"
+  - "rye.execute.directive.rye.email.draft_response"
+  - "rye.execute.tool.rye.email.send"
+  - "rye.execute.tool.rye.email.forward"
 
 config_schema:
   type: object

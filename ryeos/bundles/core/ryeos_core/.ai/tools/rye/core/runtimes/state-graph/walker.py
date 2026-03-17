@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:39Z:963cf1747eab9c6b9d08e1389e26b821ca572858a5fd06c815a19053a293bd24:Xqf3mHKhp3U2b9BKwRCsoQNfE0vzdC3Yde0SmgsDOVFxXIX9HDHlb8QHfBVdZMhgT5feD-0lT6NzJ0PMcRTpAw==:4b987fd4e40303ac
+# rye:signed:2026-03-17T03:40:35Z:10347c2e7924c36328fada3d0c4bb361fccd615b84da1b2cc599315422b1476f:tI4guGIXOc_eZuprzsdaKOkRypJfjN2KCxhzdwsMssWr6NzcL3aF7rLu9O1yca8HqQylHbIqMUsWti_qZ55xAA==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -950,6 +950,90 @@ def _store_node_receipt(
         return None
 
 
+async def _finalize_graph_run(
+    *,
+    project_path: str,
+    graph_id: str,
+    graph_run_id: str,
+    transcript: "GraphTranscript",
+    state: Dict,
+    current_node: Optional[str],
+    status: str,
+    step_count: int,
+    node_receipts: List[str],
+    errors: List[Dict],
+    registry,
+    hooks: List[Dict],
+    elapsed_s: float,
+    error_message: Optional[str] = None,
+    hook_event: Optional[str] = "graph_completed",
+) -> None:
+    """Unified terminal handler for all graph run exits.
+
+    Handles the common tail that every terminal exit needs:
+    1. Transcript event (graph_error or graph_completed)
+    2. Transcript checkpoint + render_knowledge
+    3. CAS state persistence (execution_snapshot + state_snapshot)
+    4. Registry status update
+    5. Hook dispatch (graph_completed or graph_error)
+
+    Callers still build their own return dicts (shapes differ per exit).
+    Best-effort — never raises, logs warnings on failure.
+    """
+    try:
+        # 1. Transcript terminal event — derived from status
+        if status == "cancelled":
+            transcript.write_event("graph_cancelled", {
+                "steps": step_count,
+                "elapsed_s": elapsed_s,
+            })
+        elif status == "error" or error_message:
+            transcript.write_event("graph_error", {
+                "error": error_message or "unknown",
+                "node": current_node,
+                "steps": step_count,
+                "elapsed_s": elapsed_s,
+            })
+        else:
+            transcript.write_event("graph_completed", {
+                "status": status,
+                "steps": step_count,
+                "elapsed_s": elapsed_s,
+            })
+
+        # 2. Checkpoint + render (persist before render so ref is visible)
+        transcript.checkpoint(step_count, state=state, current_node=current_node)
+        await _persist_state(
+            project_path, graph_id, graph_run_id,
+            state, current_node, status, step_count,
+            node_receipts=node_receipts, errors=errors,
+        )
+        transcript.render_knowledge(status, step_count, elapsed_s)
+
+        # 3. Registry
+        if registry is not None:
+            registry.update_status(graph_run_id, status)
+
+        # 4. Hooks
+        if hook_event:
+            await _run_hooks(
+                hook_event,
+                {
+                    "graph_id": graph_id,
+                    "state": state,
+                    "steps": step_count,
+                    **({"error": error_message} if error_message else {}),
+                },
+                hooks,
+                project_path,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to finalize graph run %s (status=%s)",
+            graph_run_id, status, exc_info=True,
+        )
+
+
 async def _persist_state(
     project_path: str,
     graph_id: str,
@@ -1424,50 +1508,87 @@ async def execute(
     # Merge hooks
     hooks = _merge_graph_hooks(cfg.get("hooks", []), project_path)
 
-    # Validate graph
-    validation_errors = _validate_graph(cfg, graph_config)
-    if validation_errors:
-        return {
-            "success": False,
-            "error": f"Graph validation failed: {validation_errors}",
-        }
+    # Assign graph_run_id early so transcript + early failures can use it
+    if is_resume and resume_run_id:
+        graph_run_id = resume_run_id
+    elif not graph_run_id:
+        graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
 
-    # Validate-only mode — static analysis, no execution
+    # Validate-only mode — pure static analysis, no filesystem side effects
     if validate_only:
-        errors, warnings = _analyze_graph(cfg, graph_config)
+        validation_errors = _validate_graph(cfg, graph_config)
+        analysis_errors, warnings = _analyze_graph(cfg, graph_config)
+        all_errors = validation_errors + analysis_errors
         return {
-            "success": len(errors) == 0,
-            "errors": errors,
+            "success": len(all_errors) == 0,
+            "errors": all_errors,
             "warnings": warnings,
             "node_count": len(nodes),
         }
 
+    # Create transcript — needed by _finalize_graph_run for all exits
+    # (after validate_only to avoid mkdir side effects on pure analysis)
+    graph_transcript = GraphTranscript(project_path, graph_id, graph_run_id, nodes)
+    graph_start_time = time.monotonic()
+
+    # Shared finalize kwargs for early failures (no state yet)
+    _early_finalize = dict(
+        project_path=project_path, graph_id=graph_id,
+        graph_run_id=graph_run_id, transcript=graph_transcript,
+        current_node=cfg.get("start"), status="error",
+        step_count=0, node_receipts=[], registry=None,
+        hooks=hooks, elapsed_s=0, hook_event=None,
+    )
+
+    # Validate graph
+    validation_errors = _validate_graph(cfg, graph_config)
+    if validation_errors:
+        error_msg = f"Graph validation failed: {validation_errors}"
+        await _finalize_graph_run(
+            **_early_finalize,
+            state={"inputs": dict(params)},
+            errors=[{"code": "graph_validation_failed", "message": error_msg, "phase": "startup"}],
+            error_message=error_msg,
+        )
+        return {"success": False, "error": error_msg}
+
     # Environment pre-validation
     missing_env = _preflight_env_check(cfg, graph_config)
     if missing_env:
-        return {
-            "success": False,
-            "error": f"Missing environment variables: {missing_env}",
-        }
+        error_msg = f"Missing environment variables: {missing_env}"
+        await _finalize_graph_run(
+            **_early_finalize,
+            state={"inputs": dict(params)},
+            errors=[{"code": "missing_environment_variables", "message": error_msg, "phase": "startup"}],
+            error_message=error_msg,
+        )
+        return {"success": False, "error": error_msg}
 
     # Validate target_node exists
     if target_node and target_node not in nodes:
-        return {
-            "success": False,
-            "error": f"Target node '{target_node}' not found in graph",
-        }
+        error_msg = f"Target node '{target_node}' not found in graph"
+        await _finalize_graph_run(
+            **_early_finalize,
+            state={"inputs": dict(params)},
+            errors=[{"code": "target_node_not_found", "message": error_msg, "phase": "startup"}],
+            error_message=error_msg,
+        )
+        return {"success": False, "error": error_msg}
 
     registry = None
 
     # Resume: reload state from signed knowledge item
     if is_resume and resume_run_id:
-        graph_run_id = resume_run_id
         resumed = _load_resume_state(project_path, graph_id, graph_run_id)
         if not resumed:
-            return {
-                "success": False,
-                "error": f"Cannot resume: state not found or signature invalid for {graph_id}/{graph_run_id}",
-            }
+            error_msg = f"Cannot resume: state not found or signature invalid for {graph_id}/{graph_run_id}"
+            await _finalize_graph_run(
+                **_early_finalize,
+                state={"inputs": dict(params)},
+                errors=[{"code": "resume_state_not_found", "message": error_msg, "phase": "startup"}],
+                error_message=error_msg,
+            )
+            return {"success": False, "error": error_msg}
         state = resumed["state"]
         current = resumed["current_node"]
         step_count = resumed["step_count"]
@@ -1475,10 +1596,14 @@ async def execute(
         suppressed_errors: List[Dict] = []
 
         if not current:
-            return {
-                "success": False,
-                "error": f"Cannot resume: no current_node in state for {graph_run_id}",
-            }
+            error_msg = f"Cannot resume: no current_node in state for {graph_run_id}"
+            await _finalize_graph_run(
+                **_early_finalize,
+                state=state,
+                errors=[{"code": "resume_no_current_node", "message": error_msg, "phase": "startup"}],
+                error_message=error_msg,
+            )
+            return {"success": False, "error": error_msg}
 
         if thread_registry is not None:
             registry = thread_registry.get_registry(Path(project_path))
@@ -1491,8 +1616,6 @@ async def execute(
         )
     else:
         # Fresh run
-        if not graph_run_id:
-            graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
         # Merge initial state from config.state, then overlay inputs
         initial_state = cfg.get("state", {})
         config_schema = graph_config.get("config_schema")
@@ -1506,10 +1629,14 @@ async def execute(
         # Validate inputs
         input_errors = _validate_inputs(params, config_schema)
         if input_errors:
-            return {
-                "success": False,
-                "error": f"Input validation failed: {input_errors}",
-            }
+            error_msg = f"Input validation failed: {input_errors}"
+            await _finalize_graph_run(
+                **_early_finalize,
+                state=state,
+                errors=[{"code": "input_validation_failed", "message": error_msg, "phase": "startup"}],
+                error_message=error_msg,
+            )
+            return {"success": False, "error": error_msg}
 
         # Register + create initial state
         # (skip register if graph_run_id was pre-provided — already registered
@@ -1544,10 +1671,9 @@ async def execute(
         current = target_node
         if not graph_run_id or not graph_run_id.endswith("-step"):
             graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}-step"
+            # Re-create transcript for the step-scoped run_id
+            graph_transcript = GraphTranscript(project_path, graph_id, graph_run_id, nodes)
 
-    # Create graph transcript (JSONL event log + signed knowledge markdown)
-    graph_transcript = GraphTranscript(project_path, graph_id, graph_run_id, nodes)
-    graph_start_time = time.monotonic()
     if not is_resume:
         graph_transcript.write_event("graph_started", {
             "graph_id": graph_id, "graph_run_id": graph_run_id,
@@ -1558,20 +1684,18 @@ async def execute(
     while current and step_count < max_steps:
         node = nodes.get(current)
         if node is None:
-            elapsed = time.monotonic() - graph_start_time
-            graph_transcript.write_event("graph_error", {
-                "error": f"Node '{current}' not found", "steps": step_count,
-                "elapsed_s": elapsed,
-            })
-            graph_transcript.checkpoint(step_count, state=state, current_node=current)
-            graph_transcript.render_knowledge("error", step_count, elapsed)
-            if registry is not None:
-                registry.update_status(graph_run_id, "error")
-            return {
-                "success": False,
-                "error": f"Node '{current}' not found in graph",
-                "state": state,
-            }
+            error_msg = f"Node '{current}' not found in graph"
+            await _finalize_graph_run(
+                project_path=project_path, graph_id=graph_id,
+                graph_run_id=graph_run_id, transcript=graph_transcript,
+                state=state, current_node=current, status="error",
+                step_count=step_count, node_receipts=node_receipt_hashes,
+                errors=[{"code": "node_not_found", "message": error_msg, "node": current, "phase": "execution"}],
+                registry=registry, hooks=hooks,
+                elapsed_s=time.monotonic() - graph_start_time,
+                error_message=error_msg, hook_event=None,
+            )
+            return {"success": False, "error": error_msg, "state": state}
 
         step_count += 1
         executed_node = current
@@ -1588,24 +1712,13 @@ async def execute(
                 "elapsed_s": 0, "action_id": "", "thread_id": "",
             })
             _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=elapsed, status="return")
-            graph_transcript.write_event("graph_completed", {
-                "status": final_status, "steps": step_count, "elapsed_s": elapsed,
-            })
-            graph_transcript.checkpoint(step_count, state=state, current_node=current)
-            graph_transcript.render_knowledge(final_status, step_count, elapsed)
-            await _persist_state(
-                project_path, graph_id, graph_run_id,
-                state, current, final_status, step_count,
-                node_receipts=node_receipt_hashes,
-                errors=suppressed_errors,
-            )
-            if registry is not None:
-                registry.update_status(graph_run_id, final_status)
-            await _run_hooks(
-                "graph_completed",
-                {"graph_id": graph_id, "state": state, "steps": step_count},
-                hooks,
-                project_path,
+            await _finalize_graph_run(
+                project_path=project_path, graph_id=graph_id,
+                graph_run_id=graph_run_id, transcript=graph_transcript,
+                state=state, current_node=current, status=final_status,
+                step_count=step_count, node_receipts=node_receipt_hashes,
+                errors=suppressed_errors, registry=registry, hooks=hooks,
+                elapsed_s=elapsed,
             )
             _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="ok", detail=f"{step_count} steps")
             # Return interpolated output from the return node (slim),
@@ -1856,26 +1969,22 @@ async def execute(
                 )
                 continue
             if error_mode == "fail":
-                elapsed = time.monotonic() - graph_start_time
-                graph_transcript.write_event("graph_error", {
-                    "error": result.get("error", "unknown"),
-                    "node": executed_node, "steps": step_count,
-                    "elapsed_s": elapsed,
-                })
-                graph_transcript.checkpoint(step_count, state=state, current_node=current)
-                graph_transcript.render_knowledge("error", step_count, elapsed)
-                await _persist_state(
-                    project_path, graph_id, graph_run_id,
-                    state, current, "error", step_count,
-                    node_receipts=node_receipt_hashes,
-                )
-                if registry is not None:
-                    registry.update_status(graph_run_id, "error")
                 node_elapsed = time.monotonic() - node_start
-                _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error", detail=str(result.get("error", ""))[:80])
+                error_msg = result.get("error", "unknown")
+                await _finalize_graph_run(
+                    project_path=project_path, graph_id=graph_id,
+                    graph_run_id=graph_run_id, transcript=graph_transcript,
+                    state=state, current_node=current, status="error",
+                    step_count=step_count, node_receipts=node_receipt_hashes,
+                    errors=[{"code": "node_error", "message": error_msg, "node": executed_node, "phase": "execution"}],
+                    registry=registry, hooks=hooks,
+                    elapsed_s=time.monotonic() - graph_start_time,
+                    error_message=error_msg, hook_event=None,
+                )
+                _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error", detail=str(error_msg)[:80])
                 return {
                     "success": False,
-                    "error": result.get("error"),
+                    "error": error_msg,
                     "node": executed_node,
                     "state": state,
                 }
@@ -1972,20 +2081,16 @@ async def execute(
 
         # SIGTERM-based cancellation
         if _shutdown_requested:
-            elapsed = time.monotonic() - graph_start_time
-            graph_transcript.write_event("graph_cancelled", {
-                "steps": step_count, "elapsed_s": elapsed,
-                "signal": _shutdown_requested,
-            })
-            graph_transcript.checkpoint(step_count, state=state, current_node=current)
-            graph_transcript.render_knowledge("cancelled", step_count, elapsed)
-            await _persist_state(
-                project_path, graph_id, graph_run_id,
-                state, current, "cancelled", step_count,
-                node_receipts=node_receipt_hashes,
+            await _finalize_graph_run(
+                project_path=project_path, graph_id=graph_id,
+                graph_run_id=graph_run_id, transcript=graph_transcript,
+                state=state, current_node=current, status="cancelled",
+                step_count=step_count, node_receipts=node_receipt_hashes,
+                errors=[{"code": "cancelled", "message": f"Signal {_shutdown_requested}", "phase": "execution"}],
+                registry=registry, hooks=hooks,
+                elapsed_s=time.monotonic() - graph_start_time,
+                hook_event=None,
             )
-            if registry is not None:
-                registry.update_status(graph_run_id, "cancelled")
             return {
                 "success": False,
                 "status": "cancelled",
@@ -1995,12 +2100,7 @@ async def execute(
 
     # Max steps exceeded
     elapsed = time.monotonic() - graph_start_time
-    graph_transcript.write_event("graph_error", {
-        "error": f"max_steps_exceeded ({max_steps})",
-        "steps": step_count, "elapsed_s": elapsed,
-    })
-    graph_transcript.checkpoint(step_count, state=state, current_node=current)
-    graph_transcript.render_knowledge("error", step_count, elapsed)
+    error_msg = f"Max steps exceeded ({max_steps})"
     limit_ctx = {
         "limit_code": "max_steps_exceeded",
         "current_value": step_count,
@@ -2008,29 +2108,19 @@ async def execute(
         "state": state,
     }
     await _run_hooks("limit", limit_ctx, hooks, project_path)
-
-    await _persist_state(
-        project_path, graph_id, graph_run_id,
-        state, current, "error", step_count,
-        node_receipts=node_receipt_hashes,
-    )
-    if registry is not None:
-        registry.update_status(graph_run_id, "error")
-    await _run_hooks(
-        "graph_completed",
-        {
-            "graph_id": graph_id,
-            "state": state,
-            "steps": step_count,
-            "error": "max_steps_exceeded",
-        },
-        hooks,
-        project_path,
+    await _finalize_graph_run(
+        project_path=project_path, graph_id=graph_id,
+        graph_run_id=graph_run_id, transcript=graph_transcript,
+        state=state, current_node=current, status="error",
+        step_count=step_count, node_receipts=node_receipt_hashes,
+        errors=[{"code": "max_steps_exceeded", "message": error_msg, "phase": "execution"}],
+        registry=registry, hooks=hooks,
+        elapsed_s=elapsed, error_message=error_msg, hook_event=None,
     )
     _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="error", detail=f"max_steps_exceeded ({max_steps})")
     return {
         "success": False,
-        "error": f"Max steps exceeded ({max_steps})",
+        "error": error_msg,
         "state": state,
     }
 

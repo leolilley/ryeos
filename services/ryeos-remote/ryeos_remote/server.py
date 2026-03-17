@@ -1242,14 +1242,19 @@ async def _execute_from_head(
         # Ingest runtime outputs (transcripts, knowledge, refs) into CAS
         exec_snapshot_hash = _find_execution_snapshot_hash(exec_space)
         if not exec_snapshot_hash:
+            error_msg = result.get("error")
+            fallback_status = result.get("status") or (
+                "completed" if result.get("success") else "error"
+            )
             es = ExecutionSnapshot(
                 graph_run_id=thread_id,
                 graph_id=f"{item_type}/{item_id}",
                 project_manifest_hash=ref["project_manifest_hash"],
                 user_manifest_hash=user_manifest_hash,
                 system_version=get_system_version(),
-                step=1,
-                status=result.get("status", "unknown"),
+                step=0,
+                status=fallback_status,
+                errors=[{"message": error_msg, "phase": "execution"}] if error_msg else [],
             )
             exec_snapshot_hash = cas.store_object(es.to_dict(), root)
             new_hashes.append(exec_snapshot_hash)
