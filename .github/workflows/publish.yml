@@ -48,7 +48,7 @@ jobs:
           pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard \
                       -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
                       -e ryeos-mcp -e ryeos-cli \
-                      -e services/ryeos-remote
+                      -e services/ryeos-remote -e services/registry-api
           pip install pytest pytest-asyncio
 
       - name: Import CI signing key
