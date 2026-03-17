@@ -24,7 +24,7 @@ import yaml
 from lillux.primitives import cas
 
 from rye.cas.objects import SourceManifest
-from rye.cas.store import cas_root, ingest_item, _guess_item_type
+from rye.cas.store import cas_root, ingest_item, item_type_from_path
 from rye.constants import AI_DIR
 from rye.utils.path_utils import get_system_spaces, get_user_space
 
@@ -226,7 +226,10 @@ def _walk_ai_items(
 
             file_path = Path(dirpath) / filename
             rel_path = str(file_path.relative_to(space_root))
-            item_type = _guess_item_type(rel_path)
+            item_type = item_type_from_path(rel_path)
+            if item_type is None:
+                logger.debug("Skipping unrecognised path %s", rel_path)
+                continue
 
             try:
                 ref = ingest_item(item_type, file_path, project_path)

@@ -122,7 +122,10 @@ def ingest_directory(
             rel_path = str(file_path.relative_to(base_path))
 
             # Determine item type from path
-            item_type = _guess_item_type(rel_path)
+            item_type = item_type_from_path(rel_path)
+            if item_type is None:
+                logger.debug("Skipping unrecognised path %s", rel_path)
+                continue
 
             try:
                 ref = ingest_item(item_type, file_path, project_path)
@@ -203,15 +206,13 @@ def read_ref(ref_path: Path) -> Optional[str]:
 
 # --- Helpers ---
 
-# Invert ItemType.TYPE_DIRS: {"directives": "directive", "tools": "tool", ...}
-_DIR_TYPE_MAP = {v: k for k, v in ItemType.TYPE_DIRS.items()}
 
-
-def _guess_item_type(rel_path: str) -> str:
-    """Best-effort item type from relative path. Falls back to 'tool'."""
+def item_type_from_path(rel_path: str) -> Optional[str]:
+    """Derive item type from a .ai/-relative path. Returns None if unrecognised."""
     parts = rel_path.split("/")
     if len(parts) >= 2 and parts[0] == AI_DIR:
         type_dir = parts[1]
-        if type_dir in _DIR_TYPE_MAP:
-            return _DIR_TYPE_MAP[type_dir]
-    return "tool"
+        for item_type, dir_name in ItemType.SIGNABLE_DIRS.items():
+            if type_dir == dir_name:
+                return item_type
+    return None

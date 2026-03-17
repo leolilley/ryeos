@@ -2185,8 +2185,10 @@ async def _pull_bundle(
                     continue
                 file_path = proj_root / rel_path
                 if file_path.exists():
-                    from rye.cas.store import _guess_item_type
-                    item_type = _guess_item_type(rel_path)
+                    from rye.cas.store import item_type_from_path
+                    item_type = item_type_from_path(rel_path)
+                    if item_type is None:
+                        continue
                     ref = ingest_item(item_type, file_path, proj_root)
                     # Verify ingested hash matches manifest
                     expected_hash = meta.get("object_hash") if isinstance(meta, dict) else None

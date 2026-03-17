@@ -225,14 +225,10 @@ def validate_bundle_manifest(
 
 
 def _classify_file(rel_path: str) -> str:
-    """Classify a file into directive/tool/knowledge/trusted_key/asset by its relative path."""
-    for item_type, dir_name in _TYPE_DIRS.items():
-        if rel_path.startswith(f"{AI_DIR}/{dir_name}/"):
-            return item_type
-    for dir_name in _EXTRA_DIRS:
-        if rel_path.startswith(f"{AI_DIR}/{dir_name}/"):
-            return dir_name
-    return "asset"
+    """Canonical CAS item type for known .ai items, else asset."""
+    from rye.cas.store import item_type_from_path
+
+    return item_type_from_path(rel_path) or "asset"
 
 
 def _has_inline_signature(path: Path) -> bool:
@@ -581,7 +577,7 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
 
             rel = str(file_path.relative_to(package_path))
             entry = _ingest_file(file_path, package_path, rel)
-            entry["item_type"] = "asset"
+            entry["item_type"] = "config"
             files.append(entry)
 
     return files
