@@ -41,6 +41,7 @@ exclude = [
     ".venv",
     "__pycache__",
     "*.pyc",
+    "**/lockfiles/**",
 ]
 # Include all files from source tree, don't filter by .gitignore
 # (the root .gitignore has rules like lib/ and */.ai/ that would

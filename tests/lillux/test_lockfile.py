@@ -19,10 +19,14 @@ class TestLockfileRoot:
             tool_id="my_tool",
             version="1.0.0",
             integrity="abc123def456",
+            provider_id="ryeos-core",
+            provider_version="0.1.26",
         )
         assert root.tool_id == "my_tool"
         assert root.version == "1.0.0"
         assert root.integrity == "abc123def456"
+        assert root.provider_id == "ryeos-core"
+        assert root.provider_version == "0.1.26"
 
 
 class TestLockfile:
@@ -30,7 +34,7 @@ class TestLockfile:
 
     def test_create_lockfile(self):
         """Create Lockfile with required fields."""
-        root = LockfileRoot("tool", "1.0.0", "hash")
+        root = LockfileRoot("tool", "1.0.0", "hash", "test-bundle", "0.1.0")
         lockfile = Lockfile(
             lockfile_version="1.0",
             generated_at="2024-01-01T00:00:00Z",
@@ -44,7 +48,7 @@ class TestLockfile:
 
     def test_lockfile_with_registry(self):
         """Lockfile can include optional registry field."""
-        root = LockfileRoot("tool", "1.0.0", "hash")
+        root = LockfileRoot("tool", "1.0.0", "hash", "test-bundle", "0.1.0")
         registry = {"tools": {"my_tool": "url"}}
         lockfile = Lockfile(
             lockfile_version="1.0",
@@ -70,6 +74,8 @@ class TestLockfileManager:
                     "tool_id": "test_tool",
                     "version": "1.0.0",
                     "integrity": "abc123",
+                    "provider_id": "ryeos-core",
+                    "provider_version": "0.1.26",
                 },
                 "resolved_chain": [],
                 "registry": None,
@@ -80,6 +86,7 @@ class TestLockfileManager:
             lockfile = manager.load(lockfile_path)
             assert lockfile.lockfile_version == "1.0"
             assert lockfile.root.tool_id == "test_tool"
+            assert lockfile.root.provider_id == "ryeos-core"
 
     def test_load_nonexistent_file_raises(self):
         """Loading nonexistent file raises FileNotFoundError."""
@@ -117,7 +124,7 @@ class TestLockfileManager:
         """Save lockfile to JSON file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             lockfile_path = Path(tmpdir) / "output.json"
-            root = LockfileRoot("tool", "1.0.0", "hash")
+            root = LockfileRoot("tool", "1.0.0", "hash", "test-bundle", "0.1.0")
             lockfile = Lockfile(
                 lockfile_version="1.0",
                 generated_at="2024-01-01T00:00:00Z",
@@ -140,7 +147,7 @@ class TestLockfileManager:
         """Save does not create parent directories."""
         with tempfile.TemporaryDirectory() as tmpdir:
             lockfile_path = Path(tmpdir) / "nonexistent" / "dir" / "lockfile.json"
-            root = LockfileRoot("tool", "1.0.0", "hash")
+            root = LockfileRoot("tool", "1.0.0", "hash", "test-bundle", "0.1.0")
             lockfile = Lockfile(
                 lockfile_version="1.0",
                 generated_at="2024-01-01T00:00:00Z",
@@ -178,6 +185,8 @@ class TestLockfileManager:
                 tool_id="my_tool",
                 version="1.2.3",
                 integrity="abc123def456",
+                provider_id="ryeos-core",
+                provider_version="0.1.26",
             )
             original = Lockfile(
                 lockfile_version="1.0",
@@ -196,6 +205,8 @@ class TestLockfileManager:
             assert loaded.root.tool_id == original.root.tool_id
             assert loaded.root.version == original.root.version
             assert loaded.root.integrity == original.root.integrity
+            assert loaded.root.provider_id == original.root.provider_id
+            assert loaded.root.provider_version == original.root.provider_version
             assert loaded.resolved_chain == original.resolved_chain
             assert loaded.registry == original.registry
 
@@ -210,6 +221,8 @@ class TestLockfileManager:
                     "tool_id": "tool",
                     "version": "1.0.0",
                     "integrity": "hash",
+                    "provider_id": "test-bundle",
+                    "provider_version": "0.1.0",
                 },
                 "resolved_chain": [],
                 "registry": None,

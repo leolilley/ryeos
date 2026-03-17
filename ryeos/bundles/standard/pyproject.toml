@@ -45,6 +45,7 @@ exclude = [
     ".venv",
     "__pycache__",
     "*.pyc",
+    "**/lockfiles/**",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]

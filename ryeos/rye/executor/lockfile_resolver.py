@@ -132,6 +132,8 @@ class LockfileResolver:
         tool_id: str,
         version: str,
         integrity: str,
+        provider_id: str,
+        provider_version: str,
         resolved_chain: List[Dict[str, Any]],
         registry: Optional[Dict[str, Any]] = None,
         verified_deps: Optional[Dict[str, Any]] = None,
@@ -142,6 +144,8 @@ class LockfileResolver:
             tool_id: Root tool identifier
             version: Tool version
             integrity: Tool integrity hash
+            provider_id: Bundle ID that provides the root tool
+            provider_version: Version of the provider bundle
             resolved_chain: List of resolved chain elements
             registry: Optional registry metadata
             verified_deps: Optional dependency verification hashes
@@ -153,6 +157,8 @@ class LockfileResolver:
             tool_id=tool_id,
             version=version,
             integrity=integrity,
+            provider_id=provider_id,
+            provider_version=provider_version,
         )
 
         return Lockfile(

@@ -43,6 +43,8 @@ class TestLockfileResolvedPath:
                 "tool_id": "my/tool",
                 "version": "1.0.0",
                 "integrity": "abc123",
+                "provider_id": "ryeos-core",
+                "provider_version": "0.1.0",
             },
             "resolved_chain": [],
         }))
@@ -63,6 +65,8 @@ class TestLockfileResolvedPath:
                 "tool_id": "shared/tool",
                 "version": "2.0.0",
                 "integrity": "xyz",
+                "provider_id": "ryeos-core",
+                "provider_version": "0.1.0",
             },
             "resolved_chain": [],
         })

@@ -19,11 +19,15 @@ class LockfileRoot:
         tool_id: The ID of the tool being locked.
         version: Version of the tool (semver).
         integrity: Hash of the tool for integrity verification.
+        provider_id: Bundle ID that provides this tool (e.g., "ryeos-core").
+        provider_version: Version of the provider bundle.
     """
 
     tool_id: str
     version: str
     integrity: str
+    provider_id: str
+    provider_version: str
 
 
 @dataclass
@@ -93,6 +97,8 @@ class LockfileManager:
                 tool_id=root_data["tool_id"],
                 version=root_data["version"],
                 integrity=root_data["integrity"],
+                provider_id=root_data["provider_id"],
+                provider_version=root_data["provider_version"],
             )
 
             lockfile = Lockfile(

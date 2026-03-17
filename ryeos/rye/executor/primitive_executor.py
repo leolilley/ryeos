@@ -127,6 +127,10 @@ class PrimitiveExecutor:
             self.system_spaces = self._get_system_spaces()
         # Use first bundle's root_path as the legacy system_space
         self.system_space = self.system_spaces[0].root_path
+        # Index bundles by ID for lockfile provenance lookups
+        self._bundle_by_id: Dict[str, BundleInfo] = {
+            b.bundle_id: b for b in self.system_spaces
+        }
 
         self.env_resolver = EnvResolver(project_path=self.project_path)
         self.parser_router = ParserRouter(project_path=self.project_path)
@@ -189,60 +193,91 @@ class PrimitiveExecutor:
                     lockfile = self.lockfile_resolver.get_lockfile(item_id, version)
                     if lockfile:
                         lockfile_path = getattr(lockfile, "_resolved_path", None)
-                        logger.debug(f"Using lockfile for {item_id}@{version}")
-                        lockfile_used = True
-                        content = tool_path[0].read_text(encoding="utf-8")
-                        current_integrity = MetadataManager.compute_hash(
-                            ItemType.TOOL,
-                            content,
-                            file_path=tool_path[0],
-                            project_path=self.project_path,
-                        )
-                        if lockfile.root.integrity != current_integrity:
-                            return ExecutionResult(
-                                success=False,
-                                error=(
-                                    f"Lockfile integrity mismatch for {item_id}. "
-                                    f"Re-sign the tool and delete the stale lockfile at: "
-                                    f"{lockfile_path}"
-                                ),
-                                duration_ms=(time.time() - start_time) * 1000,
-                            )
 
-                        for entry in lockfile.resolved_chain:
-                            entry_id = entry.get("item_id")
-                            entry_space = entry.get("space", "project")
-                            entry_integrity = entry.get("integrity")
-                            if not entry_id or not entry_integrity:
-                                continue
-                            resolved = self._resolve_tool_path(entry_id, entry_space)
-                            if not resolved:
+                        # Check provider provenance before integrity.
+                        # If the provider bundle changed (upgrade), the lockfile
+                        # is stale — discard it and re-resolve via the full
+                        # verified path. This is NOT a security bypass: the
+                        # normal _build_chain + verify_item path runs instead.
+                        if self._lockfile_provenance_changed(lockfile):
+                            logger.info(
+                                "Provider changed for %s, discarding stale lockfile",
+                                item_id,
+                            )
+                            self._best_effort_delete_lockfile(lockfile_path)
+                            lockfile = None
+                        else:
+                            logger.debug(f"Using lockfile for {item_id}@{version}")
+                            lockfile_used = True
+                            content = tool_path[0].read_text(encoding="utf-8")
+                            current_integrity = MetadataManager.compute_hash(
+                                ItemType.TOOL,
+                                content,
+                                file_path=tool_path[0],
+                                project_path=self.project_path,
+                            )
+                            if lockfile.root.integrity != current_integrity:
                                 return ExecutionResult(
                                     success=False,
                                     error=(
-                                        f"Lockfile chain element not found: {entry_id} "
-                                        f"(space: {entry_space}). Delete the stale lockfile at: "
+                                        f"Lockfile integrity mismatch for {item_id}. "
+                                        f"Re-sign the tool and delete the stale lockfile at: "
                                         f"{lockfile_path}"
                                     ),
                                     duration_ms=(time.time() - start_time) * 1000,
                                 )
-                            entry_content = resolved[0].read_text(encoding="utf-8")
-                            entry_hash = MetadataManager.compute_hash(
-                                ItemType.TOOL,
-                                entry_content,
-                                file_path=resolved[0],
-                                project_path=self.project_path,
-                            )
-                            if entry_hash != entry_integrity:
-                                return ExecutionResult(
-                                    success=False,
-                                    error=(
-                                        f"Lockfile integrity mismatch for chain element "
-                                        f"{entry_id}. Re-sign the tool and delete the stale "
-                                        f"lockfile at: {lockfile_path}"
-                                    ),
-                                    duration_ms=(time.time() - start_time) * 1000,
+
+                            for entry in lockfile.resolved_chain:
+                                entry_id = entry.get("item_id")
+                                entry_space = entry.get("space", "project")
+                                entry_integrity = entry.get("integrity")
+                                if not entry_id or not entry_integrity:
+                                    continue
+
+                                # Check chain entry provenance
+                                entry_provider_id = entry.get("provider_id")
+                                entry_provider_version = entry.get("provider_version")
+                                if entry_provider_id:
+                                    bundle = self._get_bundle_for_space(entry_space)
+                                    if not bundle or bundle.version != entry_provider_version:
+                                        logger.info(
+                                            "Provider changed for chain element %s, "
+                                            "discarding stale lockfile",
+                                            entry_id,
+                                        )
+                                        self._best_effort_delete_lockfile(lockfile_path)
+                                        lockfile = None
+                                        lockfile_used = False
+                                        break
+
+                                resolved = self._resolve_tool_path(entry_id, entry_space)
+                                if not resolved:
+                                    return ExecutionResult(
+                                        success=False,
+                                        error=(
+                                            f"Lockfile chain element not found: {entry_id} "
+                                            f"(space: {entry_space}). Delete the stale lockfile at: "
+                                            f"{lockfile_path}"
+                                        ),
+                                        duration_ms=(time.time() - start_time) * 1000,
+                                    )
+                                entry_content = resolved[0].read_text(encoding="utf-8")
+                                entry_hash = MetadataManager.compute_hash(
+                                    ItemType.TOOL,
+                                    entry_content,
+                                    file_path=resolved[0],
+                                    project_path=self.project_path,
                                 )
+                                if entry_hash != entry_integrity:
+                                    return ExecutionResult(
+                                        success=False,
+                                        error=(
+                                            f"Lockfile integrity mismatch for chain element "
+                                            f"{entry_id}. Re-sign the tool and delete the stale "
+                                            f"lockfile at: {lockfile_path}"
+                                        ),
+                                        duration_ms=(time.time() - start_time) * 1000,
+                                    )
 
             if trace and lockfile_used:
                 trace_events.append({
@@ -373,10 +408,17 @@ class PrimitiveExecutor:
                     )
                     resolved_chain = [self._chain_element_to_dict(e) for e in chain]
 
+                    # Resolve provider info for root element
+                    root_bundle = self._get_bundle_for_space(root_element.space)
+                    provider_id = root_bundle.bundle_id if root_bundle else root_element.space
+                    provider_version = root_bundle.version if root_bundle else version
+
                     new_lockfile = self.lockfile_resolver.create_lockfile(
                         tool_id=item_id,
                         version=version,
                         integrity=integrity,
+                        provider_id=provider_id,
+                        provider_version=provider_version,
                         resolved_chain=resolved_chain,
                     )
                     self.lockfile_resolver.save_lockfile(
@@ -719,7 +761,7 @@ class PrimitiveExecutor:
         """Convert ChainElement to dict for validation/serialization.
 
         Stores item_id + space (portable) instead of absolute path.
-        Includes integrity hash for each element.
+        Includes integrity hash and provider provenance for each element.
         """
         integrity = None
         try:
@@ -733,13 +775,50 @@ class PrimitiveExecutor:
         except Exception:
             pass
 
-        return {
+        result: Dict[str, Any] = {
             "item_id": element.item_id,
             "space": element.space,
             "tool_type": element.tool_type,
             "executor_id": element.executor_id,
             "integrity": integrity,
         }
+
+        # Embed provider provenance for system-space entries
+        bundle = self._get_bundle_for_space(element.space)
+        if bundle:
+            result["provider_id"] = bundle.bundle_id
+            result["provider_version"] = bundle.version
+
+        return result
+
+    def _get_bundle_for_space(self, space: str) -> Optional[BundleInfo]:
+        """Look up the BundleInfo for a system:bundle_id space string."""
+        if not space.startswith("system:"):
+            return None
+        return self._bundle_by_id.get(space.split(":", 1)[1])
+
+    def _lockfile_provenance_changed(self, lockfile) -> bool:
+        """Check if the lockfile's root provider no longer matches installed bundles.
+
+        Returns True if the provider bundle version has changed (e.g. pip upgrade),
+        meaning the lockfile is stale and should be discarded for re-resolution.
+        """
+        root = lockfile.root
+        bundle = self._get_bundle_for_space(f"system:{root.provider_id}")
+        if bundle and bundle.version != root.provider_version:
+            return True
+        # Non-system providers (project/user) don't have this staleness problem
+        return False
+
+    @staticmethod
+    def _best_effort_delete_lockfile(lockfile_path) -> None:
+        """Try to delete a stale lockfile. Silently ignore failures (read-only fs)."""
+        if lockfile_path is None:
+            return
+        try:
+            Path(lockfile_path).unlink()
+        except OSError:
+            pass
 
     def _resolve_chain_env(
         self,

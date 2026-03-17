@@ -35,6 +35,7 @@ exclude = [
     "__pycache__",
     "*.pyc",
     "**/node_modules/**",
+    "**/lockfiles/**",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
