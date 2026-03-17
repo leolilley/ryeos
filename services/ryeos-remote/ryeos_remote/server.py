@@ -743,8 +743,12 @@ async def push(
         if req.expected_snapshot_hash != current_head:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"HEAD has moved: expected={req.expected_snapshot_hash}, "
-                f"actual={current_head}. Pull and re-push.",
+                {
+                    "error": "HEAD has moved",
+                    "expected": req.expected_snapshot_hash,
+                    "actual": current_head,
+                    "revision": current_rev,
+                },
             )
 
     # Resolve user space hash for snapshot (may be None if never pushed)

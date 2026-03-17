@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:39Z:60f318854534c3d93c3ad037b0117a3adac87317a728616c65779bd1bea84119:2wnlKmgjYtRKucc-MHmHWCgdWcjTZrXw2aCLE_3d-2h0IuG8w70vX066s_LAn8xPuIupmifwXe1l9Bj5p2sKAA==:4b987fd4e40303ac
+# rye:signed:2026-03-17T01:54:37Z:b23b0d34aaf8592d373afe936ae448a0f224b5761cb337309da51ebbba4eca20:21-IVYCvr0md1bpiSZ1IFiY1G8akD-xUFoA-4OF9sFZJwJVSmATrDz61g8Nlc_6H3BmuXmxaLmku6zV6aPbxDw==:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-remote server.
 
@@ -325,6 +325,28 @@ async def _push(project_path: Path, params: Dict) -> Dict:
         push_body = json.loads(push_body)
 
     ref_published = push_resp["success"]
+
+    # 409 = HEAD moved (e.g. fold-back from execution), retry with current HEAD
+    if not ref_published and push_resp.get("status_code") == 409:
+        detail = push_body.get("detail", push_body) if isinstance(push_body, dict) else {}
+        actual_head = detail.get("actual") if isinstance(detail, dict) else None
+        if actual_head is not None:
+            logger.info("HEAD moved, retrying push with actual=%s", actual_head)
+            _store_remote_snapshot_hash(project_path, effective_remote, actual_head)
+            retry_resp = await client.post("/push", {
+                "project_path": proj_name,
+                "project_manifest_hash": ph,
+                "system_version": sys_ver,
+                "expected_snapshot_hash": actual_head,
+            })
+            retry_body = retry_resp.get("body", {})
+            if isinstance(retry_body, str):
+                retry_body = json.loads(retry_body)
+            if retry_resp["success"]:
+                push_resp = retry_resp
+                push_body = retry_body
+                ref_published = True
+
     if not ref_published:
         logger.warning("Failed to publish project ref: %s", push_resp.get("error"))
 

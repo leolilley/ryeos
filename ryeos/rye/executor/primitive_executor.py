@@ -1031,7 +1031,7 @@ class PrimitiveExecutor:
                 "anchor_path", "runtime_lib",
                 "project_path", "user_space", "system_space",
                 "cwd", "timeout", "server", "tool_name",
-                "server_config_path", "resolved_config",
+                "server_config_path",
                 "fixed_params", "params_key",
             ))
             tool_params = {

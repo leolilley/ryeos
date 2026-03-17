@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:58Z:f5622fcbe33fbeba8bf66868e20a1f0e97f2d5033a72536d20ea58646444b5e4:vqdUBqB-E_2V5EeWKbHwzA5bI782LHns0ecqkAEXTgoPrxWkW2BQiaqwRUPnNTpxlrWCU9fFG-XlgYl_Lc3MAA==:4b987fd4e40303ac
+# rye:signed:2026-03-17T02:20:17Z:0c3e3e8c93e54a1032526f74f3f91d7c50cb246c965ae3f7053e7590533c7b58:LTAoE8wOKZ25c4OctHrwTuP2JtI-3MU8DkkHOJaVnURPd4p7RU-KI0CTCmSrQwS0RZi_GBeFDoFBzCSkH64pDA==:4b987fd4e40303ac
 """Send an email via the configured email provider."""
 
 import argparse
@@ -8,7 +8,7 @@ import sys
 import yaml
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/email"
@@ -34,8 +34,6 @@ CONFIG_RESOLVE = {
 
 async def execute(params: dict, project_path: str) -> dict:
     """Send an email using the configured provider's action mapping."""
-    from rye.tools.execute import ExecuteTool
-
     config = params.get("resolved_config", {})
     provider_name = config.get("provider", {}).get("default")
     if not provider_name:
@@ -57,51 +55,121 @@ async def execute(params: dict, project_path: str) -> dict:
     if not send_action:
         return {"success": False, "error": f"Provider '{provider_name}' has no 'send' action"}
 
-    executor = ExecuteTool(project_path=project_path)
-
-    # Build the canonical params
-    send_params = {
-        "to": params["to"],
-        "subject": params["subject"],
-        "body": params["body"],
-        "from": from_address,
-        "from_name": from_name or "",
-    }
-
     # Multi-step send (e.g., CK: create → approve → schedule)
     if "steps" in send_action:
-        prev_result = {}
-        for step in send_action["steps"]:
-            tool_name = step["tool"]
-            step_params = _resolve_params(step.get("params_map", {}), send_params, prev_result)
-
-            mcp_tool_id = f"mcp/{mcp_server}/{tool_name.replace('.', '/')}"
-            result = await executor.handle(
-                item_type="tool",
-                item_id=mcp_tool_id,
-                project_path=project_path,
-                parameters=step_params,
-            )
-
-            if result.get("status") == "error":
-                return {"success": False, "error": f"Step '{tool_name}' failed: {result.get('error')}", "step": tool_name}
-
-            # Extract data from result envelope
-            prev_result = result.get("data", result)
-
-        email_id = prev_result.get("email_id") or prev_result.get("id")
-        return {
-            "success": True,
-            "email_id": email_id,
-            "status": "sent",
-            "message_id": prev_result.get("message_id"),
-        }
+        return await _multi_step_send(
+            mcp_server, send_action["steps"], params, from_address, from_name, project_path,
+        )
 
     # Single-step send (e.g., Gmail)
-    tool_name = send_action.get("tool")
-    step_params = _resolve_params(send_action.get("params_map", {}), send_params, {})
+    step = send_action
+    return await _single_step_send(
+        mcp_server, step, params, from_address, from_name, project_path,
+    )
 
-    mcp_tool_id = f"mcp/{mcp_server}/{tool_name.replace('.', '/')}"
+
+async def _multi_step_send(
+    mcp_server: str, steps: list, params: dict,
+    from_address: str, from_name: str, project_path: str,
+) -> dict:
+    """Execute a multi-step send pipeline (create → approve → schedule)."""
+    email_id = None
+
+    for step in steps:
+        action = step["action"]
+        type_name = step["type"]
+
+        step_params = _build_step_params(
+            action, type_name, params, from_address, from_name, email_id,
+        )
+
+        result = await _execute_mcp(mcp_server, type_name, action, step_params, project_path)
+        if not result.get("success", False):
+            error = result.get("error") or result.get("message", "unknown error")
+            return {"success": False, "error": f"Step '{type_name}.{action}' failed: {error}", "step": f"{type_name}.{action}"}
+
+        # Track email_id through the pipeline
+        email_id = result.get("email_id") or email_id
+
+    return {
+        "success": True,
+        "email_id": email_id,
+        "status": "sent",
+    }
+
+
+async def _single_step_send(
+    mcp_server: str, step: dict, params: dict,
+    from_address: str, from_name: str, project_path: str,
+) -> dict:
+    """Execute a single-step send (e.g., Gmail)."""
+    action = step["action"]
+    type_name = step["type"]
+
+    step_params = _build_step_params(
+        action, type_name, params, from_address, from_name, None,
+    )
+
+    result = await _execute_mcp(mcp_server, type_name, action, step_params, project_path)
+    if not result.get("success", False):
+        error = result.get("error") or result.get("message", "unknown error")
+        return {"success": False, "error": f"Send failed: {error}"}
+
+    return {
+        "success": True,
+        "email_id": result.get("email_id") or result.get("id"),
+        "status": "sent",
+    }
+
+
+def _build_step_params(
+    action: str, type_name: str, params: dict,
+    from_address: str, from_name: str, email_id: str | None,
+) -> dict:
+    """Build MCP params for a pipeline step.
+
+    Maps canonical send params to provider-specific field names.
+    Each provider type has its own param conventions.
+    """
+    if type_name == "primary_email" and action == "create":
+        return {
+            "to_emails": [params["to"]],
+            "from_email": from_address,
+            "from_name": from_name or "",
+            "subject": params["subject"],
+            "body_text": params["body"],
+        }
+    elif type_name == "primary_email" and action == "approve":
+        return {"entity_id": email_id}
+    elif type_name == "scheduler" and action == "schedule":
+        return {
+            "email_ids": [email_id],
+            "email_type": "primary",
+            "scheduled_time": "immediate",
+            "dry_run": False,
+        }
+    # Gmail-style single send
+    elif action == "send":
+        return {
+            "to": params["to"],
+            "from": from_address,
+            "subject": params["subject"],
+            "body": params["body"],
+        }
+    else:
+        return {}
+
+
+async def _execute_mcp(
+    mcp_server: str, type_name: str, action: str,
+    step_params: dict, project_path: str,
+) -> dict:
+    """Execute an MCP action via the campaign-kiwi MCP server."""
+    from rye.tools.execute import ExecuteTool
+
+    executor = ExecuteTool(project_path=project_path)
+    mcp_tool_id = f"mcp/{mcp_server}/{type_name}/{action}"
+
     result = await executor.handle(
         item_type="tool",
         item_id=mcp_tool_id,
@@ -110,20 +178,13 @@ async def execute(params: dict, project_path: str) -> dict:
     )
 
     if result.get("status") == "error":
-        return {"success": False, "error": f"Send failed: {result.get('error')}"}
+        return {"success": False, "error": result.get("error", "MCP call failed")}
 
-    data = result.get("data", result)
-    return {
-        "success": True,
-        "email_id": data.get("email_id") or data.get("id"),
-        "status": "sent",
-        "message_id": data.get("message_id"),
-    }
+    return result.get("data", result)
 
 
 def _load_provider(project_path: str, provider_name: str) -> dict:
     """Load a provider YAML from the tools directory."""
-    # Check project space first, then system bundle
     for base in [Path(project_path), *_system_paths()]:
         provider_path = base / ".ai" / "tools" / "rye" / "email" / "providers" / provider_name / f"{provider_name}.yaml"
         if provider_path.exists():
@@ -136,26 +197,10 @@ def _system_paths():
     """Find system bundle paths for provider resolution."""
     import importlib.resources
     try:
-        # ryeos_email bundle
         ref = importlib.resources.files("ryeos_email")
         return [Path(str(ref))]
     except Exception:
         return []
-
-
-def _resolve_params(params_map: dict, send_params: dict, prev_result: dict) -> dict:
-    """Resolve params_map values against send_params and previous results."""
-    resolved = {}
-    for target_key, source_expr in params_map.items():
-        if isinstance(source_expr, str) and source_expr.startswith("$prev."):
-            # Reference to previous step's result
-            field = source_expr[6:]  # strip "$prev."
-            resolved[target_key] = prev_result.get(field)
-        elif isinstance(source_expr, str) and source_expr in send_params:
-            resolved[target_key] = send_params[source_expr]
-        else:
-            resolved[target_key] = source_expr
-    return resolved
 
 
 if __name__ == "__main__":
