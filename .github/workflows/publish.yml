@@ -141,7 +141,7 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: |
           pip install build
-          pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos-cli
+          pip install -e lillux/kernel -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
 
       - name: Import CI signing key
         if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
