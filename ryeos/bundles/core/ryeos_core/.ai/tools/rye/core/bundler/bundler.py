@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:39Z:16bee7cf72ffe9a4ab4577d4d129e9d1aedfc8df54b34b391bc0ed2cb2d96944:U-5vfed8-2TQdOXIV9GigYekXSI5J1UawlteacVg0LvA5vNF-rH9iubb43CjojcIoeonh8V3wTf-Gfmv3K0dBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-17T00:59:03Z:1fa3ceb5be068ac2663b243316039b10a909398683484ebb72a59a9644ef2735:S7lO6REZsBxtXwn69QLDU96zR2mnqhVh2kuFjILg50vZbcF40boYuu3nZUTOZBC1QmyiikuTMcoTia8sdtTdCQ==:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, ItemType
 
 TOOL_METADATA = {
     "name": "bundler",
@@ -79,15 +79,8 @@ CONFIG_SCHEMA = {
 # Signature regex for detecting inline-signed files
 _SIGNED_RE = re.compile(r"(?:<!--|#|//) rye:signed:")
 
-# Item type directory names
-_TYPE_DIRS = {
-    "directive": "directives",
-    "tool": "tools",
-    "knowledge": "knowledge",
-}
-
-# Additional .ai/ subdirectories to include in bundles
-_EXTRA_DIRS = ["config/keys/trusted"]
+# Item type → directory name (all bundleable types)
+_TYPE_DIRS = ItemType.SIGNABLE_DIRS
 
 
 # ---------------------------------------------------------------------------
@@ -302,20 +295,6 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
             continue
 
         for file_path in sorted(bundle_dir.rglob("*")):
-            if not file_path.is_file():
-                continue
-            if any(d in file_path.parts for d in exclude_dirs):
-                continue
-            rel = str(file_path.relative_to(project_path))
-            files.append(_ingest_file(file_path, project_path, rel))
-
-    # Extra directories (config/keys/trusted, etc.)
-    for dir_name in _EXTRA_DIRS:
-        extra_dir = project_path / AI_DIR / dir_name
-        if not extra_dir.is_dir():
-            continue
-
-        for file_path in sorted(extra_dir.rglob("*")):
             if not file_path.is_file():
                 continue
             if any(d in file_path.parts for d in exclude_dirs):
@@ -563,21 +542,6 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
             rel = str(file_path.relative_to(package_path))
             entry = _ingest_file(file_path, package_path, rel)
             entry["item_type"] = item_type
-            files.append(entry)
-
-    # Walk extra directories (config/keys/trusted, etc.)
-    for dir_name in _EXTRA_DIRS:
-        extra_dir = ai_dir / dir_name
-        if not extra_dir.is_dir():
-            continue
-
-        for file_path in sorted(extra_dir.rglob("*")):
-            if not file_path.is_file():
-                continue
-
-            rel = str(file_path.relative_to(package_path))
-            entry = _ingest_file(file_path, package_path, rel)
-            entry["item_type"] = "config"
             files.append(entry)
 
     return files
