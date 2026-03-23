@@ -36,6 +36,7 @@ image = (
         "supabase>=2.3.0",
         # MCP transport
         "mcp>=1.9.0",
+        force_build=True,
     )
     .add_local_dir("ryeos_remote", remote_path="/app/ryeos_remote", copy=True)
     .env({

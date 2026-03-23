@@ -80,6 +80,7 @@ logs/
 !ryeos/bundles/core/ryeos_core/.ai/
 !ryeos/bundles/web/ryeos_web/.ai/
 !ryeos/bundles/code/ryeos_code/.ai/
+!ryeos/bundles/email/ryeos_email/.ai/
 
 ## Allow lib/ directories inside .ai/ (not Python build artifacts)
 !**/.ai/**/lib/
@@ -122,6 +123,9 @@ tests/e2e/.venv
 
 ## AI cache (browser snapshots, screenshots, ephemeral data)
 **/.ai/cache/
+
+## AI object store (content-addressed blobs, generated per-execution)
+**/.ai/objects/
 
 ## Lockfiles (generated per-execution, not source-controlled)
 **/.ai/lockfiles/
