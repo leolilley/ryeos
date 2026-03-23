@@ -6,7 +6,7 @@ Before I get into this, a quick note. I started building this before OpenClaw bl
 
 **What is RYE OS?**
 
-RYE OS is a cryptographically signed, graph-executable AI operating system, data-driven, capability-scoped, and registry-backed through content-addressed execution. It lives inside your projects, runs through a recursive MCP, and executes remotely or locally on infrastructure you control. It goes as deep as you dare.
+RYE OS is a cryptographically signed, graph-executable AI operating system — data-driven, capability-scoped, and registry-backed through content-addressed execution. It lives inside your projects, runs through a recursive MCP, and executes remotely or locally on infrastructure you control. It goes as deep as you dare.
 
 Yes that's a lot of jargon but it's truly the TL;DR of what this is. There is a lot to absorb here but keep reading and I can show you how it all comes together.
 
@@ -50,13 +50,11 @@ With that, all your directives carry your signature. Your tools carry your signa
 
 ---
 
-**Tool primitives — subprocess, HTTP, Lillux**
+**Tool primitives**
 
-All tool calls reduce to two execution primitives. Subprocess and HTTP. Every tool call chain bottoms out at one of these two. Python script, bash, local MCP, subprocess. Any API call, web scraper, remote MCP, HTTP. Those two primitives cover everything.
+A tool in RYE doesn't just say "run this file." It describes the full execution as data. What primitive it derives to, what runtime handles it, what environment it needs, what parameters it accepts. And every tool, regardless of what it does, derives to one of two execution primitives. Subprocess for anything with logic, parsing, or state. HTTP for tools that are just a request, a stateless API call with no interpreter in between. The Python runtime is a YAML file that describes how to invoke the interpreter, what flags to pass, how to resolve dependencies. Adding a new language isn't a code change. It's a YAML file.
 
-A tool in RYE doesn't just say "run this file." It describes the full execution as data. What primitive it derives to, what runtime handles it, what environment it needs, what parameters it accepts. The Python runtime is a YAML file that describes how to invoke the interpreter, what flags to pass, how to resolve dependencies. Adding a new language isn't a code change. It's a YAML file.
-
-From that description, RYE hands execution off to Lillux. Lillux is a microkernel sitting between RYE's description of execution and the execution itself. This boundary is critical. Because execution is fully described in data before it ever reaches Lillux, RYE and the LLM never need to see your environment variables or secrets. That happens at the Lillux and OS level, below RYE entirely. The separation isn't a policy decision. It's structural. Tampered items are rejected before they ever reach it. No fallback. No bypass.
+Lillux manages execution as a Rust subprocess boundary. Tampered or unsigned items are rejected before they ever reach it. Secrets are resolved at this level, below RYE entirely, so the LLM and item layer never see them. This isn't OS-level sandboxing, verified code runs with the permissions of the subprocess user. The security guarantee is supply chain security, not runtime confinement. You know exactly what ran, who signed it, and that it wasn't altered. No fallback. No bypass.
 
 ---
 
@@ -70,7 +68,7 @@ So RYE ships its own harness as just another tool to execute. When you execute a
 
 This is also where the recursive MCP comes in. When RYE forks a directive to its own harness, that harness itself has full access to RYE MCP. Which means a directive can spawn further directives, which can spawn their own. What looks like sub-agents in other frameworks is just the same agent running a narrower thread. Each child thread inherits the execution guarantees of its parent but can only be scoped down, never up. Permissions, token budgets, turn limits, all of it attenuates through the hierarchy. This is capability attenuation, and it's what makes the recursion safe rather than just deep. The recursion is a natural consequence of the architecture, not a feature added on top of it. Personally I build with Amp and think of in-harness execution as my front end thread driving directives that execute on managed threads underneath.
 
-Every execution in RYE runs on a thread managed by Lillux. This gives you cross-platform thread management regardless of OS, spawn, poll, kill, and inspect any thread on any platform. A tool call has a thread. A directive has a thread with one key difference: a directive is LLM execution, the harness itself is just another tool call underneath, exposed through the fork parameter. That's one directive, one thread. From here graph execution follows naturally.
+Every execution in RYE runs on a thread managed by Lillux. This gives you cross-platform thread management regardless of OS, spawn, poll, kill, and inspect any thread on any platform. A tool call has a thread. A directive has a thread with one key difference. A directive is LLM execution, the harness itself is just another tool call underneath, exposed through the fork parameter. That's one directive, one thread. From here graph execution follows naturally.
 
 ---
 
@@ -104,7 +102,7 @@ RYE defines named remotes in a simple YAML config. A URL and an environment vari
 
 The remote has its own Ed25519 key, generated on first boot. You pin it on first connect, same as SSH. When the remote produces results it signs them with its own key. The output carries two signatures, yours on the input, the remote's on the output. Chain of custody across machines. You know what ran, where it ran, and who attests to the result.
 
-The remote exposes the same four primitive actions as HTTP endpoints. It's the same interface whether local or remote. Secrets are never stored in CAS, injected at execution time at the Lillux level, below RYE entirely.
+The remote exposes the same four primitive actions as HTTP endpoints. It's the same interface whether local or remote. Secrets are never stored in CAS, injected at execution time at the Lillux level, below RYE entirely. On a named remote, environment variable injection currently routes through the centralised registry, a bootstrap convenience not a structural dependency.
 
 This is what enables always-on webhook agents. External services trigger remote execution via signed webhook bindings. The binding locks down exactly what directive or tool can execute and against which project. The caller can only provide parameters. An agent that lives outside your machine entirely, triggered by the world, executing verified work on infrastructure you control.
 
@@ -140,7 +138,7 @@ The intelligence is borrowed. The identity is yours.
 
 ---
 
-Whew, okay we got there. If you've been following along through the whole thing I thank you. You're a real one. There's more to get into, hooks, harness internals, context injection, but I wanted to get the architecture out first. The onboarding experience isn't fully there yet. Remote execution, CAS and the registry need more battle testing. But after watching Jensen put OpenClaw on the GTC stage as the AI operating system of the future, I couldn't hold it back any longer. If we keep building AI agents on a paradigm that hasn't properly thought this through, we're all in for a real headache as AI integrates deeper into society.
+Whew, okay we got there. If you've been following along through the whole thing I thank you. You're a real one. There's more to get into, hooks, harness internals, context injection, graph runtime internals, and I've deliberately kept concrete examples out of this. The architecture is the argument. If you want to see it in practice, the repo has you covered. The onboarding experience isn't fully there yet. Remote execution, CAS and the registry need more battle testing. But after watching Jensen put OpenClaw on the GTC stage as the AI operating system of the future, I couldn't hold it back any longer. If we keep building AI agents on a paradigm that hasn't properly thought this through, we're all in for a real headache as AI integrates deeper into society.
 
 This is why I need you to try it. Not because it's finished. But because the architecture is right and the direction matters. This project is for those interested in real digital ownership. Those dissatisfied with what OpenClaw and other agent SDKs offer. And if it resonates, I'd love your help building it. This is a big problem for one person to solve alone, and the network only becomes real when people use it. Contributors, testers, skeptics, all welcome.
 
