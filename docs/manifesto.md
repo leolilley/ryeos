@@ -114,17 +114,17 @@ And that's where the decentralised architecture begins to unlock.
 
 **Encrypted execution on untrusted nodes — the future**
 
-The centralised layer is a bootstrap convenience, not a dependency. The signed objects, the content hashes, the Ed25519 keys, none of that requires a central server to be true. Any peer that can store and serve CAS objects can be a registry. Auth migrates to per-request signatures, same model the remote executor already uses. Encrypted execution on untrusted nodes, where your data remains encrypted through execution on hardware you don't control, is the horizon. The architecture composes directly from the primitives already in place.
+The entire centralised layer is a bootstrap convenience, not a dependency. The signed objects, the content hashes, the Ed25519 keys, none of that requires a central server to be true. Any peer that can store and serve CAS objects can be a registry. Auth migrates to per-request signatures, same model the remote executor already uses. Encrypted execution on untrusted nodes, where your data remains encrypted through execution on hardware you don't control, is the horizon. The architecture composes directly from the primitives already in place.
 
 ---
 
 **What actually is an agent**
 
-Consider how every computing platform we've ever built actually works. The OS persists. Processes are transient. The kernel doesn't care what runs through it. It's not a Python OS or a bash OS, it's substrate. Programs come and go. The environment remains.
+Consider how every computing platform we've ever built actually works. The OS persists. Processes are transient. The kernel doesn't care what runs through it. It's not a Python OS or a bash OS. Programs come and go. The environment remains.
 
-Agents got this completely backwards. The model sits at the centre. Memory, tools, files orbit around it. Everything exists to serve the model. OpenClaw pushes this further than most, it has richer environment management, better tool orchestration, but the model is still the thing the whole system orbits. It's a very capable process that happens to spawn other processes. When the session ends, the agent ends. There's no persistent identity beyond the VPS it runs on. No provenance past the local filesystem. It's a session pretending to be an entity.
+Agents got this completely backwards. The model sits at the centre. Memory, tools, files orbit around it. Everything exists to serve the model. OpenClaw was the first to make this architecture complete enough for people to actually use, richer environment management, better tool orchestration, persistent memory across sessions. It's genuinely the most complete version of this architecture. The state persists. But ownership doesn't. There's no cryptographic chain between the work and the person who produced it. Move machines, switch tools, and you have files with no provenance, no verified identity, no way to prove they're yours or that they haven't been altered. Continuity without ownership. A session pretending to be an entity.
 
-But here's what's strange about that framing. Intelligence is actually the most replaceable thing in this stack. Models change every few months. Whatever ships next will make today's frontier look limited. What doesn't change is the work. The context. The accumulated decisions, the tools built, the knowledge gathered. The thing that should persist is precisely what current architectures treat as disposable.
+The pieces have existed separately. Reproducible builds, content-addressed storage, cryptographic signing. Nobody has combined them into an execution substrate where the agent itself, its tools, its history, its permissions, are all cryptographically tied to a single portable identity. Because until agents, nothing needed all of that at once.
 
 And none of this requires an LLM at all. The four primitives, the execution chain, the CAS, the registry, deterministic graphs, verified tool pipelines, reproducible data workflows, all of it runs without ever calling a model. The LLM is just one kind of runtime that can inhabit the substrate. A powerful one, but one among many.
 
