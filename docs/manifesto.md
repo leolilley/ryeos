@@ -18,7 +18,7 @@ After working with AI over these past few years I've come to realise that to rea
 
 I reason you can reduce a secure agent to 4 action primitives: Search, Load, Execute, and Sign. That's it. Across any harness, any workflow, any prompt, this is all you're actually getting the LLM to do. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured the Search and Load steps. When Claude Code finds a skill and runs it, that's Search, Load, Execute. When OpenClaw routes a task to a sub-agent, same thing. Every agent framework you've seen is doing some version of this, they just haven't named it.
 
-What people have missed is the Sign step. That's what makes the other 3 operations secure. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
+Other frameworks have approached agent security as a capability toggle problem. Restrict what the agent can access, limit what it can call, gate what it can send. That's a patch on the capability layer. What people have missed is the Sign step. That's what makes the other 3 operations secure. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
 
 ---
 
@@ -138,7 +138,11 @@ The intelligence is borrowed. The identity is yours.
 
 ---
 
-Whew, okay we got there. If you've been following along through the whole thing I thank you. You're a real one. There's more to get into, hooks, harness internals, context injection, graph runtime internals, and I've deliberately kept concrete examples out of this. The architecture is the argument. If you want to see it in practice, the repo has you covered. The onboarding experience isn't fully there yet. Remote execution, CAS and the registry need more battle testing. But after watching Jensen put OpenClaw on the GTC stage as the AI operating system of the future, I couldn't hold it back any longer. If we keep building AI agents on a paradigm that hasn't properly thought this through, we're all in for a real headache as AI integrates deeper into society.
+Whew, okay we got there. If you've been following along through the whole thing I thank you. You're a real one. There's more to get into, hooks, harness internals, context injection, graph runtime internals, and I've deliberately kept concrete examples out of this. The architecture is the argument. If you want to see it in practice, the repo has you covered. The onboarding experience isn't fully there yet. Remote execution, CAS and the registry need more battle testing. But after watching Jensen put OpenClaw on the GTC stage as the AI operating system of the future, I couldn't hold it back any longer.
+
+On his recent Lex Fridman episode he argued that to keep agents secure you give them two of three capabilities at any time: sensitive data access, code execution, external communication. I understand why. But that is a guardrail bolted onto an architecture that was never designed with trust in mind. When every action is signed, scoped to a directive, and verified before it executes, you don't need to withhold capabilities. You just need to know exactly what ran, who authorized it, and that it wasn't altered. That is what RYE gives you.
+
+If we keep building AI agents on a paradigm that hasn't properly thought this through, we're all in for a real headache as AI integrates deeper into society.
 
 This is why I need you to try it. Not because it's finished. But because the architecture is right and the direction matters. This project is for those interested in real digital ownership. Those dissatisfied with what OpenClaw and other agent SDKs offer. And if it resonates, I'd love your help building it. This is a big problem for one person to solve alone, and the network only becomes real when people use it. Contributors, testers, skeptics, all welcome.
 
