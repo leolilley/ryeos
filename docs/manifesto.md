@@ -18,7 +18,7 @@ After working with AI over these past few years I've come to realise that to rea
 
 I reason you can reduce a secure agent to 4 action primitives: Search, Load, Execute, and Sign. That's it. Across any harness, any workflow, any prompt, this is all you're actually getting the LLM to do. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured the Search and Load steps. When Claude Code finds a skill and runs it, that's Search, Load, Execute. When OpenClaw routes a task to a sub-agent, same thing. Every agent framework you've seen is doing some version of this, they just haven't named it.
 
-Other frameworks have approached agent security as a capability toggle problem. Restrict what the agent can access, limit what it can call, gate what it can send. That's a patch on the capability layer. What people have missed is the Sign step. That's what makes the other 3 operations secure. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
+Other frameworks have approached agent security as a runtime problem. Watch what the agent does and intervene when it steps out of bounds. What people have missed is the Sign step. That's what makes the other 3 operations secure. In RYE permissions aren't enforced after the fact. They're declared, signed, and verified before execution ever starts. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with."
 
 ---
 
