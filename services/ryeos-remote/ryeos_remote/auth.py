@@ -1,111 +1,244 @@
 """Authentication for ryeos-remote.
 
-Dual auth: API key (bearer) and HMAC (webhook).
-- Bearer: validates rye_sk_... keys against Supabase api_keys table.
+Dual auth: signed-request (Ed25519) and HMAC (webhook).
+- Signed-request: verifies X-Rye-Signature headers against authorized key files.
 - Webhook: HMAC-SHA256 signature verification via webhook_bindings table.
 """
 
+import fnmatch
 import hashlib
 import hmac as hmac_mod
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
+from fastapi import Depends, HTTPException, Request, status
 
 from ryeos_remote.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-security = HTTPBearer()
 
-API_KEY_PREFIX = "rye_" + "sk_"
+# ---------------------------------------------------------------------------
+# Principal (replaces User)
+# ---------------------------------------------------------------------------
 
 
 @dataclass
-class User:
-    id: str
-    username: str
-    email: Optional[str] = None
-    scopes: list[str] | None = None
+class Principal:
+    """Authenticated caller identity.
 
-
-async def _resolve_api_key(token: str, settings: Settings) -> User:
-    from supabase import create_client
-
-    key_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    supabase = create_client(settings.supabase_url, settings.supabase_service_key)
-
-    result = (
-        supabase.table("api_keys")
-        .select("id, user_id, scopes, revoked_at, expires_at")
-        .eq("key_hash", key_hash)
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid API key")
-
-    record = result.data[0]
-    if record.get("revoked_at"):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API key revoked")
-    if record.get("expires_at"):
-        from datetime import datetime, timezone
-
-        exp = datetime.fromisoformat(record["expires_at"].replace("Z", "+00:00"))
-        if datetime.now(timezone.utc) > exp:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API key expired")
-
-    user_result = (
-        supabase.table("users")
-        .select("id, username, email")
-        .eq("id", record["user_id"])
-        .execute()
-    )
-    if not user_result.data:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
-
-    u = user_result.data[0]
-    return User(id=u["id"], username=u["username"], email=u.get("email"), scopes=record.get("scopes"))
-
-
-def require_scope(user: User, required: str) -> None:
-    """Raise 403 if user's key doesn't have the required scope.
-
-    Scope format: 'service:action' (e.g., 'remote:execute', 'remote:*', 'registry:read').
-    A scope of 'service:*' grants all actions for that service.
-    Keys with no scopes get default backward-compatible access.
+    fingerprint: Ed25519 key fingerprint (the identity)
+    capabilities: fnmatch patterns from authorized key file
+    owner: human-readable label from authorized key file
     """
-    if user.scopes is None:
-        return  # No scopes = unrestricted (shouldn't happen with DB default)
-
-    service, _, action = required.partition(":")
-
-    # Check for exact match or wildcard
-    if required in user.scopes or f"{service}:*" in user.scopes:
-        return
-
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"API key missing required scope: {required}",
-    )
-
-
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    settings: Settings = Depends(get_settings),
-) -> User:
-    token = credentials.credentials
-
-    if token.startswith(API_KEY_PREFIX):
-        return await _resolve_api_key(token, settings)
-
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token — use an API key")
+    fingerprint: str
+    capabilities: list[str]
+    owner: str = ""
 
 
 # ---------------------------------------------------------------------------
-# HMAC webhook verification
+# Authorized key file loading + verification
+# ---------------------------------------------------------------------------
+
+
+def _load_authorized_key(fingerprint: str, settings: Settings) -> dict:
+    """Load and verify an authorized key TOML file.
+
+    The file must be signed by this node's key (signature header line).
+    Returns the parsed TOML dict.
+    Raises HTTPException(401) on any failure.
+    """
+    auth_dir = settings.authorized_keys_dir()
+    key_file = auth_dir / f"{fingerprint}.toml"
+
+    if not key_file.exists():
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown principal")
+
+    raw = key_file.read_text()
+
+    # Verify node signature (first line: # rye:signed:<timestamp>:<hash>:<sig>:<signer_fp>)
+    lines = raw.split("\n", 1)
+    sig_line = lines[0].strip()
+    if not sig_line.startswith("# rye:signed:"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (unsigned)")
+
+    parts = sig_line[len("# rye:signed:"):].split(":", 3)
+    if len(parts) != 4:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (malformed sig)")
+
+    _sig_timestamp, content_hash, sig_b64, signer_fp = parts
+
+    # Verify signature was made by this node's key
+    from lillux.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature
+
+    try:
+        _, node_pub = load_keypair(Path(settings.signing_key_dir))
+        node_fp = compute_key_fingerprint(node_pub)
+    except FileNotFoundError:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Node signing key not configured",
+        )
+
+    if signer_fp != node_fp:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (wrong signer)")
+
+    # The signed content is everything after the signature line
+    body = lines[1] if len(lines) > 1 else ""
+    actual_hash = hashlib.sha256(body.encode()).hexdigest()
+    if actual_hash != content_hash:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (tampered)")
+
+    if not verify_signature(content_hash, sig_b64, node_pub):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (bad signature)")
+
+    # Parse TOML body
+    try:
+        data = tomllib.loads(body)
+    except Exception:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (invalid TOML)")
+
+    # Verify fingerprint matches
+    if data.get("fingerprint") != fingerprint:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (fingerprint mismatch)")
+
+    # Check expiry
+    expires_at = data.get("expires_at")
+    if expires_at:
+        from datetime import datetime, timezone
+        try:
+            exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > exp:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authorized key expired")
+        except (ValueError, AttributeError):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authorized key file (bad expiry)")
+
+    return data
+
+
+def _verify_signed_request(request: Request, raw_body: bytes, settings: Settings) -> Principal:
+    """Verify Ed25519 signed request headers.
+
+    Extracts the caller's fingerprint from X-Rye-Key-Id, loads their
+    authorized key file, verifies the request signature, checks replay,
+    and returns a Principal.
+    """
+    from ryeos_remote.replay import get_replay_guard
+
+    key_id = request.headers.get("x-rye-key-id", "")
+    timestamp = request.headers.get("x-rye-timestamp", "")
+    nonce = request.headers.get("x-rye-nonce", "")
+    signature = request.headers.get("x-rye-signature", "")
+
+    if not all([key_id, timestamp, nonce, signature]):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing auth headers")
+
+    # Extract fingerprint from key_id (format: fp:<fingerprint>)
+    if not key_id.startswith("fp:"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid key ID format")
+    fingerprint = key_id[3:]
+
+    # Check timestamp freshness
+    try:
+        req_time = int(timestamp)
+    except ValueError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid timestamp")
+    now = int(time.time())
+    if abs(now - req_time) > 300:  # 5 minute window
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Request expired")
+
+    # Load authorized key file (verifies node signature, expiry)
+    auth_data = _load_authorized_key(fingerprint, settings)
+
+    # Get caller's public key from authorized key file
+    public_key_b64 = auth_data.get("public_key", "")
+    if not public_key_b64.startswith("ed25519:"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid public key format")
+    # The public key PEM is stored as base64 after "ed25519:" prefix
+    # But we stored it as the actual PEM content after the prefix
+    import base64
+    public_key_pem = base64.b64decode(public_key_b64[8:])
+
+    # Compute this node's audience (fp:<node_fingerprint>)
+    from lillux.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature
+
+    _, node_pub = load_keypair(Path(settings.signing_key_dir))
+    node_fp = compute_key_fingerprint(node_pub)
+    audience = f"fp:{node_fp}"
+
+    # Reconstruct string_to_sign and verify
+    body_hash = hashlib.sha256(raw_body or b"").hexdigest()
+
+    # Build canonical path from request
+    path = request.url.path
+    query = str(request.url.query) if request.url.query else ""
+    if query:
+        from urllib.parse import parse_qsl, urlencode
+        params = parse_qsl(query, keep_blank_values=True)
+        params.sort()
+        canon_path = f"{path}?{urlencode(params)}"
+    else:
+        canon_path = path
+
+    string_to_sign = "\n".join([
+        "ryeos-request-v1",
+        request.method.upper(),
+        canon_path,
+        body_hash,
+        timestamp,
+        nonce,
+        audience,
+    ])
+
+    content_hash = hashlib.sha256(string_to_sign.encode()).hexdigest()
+    if not verify_signature(content_hash, signature, public_key_pem):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid signature")
+
+    # Replay check
+    guard = get_replay_guard(settings.cas_base_path)
+    if not guard.check_and_record(fingerprint, nonce):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Replayed request")
+
+    return Principal(
+        fingerprint=fingerprint,
+        capabilities=auth_data.get("capabilities", []),
+        owner=auth_data.get("owner", ""),
+    )
+
+
+def require_capability(principal: Principal, action: str) -> None:
+    """Raise 403 if principal doesn't have a matching capability.
+
+    Capabilities use fnmatch patterns (e.g., 'rye.execute.tool.*').
+    """
+    for cap in principal.capabilities:
+        if fnmatch.fnmatch(action, cap):
+            return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Missing required capability: {action}",
+    )
+
+
+async def get_current_principal(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> Principal:
+    """FastAPI dependency: authenticate via signed request headers."""
+    raw_body = await request.body()
+    return _verify_signed_request(request, raw_body, settings)
+
+
+# ---------------------------------------------------------------------------
+# HMAC webhook verification (unchanged — external services don't have Ed25519)
 # ---------------------------------------------------------------------------
 
 WEBHOOK_TIMESTAMP_MAX_FUTURE_SECONDS = 30
@@ -145,60 +278,6 @@ def verify_hmac(timestamp: str, raw_body: bytes, secret: str, signature: str) ->
 
 
 # ---------------------------------------------------------------------------
-# Replay protection (DB-backed for horizontal scaling)
-# ---------------------------------------------------------------------------
-
-REPLAY_TTL_SECONDS = 600  # 10 minutes
-
-
-def check_replay(hook_id: str, delivery_id: str, settings=None) -> None:
-    """Reject duplicate webhook deliveries using persistent DB store.
-
-    Uses webhook_deliveries_replay table with (hook_id, delivery_id) unique key.
-    Insert succeeds → first delivery. Insert conflicts → duplicate.
-    """
-    if not delivery_id:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "X-Webhook-Delivery-Id header required",
-        )
-
-    if settings is None:
-        from ryeos_remote.config import get_settings
-        settings = get_settings()
-
-    from supabase import create_client
-    sb = create_client(settings.supabase_url, settings.supabase_service_key)
-
-    # Check if already processed
-    existing = (
-        sb.table("webhook_deliveries_replay")
-        .select("delivery_id")
-        .eq("hook_id", hook_id)
-        .eq("delivery_id", delivery_id)
-        .execute()
-    )
-    if existing.data:
-        raise HTTPException(
-            status.HTTP_200_OK,
-            "Already processed",
-        )
-
-    # Insert — if concurrent insert races, the unique constraint catches it
-    try:
-        sb.table("webhook_deliveries_replay").insert({
-            "hook_id": hook_id,
-            "delivery_id": delivery_id,
-        }).execute()
-    except Exception:
-        # Unique constraint violation = concurrent duplicate
-        raise HTTPException(
-            status.HTTP_200_OK,
-            "Already processed",
-        )
-
-
-# ---------------------------------------------------------------------------
 # ResolvedExecution — normalized result from dual-auth
 # ---------------------------------------------------------------------------
 
@@ -207,10 +286,10 @@ def check_replay(hook_id: str, delivery_id: str, settings=None) -> None:
 class ResolvedExecution:
     """Normalized execution request after auth resolution.
 
-    Both bearer and webhook paths produce this. The /execute handler
+    Both signed-request and webhook paths produce this. The /execute handler
     doesn't know or care which auth path was used.
     """
-    user: User
+    principal: Principal
     item_type: str
     item_id: str
     project_path: str

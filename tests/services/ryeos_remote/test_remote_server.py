@@ -55,24 +55,25 @@ from rye.cas.sync import (
 )
 from rye.constants import AI_DIR
 
-from ryeos_remote.auth import ResolvedExecution, User, get_current_user, require_scope
+from ryeos_remote.auth import Principal, ResolvedExecution, get_current_principal, require_capability
 from ryeos_remote.config import Settings, get_settings
 from ryeos_remote.server import (
     app,
     resolve_execution,
     _execute_from_head,
     _ingest_runtime_outputs,
-    _is_safe_secret_name,
     _lookup_binding,
-    _resolve_user_from_binding,
+    _resolve_principal_from_binding,
+    _resolve_project_ref_or_404,
     _load_manifest_from_snapshot,
     _try_advance_head,
     _fold_back,
-    _store_conflict_record,
     _update_snapshot_cache,
     _validate_manifest_graph,
     MAX_FOLD_BACK_RETRIES,
 )
+from ryeos_remote.refs import resolve_project_ref, advance_project_ref, resolve_user_space_ref, init_project_ref
+from ryeos_remote.executions import register_execution, complete_execution, get_execution, store_conflict_record
 
 # Load ArtifactStore from bundle via importlib (path has .ai/ dir)
 from conftest import PROJECT_ROOT, get_bundle_path
@@ -93,13 +94,18 @@ ArtifactStore = _as_mod.ArtifactStore
 def _make_settings(cas_base, signing_dir, **overrides):
     """Create a Settings instance with test defaults."""
     kwargs = dict(
-        supabase_url="http://localhost",
-        supabase_service_key="fake",
         cas_base_path=str(cas_base),
         signing_key_dir=str(signing_dir),
     )
     kwargs.update(overrides)
     return Settings(**kwargs)
+
+
+TEST_PRINCIPAL = Principal(
+    fingerprint="test-user",
+    capabilities=["rye.*"],
+    owner="tester",
+)
 
 
 @pytest.fixture
@@ -114,13 +120,11 @@ def cas_env(tmp_path):
 
     settings = _make_settings(cas_base, signing_dir)
 
-    test_user = User(id="test-user", username="tester")
-
-    app.dependency_overrides[get_current_user] = lambda: test_user
+    app.dependency_overrides[get_current_principal] = lambda: TEST_PRINCIPAL
     app.dependency_overrides[get_settings] = lambda: settings
 
     async def _mock_resolve_execution(request: Request):
-        """Test override: parse body like bearer path, skip real auth.
+        """Test override: parse body like signed-request path, skip real auth.
 
         Replicates validation from the real resolve_execution so thread
         enforcement and field validation tests still work.
@@ -151,7 +155,7 @@ def cas_env(tmp_path):
             raise _HTTPException(400, f"Tools must use thread=inline on remote, got thread={thread!r}")
 
         return ResolvedExecution(
-            user=test_user,
+            principal=TEST_PRINCIPAL,
             item_type=item_type,
             item_id=item_id,
             project_path=project_path,
@@ -213,11 +217,10 @@ def _build_manifests_with_snapshot(tmp_path, user_cas_root):
         "project_manifest_hash": ph,
         "system_version": get_system_version(),
         "snapshot_hash": snapshot_hash,
-        "snapshot_revision": 1,
+        "project_path": "test-project",
     }
     mock_user_ref = {
         "user_manifest_hash": uh,
-        "snapshot_revision": 1,
         "pushed_at": "2026-01-01T00:00:00+00:00",
     }
     return ph, uh, snapshot_hash, mock_ref, mock_user_ref
@@ -375,17 +378,12 @@ class TestPutGetRoundtrip:
 class TestExecute:
     def test_executes_tool(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -400,17 +398,12 @@ class TestExecute:
 
     def test_system_version_returned(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -422,17 +415,12 @@ class TestExecute:
 
     def test_new_object_hashes_returned(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -442,31 +430,6 @@ class TestExecute:
         body = r.json()
         assert "new_object_hashes" in body
         assert isinstance(body["new_object_hashes"], list)
-
-    def test_version_mismatch(self, cas_env):
-        c, _, _ = cas_env
-        from unittest.mock import patch
-
-        mock_ref = {
-            "project_manifest_hash": "a" * 64,
-            "system_version": "99.99.0",
-            "snapshot_hash": "c" * 64,
-            "snapshot_revision": 1,
-        }
-        mock_user_ref = {
-            "user_manifest_hash": "b" * 64,
-            "snapshot_revision": 1,
-            "pushed_at": "2026-01-01T00:00:00+00:00",
-        }
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
-        assert r.status_code == 409
 
     def test_missing_project(self, cas_env):
         c, _, _ = cas_env
@@ -525,17 +488,12 @@ class TestExecuteThreadValidation:
     def test_tool_inline_accepted(self, cas_env):
         """Tool + thread=inline → accepted (not rejected by thread validation)."""
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -548,17 +506,12 @@ class TestExecuteThreadValidation:
     def test_thread_auto_derived_for_tool(self, cas_env):
         """Omitting thread field for tool → auto-derives 'inline'."""
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -566,155 +519,6 @@ class TestExecuteThreadValidation:
                 "parameters": {},
             })
         assert r.status_code == 200
-
-
-# ============================================================================
-# _inject_user_secrets
-# ============================================================================
-
-
-class TestInjectUserSecrets:
-    """Test _inject_user_secrets uses correct RPC response field."""
-
-    def test_uses_decrypted_value_field(self, tmp_path, monkeypatch):
-        """Verify _inject_user_secrets reads 'decrypted_value' not 'decrypted_secret'."""
-        from unittest.mock import MagicMock, patch
-        from ryeos_remote.server import _inject_user_secrets
-
-        cas_base = tmp_path / "cas"
-        signing_dir = tmp_path / "signing"
-        cas_base.mkdir()
-        signing_dir.mkdir()
-
-        settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
-
-        # Mock Supabase RPC to return rows with 'decrypted_value' key
-        mock_rpc_result = MagicMock()
-        mock_rpc_result.data = [
-            {"name": "TEST_SECRET_KEY", "decrypted_value": "secret123"},
-        ]
-        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_rpc_result)))
-        mock_client = MagicMock()
-        mock_client.rpc = mock_rpc
-
-        with patch("supabase.create_client", return_value=mock_client):
-            injected = _inject_user_secrets(user, settings)
-
-        # Should have injected the secret
-        assert len(injected) == 1
-        assert injected[0][0] == "TEST_SECRET_KEY"
-        assert os.environ.get("TEST_SECRET_KEY") == "secret123"
-
-        # Clean up
-        os.environ.pop("TEST_SECRET_KEY", None)
-
-
-# ============================================================================
-# Secrets Endpoints
-# ============================================================================
-
-
-class TestSecretsEndpoints:
-    """Tests for POST /secrets, GET /secrets, DELETE /secrets/{name}."""
-
-    def test_upsert_secrets(self, cas_env):
-        """POST /secrets upserts secrets via RPC."""
-        c, _, _ = cas_env
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock()
-        mock_result.data = None
-        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
-        mock_client = MagicMock()
-        mock_client.rpc = mock_rpc
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            r = c.post("/secrets", json={
-                "secrets": [
-                    {"name": "API_KEY", "value": "secret123"},
-                    {"name": "OTHER_KEY", "value": "secret456"},
-                ],
-            })
-        assert r.status_code == 200
-        body = r.json()
-        assert set(body["stored"]) == {"API_KEY", "OTHER_KEY"}
-        assert body["count"] == 2
-
-    def test_upsert_skips_empty(self, cas_env):
-        """POST /secrets skips entries with empty name or value."""
-        c, _, _ = cas_env
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock()
-        mock_result.data = None
-        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
-        mock_client = MagicMock()
-        mock_client.rpc = mock_rpc
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            r = c.post("/secrets", json={
-                "secrets": [
-                    {"name": "", "value": "val"},
-                    {"name": "KEY", "value": ""},
-                    {"name": "GOOD", "value": "ok"},
-                ],
-            })
-        assert r.status_code == 200
-        assert r.json()["stored"] == ["GOOD"]
-
-    def test_list_secrets(self, cas_env):
-        """GET /secrets returns secret names only."""
-        c, _, _ = cas_env
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock()
-        mock_result.data = [
-            {"name": "API_KEY", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
-            {"name": "DB_URL", "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"},
-        ]
-        mock_table = MagicMock()
-        mock_table.select.return_value.eq.return_value.order.return_value.execute.return_value = mock_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            r = c.get("/secrets")
-        assert r.status_code == 200
-        body = r.json()
-        assert len(body["secrets"]) == 2
-        assert body["secrets"][0]["name"] == "API_KEY"
-
-    def test_delete_secret(self, cas_env):
-        """DELETE /secrets/{name} removes a secret."""
-        c, _, _ = cas_env
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock()
-        mock_result.data = True
-        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
-        mock_client = MagicMock()
-        mock_client.rpc = mock_rpc
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            r = c.delete("/secrets/API_KEY")
-        assert r.status_code == 200
-        assert r.json()["deleted"] == "API_KEY"
-
-    def test_delete_secret_not_found(self, cas_env):
-        """DELETE /secrets/{name} returns 404 for missing secret."""
-        c, _, _ = cas_env
-        from unittest.mock import MagicMock, patch
-
-        mock_result = MagicMock()
-        mock_result.data = False
-        mock_rpc = MagicMock(return_value=MagicMock(execute=MagicMock(return_value=mock_result)))
-        mock_client = MagicMock()
-        mock_client.rpc = mock_rpc
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            r = c.delete("/secrets/NONEXISTENT")
-        assert r.status_code == 404
 
 
 # ============================================================================
@@ -918,7 +722,7 @@ class TestRequestLimits:
         filler = root / "filler.bin"
         filler.write_bytes(b"x" * 2048)
 
-        user = User(id="test-user", username="tester")
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
         small_settings = _make_settings(
             root.parent.parent.parent,  # cas_base
             tmp_path / "signing",
@@ -933,8 +737,8 @@ class TestRequestLimits:
     @staticmethod
     def _apply_overrides(settings):
         import unittest.mock
-        app.dependency_overrides[get_current_user] = lambda: User(
-            id="test-user", username="tester",
+        app.dependency_overrides[get_current_principal] = lambda: Principal(
+            fingerprint="test-user", capabilities=["rye.*"], owner="tester",
         )
         app.dependency_overrides[get_settings] = lambda: settings
         get_settings.cache_clear()
@@ -1749,48 +1553,34 @@ class TestLoadManifestFromSnapshot:
 
 
 class TestTryAdvanceHead:
-    def test_advances_on_matching_revision(self, tmp_path):
+    def test_advances_on_matching_hash(self, tmp_path):
         cas_base = tmp_path / "cas"
         cas_base.mkdir()
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
 
-        from unittest.mock import MagicMock, patch
+        # Set up initial ref
+        init_project_ref(str(cas_base), user.fingerprint, "my-project", "old_hash")
 
-        mock_result = MagicMock()
-        mock_result.data = [{"snapshot_hash": "new_hash"}]  # update succeeded
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            result = _try_advance_head(settings, user, "my-project", "new_hash", 5)
-
+        result = _try_advance_head(settings, user, "my-project", "new_hash", "old_hash")
         assert result is True
 
-    def test_fails_on_revision_mismatch(self, tmp_path):
+        ref = resolve_project_ref(str(cas_base), user.fingerprint, "my-project")
+        assert ref["snapshot_hash"] == "new_hash"
+
+    def test_fails_on_hash_mismatch(self, tmp_path):
         cas_base = tmp_path / "cas"
         cas_base.mkdir()
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
 
-        from unittest.mock import MagicMock, patch
+        init_project_ref(str(cas_base), user.fingerprint, "my-project", "old_hash")
 
-        mock_result = MagicMock()
-        mock_result.data = []  # update returned no rows (revision mismatch)
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_client):
-            result = _try_advance_head(settings, user, "my-project", "new_hash", 5)
-
+        result = _try_advance_head(settings, user, "my-project", "new_hash", "wrong_hash")
         assert result is False
 
 
@@ -1803,10 +1593,10 @@ class TestFoldBack:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
-        root = settings.user_cas_root(user.id)
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
-        cache = settings.cache_root(user.id)
+        cache = settings.cache_root(user.fingerprint)
         cache.mkdir(parents=True)
         return settings, user, root, cache
 
@@ -1818,24 +1608,15 @@ class TestFoldBack:
         base_hash, _ = _create_snapshot_chain(root)
         exec_hash, _ = _create_snapshot_chain(root, parent_hashes=[base_hash], source="execution")
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
-        # _resolve_project_ref returns current HEAD = base (unchanged)
         mock_ref = {
             "snapshot_hash": base_hash,
-            "snapshot_revision": 1,
+            "project_path": "test-project",
         }
 
-        # _try_advance_head succeeds (first call)
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = [{"ok": True}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
              patch("ryeos_remote.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
@@ -1868,22 +1649,15 @@ class TestFoldBack:
             parent_hashes=[base_hash], source="execution",
         )
 
-        from unittest.mock import MagicMock, patch, call
+        from unittest.mock import patch
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = [{"ok": True}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
              patch("ryeos_remote.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
@@ -1925,15 +1699,15 @@ class TestFoldBack:
             parent_hashes=[base_hash], source="execution",
         )
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._store_conflict_record"):
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1968,11 +1742,11 @@ class TestFoldBack:
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._store_conflict_record"):
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2005,11 +1779,11 @@ class TestFoldBack:
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._store_conflict_record"):
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2043,22 +1817,15 @@ class TestFoldBack:
             parent_hashes=[base_hash], source="execution",
         )
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = [{"ok": True}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
              patch("ryeos_remote.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
@@ -2100,11 +1867,11 @@ class TestFoldBack:
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._store_conflict_record"):
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2137,11 +1904,11 @@ class TestFoldBack:
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._store_conflict_record"):
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2177,11 +1944,11 @@ class TestFoldBack:
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._store_conflict_record"):
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2197,23 +1964,16 @@ class TestFoldBack:
         base_hash, _ = _create_snapshot_chain(root)
         exec_hash, _ = _create_snapshot_chain(root, parent_hashes=[base_hash], source="execution")
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
-        # HEAD unchanged, but _try_advance_head always fails (concurrent writer)
+        # HEAD unchanged, but advance always fails (concurrent writer)
         mock_ref = {
             "snapshot_hash": base_hash,
-            "snapshot_revision": 1,
+            "project_path": "test-project",
         }
 
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = []  # always fails
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=False), \
              patch("asyncio.sleep", return_value=None):  # skip actual delays
             result = await _fold_back(
                 user, settings, "test-project",
@@ -2240,22 +2000,15 @@ class TestFoldBack:
             parent_hashes=[base_hash], source="execution",
         )
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = [{"ok": True}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
              patch("ryeos_remote.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
@@ -2283,22 +2036,15 @@ class TestFoldBack:
             root, files={}, parent_hashes=[base_hash], source="execution",
         )
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         mock_ref = {
             "snapshot_hash": head_hash,
-            "snapshot_revision": 2,
+            "project_path": "test-project",
         }
 
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = [{"ok": True}]
-        mock_table = MagicMock()
-        mock_table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
-        mock_client = MagicMock()
-        mock_client.table.return_value = mock_table
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_client), \
+        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
              patch("ryeos_remote.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
@@ -2318,18 +2064,12 @@ class TestExecuteFromHead:
         """Manifest unchanged after execution → no-op, skip fold-back."""
         c, root, tmp_path = cas_env
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
-
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -2346,17 +2086,9 @@ class TestExecuteFromHead:
         """Execution modifies project → fast-forward fold-back."""
         c, root, tmp_path = cas_env
 
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
-
-        # For _try_advance_head in fold-back
-        mock_advance_result = MagicMock()
-        mock_advance_result.data = [{"ok": True}]
-
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        mock_sb.table.return_value.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_advance_result
 
         async def mock_handle(self, item_type, item_id, project_path, parameters, thread):
             new_file = Path(project_path) / AI_DIR / "knowledge" / "new_knowledge.md"
@@ -2364,10 +2096,13 @@ class TestExecuteFromHead:
             new_file.write_text("# New Knowledge\n")
             return {"status": "success", "body": "done"}
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._get_supabase", return_value=mock_sb), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]), \
+        # Also need to patch fold-back's resolve + advance for the HEAD advance
+        mock_fold_ref = {"snapshot_hash": snapshot_hash, "project_path": "test-project"}
+
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_remote.server.resolve_project_ref", return_value=mock_fold_ref), \
+             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch.object(
                  __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
@@ -2395,16 +2130,14 @@ class TestExecuteFromHead:
             "project_manifest_hash": "a" * 64,
             "system_version": get_system_version(),
             "snapshot_hash": None,
-            "snapshot_revision": 0,
         }
         mock_user_ref = {
             "user_manifest_hash": "b" * 64,
-            "snapshot_revision": 1,
             "pushed_at": "2026-01-01T00:00:00+00:00",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -2421,7 +2154,7 @@ class TestConcurrentExecution:
 
     Verifies the core Phase 2.5 promise — concurrent modifications are
     merged via three-way merge with a merge commit (two parents).
-    Uses real CAS operations; only Supabase calls are mocked.
+    Uses real CAS operations; only filesystem state calls are mocked.
     """
 
     def _make_env(self, tmp_path):
@@ -2430,12 +2163,12 @@ class TestConcurrentExecution:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
-        root = settings.user_cas_root(user.id)
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
-        cache = settings.cache_root(user.id)
+        cache = settings.cache_root(user.fingerprint)
         cache.mkdir(parents=True)
-        exec_dir = settings.exec_root(user.id)
+        exec_dir = settings.exec_root(user.fingerprint)
         exec_dir.mkdir(parents=True)
         return settings, user, root, cache, exec_dir
 
@@ -2480,35 +2213,28 @@ class TestConcurrentExecution:
         ensure_snapshot_cached(base_snapshot_hash, root, cache)
 
         # --- Mutable state to simulate HEAD advancement ---
-        # Tracks current HEAD and revision — shared across concurrent calls.
+        # Tracks current HEAD — shared across concurrent calls.
         # The first execution to advance HEAD updates this; the second sees the new HEAD.
         head_state = {
             "snapshot_hash": base_snapshot_hash,
-            "project_manifest_hash": base_manifest_hash,
-            "system_version": get_system_version(),
-            "snapshot_revision": 1,
+            "project_path": "test-project",
         }
 
-        advance_lock = asyncio.Lock()
-
-        def mock_resolve_project_ref(settings, user, project_path):
+        def mock_resolve_project_ref_or_404(settings, user, project_path):
             return dict(head_state)
 
-        def mock_try_advance_head(
-            settings, user, project_path, new_hash, expected_rev, **kwargs,
-        ):
-            """Simulate optimistic CAS — succeed only if revision matches."""
-            if head_state["snapshot_revision"] != expected_rev:
+        def mock_resolve_project_ref(cas_base, user_fp, project_path):
+            return dict(head_state)
+
+        def mock_advance_project_ref(cas_base, user_fp, project_path, new_hash, expected_hash):
+            """Simulate optimistic CAS — succeed only if hash matches."""
+            if head_state["snapshot_hash"] != expected_hash:
                 return False
             head_state["snapshot_hash"] = new_hash
-            head_state["snapshot_revision"] = expected_rev + 1
-            if "project_manifest_hash" in kwargs:
-                head_state["project_manifest_hash"] = kwargs["project_manifest_hash"]
             return True
 
         mock_user_ref = {
             "user_manifest_hash": user_manifest_hash,
-            "snapshot_revision": 1,
             "pushed_at": "2026-01-01T00:00:00+00:00",
         }
 
@@ -2538,12 +2264,12 @@ class TestConcurrentExecution:
 
         from ryeos_remote.server import _execute_from_head
 
-        with patch("ryeos_remote.server._resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._try_advance_head", side_effect=mock_try_advance_head), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]), \
-             patch("ryeos_remote.server._register_thread"), \
-             patch("ryeos_remote.server._complete_thread"), \
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_remote.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
+             patch("ryeos_remote.server.advance_project_ref", side_effect=mock_advance_project_ref), \
+             patch("ryeos_remote.server.register_execution"), \
+             patch("ryeos_remote.server.complete_execution"), \
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch("ryeos_remote.server._check_user_quota"), \
              patch.object(
@@ -2649,28 +2375,23 @@ class TestConcurrentExecution:
 
         head_state = {
             "snapshot_hash": base_snapshot_hash,
-            "project_manifest_hash": base_manifest_hash,
-            "system_version": get_system_version(),
-            "snapshot_revision": 1,
+            "project_path": "test-project",
         }
 
-        def mock_resolve_project_ref(settings, user, project_path):
+        def mock_resolve_project_ref_or_404(settings, user, project_path):
             return dict(head_state)
 
-        def mock_try_advance_head(
-            settings, user, project_path, new_hash, expected_rev, **kwargs,
-        ):
-            if head_state["snapshot_revision"] != expected_rev:
+        def mock_resolve_project_ref(cas_base, user_fp, project_path):
+            return dict(head_state)
+
+        def mock_advance_project_ref(cas_base, user_fp, project_path, new_hash, expected_hash):
+            if head_state["snapshot_hash"] != expected_hash:
                 return False
             head_state["snapshot_hash"] = new_hash
-            head_state["snapshot_revision"] = expected_rev + 1
-            if "project_manifest_hash" in kwargs:
-                head_state["project_manifest_hash"] = kwargs["project_manifest_hash"]
             return True
 
         mock_user_ref = {
             "user_manifest_hash": user_manifest_hash,
-            "snapshot_revision": 1,
             "pushed_at": "2026-01-01T00:00:00+00:00",
         }
 
@@ -2694,15 +2415,15 @@ class TestConcurrentExecution:
 
         from ryeos_remote.server import _execute_from_head
 
-        with patch("ryeos_remote.server._resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._try_advance_head", side_effect=mock_try_advance_head), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]), \
-             patch("ryeos_remote.server._register_thread"), \
-             patch("ryeos_remote.server._complete_thread"), \
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_remote.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
+             patch("ryeos_remote.server.advance_project_ref", side_effect=mock_advance_project_ref), \
+             patch("ryeos_remote.server.register_execution"), \
+             patch("ryeos_remote.server.complete_execution"), \
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch("ryeos_remote.server._check_user_quota"), \
-             patch("ryeos_remote.server._store_conflict_record"), \
+             patch("ryeos_remote.server.store_conflict_record"), \
              patch.object(
                  __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
@@ -2795,28 +2516,23 @@ class TestConcurrentExecution:
 
         head_state = {
             "snapshot_hash": base_snapshot_hash,
-            "project_manifest_hash": base_manifest_hash,
-            "system_version": get_system_version(),
-            "snapshot_revision": 1,
+            "project_path": "test-project",
         }
 
-        def mock_resolve_project_ref(settings, user, project_path):
+        def mock_resolve_project_ref_or_404(settings, user, project_path):
             return dict(head_state)
 
-        def mock_try_advance_head(
-            settings, user, project_path, new_hash, expected_rev, **kwargs,
-        ):
-            if head_state["snapshot_revision"] != expected_rev:
+        def mock_resolve_project_ref(cas_base, user_fp, project_path):
+            return dict(head_state)
+
+        def mock_advance_project_ref(cas_base, user_fp, project_path, new_hash, expected_hash):
+            if head_state["snapshot_hash"] != expected_hash:
                 return False
             head_state["snapshot_hash"] = new_hash
-            head_state["snapshot_revision"] = expected_rev + 1
-            if "project_manifest_hash" in kwargs:
-                head_state["project_manifest_hash"] = kwargs["project_manifest_hash"]
             return True
 
         mock_user_ref = {
             "user_manifest_hash": user_manifest_hash,
-            "snapshot_revision": 1,
             "pushed_at": "2026-01-01T00:00:00+00:00",
         }
 
@@ -2839,12 +2555,12 @@ class TestConcurrentExecution:
 
         from ryeos_remote.server import _execute_from_head
 
-        with patch("ryeos_remote.server._resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_remote.server._resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server._try_advance_head", side_effect=mock_try_advance_head), \
-             patch("ryeos_remote.server._inject_user_secrets", return_value=[]), \
-             patch("ryeos_remote.server._register_thread"), \
-             patch("ryeos_remote.server._complete_thread"), \
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
+             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_remote.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
+             patch("ryeos_remote.server.advance_project_ref", side_effect=mock_advance_project_ref), \
+             patch("ryeos_remote.server.register_execution"), \
+             patch("ryeos_remote.server.complete_execution"), \
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch("ryeos_remote.server._check_user_quota"), \
              patch.object(
@@ -2898,44 +2614,34 @@ class TestStoreConflictRecord:
     def test_stores_conflict(self, tmp_path):
         cas_base = tmp_path / "cas"
         cas_base.mkdir()
-        signing_dir = tmp_path / "signing"
-        signing_dir.mkdir()
-        settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
+        user_fp = "test-user"
+        exec_dir = cas_base / user_fp / "executions" / "by-id"
+        exec_dir.mkdir(parents=True)
 
-        from unittest.mock import MagicMock, patch
+        store_conflict_record(
+            str(cas_base), user_fp,
+            thread_id="thread-1",
+            conflicts={"file.txt": {"type": "content"}},
+            unmerged_snapshot="snap123",
+        )
 
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{}])
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
-            _store_conflict_record(
-                settings, user, "project",
-                thread_id="thread-1",
-                conflicts={"file.txt": {"type": "content"}},
-                unmerged_snapshot="snap123",
-            )
-
-        mock_sb.table.assert_called_with("threads")
+        record_file = exec_dir / "thread-1"
+        assert record_file.exists()
+        import json
+        record = json.loads(record_file.read_text())
+        assert record["merge_conflicts"] == {"file.txt": {"type": "content"}}
+        assert record["unmerged_snapshot_hash"] == "snap123"
 
     def test_handles_error_gracefully(self, tmp_path):
         cas_base = tmp_path / "cas"
-        cas_base.mkdir()
-        signing_dir = tmp_path / "signing"
-        signing_dir.mkdir()
-        settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
-
-        from unittest.mock import patch
-
-        with patch("ryeos_remote.server._get_supabase", side_effect=Exception("db error")):
-            # Should not raise — logs warning instead
-            _store_conflict_record(
-                settings, user, "project",
-                thread_id="thread-1",
-                conflicts={},
-                unmerged_snapshot="snap123",
-            )
+        # Don't create dirs — should trigger an error path but not raise
+        store_conflict_record(
+            str(cas_base), "test-user",
+            thread_id="thread-1",
+            conflicts={},
+            unmerged_snapshot="snap123",
+        )
+        # Should not raise — logs warning instead
 
 
 class TestUpdateSnapshotCache:
@@ -2945,10 +2651,10 @@ class TestUpdateSnapshotCache:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
-        root = settings.user_cas_root(user.id)
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
-        cache = settings.cache_root(user.id)
+        cache = settings.cache_root(user.fingerprint)
         cache.mkdir(parents=True)
 
         snapshot_hash, _ = _create_snapshot_chain(root)
@@ -2967,10 +2673,10 @@ class TestUpdateSnapshotCache:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = User(id="test-user", username="tester")
-        root = settings.user_cas_root(user.id)
+        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
-        cache = settings.cache_root(user.id)
+        cache = settings.cache_root(user.fingerprint)
         cache.mkdir(parents=True)
 
         # Non-existent snapshot → ensure_snapshot_cached will raise
@@ -2981,33 +2687,6 @@ class TestUpdateSnapshotCache:
         # Should not raise — logs warning instead
 
 
-class TestSecretNameValidation:
-    def test_inject_safe_secret_name(self):
-        assert _is_safe_secret_name("MY_API_KEY") is True
-
-    def test_reject_reserved_name_path(self):
-        assert _is_safe_secret_name("PATH") is False
-
-    def test_reject_reserved_prefix_supabase(self):
-        assert _is_safe_secret_name("SUPABASE_URL") is False
-
-    def test_reject_reserved_prefix_modal(self):
-        assert _is_safe_secret_name("MODAL_TOKEN") is False
-
-    def test_reject_reserved_prefix_aws(self):
-        assert _is_safe_secret_name("AWS_SECRET_ACCESS_KEY") is False
-
-    def test_reject_empty_name(self):
-        assert _is_safe_secret_name("") is False
-
-    def test_reject_non_identifier(self):
-        assert _is_safe_secret_name("my-key") is False
-
-    def test_case_insensitive_reserved(self):
-        assert _is_safe_secret_name("path") is False
-        assert _is_safe_secret_name("Supabase_Url") is False
-
-
 class TestSettingsCacheExecRoots:
     def test_cache_root(self):
         s = _make_settings("/cas", "/signing")
@@ -3016,41 +2695,6 @@ class TestSettingsCacheExecRoots:
     def test_exec_root(self):
         s = _make_settings("/cas", "/signing")
         assert s.exec_root("user-1") == Path("/cas/user-1/executions")
-
-
-# ============================================================================
-# Scope Enforcement
-# ============================================================================
-
-
-class TestRequireScope:
-    def test_require_scope_exact_match(self):
-        user = User(id="u1", username="tester", scopes=["remote:execute", "registry:read"])
-        require_scope(user, "remote:execute")  # should not raise
-
-    def test_require_scope_wildcard_match(self):
-        user = User(id="u1", username="tester", scopes=["remote:*"])
-        require_scope(user, "remote:execute")  # should not raise
-        require_scope(user, "remote:push")  # should not raise
-
-    def test_require_scope_missing(self):
-        user = User(id="u1", username="tester", scopes=["registry:read"])
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc_info:
-            require_scope(user, "remote:execute")
-        assert exc_info.value.status_code == 403
-        assert "remote:execute" in exc_info.value.detail
-
-    def test_require_scope_wrong_service(self):
-        user = User(id="u1", username="tester", scopes=["registry:read", "registry:write"])
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc_info:
-            require_scope(user, "remote:execute")
-        assert exc_info.value.status_code == 403
-
-    def test_require_scope_none(self):
-        user = User(id="u1", username="tester", scopes=None)
-        require_scope(user, "remote:execute")  # should not raise (unrestricted)
 
 
 # ============================================================================
@@ -3142,61 +2786,6 @@ class TestVerifyHmac:
         assert exc_info.value.status_code == 401
 
 
-class TestReplayProtection:
-    def _mock_settings(self):
-        return _make_settings("/cas", "/signing")
-
-    def test_first_delivery_accepted(self):
-        from unittest.mock import MagicMock, patch
-        from ryeos_remote.auth import check_replay
-        mock_sb = MagicMock()
-        # No existing record → first delivery
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        with patch("supabase.create_client", return_value=mock_sb):
-            check_replay("wh_test", "delivery-1", self._mock_settings())  # should not raise
-
-    def test_duplicate_delivery_rejected(self):
-        from unittest.mock import MagicMock, patch
-        from ryeos_remote.auth import check_replay
-        mock_sb = MagicMock()
-        # Existing record found → duplicate
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"delivery_id": "delivery-dup"}])
-        with patch("supabase.create_client", return_value=mock_sb):
-            with pytest.raises(HTTPException) as exc_info:
-                check_replay("wh_test", "delivery-dup", self._mock_settings())
-            assert exc_info.value.status_code == 200  # idempotent
-
-    def test_different_hooks_independent(self):
-        from unittest.mock import MagicMock, patch
-        from ryeos_remote.auth import check_replay
-        mock_sb = MagicMock()
-        # No existing records → both accepted
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
-        with patch("supabase.create_client", return_value=mock_sb):
-            check_replay("wh_a", "delivery-x", self._mock_settings())
-            check_replay("wh_b", "delivery-x", self._mock_settings())  # different hook → ok
-
-    def test_missing_delivery_id(self):
-        from ryeos_remote.auth import check_replay
-        with pytest.raises(HTTPException) as exc_info:
-            check_replay("wh_test", "", self._mock_settings())
-        assert exc_info.value.status_code == 400
-
-    def test_concurrent_insert_conflict(self):
-        from unittest.mock import MagicMock, patch
-        from ryeos_remote.auth import check_replay
-        mock_sb = MagicMock()
-        # No existing record on select, but insert raises (unique constraint)
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
-        mock_sb.table.return_value.insert.return_value.execute.side_effect = Exception("unique violation")
-        with patch("supabase.create_client", return_value=mock_sb):
-            with pytest.raises(HTTPException) as exc_info:
-                check_replay("wh_test", "delivery-race", self._mock_settings())
-            assert exc_info.value.status_code == 200  # idempotent
-
-
 # ============================================================================
 # Webhook Binding Lookup
 # ============================================================================
@@ -3204,7 +2793,7 @@ class TestReplayProtection:
 
 class TestLookupBinding:
     def test_active_binding(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         settings = _make_settings("/cas", "/signing")
         binding = {
             "hook_id": "wh_test",
@@ -3216,68 +2805,45 @@ class TestLookupBinding:
             "hmac_secret": "whsec_secret",
             "revoked_at": None,
         }
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[binding])
 
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        with patch("ryeos_remote.server.resolve_binding", return_value=binding):
             result = _lookup_binding("wh_test", settings)
         assert result["item_id"] == "email/handle_inbound"
 
     def test_missing_binding(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         settings = _make_settings("/cas", "/signing")
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
 
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        with patch("ryeos_remote.server.resolve_binding", return_value=None):
             with pytest.raises(HTTPException) as exc_info:
                 _lookup_binding("wh_nonexistent", settings)
         assert exc_info.value.status_code == 401
         assert "Invalid webhook auth" in exc_info.value.detail
 
     def test_revoked_binding(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         settings = _make_settings("/cas", "/signing")
-        binding = {
-            "hook_id": "wh_revoked",
-            "user_id": "user-1",
-            "revoked_at": "2026-01-01T00:00:00+00:00",
-        }
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[binding])
 
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        # resolve_binding returns None for revoked bindings
+        with patch("ryeos_remote.server.resolve_binding", return_value=None):
             with pytest.raises(HTTPException) as exc_info:
                 _lookup_binding("wh_revoked", settings)
         assert exc_info.value.status_code == 401
 
 
-class TestResolveUserFromBinding:
-    def test_valid_user(self):
-        from unittest.mock import MagicMock, patch
-        settings = _make_settings("/cas", "/signing")
-        binding = {"user_id": "user-1"}
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
-            data=[{"id": "user-1", "username": "leo", "email": "leo@test.com"}]
-        )
+class TestResolvePrincipalFromBinding:
+    def test_valid_principal(self):
+        binding = {"user_id": "fp-abc123", "capabilities": ["rye.execute.*"], "owner": "leo"}
+        principal = _resolve_principal_from_binding(binding)
+        assert principal.fingerprint == "fp-abc123"
+        assert principal.owner == "leo"
+        assert principal.capabilities == ["rye.execute.*"]
 
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
-            user = _resolve_user_from_binding(binding, settings)
-        assert user.id == "user-1"
-        assert user.username == "leo"
-
-    def test_missing_user(self):
-        from unittest.mock import MagicMock, patch
-        settings = _make_settings("/cas", "/signing")
-        binding = {"user_id": "user-gone"}
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
-            with pytest.raises(HTTPException) as exc_info:
-                _resolve_user_from_binding(binding, settings)
-        assert exc_info.value.status_code == 401
+    def test_default_capabilities(self):
+        binding = {"user_id": "fp-abc123"}
+        principal = _resolve_principal_from_binding(binding)
+        assert principal.fingerprint == "fp-abc123"
+        assert principal.capabilities == ["rye.execute.*"]
 
 
 # ============================================================================
@@ -3288,12 +2854,17 @@ class TestResolveUserFromBinding:
 class TestWebhookBindings:
     def test_create_binding(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
+        mock_result = {
+            "hook_id": "wh_" + "a" * 32,
+            "hmac_secret": "whsec_" + "b" * 64,
+            "item_type": "directive",
+            "item_id": "email/handle_inbound",
+            "project_path": "campaign-kiwi",
+        }
 
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        with patch("ryeos_remote.server.create_binding", return_value=mock_result):
             r = c.post("/webhook-bindings", json={
                 "item_type": "directive",
                 "item_id": "email/handle_inbound",
@@ -3307,10 +2878,6 @@ class TestWebhookBindings:
         assert body["item_type"] == "directive"
         assert body["item_id"] == "email/handle_inbound"
         assert body["project_path"] == "campaign-kiwi"
-        # hook_id is 35 chars (wh_ + 32 hex)
-        assert len(body["hook_id"]) == 35
-        # hmac_secret is 70 chars (whsec_ + 64 hex)
-        assert len(body["hmac_secret"]) == 70
 
     def test_create_binding_invalid_item_type(self, cas_env):
         c, root, tmp_path = cas_env
@@ -3323,16 +2890,14 @@ class TestWebhookBindings:
 
     def test_list_bindings(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         bindings = [
             {"hook_id": "wh_abc", "item_type": "directive", "item_id": "email/send",
              "project_path": "proj", "description": "test", "created_at": "2026-01-01", "revoked_at": None},
         ]
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(data=bindings)
 
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        with patch("ryeos_remote.server.list_bindings", return_value=bindings):
             r = c.get("/webhook-bindings")
         assert r.status_code == 200
         body = r.json()
@@ -3341,24 +2906,18 @@ class TestWebhookBindings:
 
     def test_revoke_binding(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.update.return_value.eq.return_value.eq.return_value.eq.return_value.is_.return_value.execute.return_value = MagicMock(data=[{"hook_id": "wh_abc"}])
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        with patch("ryeos_remote.server.revoke_binding", return_value=True):
             r = c.delete("/webhook-bindings/wh_abc")
         assert r.status_code == 200
         assert r.json()["revoked"] == "wh_abc"
 
     def test_revoke_nonexistent(self, cas_env):
         c, root, tmp_path = cas_env
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
-        mock_sb = MagicMock()
-        mock_sb.table.return_value.update.return_value.eq.return_value.eq.return_value.eq.return_value.is_.return_value.execute.return_value = MagicMock(data=[])
-
-        with patch("ryeos_remote.server._get_supabase", return_value=mock_sb):
+        with patch("ryeos_remote.server.revoke_binding", return_value=False):
             r = c.delete("/webhook-bindings/wh_nonexistent")
         assert r.status_code == 404
 
@@ -3708,13 +3267,11 @@ class TestHistoryEndpoint:
         h1 = cas.store_object(s1.to_dict(), user_cas)
 
         mock_ref = {
-            "project_manifest_hash": "m1",
-            "system_version": "1.0.0",
             "snapshot_hash": h1,
-            "snapshot_revision": 2,
+            "project_path": "my-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref):
             r = c.get("/history", params={"project_path": "my-project"})
 
         assert r.status_code == 200
@@ -3734,7 +3291,7 @@ class TestHistoryEndpoint:
         def raise_404(*args, **kwargs):
             raise HTTPException(404, "No project ref found")
 
-        with patch("ryeos_remote.server._resolve_project_ref", side_effect=raise_404):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=raise_404):
             r = c.get("/history", params={"project_path": "nonexistent"})
 
         assert r.status_code == 404
@@ -3755,13 +3312,11 @@ class TestHistoryEndpoint:
             prev = cas.store_object(s.to_dict(), user_cas)
 
         mock_ref = {
-            "project_manifest_hash": "m4",
-            "system_version": "1.0.0",
             "snapshot_hash": prev,
-            "snapshot_revision": 5,
+            "project_path": "proj",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref", return_value=mock_ref):
+        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref):
             r = c.get("/history", params={"project_path": "proj", "limit": 2})
 
         assert r.status_code == 200

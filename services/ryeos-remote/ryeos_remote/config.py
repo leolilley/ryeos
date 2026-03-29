@@ -10,14 +10,14 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    # Supabase (auth + secrets)
-    supabase_url: str
-    supabase_service_key: str
     # CAS storage
     cas_base_path: str = "/cas"
 
     # Remote signing key
     signing_key_dir: str = "/cas/signing"
+
+    # Node config (authorized keys, node identity)
+    node_config_dir: str = ""  # defaults to <cas_base_path>/config/
 
     # Remote identity (server-asserted, set via RYE_REMOTE_NAME env var)
     rye_remote_name: str = "default"
@@ -30,14 +30,22 @@ class Settings(BaseSettings):
     max_request_bytes: int = 50 * 1024 * 1024  # 50MB
     max_user_storage_bytes: int = 1024 * 1024 * 1024  # 1GB
 
-    def user_cas_root(self, user_id: str) -> Path:
-        return Path(self.cas_base_path) / user_id / ".ai" / "objects"
+    def _node_config(self) -> Path:
+        if self.node_config_dir:
+            return Path(self.node_config_dir)
+        return Path(self.cas_base_path) / "config"
 
-    def cache_root(self, user_id: str) -> Path:
-        return Path(self.cas_base_path) / user_id / "cache"
+    def authorized_keys_dir(self) -> Path:
+        return self._node_config() / "authorized_keys"
 
-    def exec_root(self, user_id: str) -> Path:
-        return Path(self.cas_base_path) / user_id / "executions"
+    def user_cas_root(self, fingerprint: str) -> Path:
+        return Path(self.cas_base_path) / fingerprint / ".ai" / "objects"
+
+    def cache_root(self, fingerprint: str) -> Path:
+        return Path(self.cas_base_path) / fingerprint / "cache"
+
+    def exec_root(self, fingerprint: str) -> Path:
+        return Path(self.cas_base_path) / fingerprint / "executions"
 
 
 @lru_cache

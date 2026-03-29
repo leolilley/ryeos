@@ -2,9 +2,8 @@
 
 Endpoints: /health, /public-key, /objects/has, /objects/put, /objects/get,
            /push, /push/user-space, /user-space,
-           /execute, /fetch, /sign,
+           /execute,
            /threads, /threads/{thread_id},
-           /secrets (POST, GET), /secrets/{name} (DELETE),
            /webhook-bindings (POST, GET), /webhook-bindings/{hook_id} (DELETE)
 """
 
@@ -15,7 +14,6 @@ import json
 import logging
 import os
 import random
-import secrets
 import shutil
 import uuid
 from pathlib import Path
@@ -27,37 +25,34 @@ from pydantic import BaseModel
 from starlette.middleware.gzip import GZipMiddleware
 
 from ryeos_remote.auth import (
+    Principal,
     ResolvedExecution,
-    User,
-    check_replay,
-    get_current_user,
-    require_scope,
+    _verify_signed_request,
+    get_current_principal,
+    require_capability,
     verify_hmac,
     verify_timestamp,
 )
 from ryeos_remote.config import Settings, get_settings
-
-RESERVED_ENV_NAMES = frozenset({
-    "PATH", "PYTHONPATH", "HOME", "USER", "SHELL", "LANG", "TERM",
-    "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP",
-    # Internal RYE vars set by the server — block individually, not by prefix
-    "RYE_SIGNING_KEY_DIR", "RYE_KERNEL_PYTHON", "RYE_REMOTE_NAME",
-})
-
-RESERVED_ENV_PREFIXES = (
-    "SUPABASE_", "MODAL_", "LD_", "SSL_", "AWS_",
-    "GOOGLE_", "AZURE_", "GITHUB_", "CI_", "DOCKER_",
+from ryeos_remote.refs import (
+    advance_project_ref,
+    resolve_project_ref,
+    resolve_user_space_ref,
+    advance_user_space_ref,
 )
-
-
-def _is_safe_secret_name(name: str) -> bool:
-    """Check if a secret name is safe to inject into os.environ."""
-    if not name or not name.isidentifier():
-        return False
-    upper = name.upper()
-    if upper in RESERVED_ENV_NAMES:
-        return False
-    return not any(upper.startswith(p) for p in RESERVED_ENV_PREFIXES)
+from ryeos_remote.executions import (
+    register_execution,
+    complete_execution,
+    list_executions,
+    get_execution,
+    store_conflict_record,
+)
+from ryeos_remote.webhooks import (
+    create_binding,
+    list_bindings,
+    resolve_binding,
+    revoke_binding,
+)
 
 from lillux.primitives import cas
 from lillux.primitives.integrity import compute_integrity
@@ -143,10 +138,6 @@ class PushUserSpaceRequest(BaseModel):
     expected_revision: Optional[int] = None  # None = first push
 
 
-class SecretsUpsertRequest(BaseModel):
-    secrets: List[Dict[str, str]]
-
-
 class CreateWebhookBindingRequest(BaseModel):
     item_type: str
     item_id: str
@@ -157,13 +148,13 @@ class CreateWebhookBindingRequest(BaseModel):
 # --- Helpers ---
 
 
-def _user_cas_root(user: User, settings: Settings) -> Path:
-    return settings.user_cas_root(user.id)
+def _principal_cas_root(principal: Principal, settings: Settings) -> Path:
+    return settings.user_cas_root(principal.fingerprint)
 
 
-def _check_user_quota(user: User, settings: Settings) -> None:
-    """Reject if user CAS exceeds storage quota."""
-    root = _user_cas_root(user, settings)
+def _check_user_quota(principal: Principal, settings: Settings) -> None:
+    """Reject if principal CAS exceeds storage quota."""
+    root = _principal_cas_root(principal, settings)
     if not root.exists():
         return
     total = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
@@ -439,195 +430,24 @@ def _ingest_runtime_outputs(
     return bundle_hash, new_hashes
 
 
-def _inject_user_secrets(user: User, settings: Settings) -> list[tuple[str, str | None]]:
-    """Fetch user secrets from Vault and inject into os.environ.
-
-    Returns list of (key, previous_value_or_None) tuples for cleanup.
-    Safe under max_inputs=1 — no concurrent requests share this process.
-    """
-    try:
-        from supabase import create_client
-
-        supabase = create_client(settings.supabase_url, settings.supabase_service_key)
-        result = supabase.rpc(
-            "get_user_secrets", {"p_user_id": user.id}
-        ).execute()
-
-        injected: list[tuple[str, str | None]] = []
-        for row in result.data or []:
-            name = row["name"]
-            if not _is_safe_secret_name(name):
-                logger.warning("Skipping unsafe secret name: %s for user %s", name, user.username)
-                continue
-            old_value = os.environ.get(name)
-            os.environ[name] = row["decrypted_value"]
-            injected.append((name, old_value))
-
-        if injected:
-            logger.info("Injected %d user secrets for %s", len(injected), user.username)
-        return injected
-    except Exception:
-        logger.warning("Failed to fetch user secrets", exc_info=True)
-        return []
-
-
-def _get_supabase(settings: Settings):
-    """Get Supabase client (service_role for server-side writes)."""
-    from supabase import create_client
-    return create_client(settings.supabase_url, settings.supabase_service_key)
-
-
-def _register_thread(
+def _resolve_project_ref_or_404(
     settings: Settings,
-    user: User,
-    thread_id: str,
-    item_type: str,
-    item_id: str,
-    project_manifest_hash: str,
-    user_manifest_hash: str,
-    project_path: Optional[str] = None,
-) -> None:
-    """Register a thread row in Supabase (state=running)."""
-    try:
-        sb = _get_supabase(settings)
-        sb.table("threads").insert({
-            "thread_id": thread_id,
-            "user_id": user.id,
-            "item_type": item_type,
-            "item_id": item_id,
-            "execution_mode": "remote",
-            "remote_name": settings.rye_remote_name,
-            "project_path": project_path,
-            "project_manifest_hash": project_manifest_hash,
-            "user_manifest_hash": user_manifest_hash,
-            "system_version": get_system_version(),
-            "state": "running",
-        }).execute()
-    except Exception:
-        logger.warning("Failed to register thread %s", thread_id, exc_info=True)
-
-
-def _complete_thread(
-    settings: Settings,
-    thread_id: str,
-    state: str,
-    snapshot_hash: Optional[str] = None,
-    runtime_outputs_bundle_hash: Optional[str] = None,
-) -> None:
-    """Update thread state to completed/error."""
-    try:
-        sb = _get_supabase(settings)
-        update = {"state": state, "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
-        if snapshot_hash:
-            update["snapshot_hash"] = snapshot_hash
-        if runtime_outputs_bundle_hash:
-            update["runtime_outputs_bundle_hash"] = runtime_outputs_bundle_hash
-        sb.table("threads").update(update).eq(
-            "thread_id", thread_id
-        ).execute()
-    except Exception:
-        logger.warning("Failed to complete thread %s", thread_id, exc_info=True)
-
-
-def _upsert_project_ref(
-    settings: Settings,
-    user: User,
-    project_path: str,
-    project_manifest_hash: str,
-    system_version: str,
-    snapshot_hash: Optional[str] = None,
-    expected_revision: Optional[int] = None,
-) -> None:
-    """Upsert project_refs row with optional optimistic lock on snapshot_revision.
-
-    If expected_revision is provided, uses compare-and-swap on snapshot_revision
-    to prevent concurrent HEAD advances from clobbering each other.
-    Raises HTTPException(409) if the revision has moved.
-    """
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    sb = _get_supabase(settings)
-    row = {
-        "user_id": user.id,
-        "remote_name": settings.rye_remote_name,
-        "project_path": project_path,
-        "project_manifest_hash": project_manifest_hash,
-        "system_version": system_version,
-        "pushed_at": now,
-    }
-    if snapshot_hash is not None:
-        row["snapshot_hash"] = snapshot_hash
-        row["head_updated_at"] = now
-
-    if expected_revision is not None:
-        row["snapshot_revision"] = expected_revision + 1
-        # Optimistic CAS: update only if revision matches
-        result = (
-            sb.table("project_refs")
-            .update(row)
-            .eq("user_id", user.id)
-            .eq("remote_name", settings.rye_remote_name)
-            .eq("project_path", project_path)
-            .eq("snapshot_revision", expected_revision)
-            .execute()
-        )
-        if not result.data:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "HEAD revision moved during push. Pull and retry.",
-            )
-    else:
-        sb.table("project_refs").upsert(row).execute()
-
-
-def _resolve_project_ref(
-    settings: Settings,
-    user: User,
+    principal: Principal,
     project_path: str,
 ) -> Dict[str, Any]:
-    """Look up project_refs to resolve project manifest and snapshot state.
+    """Look up project ref from local filesystem.
 
-    Returns dict with project_manifest_hash, system_version,
-    snapshot_hash, snapshot_revision.
-    Raises HTTPException if not found.
+    Returns dict with snapshot_hash, project_path.
+    Raises HTTPException(404) if not found.
     """
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("project_refs")
-        .select("project_manifest_hash, system_version, snapshot_hash, snapshot_revision")
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .eq("project_path", project_path)
-        .execute()
-    )
-    if not result.data:
+    ref = resolve_project_ref(settings.cas_base_path, principal.fingerprint, project_path)
+    if not ref:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             f"No project ref '{project_path}' found on remote '{settings.rye_remote_name}'. "
             f"Push first: rye execute tool rye/core/remote/remote action=push",
         )
-    return result.data[0]
-
-
-def _resolve_user_space_ref(
-    settings: Settings,
-    user: User,
-) -> Optional[Dict[str, Any]]:
-    """Look up user_space_refs for user's current user space.
-
-    Returns dict with user_manifest_hash, snapshot_revision, pushed_at.
-    Returns None if no user space has been pushed.
-    """
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("user_space_refs")
-        .select("user_manifest_hash, snapshot_revision, pushed_at")
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .execute()
-    )
-    if not result.data:
-        return None
-    return result.data[0]
+    return ref
 
 
 def _find_execution_snapshot_hash(project_path: Path) -> Optional[str]:
@@ -658,34 +478,74 @@ async def health():
     return {"status": "ok", "version": get_system_version()}
 
 
+_identity_cache: dict | None = None
+
+
 @app.get("/public-key")
 async def public_key(settings: Settings = Depends(get_settings)):
-    from lillux.primitives.signing import ensure_keypair
-    ensure_keypair(Path(settings.signing_key_dir))
-    key_path = Path(settings.signing_key_dir) / "public_key.pem"
-    return {"public_key_pem": key_path.read_text()}
+    """Return the node's signed identity document (signing + box keys)."""
+    global _identity_cache
+    if _identity_cache is not None:
+        return _identity_cache
+
+    import base64
+    from lillux.primitives.signing import (
+        compute_key_fingerprint,
+        ensure_full_keypair,
+    )
+
+    key_dir = Path(settings.signing_key_dir)
+    priv, pub, box_key, box_pub = ensure_full_keypair(key_dir)
+    fingerprint = compute_key_fingerprint(pub)
+
+    identity_doc = {
+        "kind": "identity/v1",
+        "principal_id": f"fp:{fingerprint}",
+        "signing_key": f"ed25519:{base64.b64encode(pub).decode()}",
+        "box_key": f"x25519:{base64.b64encode(box_pub).decode()}",
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    # Sign with the node's own key
+    import hashlib as _hl
+    from lillux.primitives.signing import sign_hash
+    payload = json.dumps(
+        {k: v for k, v in identity_doc.items() if k != "_signature"},
+        sort_keys=True, separators=(",", ":"),
+    )
+    content_hash = _hl.sha256(payload.encode()).hexdigest()
+    sig_b64 = sign_hash(content_hash, priv)
+
+    identity_doc["_signature"] = {
+        "signer": f"fp:{fingerprint}",
+        "sig": sig_b64,
+        "signed_at": identity_doc["created_at"],
+    }
+
+    _identity_cache = identity_doc
+    return _identity_cache
 
 
 @app.post("/objects/has")
 async def objects_has(
     req: HasObjectsRequest,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    require_scope(user, "remote:objects")
-    root = _user_cas_root(user, settings)
+    require_capability(principal, "rye.objects.*")
+    root = _principal_cas_root(principal, settings)
     return handle_has_objects(req.hashes, root)
 
 
 @app.post("/objects/put")
 async def objects_put(
     req: PutObjectsRequest,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    require_scope(user, "remote:objects")
-    _check_user_quota(user, settings)
-    root = _user_cas_root(user, settings)
+    require_capability(principal, "rye.objects.*")
+    _check_user_quota(principal, settings)
+    root = _principal_cas_root(principal, settings)
     result = handle_put_objects(req.entries, root)
     if result.get("errors"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, result)
@@ -695,23 +555,23 @@ async def objects_put(
 @app.post("/objects/get")
 async def objects_get(
     req: GetObjectsRequest,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    require_scope(user, "remote:objects")
-    root = _user_cas_root(user, settings)
+    require_capability(principal, "rye.objects.*")
+    root = _principal_cas_root(principal, settings)
     return handle_get_objects(req.hashes, root)
 
 
 @app.post("/push")
 async def push(
     req: PushRequest,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Finalize a push — validate manifest graph, create snapshot, advance HEAD."""
-    require_scope(user, "remote:push")
-    root = _user_cas_root(user, settings)
+    require_capability(principal, "rye.push.*")
+    root = _principal_cas_root(principal, settings)
 
     # Deep validation: verify manifest schema + full transitive object graph
     _validate_manifest_graph(
@@ -725,18 +585,8 @@ async def push(
         _check_system_version(req.system_version)
 
     # Resolve current HEAD (if any)
-    sb = _get_supabase(settings)
-    ref_result = (
-        sb.table("project_refs")
-        .select("snapshot_hash, snapshot_revision")
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .eq("project_path", req.project_path)
-        .execute()
-    )
-    ref = ref_result.data[0] if ref_result.data else None
+    ref = resolve_project_ref(settings.cas_base_path, principal.fingerprint, req.project_path)
     current_head = ref["snapshot_hash"] if ref else None
-    current_rev = ref["snapshot_revision"] if ref else 0
 
     # Reject if client is behind (expected_snapshot_hash mismatch)
     if req.expected_snapshot_hash is not None or current_head is not None:
@@ -747,12 +597,11 @@ async def push(
                     "error": "HEAD has moved",
                     "expected": req.expected_snapshot_hash,
                     "actual": current_head,
-                    "revision": current_rev,
                 },
             )
 
     # Resolve user space hash for snapshot (may be None if never pushed)
-    user_ref = _resolve_user_space_ref(settings, user)
+    user_ref = resolve_user_space_ref(settings.cas_base_path, principal.fingerprint)
     user_manifest_hash = user_ref["user_manifest_hash"] if user_ref else None
 
     # Create ProjectSnapshot
@@ -765,23 +614,14 @@ async def push(
     )
     snapshot_hash = cas.store_object(snapshot.to_dict(), root)
 
-    # Advance HEAD
-    if ref is not None:
-        _upsert_project_ref(
-            settings, user,
-            project_path=req.project_path,
-            project_manifest_hash=req.project_manifest_hash,
-            system_version=req.system_version,
-            snapshot_hash=snapshot_hash,
-            expected_revision=current_rev,
-        )
-    else:
-        _upsert_project_ref(
-            settings, user,
-            project_path=req.project_path,
-            project_manifest_hash=req.project_manifest_hash,
-            system_version=req.system_version,
-            snapshot_hash=snapshot_hash,
+    # Advance HEAD (compare-and-swap on snapshot hash)
+    if not advance_project_ref(
+        settings.cas_base_path, principal.fingerprint,
+        req.project_path, snapshot_hash, current_head,
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "HEAD moved during push. Pull and retry.",
         )
 
     return {
@@ -796,12 +636,12 @@ async def push(
 @app.post("/push/user-space")
 async def push_user_space(
     req: PushUserSpaceRequest,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Push user space independently from projects."""
-    require_scope(user, "remote:push")
-    root = _user_cas_root(user, settings)
+    require_capability(principal, "rye.push.*")
+    root = _principal_cas_root(principal, settings)
 
     # Deep validation: verify manifest schema + full transitive object graph
     _validate_manifest_graph(
@@ -811,50 +651,10 @@ async def push_user_space(
         label="user_manifest",
     )
 
-    sb = _get_supabase(settings)
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    if req.expected_revision is not None:
-        # Optimistic CAS update
-        result = (
-            sb.table("user_space_refs")
-            .update({
-                "user_manifest_hash": req.user_manifest_hash,
-                "snapshot_revision": req.expected_revision + 1,
-                "pushed_at": now,
-            })
-            .eq("user_id", user.id)
-            .eq("remote_name", settings.rye_remote_name)
-            .eq("snapshot_revision", req.expected_revision)
-            .execute()
-        )
-        if not result.data:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "User space revision moved. Fetch current state and retry.",
-            )
-    else:
-        # First push — insert only (reject if row exists to prevent silent overwrite)
-        existing = (
-            sb.table("user_space_refs")
-            .select("snapshot_revision")
-            .eq("user_id", user.id)
-            .eq("remote_name", settings.rye_remote_name)
-            .execute()
-        )
-        if existing.data:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"User space already exists at revision {existing.data[0]['snapshot_revision']}. "
-                "Provide expected_revision for optimistic update.",
-            )
-        sb.table("user_space_refs").insert({
-            "user_id": user.id,
-            "remote_name": settings.rye_remote_name,
-            "user_manifest_hash": req.user_manifest_hash,
-            "snapshot_revision": 1,
-            "pushed_at": now,
-        }).execute()
+    advance_user_space_ref(
+        settings.cas_base_path, principal.fingerprint,
+        req.user_manifest_hash, req.expected_revision,
+    )
 
     return {
         "status": "ok",
@@ -865,12 +665,12 @@ async def push_user_space(
 
 @app.get("/user-space")
 async def get_user_space(
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Get current user space ref."""
-    require_scope(user, "remote:push")
-    ref = _resolve_user_space_ref(settings, user)
+    require_capability(principal, "rye.push.*")
+    ref = resolve_user_space_ref(settings.cas_base_path, principal.fingerprint)
     if not ref:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -878,7 +678,7 @@ async def get_user_space(
         )
     return {
         "user_manifest_hash": ref["user_manifest_hash"],
-        "snapshot_revision": ref["snapshot_revision"],
+        "revision": ref["revision"],
         "pushed_at": ref["pushed_at"],
         "remote_name": settings.rye_remote_name,
     }
@@ -889,35 +689,23 @@ async def get_user_space(
 
 def _lookup_binding(hook_id: str, settings: Settings) -> dict:
     """Look up an active webhook binding. Returns generic 401 on not found/revoked."""
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("webhook_bindings")
-        .select("*")
-        .eq("hook_id", hook_id)
-        .eq("remote_name", settings.rye_remote_name)
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
-    binding = result.data[0]
-    if binding.get("revoked_at"):
+    binding = resolve_binding(settings.cas_base_path, hook_id, settings.rye_remote_name)
+    if not binding:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
     return binding
 
 
-def _resolve_user_from_binding(binding: dict, settings: Settings) -> User:
-    """Resolve the User who owns a webhook binding."""
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("users")
-        .select("id, username, email")
-        .eq("id", binding["user_id"])
-        .execute()
+def _resolve_principal_from_binding(binding: dict) -> Principal:
+    """Resolve the Principal who owns a webhook binding.
+
+    The binding's user_id is the principal fingerprint.
+    Webhook bindings carry their own capabilities (inherited from when created).
+    """
+    return Principal(
+        fingerprint=binding["user_id"],
+        capabilities=binding.get("capabilities", ["rye.execute.*"]),
+        owner=binding.get("owner", ""),
     )
-    if not result.data:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook auth")
-    u = result.data[0]
-    return User(id=u["id"], username=u["username"], email=u.get("email"))
 
 
 # --- Dual-auth resolve_execution ---
@@ -929,8 +717,8 @@ async def resolve_execution(
 ) -> ResolvedExecution:
     """Determine auth mode from headers and return normalized ResolvedExecution.
 
+    - X-Rye-Signature header → signed-request auth path (caller controls everything)
     - X-Webhook-Timestamp header → webhook HMAC path (binding controls what executes)
-    - Authorization header → bearer API key path (caller controls everything)
     - Both or neither → 401
     """
     raw_body = await request.body()
@@ -941,17 +729,19 @@ async def resolve_execution(
     if not isinstance(body, dict):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "JSON body must be an object")
 
-    has_bearer = bool(request.headers.get("authorization"))
+    has_signed = bool(request.headers.get("x-rye-signature"))
     has_webhook = bool(request.headers.get("x-webhook-timestamp"))
 
-    if has_bearer == has_webhook:
+    if has_signed == has_webhook:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
-            "Provide exactly one auth mode: Authorization header OR webhook headers",
+            "Provide exactly one auth mode: signed request headers OR webhook headers",
         )
 
     if has_webhook:
         # Webhook path — HMAC auth, binding controls what executes
+        from ryeos_remote.replay import get_replay_guard
+
         timestamp = request.headers.get("x-webhook-timestamp", "")
         signature = request.headers.get("x-webhook-signature", "")
         delivery_id = request.headers.get("x-webhook-delivery-id", "")
@@ -962,9 +752,16 @@ async def resolve_execution(
         binding = _lookup_binding(hook_id, settings)
         verify_timestamp(timestamp)
         verify_hmac(timestamp, raw_body, binding["hmac_secret"], signature)
-        check_replay(hook_id, delivery_id, settings)
 
-        user = _resolve_user_from_binding(binding, settings)
+        # Replay check for webhook deliveries
+        if delivery_id:
+            guard = get_replay_guard(settings.cas_base_path)
+            if not guard.check_and_record(hook_id, delivery_id):
+                raise HTTPException(status.HTTP_200_OK, "Already processed")
+        else:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "X-Webhook-Delivery-Id header required")
+
+        principal = _resolve_principal_from_binding(binding)
         thread = "fork" if binding["item_type"] == "directive" else "inline"
 
         parameters = body.get("parameters", {})
@@ -972,7 +769,7 @@ async def resolve_execution(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "parameters must be an object")
 
         return ResolvedExecution(
-            user=user,
+            principal=principal,
             item_type=binding["item_type"],
             item_id=binding["item_id"],
             project_path=binding["project_path"],
@@ -980,18 +777,9 @@ async def resolve_execution(
             thread=thread,
         )
 
-    # Bearer path — caller controls everything
-    from fastapi.security import HTTPAuthorizationCredentials
-
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid authorization header")
-    token = auth_header[7:]
-    from ryeos_remote.auth import _resolve_api_key, API_KEY_PREFIX
-    if not token.startswith(API_KEY_PREFIX):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token — use an API key")
-    user = await _resolve_api_key(token, settings)
-    require_scope(user, "remote:execute")
+    # Signed-request path — caller controls everything
+    principal = _verify_signed_request(request, raw_body, settings)
+    require_capability(principal, "rye.execute.*")
 
     item_type = body.get("item_type")
     item_id = body.get("item_id")
@@ -1035,7 +823,7 @@ async def resolve_execution(
         )
 
     return ResolvedExecution(
-        user=user,
+        principal=principal,
         item_type=item_type,
         item_id=item_id,
         project_path=project_path,
@@ -1050,78 +838,13 @@ async def execute(
     settings: Settings = Depends(get_settings),
 ):
     return await _execute_from_head(
-        user=resolved.user,
+        principal=resolved.principal,
         settings=settings,
         project_path=resolved.project_path,
         item_type=resolved.item_type,
         item_id=resolved.item_id,
         parameters=resolved.parameters,
         thread=resolved.thread,
-    )
-
-
-# --- First-class tool endpoints (fetch/sign) ---
-
-
-@app.post("/fetch")
-async def fetch_item(
-    request: Request,
-    user: User = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-):
-    """Fetch rye items. Wraps execute with item_type=tool, item_id=rye/fetch."""
-    require_scope(user, "remote:execute")
-    raw_body = await request.body()
-    try:
-        body = json.loads(raw_body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON body")
-    if not isinstance(body, dict):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "JSON body must be an object")
-
-    project_path = body.pop("project_path", None)
-    if not project_path:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "project_path is required")
-
-    return await _execute_from_head(
-        user=user,
-        settings=settings,
-        project_path=project_path,
-        item_type="tool",
-        item_id="rye/fetch",
-        parameters=body,
-        thread="inline",
-    )
-
-
-@app.post("/sign")
-async def sign_item(
-    request: Request,
-    user: User = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-):
-    """Sign a rye item. Wraps execute with item_type=tool, item_id=rye/sign."""
-    require_scope(user, "remote:execute")
-    raw_body = await request.body()
-    try:
-        body = json.loads(raw_body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON body")
-    if not isinstance(body, dict):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "JSON body must be an object")
-
-    project_path = body.pop("project_path", None)
-    if not project_path:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "project_path is required")
-
-    return await _execute_from_head(
-        user=user,
-        settings=settings,
-        project_path=project_path,
-        item_type="tool",
-        item_id="rye/sign",
-        parameters=body,
-        thread="inline",
     )
 
 
@@ -1132,7 +855,7 @@ FOLD_BACK_BASE_JITTER_MS = 50
 
 
 async def _execute_from_head(
-    user: User,
+    principal: Principal,
     settings: Settings,
     project_path: str,
     item_type: str,
@@ -1141,8 +864,8 @@ async def _execute_from_head(
     thread: str,
 ):
     """Execute from project HEAD — isolated mutable checkout with fold-back."""
-    ref = _resolve_project_ref(settings, user, project_path)
-    user_ref = _resolve_user_space_ref(settings, user)
+    ref = _resolve_project_ref_or_404(settings, principal, project_path)
+    user_ref = resolve_user_space_ref(settings.cas_base_path, principal.fingerprint)
     user_manifest_hash = user_ref["user_manifest_hash"] if user_ref else None
 
     base_snapshot_hash = ref["snapshot_hash"]
@@ -1151,22 +874,26 @@ async def _execute_from_head(
             status.HTTP_400_BAD_REQUEST,
             f"Project '{project_path}' has no snapshot. Re-push to create one.",
         )
-    _check_system_version(ref["system_version"])
 
-    root = _user_cas_root(user, settings)
-    cache = settings.cache_root(user.id)
-    exec_root = settings.exec_root(user.id)
+    root = _principal_cas_root(principal, settings)
+    cache = settings.cache_root(principal.fingerprint)
+    exec_root = settings.exec_root(principal.fingerprint)
     thread_id = f"rye-remote-{uuid.uuid4().hex[:12]}"
     exec_space: Path | None = None
-    injected_keys: list[tuple[str, str | None]] = []
 
-    _register_thread(
-        settings, user, thread_id,
+    # Derive project_manifest_hash from snapshot for registration
+    base_snap_obj = cas.get_object(base_snapshot_hash, _principal_cas_root(principal, settings))
+    base_manifest_hash = base_snap_obj["project_manifest_hash"] if base_snap_obj else None
+
+    register_execution(
+        settings.cas_base_path, principal.fingerprint, thread_id,
         item_type=item_type,
         item_id=item_id,
-        project_manifest_hash=ref["project_manifest_hash"],
+        project_manifest_hash=base_manifest_hash or "",
         user_manifest_hash=user_manifest_hash,
         project_path=project_path,
+        remote_name=settings.rye_remote_name,
+        system_version=get_system_version(),
     )
 
     try:
@@ -1188,8 +915,6 @@ async def _execute_from_head(
             empty_user = exec_space / ".empty_user_space"
             empty_user.mkdir(exist_ok=True)
             os.environ["USER_SPACE"] = str(empty_user)
-
-        injected_keys = _inject_user_secrets(user, settings)
 
         tool = ExecuteTool(
             user_space=str(user_space) if user_space else None,
@@ -1218,7 +943,7 @@ async def _execute_from_head(
             es = ExecutionSnapshot(
                 graph_run_id=thread_id,
                 graph_id=f"{item_type}/{item_id}",
-                project_manifest_hash=ref["project_manifest_hash"],
+                project_manifest_hash=base_manifest_hash or "",
                 user_manifest_hash=user_manifest_hash,
                 system_version=get_system_version(),
                 step=0,
@@ -1247,8 +972,8 @@ async def _execute_from_head(
         if exec_manifest_hash == base_manifest_hash:
             # No-op — manifest unchanged, skip fold-back
             exec_status = result.get("status", "unknown")
-            _complete_thread(
-                settings, thread_id,
+            complete_execution(
+                settings.cas_base_path, principal.fingerprint, thread_id,
                 state="completed" if exec_status == "success" else "error",
                 snapshot_hash=exec_snapshot_hash,
                 runtime_outputs_bundle_hash=bundle_hash or None,
@@ -1280,17 +1005,17 @@ async def _execute_from_head(
 
         # Fold back into HEAD
         fold_result = await _fold_back(
-            user, settings, project_path,
+            principal, settings, project_path,
             base_snapshot_hash, proj_snapshot_hash,
             root, cache, thread_id,
             user_manifest_hash=user_manifest_hash,
         )
 
-        _check_user_quota(user, settings)
+        _check_user_quota(principal, settings)
 
         exec_status = result.get("status", "unknown")
-        _complete_thread(
-            settings, thread_id,
+        complete_execution(
+            settings.cas_base_path, principal.fingerprint, thread_id,
             state="completed" if exec_status == "success" else "error",
             snapshot_hash=fold_result["snapshot_hash"],
             runtime_outputs_bundle_hash=bundle_hash or None,
@@ -1309,18 +1034,13 @@ async def _execute_from_head(
             **({k: fold_result[k] for k in ("conflicts", "unmerged_snapshot") if k in fold_result}),
         }
     except FileNotFoundError as e:
-        _complete_thread(settings, thread_id, state="error")
+        complete_execution(settings.cas_base_path, principal.fingerprint, thread_id, state="error")
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     except Exception:
-        _complete_thread(settings, thread_id, state="error")
+        complete_execution(settings.cas_base_path, principal.fingerprint, thread_id, state="error")
         raise
     finally:
         os.environ.pop("USER_SPACE", None)
-        for key, old_value in injected_keys:
-            if old_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = old_value
         if exec_space:
             cleanup_execution_space(exec_space)
 
@@ -1341,7 +1061,7 @@ def _load_manifest_from_snapshot(
 
 
 async def _fold_back(
-    user: User,
+    principal: Principal,
     settings: Settings,
     project_path: str,
     base_snapshot_hash: str,
@@ -1359,21 +1079,17 @@ async def _fold_back(
     current_head = base_snapshot_hash  # fallback for retry_exhausted
 
     for attempt in range(MAX_FOLD_BACK_RETRIES):
-        ref = _resolve_project_ref(settings, user, project_path)
-        current_head = ref["snapshot_hash"]
-        current_rev = ref["snapshot_revision"]
+        ref = resolve_project_ref(settings.cas_base_path, principal.fingerprint, project_path)
+        current_head = ref["snapshot_hash"] if ref else base_snapshot_hash
 
         if current_head == base_snapshot_hash:
             # Fast-forward — HEAD hasn't moved
-            exec_snap_obj = cas.get_object(exec_snapshot_hash, cas_root)
-            exec_pm = exec_snap_obj["project_manifest_hash"] if exec_snap_obj else None
             if _try_advance_head(
-                settings, user, project_path,
-                exec_snapshot_hash, current_rev,
-                project_manifest_hash=exec_pm,
+                settings, principal, project_path,
+                exec_snapshot_hash, current_head,
             ):
                 _update_snapshot_cache(
-                    settings, user, project_path,
+                    settings, principal, project_path,
                     exec_snapshot_hash, cas_root, cache_root,
                 )
                 return {"snapshot_hash": exec_snapshot_hash, "merge_type": "fast-forward"}
@@ -1388,8 +1104,8 @@ async def _fold_back(
             )
 
             if merge_result.has_conflicts:
-                _store_conflict_record(
-                    settings, user, project_path,
+                store_conflict_record(
+                    settings.cas_base_path, principal.fingerprint,
                     thread_id=thread_id,
                     conflicts=merge_result.conflicts,
                     unmerged_snapshot=exec_snapshot_hash,
@@ -1424,12 +1140,11 @@ async def _fold_back(
             )
 
             if _try_advance_head(
-                settings, user, project_path,
-                merge_snapshot_hash, current_rev,
-                project_manifest_hash=merged_manifest_hash,
+                settings, principal, project_path,
+                merge_snapshot_hash, current_head,
             ):
                 _update_snapshot_cache(
-                    settings, user, project_path,
+                    settings, principal, project_path,
                     merge_snapshot_hash, cas_root, cache_root,
                 )
                 return {"snapshot_hash": merge_snapshot_hash, "merge_type": "merge"}
@@ -1439,8 +1154,8 @@ async def _fold_back(
         await asyncio.sleep(jitter / 1000)
 
     # Exhausted retries — persist unmerged snapshot for later inspection
-    _store_conflict_record(
-        settings, user, project_path,
+    store_conflict_record(
+        settings.cas_base_path, principal.fingerprint,
         thread_id=thread_id,
         conflicts={"retry_exhausted": True, "attempts": MAX_FOLD_BACK_RETRIES},
         unmerged_snapshot=exec_snapshot_hash,
@@ -1454,42 +1169,21 @@ async def _fold_back(
 
 def _try_advance_head(
     settings: Settings,
-    user: User,
+    principal: Principal,
     project_path: str,
     new_snapshot_hash: str,
-    expected_rev: int,
-    project_manifest_hash: Optional[str] = None,
+    expected_snapshot_hash: str,
 ) -> bool:
-    """Optimistic CAS on snapshot_revision. Returns True if update succeeded.
-
-    Updates full project_refs metadata to prevent stale cached values
-    after fold-back.
-    """
-    sb = _get_supabase(settings)
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    update = {
-        "snapshot_hash": new_snapshot_hash,
-        "snapshot_revision": expected_rev + 1,
-        "head_updated_at": now,
-    }
-    if project_manifest_hash is not None:
-        update["project_manifest_hash"] = project_manifest_hash
-        update["system_version"] = get_system_version()
-    result = (
-        sb.table("project_refs")
-        .update(update)
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .eq("project_path", project_path)
-        .eq("snapshot_revision", expected_rev)
-        .execute()
+    """Compare-and-swap on snapshot hash. Returns True if update succeeded."""
+    return advance_project_ref(
+        settings.cas_base_path, principal.fingerprint,
+        project_path, new_snapshot_hash, expected_snapshot_hash,
     )
-    return bool(result.data)
 
 
 def _update_snapshot_cache(
     settings: Settings,
-    user: User,
+    principal: Principal,
     project_path: str,
     new_snapshot_hash: str,
     cas_root: Path,
@@ -1505,71 +1199,34 @@ def _update_snapshot_cache(
         )
 
 
-def _store_conflict_record(
-    settings: Settings,
-    user: User,
-    project_path: str,
-    thread_id: str,
-    conflicts: dict,
-    unmerged_snapshot: str,
-) -> None:
-    """Store merge conflict record in Supabase for later resolution."""
-    try:
-        sb = _get_supabase(settings)
-        sb.table("threads").update({
-            "merge_conflicts": conflicts,
-            "unmerged_snapshot_hash": unmerged_snapshot,
-        }).eq("thread_id", thread_id).execute()
-    except Exception:
-        logger.warning(
-            "Failed to store conflict record for thread %s",
-            thread_id, exc_info=True,
-        )
-
-
 @app.get("/threads")
 async def list_threads(
     limit: int = 20,
     project_path: Optional[str] = None,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    """List user's remote executions on this remote."""
-    require_scope(user, "remote:threads")
-    sb = _get_supabase(settings)
-    query = (
-        sb.table("threads")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .order("created_at", desc=True)
-        .limit(limit)
+    """List principal's remote executions on this remote."""
+    require_capability(principal, "rye.threads.*")
+    threads = list_executions(
+        settings.cas_base_path, principal.fingerprint,
+        project_path=project_path, limit=limit,
     )
-    if project_path:
-        query = query.eq("project_path", project_path)
-    result = query.execute()
-    return {"threads": result.data or [], "remote_name": settings.rye_remote_name}
+    return {"threads": threads, "remote_name": settings.rye_remote_name}
 
 
 @app.get("/threads/{thread_id}")
 async def get_thread(
     thread_id: str,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Get status of a specific thread."""
-    require_scope(user, "remote:threads")
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("threads")
-        .select("*")
-        .eq("thread_id", thread_id)
-        .eq("user_id", user.id)
-        .execute()
-    )
-    if not result.data:
+    require_capability(principal, "rye.threads.*")
+    record = get_execution(settings.cas_base_path, principal.fingerprint, thread_id)
+    if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Thread {thread_id} not found")
-    return result.data[0]
+    return record
 
 
 # --- History ---
@@ -1579,13 +1236,13 @@ async def get_thread(
 async def history(
     project_path: str,
     limit: int = 50,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Walk first-parent snapshot chain from project HEAD."""
-    require_scope(user, "remote:threads")
-    ref = _resolve_project_ref(settings, user, project_path)
-    root = _user_cas_root(user, settings)
+    require_capability(principal, "rye.threads.*")
+    ref = _resolve_project_ref_or_404(settings, principal, project_path)
+    root = _principal_cas_root(principal, settings)
     snapshots = get_history(ref["snapshot_hash"], root, limit=min(limit, 200))
     return {
         "project_path": project_path,
@@ -1595,83 +1252,17 @@ async def history(
     }
 
 
-# --- Secrets management ---
-
-
-@app.post("/secrets")
-async def upsert_secrets(
-    req: SecretsUpsertRequest,
-    user: User = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-):
-    """Upsert user secrets into the vault for remote execution."""
-    require_scope(user, "remote:secrets")
-    sb = _get_supabase(settings)
-    stored = []
-    for entry in req.secrets:
-        name = entry.get("name", "")
-        value = entry.get("value", "")
-        if not name or not value:
-            continue
-        try:
-            sb.rpc(
-                "upsert_user_secret",
-                {"p_user_id": user.id, "p_name": name, "p_value": value},
-            ).execute()
-            stored.append(name)
-        except Exception:
-            logger.warning("Failed to upsert secret %s", name, exc_info=True)
-    return {"stored": stored, "count": len(stored)}
-
-
-@app.get("/secrets")
-async def list_secrets(
-    user: User = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-):
-    """List user's secret names (values are never returned)."""
-    require_scope(user, "remote:secrets")
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("user_secrets")
-        .select("name, created_at, updated_at")
-        .eq("user_id", user.id)
-        .order("name")
-        .execute()
-    )
-    return {"secrets": result.data or []}
-
-
-@app.delete("/secrets/{name}")
-async def delete_secret(
-    name: str,
-    user: User = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-):
-    """Delete a user secret by name."""
-    require_scope(user, "remote:secrets")
-    sb = _get_supabase(settings)
-    result = sb.rpc(
-        "delete_user_secret",
-        {"p_user_id": user.id, "p_name": name},
-    ).execute()
-    deleted = result.data if result.data else False
-    if not deleted:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Secret '{name}' not found")
-    return {"deleted": name}
-
-
 # --- Webhook binding management ---
 
 
 @app.post("/webhook-bindings")
 async def create_webhook_binding(
     req: CreateWebhookBindingRequest,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Create a webhook binding. Returns hook_id and hmac_secret (shown once)."""
-    require_scope(user, "remote:webhook-bindings")
+    require_capability(principal, "rye.webhook-bindings.*")
 
     if req.item_type not in ("tool", "directive"):
         raise HTTPException(
@@ -1679,69 +1270,36 @@ async def create_webhook_binding(
             f"item_type must be 'tool' or 'directive', got {req.item_type!r}",
         )
 
-    hook_id = f"wh_{secrets.token_hex(16)}"
-    hmac_secret = f"whsec_{secrets.token_hex(32)}"
-
-    sb = _get_supabase(settings)
-    sb.table("webhook_bindings").insert({
-        "hook_id": hook_id,
-        "user_id": user.id,
-        "remote_name": settings.rye_remote_name,
-        "item_type": req.item_type,
-        "item_id": req.item_id,
-        "project_path": req.project_path,
-        "hmac_secret": hmac_secret,
-        "description": req.description,
-    }).execute()
-
-    return {
-        "hook_id": hook_id,
-        "hmac_secret": hmac_secret,
-        "item_type": req.item_type,
-        "item_id": req.item_id,
-        "project_path": req.project_path,
-    }
+    return create_binding(
+        settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
+        req.item_type, req.item_id, req.project_path, req.description,
+    )
 
 
 @app.get("/webhook-bindings")
 async def list_webhook_bindings(
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    """List user's webhook bindings (hmac_secret excluded)."""
-    require_scope(user, "remote:webhook-bindings")
-    sb = _get_supabase(settings)
-    result = (
-        sb.table("webhook_bindings")
-        .select("hook_id, item_type, item_id, project_path, description, created_at, revoked_at")
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .order("created_at", desc=True)
-        .execute()
+    """List principal's webhook bindings (hmac_secret excluded)."""
+    require_capability(principal, "rye.webhook-bindings.*")
+    bindings_list = list_bindings(
+        settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
     )
-    return {"bindings": result.data or []}
+    return {"bindings": bindings_list}
 
 
 @app.delete("/webhook-bindings/{hook_id}")
 async def revoke_webhook_binding(
     hook_id: str,
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     """Revoke a webhook binding (soft delete via revoked_at)."""
-    require_scope(user, "remote:webhook-bindings")
-    sb = _get_supabase(settings)
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    result = (
-        sb.table("webhook_bindings")
-        .update({"revoked_at": now})
-        .eq("hook_id", hook_id)
-        .eq("user_id", user.id)
-        .eq("remote_name", settings.rye_remote_name)
-        .is_("revoked_at", "null")
-        .execute()
-    )
-    if not result.data:
+    require_capability(principal, "rye.webhook-bindings.*")
+    if not revoke_binding(
+        settings.cas_base_path, hook_id, principal.fingerprint, settings.rye_remote_name,
+    ):
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             f"Webhook binding '{hook_id}' not found or already revoked",
