@@ -1,7 +1,7 @@
 """Tests for Lillux error types (Phase 1.1)."""
 
 import pytest
-from lillux.primitives.errors import (
+from rye.errors import (
     ValidationError,
     ToolExecutionError,
     IntegrityError,

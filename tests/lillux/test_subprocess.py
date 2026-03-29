@@ -14,7 +14,7 @@ from lillux.primitives.subprocess import (
     KillResult,
     StatusResult,
 )
-from lillux.primitives.errors import ConfigurationError
+from rye.errors import ConfigurationError
 
 
 # Skip all tests if lillux-proc is not on PATH

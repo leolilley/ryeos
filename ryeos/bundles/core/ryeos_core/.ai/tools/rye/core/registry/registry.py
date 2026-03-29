@@ -236,7 +236,7 @@ async def _resolve_auth_token(scope: str = "registry:read") -> Optional[str]:
 
     # 2. Keyring
     try:
-        from lillux.runtime.auth import AuthStore
+        from rye.runtime.auth import AuthStore
         auth_store = AuthStore()
         if auth_store.is_authenticated(REGISTRY_SERVICE):
             return await auth_store.get_token(REGISTRY_SERVICE, scope=scope)
@@ -278,7 +278,7 @@ class RegistryHttpClient:
     async def _get_http(self):
         """Lazy load http_client primitive."""
         if self._http is None:
-            from lillux.primitives.http_client import HttpClientPrimitive
+            from rye.runtime.http_client import HttpClientPrimitive
 
             self._http = HttpClientPrimitive()
         return self._http
@@ -765,7 +765,7 @@ async def _signup(params: Dict[str, Any]) -> Dict[str, Any]:
         # If no confirmation required, we have a session
         if body.get("access_token"):
             try:
-                from lillux.runtime.auth import AuthStore
+                from rye.runtime.auth import AuthStore
 
                 auth_store = AuthStore()  # Uses kernel default service_name="lillux"
                 auth_store.set_token(
@@ -816,7 +816,7 @@ async def _login_email(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from lillux.runtime.auth import AuthStore
+        from rye.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -893,7 +893,7 @@ async def _login(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from lillux.runtime.auth import AuthStore
+        from rye.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available - auth runtime not installed"}
 
@@ -1098,7 +1098,7 @@ async def _logout() -> Dict[str, Any]:
         }
 
     try:
-        from lillux.runtime.auth import AuthStore
+        from rye.runtime.auth import AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -1125,7 +1125,7 @@ async def _whoami() -> Dict[str, Any]:
         }
 
     try:
-        from lillux.runtime.auth import AuthenticationRequired, AuthStore
+        from rye.runtime.auth import AuthenticationRequired, AuthStore
     except ImportError:
         return {"error": "AuthStore not available"}
 
@@ -1207,7 +1207,7 @@ async def _create_api_key(params: Dict[str, Any]) -> Dict[str, Any]:
 
         # Store in keyring immediately — raw key never leaves this function
         try:
-            from lillux.runtime.auth import AuthStore
+            from rye.runtime.auth import AuthStore
             auth_store = AuthStore()
             auth_store.set_token(
                 service=REGISTRY_SERVICE,

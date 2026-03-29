@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import pytest
-from lillux.runtime.env_resolver import EnvResolver
+from rye.runtime.env_resolver import EnvResolver
 
 
 class TestEnvResolverInit:

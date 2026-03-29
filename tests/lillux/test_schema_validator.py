@@ -1,7 +1,7 @@
 """Tests for schema validator (Phase 5.1)."""
 
 import pytest
-from lillux.schemas.schema_validator import validate_parameters, ValidationResult
+from rye.schemas.schema_validator import validate_parameters, ValidationResult
 
 
 class TestValidationResult:

@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from lillux.primitives.errors import ConfigurationError
+from rye.errors import ConfigurationError
 
 
 @dataclass

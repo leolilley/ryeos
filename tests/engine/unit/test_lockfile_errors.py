@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from rye.executor.lockfile_resolver import LockfileResolver
-from lillux.primitives.lockfile import Lockfile, LockfileRoot
+from rye.runtime.lockfile import Lockfile, LockfileRoot
 
 
 @pytest.fixture

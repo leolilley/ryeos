@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from lillux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
+from rye.runtime.lockfile import Lockfile, LockfileManager, LockfileRoot
 
 from rye.constants import AI_DIR
 from rye.utils.path_utils import (

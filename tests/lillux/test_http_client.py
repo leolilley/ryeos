@@ -1,7 +1,7 @@
 """Tests for HTTP client primitive."""
 
 import pytest
-from lillux.primitives.http_client import HttpResult, HttpClientPrimitive, ReturnSink
+from rye.runtime.http_client import HttpResult, HttpClientPrimitive, ReturnSink
 
 
 class TestHttpResult:

@@ -1,17 +1,19 @@
 ```yaml
 id: lillux-primitives
-title: "Lillux Primitives"
-description: The microkernel layer — subprocess, HTTP, signing, and env resolution
+title: "Lillux Primitives & Rye Runtime Modules"
+description: The microkernel layer — subprocess, signing, and integrity — plus runtime modules that moved from Lillux to Rye
 category: internals
-tags: [lillux, primitives, microkernel, subprocess, http]
-version: "1.0.0"
+tags: [lillux, primitives, microkernel, subprocess, rye, runtime]
+version: "1.1.0"
 ```
 
-# Lillux Primitives
+# Lillux Primitives & Rye Runtime Modules
 
 Lillux is the microkernel layer of Rye OS. It provides stateless, async-first primitives for interacting with the operating system. Lillux has **no knowledge** of Rye, `.ai/` directories, tool metadata, or space resolution — it receives fully-resolved configuration and executes it.
 
 All Lillux code lives in `lillux/kernel/`.
+
+> **Note:** As part of the kernel/userspace separation, several modules that were previously Lillux primitives have moved to Rye. Specifically, `http_client`, `lockfile`, `env_resolver`, `auth`, and `schema_validator` now live under `rye/runtime/` or `rye/schemas/`. These were always userspace concerns — networking, file I/O metadata, environment resolution, and authentication policy — and are now properly located in the Rye layer.
 
 ## SubprocessPrimitive
 
@@ -161,7 +163,7 @@ lillux-proc handles timeouts natively. On timeout, the child process is killed a
 
 ## HttpClientPrimitive
 
-**Location:** `lillux/primitives/http_client.py`
+**Location:** `rye/runtime/http_client.py`
 
 Makes HTTP requests with retry logic, authentication, and SSE streaming support. Uses `httpx` for async HTTP with connection pooling.
 
@@ -302,7 +304,7 @@ This guarantees the same input always produces the same hash, regardless of dict
 
 ## Lockfile I/O
 
-**Location:** `lillux/primitives/lockfile.py`
+**Location:** `rye/runtime/lockfile.py`
 
 Pure lockfile I/O with explicit paths. No path resolution, no creation logic — that's handled by Rye's `LockfileResolver`.
 
@@ -338,7 +340,7 @@ The manager validates required fields on load (`lockfile_version`, `generated_at
 
 ## EnvResolver
 
-**Location:** `lillux/runtime/env_resolver.py`
+**Location:** `rye/runtime/env_resolver.py`
 
 Resolves environment variables from multiple sources. Pure resolver with no side effects — it doesn't create venvs or install packages.
 
@@ -378,13 +380,13 @@ Variables are applied in order, so later variables can reference earlier ones.
 
 ## Auth
 
-**Location:** `lillux/runtime/auth.py`
+**Location:** `rye/runtime/auth.py`
 
 Authentication primitives for the runtime layer.
 
 ## SchemaValidator
 
-**Location:** `lillux/schemas/schema_validator.py`
+**Location:** `rye/schemas/schema_validator.py`
 
 JSON Schema validation for tool configs, runtime parameters, and other structured data.
 

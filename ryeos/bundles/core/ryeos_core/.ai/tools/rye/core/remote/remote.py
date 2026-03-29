@@ -115,7 +115,7 @@ class RemoteHttpClient:
 
     async def _get_http(self):
         if self._http is None:
-            from lillux.primitives.http_client import HttpClientPrimitive
+            from rye.runtime.http_client import HttpClientPrimitive
             self._http = HttpClientPrimitive()
         return self._http
 

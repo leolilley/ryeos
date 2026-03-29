@@ -1,4 +1,4 @@
-"""Lillux schema validation."""
+"""Rye schema validation."""
 
 from rye.schemas.schema_validator import (
     validate_parameters,

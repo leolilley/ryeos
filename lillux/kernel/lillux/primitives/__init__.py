@@ -1,6 +1,6 @@
 """Lillux primitives: stateless execution units."""
 
-from lillux.primitives.errors import (
+from rye.errors import (
     AuthenticationRequired,
     ConfigurationError,
     IntegrityError,
@@ -9,7 +9,7 @@ from lillux.primitives.errors import (
     ToolExecutionError,
     ValidationError,
 )
-from lillux.primitives.http_client import HttpClientPrimitive, HttpResult, ReturnSink
+from rye.runtime.http_client import HttpClientPrimitive, HttpResult, ReturnSink
 from lillux.primitives.cas import (
     get_blob,
     get_object,
@@ -22,7 +22,7 @@ from lillux.primitives.integrity import (
     canonical_json,
     compute_integrity,
 )
-from lillux.primitives.lockfile import Lockfile, LockfileManager, LockfileRoot
+from rye.runtime.lockfile import Lockfile, LockfileManager, LockfileRoot
 from lillux.primitives.subprocess import (
     SubprocessPrimitive,
     SubprocessResult,

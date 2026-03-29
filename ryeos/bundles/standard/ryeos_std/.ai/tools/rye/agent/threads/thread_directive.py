@@ -899,7 +899,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     # Resolve env_config from provider YAML (loads .env, resolves ${VAR} refs)
     env_config = provider_config.get("env_config")
     if env_config:
-        from lillux.runtime.env_resolver import EnvResolver
+        from rye.runtime.env_resolver import EnvResolver
         resolver = EnvResolver(project_path=proj_path)
         resolved_env = resolver.resolve(env_config=env_config)
         # Inject resolved vars into os.environ so http_client can find them

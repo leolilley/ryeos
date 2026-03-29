@@ -18,13 +18,13 @@ The bottom layer. Lillux provides stateless, async-first primitives for interact
 | Primitive             | Location                            | Purpose                                                                          |
 | --------------------- | ----------------------------------- | -------------------------------------------------------------------------------- |
 | `SubprocessPrimitive` | `lillux/primitives/subprocess.py`    | Run shell commands with two-stage templating, timeout handling, and stdin piping |
-| `HttpClientPrimitive` | `lillux/primitives/http_client.py`   | Make HTTP requests with retry logic, auth headers, and SSE streaming             |
+| `HttpClientPrimitive` | `rye/runtime/http_client.py`         | Make HTTP requests with retry logic, auth headers, and SSE streaming             |
 | `signing`             | `lillux/primitives/signing.py`       | Ed25519 key generation, sign, verify — pure crypto, no policy                    |
 | `integrity`           | `lillux/primitives/integrity.py`     | Generic deterministic SHA256 hashing via `compute_integrity(data)`               |
 | `cas`                 | `lillux/primitives/cas.py`           | Content-addressed storage — `store_blob`, `store_object`, sharded by hash        |
-| `lockfile`            | `lillux/primitives/lockfile.py`      | Lockfile I/O — load/save JSON lockfiles with explicit paths                      |
-| `EnvResolver`         | `lillux/runtime/env_resolver.py`     | Resolve environment variables from `.env` files, venvs, version managers         |
-| `SchemaValidator`     | `lillux/schemas/schema_validator.py` | JSON Schema validation                                                           |
+| `lockfile`            | `rye/runtime/lockfile.py`            | Lockfile I/O — load/save JSON lockfiles with explicit paths                      |
+| `EnvResolver`         | `rye/runtime/env_resolver.py`        | Resolve environment variables from `.env` files, venvs, version managers         |
+| `SchemaValidator`     | `rye/schemas/schema_validator.py`    | JSON Schema validation                                                           |
 
 Lillux primitives are pure I/O. They receive fully-resolved configuration and execute it. No path discovery, no precedence logic, no policy decisions.
 

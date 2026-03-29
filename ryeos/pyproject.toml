@@ -14,6 +14,7 @@ dependencies = [
     "lillux",
     "pyyaml",
     "cryptography",
+    "httpx>=0.26.0",
     "packaging>=21.0",
 ]
 

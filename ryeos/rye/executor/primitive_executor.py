@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from lillux.primitives.subprocess import SubprocessPrimitive, SubprocessResult
-from lillux.primitives.http_client import HttpClientPrimitive, HttpResult
-from lillux.runtime.env_resolver import EnvResolver
+from rye.runtime.http_client import HttpClientPrimitive, HttpResult
+from rye.runtime.env_resolver import EnvResolver
 
 from rye.executor.chain_validator import ChainValidator, ChainValidationResult
 from rye.executor.lockfile_resolver import LockfileResolver

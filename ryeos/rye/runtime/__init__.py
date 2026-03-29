@@ -1,4 +1,4 @@
-"""Lillux runtime services."""
+"""Rye runtime services — HTTP, auth, env resolution, lockfile I/O."""
 
 from rye.runtime.env_resolver import EnvResolver
 from rye.runtime.auth import AuthStore

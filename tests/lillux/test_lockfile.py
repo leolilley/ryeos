@@ -6,8 +6,8 @@ import tempfile
 from datetime import datetime
 
 import pytest
-from lillux.primitives.lockfile import LockfileRoot, Lockfile, LockfileManager
-from lillux.primitives.errors import LockfileError
+from rye.runtime.lockfile import LockfileRoot, Lockfile, LockfileManager
+from rye.errors import LockfileError
 
 
 class TestLockfileRoot:
