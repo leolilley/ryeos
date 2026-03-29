@@ -14,9 +14,9 @@ status: exploratory
 
 ## The Idea
 
-RYE already has remote execution. `ExecuteTool._dispatch_remote()` pushes CAS objects to a named remote, triggers execution via the `rye/core/remote/remote` tool, and folds results back. The remote server (`ryeos-remote`) materializes a workspace, runs the executor, and returns.
+RYE already has remote execution. `ExecuteTool._dispatch_remote()` pushes CAS objects to a named remote, triggers execution via the `rye/core/remote/remote` tool, and folds results back. The remote server (`ryeos-node`) materializes a workspace, runs the executor, and returns.
 
-Today this is one user pointing at one remote on Modal. This proposal extends it to multiple nodes — each running `ryeos-remote`, each self-reporting what it can do, with routing that matches workload requirements to node capabilities. The execution protocol stays the same because it's already the right shape.
+Today this is one user pointing at one remote on Modal. This proposal extends it to multiple nodes — each running `ryeos-node`, each self-reporting what it can do, with routing that matches workload requirements to node capabilities. The execution protocol stays the same because it's already the right shape.
 
 The key principle: **there is no special infrastructure for specific workload types.** Inference, scraping, data processing — these are all just tool executions. A node that serves a model has a tool that calls tinygrad's `model.generate()` in-process. A node that runs a browser has a tool that launches headless Chrome. The routing system doesn't know or care what the tools do. It matches capabilities and dispatches.
 
@@ -30,8 +30,8 @@ The key principle: **there is no special infrastructure for specific workload ty
 | `_parse_target()`                | `ryeos/rye/actions/execute.py`   | Parses `"remote:gpu"` → `("remote", "gpu")` — named remote syntax         |
 | `rye/core/remote/remote`         | Core bundle tool                 | CAS sync + HTTP POST to the remote server                                 |
 | `remote_config.py`               | Core bundle                      | Resolves named remotes from `cas/remote.yaml` via 3-tier resolution       |
-| `ryeos-remote` server            | `services/ryeos-remote/`         | FastAPI server: `/execute`, `/push`, CAS sync, threads, webhooks, secrets |
-| `modal_app.py`                   | `services/ryeos-remote/`         | Modal deployment: volume-backed CAS, scheduled execution                  |
+| `ryeos-node` server            | `services/ryeos-node/`         | FastAPI server: `/execute`, `/push`, CAS sync, threads, webhooks, secrets |
+| `modal_app.py`                   | `services/ryeos-node/`         | Modal deployment: volume-backed CAS, scheduled execution                  |
 | `cas/remote.yaml`                | `.ai/config/cas/`                | Named remotes with URL + key_env, 3-tier resolved                         |
 | CAS sync protocol                | `rye/cas/sync.py`                | `has/put/get` object exchange                                             |
 | `create_execution_space()`       | `rye/cas/checkout.py`            | Materializes `.ai/` workspace from snapshot on the remote                 |
@@ -43,7 +43,7 @@ The key principle: **there is no special infrastructure for specific workload ty
 
 ## Node Identity
 
-A node's identity is its Ed25519 signing key fingerprint. `ryeos-remote` already has a signing key (configured at `SIGNING_KEY_DIR`) and exposes the public key via `/public-key` for TOFU pinning.
+A node's identity is its Ed25519 signing key fingerprint. `ryeos-node` already has a signing key (configured at `SIGNING_KEY_DIR`) and exposes the public key via `/public-key` for TOFU pinning.
 
 The node ID is derived from the key — not assigned, not arbitrary. `fp:4b987fd4e40303ac` is the fingerprint of the node's Ed25519 public key. Same principle as principal identity in the [Decentralized Rye OS](encrypted-shared-intelligence.md) doc: the key IS the identity.
 
@@ -94,7 +94,7 @@ Each node exposes `/status` — a lightweight HTTP endpoint that wraps a local `
 
 **Capability strings use the existing fnmatch pattern system.** The same matching that governs thread permissions — `rye.execute.tool.<tool_id>` — expresses what tools a node can execute. The routing tool filters nodes by fnmatch against their reported capabilities. No new matching logic.
 
-**Active count is server state.** The `ryeos-remote` server increments a counter when an `/execute` request starts, decrements when it finishes. `/status` reads the counter. No separate status update mechanism.
+**Active count is server state.** The `ryeos-node` server increments a counter when an `/execute` request starts, decrements when it finishes. `/status` reads the counter. No separate status update mechanism.
 
 **The `node/status` tool runs locally.** It's a regular RYE tool, executed through the local `PrimitiveExecutor`. No CAS sync, no remote dispatch overhead. The `/status` HTTP endpoint is a thin wrapper that calls `ExecuteTool.handle("tool", "node/status", ...)` locally and returns the result.
 
@@ -150,11 +150,11 @@ This is the same for any distributed tool execution, not just inference. A brows
 
 **Nodes 3-15** (2x GPU each): GPU execution nodes serving llama-3.1-8b via tinygrad in-process. Their `.ai/tools/` includes `llm/complete/meta-llama/llama-3-1-8b` — same pattern, different model.
 
-**All 15 nodes** are execution nodes running `ryeos-remote`. All expose `/status`. All report their capabilities dynamically.
+**All 15 nodes** are execution nodes running `ryeos-node`. All expose `/status`. All report their capabilities dynamically.
 
 **CPU-only execution node** (separate, could be Modal): has routing implementations of the `llm/complete` tools that query `/status`, match capabilities, and dispatch to whichever GPU execution node can serve the requested model.
 
-A separate **completions server** exposes `/v1/chat/completions` — a standalone HTTP service (not an endpoint on `ryeos-remote`) that agent threads and external callers use as a standard LLM provider. It runs RYE's execution engine underneath, routing internally to GPU execution nodes via the same `_dispatch_remote()` path.
+A separate **completions server** exposes `/v1/chat/completions` — a standalone HTTP service (not an endpoint on `ryeos-node`) that agent threads and external callers use as a standard LLM provider. It runs RYE's execution engine underneath, routing internally to GPU execution nodes via the same `_dispatch_remote()` path.
 
 ### `remote.yaml` on the execution node
 
@@ -222,7 +222,7 @@ Same routing inside the completions server. The model selection is which model t
 
 1. Install tinygrad + download model weights on node-3
 2. Add the tool file to node-3's `.ai/tools/llm/complete/meta-llama/llama-3-1-70b`
-3. Start (or restart) `ryeos-remote` — tinygrad loads the model into GPU memory
+3. Start (or restart) `ryeos-node` — tinygrad loads the model into GPU memory
 4. Node-3's `/status` now reports that capability
 5. Execution node picks it up on next cache refresh
 
@@ -247,7 +247,7 @@ The only new step is routing — querying `/status` and matching capabilities. E
 
 ---
 
-## What `ryeos-remote` Becomes
+## What `ryeos-node` Becomes
 
 The same server, deployed on more machines. Nothing about the server code changes for the multi-node case:
 
@@ -259,7 +259,7 @@ The same server, deployed on more machines. Nothing about the server code change
 | Identity      | Supabase user_id          | Ed25519 key fingerprint (`fp:...`)          |
 | New endpoint  | —                         | `/status` wrapping local `node/status` tool |
 
-The server at `services/ryeos-remote/ryeos_remote/server.py` doesn't assume Modal. Modal-specific parts are isolated in `modal_app.py`. Running the same `server.py` via uvicorn on bare metal works today.
+The server at `services/ryeos-node/ryeos_node/server.py` doesn't assume Modal. Modal-specific parts are isolated in `modal_app.py`. Running the same `server.py` via uvicorn on bare metal works today.
 
 ---
 
@@ -270,7 +270,7 @@ The server at `services/ryeos-remote/ryeos_remote/server.py` doesn't assume Moda
 | Item                         | Type                            | Purpose                                                                                    |
 | ---------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------ |
 | `node/status`                | Tool                            | Local workspace introspection — scans available tools, reports capabilities + active count |
-| `/status` endpoint           | HTTP endpoint on `ryeos-remote` | Thin wrapper around local `node/status` tool execution                                     |
+| `/status` endpoint           | HTTP endpoint on `ryeos-node` | Thin wrapper around local `node/status` tool execution                                     |
 | Routing tool implementations | Tools                           | Per-tool routing implementations that query `/status` and dispatch via `_dispatch_remote`  |
 
 ### Proposed New Config
@@ -286,7 +286,7 @@ The server at `services/ryeos-remote/ryeos_remote/server.py` doesn't assume Moda
 | `ExecuteTool._dispatch_remote()`       | Unchanged — routing tools use existing remote dispatch      |
 | `rye/core/remote/remote` tool          | Unchanged — CAS sync + execute, same protocol               |
 | `remote_config.py` + `cas/remote.yaml` | Unchanged — just reachability, capabilities come from nodes |
-| `ryeos-remote` server                  | Unchanged — same endpoints, deployable on any hardware      |
+| `ryeos-node` server                  | Unchanged — same endpoints, deployable on any hardware      |
 | CAS sync protocol (`has/put/get`)      | Unchanged                                                   |
 | `create_execution_space()`             | Unchanged                                                   |
 | `three_way_merge()` fold-back          | Unchanged                                                   |
@@ -316,7 +316,7 @@ The execution node caches `/status` responses to avoid querying every node on ev
 
 ### Node health and failover
 
-If a node is unreachable, the routing tool skips it. `/health` already exists on `ryeos-remote`. The routing tool could ping `/health` as a quick check before `/status`, or just treat a failed `/status` query as "unhealthy."
+If a node is unreachable, the routing tool skips it. `/health` already exists on `ryeos-node`. The routing tool could ping `/health` as a quick check before `/status`, or just treat a failed `/status` query as "unhealthy."
 
 ### CAS locality
 

@@ -1,30 +1,27 @@
-# rye:signed:2026-03-29T05:38:21Z:b23b0d34aaf8592d373afe936ae448a0f224b5761cb337309da51ebbba4eca20:21-IVYCvr0md1bpiSZ1IFiY1G8akD-xUFoA-4OF9sFZJwJVSmATrDz61g8Nlc_6H3BmuXmxaLmku6zV6aPbxDw==:4b987fd4e40303ac
 """
-Remote tool — sync and execute against ryeos-remote server.
+Remote tool — sync and execute against ryeos-node server.
 
 Actions:
   push           - Build manifests, sync missing objects to remote.
   pull           - Fetch new objects from remote (execution results).
   status         - Show local vs remote manifest hashes.
   execute        - Push + trigger remote execution + pull results.
-  secrets_push   - Push secrets from .env file or env vars to remote vault.
-  secrets_list   - List secret names stored on remote (no values).
-  secrets_remove - Remove a named secret from remote vault.
 """
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/remote"
-__tool_description__ = "Sync and execute against ryeos-remote server"
+__tool_description__ = "Sync and execute against ryeos-node server"
 
+import base64
 import hashlib
 import json
 import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rye.cas.manifest import build_manifest
 from rye.cas.store import cas_root
@@ -36,14 +33,13 @@ logger = logging.getLogger(__name__)
 
 TOOL_METADATA = {
     "name": "remote",
-    "description": "Sync and execute against ryeos-remote server",
+    "description": "Sync and execute against ryeos-node server",
     "version": __version__,
     "protected": True,
 }
 
 ACTIONS = [
     "push", "pull", "status", "execute", "threads", "thread_status",
-    "secrets_push", "secrets_list", "secrets_remove",
 ]
 
 CONFIG_SCHEMA = {
@@ -52,7 +48,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Remote operation: push, pull, status, execute, threads, thread_status, secrets_push, secrets_list, secrets_remove",
+            "description": "Remote operation: push, pull, status, execute, threads, thread_status",
         },
         "item_type": {
             "type": "string",
@@ -82,19 +78,6 @@ CONFIG_SCHEMA = {
             "type": "string",
             "description": "Filter threads by project path",
         },
-        "env_file": {
-            "type": "string",
-            "description": "Path to .env file for secrets_push (reads KEY=VALUE pairs)",
-        },
-        "names": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Secret names to push from env vars (for secrets_push without env_file)",
-        },
-        "secret_name": {
-            "type": "string",
-            "description": "Secret name for secrets_remove",
-        },
     },
     "required": ["action"],
 }
@@ -106,7 +89,7 @@ CONFIG_SCHEMA = {
 
 
 class RemoteHttpClient:
-    """HTTP client for ryeos-remote API calls."""
+    """HTTP client for ryeos-node API calls."""
 
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
@@ -149,25 +132,6 @@ class RemoteHttpClient:
             },
             "body": body,
             "timeout": timeout,
-        }
-        result = await http.execute(config, {})
-        return {
-            "success": result.success,
-            "status_code": result.status_code,
-            "body": result.body,
-            "error": result.error,
-        }
-
-    async def delete(self, path: str) -> Dict:
-        http = await self._get_http()
-        config = {
-            "method": "DELETE",
-            "url": f"{self.base_url}{path}",
-            "headers": {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            "timeout": 30,
         }
         result = await http.execute(config, {})
         return {
@@ -450,28 +414,47 @@ async def _status(project_path: Path, params: Dict) -> Dict:
     return result
 
 
-async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[str] = None) -> Optional[Dict]:
-    """Fetch remote public key and verify against pinned fingerprint.
+async def _fetch_verified_identity(
+    client: "RemoteHttpClient", remote_name: Optional[str] = None,
+) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Fetch and verify remote identity document.
 
-    TOFU: pins on first contact. Hard-fails on fingerprint mismatch or
-    fetch failure. Returns error dict on failure, None if OK.
+    Parses the identity/v1 format returned by /public-key, verifies the
+    document signature, and performs TOFU key pinning on the signing key.
+
+    Returns (identity_doc, None) on success, (None, error_dict) on failure.
     """
     resp = await client.get("/public-key")
     if not resp["success"]:
-        return {
-            "error": f"Could not verify remote server key: {resp.get('error')}",
+        return None, {
+            "error": f"Could not fetch remote identity: {resp.get('error')}",
         }
 
     body = resp["body"]
     if isinstance(body, str):
         body = json.loads(body)
 
-    pem_text = body.get("public_key_pem", "")
-    if not pem_text:
-        return {"error": "Remote server returned empty public key"}
+    # Extract signing key PEM from identity doc
+    signing_key_str = body.get("signing_key", "")
+    if not signing_key_str.startswith("ed25519:"):
+        return None, {"error": "Remote identity has invalid signing_key format"}
 
-    remote_pem = pem_text.encode("utf-8")
+    remote_pem = base64.b64decode(signing_key_str.removeprefix("ed25519:"))
 
+    # Verify identity document signature
+    sig_block = body.get("_signature")
+    if sig_block:
+        from lillux.primitives.signing import verify_signature
+
+        payload = json.dumps(
+            {k: v for k, v in body.items() if k != "_signature"},
+            sort_keys=True, separators=(",", ":"),
+        )
+        content_hash = hashlib.sha256(payload.encode()).hexdigest()
+        if not verify_signature(content_hash, sig_block["sig"], remote_pem):
+            return None, {"error": "Remote identity document signature verification failed"}
+
+    # TOFU key pinning
     from lillux.primitives.signing import compute_key_fingerprint
     from rye.utils.trust_store import TrustStore
 
@@ -487,14 +470,14 @@ async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[s
         # TOFU: first contact, pin the key
         trust_store.pin_remote_key(remote_pem, remote_name=owner)
         logger.info("Pinned remote server key (TOFU): %s", remote_fp)
-        return None
+        return body, None
 
     pinned_fp = compute_key_fingerprint(pinned_key)
     if remote_fp == pinned_fp:
-        return None
+        return body, None
 
     # Key rotation detected — hard fail
-    return {
+    return None, {
         "error": (
             f"Remote server key mismatch (pinned: {pinned_fp}, "
             f"remote: {remote_fp}). To re-pin, remove the old key via "
@@ -502,6 +485,18 @@ async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[s
             f"then re-run the remote command to TOFU-pin the new key."
         ),
     }
+
+
+async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[str] = None) -> Optional[Dict]:
+    """Fetch remote identity and verify against pinned fingerprint.
+
+    TOFU: pins on first contact. Hard-fails on fingerprint mismatch or
+    fetch failure. Returns error dict on failure, None if OK.
+    """
+    _identity, err = await _fetch_verified_identity(client, remote_name)
+    if err:
+        return err
+    return None
 
 
 # Allowlisted path prefixes for runtime output materialization.
@@ -601,13 +596,52 @@ def _materialize_runtime_outputs(
     return count
 
 
+def _load_local_secrets() -> dict:
+    """Load secrets from the local encrypted store.
+
+    Returns empty dict if no store exists or on any error.
+    """
+    store_path = Path.home() / ".ai" / "secrets" / "store.enc"
+    if not store_path.is_file():
+        return {}
+
+    try:
+        from lillux.primitives.signing import load_keypair
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+        key_dir = Path(os.environ.get("RYE_SIGNING_KEY_DIR", str(Path.home() / ".ai" / "signing")))
+        private_pem, _ = load_keypair(key_dir)
+
+        store_key = HKDF(
+            algorithm=SHA256(),
+            length=32,
+            salt=None,
+            info=b"ryeos-secret-store-v1",
+        ).derive(private_pem)
+
+        raw = store_path.read_bytes()
+        if len(raw) < 12:
+            return {}
+        nonce, ciphertext = raw[:12], raw[12:]
+        plaintext = ChaCha20Poly1305(store_key).decrypt(nonce, ciphertext, None)
+        return json.loads(plaintext)
+    except Exception:
+        logger.warning("Failed to load local secrets", exc_info=True)
+        return {}
+
+
 async def _execute(project_path: Path, params: Dict) -> Dict:
     """Push + trigger remote execution + pull results.
 
     End-to-end flow:
-      1. Push (sync objects)
-      2. POST /execute on remote
-      3. Pull new result objects
+      1. Verify remote key
+      2. Push (sync objects)
+      3. Seal local secrets for the target node
+      4. POST /execute on remote
+      5. Pull new result objects
+      6. Materialize runtime outputs
     """
     item_type = params.get("item_type")
     item_id = params.get("item_id")
@@ -635,10 +669,10 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
             ),
         }
 
-    # 1. Verify remote server key (before push — fail early)
+    # 1. Verify remote server key and get identity doc (before push — fail early)
     remote_name = params.get("remote")
     client = _get_client(remote_name, project_path)
-    key_err = await _verify_remote_key(client, remote_name)
+    identity_doc, key_err = await _fetch_verified_identity(client, remote_name)
     if key_err:
         return key_err
 
@@ -647,16 +681,33 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     if "error" in push_result:
         return push_result
 
-    # 3. Execute on remote (longer timeout for execution)
+    # 3. Seal local secrets for the target node (using already-verified identity doc)
+    secret_envelope = None
+    local_secrets = _load_local_secrets()
+    if local_secrets and identity_doc:
+        try:
+            import importlib.util
+            _envelope_path = Path(__file__).resolve().parent.parent / "crypto" / "envelope.py"
+            _spec = importlib.util.spec_from_file_location("envelope", _envelope_path)
+            _envelope_mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_envelope_mod)
+            secret_envelope = _envelope_mod.seal_secrets_for_identity(local_secrets, identity_doc)
+        except Exception as e:
+            logger.warning("Failed to seal secrets for remote: %s", e)
+
+    # 4. Execute on remote (longer timeout for execution)
     from remote_config import get_project_path
     proj_name = get_project_path(project_path)
-    exec_resp = await client.post("/execute", {
+    exec_body = {
         "project_path": proj_name,
         "item_type": item_type,
         "item_id": item_id,
         "parameters": exec_params,
         "thread": thread,
-    }, timeout=300)
+    }
+    if secret_envelope:
+        exec_body["secret_envelope"] = secret_envelope
+    exec_resp = await client.post("/execute", exec_body, timeout=300)
 
     if not exec_resp["success"]:
         return {"error": f"Remote execution failed: {exec_resp['error']}"}
@@ -665,7 +716,7 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     if isinstance(exec_body, str):
         exec_body = json.loads(exec_body)
 
-    # 4. Pull execution outputs (CAS objects + runtime output blobs)
+    # 5. Pull execution outputs (CAS objects + runtime output blobs)
     snapshot_hash = exec_body.get("execution_snapshot_hash")
     bundle_hash = exec_body.get("runtime_outputs_bundle_hash")
     pull_hashes = []
@@ -678,7 +729,7 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     else:
         pull_result = {"fetched": 0}
 
-    # 5. Materialize runtime outputs into local project tree
+    # 6. Materialize runtime outputs into local project tree
     outputs_materialized = 0
     if bundle_hash:
         outputs_materialized = _materialize_runtime_outputs(
@@ -740,140 +791,6 @@ async def _thread_status(project_path: Path, params: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# Secrets management
-# ---------------------------------------------------------------------------
-
-
-def _parse_env_file(env_path: Path) -> Dict[str, str]:
-    """Parse a .env file into a dict of KEY=VALUE pairs.
-
-    Skips comments and blank lines. Does not expand variables.
-    """
-    secrets = {}
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if not key or not value:
-            continue
-        secrets[key] = value
-    return secrets
-
-
-async def _secrets_push(project_path: Path, params: Dict) -> Dict:
-    """Push secrets from .env file or env vars to remote vault.
-
-    The LLM never sees secret values — it only provides key names
-    or an .env file path, and this function reads values directly.
-    """
-    env_file = params.get("env_file")
-    names = params.get("names", [])
-
-    # Resolve secrets locally before connecting to remote
-    secrets_to_push: Dict[str, str] = {}
-
-    if env_file:
-        env_path = Path(env_file)
-        if not env_path.is_absolute():
-            env_path = project_path / env_path
-        if not env_path.is_file():
-            return {"error": f"File not found: {env_path}"}
-        secrets_to_push = _parse_env_file(env_path)
-    elif names:
-        for name in names:
-            value = os.environ.get(name, "")
-            if value:
-                secrets_to_push[name] = value
-            else:
-                logger.warning("Env var %s not set, skipping", name)
-    else:
-        return {
-            "error": "Provide either env_file (path to .env) or names (list of env var names)",
-        }
-
-    if not secrets_to_push:
-        return {"error": "No secrets found to push"}
-
-    remote_name = params.get("remote")
-    client = _get_client(remote_name, project_path)
-
-    key_err = await _verify_remote_key(client, remote_name)
-    if key_err:
-        return key_err
-
-    payload = [{"name": k, "value": v} for k, v in secrets_to_push.items()]
-    resp = await client.post("/secrets", {"secrets": payload})
-    if not resp["success"]:
-        return {"error": f"Failed to push secrets: {resp['error']}"}
-
-    body = resp["body"]
-    if isinstance(body, str):
-        body = json.loads(body)
-
-    return {
-        "stored": body.get("stored", []),
-        "count": body.get("count", 0),
-        "message": f"Pushed {body.get('count', 0)} secrets to remote",
-    }
-
-
-async def _secrets_list(project_path: Path, params: Dict) -> Dict:
-    """List secret names stored on remote (values are never returned)."""
-    remote_name = params.get("remote")
-    client = _get_client(remote_name, project_path)
-
-    key_err = await _verify_remote_key(client, remote_name)
-    if key_err:
-        return key_err
-
-    resp = await client.get("/secrets")
-    if not resp["success"]:
-        return {"error": f"Failed to list secrets: {resp['error']}"}
-
-    body = resp["body"]
-    if isinstance(body, str):
-        body = json.loads(body)
-
-    secrets = body.get("secrets", [])
-    return {
-        "secrets": [s["name"] for s in secrets],
-        "count": len(secrets),
-    }
-
-
-async def _secrets_remove(project_path: Path, params: Dict) -> Dict:
-    """Remove a named secret from remote vault."""
-    secret_name = params.get("secret_name")
-    if not secret_name:
-        return {"error": "secret_name is required for secrets_remove"}
-
-    remote_name = params.get("remote")
-    client = _get_client(remote_name, project_path)
-
-    key_err = await _verify_remote_key(client, remote_name)
-    if key_err:
-        return key_err
-
-    resp = await client.delete(f"/secrets/{secret_name}")
-    if not resp["success"]:
-        return {"error": f"Failed to remove secret: {resp['error']}"}
-
-    body = resp["body"]
-    if isinstance(body, str):
-        body = json.loads(body)
-
-    return {
-        "deleted": body.get("deleted", secret_name),
-        "message": f"Removed secret '{secret_name}' from remote",
-    }
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -884,9 +801,6 @@ _ACTION_MAP = {
     "execute": _execute,
     "threads": _threads,
     "thread_status": _thread_status,
-    "secrets_push": _secrets_push,
-    "secrets_list": _secrets_list,
-    "secrets_remove": _secrets_remove,
 }
 
 

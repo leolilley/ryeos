@@ -104,7 +104,7 @@ EXECUTE_TARGET_DESC = (
     "</description>"
     "<rules>"
     '<rule>"local" (default) — execute in the current environment</rule>'
-    '<rule>"remote" — execute on ryeos-remote server. Configure via .ai/config/cas/remote.yaml: '
+    '<rule>"remote" — execute on ryeos-node server. Configure via .ai/config/cas/remote.yaml: '
     'add a "default" entry under remotes: with url and key_env (env var name holding the API key). '
     'Use "remote:name" to target a specific remote.</rule>'
     "</rules>"

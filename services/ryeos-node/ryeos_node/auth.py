@@ -1,4 +1,4 @@
-"""Authentication for ryeos-remote.
+"""Authentication for ryeos-node.
 
 Dual auth: signed-request (Ed25519) and HMAC (webhook).
 - Signed-request: verifies X-Rye-Signature headers against authorized key files.
@@ -21,7 +21,7 @@ except ModuleNotFoundError:
 
 from fastapi import Depends, HTTPException, Request, status
 
-from ryeos_remote.config import Settings, get_settings
+from ryeos_node.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ def _verify_signed_request(request: Request, raw_body: bytes, settings: Settings
     authorized key file, verifies the request signature, checks replay,
     and returns a Principal.
     """
-    from ryeos_remote.replay import get_replay_guard
+    from ryeos_node.replay import get_replay_guard
 
     key_id = request.headers.get("x-rye-key-id", "")
     timestamp = request.headers.get("x-rye-timestamp", "")
@@ -295,3 +295,4 @@ class ResolvedExecution:
     project_path: str
     parameters: dict
     thread: str
+    secret_envelope: dict | None = None

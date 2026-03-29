@@ -11,7 +11,7 @@ version: "1.0.0"
 
 Remote execution lets you run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage (CAS) for sync — no git, no file diffs. Objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects.
 
-The remote server is a FastAPI app at `services/ryeos-remote/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-remote-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 3 tools (fetch, execute, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
+The remote server is a FastAPI app at `services/ryeos-node/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-node-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 3 tools (fetch, execute, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
 
 ## End-to-End Flow
 
@@ -109,7 +109,7 @@ class ExecutionPaths:
 
 ## Server Endpoints
 
-FastAPI app at `services/ryeos-remote/ryeos_remote/server.py`.
+FastAPI app at `services/ryeos-node/ryeos_node/server.py`.
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -147,7 +147,7 @@ Execution via `_execute_from_head()`:
 2. **Resolve user space** — look up `user_space_refs` independently (handles `None` gracefully).
 3. **Create execution space** — `create_execution_space()` produces a mutable checkout from the snapshot cache.
 4. **Cache user space** — `ensure_user_space_cached()` for user-level items.
-5. **Inject secrets** — fetch from vault, inject as env vars. Validates names against `RESERVED_ENV_NAMES` and `RESERVED_ENV_PREFIXES` (blocks PATH, PYTHONPATH, SUPABASE_*, MODAL_*, AWS_*, etc.).
+5. **Inject secrets** — fetch from vault, inject as env vars. Validates names against `RESERVED_ENV_NAMES` and `RESERVED_ENV_PREFIXES` (blocks PATH, PYTHONPATH, and other dangerous prefixes).
 6. **Run executor** — `ExecuteTool` against the materialized checkout.
 7. **Promote CAS objects** — `_copy_cas_objects()` re-ingests execution-local CAS into user CAS (integrity-verified).
 8. **Ingest runtime outputs** — transcripts, knowledge, refs stored as `RuntimeOutputsBundle`.
@@ -188,11 +188,11 @@ The trust chain: you trust the remote by pinning its key. The remote proves iden
 
 ## Authentication
 
-Bearer token auth via `services/ryeos-remote/ryeos_remote/auth.py`. Two methods:
+Bearer token auth via `services/ryeos-node/ryeos_node/auth.py`. Ed25519 signed requests authenticate the caller:
 
-**API key:** SHA256-hashed keys looked up in Supabase `api_keys` table. Checks revocation and expiry.
+**API key:** SHA256-hashed keys looked up in the local key store. Checks revocation and expiry.
 
-**JWT:** Supabase JWT decoded with HS256, audience `"authenticated"`. Extracts `user_id` from `sub` claim.
+**Ed25519 signed envelope:** Sealed envelopes verify the caller's identity via their Ed25519 public key.
 
 Both methods resolve to a `user_id` that scopes all CAS operations.
 
@@ -226,7 +226,7 @@ Secret names are validated before injection via `_is_safe_secret_name()`:
 
 - Must be a valid Python identifier
 - Blocked: `RESERVED_ENV_NAMES` (PATH, HOME, PYTHONPATH, TMPDIR, RYE_SIGNING_KEY_DIR, RYE_KERNEL_PYTHON, RYE_REMOTE_NAME, etc.)
-- Blocked: `RESERVED_ENV_PREFIXES` (SUPABASE_, MODAL_, LD_, SSL_, AWS_, GOOGLE_, AZURE_, GITHUB_, CI_, DOCKER_)
+- Blocked: `RESERVED_ENV_PREFIXES` (dangerous prefixes like MODAL_, LD_, SSL_, AWS_, GOOGLE_, AZURE_, GITHUB_, CI_, DOCKER_, SUPABASE_, etc.)
 - Unsafe names are logged and skipped (not rejected — other secrets still inject)
 
 ## Client Tool
@@ -251,7 +251,7 @@ Remotes are configured in `cas/remote.yaml` under `.ai/config/`:
 ```yaml
 remotes:
   default:
-    url: "https://ryeos-remote--execute.modal.run"
+    url: "https://ryeos-node--execute.modal.run"
     key_env: "RYE_REMOTE_API_KEY"
 
   gpu:
@@ -278,7 +278,7 @@ The walker also supports per-node remote dispatch — individual graph nodes can
 
 The `/push` endpoint registers a project ref and creates a `ProjectSnapshot` with parent lineage. The ref tracks the latest state for a user × remote × project combination.
 
-Project refs are stored in the `project_refs` Supabase table:
+Project refs are stored in the `project_refs` table on the local filesystem:
 - Primary key: `(user_id, remote_name, project_path)`
 - Columns: `project_manifest_hash`, `system_version`, `pushed_at`, `snapshot_hash`, `snapshot_revision` (bigint, optimistic CAS counter), `head_updated_at`
 
@@ -306,9 +306,9 @@ Returns a list of `ProjectSnapshot` objects following `parent_hashes[0]` (mainli
 
 | Component | File |
 |-----------|------|
-| Server | `services/ryeos-remote/ryeos_remote/server.py` |
-| Server config | `services/ryeos-remote/ryeos_remote/config.py` |
-| Server auth | `services/ryeos-remote/ryeos_remote/auth.py` |
+| Server | `services/ryeos-node/ryeos_node/server.py` |
+| Server config | `services/ryeos-node/ryeos_node/config.py` |
+| Server auth | `services/ryeos-node/ryeos_node/auth.py` |
 | Sync protocol | `ryeos/rye/cas/sync.py` |
 | Materializer | `ryeos/rye/cas/materializer.py` |
 | Client tool | `.ai/tools/rye/core/remote/remote.py` |
@@ -317,5 +317,5 @@ Returns a list of `ProjectSnapshot` objects following `parent_hashes[0]` (mainli
 | CAS primitives | `lillux/kernel/lillux/primitives/cas.py` |
 | Checkout/spaces | `ryeos/rye/cas/checkout.py` |
 | Three-way merge | `ryeos/rye/cas/merge.py` |
-| MCP transport | `services/ryeos-remote/ryeos_remote/mcp.py` |
+| MCP transport | `services/ryeos-node/ryeos_node/mcp.py` |
 | Object model | `ryeos/rye/cas/objects.py` |

@@ -18,7 +18,7 @@ tags:
 
 ## Overview
 
-ryeos-remote enables remote execution of tools and graphs by syncing
+ryeos-node enables remote execution of tools and graphs by syncing
 project state via a Content-Addressable Store (CAS). Objects are
 addressed by their SHA-256 hash — syncing is efficient because
 identical content is never transferred twice.
@@ -109,7 +109,7 @@ Remotes are configured in `.ai/config/cas/remote.yaml`:
 ```yaml
 remotes:
   default:
-    url: "https://ryeos--ryeos-remote-remote-server.modal.run"
+    url: "https://ryeos--ryeos-node-remote-server.modal.run"
     key_env: "RYE_REMOTE_API_KEY"
 ```
 

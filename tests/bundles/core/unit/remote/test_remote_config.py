@@ -172,86 +172,17 @@ class TestRemoteToolIntegration:
 
 
 class TestParseEnvFile:
-    """Tests for _parse_env_file in the remote tool."""
+    """Tests for _parse_env_file — removed with Supabase secrets migration.
 
-    def _load_remote(self):
-        spec = importlib.util.spec_from_file_location("remote_env_test", _REMOTE_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
+    The _parse_env_file function and all remote secret actions
+    (secrets_push, secrets_list, secrets_remove) were removed in Phase 2
+    (Sealed Secrets). Secrets are now managed locally via the secrets tool
+    and sealed into HPKE envelopes before dispatch.
+    """
 
-    def test_parses_key_value_pairs(self, tmp_path):
-        mod = self._load_remote()
-        env_file = tmp_path / ".env"
-        env_file.write_text("KEY1=value1\nKEY2=value2\n")
-        result = mod._parse_env_file(env_file)
-        assert result == {"KEY1": "value1", "KEY2": "value2"}
-
-    def test_skips_comments_and_blanks(self, tmp_path):
-        mod = self._load_remote()
-        env_file = tmp_path / ".env"
-        env_file.write_text("# comment\n\nKEY=val\n  \n# another\n")
-        result = mod._parse_env_file(env_file)
-        assert result == {"KEY": "val"}
-
-    def test_skips_empty_values(self, tmp_path):
-        mod = self._load_remote()
-        env_file = tmp_path / ".env"
-        env_file.write_text("EMPTY=\nGOOD=ok\n")
-        result = mod._parse_env_file(env_file)
-        assert result == {"GOOD": "ok"}
-
-    def test_handles_equals_in_value(self, tmp_path):
-        mod = self._load_remote()
-        env_file = tmp_path / ".env"
-        env_file.write_text("KEY=val=with=equals\n")
-        result = mod._parse_env_file(env_file)
-        assert result == {"KEY": "val=with=equals"}
-
-
-@pytest.mark.asyncio
-class TestRemoteSecretsActions:
-    """Tests for secrets_push, secrets_list, secrets_remove validation."""
-
-    def _load_remote(self):
-        spec = importlib.util.spec_from_file_location("remote_secrets_test", _REMOTE_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-
-    async def test_secrets_push_requires_input(self):
-        """_secrets_push with no env_file or names → error."""
-        mod = self._load_remote()
-        result = await mod._secrets_push(Path("/tmp/fake"), {})
-        assert "error" in result
-        assert "env_file" in result["error"]
-
-    async def test_secrets_push_file_not_found(self):
-        """_secrets_push with nonexistent env_file → error."""
-        mod = self._load_remote()
-        result = await mod._secrets_push(Path("/tmp/fake"), {
-            "env_file": "/tmp/nonexistent/.env",
-        })
-        assert "error" in result
-        assert "not found" in result["error"].lower()
-
-    async def test_secrets_push_no_set_env_vars(self, monkeypatch):
-        """_secrets_push with names but no env vars set → error."""
-        mod = self._load_remote()
-        monkeypatch.delenv("UNSET_VAR_1", raising=False)
-        monkeypatch.delenv("UNSET_VAR_2", raising=False)
-        result = await mod._secrets_push(Path("/tmp/fake"), {
-            "names": ["UNSET_VAR_1", "UNSET_VAR_2"],
-        })
-        assert "error" in result
-        assert "No secrets found" in result["error"]
-
-    async def test_secrets_remove_requires_name(self):
-        """_secrets_remove with no secret_name → error."""
-        mod = self._load_remote()
-        result = await mod._secrets_remove(Path("/tmp/fake"), {})
-        assert "error" in result
-        assert "secret_name" in result["error"]
+    @pytest.mark.skip(reason="Removed: Supabase secrets replaced by sealed envelopes")
+    def test_placeholder(self):
+        pass
 
 
 @pytest.mark.asyncio

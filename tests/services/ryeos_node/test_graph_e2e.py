@@ -1,4 +1,4 @@
-"""E2E tests for graph execution via ryeos-remote server.
+"""E2E tests for graph execution via ryeos-node server.
 
 Covers:
   - test_push_execute_pull_graph: Push → execute graph → pull snapshot + receipts

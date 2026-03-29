@@ -1,5 +1,5 @@
 """
-ryeos-remote — Modal Deployment
+ryeos-node — Modal Deployment
 
 CAS-native remote execution server on Modal.
 Volume-backed CAS storage, persistent signing key, per-user isolation.
@@ -9,14 +9,14 @@ Usage:
   modal serve modal_app.py           # Local dev with Modal
 
 Packages: ryeos-core (from PyPI) provides the engine, CAS, and core bundle.
-Only ryeos_remote/ is copied locally (server, auth, config).
+Only ryeos_node/ is copied locally (server, auth, config).
 """
 
 import modal
 
-app = modal.App("ryeos-remote")
+app = modal.App("ryeos-node")
 
-cas_volume = modal.Volume.from_name("ryeos-remote-cas", create_if_missing=True)
+cas_volume = modal.Volume.from_name("ryeos-node-cas", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -32,7 +32,7 @@ image = (
         "tomli>=2.0.0;python_version<'3.11'",
         force_build=True,
     )
-    .add_local_dir("ryeos_remote", remote_path="/app/ryeos_remote", copy=True)
+    .add_local_dir("ryeos_node", remote_path="/app/ryeos_node", copy=True)
     .env({
         "CAS_BASE_PATH": "/cas",
         "SIGNING_KEY_DIR": "/cas/signing",
@@ -51,7 +51,7 @@ image = (
 @modal.concurrent(max_inputs=1)
 @modal.asgi_app()
 def remote_server():
-    """ryeos-remote — CAS-native execution server."""
-    from ryeos_remote.server import app as fastapi_app
+    """ryeos-node — CAS-native execution server."""
+    from ryeos_node.server import app as fastapi_app
 
     return fastapi_app

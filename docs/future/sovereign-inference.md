@@ -26,7 +26,7 @@ status: exploratory
 
 RYE today calls LLM providers over HTTP — Anthropic, OpenAI — via the `http_provider` adapter in `rye/agent/threads/adapters/`. The provider is external. You rent inference.
 
-This proposal replaces the external provider with your own hardware running tinygrad. The model loads directly into the `ryeos-remote` process on GPU execution nodes, and the `llm/complete` tool calls `model.generate()` as a Python function call. On top of this, a separate completions server exposes `/v1/chat/completions` — the same interface as Anthropic or OpenAI. Agent threads call it via `http_provider` like any other provider, with no CAS sync overhead.
+This proposal replaces the external provider with your own hardware running tinygrad. The model loads directly into the `ryeos-node` process on GPU execution nodes, and the `llm/complete` tool calls `model.generate()` as a Python function call. On top of this, a separate completions server exposes `/v1/chat/completions` — the same interface as Anthropic or OpenAI. Agent threads call it via `http_provider` like any other provider, with no CAS sync overhead.
 
 The interesting part is not just "run tinygrad instead of calling Anthropic". It's that the entire inference stack — from forward pass to tool dispatch to cluster routing — runs through RYE's execution primitives. Chat template formatting and tool call parsing are data-driven — config files resolved via 3-tier, processors and parsers registered in the existing routers. At cluster scale — 30 GPUs across 15 machines — the routing between GPU execution nodes is also a RYE tool. The completions server sits on top as the external-facing surface, while the execution node infrastructure handles distribution underneath.
 
@@ -121,9 +121,9 @@ These format differences are handled by the data-driven chat template and tool c
 
 ## Architecture: Execution Nodes and the Completions Server
 
-Every node in the cluster is an execution node running `ryeos-remote`. The difference is what tools are available — a GPU execution node has `llm/complete` tools that call tinygrad directly, a CPU-only execution node has routing implementations that dispatch to GPU execution nodes.
+Every node in the cluster is an execution node running `ryeos-node`. The difference is what tools are available — a GPU execution node has `llm/complete` tools that call tinygrad directly, a CPU-only execution node has routing implementations that dispatch to GPU execution nodes.
 
-On top of this sits the completions server — a separate HTTP service exposing `/v1/chat/completions`. It's not an endpoint on `ryeos-remote`. It's its own standalone process that runs RYE's execution engine underneath for tool use loops. External-facing — for agent threads, users, and automations calling the model directly. It could run on the same hardware as an execution node, but it's a separate service.
+On top of this sits the completions server — a separate HTTP service exposing `/v1/chat/completions`. It's not an endpoint on `ryeos-node`. It's its own standalone process that runs RYE's execution engine underneath for tool use loops. External-facing — for agent threads, users, and automations calling the model directly. It could run on the same hardware as an execution node, but it's a separate service.
 
 Two paths coexist:
 
@@ -144,7 +144,7 @@ The agent thread harness doesn't know it's talking to tinygrad. It calls the com
 
 ### What Runs on a GPU Execution Node
 
-The `ryeos-remote` process on the GPU node loads the tinygrad model at startup. No separate inference server — the model lives in GPU memory as state held by the process.
+The `ryeos-node` process on the GPU node loads the tinygrad model at startup. No separate inference server — the model lives in GPU memory as state held by the process.
 
 tinygrad's `LLaMa` implementation (`examples/llama.py`) loads weights once via `safe_load` (memory-mapped from safetensors, realized to GPU via `.realize()`), keeps them in GPU memory for the lifetime of the process, and uses `TinyJit` to compile GPU kernels on the second forward pass and replay them from the third onward. The KV cache persists across calls as in-place tensor updates.
 
@@ -264,7 +264,7 @@ Agent threads call the completions server via `http_provider` — same path as A
                               ← on CPU-only execution node: routing to capable remote
 ```
 
-On a GPU execution node, the tool loads the tinygrad model into the `ryeos-remote` process at startup and holds it in GPU memory. The tool's `execute()` calls `model.generate()` directly — no chain to `http_client`, no subprocess. The model is process state, and the `TinyJit` system compiles and replays GPU kernels after the second call.
+On a GPU execution node, the tool loads the tinygrad model into the `ryeos-node` process at startup and holds it in GPU memory. The tool's `execute()` calls `model.generate()` directly — no chain to `http_client`, no subprocess. The model is process state, and the `TinyJit` system compiles and replays GPU kernels after the second call.
 
 On a CPU-only execution node, the same tool ID has a different implementation that queries `/status` on known remotes, matches capabilities, and dispatches via `_dispatch_remote()`.
 
@@ -387,7 +387,7 @@ The agent thread calls the completions server via the provider path. The complet
 
 ## The Completions Server
 
-The completions server is a separate HTTP service from `ryeos-remote` — its own standalone process exposing `/v1/chat/completions`. It's not an endpoint on `ryeos-remote`. It could run on the same hardware as an execution node, but it's a separate service.
+The completions server is a separate HTTP service from `ryeos-node` — its own standalone process exposing `/v1/chat/completions`. It's not an endpoint on `ryeos-node`. It could run on the same hardware as an execution node, but it's a separate service.
 
 From the outside, it looks like any other LLM endpoint — Anthropic, OpenAI, or any OpenAI-compatible provider. Internally, every request runs through RYE's execution engine:
 
@@ -520,14 +520,14 @@ tinygrad's generate loop produces tokens one at a time. Streaming to the caller 
 
 ### Model Loading Lifecycle
 
-The tinygrad model loads into GPU memory when `ryeos-remote` starts and stays resident. Questions: should the model load lazily on first request? Should there be a mechanism to unload/swap models without restarting the process? For a single-model node this doesn't matter much, but a node serving multiple models would need model lifecycle management.
+The tinygrad model loads into GPU memory when `ryeos-node` starts and stays resident. Questions: should the model load lazily on first request? Should there be a mechanism to unload/swap models without restarting the process? For a single-model node this doesn't matter much, but a node serving multiple models would need model lifecycle management.
 
 ### Model Parallelism vs Replica Pool
 
 With 30 GPUs:
 
 - **Model parallelism**: Large model (70B+) sharded across multiple GPUs via tinygrad's `.shard_(device, axis=...)`. Single inference process spans N GPUs. Higher quality, lower throughput.
-- **Replica pool**: Small model (8B–13B) replicated across all GPUs. 30 independent `ryeos-remote` processes each holding a model. Routing tool load-balances. Higher throughput, lower latency per request.
+- **Replica pool**: Small model (8B–13B) replicated across all GPUs. 30 independent `ryeos-node` processes each holding a model. Routing tool load-balances. Higher throughput, lower latency per request.
 - **Tiered**: 4 GPUs → large reasoning model (70B) for hard tasks. 26 GPUs → fast small model (8B) for bulk extraction. The agent selects the model by calling the appropriate `llm/complete/{family}/{model}` tool ID. The routing tool finds a node that can execute it.
 
 ---

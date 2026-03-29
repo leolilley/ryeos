@@ -347,12 +347,12 @@ class TrustStore:
     def pin_remote_key(
         self,
         public_key_pem: bytes,
-        remote_name: str = "ryeos-remote",
+        remote_name: str = "ryeos-node",
         version: str = "1.0.0",
     ) -> str:
         """Pin the remote server public key (TOFU).
 
-        Same pattern as pin_registry_key but for ryeos-remote.
+        Same pattern as pin_registry_key but for ryeos-node.
         """
         fingerprint = compute_key_fingerprint(public_key_pem)
         existing = self.get_key(fingerprint)
@@ -360,7 +360,7 @@ class TrustStore:
             return fingerprint
         return self.add_key(public_key_pem, owner=remote_name, version=version)
 
-    def get_remote_key(self, remote_name: str = "ryeos-remote") -> Optional[bytes]:
+    def get_remote_key(self, remote_name: str = "ryeos-node") -> Optional[bytes]:
         """Get the pinned remote server public key with integrity verification."""
         fp = self._find_key_fp_by_owner(remote_name)
         if not fp:

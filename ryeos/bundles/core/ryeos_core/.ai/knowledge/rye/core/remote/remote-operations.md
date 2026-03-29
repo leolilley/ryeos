@@ -18,7 +18,7 @@ tags:
 
 # Remote Tool — Operations Reference
 
-Agent-facing reference for `rye/core/remote/remote` — the client-side tool for interacting with ryeos-remote.
+Agent-facing reference for `rye/core/remote/remote` — the client-side tool for interacting with ryeos-node.
 
 ## Tool Actions
 
@@ -302,7 +302,7 @@ Remotes are declared in `.ai/config/cas/remote.yaml`:
 ```yaml
 remotes:
   default:
-    url: "https://ryeos--ryeos-remote-remote-server.modal.run"
+    url: "https://ryeos--ryeos-node-remote-server.modal.run"
     key_env: "RYE_REMOTE_API_KEY"
 ```
 

@@ -79,17 +79,17 @@ Markdown files in `.ai/directives/` containing XML workflow instructions. Exampl
 
 Reference entries in `.ai/knowledge/` — metadata patterns, best practices, domain information.
 
-## Layer 4: Registry API
+## Layer 4: Registry (ryeos-node)
 
-A separate FastAPI service (`services/registry-api/`) for sharing items across projects and users. It provides:
+The registry is a built-in feature of ryeos-node (`services/ryeos-node/`), not a separate service. It provides:
 
-- **POST /v1/push** — Validate, sign with registry provenance, and store items in Supabase
-- **GET /v1/pull/{item_type}/{item_id}** — Download items with integrity verification
-- **GET /v1/search** — Full-text search across published items
-- **POST /v1/bundle/push** and **GET /v1/bundle/pull** — Bundle-level push/pull
-- **GET /v1/public-key** — Expose the registry's Ed25519 public key for TOFU pinning
+- **POST /registry/push** — Validate and store items with the publisher's Ed25519 signature as sole provenance
+- **GET /registry/pull/{item_type}/{item_id}** — Download items with integrity verification
+- **GET /registry/search** — Full-text search across published items
+- **POST /registry/bundle/push** and **GET /registry/bundle/pull** — Bundle-level push/pull
+- **GET /public-key** — Expose the server's Ed25519 public key for TOFU pinning
 
-The registry API runs independently (deployed on Railway) and uses Supabase as its database. The bundled registry tool (`.ai/tools/rye/core/registry/registry.py`) is the client-side interface.
+The registry runs as part of ryeos-node (deployed on Modal) with CAS-native storage and Ed25519 authentication. The bundled registry tool (`.ai/tools/rye/core/registry/registry.py`) is the client-side interface.
 
 ## Data Flow
 
@@ -145,7 +145,7 @@ The only hardcoded knowledge in the system is the mapping from primitive IDs to 
 
 ## Remote Execution
 
-Remote execution is a deployment mode — it runs the same executor and graph walker on a remote server, synced via content-addressed storage rather than git. The remote server (`services/ryeos-remote/`) provides CAS sync endpoints (`/objects/has`, `/objects/put`, `/objects/get`) and an `/execute` endpoint that materializes a temp `.ai/` directory from CAS manifests, runs the tool, and re-ingests outputs. The remote executor has its own Ed25519 signing identity — it never receives the user's private key. See [Remote Execution](remote-execution.md) and [Content-Addressed Store](cas.md) for details.
+Remote execution is a deployment mode — it runs the same executor and graph walker on a remote server, synced via content-addressed storage rather than git. The remote server (`services/ryeos-node/`) provides CAS sync endpoints (`/objects/has`, `/objects/put`, `/objects/get`) and an `/execute` endpoint that materializes a temp `.ai/` directory from CAS manifests, runs the tool, and re-ingests outputs. The remote executor has its own Ed25519 signing identity — it never receives the user's private key. See [Remote Execution](remote-execution.md) and [Content-Addressed Store](cas.md) for details.
 
 ## Package and Bundle Distribution
 

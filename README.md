@@ -85,7 +85,7 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions    |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
 | `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three primitives |
-| `ryeos-remote` | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
+| `ryeos-node` | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
 
 > **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
@@ -107,7 +107,7 @@ Fully modular and extendable.
 Run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage for sync — objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects. The remote executor has its own Ed25519 identity and signs execution artifacts independently.
 
 ```bash
-pip install ryeos-remote          # server package (deployed on Modal)
+pip install ryeos-node          # server package (deployed on Modal)
 ```
 
 Named remotes are configured in `cas/remote.yaml`:
@@ -115,7 +115,7 @@ Named remotes are configured in `cas/remote.yaml`:
 ```yaml
 remotes:
   default:
-    url: "https://ryeos-remote--execute.modal.run"
+    url: "https://ryeos-node--execute.modal.run"
     key_env: "RYE_REMOTE_API_KEY"
   gpu:
     url: "https://gpu-worker--execute.modal.run"

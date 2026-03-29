@@ -645,7 +645,7 @@ Today, nodes are configured as named entries in `remote.yaml`:
 ```yaml
 remotes:
   default:
-    url: "https://ryeos-remote--execute.modal.run"
+    url: "https://ryeos-node--execute.modal.run"
     key_env: "RYE_REMOTE_API_KEY"
   gpu:
     url: "https://gpu-worker--execute.modal.run"

@@ -236,13 +236,13 @@ For a **first-time publish** of all packages, you may need to run the workflow m
 
 ## Services
 
-### registry-api
+### ryeos-node
 
-The registry API is a standalone FastAPI service deployed to Railway.
+The ryeos-node server provides remote execution, CAS sync, and registry features. Deployed on Modal.
 
-- **Source:** `services/registry-api/`
+- **Source:** `services/ryeos-node/`
 - **Not a pip package** — deployed as a container
-- **Dependencies:** fastapi, supabase, httpx, python-jose, pydantic, pydantic-settings
+- **Dependencies:** fastapi, httpx, pydantic, pydantic-settings, cryptography
 
 Deployment is managed separately from the PyPI publishing workflow.
 

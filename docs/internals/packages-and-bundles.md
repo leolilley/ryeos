@@ -221,13 +221,13 @@ rye graph validate my-project/graphs/pipeline
 rye test my-project/tools/scraper --exclude-tags integration
 ```
 
-### services/registry-api
+### services/ryeos-node
 
 **Package name:** N/A (deployed as a service)
-**Source:** `services/registry-api/`
-**Dependencies:** `fastapi`, `supabase`, `httpx`, `python-jose`, `pydantic`, `pydantic-settings`
+**Source:** `services/ryeos-node/`
+**Dependencies:** `fastapi`, `httpx`, `pydantic`, `pydantic-settings`, `cryptography`
 
-A standalone FastAPI service for the item registry. Deployed separately (e.g., on Railway) and accessed via the bundled registry tool. Not installed as a pip package locally.
+The ryeos-node server provides remote execution, CAS sync, and registry features. Registry is a built-in feature of ryeos-node — no separate service. Deployed on Modal and accessed via the bundled remote and registry tools. Not installed as a pip package locally.
 
 ## Bundles vs Packages
 
@@ -389,7 +389,7 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 | `ryeos/bundles/email/` | `ryeos-email` | `ryeos` | `ryeos-email` | `rye/email/*` |
 | `ryeos-mcp/` | `ryeos-mcp` | `ryeos`, `mcp` | — | — |
 | `ryeos-cli/` | `ryeos-cli` | `ryeos`, `pyyaml` | — | — |
-| `services/registry-api/` | — | `fastapi`, `supabase`, `httpx`, etc. | — | — |
+| `services/ryeos-node/` | — | `fastapi`, `httpx`, `cryptography`, etc. | — | — |
 
 ## Publishing Order
 

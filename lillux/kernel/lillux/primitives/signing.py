@@ -1,4 +1,4 @@
-"""Ed25519 signing primitives for content integrity.
+"""Ed25519 and X25519 signing/box primitives for content integrity.
 
 Delegates all crypto operations to the ``lillux`` Rust binary via subprocess.
 """
@@ -63,6 +63,24 @@ def generate_keypair() -> Tuple[bytes, bytes]:
         private_pem = Path(tmpdir, "private_key.pem").read_bytes()
         public_pem = Path(tmpdir, "public_key.pem").read_bytes()
         return private_pem, public_pem
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def generate_full_keypair() -> Tuple[bytes, bytes, bytes, bytes]:
+    """Generate a new Ed25519 keypair and X25519 box keypair.
+
+    Returns:
+        Tuple of (private_key_pem, public_key_pem, box_key, box_pub)
+    """
+    tmpdir = tempfile.mkdtemp()
+    try:
+        _run(["keypair", "generate", "--key-dir", tmpdir])
+        private_pem = Path(tmpdir, "private_key.pem").read_bytes()
+        public_pem = Path(tmpdir, "public_key.pem").read_bytes()
+        box_key = Path(tmpdir, "box_key.pem").read_bytes()
+        box_pub = Path(tmpdir, "box_pub.pem").read_bytes()
+        return private_pem, public_pem, box_key, box_pub
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -145,10 +163,79 @@ def compute_key_fingerprint(public_key_pem: bytes) -> str:
             os.unlink(tmpfile)
 
 
+def compute_box_fingerprint(box_pub: bytes) -> str:
+    """Compute fingerprint of an X25519 box public key.
+
+    Args:
+        box_pub: Raw base64url-encoded X25519 public key bytes
+
+    Returns:
+        Fingerprint string
+    """
+    tmpfile = None
+    try:
+        fd, tmpfile = tempfile.mkstemp(suffix=".pem")
+        os.write(fd, box_pub)
+        os.close(fd)
+
+        result = _run(["keypair", "box-fingerprint", "--public-key", tmpfile])
+        data = json.loads(result.stdout)
+        return data["fingerprint"]
+    finally:
+        if tmpfile and os.path.exists(tmpfile):
+            os.unlink(tmpfile)
+
+
+def load_box_keypair(key_dir: Path) -> Tuple[bytes, bytes]:
+    """Load X25519 box keypair from directory.
+
+    Args:
+        key_dir: Directory containing box_key.pem and box_pub.pem
+
+    Returns:
+        Tuple of (box_key, box_pub) as raw bytes
+
+    Raises:
+        FileNotFoundError: If keys don't exist
+    """
+    box_key_path = key_dir / "box_key.pem"
+    box_pub_path = key_dir / "box_pub.pem"
+
+    if not box_key_path.exists():
+        raise FileNotFoundError(f"Box key not found at {box_key_path}")
+    if not box_pub_path.exists():
+        raise FileNotFoundError(f"Box public key not found at {box_pub_path}")
+
+    return box_key_path.read_bytes(), box_pub_path.read_bytes()
+
+
+def save_box_keypair(box_key: bytes, box_pub: bytes, key_dir: Path) -> None:
+    """Save X25519 box keypair to directory with proper permissions.
+
+    Args:
+        box_key: Raw base64url-encoded X25519 private key bytes
+        box_pub: Raw base64url-encoded X25519 public key bytes
+        key_dir: Directory to save keys into
+    """
+    key_dir.mkdir(parents=True, exist_ok=True)
+
+    box_key_path = key_dir / "box_key.pem"
+    box_pub_path = key_dir / "box_pub.pem"
+
+    box_key_path.write_bytes(box_key)
+    os.chmod(box_key_path, 0o600)
+
+    box_pub_path.write_bytes(box_pub)
+    os.chmod(box_pub_path, 0o644)
+
+
 def save_keypair(
     private_key_pem: bytes,
     public_key_pem: bytes,
     key_dir: Path,
+    *,
+    box_key: Optional[bytes] = None,
+    box_pub: Optional[bytes] = None,
 ) -> None:
     """Save keypair to directory with proper permissions.
 
@@ -156,6 +243,8 @@ def save_keypair(
         private_key_pem: Ed25519 private key PEM bytes
         public_key_pem: Ed25519 public key PEM bytes
         key_dir: Directory to save keys into
+        box_key: Optional X25519 box private key bytes
+        box_pub: Optional X25519 box public key bytes
     """
     key_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(key_dir, 0o700)
@@ -168,6 +257,9 @@ def save_keypair(
 
     public_path.write_bytes(public_key_pem)
     os.chmod(public_path, 0o644)
+
+    if box_key is not None and box_pub is not None:
+        save_box_keypair(box_key, box_pub, key_dir)
 
 
 def load_keypair(key_dir: Path) -> Tuple[bytes, bytes]:
@@ -207,3 +299,23 @@ def ensure_keypair(key_dir: Path) -> Tuple[bytes, bytes]:
     except FileNotFoundError:
         _run(["keypair", "generate", "--key-dir", str(key_dir)])
         return load_keypair(key_dir)
+
+
+def ensure_full_keypair(key_dir: Path) -> Tuple[bytes, bytes, bytes, bytes]:
+    """Ensure Ed25519 and X25519 keypairs exist at key_dir, generating if needed.
+
+    Args:
+        key_dir: Directory for keys
+
+    Returns:
+        Tuple of (private_key_pem, public_key_pem, box_key, box_pub)
+    """
+    try:
+        ed_keys = load_keypair(key_dir)
+        box_keys = load_box_keypair(key_dir)
+        return ed_keys[0], ed_keys[1], box_keys[0], box_keys[1]
+    except FileNotFoundError:
+        _run(["keypair", "generate", "--key-dir", str(key_dir)])
+        ed_keys = load_keypair(key_dir)
+        box_keys = load_box_keypair(key_dir)
+        return ed_keys[0], ed_keys[1], box_keys[0], box_keys[1]

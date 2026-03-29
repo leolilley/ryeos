@@ -84,8 +84,8 @@ The push flow:
 2. Strip any existing signature
 3. Send to registry API with authentication
 4. Server validates content structure
-5. Server signs with registry Ed25519 key (adds `|registry@username` provenance)
-6. Server stores in Supabase database
+5. Server verifies the publisher's Ed25519 signature (sole provenance — no re-signing)
+6. Server stores in CAS-backed registry
 7. Client receives confirmation with item ID and version
 
 **Namespace enforcement:** You can only push to your own namespace. Attempting to push to `otheruser/...` returns a 403 error.
@@ -170,9 +170,9 @@ Search matches against bundle names and descriptions. Only public bundles are re
 
 ## Registry API Service
 
-**Location:** `services/registry-api/registry_api/`
+**Location:** `services/ryeos-node/ryeos_node/` (registry is a feature of ryeos-node)
 
-A separate FastAPI application that handles server-side operations. Deployed independently (on Railway) with Supabase as the database backend.
+Registry endpoints are built into the ryeos-node server. No separate service or external database — storage is CAS-native with Ed25519 authentication.
 
 ### Endpoints
 
@@ -196,8 +196,8 @@ When the registry receives a push request:
 1. **Namespace verification** — Confirms the authenticated user matches the namespace
 2. **Strip signature** — Removes any existing signature from content
 3. **Validate content** — Runs structural validation (metadata fields, format)
-4. **Registry signing** — Signs with the registry's Ed25519 key, adding `|registry@username` provenance
-5. **Database upsert** — Stores/updates in the appropriate Supabase table
+4. **Signature verification** — Verifies the publisher's Ed25519 signature (no re-signing; publisher's signature is sole provenance)
+5. **CAS storage** — Stores in the content-addressed registry
 6. **Version tracking** — Creates version record, marks previous versions as not latest
 
 ### Search Endpoint
@@ -212,7 +212,7 @@ Search performs case-insensitive matching on `name` and `description` fields. Ca
 
 Bundles are versioned collections of items (manifest + files) that can be pushed and pulled as a unit. Like individual items, bundles support visibility control and search.
 
-**Push:** Stores the manifest and all bundle files as JSONB in Supabase. Each version tracks a content hash (object_hash (CAS-based) of manifest) and an `is_latest` flag.
+**Push:** Stores the manifest and all bundle files in the CAS-backed registry. Each version tracks a content hash (object_hash (CAS-based) of manifest) and an `is_latest` flag.
 
 **Pull:** Returns the manifest and all files for a specific version (or latest). Increments download count on each pull.
 
@@ -220,19 +220,9 @@ Bundles are versioned collections of items (manifest + files) that can be pushed
 
 Bundle visibility is `public` or `unlisted`. New bundles default to `public` on push.
 
-### Database Tables
+### Storage
 
-The registry uses Supabase tables:
-
-| Table                                                         | Purpose                                        |
-| ------------------------------------------------------------- | ---------------------------------------------- |
-| `users`                                                       | User accounts (id, username)                   |
-| `tools`                                                       | Tool registry entries                          |
-| `directives`                                                  | Directive registry entries                     |
-| `knowledge`                                                   | Knowledge registry entries                     |
-| `tool_versions` / `directive_versions` / `knowledge_versions` | Version history                                |
-| `bundles`                                                     | Bundle metadata                                |
-| `bundle_versions`                                             | Bundle version history with manifest and files |
+The registry uses CAS-native storage on ryeos-node. Items and bundles are stored as content-addressed objects, with metadata indexed for search and version tracking. Identity is managed via Ed25519 keypairs and namespace claims — no external database.
 
 ### Authentication
 
@@ -240,12 +230,10 @@ The registry API authenticates via API keys (format: `rye_sk_...`). The `get_cur
 
 ### Configuration
 
-Server configuration via environment variables (in `registry_api/config.py`):
+Server configuration via environment variables (in `ryeos_node/config.py`):
 
 | Variable               | Description               |
 | ---------------------- | ------------------------- |
-| `SUPABASE_URL`         | Supabase project URL      |
-| `SUPABASE_SERVICE_KEY` | Supabase service role key |
 | `HOST`                 | Server bind host          |
 | `PORT`                 | Server bind port          |
 | `LOG_LEVEL`            | Logging level             |

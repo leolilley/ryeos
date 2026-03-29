@@ -1,0 +1,13 @@
+# Registry configuration.
+#
+# Loaded via 3-tier resolution (system → user → project).
+# Projects override with their own .ai/config/registry/registry.yaml.
+category: "registry"
+version: "1.0.0"
+
+# Registry node connection.
+# url: the ryeos-node that has registry features enabled.
+# key_env: env var name containing API key (if needed).
+#
+# registry:
+#   url: https://registry.example.com

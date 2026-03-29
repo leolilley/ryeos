@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:0624284b8b17f656040aa642fc0c364c6e36b8f4ed64a5c390109d4f0ad8f561:vdfOs7p4RkXHyHZlBi0TjsX7GcA3I6Dpwk36EJtWzw87mnP7hV71sBQoJGWR45dRyI7LNxeAU1DiYxXJ9vQHDg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T13:37:45Z:2ea58ee810e905d6f988caf3075d6fe81b193b8d50589f0f2ccaeb225587c307:XuzF_XLbV_DGgwWybXK4arDxDLemnddbBYhpZKHX5EO7zCgiZIv3IfzvoVmNZuhe6I2WroNdTOX9wBIDLoKwBA:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api
@@ -25,27 +25,31 @@ Endpoints, auth flow, and semantics for the Rye OS item registry.
 
 ## Service Overview
 
-- **Server:** FastAPI at `services/registry-api/registry_api/`
+- **Server:** Built into ryeos-node at `services/ryeos-node/ryeos_node/`
 - **Client tool:** `.ai/tools/rye/core/registry/registry.py`
-- **Database:** Supabase (PostgreSQL)
-- **Auth:** JWT (OAuth PKCE via GitHub)
-- **Deployed:** Railway (or equivalent)
+- **Storage:** CAS-native (content-addressed, no external database)
+- **Auth:** Ed25519 signed requests + API keys
+- **Deployed:** Modal (as part of ryeos-node)
 
 ## API Endpoints
 
-| Method | Path                                         | Description                           | Auth     |
-| ------ | -------------------------------------------- | ------------------------------------- | -------- |
-| GET    | `/health`                                    | Health check (DB connectivity)        | None     |
-| GET    | `/v1/public-key`                             | Registry Ed25519 public key (PEM)     | None     |
-| POST   | `/v1/push`                                   | Validate, sign, store an item         | Required |
-| GET    | `/v1/pull/{item_type}/{item_id}`             | Download an item                      | Required |
-| GET    | `/v1/search`                                 | Search items by query                 | Optional |
-| DELETE | `/v1/items/{item_type}/{item_id}`            | Delete an item                        | Required |
-| PATCH  | `/v1/items/{item_type}/{item_id}/visibility` | Set visibility (publish/unpublish)    | Required |
-| POST   | `/v1/bundle/push`                            | Push bundle (manifest + files)        | Required |
-| GET    | `/v1/bundle/pull/{bundle_id}`                | Pull bundle (manifest + files)        | Required |
-| GET    | `/v1/bundle/search`                          | Search bundles by query               | Optional |
-| POST   | `/v1/bundle/{bundle_id}/visibility`          | Set bundle visibility                 | Required |
+Registry endpoints are hosted on ryeos-node under the `/registry/*` path:
+
+| Method | Path                                                  | Description                           | Auth     |
+| ------ | ----------------------------------------------------- | ------------------------------------- | -------- |
+| GET    | `/health`                                             | Health check                          | None     |
+| GET    | `/public-key`                                         | Server Ed25519 public key (PEM)       | None     |
+| POST   | `/registry/push`                                      | Validate and store an item            | Required |
+| GET    | `/registry/pull/{item_type}/{item_id}`                | Download an item                      | Required |
+| GET    | `/registry/search`                                    | Search items by query                 | Optional |
+| DELETE | `/registry/items/{item_type}/{item_id}`               | Delete an item                        | Required |
+| PATCH  | `/registry/items/{item_type}/{item_id}/visibility`    | Set visibility (publish/unpublish)    | Required |
+| POST   | `/registry/bundle/push`                               | Push bundle (manifest + files)        | Required |
+| GET    | `/registry/bundle/pull/{bundle_id}`                   | Pull bundle (manifest + files)        | Required |
+| GET    | `/registry/bundle/search`                             | Search bundles by query               | Optional |
+| POST   | `/registry/bundle/{bundle_id}/visibility`             | Set bundle visibility                 | Required |
+| POST   | `/registry/identity`                                  | Register identity (namespace claim)   | Required |
+| GET    | `/registry/identity/{namespace}`                      | Look up namespace owner               | None     |
 
 ## Item Identity
 
@@ -81,7 +85,7 @@ login  →  opens browser for OAuth PKCE (GitHub), waits with initial delay,
 
 ### Server Auth
 
-JWT-based. The `get_current_user` dependency extracts user from `Authorization` header. Some endpoints (search, public-key) allow unauthenticated access.
+Ed25519 signed requests and API keys. The `get_current_user` dependency extracts user from the `Authorization` header. Some endpoints (search, public-key, identity lookup) allow unauthenticated access.
 
 ## Namespaces
 
@@ -106,18 +110,13 @@ JWT-based. The `get_current_user` dependency extracts user from `Authorization` 
 1. **Namespace verification** — Authenticated user must match namespace
 2. **Strip signature** — `strip_signature(content, item_type)` removes existing `rye:signed:` comment
 3. **Validate content** — Structural validation (metadata fields, format)
-4. **Registry signing** — `sign_with_registry(content, item_type, username)`:
-   - SHA256 of normalized content
-   - Ed25519 signature with registry private key
-   - Appends `|rye-registry@{username}` provenance
-5. **Database upsert** — Stores in Supabase table
+4. **Signature verification** — Verifies the publisher's Ed25519 signature (publisher's signature is sole provenance — no re-signing by the registry)
+5. **CAS storage** — Stores in the content-addressed registry
 6. **Version tracking** — Creates version record, marks previous versions as not latest
 
-### Registry Signature Format
+### Signature Provenance
 
-```
-rye:signed:TIMESTAMP:HASH:SIG:FP|rye-registry@username
-```
+The publisher's Ed25519 signature is preserved as-is — the registry does not re-sign items. Provenance is established by the publisher's keypair and namespace claim.
 
 ## Pull Semantics
 
@@ -229,19 +228,9 @@ New bundles default to `public` on push.
 
 Pull endpoints increment a download counter per item/bundle version on each successful pull.
 
-## Database Schema
+## Storage
 
-| Table                | Purpose                                        |
-| -------------------- | ---------------------------------------------- |
-| `users`              | User accounts (id, username)                   |
-| `tools`              | Tool registry entries                          |
-| `directives`         | Directive registry entries                     |
-| `knowledge`          | Knowledge registry entries                     |
-| `tool_versions`      | Tool version history                           |
-| `directive_versions` | Directive version history                      |
-| `knowledge_versions` | Knowledge version history                      |
-| `bundles`            | Bundle metadata                                |
-| `bundle_versions`    | Bundle version history (manifest + files)      |
+The registry uses CAS-native storage on ryeos-node. Items and bundles are stored as content-addressed objects with metadata indexed for search and version tracking. Identity is managed via Ed25519 keypairs and namespace claims — no external database.
 
 ## API Key Authentication
 
@@ -269,10 +258,10 @@ API keys use the `rye_sk_` prefix (e.g., `rye_sk_a1b2c3d4...`). Pass via the `Au
 
 ## Server Configuration
 
+Registry configuration is part of ryeos-node's config (`ryeos_node/config.py`):
+
 | Variable               | Description               |
 | ---------------------- | ------------------------- |
-| `SUPABASE_URL`         | Supabase project URL      |
-| `SUPABASE_SERVICE_KEY` | Supabase service role key |
 | `HOST`                 | Server bind host          |
 | `PORT`                 | Server bind port          |
 | `LOG_LEVEL`            | Logging level             |

@@ -1,4 +1,4 @@
-"""Tests for ryeos-remote server endpoints.
+"""Tests for ryeos-node server endpoints.
 
 Uses FastAPI TestClient with auth dependency overrides.
 Covers: happy path, security, limits/quotas, trust/key verification,
@@ -55,9 +55,9 @@ from rye.cas.sync import (
 )
 from rye.constants import AI_DIR
 
-from ryeos_remote.auth import Principal, ResolvedExecution, get_current_principal, require_capability
-from ryeos_remote.config import Settings, get_settings
-from ryeos_remote.server import (
+from ryeos_node.auth import Principal, ResolvedExecution, get_current_principal, require_capability
+from ryeos_node.config import Settings, get_settings
+from ryeos_node.server import (
     app,
     resolve_execution,
     _execute_from_head,
@@ -72,8 +72,8 @@ from ryeos_remote.server import (
     _validate_manifest_graph,
     MAX_FOLD_BACK_RETRIES,
 )
-from ryeos_remote.refs import resolve_project_ref, advance_project_ref, resolve_user_space_ref, init_project_ref
-from ryeos_remote.executions import register_execution, complete_execution, get_execution, store_conflict_record
+from ryeos_node.refs import resolve_project_ref, advance_project_ref, resolve_user_space_ref, init_project_ref
+from ryeos_node.executions import register_execution, complete_execution, get_execution, store_conflict_record
 
 # Load ArtifactStore from bundle via importlib (path has .ai/ dir)
 from conftest import PROJECT_ROOT, get_bundle_path
@@ -161,13 +161,14 @@ def cas_env(tmp_path):
             project_path=project_path,
             parameters=parameters,
             thread=thread,
+            secret_envelope=body.get("secret_envelope"),
         )
     app.dependency_overrides[resolve_execution] = _mock_resolve_execution
 
     # Populate lru_cache so middleware (which calls get_settings() directly) uses ours
     get_settings.cache_clear()
     import unittest.mock
-    with unittest.mock.patch("ryeos_remote.config.Settings", return_value=settings):
+    with unittest.mock.patch("ryeos_node.config.Settings", return_value=settings):
         get_settings()  # populates the cache with our settings
 
     with TestClient(app) as c:
@@ -249,14 +250,15 @@ class TestHealth:
 class TestPublicKey:
     def test_auto_generate(self, cas_env):
         c, _, tmp_path = cas_env
-        # Signing dir exists but no keys yet — ensure_keypair auto-generates
+        # Signing dir exists but no keys yet — ensure_full_keypair auto-generates
         r = c.get("/public-key")
         assert r.status_code == 200
         body = r.json()
-        assert "public_key_pem" in body
-        pem = body["public_key_pem"]
-        assert pem.startswith("-----BEGIN PUBLIC KEY-----")
-        assert pem.strip().endswith("-----END PUBLIC KEY-----")
+        assert body["kind"] == "identity/v1"
+        assert body["principal_id"].startswith("fp:")
+        assert body["signing_key"].startswith("ed25519:")
+        assert body["box_key"].startswith("x25519:")
+        assert "_signature" in body
 
 
 # ============================================================================
@@ -382,8 +384,8 @@ class TestExecute:
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -402,8 +404,8 @@ class TestExecute:
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -419,8 +421,8 @@ class TestExecute:
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -492,8 +494,8 @@ class TestExecuteThreadValidation:
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -510,8 +512,8 @@ class TestExecuteThreadValidation:
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -716,8 +718,8 @@ class TestRequestLimits:
         # the quota check mechanism works by filling over a smaller limit
         # This is already covered by test_user_quota_exceeded above;
         # here we verify the _check_user_quota function directly
-        from ryeos_remote.server import _check_user_quota
-        from ryeos_remote.config import Settings
+        from ryeos_node.server import _check_user_quota
+        from ryeos_node.config import Settings
 
         filler = root / "filler.bin"
         filler.write_bytes(b"x" * 2048)
@@ -742,7 +744,7 @@ class TestRequestLimits:
         )
         app.dependency_overrides[get_settings] = lambda: settings
         get_settings.cache_clear()
-        with unittest.mock.patch("ryeos_remote.config.Settings", return_value=settings):
+        with unittest.mock.patch("ryeos_node.config.Settings", return_value=settings):
             get_settings()
 
     @staticmethod
@@ -989,13 +991,13 @@ class TestTrustStore:
         ts = self._setup_user(tmp_path, monkeypatch)
 
         _, remote_pub = generate_keypair()
-        fp = ts.pin_remote_key(remote_pub, remote_name="ryeos-remote")
+        fp = ts.pin_remote_key(remote_pub, remote_name="ryeos-node")
 
         # Tamper with the key file
         trust_dir = tmp_path / "user" / AI_DIR / "config" / "keys" / "trusted"
         key_file = trust_dir / f"{fp}.toml"
         content = key_file.read_text()
-        tampered = content.replace('owner = "ryeos-remote"', 'owner = "evil"')
+        tampered = content.replace('owner = "ryeos-node"', 'owner = "evil"')
         key_file.write_text(tampered)
 
         # get_remote_key should return None for tampered file
@@ -1008,10 +1010,10 @@ class TestTrustStore:
 
         # Pin two different keys with the same owner
         _, pub1 = generate_keypair()
-        fp1 = ts.pin_remote_key(pub1, remote_name="ryeos-remote")
+        fp1 = ts.pin_remote_key(pub1, remote_name="ryeos-node")
 
         _, pub2 = generate_keypair()
-        fp2 = ts.pin_remote_key(pub2, remote_name="ryeos-remote")
+        fp2 = ts.pin_remote_key(pub2, remote_name="ryeos-node")
 
         # Tamper with the first key file
         trust_dir = tmp_path / "user" / AI_DIR / "config" / "keys" / "trusted"
@@ -1052,6 +1054,43 @@ class TestRemoteKeyVerification:
         ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
         return ts
 
+    @staticmethod
+    def _make_identity_body(pub_pem: bytes, priv_pem: bytes) -> dict:
+        """Build a signed identity/v1 document for mock /public-key responses."""
+        import base64 as _b64
+        import hashlib as _hl
+        from lillux.primitives.signing import (
+            compute_key_fingerprint as _fp,
+            sign_hash as _sign,
+            ensure_full_keypair as _efk,
+        )
+        fp = _fp(pub_pem)
+        # Generate box keys (just for the identity doc shape)
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        box_priv = X25519PrivateKey.generate()
+        box_pub_raw = box_priv.public_key().public_bytes_raw()
+        box_pub_b64url = _b64.urlsafe_b64encode(box_pub_raw).decode()
+
+        doc = {
+            "kind": "identity/v1",
+            "principal_id": f"fp:{fp}",
+            "signing_key": f"ed25519:{_b64.b64encode(pub_pem).decode()}",
+            "box_key": f"x25519:{_b64.b64encode(box_pub_b64url.encode()).decode()}",
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        payload = json.dumps(
+            {k: v for k, v in doc.items() if k != "_signature"},
+            sort_keys=True, separators=(",", ":"),
+        )
+        content_hash = _hl.sha256(payload.encode()).hexdigest()
+        sig_b64 = _sign(content_hash, priv_pem)
+        doc["_signature"] = {
+            "signer": f"fp:{fp}",
+            "sig": sig_b64,
+            "signed_at": "2026-01-01T00:00:00Z",
+        }
+        return doc
+
     @pytest.mark.asyncio
     async def test_pinned_key_mismatch_fails(self, tmp_path, monkeypatch):
         """Different key from server → hard error dict returned."""
@@ -1061,18 +1100,18 @@ class TestRemoteKeyVerification:
         _, first_pub = generate_keypair()
         ts.pin_remote_key(first_pub, remote_name="remote:default:mock.example.com")
 
-        # Simulate server returning a DIFFERENT key
-        _, second_pub = generate_keypair()
-        second_pem = second_pub.decode("utf-8")
+        # Simulate server returning a DIFFERENT key (signed identity doc)
+        second_priv, second_pub = generate_keypair()
+        identity_body = self._make_identity_body(second_pub, second_priv)
 
         class MockClient:
             base_url = "https://mock.example.com"
 
-            async def get(self, path):
+            async def get(self_inner, path):
                 return {
                     "success": True,
                     "status_code": 200,
-                    "body": {"public_key_pem": second_pem},
+                    "body": identity_body,
                     "error": None,
                 }
 
@@ -1111,7 +1150,7 @@ class TestRemoteKeyVerification:
         result = await _r_mod._verify_remote_key(MockClient())
         assert result is not None
         assert "error" in result
-        assert "Could not verify" in result["error"]
+        assert "Could not fetch" in result["error"]
 
 
 # ============================================================================
@@ -1121,7 +1160,7 @@ class TestRemoteKeyVerification:
 
 class TestCopyCasObjects:
     def test_valid_blobs_copied(self, tmp_path):
-        from ryeos_remote.server import _copy_cas_objects
+        from ryeos_node.server import _copy_cas_objects
 
         src = tmp_path / "src"
         dst = tmp_path / "dst"
@@ -1136,7 +1175,7 @@ class TestCopyCasObjects:
         assert cas.get_blob(h, dst) == b"test blob"
 
     def test_valid_objects_copied(self, tmp_path):
-        from ryeos_remote.server import _copy_cas_objects
+        from ryeos_node.server import _copy_cas_objects
 
         src = tmp_path / "src"
         dst = tmp_path / "dst"
@@ -1151,7 +1190,7 @@ class TestCopyCasObjects:
         assert cas.get_object(h, dst) == obj
 
     def test_mismatched_blob_raises(self, tmp_path):
-        from ryeos_remote.server import _copy_cas_objects
+        from ryeos_node.server import _copy_cas_objects
 
         src = tmp_path / "src"
         dst = tmp_path / "dst"
@@ -1173,7 +1212,7 @@ class TestCopyCasObjects:
         assert cas.get_blob(h, dst) is None
 
     def test_invalid_object_json_raises(self, tmp_path):
-        from ryeos_remote.server import _copy_cas_objects
+        from ryeos_node.server import _copy_cas_objects
 
         src = tmp_path / "src"
         dst = tmp_path / "dst"
@@ -1615,9 +1654,9 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
-             patch("ryeos_remote.server._update_snapshot_cache"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=True), \
+             patch("ryeos_node.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1656,9 +1695,9 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
-             patch("ryeos_remote.server._update_snapshot_cache"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=True), \
+             patch("ryeos_node.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1706,8 +1745,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.store_conflict_record"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1745,8 +1784,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.store_conflict_record"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1782,8 +1821,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.store_conflict_record"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1824,9 +1863,9 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
-             patch("ryeos_remote.server._update_snapshot_cache"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=True), \
+             patch("ryeos_node.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1870,8 +1909,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.store_conflict_record"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1907,8 +1946,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.store_conflict_record"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1947,8 +1986,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.store_conflict_record"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.store_conflict_record"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -1972,8 +2011,8 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=False), \
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=False), \
              patch("asyncio.sleep", return_value=None):  # skip actual delays
             result = await _fold_back(
                 user, settings, "test-project",
@@ -2007,9 +2046,9 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
-             patch("ryeos_remote.server._update_snapshot_cache"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=True), \
+             patch("ryeos_node.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2043,9 +2082,9 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_remote.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
-             patch("ryeos_remote.server._update_snapshot_cache"):
+        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=True), \
+             patch("ryeos_node.server._update_snapshot_cache"):
             result = await _fold_back(
                 user, settings, "test-project",
                 base_hash, exec_hash, root, cache, "thread-1",
@@ -2068,8 +2107,8 @@ class TestExecuteFromHead:
 
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -2099,11 +2138,11 @@ class TestExecuteFromHead:
         # Also need to patch fold-back's resolve + advance for the HEAD advance
         mock_fold_ref = {"snapshot_hash": snapshot_hash, "project_path": "test-project"}
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server.resolve_project_ref", return_value=mock_fold_ref), \
-             patch("ryeos_remote.server.advance_project_ref", return_value=True), \
-             patch("ryeos_remote.server._update_snapshot_cache"), \
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_node.server.resolve_project_ref", return_value=mock_fold_ref), \
+             patch("ryeos_node.server.advance_project_ref", return_value=True), \
+             patch("ryeos_node.server._update_snapshot_cache"), \
              patch.object(
                  __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
@@ -2136,8 +2175,8 @@ class TestExecuteFromHead:
             "pushed_at": "2026-01-01T00:00:00+00:00",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
             r = c.post("/execute", json={
                 "project_path": "test-project",
                 "item_type": "tool",
@@ -2262,16 +2301,16 @@ class TestConcurrentExecution:
             await barrier.wait()
             return {"status": "success", "body": "done"}
 
-        from ryeos_remote.server import _execute_from_head
+        from ryeos_node.server import _execute_from_head
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_remote.server.advance_project_ref", side_effect=mock_advance_project_ref), \
-             patch("ryeos_remote.server.register_execution"), \
-             patch("ryeos_remote.server.complete_execution"), \
-             patch("ryeos_remote.server._update_snapshot_cache"), \
-             patch("ryeos_remote.server._check_user_quota"), \
+        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_node.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
+             patch("ryeos_node.server.advance_project_ref", side_effect=mock_advance_project_ref), \
+             patch("ryeos_node.server.register_execution"), \
+             patch("ryeos_node.server.complete_execution"), \
+             patch("ryeos_node.server._update_snapshot_cache"), \
+             patch("ryeos_node.server._check_user_quota"), \
              patch.object(
                  __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
@@ -2413,17 +2452,17 @@ class TestConcurrentExecution:
             await barrier.wait()
             return {"status": "success", "body": "done"}
 
-        from ryeos_remote.server import _execute_from_head
+        from ryeos_node.server import _execute_from_head
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_remote.server.advance_project_ref", side_effect=mock_advance_project_ref), \
-             patch("ryeos_remote.server.register_execution"), \
-             patch("ryeos_remote.server.complete_execution"), \
-             patch("ryeos_remote.server._update_snapshot_cache"), \
-             patch("ryeos_remote.server._check_user_quota"), \
-             patch("ryeos_remote.server.store_conflict_record"), \
+        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_node.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
+             patch("ryeos_node.server.advance_project_ref", side_effect=mock_advance_project_ref), \
+             patch("ryeos_node.server.register_execution"), \
+             patch("ryeos_node.server.complete_execution"), \
+             patch("ryeos_node.server._update_snapshot_cache"), \
+             patch("ryeos_node.server._check_user_quota"), \
+             patch("ryeos_node.server.store_conflict_record"), \
              patch.object(
                  __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
@@ -2553,16 +2592,16 @@ class TestConcurrentExecution:
             await barrier.wait()
             return {"status": "success", "body": "done"}
 
-        from ryeos_remote.server import _execute_from_head
+        from ryeos_node.server import _execute_from_head
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
-             patch("ryeos_remote.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_remote.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_remote.server.advance_project_ref", side_effect=mock_advance_project_ref), \
-             patch("ryeos_remote.server.register_execution"), \
-             patch("ryeos_remote.server.complete_execution"), \
-             patch("ryeos_remote.server._update_snapshot_cache"), \
-             patch("ryeos_remote.server._check_user_quota"), \
+        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_node.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
+             patch("ryeos_node.server.advance_project_ref", side_effect=mock_advance_project_ref), \
+             patch("ryeos_node.server.register_execution"), \
+             patch("ryeos_node.server.complete_execution"), \
+             patch("ryeos_node.server._update_snapshot_cache"), \
+             patch("ryeos_node.server._check_user_quota"), \
              patch.object(
                  __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
@@ -2704,30 +2743,30 @@ class TestSettingsCacheExecRoots:
 
 class TestVerifyTimestamp:
     def test_valid_timestamp(self):
-        from ryeos_remote.auth import verify_timestamp
+        from ryeos_node.auth import verify_timestamp
         verify_timestamp(str(int(time.time())))  # should not raise
 
     def test_empty_timestamp(self):
-        from ryeos_remote.auth import verify_timestamp
+        from ryeos_node.auth import verify_timestamp
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp("")
         assert exc_info.value.status_code == 401
 
     def test_non_numeric_timestamp(self):
-        from ryeos_remote.auth import verify_timestamp
+        from ryeos_node.auth import verify_timestamp
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp("not-a-number")
         assert exc_info.value.status_code == 401
 
     def test_stale_timestamp(self):
-        from ryeos_remote.auth import verify_timestamp
+        from ryeos_node.auth import verify_timestamp
         stale = str(int(time.time()) - 600)
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp(stale)
         assert exc_info.value.status_code == 401
 
     def test_future_timestamp(self):
-        from ryeos_remote.auth import verify_timestamp
+        from ryeos_node.auth import verify_timestamp
         future = str(int(time.time()) + 60)
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp(future)
@@ -2742,7 +2781,7 @@ class TestVerifyHmac:
         return f"sha256={sig}"
 
     def test_valid_hmac(self):
-        from ryeos_remote.auth import verify_hmac
+        from ryeos_node.auth import verify_hmac
         ts = str(int(time.time()))
         body = b'{"hook_id": "wh_test"}'
         secret = "whsec_test123"
@@ -2750,7 +2789,7 @@ class TestVerifyHmac:
         verify_hmac(ts, body, secret, sig)  # should not raise
 
     def test_wrong_secret(self):
-        from ryeos_remote.auth import verify_hmac
+        from ryeos_node.auth import verify_hmac
         ts = str(int(time.time()))
         body = b'{"hook_id": "wh_test"}'
         sig = self._sign(ts, body, "correct_secret")
@@ -2759,7 +2798,7 @@ class TestVerifyHmac:
         assert exc_info.value.status_code == 401
 
     def test_tampered_body(self):
-        from ryeos_remote.auth import verify_hmac
+        from ryeos_node.auth import verify_hmac
         ts = str(int(time.time()))
         secret = "whsec_test123"
         sig = self._sign(ts, b'{"hook_id": "wh_test"}', secret)
@@ -2768,19 +2807,19 @@ class TestVerifyHmac:
         assert exc_info.value.status_code == 401
 
     def test_missing_signature(self):
-        from ryeos_remote.auth import verify_hmac
+        from ryeos_node.auth import verify_hmac
         with pytest.raises(HTTPException) as exc_info:
             verify_hmac("123", b"body", "secret", "")
         assert exc_info.value.status_code == 401
 
     def test_wrong_prefix(self):
-        from ryeos_remote.auth import verify_hmac
+        from ryeos_node.auth import verify_hmac
         with pytest.raises(HTTPException) as exc_info:
             verify_hmac("123", b"body", "secret", "md5=abcd")
         assert exc_info.value.status_code == 401
 
     def test_wrong_length(self):
-        from ryeos_remote.auth import verify_hmac
+        from ryeos_node.auth import verify_hmac
         with pytest.raises(HTTPException) as exc_info:
             verify_hmac("123", b"body", "secret", "sha256=tooshort")
         assert exc_info.value.status_code == 401
@@ -2806,7 +2845,7 @@ class TestLookupBinding:
             "revoked_at": None,
         }
 
-        with patch("ryeos_remote.server.resolve_binding", return_value=binding):
+        with patch("ryeos_node.server.resolve_binding", return_value=binding):
             result = _lookup_binding("wh_test", settings)
         assert result["item_id"] == "email/handle_inbound"
 
@@ -2814,7 +2853,7 @@ class TestLookupBinding:
         from unittest.mock import patch
         settings = _make_settings("/cas", "/signing")
 
-        with patch("ryeos_remote.server.resolve_binding", return_value=None):
+        with patch("ryeos_node.server.resolve_binding", return_value=None):
             with pytest.raises(HTTPException) as exc_info:
                 _lookup_binding("wh_nonexistent", settings)
         assert exc_info.value.status_code == 401
@@ -2825,7 +2864,7 @@ class TestLookupBinding:
         settings = _make_settings("/cas", "/signing")
 
         # resolve_binding returns None for revoked bindings
-        with patch("ryeos_remote.server.resolve_binding", return_value=None):
+        with patch("ryeos_node.server.resolve_binding", return_value=None):
             with pytest.raises(HTTPException) as exc_info:
                 _lookup_binding("wh_revoked", settings)
         assert exc_info.value.status_code == 401
@@ -2864,7 +2903,7 @@ class TestWebhookBindings:
             "project_path": "campaign-kiwi",
         }
 
-        with patch("ryeos_remote.server.create_binding", return_value=mock_result):
+        with patch("ryeos_node.server.create_binding", return_value=mock_result):
             r = c.post("/webhook-bindings", json={
                 "item_type": "directive",
                 "item_id": "email/handle_inbound",
@@ -2897,7 +2936,7 @@ class TestWebhookBindings:
              "project_path": "proj", "description": "test", "created_at": "2026-01-01", "revoked_at": None},
         ]
 
-        with patch("ryeos_remote.server.list_bindings", return_value=bindings):
+        with patch("ryeos_node.server.list_bindings", return_value=bindings):
             r = c.get("/webhook-bindings")
         assert r.status_code == 200
         body = r.json()
@@ -2908,7 +2947,7 @@ class TestWebhookBindings:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        with patch("ryeos_remote.server.revoke_binding", return_value=True):
+        with patch("ryeos_node.server.revoke_binding", return_value=True):
             r = c.delete("/webhook-bindings/wh_abc")
         assert r.status_code == 200
         assert r.json()["revoked"] == "wh_abc"
@@ -2917,7 +2956,7 @@ class TestWebhookBindings:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        with patch("ryeos_remote.server.revoke_binding", return_value=False):
+        with patch("ryeos_node.server.revoke_binding", return_value=False):
             r = c.delete("/webhook-bindings/wh_nonexistent")
         assert r.status_code == 404
 
@@ -3271,7 +3310,7 @@ class TestHistoryEndpoint:
             "project_path": "my-project",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref):
             r = c.get("/history", params={"project_path": "my-project"})
 
         assert r.status_code == 200
@@ -3291,7 +3330,7 @@ class TestHistoryEndpoint:
         def raise_404(*args, **kwargs):
             raise HTTPException(404, "No project ref found")
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", side_effect=raise_404):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=raise_404):
             r = c.get("/history", params={"project_path": "nonexistent"})
 
         assert r.status_code == 404
@@ -3316,7 +3355,7 @@ class TestHistoryEndpoint:
             "project_path": "proj",
         }
 
-        with patch("ryeos_remote.server._resolve_project_ref_or_404", return_value=mock_ref):
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref):
             r = c.get("/history", params={"project_path": "proj", "limit": 2})
 
         assert r.status_code == 200
@@ -3327,3 +3366,207 @@ class TestHistoryEndpoint:
         c, _, _ = cas_env
         r = c.get("/history")
         assert r.status_code == 422
+
+
+# ============================================================================
+# Sealed Envelope
+# ============================================================================
+
+
+def _generate_box_keypair():
+    """Generate an X25519 keypair, return (box_key, box_pub) as unpadded base64url bytes.
+
+    Matches the format produced by ``lillux keypair generate`` and stored in
+    ``box_key.pem`` / ``box_pub.pem``.
+    """
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    priv = X25519PrivateKey.generate()
+    priv_bytes = priv.private_bytes_raw()
+    pub_bytes = priv.public_key().public_bytes_raw()
+    return (
+        base64.urlsafe_b64encode(priv_bytes).rstrip(b"="),
+        base64.urlsafe_b64encode(pub_bytes).rstrip(b"="),
+    )
+
+
+class TestSealedEnvelope:
+    """Tests for sealed envelope seal/open round-trip."""
+
+    @staticmethod
+    def _load_envelope_module():
+        envelope_path = get_bundle_path("core", "tools/rye/core/crypto/envelope.py")
+        spec = importlib.util.spec_from_file_location("envelope", envelope_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_seal_open_round_trip(self):
+        """Seal + open produces the original env map."""
+        box_key, box_pub = _generate_box_keypair()
+        envelope_mod = self._load_envelope_module()
+
+        env_map = {"API_KEY": "sk-test-123", "DB_URL": "postgres://localhost/db"}
+        sealed = envelope_mod.seal_secrets(env_map, box_pub)
+
+        assert sealed["version"] == 1
+        assert sealed["recipient"].startswith("fp:")
+        assert "enc" in sealed
+        assert "ciphertext" in sealed
+        assert sealed["aad_fields"]["kind"] == "execution-secrets/v1"
+
+        decrypted = envelope_mod.open_envelope(sealed, box_key)
+        assert decrypted == env_map
+
+    def test_wrong_key_fails(self):
+        """Opening with wrong key raises ValueError."""
+        _, box_pub_1 = _generate_box_keypair()
+        box_key_2, _ = _generate_box_keypair()
+
+        envelope_mod = self._load_envelope_module()
+        sealed = envelope_mod.seal_secrets({"SECRET": "value"}, box_pub_1)
+
+        with pytest.raises(ValueError, match="Failed to open"):
+            envelope_mod.open_envelope(sealed, box_key_2)
+
+    def test_tampered_ciphertext_fails(self):
+        """Tampered ciphertext fails authentication."""
+        box_key, box_pub = _generate_box_keypair()
+        envelope_mod = self._load_envelope_module()
+        sealed = envelope_mod.seal_secrets({"KEY": "val"}, box_pub)
+
+        ct = base64.urlsafe_b64decode(sealed["ciphertext"])
+        tampered = bytes([ct[0] ^ 0xFF]) + ct[1:]
+        sealed["ciphertext"] = base64.urlsafe_b64encode(tampered).decode()
+
+        with pytest.raises(ValueError):
+            envelope_mod.open_envelope(sealed, box_key)
+
+    def test_seal_for_identity(self):
+        """seal_secrets_for_identity extracts box key from identity doc."""
+        import base64 as b64
+
+        box_key, box_pub = _generate_box_keypair()
+        from lillux.primitives.signing import compute_box_fingerprint
+        fp = compute_box_fingerprint(box_pub)
+
+        identity_doc = {
+            "kind": "identity/v1",
+            "principal_id": f"fp:{fp}",
+            "signing_key": "ed25519:placeholder",
+            "box_key": f"x25519:{b64.b64encode(box_pub).decode()}",
+        }
+
+        envelope_mod = self._load_envelope_module()
+        sealed = envelope_mod.seal_secrets_for_identity({"MY_SECRET": "abc"}, identity_doc)
+
+        decrypted = envelope_mod.open_envelope(sealed, box_key)
+        assert decrypted == {"MY_SECRET": "abc"}
+
+
+class TestSealedEnvelopeLillux:
+    """Tests for Lillux-level envelope decryption and validation."""
+
+    def test_decrypt_and_inject(self, tmp_path):
+        """decrypt_and_inject round-trips with seal_secrets."""
+        from lillux.primitives.signing import save_box_keypair
+        from lillux.primitives.sealed_envelope import decrypt_and_inject
+
+        box_key, box_pub = _generate_box_keypair()
+        key_dir = tmp_path / "keys"
+        key_dir.mkdir()
+        save_box_keypair(box_key, box_pub, key_dir)
+
+        envelope_mod = TestSealedEnvelope._load_envelope_module()
+        env_map = {"MY_API_KEY": "secret-value-123"}
+        sealed = envelope_mod.seal_secrets(env_map, box_pub)
+
+        result = decrypt_and_inject(sealed, str(key_dir))
+        assert result == env_map
+
+    def test_is_safe_secret_name(self):
+        """Validate secret name safety checks."""
+        from lillux.primitives.sealed_envelope import is_safe_secret_name
+
+        assert is_safe_secret_name("MY_API_KEY") is True
+        assert is_safe_secret_name("DATABASE_URL") is True
+
+        assert is_safe_secret_name("PATH") is False
+        assert is_safe_secret_name("HOME") is False
+        assert is_safe_secret_name("PYTHONPATH") is False
+
+        assert is_safe_secret_name("AWS_SECRET_KEY") is False
+        assert is_safe_secret_name("GITHUB_TOKEN") is False
+        assert is_safe_secret_name("DOCKER_HOST") is False
+
+        assert is_safe_secret_name("") is False
+        assert is_safe_secret_name("has space") is False
+        assert is_safe_secret_name("123start") is False
+
+    def test_validate_env_map(self):
+        """Test env map validation limits."""
+        from lillux.primitives.sealed_envelope import validate_env_map, MAX_VARIABLE_COUNT
+
+        assert validate_env_map({"KEY": "value"}) == []
+
+        errors = validate_env_map({"KEY": "val\x00ue"})
+        assert any("NUL" in e for e in errors)
+
+        big_map = {f"VAR_{i}": "x" for i in range(MAX_VARIABLE_COUNT + 1)}
+        errors = validate_env_map(big_map)
+        assert any("too many" in e for e in errors)
+
+    def test_unsafe_names_filtered(self, tmp_path):
+        """Unsafe secret names are filtered out during decryption."""
+        from lillux.primitives.signing import save_box_keypair
+        from lillux.primitives.sealed_envelope import decrypt_and_inject
+
+        box_key, box_pub = _generate_box_keypair()
+        key_dir = tmp_path / "keys"
+        key_dir.mkdir()
+        save_box_keypair(box_key, box_pub, key_dir)
+
+        envelope_mod = TestSealedEnvelope._load_envelope_module()
+        env_map = {
+            "MY_API_KEY": "safe-value",
+            "PATH": "should-be-filtered",
+            "AWS_SECRET": "should-be-filtered",
+        }
+        sealed = envelope_mod.seal_secrets(env_map, box_pub)
+
+        result = decrypt_and_inject(sealed, str(key_dir))
+        assert "MY_API_KEY" in result
+        assert "PATH" not in result
+        assert "AWS_SECRET" not in result
+
+
+class TestExecuteWithEnvelope:
+    """Tests for sealed envelope passthrough in /execute endpoint."""
+
+    def test_resolve_execution_includes_envelope(self, cas_env):
+        """secret_envelope from request body appears in ResolvedExecution."""
+        c, user_cas, tmp_path = cas_env
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, user_cas,
+        )
+
+        from unittest.mock import patch
+
+        envelope = {"version": 1, "recipient": "fp:test", "enc": "abc", "ciphertext": "xyz"}
+
+        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
+             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
+             patch("ryeos_node.server._execute_from_head") as mock_exec:
+            mock_exec.return_value = {"status": "ok"}
+            r = c.post("/execute", json={
+                "project_path": "test-project",
+                "item_type": "tool",
+                "item_id": "test/tool",
+                "parameters": {},
+                "secret_envelope": envelope,
+            })
+
+        assert mock_exec.called
+        call_kwargs = mock_exec.call_args
+        assert call_kwargs.kwargs.get("secret_envelope") == envelope \
+            or (len(call_kwargs.args) > 7 and call_kwargs.args[7] == envelope)

@@ -6,14 +6,14 @@ Backend services that power the RYE ecosystem.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| [registry-api](./registry-api/) | 8000 | Server-side validation and signing for registry push/pull |
+| [ryeos-node](./ryeos-node/) | 8000 | Remote execution, CAS sync, and registry features (Ed25519 auth) |
 
 ## Architecture
 
 ```
 ┌─────────────────┐     ┌──────────────────────┐     ┌─────────────┐
-│  Client (rye)   │────▶│  Registry API        │────▶│  Supabase   │
-│  CLI / MCP      │     │  (FastAPI + rye pkg) │     │  Database   │
+│  Client (rye)   │────▶│  ryeos-node           │────▶│  Local CAS  │
+│  CLI / MCP      │     │  (FastAPI + Ed25519)  │     │  + Registry │
 └─────────────────┘     └──────────────────────┘     └─────────────┘
 ```
 
