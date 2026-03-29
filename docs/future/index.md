@@ -20,3 +20,5 @@ Exploratory designs that build on Rye's existing architecture. These are not com
 | [ryeos-cli](ryeos-cli.md) | **Implemented** — Terminal CLI mapping shell verbs to the three primitives. `pip install ryeos-cli` |
 | [Sovereign Inference](sovereign-inference.md) | Self-hosted LLM inference on your own hardware — inference calls, tool dispatch, and cluster routing all running through RYE's `execute` primitive |
 | [Execution Nodes](execution-nodes.md) | Self-describing execution nodes that advertise capabilities, accept signed requests, and route work across a multi-node cluster |
+| [Deploying Nodes](deploying-nodes.md) | Deployment guide for ryeos-node on Modal, Render, and local — node space init, Dockerfile, deploy configs |
+| [Execution Graph Scheduling](execution-graph-scheduling.md) | Pressure-aware graph realization — the execution graph IS the scheduler |
