@@ -1,0 +1,12 @@
+services:
+  ryeos-node:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - cas-data:/cas
+    environment:
+      - CAS_BASE_PATH=/cas
+
+volumes:
+  cas-data:

@@ -6,7 +6,7 @@ Backend services that power the RYE ecosystem.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| [ryeos-node](./ryeos-node/) | 8000 | Remote execution, CAS sync, and registry features (Ed25519 auth) |
+| [ryeos-node](./ryeos-node/) | 8000 | Execution node — CAS sync, directive/tool execution, webhooks, registry (Ed25519 auth) |
 
 ## Architecture
 
@@ -17,33 +17,17 @@ Backend services that power the RYE ecosystem.
 └─────────────────┘     └──────────────────────┘     └─────────────┘
 ```
 
-## Key Principle: Single Source of Truth
-
-All services import and use the `rye` package directly:
-
-```python
-from rye.utils.validators import validate_parsed_data
-from rye.utils.metadata_manager import MetadataManager
-from rye.utils.parser_router import ParserRouter
-```
-
-This ensures:
-- **Consistent validation** between client and server
-- **No duplication** of validation schemas or parsing logic
-- **Easy updates** - change validation in one place
-
-## Development
+## Deploy
 
 ```bash
-# Start all services
-docker-compose up
+# Modal
+cd ryeos-node && modal deploy modal_app.py
 
-# Start specific service
-cd registry-api
-pip install -e .
-uvicorn registry_api.main:app --reload
+# Docker
+cd ryeos-node && docker compose up
+
+# Local
+cd ryeos-node && ./run.sh
 ```
 
-## Documentation
-
-See [/docs/db/services/](../docs/db/services/) for detailed service documentation.
+See [ryeos-node/README.md](./ryeos-node/README.md) for full deployment docs.

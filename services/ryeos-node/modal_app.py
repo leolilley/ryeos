@@ -28,6 +28,7 @@ image = (
         "fastapi>=0.109.0",
         "uvicorn[standard]>=0.27.0",
         "pydantic-settings>=2.1.0",
+        "pyyaml>=6.0",
         # Auth (TOML parsing for authorized key files)
         "tomli>=2.0.0;python_version<'3.11'",
         force_build=True,
@@ -35,8 +36,6 @@ image = (
     .add_local_dir("ryeos_node", remote_path="/app/ryeos_node", copy=True)
     .env({
         "CAS_BASE_PATH": "/cas",
-        "SIGNING_KEY_DIR": "/cas/signing",
-        "RYE_REMOTE_NAME": "default",
         "PYTHONPATH": "/app",
         "RYE_KERNEL_PYTHON": "/usr/local/bin/python3",
     })
@@ -47,11 +46,17 @@ image = (
     image=image,
     volumes={"/cas": cas_volume},
     timeout=300,
+    keep_warm=1,
 )
-@modal.concurrent(max_inputs=1)
+@modal.concurrent(max_inputs=8)
 @modal.asgi_app()
-def remote_server():
+def node():
     """ryeos-node — CAS-native execution server."""
+    from ryeos_node.init import ensure_node_space
+
+    ensure_node_space("/cas")
+    cas_volume.commit()
+
     from ryeos_node.server import app as fastapi_app
 
     return fastapi_app

@@ -1,3 +1,3 @@
-"""RYE Remote Execution Server — CAS-native, no git."""
+"""RYE Execution Node — CAS-native remote execution server."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

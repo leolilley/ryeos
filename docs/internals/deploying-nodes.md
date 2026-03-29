@@ -2,15 +2,15 @@
 id: deploying-nodes
 title: "Deploying Execution Nodes — Modal, Render, Local"
 description: Deployment guide for ryeos-node across three targets, scoping the work to get CPU execution nodes running for directive execution and tool dispatch
-category: future
+category: internals
 tags: [deployment, nodes, modal, render, local, operations]
-version: "0.1.0"
-status: planned
+version: "1.0.0"
+status: implemented
 ```
 
 # Deploying Execution Nodes — Modal, Render, Local
 
-> **Status:** Planned — scoping doc. Implements the non-GPU side of [Snap-Track on Sovereign Infrastructure](../.tmp/snap-track-sovereign-example.md). GPU nodes and the completions server come later.
+> **Status:** Implemented — init module, Dockerfile, Modal/Render/local configs all landed. GPU nodes and the completions server come later.
 
 ## Goal
 
@@ -34,10 +34,10 @@ Get `ryeos-node` running on three targets so CPU execution nodes can:
 | Route tool + status cache | ✅ Capability-based dispatch with topology config |
 | `cluster/topology.yaml` | ✅ Routing policy (strategy, thresholds, TTLs) |
 | Authorized key auth | ✅ Ed25519 signed requests, TOML key files |
-| First-boot init | ❌ Manual — needs `rye node init` |
-| Dockerfile | ❌ Needed for Render and local Docker |
-| `render.yaml` | ❌ Needed for Render blueprint |
-| Local run script | ❌ Needed for bare metal |
+| First-boot init | ✅ `ryeos_node/init.py` — idempotent, generates keys + scaffolds node.yaml |
+| Dockerfile | ✅ Multi-target container build |
+| `render.yaml` | ✅ One-click Render blueprint |
+| Local run script | ✅ `run.sh` — defaults to `~/.ryeos-node` |
 
 ---
 
@@ -284,31 +284,6 @@ uvicorn ryeos_node.server:app --host 0.0.0.0 --port "${PORT:-8000}"
 
 ---
 
-## The Missing Piece: `ryeos_node.init`
-
-All three targets need a first-boot init that:
-
-1. **Generates signing key** if `<cas>/signing/id_ed25519` doesn't exist
-2. **Creates node config dirs** — `<cas>/config/authorized_keys/`, `<cas>/config/.ai/config/node/`
-3. **Scaffolds `node.yaml`** with sensible defaults if missing
-4. **Prints node fingerprint** so you know what to authorize on other nodes
-
-```python
-# ryeos_node/init.py
-"""First-boot initialization for ryeos-node."""
-
-def ensure_node_space(cas_base_path: str) -> None:
-    """Ensure node space is initialized. Idempotent."""
-    # 1. Generate signing key if missing
-    # 2. Create authorized_keys dir
-    # 3. Scaffold node.yaml if missing
-    # 4. Log node fingerprint
-```
-
-This is a ~50 line module. Idempotent — safe to call on every startup.
-
----
-
 ## Wiring It Up for Snap-Track
 
 Once a CPU node is running on any target, the snap-track setup is:
@@ -322,28 +297,22 @@ The CPU node handles directive execution, browser automation, database writes. L
 
 ---
 
-## Implementation Order
+## Implementation Files
 
-| Step | What | Effort |
-|---|---|---|
-| 1 | `ryeos_node/init.py` — first-boot init module | Small |
-| 2 | Update `modal_app.py` — rename, init hook, max_inputs | Small |
-| 3 | `Dockerfile` + `docker-compose.yml` | Small |
-| 4 | `render.yaml` blueprint | Small |
-| 5 | `run.sh` local convenience script | Tiny |
-| 6 | Update `services/README.md` with deploy instructions | Small |
-| 7 | Test: deploy to Modal, verify /health + /status + /execute | Medium |
-| 8 | Test: deploy to Render, same verification | Medium |
-| 9 | Test: local run, push a project, execute a directive | Medium |
-
-Steps 1-6 are code. Steps 7-9 are deployment testing.
-
----
+| Component | File |
+|---|---|
+| Init module | `services/ryeos-node/ryeos_node/init.py` |
+| Modal deployment | `services/ryeos-node/modal_app.py` |
+| Dockerfile | `services/ryeos-node/Dockerfile` |
+| Docker Compose | `services/ryeos-node/docker-compose.yml` |
+| Render blueprint | `services/ryeos-node/render.yaml` |
+| Local run script | `services/ryeos-node/run.sh` |
+| Server README | `services/ryeos-node/README.md` |
 
 ## Relationship to Other Docs
 
 | Doc | Relationship |
 |---|---|
-| [Execution Nodes](execution-nodes.md) | This doc deploys what that doc designed. Route tool, status cache, topology config — all implemented. |
-| [Snap-Track Example](../.tmp/snap-track-sovereign-example.md) | This doc gets the CPU execution node running. That doc is the end-to-end use case. |
-| [Sovereign Inference](sovereign-inference.md) | GPU nodes and completions server come after this. This doc is the foundation. |
+| [Execution Nodes](execution-nodes.md) | Architecture — routing tool, status cache, topology config. This doc is the operational guide. |
+| [Remote Execution](remote-execution.md) | Protocol layer — CAS sync, materializer, trust model. |
+| [Sovereign Inference](../future/sovereign-inference.md) | GPU nodes and completions server come after this. This doc is the foundation. |

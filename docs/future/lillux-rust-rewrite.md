@@ -294,7 +294,7 @@ This architecture draws from fundamental computing concepts. These aren't borrow
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | [Memory & Intent Resolution](memory-and-intent-resolution.md)           | Embedding _computation_ is Execute. Embedding _storage_ is a Memory backend. No new kernel primitive needed.            |
 | [Sovereign Inference](sovereign-inference.md)                           | GPU inference is an Execute dispatch target. The kernel doesn't know about models — it runs processes.                  |
-| [Execution Nodes](execution-nodes.md)                                   | A node is a machine running the `lillux` binary. Three primitives define the full node spec.                            |
+| [Execution Nodes](../internals/execution-nodes.md)                                   | A node is a machine running the `lillux` binary. Three primitives define the full node spec.                            |
 | [Encrypted Shared Intelligence](encrypted-shared-intelligence.md)       | HPKE decryption at the Lillux boundary becomes an Identity operation. Private keys never leave Rust.                    |
 | [Dynamic Personality](dynamic-personality.md)                           | Trait retrieval uses Memory (CAS + embedding backend). No kernel changes.                                               |
 | [Residual Stream](Residual%20stream%20and%20native%20model%20family.md) | Residual artifacts are CAS blobs. The proposed `residual_stream` primitive is a Memory backend, not a kernel primitive. |

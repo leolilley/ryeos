@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: ryeos-node
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    disk:
+      name: cas-storage
+      mountPath: /cas
+      sizeGB: 10
+    envVars:
+      - key: CAS_BASE_PATH
+        value: /cas

@@ -2,15 +2,15 @@
 id: execution-nodes
 title: "Execution Nodes — Distributed Computing Through RYE's Execution Model"
 description: Distributed tool execution across self-reporting nodes — capabilities derived from the workspace, routing through existing execute and remote dispatch, no inference-specific logic
-category: future
+category: internals
 tags: [nodes, execution, remote, cluster, distributed, compute, routing]
-version: "0.1.0"
-status: exploratory
+version: "1.0.0"
+status: implemented
 ```
 
 # Execution Nodes — Distributed Computing Through RYE's Execution Model
 
-> **Status:** Exploratory — builds directly on existing remote execution infrastructure. Not scheduled for implementation.
+> **Status:** Implemented — routing tool, status cache, topology config, node space, and deploy configs.
 
 ## The Idea
 
@@ -256,8 +256,8 @@ The same server, deployed on more machines. Nothing about the server code change
 | Where it runs | Modal (single deployment) | Any machine — self-hosted or Modal          |
 | How many      | One                       | One per node                                |
 | CAS storage   | Modal Volume (`/cas`)     | Local NVMe per node                         |
-| Identity      | Supabase user_id          | Ed25519 key fingerprint (`fp:...`)          |
-| New endpoint  | —                         | `/status` wrapping local `node/status` tool |
+| Identity      | Ed25519 key fingerprint   | Ed25519 key fingerprint (`fp:...`)          |
+| New endpoint  | —                         | `/status` with capability scanning          |
 
 The server at `services/ryeos-node/ryeos_node/server.py` doesn't assume Modal. Modal-specific parts are isolated in `modal_app.py`. Running the same `server.py` via uvicorn on bare metal works today.
 
@@ -265,19 +265,16 @@ The server at `services/ryeos-node/ryeos_node/server.py` doesn't assume Modal. M
 
 ## What's New vs What Exists
 
-### Proposed New Items
+### Implemented Items
 
-| Item                         | Type                            | Purpose                                                                                    |
+| Item                         | Type                            | Location                                                                                   |
 | ---------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------ |
-| `node/status`                | Tool                            | Local workspace introspection — scans available tools, reports capabilities + active count |
-| `/status` endpoint           | HTTP endpoint on `ryeos-node` | Thin wrapper around local `node/status` tool execution                                     |
-| Routing tool implementations | Tools                           | Per-tool routing implementations that query `/status` and dispatch via `_dispatch_remote`  |
-
-### Proposed New Config
-
-| Config                  | Location              | Purpose                                                                     |
-| ----------------------- | --------------------- | --------------------------------------------------------------------------- |
-| `cluster/topology.yaml` | `.ai/config/cluster/` | Optional — routing policy (prefer local, tier definitions, load thresholds) |
+| `node/status`                | Tool                            | `.ai/tools/node/status/status.py` — capability scanning via system bundle introspection   |
+| `/status` endpoint           | HTTP endpoint on `ryeos-node` | `server.py` — calls `_scan_capabilities()`, reports load + hardware                       |
+| `route/route`                | Tool                            | `.ai/tools/rye/core/remote/route/route.py` — capability matching, least-loaded dispatch   |
+| `status_cache`               | Library                         | `.ai/tools/rye/core/remote/status_cache.py` — TTL cache for `/status` responses           |
+| `node.yaml`                  | Config                          | `<node_config>/.ai/config/node/node.yaml` — identity, hardware, features, limits          |
+| `cluster/topology.yaml`      | Config                          | `.ai/config/cluster/topology.yaml` — routing strategy, load threshold, TTLs               |
 
 ### What's Unchanged
 
@@ -302,21 +299,28 @@ The server at `services/ryeos-node/ryeos_node/server.py` doesn't assume Modal. M
 
 | Doc                                                                                           | Relationship                                                                                                                                                                                                                                                 |
 | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Sovereign Inference](sovereign-inference.md)                                                 | Describes the completions server, provider path for agent threads, and how inference calls become tools routed through `execute` on GPU execution nodes. This doc describes how those tools get distributed across nodes.                                    |
-| [Decentralized Rye OS](encrypted-shared-intelligence.md)                                      | This doc covers compute routing and node identity. That doc covers the full cryptographic identity model (principals, sealed objects, group keys). The auth migration (Bearer → per-request signatures) connects them, but the compute layer is independent. |
-| [Residual Stream & Native Model Family](Residual%20stream%20and%20native%20model%20family.md) | Model family components deploy as tools on nodes. Nodes report which model tools they have via `/status`.                                                                                                                                                    |
+| [Remote Execution](remote-execution.md)                                                       | Protocol layer — CAS sync, materializer, server endpoints, trust model. This doc builds the multi-node layer on top.                                                                                                                                         |
+| [Deploying Nodes](deploying-nodes.md)                                                         | Operational guide — Modal, Render, local deployment, node space init.                                                                                                                                                                                        |
+| [Sovereign Inference](../future/sovereign-inference.md)                                        | Describes the completions server, provider path for agent threads, and how inference calls become tools routed through `execute` on GPU execution nodes. This doc describes how those tools get distributed across nodes.                                     |
+| [Decentralized Rye OS](../future/encrypted-shared-intelligence.md)                             | This doc covers compute routing and node identity. That doc covers the full cryptographic identity model (principals, sealed objects, group keys).                                                                                                            |
 
 ---
 
+## Implementation Files
+
+| Component | File |
+|---|---|
+| Node status tool | `ryeos/bundles/core/ryeos_core/.ai/tools/node/status/status.py` |
+| Route tool | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/remote/route/route.py` |
+| Status cache | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/remote/status_cache.py` |
+| Node config schema | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/node/node.config-schema.yaml` |
+| Topology config | `ryeos/bundles/core/ryeos_core/.ai/config/cluster/topology.yaml` |
+| Topology schema | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/cluster/topology.config-schema.yaml` |
+| Server config | `services/ryeos-node/ryeos_node/config.py` |
+| Server `/status` | `services/ryeos-node/ryeos_node/server.py` |
+| Init module | `services/ryeos-node/ryeos_node/init.py` |
+
 ## Open Design Questions
-
-### Status caching and TTL
-
-The execution node caches `/status` responses to avoid querying every node on every routing decision. The TTL determines how fresh the capability and load data is. Short TTL (seconds) = more accurate routing, more network overhead. Long TTL (minutes) = stale data, less overhead. The right balance depends on how dynamic the cluster is.
-
-### Node health and failover
-
-If a node is unreachable, the routing tool skips it. `/health` already exists on `ryeos-node`. The routing tool could ping `/health` as a quick check before `/status`, or just treat a failed `/status` query as "unhealthy."
 
 ### CAS locality
 
@@ -324,4 +328,4 @@ Nodes that already have a project's CAS objects cached require less sync overhea
 
 ### Scheduling complexity
 
-The routing tool starts simple — filter by capability, pick least loaded. Over time it could grow: affinity (prefer the node that last ran this project), locality (prefer nodes with cached CAS), tiered routing (different policies per tool type). Each of these is a policy expression in `cluster/topology.yaml`, not a code change to the routing tool.
+The routing tool starts simple — filter by capability, pick least loaded. Over time it could grow: affinity (prefer the node that last ran this project), locality (prefer nodes with cached CAS), tiered routing (different policies per tool type). Each of these is a policy expression in `cluster/topology.yaml`, not a code change to the routing tool. See [Execution Graph Scheduling](../future/execution-graph-scheduling.md) for the full graph-aware scheduling design.

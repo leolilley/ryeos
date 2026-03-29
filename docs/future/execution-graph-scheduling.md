@@ -20,7 +20,7 @@ status: exploratory
 
 # Execution Graph Scheduling — Pressure-Aware Realization of the Execute Graph
 
-> **Status:** Exploratory — extends [Sovereign Inference](sovereign-inference.md) and [Execution Nodes](execution-nodes.md) with graph-aware scheduling. Not scheduled for implementation.
+> **Status:** Exploratory — extends [Sovereign Inference](sovereign-inference.md) and [Execution Nodes](../internals/execution-nodes.md) with graph-aware scheduling. Not scheduled for implementation.
 
 ## The Idea
 
@@ -51,7 +51,7 @@ POST /execute { directive: "snap-track/add-show", username: "mrbeast" }
 
 This structure exists at runtime — the call stack, the agent loop, the chain resolution. But it's not tracked. Each `execute` completes independently. Nobody can see the whole picture.
 
-The [Execution Nodes](execution-nodes.md) design routes `llm/complete` to GPU nodes by querying `/status` and picking the least loaded. This works, but it's blind to context. It doesn't know that this `llm/complete` call is blocking an interactive user, or that it's turn 3 of 4 in a thread that's already spent 12 seconds on two GPU round-trips to the same node (whose KV cache is warm for this conversation).
+The [Execution Nodes](../internals/execution-nodes.md) design routes `llm/complete` to GPU nodes by querying `/status` and picking the least loaded. This works, but it's blind to context. It doesn't know that this `llm/complete` call is blocking an interactive user, or that it's turn 3 of 4 in a thread that's already spent 12 seconds on two GPU round-trips to the same node (whose KV cache is warm for this conversation).
 
 ---
 
@@ -339,7 +339,7 @@ Speculative preemption only is the right starting point. It's the reason specula
 
 ## The Logical Extension
 
-[Sovereign Inference](sovereign-inference.md) says "the model is a device driver." [Execution Nodes](execution-nodes.md) says "the cluster is just more tools." This doc says **the execution graph is the scheduler**.
+[Sovereign Inference](sovereign-inference.md) says "the model is a device driver." [Execution Nodes](../internals/execution-nodes.md) says "the cluster is just more tools." This doc says **the execution graph is the scheduler**.
 
 Three layers, same primitive:
 

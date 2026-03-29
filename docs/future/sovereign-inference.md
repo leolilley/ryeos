@@ -164,7 +164,7 @@ No `http_client` primitive. No subprocess. No server. The model is process state
 
 ### What Changes in RYE Configuration
 
-On a GPU execution node, no provider config needed — the `llm/complete` tool calls tinygrad directly. On a CPU-only execution node, the routing implementation of `llm/complete` queries `/status` on known remotes and dispatches via `_dispatch_remote()`. See [Execution Nodes](execution-nodes.md) for the routing model.
+On a GPU execution node, no provider config needed — the `llm/complete` tool calls tinygrad directly. On a CPU-only execution node, the routing implementation of `llm/complete` queries `/status` on known remotes and dispatches via `_dispatch_remote()`. See [Execution Nodes](../internals/execution-nodes.md) for the routing model.
 
 For agent threads, the self-hosted setup registers as a provider in `agent.yaml`:
 
@@ -340,7 +340,7 @@ The caller sends one request, gets one response. The completions server ran N in
 
 ## Cluster Routing via Execute
 
-With 30 GPUs across 15 machines, `llm/complete` needs to route to the right GPU execution node. This is covered in detail in [Execution Nodes](execution-nodes.md) — the key insight is that routing is not a separate system but a different implementation of the same tool.
+With 30 GPUs across 15 machines, `llm/complete` needs to route to the right GPU execution node. This is covered in detail in [Execution Nodes](../internals/execution-nodes.md) — the key insight is that routing is not a separate system but a different implementation of the same tool.
 
 ### Same tool ID, different implementations per node
 
@@ -354,7 +354,7 @@ Same tool ID. Different behavior. Standard space resolution. No fallback logic i
 
 Execution nodes report what they can execute via a `/status` endpoint — a lightweight HTTP wrapper around a local `node/status` tool that introspects the workspace. Capabilities are derived from what tools are actually in the node's `.ai/tools/`, expressed as the same fnmatch strings used for thread permissions (`rye.execute.tool.llm.complete.meta-llama.llama-3-1-8b`).
 
-`remote.yaml` stays minimal — just URLs and auth. Capabilities come from the nodes themselves. See [Execution Nodes](execution-nodes.md) for the full model.
+`remote.yaml` stays minimal — just URLs and auth. Capabilities come from the nodes themselves. See [Execution Nodes](../internals/execution-nodes.md) for the full model.
 
 ### The request flow
 
@@ -486,7 +486,7 @@ This extends the principle from the [Residual Stream](Residual%20stream%20and%20
 | -------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------- |
 | Model family configs | `.ai/config/llm/models/{family}.yaml` | Chat format specification — special tokens, role markers, tool call markers. 3-tier resolved. |
 
-Cluster routing config (`cluster/topology.yaml`) and node capability reporting are covered in [Execution Nodes](execution-nodes.md).
+Cluster routing config (`cluster/topology.yaml`) and node capability reporting are covered in [Execution Nodes](../internals/execution-nodes.md).
 
 ### What's Unchanged
 
