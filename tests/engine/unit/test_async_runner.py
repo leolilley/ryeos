@@ -27,7 +27,7 @@ class TestRun:
         expected = {"status": "success", "data": {"output": "done"}}
 
         mock_handle = AsyncMock(return_value=expected)
-        with patch("rye.tools.execute.ExecuteTool") as MockET:
+        with patch("rye.actions.execute.ExecuteTool") as MockET:
             MockET.return_value.handle = mock_handle
             result = await _run(payload, str(tmp_path))
 
@@ -52,7 +52,7 @@ class TestRun:
         }
 
         mock_handle = AsyncMock(return_value={"status": "success"})
-        with patch("rye.tools.execute.ExecuteTool") as MockET:
+        with patch("rye.actions.execute.ExecuteTool") as MockET:
             MockET.return_value.handle = mock_handle
             await _run(payload, str(tmp_path))
 
@@ -65,7 +65,7 @@ class TestRun:
         payload = {"item_type": "tool", "item_id": "x"}
 
         mock_handle = AsyncMock(return_value={"status": "success"})
-        with patch("rye.tools.execute.ExecuteTool") as MockET:
+        with patch("rye.actions.execute.ExecuteTool") as MockET:
             MockET.return_value.handle = mock_handle
             await _run(payload, str(tmp_path))
 
@@ -109,7 +109,7 @@ class TestRegistryIntegration:
 
         result = {"status": "success", "data": {"value": 42}}
 
-        with patch("rye.tools.execute.ExecuteTool") as MockET:
+        with patch("rye.actions.execute.ExecuteTool") as MockET:
             MockET.return_value.handle = AsyncMock(return_value=result)
             MockET._get_registry = MagicMock(return_value=mock_registry)
 
@@ -135,7 +135,7 @@ class TestRegistryIntegration:
 
         error_result = {"status": "error", "error": "something failed"}
 
-        with patch("rye.tools.execute.ExecuteTool") as MockET:
+        with patch("rye.actions.execute.ExecuteTool") as MockET:
             MockET.return_value.handle = AsyncMock(return_value=error_result)
             MockET._get_registry = MagicMock(return_value=mock_registry)
 

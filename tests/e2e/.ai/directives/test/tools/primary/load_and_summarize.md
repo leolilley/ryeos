@@ -13,9 +13,9 @@ Load a directive to inspect its structure, then write a summary of its metadata 
     <model tier="fast" id="claude-3-5-haiku-20241022">Directive inspection and summarization</model>
     <limits turns="5" tokens="2048" />
     <permissions>
-      <load>
+      <fetch>
         <directive>*</directive>
-      </load>
+      </fetch>
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>

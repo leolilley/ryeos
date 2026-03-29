@@ -1,10 +1,6 @@
 """MCP server for RYE OS.
 
-Exposes 4 universal tools:
-- mcp__rye__search
-- mcp__rye__load
-- mcp__rye__execute
-- mcp__rye__sign
+Exposes 3 universal tools: mcp__rye__fetch, mcp__rye__execute, mcp__rye__sign
 """
 
 import asyncio
@@ -26,17 +22,15 @@ from rye.primary_action_descriptions import (
     EXECUTE_TARGET_DESC,
     EXECUTE_THREAD_DESC,
     EXECUTE_TOOL_DESC,
+    FETCH_DESTINATION_DESC,
+    FETCH_LIMIT_DESC,
+    FETCH_QUERY_DESC,
+    FETCH_SCOPE_DESC,
+    FETCH_SOURCE_DESC,
+    FETCH_TOOL_DESC,
     ITEM_ID_DESC,
     ITEM_TYPE_DESC,
-    LOAD_DESTINATION_DESC,
-    LOAD_SOURCE_DESC,
-    LOAD_TOOL_DESC,
     PROJECT_PATH_DESC,
-    SEARCH_LIMIT_DESC,
-    SEARCH_QUERY_DESC,
-    SEARCH_SCOPE_DESC,
-    SEARCH_SOURCE_DESC,
-    SEARCH_TOOL_DESC,
     SIGN_ITEM_ID_DESC,
     SIGN_SOURCE_DESC,
     SIGN_TOOL_DESC,
@@ -66,20 +60,68 @@ class RYEServer:
 
     def _setup_handlers(self):
         """Register MCP handlers."""
-        from rye.tools.search import SearchTool
-        from rye.tools.load import LoadTool
-        from rye.tools.execute import ExecuteTool
-        from rye.tools.sign import SignTool
+        from rye.actions.fetch import FetchTool
+        from rye.actions.execute import ExecuteTool
+        from rye.actions.sign import SignTool
 
-        self.search = SearchTool(self.user_space)
-        self.load = LoadTool(self.user_space)
+        self.fetch = FetchTool(self.user_space)
         self.execute = ExecuteTool(self.user_space)
         self.sign = SignTool(self.user_space)
 
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
-            """Return 4 MCP tools."""
+            """Return 3 MCP tools."""
             return [
+                Tool(
+                    name="fetch",
+                    description=FETCH_TOOL_DESC,
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "item_type": {
+                                "type": "string",
+                                "enum": ["directive", "tool", "knowledge"],
+                                "description": ITEM_TYPE_DESC,
+                            },
+                            "item_id": {
+                                "type": "string",
+                                "description": ITEM_ID_DESC,
+                            },
+                            "query": {
+                                "type": "string",
+                                "description": FETCH_QUERY_DESC,
+                            },
+                            "scope": {
+                                "type": "string",
+                                "description": FETCH_SCOPE_DESC,
+                            },
+                            "project_path": {
+                                "type": "string",
+                                "description": PROJECT_PATH_DESC,
+                            },
+                            "source": {
+                                "type": "string",
+                                "enum": ["project", "user", "system", "local", "registry", "all"],
+                                "description": FETCH_SOURCE_DESC,
+                            },
+                            "destination": {
+                                "type": "string",
+                                "enum": ["project", "user"],
+                                "description": FETCH_DESTINATION_DESC,
+                            },
+                            "version": {
+                                "type": "string",
+                                "description": "Version to pull (registry source only).",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "default": 10,
+                                "description": FETCH_LIMIT_DESC,
+                            },
+                        },
+                        "required": ["project_path"],
+                    },
+                ),
                 Tool(
                     name="execute",
                     description=EXECUTE_TOOL_DESC,
@@ -129,76 +171,6 @@ class RYEServer:
                     },
                 ),
                 Tool(
-                    name="search",
-                    description=SEARCH_TOOL_DESC,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "scope": {
-                                "type": "string",
-                                "description": SEARCH_SCOPE_DESC,
-                            },
-                            "query": {
-                                "type": "string",
-                                "description": SEARCH_QUERY_DESC,
-                            },
-                            "project_path": {
-                                "type": "string",
-                                "description": PROJECT_PATH_DESC,
-                            },
-                            "source": {
-                                "type": "string",
-                                "enum": ["project", "user", "system", "local", "registry", "all"],
-                                "default": "all",
-                                "description": SEARCH_SOURCE_DESC,
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "default": 10,
-                                "description": SEARCH_LIMIT_DESC,
-                            },
-                        },
-                        "required": ["scope", "query", "project_path"],
-                    },
-                ),
-                Tool(
-                    name="load",
-                    description=LOAD_TOOL_DESC,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_type": {
-                                "type": "string",
-                                "enum": ["directive", "tool", "knowledge"],
-                                "description": ITEM_TYPE_DESC,
-                            },
-                            "item_id": {
-                                "type": "string",
-                                "description": ITEM_ID_DESC,
-                            },
-                            "project_path": {
-                                "type": "string",
-                                "description": PROJECT_PATH_DESC,
-                            },
-                            "source": {
-                                "type": "string",
-                                "enum": ["project", "user", "system", "registry"],
-                                "description": LOAD_SOURCE_DESC,
-                            },
-                            "destination": {
-                                "type": "string",
-                                "enum": ["project", "user"],
-                                "description": LOAD_DESTINATION_DESC,
-                            },
-                            "version": {
-                                "type": "string",
-                                "description": "Version to pull (registry source only).",
-                            },
-                        },
-                        "required": ["item_type", "item_id", "project_path"],
-                    },
-                ),
-                Tool(
                     name="sign",
                     description=SIGN_TOOL_DESC,
                     inputSchema={
@@ -234,10 +206,8 @@ class RYEServer:
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             """Dispatch to appropriate tool."""
             try:
-                if name == "search":
-                    result = await self.search.handle(**arguments)
-                elif name == "load":
-                    result = await self.load.handle(**arguments)
+                if name == "fetch":
+                    result = await self.fetch.handle(**arguments)
                 elif name == "execute":
                     result = await self.execute.handle(**arguments)
                 elif name == "sign":

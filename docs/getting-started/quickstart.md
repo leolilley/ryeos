@@ -53,9 +53,9 @@ Greet the user by name and offer to help with their project.
 <model tier="haiku" />
 <limits max_turns="3" max_tokens="1024" />
 <permissions>
-<search>
+<fetch>
 <knowledge>\*</knowledge>
-</search>
+</fetch>
 </permissions>
 </metadata>
 
@@ -329,7 +329,7 @@ The `item_id` is the relative path from `.ai/<type>/` without the file extension
 
 - **`rye_execute(item_type="knowledge", ...)`** — Returns _only the content_ (the Markdown body). Keeps context tight. Use this when you want the knowledge to flow into the agent's reasoning without metadata overhead.
 
-- **`rye_load(item_type="knowledge", ...)`** — Returns the _entire file_ including YAML frontmatter and metadata. Use this for inspection, copying between spaces, or when you need the full context including tags, version, and entry type.
+- **`rye_fetch(item_type="knowledge", ...)`** — Returns the _entire file_ including YAML frontmatter and metadata. Use this for inspection, copying between spaces, or when you need the full context including tags, version, and entry type.
 
 ## 6. Execute items
 
@@ -388,10 +388,10 @@ This returns only the Markdown content:
 - Commit messages: imperative mood, 72-char subject line
 ```
 
-**Note:** If you need the full file with metadata (frontmatter), use `rye_load()` instead:
+**Note:** If you need the full file with metadata (frontmatter), use `rye_fetch()` instead:
 
 ```
-rye_load(
+rye_fetch(
     item_type="knowledge",
     item_id="project_conventions",
     project_path="/path/to/your/project"
@@ -405,18 +405,18 @@ This returns the complete file including YAML frontmatter and metadata.
 Find items across all spaces (project, user, and system):
 
 ```
-rye_search(scope="directive", query="greet", project_path="/path/to/your/project")
-rye_search(scope="tool", query="count", project_path="/path/to/your/project")
-rye_search(scope="knowledge", query="conventions", project_path="/path/to/your/project")
+rye_fetch(query="greet", scope="directive", project_path="/path/to/your/project")
+rye_fetch(query="count", scope="tool", project_path="/path/to/your/project")
+rye_fetch(query="conventions", scope="knowledge", project_path="/path/to/your/project")
 ```
 
 You can narrow the scope with namespace prefixes:
 
 ```
-rye_search(scope="tool.rye.core.*", query="create", project_path="/path/to/your/project")
+rye_fetch(query="create", scope="tool.rye.core.*", project_path="/path/to/your/project")
 ```
 
 ## What's next
 
 - [The .ai/ Directory](ai-directory.md) — Learn about the full directory structure, namespaces, and the 3-tier space system.
-- Explore the system bundle: `rye_search(scope="directive", query="create", project_path=".")` to see the built-in directives for creating new items.
+- Explore the system bundle: `rye_fetch(query="create", scope="directive", project_path=".")` to see the built-in directives for creating new items.

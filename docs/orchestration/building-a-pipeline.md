@@ -71,20 +71,17 @@ Each directive gets the minimum capabilities it needs.
     <tool>rye.agent.threads.thread_directive</tool>
     <tool>rye.agent.threads.orchestrator</tool>
   </execute>
-  <search>
+  <fetch>
     <directive>agency-kiwi.*</directive>
     <knowledge>agency-kiwi.*</knowledge>
-  </search>
-  <load>
-    <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 ```
 
 The root needs:
 - `thread_directive` capability — required internally when `execute directive` spawns child threads
 - `orchestrator` — to wait for children, aggregate results, read transcripts
-- `search/load` agency-kiwi — to find and load state/knowledge
+- `fetch` agency-kiwi — to find and fetch state/knowledge
 
 ### Sub-Orchestrator Permissions
 
@@ -94,9 +91,9 @@ The root needs:
     <tool>rye.agent.threads.thread_directive</tool>
     <tool>rye.agent.threads.orchestrator</tool>
   </execute>
-  <load>
+  <fetch>
     <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 ```
 
@@ -110,9 +107,9 @@ Sub-orchestrators need the same spawn/wait capabilities. They load knowledge but
   <execute>
     <tool>scraping.gmaps.scrape_gmaps</tool>
   </execute>
-  <load>
+  <fetch>
     <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 
 <!-- score_lead — tightest possible -->
@@ -149,9 +146,9 @@ Scrape Google Maps for businesses in a specific niche and city. Save raw leads t
       <execute>
         <tool>scraping.gmaps.scrape_gmaps</tool>
       </execute>
-      <load>
+      <fetch>
         <knowledge>agency-kiwi.*</knowledge>
-      </load>
+      </fetch>
     </permissions>
   </metadata>
 
@@ -179,7 +176,7 @@ Scrape Google Maps for businesses in a specific niche and city. Save raw leads t
     Check if leads have already been scraped for this niche/city combination.
     Load the pipeline state to see if {input:niche} in {input:city} has been processed.
 
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/state/pipeline_state")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/state/pipeline_state")`
 
     If already scraped, report "already done" and return the existing file path.
   </step>
@@ -310,9 +307,9 @@ Take raw discovered leads, scrape their websites, score each one, and produce a 
         <tool>rye.agent.threads.thread_directive</tool>
         <tool>rye.agent.threads.orchestrator</tool>
       </execute>
-      <load>
+      <fetch>
         <knowledge>agency-kiwi.*</knowledge>
-      </load>
+      </fetch>
     </permissions>
   </metadata>
 
@@ -336,8 +333,8 @@ Take raw discovered leads, scrape their websites, score each one, and produce a 
   <step name="load_knowledge">
     Load the GHL sales framework and service tier definitions for scoring context.
 
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/frameworks/ghl_sales")`
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/frameworks/service_tiers")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/frameworks/ghl_sales")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/frameworks/service_tiers")`
   </step>
 
   <step name="read_leads">
@@ -423,13 +420,10 @@ Execute the full lead generation pipeline for a city: discover leads across nich
         <tool>rye.agent.threads.thread_directive</tool>
         <tool>rye.agent.threads.orchestrator</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>agency-kiwi.*</directive>
         <knowledge>agency-kiwi.*</knowledge>
-      </search>
-      <load>
-        <knowledge>agency-kiwi.*</knowledge>
-      </load>
+      </fetch>
     </permissions>
   </metadata>
 
@@ -454,10 +448,10 @@ Execute the full lead generation pipeline for a city: discover leads across nich
   <step name="load_state">
     Load pipeline state and configuration:
 
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/state/pipeline_state")`
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/config/niche_list")`
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/config/city_data")`
-    `rye_load(item_type="knowledge", item_id="agency-kiwi/learnings/pipeline_learnings")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/state/pipeline_state")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/config/niche_list")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/config/city_data")`
+    `rye_fetch(item_type="knowledge", item_id="agency-kiwi/learnings/pipeline_learnings")`
 
     Determine which niches have been processed for {input:city} and which remain.
   </step>

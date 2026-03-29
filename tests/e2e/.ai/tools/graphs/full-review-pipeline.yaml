@@ -7,8 +7,7 @@ description: "Complex pipeline: foreach analysis, conditional routing, nested LL
 permissions:
   - rye.execute.tool.*
   - rye.execute.directive.*
-  - rye.search.*
-  - rye.load.*
+  - rye.fetch.*
   - rye.sign.*
 
 config_schema:
@@ -288,8 +287,7 @@ config:
           capabilities:
             - "rye.execute.tool.*"
             - "rye.execute.directive.*"
-            - "rye.search.*"
-            - "rye.load.*"
+            - "rye.fetch.*"
             - "rye.sign.*"
           depth: 5
       assign:

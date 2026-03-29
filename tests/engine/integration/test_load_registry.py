@@ -1,4 +1,4 @@
-"""Tests for registry load integration in LoadTool via RegistrySpaceProvider."""
+"""Tests for registry load integration in FetchTool (ID mode) via RegistrySpaceProvider."""
 
 import tempfile
 from pathlib import Path
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from rye.tools.load import LoadTool
+from rye.actions._resolve import resolve_item
 
 
 @pytest.fixture
@@ -52,11 +52,11 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=provider,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="directive",
                 item_id="acme/core/bootstrap",
                 project_path=str(temp_project),
@@ -78,11 +78,11 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=provider,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="directive",
                 item_id="acme/core/bootstrap",
                 project_path=str(temp_project),
@@ -102,11 +102,11 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=provider,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="directive",
                 item_id="acme/core/bootstrap",
                 project_path=str(temp_project),
@@ -127,11 +127,11 @@ class TestLoadFromRegistry:
         provider = _mock_registry_provider()
 
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=provider,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="directive",
                 item_id="acme/core/bootstrap",
                 project_path=str(temp_project),
@@ -150,11 +150,11 @@ class TestLoadFromRegistry:
         )
 
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=provider,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="directive",
                 item_id="acme/core/nonexistent",
                 project_path=str(temp_project),
@@ -167,11 +167,11 @@ class TestLoadFromRegistry:
     async def test_load_from_registry_no_provider(self, temp_project):
         """Missing provider returns clean error."""
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=None,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="directive",
                 item_id="acme/core/bootstrap",
                 project_path=str(temp_project),
@@ -200,11 +200,11 @@ class TestLoadFromRegistry:
         })
 
         with patch(
-            "rye.tools.load.get_registry_provider",
+            "rye.actions._resolve.get_registry_provider",
             return_value=provider,
         ):
-            tool = LoadTool(str(temp_project))
-            result = await tool.handle(
+            result = await resolve_item(
+                str(temp_project),
                 item_type="tool",
                 item_id="acme/utils/helper",
                 project_path=str(temp_project),

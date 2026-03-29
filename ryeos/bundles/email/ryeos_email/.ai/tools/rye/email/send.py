@@ -1,4 +1,4 @@
-# rye:signed:2026-03-17T02:33:40Z:301bafc9f9b248732868f64d0453f23ba4eb641862ba9477aca3b538b7296802:uLN4xAzkeV2L6RgFSZrcJCIF7JrdyK0p_O_XsesZ1WVnkGxY3mNwRDEGnnWdqKSf8GYz0Mzv8K3me1I0USQcBQ==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:50:06Z:c1854f464340d01feef1419c2a200124bc08a7d099061eb27152d7727909836e:VqvNaR9uOIWYyTf0-biFOiM9OLj5VuqKSUKqqYAz85woPzfDDeNxR34RxbHX6UFzypkHVe8vWwXAnXT88o-aCg==:4b987fd4e40303ac
 """Send an email via the configured email provider."""
 
 import argparse
@@ -165,7 +165,7 @@ async def _execute_mcp(
     step_params: dict, project_path: str,
 ) -> dict:
     """Execute an MCP action via the campaign-kiwi MCP server."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
 
     executor = ExecuteTool(project_path=project_path)
     mcp_tool_id = f"mcp/{mcp_server}/{type_name}/{action}"

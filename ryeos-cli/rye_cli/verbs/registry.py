@@ -89,7 +89,7 @@ def register(subparsers):
 
 def _registry_execute(project_path: str, params: dict) -> dict:
     """Call the registry tool via ExecuteTool."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
     tool = ExecuteTool(str(get_user_space()))
@@ -103,7 +103,7 @@ def _registry_execute(project_path: str, params: dict) -> dict:
 
 def _bundler_execute(project_path: str, params: dict) -> dict:
     """Call the bundler tool via ExecuteTool."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
     tool = ExecuteTool(str(get_user_space()))

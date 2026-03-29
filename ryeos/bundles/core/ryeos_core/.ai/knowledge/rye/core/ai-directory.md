@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:71617b5eee64e397f2e83fa2686bf50871a48c7c66eae3befb0512e74a3a78e7:cWMYFbMQy7kVF06brvAK1ANanwALuYHvbv87Qqhf2E1rQvDuXKMuEU9URburNqvznpPVPOFO8x4yQxuNmDElDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:09Z:b58106238e4a57df8173179ec4daf71f5295da093c2a7f6a1fb1e87ad522d858:qK2M5xTGaR4rqRzRt-7ct_kiUL78y39fy-cranahBB_HKn1bdTUwK5FTAAXzsmD1XL5d0xKn-8SffEY6kL_PCA==:4b987fd4e40303ac -->
 
 ```yaml
 name: ai-directory
@@ -112,11 +112,11 @@ Common namespace prefixes:
 
 ## Search Scopes
 
-Namespaces work with `rye_search` scope parameter:
+Namespaces work with `rye_fetch` scope parameter:
 
 ```
-rye_search(scope="tool.rye.bash.*", query="execute", project_path=".")
-rye_search(scope="directive.rye.core.*", query="create", project_path=".")
+rye_fetch(scope="tool.rye.bash.*", query="execute", project_path=".")
+rye_fetch(scope="directive.rye.core.*", query="create", project_path=".")
 ```
 
 Scope format: `{item_type}.{namespace.dotted}.*`

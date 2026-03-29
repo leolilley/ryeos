@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:58Z:095138272452334ef075e14a726d54d904fb0808eeeaeea80c00b244fec42072:TV2mZPRkw3UzL6GFHCBnn4dwzYEPQbUzLQW0x9Gn2rw85-yqFIviqiJMkQVJ34vwk6bt1cELECt-_rmla4XtCg==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:50:06Z:762b82c743e2df4bf8cb8485df06e6bc0a4ac110ad654afe7ac600492211c947:EeSRFGMK5L7qTgLNPAKylIdeDJR8J2oMIC0fZ_ZGX-EsigkGlNHL-9yLqM3HAuE0Gbb_D0HYmo3NIInEDbymCA==:4b987fd4e40303ac
 """Forward an email to a private address with agent context."""
 
 import argparse
@@ -34,7 +34,7 @@ CONFIG_RESOLVE = {
 
 async def execute(params: dict, project_path: str) -> dict:
     """Forward an email with agent context prepended."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
 
     config = params.get("resolved_config", {})
     provider_name = config.get("provider", {}).get("default")

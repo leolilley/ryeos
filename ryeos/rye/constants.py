@@ -21,7 +21,7 @@ class ItemType:
     CONFIG = "config"
     SIGNABLE = [DIRECTIVE, TOOL, KNOWLEDGE, CONFIG]
 
-    # Type directory mappings (execute/load/search — NO config)
+    # Type directory mappings (execute/fetch/sign — NO config)
     TYPE_DIRS = {
         DIRECTIVE: "directives",
         TOOL: "tools",
@@ -44,9 +44,8 @@ class ItemType:
 class Action:
     """Tool action constants."""
 
-    SEARCH = "search"
+    FETCH = "fetch"
     SIGN = "sign"
-    LOAD = "load"
     EXECUTE = "execute"
 
-    ALL = [SEARCH, SIGN, LOAD, EXECUTE]
+    ALL = [FETCH, EXECUTE, SIGN]

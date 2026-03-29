@@ -189,7 +189,7 @@ Conditional branches: you see the particle _choose_. Multiple edges extend from 
 
 ## The Agent Boundary
 
-The four MCP tools — `search`, `load`, `execute`, `sign` — form a **membrane** around the shard-space. Everything inside is the substrate. The agent is outside, reaching in through four channels.
+The three MCP tools — `fetch`, `execute`, `sign` — form a **membrane** around the shard-space. Everything inside is the substrate. The agent is outside, reaching in through three channels.
 
 But this isn't just a boundary. RYE's philosophy: _"Most agent frameworks treat the model as something you call. RYE treats it as something you are."_
 

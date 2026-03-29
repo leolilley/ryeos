@@ -1,6 +1,6 @@
 """ryeos-cli entry point.
 
-Maps shell verbs to the four RYE primitives (search, load, execute, sign)
+Maps shell verbs to the three RYE primitives (fetch, execute, sign)
 plus convenience verbs (thread, graph, test).
 
 No MCP transport — imports ryeos directly as a Python library.
@@ -9,7 +9,7 @@ No MCP transport — imports ryeos directly as a Python library.
 import argparse
 import sys
 
-from rye_cli.verbs import search, load, execute, sign, thread, graph, test, registry, install, uninstall
+from rye_cli.verbs import fetch, execute, sign, thread, graph, test, registry, install, uninstall
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,8 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="verb", required=True)
 
-    search.register(sub)
-    load.register(sub)
+    fetch.register(sub)
     execute.register(sub)
     sign.register(sub)
     thread.register(sub)

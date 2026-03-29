@@ -104,7 +104,7 @@ The `residual_export` primitive requires that the inference server exposes inter
   "context_summary": "Economic debt dynamics analysis — rate shock fragility",
   "capability_context": [
     "rye.execute.tool.rye.file-system.*",
-    "rye.load.knowledge.*"
+    "rye.fetch.knowledge.*"
   ],
   "timestamp": "2026-03-01T14:22:00Z",
   "integrity": "sha256:a1b2c3..."
@@ -226,7 +226,7 @@ The intent router is the first component of this family worth building. It is th
 
 A small sequence model — potentially an adapter on top of the reasoning engine rather than a standalone model — that watches the reasoning stream and prefetches knowledge and tool context before the model asks for it.
 
-While the reasoning engine is generating tokens (typically 1–5 seconds of streaming output), the preloader reads the partial output and predicts what `rye_search` and `rye_load` calls are about to happen. It fires those queries in parallel, warming the context before the reasoning engine reaches the point of needing the results.
+While the reasoning engine is generating tokens (typically 1–5 seconds of streaming output), the preloader reads the partial output and predicts what `rye_fetch` calls are about to happen. It fires those queries in parallel, warming the context before the reasoning engine reaches the point of needing the results.
 
 The preloader does not make decisions — it prefetches. If its predictions are wrong, the fetched context is simply unused. Cache misses fall back to the normal search-and-load path. The upside is significant latency reduction for common patterns; the downside is negligible.
 
@@ -426,7 +426,7 @@ The moat is not the code — RYE is MIT licensed. It is not the models — those
 
 | Component                                            | Status                                                                                      |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Four MCP tools (`search`, `load`, `execute`, `sign`) | Same interface, no changes                                                                  |
+| Three MCP tools (`fetch`, `execute`, `sign`)          | Same interface, no changes                                                                  |
 | Capability attenuation (fnmatch patterns)            | Unchanged — capability masking extends it at the model level, does not replace it           |
 | Three-tier space resolution                          | Unchanged                                                                                   |
 | Ed25519 signing, lockfiles, chain verification       | Unchanged                                                                                   |

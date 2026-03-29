@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rye.tools.load import LoadTool
+from rye.actions._resolve import resolve_item
 
 
 @pytest.fixture
@@ -74,13 +74,13 @@ def temp_user_space(_setup_user_space):
 
 
 @pytest.mark.asyncio
-class TestLoadTool:
-    """Test load tool."""
+class TestFetchResolve:
+    """Test fetch ID-mode resolution."""
 
     async def test_load_directive(self, temp_project):
         """Load directive content."""
-        tool = LoadTool("")
-        result = await tool.handle(
+        result = await resolve_item(
+            "",
             item_type="directive",
             item_id="test",
             project_path=str(temp_project),
@@ -93,8 +93,8 @@ class TestLoadTool:
 
     async def test_load_tool(self, temp_project):
         """Load tool content."""
-        tool = LoadTool("")
-        result = await tool.handle(
+        result = await resolve_item(
+            "",
             item_type="tool",
             item_id="myscript",
             project_path=str(temp_project),
@@ -106,8 +106,8 @@ class TestLoadTool:
 
     async def test_load_nonexistent_item(self, temp_project):
         """Handle nonexistent item."""
-        tool = LoadTool("")
-        result = await tool.handle(
+        result = await resolve_item(
+            "",
             item_type="directive",
             item_id="nonexistent",
             project_path=str(temp_project),
@@ -119,8 +119,8 @@ class TestLoadTool:
 
     async def test_load_with_metadata(self, temp_project):
         """Load extracts metadata."""
-        tool = LoadTool("")
-        result = await tool.handle(
+        result = await resolve_item(
+            "",
             item_type="directive",
             item_id="test",
             project_path=str(temp_project),
@@ -133,8 +133,8 @@ class TestLoadTool:
 
     async def test_copy_to_user_space(self, temp_project, temp_user_space):
         """Copy item from project to user space."""
-        tool = LoadTool(str(temp_user_space))
-        result = await tool.handle(
+        result = await resolve_item(
+            str(temp_user_space),
             item_type="tool",
             item_id="myscript",
             project_path=str(temp_project),
@@ -153,8 +153,8 @@ class TestLoadTool:
 
     async def test_load_from_user_space(self, temp_user_space):
         """Load item from user space."""
-        tool = LoadTool(str(temp_user_space))
-        result = await tool.handle(
+        result = await resolve_item(
+            str(temp_user_space),
             item_type="tool",
             item_id="shared",
             project_path="/dummy",

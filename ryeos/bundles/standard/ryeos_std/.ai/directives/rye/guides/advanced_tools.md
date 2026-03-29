@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:f773a958ec5ede98df99996b5d547015e6293fab3046a73a4aec3fb3e285b5b7:_4nN9Du9mB6H3sLvEUSBaKSPJ_uOHjo3f8w-gSVJdl98YZCbsR4ePxI6i9F3lXFnSUU5Ay31NNFm5pNYHBqKBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:f773a958ec5ede98df99996b5d547015e6293fab3046a73a4aec3fb3e285b5b7:_4nN9Du9mB6H3sLvEUSBaKSPJ_uOHjo3f8w-gSVJdl98YZCbsR4ePxI6i9F3lXFnSUU5Ay31NNFm5pNYHBqKBA==:4b987fd4e40303ac -->
 # Advanced Tools
 
 Multi-file tools, the anchor system, bundles, and dependency management.
@@ -61,7 +61,7 @@ Another pattern — a tool with private helpers:
 Only `scraper.py` is callable as a tool. The helpers are just Python modules it imports.
 </render>
     <instruction>Output the render block above, then have the user search for the MCP tools to see this in practice:</instruction>
-    <tool_call>rye_search(scope="tool.rye.mcp.*", query="*")</tool_call>
+    <tool_call>rye_fetch(scope="tool.rye.mcp.*", query="*")</tool_call>
   </step>
 
   <step name="anchor_system">

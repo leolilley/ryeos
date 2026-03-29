@@ -13,7 +13,7 @@ Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM 
     <limits turns="10" tokens="500" spend="1.0" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

@@ -1,22 +1,26 @@
-# rye:signed:2026-03-16T11:23:45Z:47c4e354dd363f312fc9672740c7d7ec7cf0d3924233ee93277eb32c6786f124:CXPBcYq6VVaHKj2-8lsHK17W3g9YH815Ya33SxaHGnshy43hiJQBMhnomNjeIaqe-W4gtWssDBHoqBH04vNMCw==:4b987fd4e40303ac
-"""Load item content for inspection."""
+# rye:signed:2026-03-29T06:34:27Z:e8742bb9c670a715f7864c09f3f6a488b50c1010a9b5e9e7522e3e31bb966e52:5JgjLMua-rmYk7ziwU4X43YmARkJVSvRtDLz95YSH5ifkOQ-fjnseIE4Nh3FXjfTKXCxl1QYv5ukBtV6hWH7Dg==:4b987fd4e40303ac
+"""Resolve items by ID or discover by query."""
 
 import argparse
 import json
+import sys
 import asyncio
 
 from rye.primary_action_descriptions import (
+    FETCH_DESTINATION_DESC,
+    FETCH_LIMIT_DESC,
+    FETCH_QUERY_DESC,
+    FETCH_SCOPE_DESC,
+    FETCH_SOURCE_DESC,
     ITEM_ID_DESC,
     ITEM_TYPE_DESC,
-    LOAD_DESTINATION_DESC,
-    LOAD_SOURCE_DESC,
 )
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye"
-__tool_description__ = "Read raw content and metadata of a Rye item for inspection"
+__tool_description__ = "Resolve items by ID or discover by query"
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -30,40 +34,47 @@ CONFIG_SCHEMA = {
             "type": "string",
             "description": ITEM_ID_DESC,
         },
+        "query": {
+            "type": "string",
+            "description": FETCH_QUERY_DESC,
+        },
+        "scope": {
+            "type": "string",
+            "description": FETCH_SCOPE_DESC,
+        },
         "source": {
             "type": "string",
-            "enum": ["project", "user", "system", "registry"],
-            "description": LOAD_SOURCE_DESC,
+            "enum": ["project", "user", "system", "local", "registry", "all"],
+            "description": FETCH_SOURCE_DESC,
         },
         "destination": {
             "type": "string",
             "enum": ["project", "user"],
-            "description": LOAD_DESTINATION_DESC,
+            "description": FETCH_DESTINATION_DESC,
         },
         "version": {
             "type": "string",
             "description": "Version to pull (registry source only).",
         },
+        "limit": {
+            "type": "integer",
+            "default": 10,
+            "description": FETCH_LIMIT_DESC,
+        },
     },
-    "required": ["item_type", "item_id"],
+    "required": [],
 }
 
 
 def execute(params: dict, project_path: str) -> dict:
     try:
-        from rye.tools.load import LoadTool
+        from rye.actions.fetch import FetchTool
 
-        tool = LoadTool()
-        kwargs = {
-            "item_type": params["item_type"],
-            "item_id": params["item_id"],
-            "project_path": project_path,
-            "source": params.get("source"),
-        }
-        if "destination" in params:
-            kwargs["destination"] = params["destination"]
-        if "version" in params:
-            kwargs["version"] = params["version"]
+        tool = FetchTool()
+        kwargs = {"project_path": project_path}
+        for key in ("item_type", "item_id", "query", "scope", "source", "destination", "version", "limit"):
+            if key in params and params[key] is not None:
+                kwargs[key] = params[key]
         result = asyncio.run(tool.handle(**kwargs))
         return result
     except Exception as e:
@@ -71,7 +82,6 @@ def execute(params: dict, project_path: str) -> dict:
 
 
 if __name__ == "__main__":
-    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-path", required=True)
     args = parser.parse_args()

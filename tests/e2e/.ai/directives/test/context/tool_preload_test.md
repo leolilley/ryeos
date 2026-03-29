@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:24b001c419370159335af4ce92de0f49a28d1e7543a19ed76f78a80a1a73b354:WVfLuWBxOR77pK6xjSjTYIDhe4yyuOAe_R36chJ9QF8haxnbdS95BN8YjbJRgQD7hqBxa7e2HX9HdTBjMAYxBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:13:34Z:24b001c419370159335af4ce92de0f49a28d1e7543a19ed76f78a80a1a73b354:WVfLuWBxOR77pK6xjSjTYIDhe4yyuOAe_R36chJ9QF8haxnbdS95BN8YjbJRgQD7hqBxa7e2HX9HdTBjMAYxBA==:4b987fd4e40303ac -->
 # Tool Schema Preload Test
 
 Tests Layer 1 — permissions-driven tool schema preload. This directive grants

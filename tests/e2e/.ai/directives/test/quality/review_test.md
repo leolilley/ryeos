@@ -21,8 +21,7 @@ End-to-end test for the review directive — verifies the full review flow with 
         <tool>rye.code.quality.gate</tool>
         <knowledge>*</knowledge>
       </execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

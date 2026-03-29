@@ -7,8 +7,7 @@ description: "Spawn an LLM thread and monitor its progress via the thread regist
 permissions:
   - rye.execute.tool.*
   - rye.execute.directive.*
-  - rye.search.*
-  - rye.load.*
+  - rye.fetch.*
 
 config_schema:
   type: object

@@ -20,7 +20,7 @@ def register(subparsers):
 
 
 def handle(args, project_path: str):
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
     params = {}

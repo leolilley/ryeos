@@ -2370,7 +2370,7 @@ class TestExecuteFromHead:
              patch("ryeos_remote.server._inject_user_secrets", return_value=[]), \
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch.object(
-                 __import__("rye.tools.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
              ):
             r = c.post("/execute", json={
@@ -2547,7 +2547,7 @@ class TestConcurrentExecution:
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch("ryeos_remote.server._check_user_quota"), \
              patch.object(
-                 __import__("rye.tools.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
              ):
             result_a, result_b = await asyncio.gather(
@@ -2704,7 +2704,7 @@ class TestConcurrentExecution:
              patch("ryeos_remote.server._check_user_quota"), \
              patch("ryeos_remote.server._store_conflict_record"), \
              patch.object(
-                 __import__("rye.tools.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
              ):
             result_a, result_b = await asyncio.gather(
@@ -2848,7 +2848,7 @@ class TestConcurrentExecution:
              patch("ryeos_remote.server._update_snapshot_cache"), \
              patch("ryeos_remote.server._check_user_quota"), \
              patch.object(
-                 __import__("rye.tools.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
                  "handle", mock_handle,
              ):
             result_a, result_b = await asyncio.gather(

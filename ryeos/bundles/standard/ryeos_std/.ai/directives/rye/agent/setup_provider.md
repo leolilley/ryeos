@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:364691f26d54128763f5394b978fcdc312a033c4d6fedb25db85ca177954a01b:a9o4hELejK4hfar6bvWkua5fjKO17Co5kTBVg4AgPHdYdUFhDCOeF_saEfl1iYJ2jc08tObSlU4zOaAfdESWCQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:549eab55194366478277c92c23bfaacbd29bfb59c4835462313f2bf5a70b5934:7Qw-o9OQg10QRl8KQh5vkuZHCKGXt9a3XerIjWMiH-A0EwIwD3pfYbPLaiF3QJp4-BedjjPy75g46SFSrqK0Bw==:4b987fd4e40303ac -->
 
 # Setup Provider
 
@@ -16,9 +16,9 @@ Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <tool>*</tool>
-      </search>
+      </fetch>
     </permissions>
   </metadata>
 
@@ -49,7 +49,7 @@ Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider
 
   <step name="load_system_default">
     Load the system default config for the provider:
-    `rye_load(item_type="tool", item_id="rye/agent/providers/{input:provider}")`
+    `rye_fetch(item_type="tool", item_id="rye/agent/providers/{input:provider}")`
     Use this as the base template for the config.
   </step>
 
@@ -65,7 +65,7 @@ Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider
 
   <step name="verify_provider">
     Verify the provider resolves correctly by loading the config back and confirming the env var reference and model are set.
-    `rye_load(item_type="tool", item_id="rye/agent/providers/{input:provider}", source="user")`
+    `rye_fetch(item_type="tool", item_id="rye/agent/providers/{input:provider}", source="user")`
   </step>
 </process>
 

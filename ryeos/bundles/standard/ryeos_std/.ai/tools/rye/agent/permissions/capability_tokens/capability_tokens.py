@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:ab4e395c544c964a2fc3b60bf78b6e4b54cb8ade8db6f926af2571cfa0397310:e7fei8VzXPsjppIKplPYGFSHk82xcb748S4uO6C1KV3jE2S14p08ecqVoHzASUQQGDBT93Br3ghTq9pV0spADQ==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:19:02Z:89cea3eab8f4fee6e56b9c34ca8614b27bc6c144e740aef98974815d9d53a000:unirbCV_qvhtnQHiijeinFEngad5ewvVkNV7KiztgLz_YXEBKScWCLOSp1YBY6yaUXiJlBAyJ5AENpmnd5yGCg==:4b987fd4e40303ac
 # PROTECTED: Core RYE tool - do not override
 """
 Capability Token System
@@ -365,24 +365,24 @@ def attenuate_token(
 
 # ---------------------------------------------------------------------------
 # Capability format: rye.{primary}.{item_type}.{specifics...}
-#   primary:   execute | search | load | sign
+#   primary:   execute | fetch | sign
 #   item_type: tool | directive | knowledge
 #   specifics: item_id with / converted to .
 #
 # Examples:
 #   rye.execute.tool.rye.file-system.fs_write
 #   rye.execute.knowledge.rye-architecture
-#   rye.search.directive.*
+#   rye.fetch.directive.*
 #   rye.execute.*  (can execute anything)
 #   rye.*  (god mode)
 # ---------------------------------------------------------------------------
 
-PRIMARY_ACTIONS = ("execute", "search", "load", "sign")
+PRIMARY_ACTIONS = ("execute", "fetch", "sign")
 ITEM_TYPES = ("tool", "directive", "knowledge")
 
 PRIMARY_IMPLIES = {
-    "execute": ["search", "load"],
-    "sign": ["load"],
+    "execute": ["fetch"],
+    "sign": ["fetch"],
 }
 
 
@@ -390,7 +390,7 @@ def item_id_to_cap(primary: str, item_type: str, item_id: str) -> str:
     """Convert item_id to capability string.
 
     Args:
-        primary: Primary action (execute, search, load, sign)
+        primary: Primary action (execute, fetch, sign)
         item_type: Item type (tool, directive, knowledge)
         item_id: Item ID with / separators (e.g., "rye/file-system/fs_write")
 
@@ -481,10 +481,10 @@ def cap_matches(granted: str, required: str) -> bool:
 def expand_capabilities(caps) -> Set[str]:
     """Expand capabilities using structural implication.
 
-    rye.execute.* implies rye.search.* + rye.load.*
-    rye.sign.* implies rye.load.*
+    rye.execute.* implies rye.fetch.*
+    rye.sign.* implies rye.fetch.*
 
-    Also: rye.execute.tool.* implies rye.search.tool.* + rye.load.tool.*
+    Also: rye.execute.tool.* implies rye.fetch.tool.*
     (implication preserves item_type specificity)
     """
     expanded = set(caps)
@@ -553,7 +553,7 @@ def check_all_capabilities(granted_caps, required_caps) -> Tuple[bool, List[str]
 
 
 def get_primary_actions_for_caps(caps) -> Set[str]:
-    """Determine which primary actions (execute/search/load/sign) are needed.
+    """Determine which primary actions (execute/fetch/sign) are needed.
 
     Parses each capability, extracts the primary action name.
     Returns set of primary action names.

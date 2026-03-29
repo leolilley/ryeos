@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:99bc0af98957591bbc9b4210b9d6faa83aa512745a72bb75c19897f61fa06d69:0f8fzupoPY6zf8piAfWvJCOiK4vLjOGLAglLH8XiB1BRdGL5l0OA0QMwASKlvT_iCp7k8VZHXgqw2j9K288dAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:817d2dece0cae3ea87aae16db743ca8f7a403cdf9d4bc288f5399bf035d7800b:VK5vt1qkiSxcwZCibd4DFyOH99bC8pbOWMbRyPh1ubULSCm_viRK-ecnnKzfJ9Cb-KPK5mIGXUTybqDXOkU_AA==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -144,9 +144,8 @@ Use `<context>` for content that is always needed (persona, knowledge, instructi
     </context>
   </metadata>
   <permissions>
-    <search><directive>*</directive></search>
-    <search><knowledge>*</knowledge></search>
-    <load><knowledge>*</knowledge></load>
+    <fetch><directive>*</directive></fetch>
+    <fetch><knowledge>*</knowledge></fetch>
   </permissions>
 </directive>
 ```
@@ -168,8 +167,8 @@ Use `<context>` for content that is always needed (persona, knowledge, instructi
       <tool>rye.file-system.*</tool>
       <tool>rye.bash.bash</tool>
     </execute>
-    <search><directive>*</directive></search>
-    <load><knowledge>*</knowledge></load>
+    <fetch><directive>*</directive></fetch>
+    <fetch><knowledge>*</knowledge></fetch>
   </permissions>
 </directive>
 ```
@@ -209,4 +208,4 @@ You write clean, tested code following project conventions.
 Verify deployment health before returning.
 ```
 
-**Capabilities:** Inherited from `rye/agent/core/coder` (file-system, bash, search, load).
+**Capabilities:** Inherited from `rye/agent/core/coder` (file-system, bash, fetch).

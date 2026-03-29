@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:055b049709664ff5c85c8d5bc20c6b8ff00615529fdd78af4c436c3176f386b9:c67apy3VwDuCGNPs3uXUq8q2kvZJDjiD3YC_PtII6HvrXSpaeBjMipQenW8vTgbKH3sqzuuAAqn-ymsEUfinAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:852de1e777b6d0f99a81a1e80516a86d16c0152265ef759dc54c7b6610e2f1b5:5fCOMkQPkJ0fkSAPnQ3p8EgJKs8whsDa97rybzO7dEnSQa459Sx7TeVz3sNjJHStKN6sqGvAEYnVfxLFzG1CCg==:4b987fd4e40303ac -->
 ```yaml
 name: execute-semantics
 title: "rye_execute — MCP Tool Semantics"
@@ -12,8 +12,7 @@ tags:
   - mcp-tool
   - api
 references:
-  - search-semantics
-  - load-semantics
+  - fetch-semantics
   - sign-semantics
   - "docs/tools-reference/execute.md"
 ```

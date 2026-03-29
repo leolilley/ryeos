@@ -1,4 +1,4 @@
-"""Search tool - find directives, tools, or knowledge entries.
+"""Search engine — BM25 keyword search, query parsing, scoring, field extraction.
 
 Implements keyword-based search with:
 - Boolean operators (AND, OR, NOT)
@@ -169,7 +169,7 @@ class SearchOptions:
     """Search configuration options."""
 
     query: str = ""
-    scope: str = ""  # Capability format: rye.search.directive.rye.core.*
+    scope: str = ""  # Capability format: rye.fetch.directive.rye.core.*
     source: str = "all"  # project | user | system | all
     project_path: str = ""
     limit: int = 10
@@ -184,7 +184,7 @@ class SearchOptions:
 def parse_search_scope(scope: str) -> Dict[str, Any]:
     """Parse a scope string into its components.
 
-    Accepts capability format: rye.search.directive.rye.core.*
+    Accepts capability format: rye.fetch.directive.rye.core.*
     Or shorthand: directive (all directives), tool.rye.core.* (tools in rye/core)
 
     Returns dict with keys: item_type, namespace_filter
@@ -195,13 +195,16 @@ def parse_search_scope(scope: str) -> Dict[str, Any]:
     if not scope:
         return {"item_type": "", "namespace_filter": None}
 
-    # Full capability format: rye.search.directive.rye.core.*
+    # Full capability format: rye.fetch.directive.rye.core.*
     if scope.startswith("rye."):
         parts = scope[4:].split(".", 2)  # After "rye."
         if len(parts) < 2:
             return {"item_type": "", "namespace_filter": None}
 
-        # parts[0] = primary (search), parts[1] = item_type
+        # parts[0] = primary (fetch), parts[1] = item_type
+        primary = parts[0]
+        if primary not in ("fetch", "*"):
+            return {"item_type": "", "namespace_filter": None}
         item_type = parts[1]
         if item_type == "*":
             return {"item_type": "", "namespace_filter": None}
@@ -876,11 +879,11 @@ class MetadataExtractor:
 
 
 # ---------------------------------------------------------------------------
-# SearchTool
+# SearchEngine
 # ---------------------------------------------------------------------------
 
 
-class SearchTool:
+class SearchEngine:
     """Search for items by query with advanced matching.
 
     Loads field weights from SEARCH_FIELDS in data-driven extractors.
@@ -912,7 +915,7 @@ class SearchTool:
         )
 
         if not item_type:
-            return {"error": "scope must specify an item_type (e.g., rye.search.directive.*)"}
+            return {"error": "scope must specify an item_type (e.g., rye.fetch.directive.*)"}
 
         logger.debug(
             f"Search: scope={opts.scope}, source={opts.source}, query={opts.query}"
@@ -1217,3 +1220,9 @@ class SearchTool:
                 key=lambda x: (x.get("name", "").lower(), *_tie_key(x)),
             )
         return results
+
+
+async def search_items(user_space: str, **kwargs) -> Dict[str, Any]:
+    """Search for items by query."""
+    engine = SearchEngine(user_space)
+    return await engine.handle(**kwargs)

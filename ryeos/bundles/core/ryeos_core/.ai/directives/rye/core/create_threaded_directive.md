@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:a081b222bffc9714e906beccd866f563a210255708bd91bcad4014d422f1792f:98f8ZishzFy5e4xYmpgDixQ8rSgX5Q4jMS4ao1zaXqhoZKukLEXNzB6sdqhROn90TKJoyf82oKM6JwrNmUu4Bw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:38:41Z:447f30e9f4fe0bd885b9c59b50685ebb83d7be187b632479a321585ed40cffa5:YXcEcE1vsqx9Fn-xOSYZBmEEq2naqu4L_B3sJ3nJ56L-tQwSxgWUeLxgNE0vYC_7HwYLySHBBhtmYbsiTGZDBQ==:4b987fd4e40303ac -->
 # Create Threaded Directive
 
 Create a directive with full thread execution support — model configuration, cost limits,
@@ -16,13 +16,10 @@ capability permissions for autonomous thread-based execution via thread_directiv
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
-        <directive>*</directive>
-      </search>
-      <load>
+      <fetch>
         <directive>*</directive>
         <knowledge>*</knowledge>
-      </load>
+      </fetch>
       <sign>
         <directive>*</directive>
       </sign>
@@ -94,7 +91,7 @@ capability permissions for autonomous thread-based execution via thread_directiv
 
     **Process steps** go AFTER the xml fence. Describe WHAT to do, not HOW.
     The LLM sees its tools as flat API tools and infers usage from their schemas.
-    Do NOT write `rye_execute(...)` or `rye_search(...)` calls in process steps.
+    Do NOT write `rye_execute(...)` or `rye_fetch(...)` calls in process steps.
 
     ## Permissions rules
 
@@ -120,13 +117,13 @@ capability permissions for autonomous thread-based execution via thread_directiv
     - Parent context items are injected unless suppressed
     - Child permissions are attenuated against parent (can only narrow, not widen)
     - Do NOT extend from `agent/core/base` unless you need the full Rye protocol docs
-      (search/load/sign/execute protocol knowledge). Most focused directives should NOT
+      (fetch/sign/execute protocol knowledge). Most focused directives should NOT
       extend from it — define their own identity context and permissions instead.
     - Use extends for shared identity (e.g., a base that sets `<system>` to an identity knowledge item)
     - Each leaf directive should own its permissions — the base provides context, not capabilities
 
     Parse {input:permissions_needed} into hierarchical `<permissions>` entries grouped by
-    primary action (execute, search, load, sign). All tool permissions go under `<execute><tool>`.
+    primary action (execute, fetch, sign). All tool permissions go under `<execute><tool>`.
     If {input:extends_from} is provided, add `extends="{input:extends_from}"` to the directive element.
     Use {input:process_steps} if provided to write the process steps.
   </step>

@@ -374,7 +374,7 @@ class TestSendTool:
         assert result["success"] is False
         assert "No sending address" in result["error"]
 
-    @patch("rye.tools.execute.ExecuteTool")
+    @patch("rye.actions.execute.ExecuteTool")
     def test_multistep_send_calls_create_approve_schedule(self, MockExecuteTool):
         """CK provider: create → approve → schedule."""
         mock_executor = AsyncMock()
@@ -410,7 +410,7 @@ class TestSendTool:
         assert "primary_email/approve" in calls[1].kwargs["item_id"]
         assert "scheduler/schedule" in calls[2].kwargs["item_id"]
 
-    @patch("rye.tools.execute.ExecuteTool")
+    @patch("rye.actions.execute.ExecuteTool")
     def test_step_failure_returns_error(self, MockExecuteTool):
         mock_executor = AsyncMock()
         MockExecuteTool.return_value = mock_executor

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:cff74b6dab29568437ba96ef0ba545813c415baf364071c902cbc72f20c31dda:fsCHQOxmju4-MvFZqZ2JlBd9FRqnvLLV2AhNA0K6BgpeT2kKGszN6HNViha7aGxL0b7htBTluGlO983cJeT4AQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:136701191454f742e16909f4b56f1c3bb69c8c4cc6feb1a01ce0a7358e563691:m2LaulXdfcYhuXWHiuV7pwjhdf3ihmkysf1v4wQlNemFEPo9uJ2FECCCX9Oadsb8a6vKxxopytfTWlLfC3CYCQ==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Base
@@ -18,8 +18,7 @@ Standard operating context for Rye agent threads.
     </context>
     <permissions>
       <execute>*</execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
       <sign>*</sign>
     </permissions>
   </metadata>

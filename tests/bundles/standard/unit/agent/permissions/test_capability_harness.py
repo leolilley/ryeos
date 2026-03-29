@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from conftest import get_bundle_path
-from rye.tools.sign import SignTool
-from rye.tools.execute import ExecuteTool
+from rye.actions.sign import SignTool
+from rye.actions.execute import ExecuteTool
 
 # Import capability tokens module using importlib to avoid package conflicts
 TOKENS_PATH = get_bundle_path('standard', 'tools/rye/agent/permissions/capability_tokens/capability_tokens.py')
@@ -176,7 +176,7 @@ default:
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
   <inputs>
@@ -248,31 +248,29 @@ async def signed_project(temp_project, _setup_user_space):
 class TestCapabilityHierarchy:
     """Test capability hierarchy expansion."""
     
-    def test_execute_implies_search_and_load(self):
-        """rye.execute.* should imply rye.search.* and rye.load.*."""
+    def test_execute_implies_fetch(self):
+        """rye.execute.* should imply rye.fetch.*."""
         caps = ["rye.execute.*"]
         expanded = expand_capabilities(caps)
-        assert "rye.search.*" in expanded
-        assert "rye.load.*" in expanded
+        assert "rye.fetch.*" in expanded
     
-    def test_search_does_not_imply_execute(self):
-        """rye.search.* should NOT imply rye.execute.*."""
-        caps = ["rye.search.*"]
+    def test_fetch_does_not_imply_execute(self):
+        """rye.fetch.* should NOT imply rye.execute.*."""
+        caps = ["rye.fetch.*"]
         expanded = expand_capabilities(caps)
         assert "rye.execute.*" not in expanded
     
-    def test_execute_tool_implies_search_tool(self):
-        """rye.execute.tool.* should imply rye.search.tool.* and rye.load.tool.*."""
+    def test_execute_tool_implies_fetch_tool(self):
+        """rye.execute.tool.* should imply rye.fetch.tool.*."""
         caps = ["rye.execute.tool.*"]
         expanded = expand_capabilities(caps)
-        assert "rye.search.tool.*" in expanded
-        assert "rye.load.tool.*" in expanded
+        assert "rye.fetch.tool.*" in expanded
     
-    def test_sign_implies_load(self):
-        """rye.sign.* should imply rye.load.*."""
+    def test_sign_implies_fetch(self):
+        """rye.sign.* should imply rye.fetch.*."""
         caps = ["rye.sign.*"]
         expanded = expand_capabilities(caps)
-        assert "rye.load.*" in expanded
+        assert "rye.fetch.*" in expanded
         assert "rye.execute.*" not in expanded
 
 
@@ -323,7 +321,7 @@ class TestCapabilityParsing:
     
     def test_cap_no_match_wrong_primary(self):
         assert not cap_matches(
-            "rye.search.*",
+            "rye.fetch.*",
             "rye.execute.tool.rye.file-system.fs_write",
         )
     
@@ -335,8 +333,7 @@ class TestCapabilityParsing:
         caps = ["rye.execute.tool.rye.file-system.*"]
         primaries = get_primary_actions_for_caps(caps)
         assert "execute" in primaries
-        assert "search" in primaries
-        assert "load" in primaries
+        assert "fetch" in primaries
 
 
 class TestCapabilityChecking:
@@ -350,29 +347,29 @@ class TestCapabilityChecking:
         assert check_capability(granted, "rye.execute.tool.rye.file-system.fs_read")
     
     def test_implied_match(self):
-        """rye.execute.* implies access to rye.search.tool.something."""
+        """rye.execute.* implies access to rye.fetch.tool.something."""
         granted = ["rye.execute.*"]
-        assert check_capability(granted, "rye.search.tool.rye.file-system.fs_read")
+        assert check_capability(granted, "rye.fetch.tool.rye.file-system.fs_read")
     
     def test_missing_capability(self):
-        """rye.search.* should NOT match rye.execute.tool.X."""
-        granted = ["rye.search.*"]
+        """rye.fetch.* should NOT match rye.execute.tool.X."""
+        granted = ["rye.fetch.*"]
         assert not check_capability(granted, "rye.execute.tool.rye.file-system.fs_write")
     
     def test_check_all_satisfied(self):
         granted = ["rye.execute.*"]
         satisfied, missing = check_all_capabilities(
             granted,
-            ["rye.search.tool.rye.file-system.fs_read", "rye.load.directive.test"],
+            ["rye.fetch.tool.rye.file-system.fs_read", "rye.fetch.directive.test"],
         )
         assert satisfied
         assert len(missing) == 0
     
     def test_check_all_with_missing(self):
-        granted = ["rye.search.*"]
+        granted = ["rye.fetch.*"]
         satisfied, missing = check_all_capabilities(
             granted,
-            ["rye.search.tool.rye.file-system.fs_read", "rye.execute.tool.rye.file-system.fs_write"],
+            ["rye.fetch.tool.rye.file-system.fs_read", "rye.execute.tool.rye.file-system.fs_write"],
         )
         assert not satisfied
         assert "rye.execute.tool.rye.file-system.fs_write" in missing
@@ -420,7 +417,7 @@ class TestTokenCreation:
             directive_id="test",
             thread_id="test",
         )
-        assert token.has_capability("rye.search.tool.rye.file-system.fs_read")
+        assert token.has_capability("rye.fetch.tool.rye.file-system.fs_read")
     
     def test_token_serialization_roundtrip(self):
         token = CapabilityToken(
@@ -459,7 +456,7 @@ class TestTokenAttenuation:
     
     def test_attenuation_no_escalation(self):
         parent_token = CapabilityToken(
-            caps=["rye.search.*"],
+            caps=["rye.fetch.*"],
             aud="test",
             exp=datetime.now(timezone.utc) + timedelta(hours=24),
             directive_id="parent",
@@ -622,7 +619,7 @@ class TestNewPermissionFormat:
         <tool>rye.file-system.*</tool>
         <tool>rye.agent.threads.spawn_thread</tool>
       </execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 </directive>
@@ -633,7 +630,7 @@ class TestNewPermissionFormat:
         caps = [p["content"] for p in perms]
         assert "rye.execute.tool.rye.file-system.*" in caps
         assert "rye.execute.tool.rye.agent.threads.spawn_thread" in caps
-        assert "rye.search.*" in caps
+        assert "rye.fetch.*" in caps
 
     def test_mixed_item_types(self):
         content = '''# Test
@@ -649,12 +646,10 @@ class TestNewPermissionFormat:
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>analysis/*</directive>
-      </search>
-      <load>
         <knowledge>*</knowledge>
-      </load>
+      </fetch>
     </permissions>
   </metadata>
 </directive>
@@ -664,8 +659,8 @@ class TestNewPermissionFormat:
         perms = result.get("permissions", [])
         caps = [p["content"] for p in perms]
         assert "rye.execute.tool.rye.file-system.*" in caps
-        assert "rye.search.directive.analysis/*" in caps
-        assert "rye.load.knowledge.*" in caps
+        assert "rye.fetch.directive.analysis/*" in caps
+        assert "rye.fetch.knowledge.*" in caps
 
 
 @pytest.mark.asyncio

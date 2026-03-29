@@ -29,14 +29,14 @@ Skills are **prompt injection with a directory convention and some YAML**. There
 
 | Capability                   | Skills                         | RyeOS                                                                           |
 | ---------------------------- | ------------------------------ | ------------------------------------------------------------------------------- |
-| Integrity / tamper detection | None — just files              | Ed25519 signing on every item, verified on every execute/load                   |
+| Integrity / tamper detection | None — just files              | Ed25519 signing on every item, verified on every execute/fetch                  |
 | Structured I/O               | None — markdown instructions   | Typed `<inputs>/<outputs>`, model tier selection, resource limits per directive |
 | Namespacing                  | Filesystem paths               | 3-tier (system/user/project) with explicit resolution order                     |
-| Search / discovery           | Description-matching heuristic | `rye_search()` across all spaces with scope and namespace filters               |
+| Search / discovery           | Description-matching heuristic | `rye_fetch()` across all spaces with scope and namespace filters               |
 | Knowledge as a type          | Not distinct from instructions | First-class item type, separate from directives, searchable, composable         |
 | Tool execution               | `!`cmd`` shell injection       | Full runtime chain: tool → runtime YAML → primitive → Lillux                    |
 | Inheritance                  | Not possible                   | `extends` on directives                                                         |
-| Permissions                  | `allowed-tools` coarse list    | `<permissions>` with execute/search/load/sign scopes per directive              |
+| Permissions                  | `allowed-tools` coarse list    | `<permissions>` with execute/fetch/sign scopes per directive                    |
 | Thread model                 | Forked subagent, no provenance | Capability tokens, signed thread metadata, budget propagation                   |
 | Portability of identity      | None — files have no identity  | Signatures travel with data, not infrastructure                                 |
 | Authorship provenance        | None                           | `\|registry@username` layers into the chain                                     |

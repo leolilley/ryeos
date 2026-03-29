@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:755b18aee31900a06930f2200ce66e5e64a7bafeb5ccbb7f5d5759b6732e2ada:fX3lNDEyE8tVpuhUcIrnMVZUD6CC1-bgOFS3SPUMpLbr2vjXXrhjKjjdCYxQ9AgsVs_HJZsy_fcipLPvJ4uuBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:794b11b1c52ba6548ce4a8b1cb9a65133bc05d7d0abae7da6f058474b942ad63:oZ5nfiPYjgDO1SoZATaF1yeM-jn8OJbMZLSFFtBrTKk_gafIa5uwxq8VIyXNr_E1gzc9cqz1zHUJfNsJ9D93BQ==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Base Review
@@ -17,8 +17,7 @@ Operating context for review and analysis threads with read-only file access.
       <suppress>agent/core/Behavior</suppress>
     </context>
     <permissions>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
       <execute>
         <tool>rye.file-system.read</tool>
         <tool>rye.file-system.glob</tool>

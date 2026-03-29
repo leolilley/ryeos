@@ -335,7 +335,7 @@ The `complexity` input determines default resource limits:
    - Markdown title and description
    - XML fenced block with `<model>`, `<limits>`, and `<permissions>` elements
    - Process steps after the fence
-   - Permissions parsed from `permissions_needed` into hierarchical XML entries grouped by action (execute, search, load, sign)
+   - Permissions parsed from `permissions_needed` into hierarchical XML entries grouped by action (execute, fetch, sign)
 5. **Sign** — Validates and signs the directive.
 
 ### Outputs
@@ -366,7 +366,7 @@ rye_execute(
         "category": "deployment",
         "description": "Deploy the application through the full CI/CD pipeline",
         "complexity": "moderate",
-        "permissions_needed": "rye.execute.tool.rye.file-system.*,rye.execute.tool.rye.bash.*,rye.search.directive.*"
+        "permissions_needed": "rye.execute.tool.rye.file-system.*,rye.execute.tool.rye.bash.*,rye.fetch.directive.*"
     }
 )
 ```

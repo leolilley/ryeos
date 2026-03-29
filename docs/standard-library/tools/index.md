@@ -21,7 +21,7 @@ This section documents every tool that ships with Rye OS. Tools are organized in
 | [File System](file-system.md) | `rye/file-system/` | 6     | Read, write, edit, glob, grep, ls |
 | [Bash](bash.md)               | `rye/`             | 1     | Shell command execution           |
 | [MCP Client](mcp.md)          | `rye/mcp/`         | 3     | Connect to external MCP servers   |
-| [Primary Actions](primary.md) | `rye/`             | 4     | Search, load, execute, sign items |
+| [Primary Actions](primary.md) | `rye/`             | 3     | Fetch, execute, sign items |
 | [Agent System](agent.md)      | `rye/agent/`       | 40+   | Thread orchestration engine       |
 | Dev Tools                     | `rye/dev/`         | 1     | Tool test runner                  |
 

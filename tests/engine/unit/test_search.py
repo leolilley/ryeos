@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rye.tools.search import SearchTool
+from rye.actions._search import SearchEngine
 
 
 @pytest.fixture
@@ -82,13 +82,13 @@ def temp_project(_setup_user_space):
 
 
 @pytest.mark.asyncio
-class TestSearchTool:
-    """Test search tool."""
+class TestSearchEngine:
+    """Test search engine."""
 
     async def test_search_directives(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="create",
             project_path=str(temp_project),
             source="project",
@@ -99,9 +99,9 @@ class TestSearchTool:
         assert any(r["name"] == "create_tool" for r in result["results"])
 
     async def test_search_tools(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.tool.*",
+            scope="rye.fetch.tool.*",
             query="scraper",
             project_path=str(temp_project),
             source="project",
@@ -111,9 +111,9 @@ class TestSearchTool:
         assert result["total"] >= 1
 
     async def test_search_knowledge(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.knowledge.*",
+            scope="rye.fetch.knowledge.*",
             query="api",
             project_path=str(temp_project),
             source="project",
@@ -123,9 +123,9 @@ class TestSearchTool:
         assert result["total"] >= 1
 
     async def test_search_empty_query(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="",
             project_path=str(temp_project),
             source="project",
@@ -135,9 +135,9 @@ class TestSearchTool:
         assert result["total"] >= 2
 
     async def test_search_with_limit(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="",
             project_path=str(temp_project),
             source="project",
@@ -148,9 +148,9 @@ class TestSearchTool:
         assert len(result["results"]) <= 1
 
     async def test_search_nonexistent_project(self):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="test",
             project_path="/nonexistent/path",
             source="project",
@@ -160,9 +160,9 @@ class TestSearchTool:
         assert result["total"] == 0
 
     async def test_boolean_or(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="create OR bootstrap",
             project_path=str(temp_project),
             source="project",
@@ -172,9 +172,9 @@ class TestSearchTool:
         assert result["total"] >= 2
 
     async def test_boolean_not(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="NOT bootstrap",
             project_path=str(temp_project),
             source="project",
@@ -186,9 +186,9 @@ class TestSearchTool:
         )
 
     async def test_phrase_search(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query='"Create a new tool"',
             project_path=str(temp_project),
             source="project",
@@ -198,9 +198,9 @@ class TestSearchTool:
         assert result["total"] >= 1
 
     async def test_wildcard_search(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="boot*",
             project_path=str(temp_project),
             source="project",
@@ -210,9 +210,9 @@ class TestSearchTool:
         assert result["total"] >= 1
 
     async def test_field_specific_search(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="",
             fields={"name": "bootstrap"},
             project_path=str(temp_project),
@@ -224,16 +224,16 @@ class TestSearchTool:
         assert result["results"][0]["name"] == "bootstrap"
 
     async def test_pagination_offset(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         all_results = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="",
             project_path=str(temp_project),
             source="project",
             limit=100,
         )
         page2 = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="",
             project_path=str(temp_project),
             source="project",
@@ -245,9 +245,9 @@ class TestSearchTool:
         assert len(page2["results"]) <= 1
 
     async def test_response_schema(self, temp_project):
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="create",
             project_path=str(temp_project),
             source="project",

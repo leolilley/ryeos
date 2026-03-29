@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:a3367508d7eef643ec64708266e3849f680e2757b20aba8ca4be47385f956dc7:468IRPPXfxwVpfw0fmBmZyVPLgb-S79AOs1DdV8VTF3X-br8ve2Rg5xa7ITnE6tVF3X9T3zbMzdwE_GiypZUBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:13:34Z:a3367508d7eef643ec64708266e3849f680e2757b20aba8ca4be47385f956dc7:468IRPPXfxwVpfw0fmBmZyVPLgb-S79AOs1DdV8VTF3X-br8ve2Rg5xa7ITnE6tVF3X9T3zbMzdwE_GiypZUBA==:4b987fd4e40303ac -->
 # Full 3-Layer Composition Test
 
 Tests all 3 layers working together:

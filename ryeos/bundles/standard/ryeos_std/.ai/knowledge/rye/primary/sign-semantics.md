@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:6758f0ba7e068e3b72b341ad3dffb6f669c8e46a48cbfb562cbe08f95ad454c3:LemsJSvzN4Mz1N1x81sxlq3XbFYWBTujqEeINIWOkXH_avUbslQh5LCkUNIMwuCjyNIn0CVrro3I1q-cYoBqAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:187b2b27680bd92fcdb88b270a66c2273a6aaff90132181efc14e369821612ce:sh49DBVkYwrHVV10IBkpw_gbz8tx2OGcI7bR5ZF0QJAuaet_r5v7owVBvlJ2cW-g0RZEdmz9NnUxiHaO7LmNCQ==:4b987fd4e40303ac -->
 
 ```yaml
 name: sign-semantics
@@ -15,8 +15,7 @@ tags:
   - integrity
 references:
   - execute-semantics
-  - search-semantics
-  - load-semantics
+  - fetch-semantics
   - "docs/tools-reference/sign.md"
 ```
 
@@ -87,7 +86,7 @@ Trusted key identity documents (`.ai/config/keys/trusted/{fingerprint}.toml`) ar
 
 **Re-sign after any content change.** The integrity check compares current file content against the stored hash. Any modification — edits, moves, renames — invalidates the signature.
 
-Rule: **edit → sign → execute/load**. Unsigned or stale-signed items fail integrity verification on `rye_execute` and `rye_load`.
+Rule: **edit → sign → execute/fetch**. Unsigned or stale-signed items fail integrity verification on `rye_execute` and `rye_fetch`.
 
 ## Response (Single Item)
 
@@ -144,7 +143,7 @@ Glob patterns in `item_id` (`*` or `?`) trigger batch mode.
 
 ## Verification Flow
 
-When `rye_load` or `rye_execute` is called, items are verified:
+When `rye_fetch` or `rye_execute` is called, items are verified:
 
 1. Read stored signature from file
 2. Recompute content hash from current file contents

@@ -1,7 +1,7 @@
 [project]
 name = "ryeos-cli"
 version = "0.1.6"
-description = "Terminal-native CLI for RYE OS — maps shell verbs to the four primitives"
+description = "Terminal-native CLI for RYE OS — maps shell verbs to the three primitives"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Leo Lilley", email = "leo.lml.lilley@gmail.com"}]

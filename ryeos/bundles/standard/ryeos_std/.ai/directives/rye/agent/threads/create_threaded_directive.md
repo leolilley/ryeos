@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:f6b13dde7b50f0c424feb547422b410ef39f92c168c345446256919cac25749f:GHDNKlzombkp8LHQANxWR5QaINScuKcxH133byhX-2-RVAIT1TKp5b4-ZNxIh9QkQ3NwSwOusAFMUUQ3pF2KBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:20b9f47e4111ee047abce709f09581f908874bd571fe53850c4f2b4e1a06cf7e:lRfsY06I45dkBpVEqrUHHBDm0h-BDxk6a46jJbfdGHksiyIkVn3vNgIB8QrWGsYGtgD7Yxi93x_1fSTUhLFWAg==:4b987fd4e40303ac -->
 
 # Create Threaded Directive
 
@@ -16,12 +16,9 @@ Create a directive with full thread execution support — model configuration, c
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>*</directive>
-      </search>
-      <load>
-        <directive>*</directive>
-      </load>
+      </fetch>
       <sign>
         <directive>*</directive>
       </sign>
@@ -42,7 +39,7 @@ Create a directive with full thread execution support — model configuration, c
       Complexity level: simple, moderate, or complex — determines default limits and turn counts
     </input>
     <input name="permissions_needed" type="string" required="true">
-      Comma-separated capability strings (e.g., rye.execute.tool.rye.file-system.*,rye.search.directive.*)
+      Comma-separated capability strings (e.g., rye.execute.tool.rye.file-system.*,rye.fetch.directive.*)
     </input>
     <input name="process_steps" type="string" required="false">
       Optional summary of the steps the directive should perform
@@ -59,12 +56,12 @@ Create a directive with full thread execution support — model configuration, c
 <process>
   <step name="search_existing">
     Search for similar existing directives to avoid duplication and gather patterns.
-    `rye_search(item_type="directive", query="{input:name} {input:category}")`
+    `rye_fetch(scope="directive", query="{input:name} {input:category}")`
   </step>
 
   <step name="load_reference">
     Load an example threaded directive to use as a structural reference.
-    `rye_load(item_type="directive", item_id="rye/core/create_threaded_directive")`
+    `rye_fetch(item_type="directive", item_id="rye/core/create_threaded_directive")`
   </step>
 
   <step name="determine_limits">
@@ -83,7 +80,7 @@ Create a directive with full thread execution support — model configuration, c
     3. A single ```xml fenced block containing ONLY metadata (with model, limits, permissions), inputs, and outputs
     4. Pseudo-XML process steps AFTER the fence
 
-    Parse {input:permissions_needed} into hierarchical permission entries grouped by primary action (execute, search, load, sign).
+    Parse {input:permissions_needed} into hierarchical permission entries grouped by primary action (execute, fetch, sign).
     Use {input:process_steps} if provided to write the process steps.
 
     `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`

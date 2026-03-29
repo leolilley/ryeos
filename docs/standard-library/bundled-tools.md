@@ -336,13 +336,12 @@ Output sinks for streaming events:
 
 ### Primary Actions (`rye/`)
 
-Wrappers around the 4 MCP tools, used inside threads:
+Wrappers around the 3 MCP tools, used inside threads:
 
-| Tool        | Item ID        | Description                             |
-| ----------- | -------------- | --------------------------------------- |
-| rye_execute | `rye/execute`  | Execute tools, directives, or knowledge |
-| rye_load    | `rye/load`     | Load item content for inspection        |
-| rye_search  | `rye/search`   | Search for items by scope and query     |
-| rye_sign    | `rye/sign`     | Validate and sign item files            |
+| Tool        | Item ID        | Description                              |
+| ----------- | -------------- | ---------------------------------------- |
+| rye_fetch   | `rye/fetch`    | Find items by ID or discover by query    |
+| rye_execute | `rye/execute`  | Execute tools, directives, or knowledge  |
+| rye_sign    | `rye/sign`     | Validate and sign item files             |
 
 These are the tools the LLM sees when running inside a thread. Inside threads, these are dynamically registered in the LLM's tool palette based on the directive's capability strings. The runner routes calls using a `_primary` field for dispatch.

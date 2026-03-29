@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:07e66118676062c0af8a6e27ed9660d2ca3130ea2a99e4766b2f5b5cac05d7cd:dcYpEpDi_D-qtzbtawtsPdxUNt1TWJrpMN5mKyNbBE-4-KxZ7EHwDjcpnpCuiGySWtzEULt41MN7-Kv4KX7hCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:00c44cf6fbc108cb9d6e2f51a9719b6413e3cf1a4c1fc6ee87fc05be9c5bf7f3:9h-95emxBhlMp2mKnNKWN2C7ttH_aX9ZIhoAnLA9NzPwWg7Ogbj9n52yRGoPpHVncTCBW2pouqWyLr_5coHyBg==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -17,7 +17,7 @@ tags:
 
 ## Tool Protocol
 
-You have four primary actions. They are the Rye OS interface.
+You have three primary actions. They are the Rye OS interface.
 
 ### rye_execute — Run items
 
@@ -29,24 +29,22 @@ rye_execute(item_type="directive", item_id="my/workflow", parameters={"target": 
 rye_execute(item_type="knowledge", item_id="project/design-spec")
 ```
 
-### rye_search — Discover items
+### rye_fetch — Resolve or discover items
 
-Find item IDs before executing or loading them. Use when you don't know the exact ID.
+Unified item resolution. Two modes:
 
+**ID mode** — resolve by exact path:
 ```json
-rye_search(scope="tool", query="file system")
-rye_search(scope="knowledge", query="design spec")
-rye_search(scope="directive", query="build")
-rye_search(scope="tool.rye.web.*", query="*")
+rye_fetch(item_id="rye/file-system/write")
+rye_fetch(item_type="directive", item_id="my/workflow")
 ```
 
-### rye_load — Inspect items
-
-Read raw content and metadata. Use to check a tool's parameter schema or a directive's inputs before executing.
-
+**Query mode** — discover by keyword:
 ```json
-rye_load(item_type="tool", item_id="rye/file-system/write")
-rye_load(item_type="directive", item_id="my/workflow")
+rye_fetch(scope="tool", query="file system")
+rye_fetch(scope="knowledge", query="design spec")
+rye_fetch(scope="directive", query="build")
+rye_fetch(scope="tool.rye.web.*", query="*")
 ```
 
 ### rye_sign — Sign items
@@ -81,17 +79,17 @@ If execution fails with an IntegrityError, the error message tells you exactly w
 
 ### Shadow detection
 
-When `rye_search` returns results from multiple spaces, items may include:
+When `rye_fetch` returns results from multiple spaces, items may include:
 - `shadows` — this item overrides the same item_id in a lower space
 - `shadowed_by` — this item is overridden by a higher-precedence space
 
-If a project tool shadows a system tool, search results make this visible.
+If a project tool shadows a system tool, fetch results make this visible.
 
 ### When unsure
 
 If a directive tells you to use a tool and you don't know the exact item_id or parameters:
-1. `rye_search` to find the item
-2. `rye_load` to inspect its schema
+1. `rye_fetch` in query mode to find the item
+2. `rye_fetch` in ID mode to inspect its schema
 3. `rye_execute` to run it
 
 Do NOT guess parameters. Look them up.

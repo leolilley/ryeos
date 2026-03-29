@@ -28,13 +28,12 @@ _resolve_directive_chain = _td_mod._resolve_directive_chain
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _mock_load_and_parser(*parent_dicts):
-    """Create mocked LoadTool and ParserRouter that return parent directives in order.
+    """Create mocked resolve_item and ParserRouter that return parent directives in order.
 
     parent_dicts: sequence of parsed directive dicts returned for each
     parent load (in chain-walk order: first parent, then grandparent, etc.)
     """
-    mock_load_tool = MagicMock()
-    mock_load_tool.handle = AsyncMock(return_value={"status": "success", "content": "fake"})
+    mock_resolve = AsyncMock(return_value={"status": "success", "content": "fake"})
 
     call_idx = {"i": 0}
 
@@ -46,12 +45,12 @@ def _mock_load_and_parser(*parent_dicts):
     mock_parser = MagicMock()
     mock_parser.parse = MagicMock(side_effect=_parse_side_effect)
 
-    return mock_load_tool, mock_parser
+    return mock_resolve, mock_parser
 
 
-async def _patch_and_run(coro, mock_load_tool, mock_parser):
-    """Run an async coroutine with LoadTool, ParserRouter, and get_user_space patched."""
-    with patch("rye.tools.load.LoadTool", return_value=mock_load_tool), \
+async def _patch_and_run(coro, mock_resolve, mock_parser):
+    """Run an async coroutine with resolve_item, ParserRouter, and get_user_space patched."""
+    with patch("rye.actions._resolve.resolve_item", mock_resolve), \
          patch("rye.utils.parser_router.ParserRouter", return_value=mock_parser), \
          patch("rye.utils.resolvers.get_user_space", return_value=Path("/tmp/user")):
         return await coro
@@ -303,8 +302,7 @@ class TestChainMetadata:
         """Parent directive that fails to load raises ValueError."""
         child = {"name": "child", "extends": "nonexistent"}
 
-        mock_load_tool = MagicMock()
-        mock_load_tool.handle = AsyncMock(return_value={
+        mock_resolve = AsyncMock(return_value={
             "status": "error",
             "error": "Directive not found: nonexistent",
         })
@@ -313,5 +311,5 @@ class TestChainMetadata:
         with pytest.raises(ValueError, match="Failed to load parent directive"):
             await _patch_and_run(
                 _resolve_directive_chain("child", child, "/tmp/test"),
-                mock_load_tool, mock_parser,
+                mock_resolve, mock_parser,
             )

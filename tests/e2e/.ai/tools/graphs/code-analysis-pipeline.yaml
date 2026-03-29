@@ -7,8 +7,7 @@ description: "Read a Python file, analyze it with an LLM, and produce a structur
 permissions:
   - rye.execute.tool.*
   - rye.execute.directive.*
-  - rye.search.*
-  - rye.load.*
+  - rye.fetch.*
 
 config_schema:
   type: object

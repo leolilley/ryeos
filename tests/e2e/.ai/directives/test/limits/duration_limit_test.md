@@ -13,7 +13,7 @@ Test that the duration_seconds limit triggers escalation. Set duration_seconds=1
     <limits turns="10" tokens="100000" spend="1.0" duration_seconds="1" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

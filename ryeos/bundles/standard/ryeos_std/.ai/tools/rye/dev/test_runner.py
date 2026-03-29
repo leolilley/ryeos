@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:200fa170929b7b2a34645e1630674d0d2b0ee26b32ddf85ac8859190ec9eb81d:F7afT_RA2gVNDjPgMtSNklhGq5F3yy5D4RJ-ogcecHkOhWQ5D5pE_R_U77gLrBaVujkG57nG_FyB_nr0yfm0CA==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:34:27Z:6dd643bfb7c936486f63b420b5e19ce7a36c80edc99494c84434385c0432db03:guum2awo6Qhd8cCWVt01Kq8GaDYYY9w21EhMYqFSXdLrH2T_PrmZG9GqESHNpnQ_rx7K5qsNXoJkzmuqVX70DQ==:4b987fd4e40303ac
 """Rye tool test runner — execute .test.yaml specs against real tools.
 
 Discovers test specs from .ai/tests/**/*.test.yaml, executes tools via
@@ -388,7 +388,7 @@ async def run_spec(
 
     Returns a summary dict with per-test results.
     """
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
     spec = _load_spec(spec_path)

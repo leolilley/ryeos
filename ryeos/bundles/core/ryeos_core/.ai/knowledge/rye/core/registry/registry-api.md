@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:7fbe851ec5f1c873eb1e284c54e3dc7f197fb081309094152d4ab9cae640bf1f:qQiIdDigjoOH-NBK37YfzUu-mo4D2bR9bPmUKUAK-1IG2nU9og0xMpwmtC61dmFmZ_re71J3pv4LsbNlhPnrDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:38:41Z:0624284b8b17f656040aa642fc0c364c6e36b8f4ed64a5c390109d4f0ad8f561:vdfOs7p4RkXHyHZlBi0TjsX7GcA3I6Dpwk36EJtWzw87mnP7hV71sBQoJGWR45dRyI7LNxeAU1DiYxXJ9vQHDg==:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api
@@ -283,7 +283,7 @@ API keys use the `rye_sk_` prefix (e.g., `rye_sk_a1b2c3d4...`). Pass via the `Au
 
 | Mechanism                                  | Scope                               | Network |
 | ------------------------------------------ | ----------------------------------- | ------- |
-| `rye_search(query=...)`                    | Project `.ai/`, user `~/.ai/`, system | No   |
+| `rye_fetch(query=...)`                     | Project `.ai/`, user `~/.ai/`, system | No   |
 | `rye_execute(item_id="rye/core/registry/registry", action="search")` | Registry server | Yes |
 
 Search is **explicit** — agents must consciously invoke the registry tool. No implicit network calls.
@@ -330,7 +330,7 @@ rye_execute(item_id="utilities/web-scraper",
 
 | Limitation                        | Description                                                        |
 | --------------------------------- | ------------------------------------------------------------------ |
-| No automatic registry search      | `rye_search` is local-only; agent must explicitly call registry    |
+| No automatic registry search      | `rye_fetch` is local-only; agent must explicitly call registry     |
 | Auth required for pull             | Most operations need authentication via `action: login`            |
 | No dependency resolution           | Pulling an item does not pull its dependencies                     |
 | No auto-update                     | Pulled items are static snapshots                                  |

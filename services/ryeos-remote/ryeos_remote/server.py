@@ -2,7 +2,7 @@
 
 Endpoints: /health, /public-key, /objects/has, /objects/put, /objects/get,
            /push, /push/user-space, /user-space,
-           /execute, /search, /load, /sign,
+           /execute, /fetch, /sign,
            /threads, /threads/{thread_id},
            /secrets (POST, GET), /secrets/{name} (DELETE),
            /webhook-bindings (POST, GET), /webhook-bindings/{hook_id} (DELETE)
@@ -78,7 +78,7 @@ from rye.cas.checkout import (
 from rye.cas.manifest import build_manifest
 from rye.cas.merge import three_way_merge
 from rye.constants import AI_DIR
-from rye.tools.execute import ExecuteTool
+from rye.actions.execute import ExecuteTool
 
 logger = logging.getLogger(__name__)
 
@@ -1060,16 +1060,16 @@ async def execute(
     )
 
 
-# --- First-class tool endpoints (search/load/sign) ---
+# --- First-class tool endpoints (fetch/sign) ---
 
 
-@app.post("/search")
-async def search_items(
+@app.post("/fetch")
+async def fetch_item(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    """Search for rye items. Wraps execute with item_type=tool, item_id=rye/search."""
+    """Fetch rye items. Wraps execute with item_type=tool, item_id=rye/fetch."""
     require_scope(user, "remote:execute")
     raw_body = await request.body()
     try:
@@ -1088,38 +1088,7 @@ async def search_items(
         settings=settings,
         project_path=project_path,
         item_type="tool",
-        item_id="rye/search",
-        parameters=body,
-        thread="inline",
-    )
-
-
-@app.post("/load")
-async def load_item(
-    request: Request,
-    user: User = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-):
-    """Load/inspect a rye item. Wraps execute with item_type=tool, item_id=rye/load."""
-    require_scope(user, "remote:execute")
-    raw_body = await request.body()
-    try:
-        body = json.loads(raw_body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON body")
-    if not isinstance(body, dict):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "JSON body must be an object")
-
-    project_path = body.pop("project_path", None)
-    if not project_path:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "project_path is required")
-
-    return await _execute_from_head(
-        user=user,
-        settings=settings,
-        project_path=project_path,
-        item_type="tool",
-        item_id="rye/load",
+        item_id="rye/fetch",
         parameters=body,
         thread="inline",
     )

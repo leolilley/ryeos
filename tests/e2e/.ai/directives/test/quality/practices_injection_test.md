@@ -20,8 +20,7 @@ End-to-end test for knowledge context injection — verifies that the practices 
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

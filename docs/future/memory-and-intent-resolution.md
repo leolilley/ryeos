@@ -35,10 +35,10 @@ Before describing what this proposal adds, here's the infrastructure it builds o
 | Thread registry            | `thread_registry.py` (SQLite)                                   | Tracks `thread_id`, `directive`, `model`, `status`, `parent_id`, `continuation_of`, `continuation_thread_id`, `chain_root_id`, `turns`, `input_tokens`, `output_tokens`, `spend`                                                                                                                                                 |
 | `thread_chain_search`      | `rye/agent/threads/internal/thread_chain_search.py`             | Regex search across JSONL transcripts within a single delegation tree (resolves ancestry via registry)                                                                                                                                                                                                                           |
 | `walker`       | `rye/core/runtimes/walker.py`                       | Follows `continuation_of` links to retrieve results from continued threads                                                                                                                                                                                                                                                       |
-| `rye_search`               | `ryeos/rye/tools/search.py`                                     | BM25 + fuzzy matching over the registry — field-weighted scoring, boolean operators, wildcards, phrase matching, namespace filtering                                                                                                                                                                                             |
+| `rye_fetch` (query mode)   | `ryeos/rye/actions/_fetch.py`                                   | BM25 + fuzzy matching over the registry — field-weighted scoring, boolean operators, wildcards, phrase matching, namespace filtering                                                                                                                                                                                             |
 | Event system               | `events.yaml`                                                   | Lifecycle: `thread_started`, `thread_completed`, `thread_suspended`, `thread_cancelled`; Cognition: `cognition_in`, `cognition_out`, `cognition_out_delta`, `cognition_reasoning`; Tools: `tool_call_start`, `tool_call_result`; Errors: `error_classified`, `limit_escalation_requested`; Orchestration: `child_thread_started` |
 | Hook system                | `hook_conditions.yaml`                                          | Hook events: `error`, `limit`, `context_window_pressure`, `after_step`, `after_complete`, `directive_return` — each triggers an `execute` action against existing tools/directives                                                                                                                                               |
-| Four MCP tools             | `search`, `load`, `execute`, `sign`                             | The entire agent-facing interface                                                                                                                                                                                                                                                                                                |
+| Three MCP tools            | `fetch`, `execute`, `sign`                                      | The entire agent-facing interface                                                                                                                                                                                                                                                                                                |
 | Capability attenuation     | fnmatch patterns (e.g., `rye.execute.tool.rye.bash`)       | Granular permission control                                                                                                                                                                                                                                                                                                      |
 | Three-tier spaces          | project → user → system with shadow-override                    | Resolution precedence for all items                                                                                                                                                                                                                                                                                              |
 | Lillux primitives           | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — no embedding primitive exists today                                                                                                                                                                                                                                                        |
@@ -92,9 +92,9 @@ An agent that wants to filter to its own directive queries with a metadata filte
 Access to thread memory follows the same capability attenuation model as everything else in Rye. No new permission concepts needed:
 
 ```
-rye.load.memory.thread.*                      — read any thread in scope
-rye.load.memory.thread.project.ryeos.*        — read only ryeos project threads
-rye.load.memory.thread.directive.rye.outreach.*  — read only outreach threads
+rye.fetch.memory.thread.*                      — read any thread in scope
+rye.fetch.memory.thread.project.ryeos.*        — read only ryeos project threads
+rye.fetch.memory.thread.directive.rye.outreach.*  — read only outreach threads
 ```
 
 Capabilities cascade down the thread hierarchy as normal — a child thread can only access thread memory its parent granted it. A sandboxed scoring leaf that should only see its own work gets exactly that. An orchestrator coordinating across multiple agents can see across all of them.
@@ -270,11 +270,11 @@ The system gets more useful over time and across agents as the store grows.
 
 ### The Problem
 
-As `.ai/` registries grow — more directives, more tools, more knowledge items — agents increasingly struggle with exact tool call syntax. They hallucinate parameter names, use wrong item IDs, or pick the wrong item entirely. Rye already has the right surface: four MCP tools as the entire agent-facing interface. The problem is that even with four tools, the agent still needs to know exact `item_id` strings and parameter structures for potentially hundreds of items.
+As `.ai/` registries grow — more directives, more tools, more knowledge items — agents increasingly struggle with exact tool call syntax. They hallucinate parameter names, use wrong item IDs, or pick the wrong item entirely. Rye already has the right surface: three MCP tools as the entire agent-facing interface. The problem is that even with three tools, the agent still needs to know exact `item_id` strings and parameter structures for potentially hundreds of items.
 
 ### What Exists Today
 
-`rye_search` (`ryeos/rye/tools/search.py`) already provides sophisticated discovery over the registry:
+`rye_fetch` (query mode, `ryeos/rye/actions/_fetch.py`) already provides sophisticated discovery over the registry:
 
 - BM25 field-weighted scoring (titles weighted higher than content)
 - Fuzzy matching with Levenshtein distance
@@ -286,7 +286,7 @@ This is a strong foundation. What it doesn't do is take a **natural-language int
 
 ### The Proposal: Intent Syntax + Registry Metadata RAG + Small Model
 
-Rather than requiring the agent to know exact syntax, it expresses intent in natural language. A resolver directive intercepts this, uses RAG over registry metadata to find the best candidate items (complementing `rye_search`'s BM25), and passes them to a small specialized model to construct the actual tool call.
+Rather than requiring the agent to know exact syntax, it expresses intent in natural language. A resolver directive intercepts this, uses RAG over registry metadata to find the best candidate items (complementing `rye_fetch`'s BM25), and passes them to a small specialized model to construct the actual tool call.
 
 ```
 # Instead of:
@@ -301,7 +301,7 @@ rye_execute(item_type="directive", action="run", item_id="rye/outreach/email_cam
 
 ### Registry Metadata RAG
 
-This proposal adds an **embedding index** as a complement to the existing `rye_search` BM25 index. The RAG index is built purely over item **metadata** — not content. Each item contributes:
+This proposal adds an **embedding index** as a complement to the existing `rye_fetch` BM25 index. The RAG index is built purely over item **metadata** — not content. Each item contributes:
 
 ```json
 {
@@ -489,7 +489,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 | --------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Embedding primitive               | New Lillux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
 | Shared thread embedding store     | New persistent store under `.ai/tools/rye/memory/thread_store/`                                        |
-| Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_search`                          |
+| Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_fetch`                           |
 | ryeos-cli parser                  | **Conditional** — if the small model targets CLI strings ([Option A](#output-format--open-question)), the [ryeos-cli](ryeos-cli.md) parser becomes a prerequisite. If it targets structured JSON (Option B), the parser is not in the critical path. |
 
 ### Proposed New/Extended Hook Events
@@ -515,13 +515,13 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 
 | Component                                            | Location                                            | Status                                                         |
 | ---------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
-| Four MCP tools (`search`, `load`, `execute`, `sign`) | Agent-facing interface                              | Same interface, no changes                                     |
+| Three MCP tools (`fetch`, `execute`, `sign`)          | Agent-facing interface                              | Same interface, no changes                                     |
 | Capability attenuation (fnmatch patterns)            | Thread memory permissions use the same model        | No new permission concepts                                     |
 | Space resolution (project → user → system)           | Three-tier shadow-override                          | Unchanged                                                      |
 | Ed25519 signing, lockfiles, chain verification       | Lillux `signing`, `integrity`, `lockfile` primitives | Unchanged                                                      |
 | Thread orchestration and budget cascading            | `orchestrator.py`, `coordination.yaml`              | Unchanged                                                      |
 | `thread_chain_search`                                | `rye/agent/threads/internal/thread_chain_search.py` | Unchanged — new `thread_search` extends it, doesn't replace it |
-| `rye_search` (BM25 + fuzzy)                          | `ryeos/rye/tools/search.py`                         | Unchanged — RAG index complements it, doesn't replace it       |
+| `rye_fetch` (BM25 + fuzzy)                           | `ryeos/rye/actions/_fetch.py`                       | Unchanged — RAG index complements it, doesn't replace it       |
 | Thread registry (SQLite)                             | `thread_registry.py`                                | Unchanged — embedding store reads from it                      |
 | Existing hook events                                 | `hook_conditions.yaml`                              | Unchanged — new hooks are additions, not modifications         |
 | Existing lifecycle events                            | `events.yaml`                                       | Unchanged — new events are additions                           |
@@ -533,7 +533,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 
 **Everything is data** — the resolver, predictor, and memory tools are all items in `.ai/`. Swap them by overriding at project level. No framework code changes.
 
-**RAG only where warranted** — registry metadata RAG scoped to intent resolution. Thread memory RAG scoped to associative recall. Neither applied where simpler tools suffice — `rye_search` BM25 remains the primary discovery mechanism, `thread_chain_search` remains the primary within-tree search.
+**RAG only where warranted** — registry metadata RAG scoped to intent resolution. Thread memory RAG scoped to associative recall. Neither applied where simpler tools suffice — `rye_fetch` BM25 remains the primary discovery mechanism, `thread_chain_search` remains the primary within-tree search.
 
 **The runtime runs on itself** — the intent resolution system is subject to the same signing, integrity checks, and space precedence as any other tool.
 

@@ -16,7 +16,7 @@ Yes that's a lot of jargon but it's truly the TL;DR of what this is. There is a 
 
 After working with AI over these past few years I've come to realise that to really turn an LLM into an agent, you first need to understand the core primitives of agentic operation.
 
-I reason you can reduce a secure agent to 4 action primitives: Search, Load, Execute, and Sign. That's it. Across any harness, any workflow, any prompt, this is all you're actually getting the LLM to do. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured the Search and Load steps. When Claude Code finds a skill and runs it, that's Search, Load, Execute. When OpenClaw routes a task to a sub-agent, same thing. Every agent framework you've seen is doing some version of this, they just haven't named it.
+I reason you can reduce a secure agent to 3 action primitives: Fetch, Execute, and Sign. That's it. Across any harness, any workflow, any prompt, this is all you're actually getting the LLM to do. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured the Fetch step. When Claude Code finds a skill and runs it, that's Fetch, Execute. When OpenClaw routes a task to a sub-agent, same thing. Every agent framework you've seen is doing some version of this, they just haven't named it.
 
 Other frameworks have approached agent security as a runtime problem. Watch what the agent does and intervene when it steps out of bounds. In RYE permissions aren't enforced after the fact. What people have missed is the Sign step. That's what makes the other 3 operations secure. They're declared, signed, and verified before execution ever starts. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
 
@@ -28,7 +28,7 @@ I reason that the primitives of what an LLM actually acts on can be reduced to 3
 
 I started building this before the community collectively decided that skills were the way to go. The reason I haven't adopted that framing is simple. Skills describe what to do. They don't describe what an agent is allowed to do, or how far it can go.
 
-Directives act as just that, direction. They reflect your intent inflicted on the LLM to adhere to. Steps to follow, how to respond, what tools to call, what to evaluate. On the surface this feels like what a skill is, but directives go deeper. They also enforce the bounds of the LLM's limits, tokens, turns, cost. Its permissions, what it can search, load, execute or sign. Its context, system prompt, context injection, hooks. That's not just instruction. That's scope.
+Directives act as just that, direction. They reflect your intent inflicted on the LLM to adhere to. Steps to follow, how to respond, what tools to call, what to evaluate. On the surface this feels like what a skill is, but directives go deeper. They also enforce the bounds of the LLM's limits, tokens, turns, cost. Its permissions, what it can fetch, execute or sign. Its context, system prompt, context injection, hooks. That's not just instruction. That's scope.
 
 Knowledge is persistent context without intent. Best practices, something discovered during execution, transcripts, domain references. Anything worth remembering that isn't an instruction and isn't executable. But it's not just loose files in your project. Knowledge items are first-class, searchable and loadable on demand.
 
@@ -60,7 +60,7 @@ Lillux is the micro kernel sitting at the bottom of this chain that manages exec
 
 **MCP, harness, and recursive execution**
 
-Everything described so far, the four actions, the three item types, signing, Lillux, all of it is accessible through MCP. Four primitive actions as MCP tools. Search, Load, Execute, Sign. You point your existing harness at RYE MCP and you're using it. Claude Code, Cursor, Codex, whatever you're already running. That's the entry point.
+Everything described so far, the three actions, the three item types, signing, Lillux, all of it is accessible through MCP. Three primitive actions as MCP tools. Fetch, Execute, Sign. You point your existing harness at RYE MCP and you're using it. Claude Code, Cursor, Codex, whatever you're already running. That's the entry point.
 
 Through MCP, RYE enforces hash validation, schema validation, and signature verification on every item. That's real security you get immediately. But there's a ceiling when running RYE through MCP in your native harness. A directive defines permissions, token budgets, turn limits, what the LLM can and can't touch. But if your harness is the one running the LLM, your harness is the one that would need to enforce those constraints. And it doesn't know how. It's not built for that.
 
@@ -74,7 +74,7 @@ Every execution in RYE runs on a thread managed by Lillux. This gives you cross-
 
 **Graph execution**
 
-A graph in RYE is a YAML file that describes a workflow as a series of nodes. Each node is Search, Load, Execute, Sign. You describe the shape of the work and RYE walks it. Like any other tool, a graph is defined in YAML and runs on the RYE graph runtime, just another runtime in the toolchain.
+A graph in RYE is a YAML file that describes a workflow as a series of nodes. Each node is Fetch, Execute, Sign. You describe the shape of the work and RYE walks it. Like any other tool, a graph is defined in YAML and runs on the RYE graph runtime, just another runtime in the toolchain.
 
 What graphs give you that directives alone don't is clean composition of deterministic and non-deterministic steps in the same execution layer. Run a bash script, have an LLM evaluate the output, branch on its judgment, run another tool. Fixed logic and reasoning mixed in a single verified workflow. Every node verified before it runs. Every transition attributable. And because the whole graph is data, the whole graph is hashable and trust verified.
 
@@ -126,7 +126,7 @@ Agents got this completely backwards. The model sits at the centre. Memory, tool
 
 The pieces have existed separately. Reproducible builds, content-addressed storage, cryptographic signing. Nobody has combined them into an execution substrate where the agent itself, its tools, its history, its permissions, are all cryptographically tied to a single portable identity. Because until agents, nothing needed all of that at once.
 
-And none of this requires an LLM at all. The four primitives, the execution chain, the CAS, the registry, deterministic graphs, verified tool pipelines, reproducible data workflows, all of it runs without ever calling a model. The LLM is just one kind of runtime that can inhabit the substrate. A powerful one, but one among many.
+And none of this requires an LLM at all. The three primitives, the execution chain, the CAS, the registry, deterministic graphs, verified tool pipelines, reproducible data workflows, all of it runs without ever calling a model. The LLM is just one kind of runtime that can inhabit the substrate. A powerful one, but one among many.
 
 Which brings us to the actual answer. The agent is the signing key. The workspace. The accumulated directives, knowledge, execution history. The model is just the current best available reasoning engine passing through it. Swap Claude for GPT for Gemini for whatever comes next. The agent remains. Because the agent was never the model. It's the data it consumes and produces, cryptographically tied to the key that signs it.
 

@@ -290,7 +290,7 @@ rye_execute(
 | --------------------------------- | -------------------------------------- |
 | `rye.execute.tool.*`              | Execute any tool                       |
 | `rye.execute.tool.rye.bash`       | Execute only `rye/bash`           |
-| `rye.load.knowledge.my-project.*` | Load any knowledge under `my-project/` |
+| `rye.fetch.knowledge.my-project.*` | Load any knowledge under `my-project/` |
 
 ## Result Unwrapping
 

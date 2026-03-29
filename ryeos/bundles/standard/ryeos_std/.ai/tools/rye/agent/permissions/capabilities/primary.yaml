@@ -1,19 +1,18 @@
-# rye:signed:2026-03-16T11:23:45Z:8818e6918c37d351e2ed473fcb78e1c4f7404ed38b4d4ed3d7bfd4be30c63aee:jVfGn0KmBC-YsRN2n9mFqN5qm20kKklTHf0Xkgu3ktqYCatzWa5IJBxuFB18ZmeMICr0vpc6AwiRbgQLVmTZDA==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:38:20Z:56590b1639c9dcc21ccca3fb1233d1941df48425bee6d53afb9d897a2988c2d5:dRW8nJJEsWatoXMhMAFo2MvGfbZz_MExPpBHOvB1Nf8GJev0eyH1qB24enSqvxHUW0Oi4-_CO18RcNYoQRB9Cg==:4b987fd4e40303ac
 name: primary
 category: "rye/agent/permissions/capabilities"
 tool_type: "config"
-version: "2.0.0"
+version: "3.0.0"
 description: "Primary rye capability structure: rye.{primary}.{item_type}.{specifics}"
 
 primary_actions:
   execute: "rye/primary-actions/rye_execute"
-  search: "rye/primary-actions/rye_search"
-  load: "rye/primary-actions/rye_load"
+  fetch: "rye/primary-actions/rye_fetch"
   sign: "rye/primary-actions/rye_sign"
 
 implies:
-  execute: [search, load]
-  sign: [load]
+  execute: [fetch]
+  sign: [fetch]
 
 permissions: []
 hierarchy: {}

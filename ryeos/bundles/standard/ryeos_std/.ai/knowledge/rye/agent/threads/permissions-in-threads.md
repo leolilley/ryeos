@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:58eb480536a60d7d9f7941a9b2ce711008e0dae31e6523995655f5dcd7f36dd5:DkCu-y3HQQj4IN7Yqic-FGYkjpZc1IN_tRvUZy3ht0Z7rwi6mnvIn4q-j-tAxZMtwqvmwIPqANZyM81GgpvFDA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:deb6d7fac92924add55ad21888d80c8fcc3672d306478a0f844dc021ddd4f843:n90WFVjGM3oJ7eSoKWwoQUtzJxtD_eBBZTRwrCYr7BWhfCmqWYCNAwNmYDYN2FBladfyZrQAUhAIpXdPos-eBg==:4b987fd4e40303ac -->
 ```yaml
 name: permissions-in-threads
 title: Permissions in Threads
@@ -33,7 +33,7 @@ rye.<primary>.<item_type>.<item_id_dotted>
 
 | Component        | Values                                     |
 |------------------|--------------------------------------------|
-| `primary`        | `execute`, `search`, `load`, `sign`        |
+| `primary`        | `execute`, `fetch`, `sign`                 |
 | `item_type`      | `tool`, `directive`, `knowledge`           |
 | `item_id_dotted` | Item ID with `/` → `.`, fnmatch wildcards  |
 
@@ -44,8 +44,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | `rye.execute.tool.rye.file-system.*`                 | Execute any tool under `rye/file-system/` |
 | `rye.execute.tool.rye.agent.threads.thread_directive`| Execute thread_directive (internal, used by `execute directive`) |
 | `rye.execute.directive.domain.*`                     | Spawn threads for any directive under `domain/` |
-| `rye.search.directive.*`                             | Search all directives                     |
-| `rye.load.knowledge.agency-kiwi.*`                   | Load any knowledge under `agency-kiwi/`   |
+| `rye.fetch.directive.*`                              | Fetch all directives                      |
+| `rye.fetch.knowledge.agency-kiwi.*`                  | Fetch any knowledge under `agency-kiwi/`  |
 | `rye.sign.directive.*`                               | Sign any directive                        |
 
 ## Declaring Permissions in Directives
@@ -57,13 +57,10 @@ rye.<primary>.<item_type>.<item_id_dotted>
     <tool>rye.agent.threads.orchestrator</tool>
     <directive>agency-kiwi.*</directive>  <!-- allows spawning threads for these directives -->
   </execute>
-  <search>
+  <fetch>
     <directive>agency-kiwi.*</directive>
     <knowledge>agency-kiwi.*</knowledge>
-  </search>
-  <load>
-    <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 ```
 
@@ -74,15 +71,15 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | XML Declaration                                         | Capability String                                     |
 |---------------------------------------------------------|-------------------------------------------------------|
 | `<execute><tool>rye.file-system.*</tool></execute>`     | `rye.execute.tool.rye.file-system.*`                  |
-| `<search><directive>*</directive></search>`             | `rye.search.directive.*`                              |
-| `<load><knowledge>agency-kiwi.*</knowledge></load>`    | `rye.load.knowledge.agency-kiwi.*`                    |
+| `<fetch><directive>*</directive></fetch>`               | `rye.fetch.directive.*`                               |
+| `<fetch><knowledge>agency-kiwi.*</knowledge></fetch>`  | `rye.fetch.knowledge.agency-kiwi.*`                   |
 
 ### Wildcard Shortcuts
 
 ```xml
 <permissions>*</permissions>     <!-- God mode — all permissions -->
 <execute>*</execute>             <!-- Execute everything -->
-<search>*</search>               <!-- Search everything -->
+<fetch>*</fetch>                 <!-- Fetch everything -->
 ```
 
 ## Fail-Closed Default
@@ -95,7 +92,7 @@ if not self._capabilities:
                      f"Cannot {primary} {item_type} '{target}'"}
 ```
 
-A directive with empty/missing `<permissions>` can't execute tools, load knowledge, or search anything. Prevents accidental privilege escalation.
+A directive with empty/missing `<permissions>` can't execute tools or fetch knowledge. Prevents accidental privilege escalation.
 
 ## Permission Checking Flow
 
@@ -175,26 +172,26 @@ else:
 
 ```
 Root orchestrator:
-  ✓ thread_directive (internal), orchestrator, directive agency-kiwi.*, search agency-kiwi.*, load agency-kiwi.*
+  ✓ thread_directive (internal), orchestrator, directive agency-kiwi.*, fetch agency-kiwi.*
   (spawns threads via: execute directive)
 
   └── qualify_leads (declares own permissions):
-      ✓ thread_directive (internal), directive agency-kiwi.*, load agency-kiwi.*
-      ✗ orchestrator (dropped), search (dropped)
+      ✓ thread_directive (internal), directive agency-kiwi.*, fetch agency-kiwi.*
+      ✗ orchestrator (dropped)
 
       └── score_lead (declares own permissions):
           ✓ analysis.score_ghl_opportunity
-          ✗ thread_directive (dropped), directive (dropped), knowledge loading (dropped)
+          ✗ thread_directive (dropped), directive (dropped), fetch (dropped)
 
       └── leaf_without_permissions (no <permissions> block):
-          ✓ Inherits qualify_leads: thread_directive, directive agency-kiwi.*, load agency-kiwi.*
+          ✓ Inherits qualify_leads: thread_directive, directive agency-kiwi.*, fetch agency-kiwi.*
 ```
 
 ## Design Principles
 
 1. **Start with execution leaves** — each needs exactly the tools it calls
 2. **Sub-orchestrators** need `thread_directive` (internal) + `directive` patterns for children + domain knowledge loading
-3. **Root orchestrators** need `thread_directive` (internal), `orchestrator` (wait/aggregate), `directive` patterns, search/load
+3. **Root orchestrators** need `thread_directive` (internal), `orchestrator` (wait/aggregate), `directive` patterns, fetch
 4. **Never use `<permissions>*</permissions>` in production** — defeats the purpose
 5. **LLM gets clear error** — denied permissions produce explicit messages for debugging
 
@@ -206,7 +203,7 @@ Every capability string is assigned a **risk level** that determines how it's ha
 
 | Risk Level     | Description                                              | Example Capabilities               |
 |----------------|----------------------------------------------------------|--------------------------------------|
-| `safe`         | Read-only, no side effects                               | `rye.search.*`, `rye.load.*`        |
+| `safe`         | Read-only, no side effects                               | `rye.fetch.*`                       |
 | `write`        | Modifies state but within normal operation               | `rye.execute.tool.rye.file-system.*`|
 | `elevated`     | High-impact actions requiring explicit opt-in            | `rye.sign.*`, `rye.execute.directive.*` |
 | `unrestricted` | Full access, no guardrails                               | `rye.*`                              |
@@ -230,8 +227,7 @@ risk_levels:
   safe:
     policy: allow
     patterns:
-      - "rye.search.*"
-      - "rye.load.*"
+      - "rye.fetch.*"
   write:
     policy: allow
     patterns:
@@ -270,11 +266,11 @@ Without the `<acknowledge>` tag, capabilities classified as `acknowledge_require
 When a capability string matches multiple risk patterns, the **most specific** pattern wins. Specificity is determined by the number of segments in the pattern.
 
 ```
-rye.search.directive.*     → matches "safe" (4 segments)
+rye.fetch.directive.*      → matches "safe" (4 segments)
 rye.*                      → matches "unrestricted" (2 segments)
 
-Request: rye.search.directive.my-project.workflows
-→ "rye.search.directive.*" is more specific → risk = safe
+Request: rye.fetch.directive.my-project.workflows
+→ "rye.fetch.directive.*" is more specific → risk = safe
 ```
 
 This ensures that granting broad patterns like `rye.*` doesn't accidentally classify fine-grained safe operations as unrestricted.

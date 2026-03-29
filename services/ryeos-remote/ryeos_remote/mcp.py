@@ -1,6 +1,6 @@
 """MCP transport for ryeos-remote.
 
-Exposes 4 MCP tools (execute, search, load, sign) that call the engine
+Exposes 3 MCP tools (fetch, execute, sign) that call the engine
 directly — no HTTP proxy, no separate service.
 
 Mounted at /mcp in the FastAPI app via modal_app.py.
@@ -83,60 +83,46 @@ async def execute(
 
 
 @mcp.tool()
-async def search(
-    scope: str,
-    query: str,
+async def fetch(
     ctx: Context,
     project_path: str | None = None,
-    source: str = "all",
-    limit: int = 10,
-) -> dict:
-    """Search for rye items on ryeos-remote."""
-    user, settings = await _authenticate(ctx)
-    require_scope(user, "remote:execute")
-
-    if not project_path:
-        raise ValueError("project_path is required")
-
-    return await _execute_from_head(
-        user=user,
-        settings=settings,
-        project_path=project_path,
-        item_type="tool",
-        item_id="rye/search",
-        parameters={"scope": scope, "query": query, "source": source, "limit": limit},
-        thread="inline",
-    )
-
-
-@mcp.tool()
-async def load(
-    item_type: str,
-    item_id: str,
-    ctx: Context,
-    project_path: str | None = None,
+    item_id: str | None = None,
+    item_type: str | None = None,
+    query: str | None = None,
+    scope: str | None = None,
     source: str | None = None,
     destination: str | None = None,
+    limit: int | None = None,
 ) -> dict:
-    """Load/inspect a rye item on ryeos-remote."""
+    """Fetch rye items on ryeos-remote. ID mode (item_id) or query mode (query+scope)."""
     user, settings = await _authenticate(ctx)
     require_scope(user, "remote:execute")
 
     if not project_path:
         raise ValueError("project_path is required")
 
-    params: dict = {"item_type": item_type, "item_id": item_id}
+    params: dict = {}
+    if item_id is not None:
+        params["item_id"] = item_id
+    if item_type is not None:
+        params["item_type"] = item_type
+    if query is not None:
+        params["query"] = query
+    if scope is not None:
+        params["scope"] = scope
     if source is not None:
         params["source"] = source
     if destination is not None:
         params["destination"] = destination
+    if limit is not None:
+        params["limit"] = limit
 
     return await _execute_from_head(
         user=user,
         settings=settings,
         project_path=project_path,
         item_type="tool",
-        item_id="rye/load",
+        item_id="rye/fetch",
         parameters=params,
         thread="inline",
     )

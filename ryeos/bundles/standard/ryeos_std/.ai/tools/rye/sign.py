@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:cf91b660c0562afd765f9922591db051ce356be5e76e5adb4619c2901261d356:j_epJJKKYcnbGzORUXlMCq2E318FZLnCe0vCR0JSYkV3sJzV22nN8QHpl0lCK0h-t2rlWhIUArd4cwnWtUexCw==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:34:27Z:4ed46d82c918090ac7e93e4888298111acf84f1020765e73f30f16f71a85fd91:m3H09WqlRajRWVl07WA0K12WfYJIqzYSXkjhR5JaSUCWkBo9H-R94HWhpiY45AWGKGU0G9pJtOhaGNlDxAYnDw==:4b987fd4e40303ac
 """Validate and sign a directive, tool, knowledge, or config item."""
 
 import argparse
@@ -43,7 +43,7 @@ CONFIG_SCHEMA = {
 
 def execute(params: dict, project_path: str) -> dict:
     try:
-        from rye.tools.sign import SignTool
+        from rye.actions.sign import SignTool
 
         tool = SignTool()
         result = asyncio.run(tool.handle(

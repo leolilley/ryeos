@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:bacb3f1afc41a26407eb9a6631a76af6d097508b9d04415e4d189c0146904def:hQ8c_0uSgZqsDkEivYn8560KwGtYBDkVpOZMborLH6HkqUxjVCmSsY4y_x-YXfXoV9kK59r4dGhg266k1C6EBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:bf71c16e042aa31d53ffa45b0effd71ea6f93b134a4b82b5559feace8f02d094:HsVOTloyvwGfpnyaszsrMhqJ2QCqqQVcJytFFVZ9bS_Ijv6BtmVT_76NslJDB9FxG7qkpLkr-Bn9iFLzHGVKBQ==:4b987fd4e40303ac -->
 # Create Graph Tool
 
 Create a declarative state graph tool — a YAML workflow definition with nodes, edges, and state management.
@@ -15,13 +15,10 @@ Create a declarative state graph tool — a YAML workflow definition with nodes,
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
-        <tool>*</tool>
-      </search>
-      <load>
+      <fetch>
         <tool>*</tool>
         <knowledge>*</knowledge>
-      </load>
+      </fetch>
       <sign>
         <tool>*</tool>
       </sign>

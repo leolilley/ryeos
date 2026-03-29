@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:5dabc0be78d4cae294446382a629e83c474b39cbb1db0a2719d4887af622253f:lwhYG91sSABfs4R0nqSGwZcbQM4ByIA0sn5b_1hpvldFeCxANz4fiTr7OMB7Il6DvYbj5BHKdD2FkeI7ueH9BQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:09Z:ad1c231bed2390dd349c6d0bec57eec1b75eac2f254c57962925a3e5df54f262:sPvmvVW5y_p1NBte8IdJ5qcKdRN67w6TSD2wiEW8cveOP1NtHXnEfWSOPslwfsdahODUZwM8uVBf5mno4IeYCQ==:4b987fd4e40303ac -->
 ```yaml
 name: input-interpolation
 title: Input Interpolation
@@ -86,7 +86,7 @@ Inputs are declared in the directive's XML metadata fence:
 <process>
   <step name="check_duplicates">
     Search for directives similar to {input:name}.
-    <search item_type="directive" query="{input:name}" />
+    <fetch scope="directive" query="{input:name}" />
   </step>
 
   <step name="write_file">
@@ -102,7 +102,7 @@ Inputs are declared in the directive's XML metadata fence:
 
 ```markdown
 **Check duplicates**
-`rye_search(item_type="directive", query="{input:name}")`
+`rye_fetch(query="{input:name}", scope="directive")`
 
 **Write file**
 `rye_execute(item_type="tool", item_id="rye/file-system/write",

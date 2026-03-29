@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:9adf78218eb75990c65f3e9f6b1465c0977d8a2326cc0ed114904dac98f7d9e0:O7QAD4fBdKCS1TcFZpYVDafDmCNrHLSt04h0kIq3VaaPzIUodf7_9D6Ts2b80mnoI33a8pOdD_DEl-H_92ONAw==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:50:06Z:103e5e42d6078c6ad5b492f85d4697330840133dc9b1aab4428082c93c15c304:E_NoLRpoMBigAXb5EZqr_VkRCHzPJJsxc3RjLJoWL_CEsJYLj9WcYnHtX_r7neaql-61wcJs7OT6-98HUM1WBg==:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rye.constants import Action
-from rye.tools.search import SearchTool
-from rye.tools.load import LoadTool
-from rye.tools.execute import ExecuteTool
-from rye.tools.sign import SignTool
+from rye.actions.fetch import FetchTool
+from rye.actions.execute import ExecuteTool
+from rye.actions.sign import SignTool
 from module_loader import load_module
 from rye.utils.resolvers import get_user_space
 
@@ -35,8 +34,7 @@ class ToolDispatcher:
 
     Core tool handle() kwargs:
         ExecuteTool.handle(item_type=, item_id=, project_path=, parameters=, dry_run=)
-        SearchTool.handle(item_type=, query=, project_path=, source=, limit=)
-        LoadTool.handle(item_type=, item_id=, project_path=, source=)
+        FetchTool.handle(item_id=, item_type=, project_path=, source=, query=, scope=, limit=)
         SignTool.handle(item_type=, item_id=, project_path=, source=)
     """
 
@@ -45,8 +43,7 @@ class ToolDispatcher:
         user_space = str(get_user_space())
         self._tools = {
             Action.EXECUTE: ExecuteTool(user_space),
-            Action.SEARCH: SearchTool(user_space),
-            Action.LOAD: LoadTool(user_space),
+            Action.FETCH: FetchTool(user_space),
             Action.SIGN: SignTool(user_space),
         }
 
@@ -89,21 +86,32 @@ class ToolDispatcher:
                     parameters=params,
                     dry_run=action.get("dry_run", False),
                 )
-            elif primary == Action.SEARCH:
-                return await tool.handle(
-                    item_type=item_type,
-                    query=self._get(action, params, "query"),
-                    project_path=project_path_str,
-                    source=self._get(action, params, "source", "project"),
-                    limit=self._get(action, params, "limit", 10),
-                )
-            elif primary == Action.LOAD:
-                return await tool.handle(
-                    item_type=item_type,
-                    item_id=item_id,
-                    project_path=project_path_str,
-                    source=self._get(action, params, "source", None),
-                )
+            elif primary == Action.FETCH:
+                # Pass through all fetch params — FetchTool handles mode detection
+                fetch_kwargs = {"project_path": project_path_str}
+                # ID mode params
+                if item_id:
+                    fetch_kwargs["item_id"] = item_id
+                if item_type and item_type != "tool":  # Don't pass default
+                    fetch_kwargs["item_type"] = item_type
+                # Query mode params
+                query = self._get(action, params, "query", None)
+                if query:
+                    fetch_kwargs["query"] = query
+                scope = self._get(action, params, "scope", None)
+                if scope:
+                    fetch_kwargs["scope"] = scope
+                # Shared params
+                source = self._get(action, params, "source", None)
+                if source:
+                    fetch_kwargs["source"] = source
+                destination = self._get(action, params, "destination", None)
+                if destination:
+                    fetch_kwargs["destination"] = destination
+                limit = self._get(action, params, "limit", None)
+                if limit:
+                    fetch_kwargs["limit"] = limit
+                return await tool.handle(**fetch_kwargs)
             elif primary == Action.SIGN:
                 return await tool.handle(
                     item_type=item_type,

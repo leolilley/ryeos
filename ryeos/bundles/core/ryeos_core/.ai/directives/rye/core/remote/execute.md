@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:20d1c57c5c8683c4ef1efe4335cfb07847b4f96290cc8b70723577f688ff5496:AVUGXxHaDuclMGsRFqvhrhrf48wZMCltoazzmjRmudJ6FbPQCiRWmsAJ7k6KAgUGx6MWleWuNtwpG7rAioiRCQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:38:41Z:20d1c57c5c8683c4ef1efe4335cfb07847b4f96290cc8b70723577f688ff5496:AVUGXxHaDuclMGsRFqvhrhrf48wZMCltoazzmjRmudJ6FbPQCiRWmsAJ7k6KAgUGx6MWleWuNtwpG7rAioiRCQ==:4b987fd4e40303ac -->
 # Remote Execute
 
 Run a tool or graph remotely. Pushes state, executes on server, pulls results.

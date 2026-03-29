@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:99973858524dca2e32bd67080533d1721aae3dd28b5654b0a54e62ae93571d84:D0RRFE_GRa6-lHEVfRFcGy1kBUCqpTm5mFOANQG3cBxGkkXCiuHWukm9L2TAzIiJe30YOrhMeeMUxWQAuvK2CQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:4364fb389d07f2fdf5de0953820941192c2902154e3e6ef69b4b78ae3f6eee69:SjsTy-voSTF31NFxcaxOHiUOdwlzHLs-cjbE0FFGl13yHjm462hy-ma1SEX7E8OL1V03xgcK3gkGCbXJ5s5kCg==:4b987fd4e40303ac -->
 # Create Tool
 
 Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign it.
@@ -15,9 +15,9 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <tool>*</tool>
-      </search>
+      </fetch>
       <sign>
         <tool>*</tool>
       </sign>
@@ -52,7 +52,7 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
 <process>
   <step name="check_existing">
     Search for existing tools with a similar name to avoid duplicates.
-    `rye_search(item_type="tool", query="{input:tool_name}")`
+    `rye_fetch(scope="tool", query="{input:tool_name}")`
   </step>
 
   <step name="write_tool_file">

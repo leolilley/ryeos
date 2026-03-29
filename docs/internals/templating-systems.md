@@ -185,4 +185,4 @@ The dispatch boundary is critical: Systems 1-2 (pre-dispatch) operate on the _va
 | 1      | `rye/executor/primitive_executor.py` (`_template_config` Pass 1), `lillux/primitives/subprocess.py` (`_template_env_vars`), `lillux/runtime/env_resolver.py` (`_expand_variables`) |
 | 2      | `rye/executor/primitive_executor.py` (`_template_config` Pass 2, `_template_string`), `lillux/primitives/subprocess.py` (`_template_params`)                                      |
 | 3      | `rye/.ai/tools/rye/agent/threads/loaders/interpolation.py`, `rye/.ai/tools/rye/agent/threads/loaders/condition_evaluator.py`                                                     |
-| 4      | `rye/tools/execute.py` (`_resolve_input_refs`, `_interpolate_parsed`)                                                                                                            |
+| 4      | `rye/actions/execute.py` (`_resolve_input_refs`, `_interpolate_parsed`)                                                                                                          |

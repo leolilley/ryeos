@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:9dd9b8d29872ceb33f3c84d559695017c0a655894e65adcfe14d18dbc3649810:JdDbylu808dH8KlirZ37gKs_JZ3KtOQTYsJ28KZ-GrylCGxfGaORmgzBXtK_nwXu_yRGgT-MQi6KfqAxWfizCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:13:34Z:9dd9b8d29872ceb33f3c84d559695017c0a655894e65adcfe14d18dbc3649810:JdDbylu808dH8KlirZ37gKs_JZ3KtOQTYsJ28KZ-GrylCGxfGaORmgzBXtK_nwXu_yRGgT-MQi6KfqAxWfizCw==:4b987fd4e40303ac -->
 # Inherited Capabilities Minimal Test
 
 Minimal-guidance version of inherited_capabilities_test. The LLM must
@@ -23,6 +23,6 @@ figure out tool names and parameters from the `<capabilities>` block alone.
 
 <process>
   <step name="call_tools">
-    <description>Call every tool in your capabilities block. List the project root, glob for *.md files, grep for "MARKER" in .ai/, read the .gitignore file, write a summary to outputs/inherited_caps_minimal.txt, and use rye_search and rye_load at least once each.</description>
+    <description>Call every tool in your capabilities block. List the project root, glob for *.md files, grep for "MARKER" in .ai/, read the .gitignore file, write a summary to outputs/inherited_caps_minimal.txt, and use rye_fetch at least once.</description>
   </step>
 </process>

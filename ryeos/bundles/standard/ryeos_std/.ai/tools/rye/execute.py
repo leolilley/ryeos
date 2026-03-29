@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:0082af4676aa99ac86a68fadc01d1304ad4cb94b6a781d7b034b935d306516cf:e99YDyxAS7dCVzxrmmhrkXMRBHGDKFuVs1_hia5epQZzcctdba2HIVmUiYC-O3_3ApockSHJHKodWaCIs7pnBA==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:34:27Z:85954594df86ab49f6a646ded2f907cc407c448fc5cef7fd7cd38dd21490d3d0:nsydNH3sLif2udJbCXiI3d86Yif00K98CVc-YWZ_ijd0V3tcHHu1cWr_l4W6wzQWk8DchsDoGcNvXlKbGov_Aw==:4b987fd4e40303ac
 """Execute a directive, tool, or knowledge item via rye."""
 
 import argparse
@@ -66,7 +66,7 @@ CONFIG_SCHEMA = {
 
 def execute(params: dict, project_path: str) -> dict:
     try:
-        from rye.tools.execute import ExecuteTool
+        from rye.actions.execute import ExecuteTool
 
         raw_params = params.get("parameters", {})
         if isinstance(raw_params, str):

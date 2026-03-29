@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:7611601f3611a18d232c101da6fd958c56edbd050c17f72272043dc121923de9:TdIZu2UZ3ykjZR-UYyN3wz9NMN7jxgOvJWlyJ58-UULGb2G13ZmV_dtg6EYRVZR3YM7ZaMB-amkPIywoVT-SDg==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:39:09Z:64fb3776bf426d1814898a709357bf87e5bcb7a5bf25ae7e6e35b2e8c0dc23a0:11WvbnjD4hjh0mcF7QriQstwhYFHe7u-cDVBe0vojYKNR4Mo28aPnNSSzhAGdKg2Ir65-7Q3Z_2HzRm-ozY2AA==:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -478,10 +478,14 @@ async def run(
                     inner_item_type = tc_input.get("item_type", "tool")
                     inner_item_id = tc_input.get("item_id", "") or resolved_id
                     denied = harness.check_permission("execute", inner_item_type, inner_item_id)
-                elif primary == "search":
-                    scope = tc_input.get("scope", "")
-                    item_type_from_scope = scope.split(".")[0] if scope else ""
-                    denied = harness.check_permission("search", item_type_from_scope, "")
+                elif primary == "fetch":
+                    # Fetch can be ID mode or query mode
+                    fetch_item_type = tc_input.get("item_type", "")
+                    fetch_item_id = tc_input.get("item_id", "")
+                    if not fetch_item_type:
+                        scope = tc_input.get("scope", "")
+                        fetch_item_type = scope.split(".")[0] if scope else ""
+                    denied = harness.check_permission("fetch", fetch_item_type, fetch_item_id)
                 else:
                     denied = harness.check_permission(
                         primary, tc_input.get("item_type", ""), tc_input.get("item_id", "")
@@ -587,7 +591,7 @@ async def run(
                         thread_context=thread_ctx,
                     )
                 else:
-                    # search/load/sign — params are the tool input directly
+                    # fetch/sign — params are the tool input directly
                     result = await dispatcher.dispatch(
                         {"primary": primary, **dispatch_params},
                         thread_context=thread_ctx,

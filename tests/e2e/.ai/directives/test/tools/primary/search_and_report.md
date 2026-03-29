@@ -13,7 +13,7 @@ Multi-step directive that searches the knowledge base for entries on a topic, th
     <model tier="fast" id="claude-3-5-haiku-20241022" />
     <limits turns="5" tokens="2048" />
     <permissions>
-      <search><knowledge>*</knowledge></search>
+      <fetch><knowledge>*</knowledge></fetch>
       <execute><tool>rye.file-system.*</tool></execute>
     </permissions>
   </metadata>

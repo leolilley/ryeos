@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:35d54f1abe58657d8a980a57bef73456e0d1090774cfe9aecee15046ffe0a5f5:vII4Yn-a7skrHsIHmmwfC7yVrupkH9rZAnMybpqWDO1i16uNiB-8M7UYYcRnXKTVECyMADYiIXTZXf53H-LXAA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:2f2c5b0303529a25861e317a8bb110e5cf20ee8c6729eb0a504eb67038455be5:nNZc6EISgj8swaLXIZzqgoSL9FHj_rQGig0sXjaulrLSN1NshqlXegyBEnKMewxsnpeobYrn2nUZJKJENjQ-Aw==:4b987fd4e40303ac -->
 
 ```yaml
 name: thread-lifecycle
@@ -70,7 +70,7 @@ Insert into SQLite registry (`registry.db`) with status `created`, directive nam
 `DirectiveResolver` searches project → user → system spaces. The markdown_xml parser extracts metadata (limits, permissions, model, inputs) and preserves raw content for the LLM prompt.
 
 - **Normal execution:** `ExecuteTool` handles input validation and interpolation
-- **Resume/handoff:** `LoadTool` used instead (no input validation)
+- **Resume/handoff:** `FetchTool` used instead (no input validation)
 
 ### Step 3.5: Reconstruct resume messages (continuation only)
 

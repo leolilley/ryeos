@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:3dc054301d9ccd305203d2a7913a37d2f59c3af8202ede374b239281e56b091b:a2MP_ad2mDY-rKw2t_L7SXco6XA_2z1n72xM0dcwT6exXUBBwIDXFHewdlW2hJi96tcByG6K3g-tjCl9pWaxAA==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:38:20Z:3dc054301d9ccd305203d2a7913a37d2f59c3af8202ede374b239281e56b091b:a2MP_ad2mDY-rKw2t_L7SXco6XA_2z1n72xM0dcwT6exXUBBwIDXFHewdlW2hJi96tcByG6K3g-tjCl9pWaxAA==:4b987fd4e40303ac
 """
 persistence/artifact_store.py: CAS-backed artifact store
 

@@ -13,8 +13,7 @@ Test creating, signing, loading, and searching for a directive.
     <limits turns="10" tokens="4096" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search><directive>*</directive></search>
-      <load><directive>*</directive></load>
+      <fetch><directive>*</directive></fetch>
       <sign><directive>*</directive></sign>
     </permissions>
   </metadata>

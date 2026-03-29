@@ -13,8 +13,7 @@ Orchestrator that spawns the leaf_context directive as a child thread. Tests tha
     <limits turns="8" tokens="4096" spend="0.50" depth="3" spawns="2" />
     <permissions>
       <execute><tool>*</tool><directive>test/context/leaf_context</directive></execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 async def _run(payload: dict, project_path: str) -> dict:
     """Execute the payload via ExecuteTool and return the result."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
 
     tool = ExecuteTool(project_path=project_path)
 
@@ -64,7 +64,7 @@ def main():
     proj = Path(project_path)
 
     # Get registry (optional — degrades gracefully)
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     registry = ExecuteTool._get_registry(proj)
 
     try:

@@ -1,7 +1,7 @@
 ```yaml
 id: ryeos-cli
 title: "ryeos-cli — Terminal-Native Interface"
-description: A CLI wrapper around ryeos that maps shell commands to deterministic RYE invocations — shorthand verbs for the four primitives, a parameter parser for correct tool call construction, a thread verb for directive execution, and a graph verb for state-graph operation
+description: A CLI wrapper around ryeos that maps shell commands to deterministic RYE invocations — shorthand verbs for the three primitives, a parameter parser for correct tool call construction, a thread verb for directive execution, and a graph verb for state-graph operation
 category: future
 tags: [cli, terminal, interface, shell, parser, graph]
 version: "0.3.0"
@@ -11,12 +11,12 @@ status: implemented
 # ryeos-cli — Terminal-Native Interface
 
 > **Status:** Implemented — `pip install ryeos-cli` (package at `ryeos-cli/`).
-> All verbs functional: `search`, `load`, `execute`, `sign`, `thread`, `graph` (run/step/validate), `test`.
+> All verbs functional: `fetch`, `execute`, `sign`, `thread`, `graph` (run/step/validate), `test`.
 > Schema-driven flag expansion deferred — all verbs accept params via stdin for now.
 
 ## The Idea
 
-RYE's agent-facing surface is four MCP tools: `search`, `load`, `execute`, `sign`. Today, invoking these requires an MCP client. `ryeos-cli` is a CLI that maps shell verbs directly to these primitives — no MCP transport, no JSON-RPC, no agent session.
+RYE's agent-facing surface is three MCP tools: `fetch`, `execute`, `sign`. Today, invoking these requires an MCP client. `ryeos-cli` is a CLI that maps shell verbs directly to these primitives — no MCP transport, no JSON-RPC, no agent session.
 
 The core mapping:
 
@@ -30,12 +30,12 @@ Now that `execute directive` spawns threads directly (internally delegating to `
 
 ## Verb Mapping
 
-The CLI exposes verbs that map to the four primitives, plus a `thread` verb that shortcuts directive execution:
+The CLI exposes verbs that map to the three primitives, plus a `thread` verb that shortcuts directive execution:
 
 | CLI                                          | What It Calls                                                                                                     | Notes                                               |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `rye search <scope> <query>`                 | `rye_search(scope=..., query=...)`                                                                                | Registry search                                     |
-| `rye load <item_type> <item_id>`             | `rye_load(item_type=..., item_id=...)`                                                                            | Read item content to stdout                         |
+| `rye fetch <scope> <query>`                  | `rye_fetch(scope=..., query=...)`                                                                                 | Registry search                                     |
+| `rye fetch <item_type> <item_id>`            | `rye_fetch(item_type=..., item_id=...)`                                                                           | Read item content to stdout                         |
 | `rye execute <item_type> <item_id> [params]` | `rye_execute(item_type=..., item_id=..., parameters=...)`                                                         | Execute a tool or spawn a directive thread          |
 | `rye sign <item_type> <item_id>`             | `rye_sign(item_type=..., item_id=...)`                                                                            | Ed25519 sign an item                                |
 | `rye thread <directive_id> [params]`         | `rye_execute(item_type="directive", item_id=..., parameters={...}, async=True)` | **Alias** — spawn a directive thread with explicit thread flags |
@@ -138,7 +138,7 @@ rye thread my/directive --target foo --model sonnet
     │
     ▼
 ryeos-cli
-  ├── Verb parser (thread/execute/search/load/sign)
+  ├── Verb parser (thread/execute/fetch/sign)
   ├── Schema loader (resolve item → extract param schema)
   ├── Param router (separate tool params from item params)
   └── Call constructor (build deterministic rye_execute call)
@@ -377,7 +377,7 @@ Independent of the model output format question, the CLI parser has value as a *
 
 - **Terminal entry point** — the primary purpose of `ryeos-cli`
 - **Human-readable invocations** — useful for logging, debugging, documentation
-- **MCP simplification** — the four MCP tools could optionally accept a CLI-style string alongside the current JSON parameters, routing through the same parser
+- **MCP simplification** — the three MCP tools could optionally accept a CLI-style string alongside the current JSON parameters, routing through the same parser
 - **Intent resolution (if Option A wins)** — the parser becomes the structuring layer between model output and executor
 
 If the function-calling format (Option B) turns out to be better for the small model, the CLI parser still justifies itself as a terminal interface and human-readable format. It just wouldn't be in the intent resolution critical path.
@@ -388,9 +388,9 @@ If the function-calling format (Option B) turns out to be better for the small m
 
 | Existing Component                                   | How ryeos-cli Uses It                        |
 | ---------------------------------------------------- | -------------------------------------------- |
-| Four MCP tools (`search`, `load`, `execute`, `sign`) | Direct invocation without MCP transport      |
+| Three MCP tools (`fetch`, `execute`, `sign`)          | Direct invocation without MCP transport      |
 | `execute directive` (delegates to `thread_directive`) | The `thread` verb is an alias with explicit thread flags |
-| `rye_search` (BM25 + fuzzy)                          | Powers `rye search` and completion           |
+| `rye_fetch` (BM25 + fuzzy)                           | Powers `rye search` and completion           |
 | Executor chain (tool → runtime → primitive)          | Same chain, invoked synchronously            |
 | Three-tier spaces (project → user → system)          | Same resolution, same precedence             |
 | Ed25519 signing                                      | Same keys, same verification                 |

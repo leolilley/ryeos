@@ -1,8 +1,7 @@
-"""Registry space provider protocol for extending search and load beyond local spaces.
+"""Registry space provider protocol for extending fetch beyond local spaces.
 
-Registry space providers allow tools (SearchTool, LoadTool) to access items
-from external sources (e.g., the Rye Registry) without hardcoding
-specific implementations.
+Registry space providers allow FetchTool to access items from external
+sources (e.g., the Rye Registry) without hardcoding specific implementations.
 
 Providers are discovered via bundle entry points — bundles declare their
 providers in the dict returned by their `rye.bundles` entry point:
@@ -72,7 +71,7 @@ class RegistrySpaceProvider(ABC):
         """Pull (download) an item from this remote space.
 
         Returns the item content and metadata without writing to disk.
-        The caller (LoadTool) handles destination path resolution.
+        The caller (FetchTool) handles destination path resolution.
 
         Args:
             item_type: "directive", "tool", or "knowledge".

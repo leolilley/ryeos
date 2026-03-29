@@ -1,4 +1,4 @@
-# rye:signed:2026-03-17T04:35:42Z:0c2cf32bdf18fae5f074627662a998720894a5bd34f6cf6ef5091db8a458bbf5:Vw37A3U9XTbRs7ruHJGmoNehYvDRomz-o00iHFhnlPheDvqq_XIaO3ieXD3TcFu2tP0zQV351uDlAt7GRaEPBg==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:50:06Z:1491f208d98fbf7332d6f8d2892b06c7414789f41e149108ab30f1c1b46be3b2:LKnsnLxhIG8QS3ruUnQR5f_TtU0VoM_UXztIgqE1z-NHrjCuMeBBpB7KEAz4yl2jDTiy0xsG_s3XQ1peO21qDA==:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -35,10 +35,9 @@ import yaml
 from rye.constants import AI_DIR, ItemType
 from rye.utils.metadata_manager import MetadataManager
 from rye.utils.resolvers import get_user_space
-from rye.tools.execute import ExecuteTool
-from rye.tools.search import SearchTool
-from rye.tools.load import LoadTool
-from rye.tools.sign import SignTool
+from rye.actions.execute import ExecuteTool
+from rye.actions.fetch import FetchTool
+from rye.actions.sign import SignTool
 
 from module_loader import load_module
 import condition_evaluator
@@ -473,8 +472,7 @@ def _get_tools():
     us = _get_user_space()
     return {
         "execute": ExecuteTool(us),
-        "search": SearchTool(us),
-        "load": LoadTool(us),
+        "fetch": FetchTool(us),
         "sign": SignTool(us),
     }
 
@@ -555,21 +553,25 @@ async def _dispatch_action(
                 parameters=params,
                 thread=thread,
             )
-        elif primary == "search":
-            return await tools["search"].handle(
-                item_type=item_type,
-                query=params.get("query", ""),
-                project_path=project_path,
-                source=params.get("source", "project"),
-                limit=params.get("limit", 10),
-            )
-        elif primary == "load":
-            return await tools["load"].handle(
-                item_type=item_type,
-                item_id=item_id,
-                project_path=project_path,
-                source=params.get("source", "project"),
-            )
+        elif primary == "fetch":
+            fetch_kwargs = {
+                "project_path": project_path,
+            }
+            if params.get("query"):
+                fetch_kwargs["query"] = params["query"]
+                if params.get("scope"):
+                    fetch_kwargs["scope"] = params["scope"]
+                if params.get("source"):
+                    fetch_kwargs["source"] = params["source"]
+                if params.get("limit"):
+                    fetch_kwargs["limit"] = params["limit"]
+            else:
+                fetch_kwargs["item_id"] = item_id
+                if item_type:
+                    fetch_kwargs["item_type"] = item_type
+                if params.get("source"):
+                    fetch_kwargs["source"] = params["source"]
+            return await tools["fetch"].handle(**fetch_kwargs)
         elif primary == "sign":
             return await tools["sign"].handle(
                 item_type=item_type,

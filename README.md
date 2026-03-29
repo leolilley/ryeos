@@ -4,14 +4,13 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE is a portable operating system for AI. It gives any LLM a persistent, signed workspace — directives, tools, and knowledge — that travels with you across projects, machines, and models. Four MCP tools. One substrate.
+RYE is a portable operating system for AI. It gives any LLM a persistent, signed workspace — directives, tools, and knowledge — that travels with you across projects, machines, and models. Three MCP tools. One substrate.
 
-| Tool      | Purpose                                  |
-| --------- | ---------------------------------------- |
-| `search`  | Find items across all spaces             |
-| `load`    | Read or copy items between spaces        |
-| `execute` | Run a directive, tool, or knowledge item |
-| `sign`    | Cryptographically sign items             |
+| Tool      | Purpose                                    |
+| --------- | ------------------------------------------ |
+| `fetch`   | Find items by ID or discover by query      |
+| `execute` | Run a directive, tool, or knowledge item   |
+| `sign`    | Cryptographically sign items               |
 
 ---
 
@@ -85,7 +84,7 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only) |
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions    |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
-| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the four primitives |
+| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three primitives |
 | `ryeos-remote` | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
 
 > **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.

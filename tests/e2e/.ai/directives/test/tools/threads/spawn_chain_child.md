@@ -13,7 +13,7 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>
       <execute><tool>*</tool></execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:7a0913ea901a85185616a04126281e1f77e9cbde5e0e3a682f3b0eb903c18b7c:mAO7-Vv3qn73VQSZL1iqRXenlI-Cw5U1JtVPeKGoTPz4QZq9Z_9CBMVpe1tdoUG10lgyzHXJXuQugqXnfti2Dg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:09Z:590cac0f4379853d514115975efc78d1dafe5f73618206dfbb2953910a9acef9:DaswKg2LEIZoiaogaXhKENYXuEJrCHRKX2n6k8Tdcyksnj1dNj95AgJoBLpCt0eX-t6xpDIK5m64Ed7hvb1cAQ==:4b987fd4e40303ac -->
 ```yaml
 name: capability-strings
 title: Capability Strings & Permissions
@@ -35,7 +35,7 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | Segment           | Values                                         |
 | ----------------- | ---------------------------------------------- |
 | `rye`             | Fixed prefix                                   |
-| `<primary>`       | `execute`, `search`, `load`, `sign`            |
+| `<primary>`       | `execute`, `fetch`, `sign`                     |
 | `<item_type>`     | `tool`, `directive`, `knowledge`               |
 | `<item_id_dotted>`| Item ID with `/` replaced by `.`, supports fnmatch wildcards |
 
@@ -46,8 +46,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | `rye.execute.tool.rye.file-system.*`                   | Execute any tool under `rye/file-system/` |
 | `rye.execute.tool.rye.agent.threads.thread_directive`  | Execute thread_directive (internal, used by `execute directive`) |
 | `rye.execute.directive.domain.*`                       | Spawn threads for any directive under `domain/` |
-| `rye.search.directive.*`                               | Search any directive                      |
-| `rye.load.knowledge.agency-kiwi.*`                     | Load any knowledge under `agency-kiwi/`   |
+| `rye.fetch.directive.*`                                | Fetch any directive                       |
+| `rye.fetch.knowledge.agency-kiwi.*`                    | Fetch any knowledge under `agency-kiwi/`  |
 | `rye.sign.directive.*`                                 | Sign any directive                        |
 
 ## Declaring Permissions in Directive XML
@@ -58,13 +58,10 @@ rye.<primary>.<item_type>.<item_id_dotted>
     <tool>rye.agent.threads.thread_directive</tool>
     <tool>rye.file-system.*</tool>
   </execute>
-  <search>
+  <fetch>
     <directive>*</directive>
     <knowledge>agency-kiwi.*</knowledge>
-  </search>
-  <load>
-    <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
   <sign>
     <directive>*</directive>
   </sign>
@@ -76,8 +73,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | XML Declaration                                          | Capability String                                     |
 | -------------------------------------------------------- | ----------------------------------------------------- |
 | `<execute><tool>rye.file-system.*</tool></execute>`      | `rye.execute.tool.rye.file-system.*`                  |
-| `<search><directive>*</directive></search>`              | `rye.search.directive.*`                              |
-| `<load><knowledge>agency-kiwi.*</knowledge></load>`     | `rye.load.knowledge.agency-kiwi.*`                    |
+| `<fetch><directive>*</directive></fetch>`                | `rye.fetch.directive.*`                               |
+| `<fetch><knowledge>agency-kiwi.*</knowledge></fetch>`   | `rye.fetch.knowledge.agency-kiwi.*`                   |
 
 Tag under the action (`<tool>`, `<directive>`, `<knowledge>`) specifies the item type. Text content is the item ID pattern.
 
@@ -90,19 +87,18 @@ Tag under the action (`<tool>`, `<directive>`, `<knowledge>`) specifies the item
 <!-- All execute permissions -->
 <execute>*</execute>
 
-<!-- All search permissions -->
-<search>*</search>
+<!-- All fetch permissions -->
+<fetch>*</fetch>
 ```
 
 **Never use `<permissions>*</permissions>` in production.**
 
-## The 4 Primary Actions
+## The 3 Primary Actions
 
 | Action    | What It Gates                                       |
 | --------- | --------------------------------------------------- |
 | `execute` | Running tools, spawning threads for directives, parsing knowledge via `rye_execute` |
-| `search`  | Searching items via `rye_search`                    |
-| `load`    | Loading/inspecting items via `rye_load`             |
+| `fetch`   | Finding/loading items via `rye_fetch`               |
 | `sign`    | Signing items via `rye_sign`                        |
 
 ## Matching Algorithm
@@ -149,7 +145,7 @@ Design permissions bottom-up:
 
 1. **Execution leaves** — exactly the tools they call
 2. **Sub-orchestrators** — `thread_directive` (internal) + `directive` patterns for children + knowledge they load
-3. **Root orchestrators** — `thread_directive` (internal) + `orchestrator` + `directive` patterns + domain search/load
+3. **Root orchestrators** — `thread_directive` (internal) + `orchestrator` + `directive` patterns + domain fetch
 4. **Never `*` in production** — defeats the purpose
 
 > **Note:** The primary way to spawn threads is `execute directive`. This internally requires the `rye.execute.tool.rye.agent.threads.thread_directive` capability, so orchestrators still need that tool permission declared.
@@ -180,12 +176,12 @@ Capability strings are classified by risk level to enforce graduated access cont
 
 | Tier           | Policy                 | Description                                         |
 |----------------|------------------------|-----------------------------------------------------|
-| `safe`         | `allow`                | Read-only operations (search, load)                 |
+| `safe`         | `allow`                | Read-only operations (fetch)                        |
 | `write`        | `allow`                | State-modifying but routine (file-system tools)     |
 | `elevated`     | `acknowledge_required` | High-impact — requires `<acknowledge>` opt-in       |
 | `unrestricted` | `block`                | Full access — blocked by default                    |
 
-Matching uses most-specific-first: `rye.search.*` (safe, 3 segments) wins over `rye.*` (unrestricted, 2 segments) for a search capability.
+Matching uses most-specific-first: `rye.fetch.*` (safe, 3 segments) wins over `rye.*` (unrestricted, 2 segments) for a fetch capability.
 
 See `rye/agent/threads/permissions-in-threads` for the full risk classification model, policies, and matching algorithm.
 

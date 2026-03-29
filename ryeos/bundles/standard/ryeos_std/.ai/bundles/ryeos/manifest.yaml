@@ -109,11 +109,8 @@ files:
   .ai/directives/rye/primary/execute.md:
     sha256: 3161438075ff194a416732f08cc28ff58e8a6c1dfbf2865b6836c3016672b80d
     inline_signed: true
-  .ai/directives/rye/primary/load.md:
+  .ai/directives/rye/primary/fetch.md:
     sha256: a9998c3be6cae9bd357cf9fe7d7bac704300063c8eb084ab6663860dedfdf13f
-    inline_signed: true
-  .ai/directives/rye/primary/search.md:
-    sha256: d435ff11f57382c0d5e1f3eee7c6716b9b13097556458c128c772afaee249c7c
     inline_signed: true
   .ai/directives/rye/primary/sign.md:
     sha256: 17b29b9f03e68429bcacd16a81ab9c13ec0afb6a851d64718bff335fe884cc44
@@ -361,11 +358,8 @@ files:
   .ai/tools/rye/primary/rye_execute.py:
     sha256: 6a807d8361157163280c3b41606eaaf196bb0659f7e4dd8d7b8261d4ab27e319
     inline_signed: true
-  .ai/tools/rye/primary/rye_load.py:
+  .ai/tools/rye/primary/rye_fetch.py:
     sha256: 34aa85fa0ca6816a1a12049f34bcf4b47616be97e16a6c5595fe491051cbdac2
-    inline_signed: true
-  .ai/tools/rye/primary/rye_search.py:
-    sha256: edd81692cc396de4791f6a85e7530b4e9b856eaac57213dc727dc59811cc158b
     inline_signed: true
   .ai/tools/rye/primary/rye_sign.py:
     sha256: 487e39669419335a449c8a99ca8b8f270619d9dd7f9a2210ee6de21934cca362
@@ -436,11 +430,8 @@ files:
   .ai/knowledge/rye/primary/execute-semantics.md:
     sha256: 1143ea476dbe1ee9ba79847c3b4b3ec78f0f88086f2e0c1f79f77a17f95660d4
     inline_signed: true
-  .ai/knowledge/rye/primary/load-semantics.md:
+  .ai/knowledge/rye/primary/fetch-semantics.md:
     sha256: 1aa0f63d0eb819c6a1b23deaa0811385b7532a1eaeac71bd686526fbd50996e6
-    inline_signed: true
-  .ai/knowledge/rye/primary/search-semantics.md:
-    sha256: 7e8a45580cf42fd5b26df3651b4e76f8fe2716be408c3247fde67366e7e2c974
     inline_signed: true
   .ai/knowledge/rye/primary/sign-semantics.md:
     sha256: c90e028cdd91bd44363a4379dc24e398454ddd6d59b0b05865a8bb29c025f3b7

@@ -1,10 +1,10 @@
 ```yaml
 id: tools-primary
 title: "Primary Actions"
-description: The four core MCP tools — search, load, execute, sign — that everything in Rye OS builds on
+description: The three core MCP tools — fetch, execute, sign — that everything in Rye OS builds on
 category: standard-library/tools
-tags: [tools, primary, search, load, execute, sign, mcp]
-version: "1.0.0"
+tags: [tools, primary, fetch, execute, sign, mcp]
+version: "2.0.0"
 ```
 
 # Primary Actions
@@ -12,26 +12,37 @@ version: "1.0.0"
 **Namespace:** `rye/`
 **Runtime:** `python/script`
 
-These are the four foundational MCP tools that Rye OS exposes. They map 1:1 to the MCP tool interface and are the same implementations exposed via MCP. Inside threads, these tools are dynamically registered in the LLM's tool palette via dynamic tool registration based on the directive's capability strings.
+These are the three foundational MCP tools that Rye OS exposes. They map 1:1 to the MCP tool interface and are the same implementations exposed via MCP. Inside threads, these tools are dynamically registered in the LLM's tool palette via dynamic tool registration based on the directive's capability strings.
 
 Inside threads, these tools are dynamically registered in the LLM's tool palette based on the directive's capability strings. The runner routes calls using a `_primary` field on each tool definition.
 
 ---
 
-## `rye_search`
+## `rye_fetch`
 
-**Item ID:** `rye/search`
+**Item ID:** `rye/fetch`
 
-Search for directives, tools, or knowledge items by query. Supports full-text search with AND, OR, NOT operators, wildcards, and quoted phrases.
+Resolve an item by ID or discover items by query. Operates in two modes depending on which parameters are provided.
+
+### ID Mode
+
+When `item_id` is provided, resolves and returns the item's full content. Can also copy items between spaces.
+
+### Query Mode
+
+When `query` and `scope` are provided, discovers items by keyword search. Supports full-text search with AND, OR, NOT operators, wildcards (`*`), and quoted phrases.
 
 ### Parameters
 
-| Name    | Type    | Required | Default | Description                                            |
-| ------- | ------- | -------- | ------- | ------------------------------------------------------ |
-| `query` | string  | ✅       | —       | Search query                                           |
-| `scope` | string  | ✅       | —       | Capability-format scope (see below)                    |
-| `space` | string  | ❌       | `all`   | Space to search: `project`, `user`, `system`, or `all` |
-| `limit` | integer | ❌       | `10`    | Maximum results to return                              |
+| Name          | Type    | Required | Default | Description                                                                                                               |
+| ------------- | ------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `item_id`     | string  | ❌       | —       | Item ID (relative path without extension). Triggers **ID mode**.                                                          |
+| `item_type`   | string  | ❌       | —       | `directive`, `tool`, or `knowledge`. Optional in ID mode (auto-detected); unused in query mode.                           |
+| `source`      | string  | ❌       | —       | ID mode: space to load from (`project`, `user`, `system`). Query mode: space to search (`project`, `user`, `system`, `local`, `registry`, `all`). When omitted, cascades **project → user → system** (first match wins). |
+| `destination` | string  | ❌       | —       | Copy to this space after resolving: `project` or `user`. ID mode only.                                                   |
+| `query`       | string  | ❌       | —       | Keyword search query. Triggers **query mode**.                                                                            |
+| `scope`       | string  | ❌       | —       | Item type and optional namespace filter. Query mode only.                                                                 |
+| `limit`       | integer | ❌       | `10`    | Maximum results to return. Query mode only.                                                                               |
 
 ### Scope Format
 
@@ -45,39 +56,26 @@ Scopes use capability string format or shorthand:
 | `tool.rye.core.*`       | Tools under `rye/core/`       |
 | `directive.rye.agent.*` | Directives under `rye/agent/` |
 
-### Example
+### Examples
+
+**ID mode — inspect an item:**
 
 ```python
-rye_search(scope="tool", query="file system operations")
-rye_search(scope="knowledge", query="metadata specification", space="system")
+rye_fetch(item_id="rye/core/create_directive")
 ```
 
----
-
-## `rye_load`
-
-**Item ID:** `rye/load`
-
-Load an item's full content for inspection. Can also copy items between spaces.
-
-### Parameters
-
-| Name          | Type   | Required | Default   | Description                                     |
-| ------------- | ------ | -------- | --------- | ----------------------------------------------- |
-| `item_type`   | string | ✅       | —         | `directive`, `tool`, or `knowledge`             |
-| `item_id`     | string | ✅       | —         | Item ID (relative path without extension)       |
-| `source`      | string | ❌       | —         | Space to load from: `project`, `user`, `system`. When omitted, cascades **project → user → system** (first match wins). |
-| `destination` | string | ❌       | —         | Copy to this space: `project` or `user`         |
-
-### Example
+**ID mode — restrict source and copy to project:**
 
 ```python
-# Inspect a directive
-rye_load(item_type="directive", item_id="rye/core/create_directive")
-
-# Copy a system tool to project space for customization
-rye_load(item_type="tool", item_id="rye/file-system/read",
+rye_fetch(item_id="rye/file-system/read", item_type="tool",
     source="system", destination="project")
+```
+
+**Query mode — search by keyword:**
+
+```python
+rye_fetch(scope="tool", query="file system operations")
+rye_fetch(scope="knowledge", query="metadata specification", source="system")
 ```
 
 ---

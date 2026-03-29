@@ -45,7 +45,7 @@ def register(subparsers):
 
 def _execute_graph(graph_id: str, params: dict, project_path: str):
     """Execute a graph tool via ExecuteTool."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
     tool = ExecuteTool(str(get_user_space()))

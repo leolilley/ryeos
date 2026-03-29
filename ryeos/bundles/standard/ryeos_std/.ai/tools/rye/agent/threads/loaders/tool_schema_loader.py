@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:8aee044bef0a32ab97a4d0cf36bac2c0d608ad82ea69e8412c1534463e8f463a:LOoc13ROc1gLiIq9p0dgysZQLLsnDDHFo6vNGQniTzySEWSyRHu9pJ0UX2ye24391OgqsGSm6214of18xbiUCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:38:20Z:cc081123c89dde3915271da2ef0090297dec8cb6550ce08a361a92aa6bf37b93:OvDBz5lISNn-9fRpVLt8_JMR2sH-ARa-XflZmGAlqML25h_R5ippu6A1PNeez482VdFCLcWR21L8fnnhtU2fBA==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -18,20 +18,16 @@ _CHARS_PER_TOKEN = 4
 
 # Capability prefixes → (primary_action, sub_type_or_none)
 # Longer (more specific) prefixes MUST come before shorter ones so that
-# e.g. "rye.search.directive.*" matches the directive entry, not the
-# generic "rye.search." wildcard.  sub_type=None means "all types".
+# e.g. "rye.fetch.directive.*" matches the directive entry, not the
+# generic "rye.fetch." wildcard.  sub_type=None means "all types".
 _CAP_PREFIXES = {
     "rye.execute.tool.": ("execute", "tool"),
     "rye.execute.directive.": ("execute", "directive"),
     "rye.execute.knowledge.": ("execute", "knowledge"),
-    "rye.search.directive.": ("search", "directive"),
-    "rye.search.tool.": ("search", "tool"),
-    "rye.search.knowledge.": ("search", "knowledge"),
-    "rye.search.": ("search", None),
-    "rye.load.directive.": ("load", "directive"),
-    "rye.load.tool.": ("load", "tool"),
-    "rye.load.knowledge.": ("load", "knowledge"),
-    "rye.load.": ("load", None),
+    "rye.fetch.directive.": ("fetch", "directive"),
+    "rye.fetch.tool.": ("fetch", "tool"),
+    "rye.fetch.knowledge.": ("fetch", "knowledge"),
+    "rye.fetch.": ("fetch", None),
     "rye.sign.directive.": ("sign", "directive"),
     "rye.sign.tool.": ("sign", "tool"),
     "rye.sign.knowledge.": ("sign", "knowledge"),
@@ -39,15 +35,15 @@ _CAP_PREFIXES = {
 }
 
 # Actions that get registered as direct agent tools when granted.
-_PRIMARY_ACTIONS = ("execute", "search", "load", "sign")
+_PRIMARY_ACTIONS = ("execute", "fetch", "sign")
 
 
 def _classify_capability(cap: str) -> Optional[dict]:
     """Classify a capability string into action, sub_type, and pattern.
 
     'rye.execute.tool.rye.file-system.read' → {action: 'execute', sub_type: 'tool', pattern: 'rye/file-system/read'}
-    'rye.search.*'                          → {action: 'search', sub_type: None, pattern: '*'}
-    'rye.load.knowledge.*'                  → {action: 'load', sub_type: None, pattern: 'knowledge.*'}
+    'rye.fetch.*'                           → {action: 'fetch', sub_type: None, pattern: '*'}
+    'rye.fetch.knowledge.*'                 → {action: 'fetch', sub_type: 'knowledge', pattern: '*'}
     """
     for prefix, (action, sub_type) in _CAP_PREFIXES.items():
         if cap.startswith(prefix):
@@ -139,7 +135,7 @@ def _tool_id_from_path(file_path: Path, search_dir: Path) -> str:
 def _tool_id_to_api_name(tool_id: str) -> str:
     """Flatten a tool_id into an API-safe tool name.
 
-    rye/search → rye_search
+    rye/fetch → rye_fetch
     rye/file-system/ls → rye_file_system_ls
     rye/bash → rye_bash
     """
@@ -346,7 +342,7 @@ def _format_capabilities_tree(capabilities: list, project_path: Path) -> str:
     and renders every accessible item. This is metadata-only — not sent
     to the LLM — so full resolution is fine.
 
-    Input:  ["rye.execute.tool.rye.file-system.*", "rye.search.*"]
+    Input:  ["rye.execute.tool.rye.file-system.*", "rye.fetch.*"]
     Output:
       ├── execute
       │   └── tool
@@ -357,7 +353,7 @@ def _format_capabilities_tree(capabilities: list, project_path: Path) -> str:
       │               ├── ls
       │               ├── read
       │               └── write
-      └── search
+      └── fetch
           ├── directive
           │   ├── init
           │   └── ...
@@ -454,13 +450,12 @@ def preload_tool_schemas(
 ) -> dict:
     """Build dynamic tool definitions from resolved capability strings.
 
-    Resolves ALL tools uniformly — primary actions (search, load, sign) and
+    Resolves ALL tools uniformly — primary actions (fetch, sign) and
     resolved tools (file-system/ls, bash, etc.) are treated as peers.
     Each tool gets a flattened API name and a _primary field for dispatch routing.
 
     The _primary field comes from the capability action:
-      - rye.search.*             → _primary: "search"
-      - rye.load.*               → _primary: "load"
+      - rye.fetch.*              → _primary: "fetch"
       - rye.sign.*               → _primary: "sign"
       - rye.execute.tool.*       → individual tool defs, _primary: "execute"
       - rye.execute.directive.*  → rye_execute registered, _primary: "execute"
@@ -493,7 +488,7 @@ def preload_tool_schemas(
     if not tool_patterns and not granted_actions:
         return {"tool_defs": [], "capabilities_summary": []}
 
-    # Step 2: Build tool defs for primary actions (search, load, sign).
+    # Step 2: Build tool defs for primary actions (fetch, sign).
     # rye_execute is NOT registered as an agent tool — its functionality
     # is exposed via individual tool defs with _primary="execute".
     tool_defs: List[dict] = []

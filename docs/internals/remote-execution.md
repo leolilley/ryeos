@@ -11,7 +11,7 @@ version: "1.0.0"
 
 Remote execution lets you run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage (CAS) for sync — no git, no file diffs. Objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects.
 
-The remote server is a FastAPI app at `services/ryeos-remote/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-remote-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 4 tools (execute, search, load, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
+The remote server is a FastAPI app at `services/ryeos-remote/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-remote-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 3 tools (fetch, execute, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
 
 ## End-to-End Flow
 
@@ -122,8 +122,7 @@ FastAPI app at `services/ryeos-remote/ryeos_remote/server.py`.
 | `/push/user-space` | POST | Yes | Push user space independently (optimistic CAS) |
 | `/user-space` | GET | Yes | Get current user space ref |
 | `/execute` | POST | Yes (dual) | Execute via snapshot checkout (bearer or webhook HMAC) |
-| `/search` | POST | Yes | Search items (wraps execute with rye/search) |
-| `/load` | POST | Yes | Load/inspect items (wraps execute with rye/load) |
+| `/fetch` | POST | Yes | Fetch/search/inspect items (wraps execute with rye/fetch) |
 | `/sign` | POST | Yes | Sign items (wraps execute with rye/sign) |
 | `/threads` | GET | Yes | List user's executions (optional `project_path` filter) |
 | `/threads/{thread_id}` | GET | Yes | Get specific thread status |

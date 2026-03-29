@@ -29,7 +29,7 @@ The layered context injection system assembles context through three independent
 
 ### Layer 1 — Tool Schema Preload
 
-After capability resolution, the tool schema loader scans `harness._capabilities`, resolves all granted tools across the 3-tier space, and injects their `CONFIG_SCHEMA` + `__tool_description__` into the before-context. The agent starts knowing the parameter shapes for every tool it's permitted to call — no `rye_search` → `rye_load` discovery loops.
+After capability resolution, the tool schema loader scans `harness._capabilities`, resolves all granted tools across the 3-tier space, and injects their `CONFIG_SCHEMA` + `__tool_description__` into the before-context. The agent starts knowing the parameter shapes for every tool it's permitted to call — no `rye_fetch` discovery loops.
 
 This is automatic. No authoring required. Declare permissions, get schemas.
 

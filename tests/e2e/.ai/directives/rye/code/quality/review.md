@@ -24,8 +24,7 @@ Review code changes for quality issues — runs gates then uses LLM analysis aga
         <tool>rye.file-system.grep</tool>
         <knowledge>*</knowledge>
       </execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

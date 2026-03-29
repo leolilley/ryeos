@@ -15,7 +15,7 @@ PROJECT_PATH_DESC = "Absolute path to the project root containing .ai/."
 ITEM_ID_DESC = (
     "<description>"
     "Slash-separated path without file extension. "
-    "Resolved project → user → system. If unsure of the ID, call search first."
+    "Resolved project → user → system. If unsure of the ID, use fetch in query mode."
     "</description>"
     "<examples>"
     '<example>"init" → .ai/directives/init.md</example>'
@@ -46,8 +46,8 @@ EXECUTE_TOOL_DESC = (
     "</threading>"
     "<rules>"
     "<rule>When the user says 'rye execute [type] [name]', call execute DIRECTLY with the given name as item_id. "
-    "Do NOT call search or load first — go straight to execute. "
-    "Only call search first if the user does NOT provide a name and you need to discover it.</rule>"
+    "Do NOT call fetch first — go straight to execute. "
+    "Only call fetch first if the user does NOT provide a name and you need to discover it.</rule>"
     "<rule>ALWAYS call this tool when the user says 'rye execute' — NEVER ask for clarification.</rule>"
     "<rule>Pass any extra words the user provides as parameters.</rule>"
     "<rule>The tool rejects unknown parameter keys and returns the list of valid ones — let it self-correct.</rule>"
@@ -71,7 +71,7 @@ EXECUTE_PARAMETERS_DESC = (
     "</description>"
     "<rules>"
     "<rule>When the user provides extra words after the directive name, those ARE parameter values — do NOT ask for clarification, pass them as parameters.</rule>"
-    "<rule>If unsure which parameter key they map to, call load on the item first to see its input schema.</rule>"
+    "<rule>If unsure which parameter key they map to, call fetch on the item first to see its input schema.</rule>"
     "<rule>Unknown keys are rejected with the list of valid inputs — safe to guess and let the tool correct you.</rule>"
     "</rules>"
     "<examples>"
@@ -118,91 +118,65 @@ EXECUTE_ASYNC_DESC = (
 )
 
 # ---------------------------------------------------------------------------
-# search
+# fetch
 # ---------------------------------------------------------------------------
 
-SEARCH_TOOL_DESC = (
+FETCH_TOOL_DESC = (
     "<description>"
-    "Discover item IDs before calling execute or load. Searches directives, tools, "
-    "or knowledge across project/user/system spaces. Returns matching IDs you can "
-    "pass to other tools."
+    "Resolve a name to items. Two modes: give an item_id to get content, "
+    "or give a query+scope to discover matches. "
+    "item_id is a slash-separated path without extension, "
+    "resolved project → user → system unless source restricts it."
     "</description>"
     "<rules>"
-    "<rule>Use scope to set the item type — shorthand or capability format. Dots in the namespace become path separators.</rule>"
-    '<rule>System space includes built-in knowledge entries covering how Rye works — search with scope="knowledge" when you need to understand a concept, resolve ambiguity, or figure out how something is configured.</rule>'
+    "<rule>Re-sign after copying or editing any item.</rule>"
+    "<rule>Use this to inspect an item's input schema before calling execute.</rule>"
+    '<rule>System space includes built-in knowledge entries covering how Rye works — '
+    'use query mode with scope="knowledge" when you need to understand a concept, '
+    "resolve ambiguity, or figure out how something is configured.</rule>"
     "<rule>The knowledge base is your reference manual. Search it before asking the user.</rule>"
     "</rules>"
-    "<examples>"
-    '<example>scope="directive", query="init"</example>'
-    '<example>scope="tool.rye.core.*", query="*"</example>'
-    '<example>scope="knowledge", query="spaces" — find knowledge about how spaces work</example>'
-    "</examples>"
 )
 
-SEARCH_SCOPE_DESC = (
+FETCH_SCOPE_DESC = (
     "<description>"
-    "Item type and optional namespace filter."
+    "Item type and optional namespace filter. Query mode only."
     "</description>"
     "<examples>"
     '<example>Shorthand: "directive", "tool", "knowledge", "tool.rye.core.*"</example>'
-    '<example>Capability format: "rye.search.directive.*", "rye.search.tool.rye.core.*"</example>'
+    '<example>Capability format: "rye.fetch.directive.*", "rye.fetch.tool.rye.core.*"</example>'
     "</examples>"
     "<rules>"
     "<rule>Namespace dots map to path separators; trailing .* matches all items under that prefix.</rule>"
     "</rules>"
 )
 
-SEARCH_QUERY_DESC = (
+FETCH_QUERY_DESC = (
     "<description>"
-    "Keyword search query. Supports AND, OR, NOT, quoted phrases, and * wildcards."
+    "Keyword search query. Triggers query mode. Supports AND, OR, NOT, quoted phrases, and * wildcards."
     "</description>"
     "<rules>"
     '<rule>Use "*" to list all items in a scope.</rule>'
     "</rules>"
 )
 
-SEARCH_SOURCE_DESC = (
-    '<description>Which sources to search: "project", "user", "system", "local" (all local spaces), '
+FETCH_SOURCE_DESC = (
+    '<description>Restrict where to resolve from. ID mode: "project", "user", "system", or "registry". '
+    'Query mode: "project", "user", "system", "local" (all local spaces), '
     '"registry" (published items only), or "all" (local + registry, default).</description>'
 )
 
-SEARCH_LIMIT_DESC = "Maximum number of results to return."
-
-# ---------------------------------------------------------------------------
-# load
-# ---------------------------------------------------------------------------
-
-LOAD_TOOL_DESC = (
+FETCH_DESTINATION_DESC = (
     "<description>"
-    "Read raw content and metadata of a Rye item for inspection. Also copies items "
-    "between spaces — set destination to copy a system item into project or user space "
-    "for customization. item_id is a slash-separated path without extension, "
-    "resolved project → user → system unless source restricts it."
-    "</description>"
-    "<rules>"
-    "<rule>Re-sign after copying or editing any item.</rule>"
-    "<rule>Use this to inspect an item's input schema before calling execute.</rule>"
-    "</rules>"
-)
-
-LOAD_SOURCE_DESC = (
-    "<description>"
-    'Restrict where to load from: "project", "user", "system", or "registry". '
-    "If omitted, resolves project → user → system (first match wins). "
-    'Use "registry" to pull items from a remote registry by their full item_id '
-    "(namespace/category/name format)."
-    "</description>"
-)
-
-LOAD_DESTINATION_DESC = (
-    "<description>"
-    'Copy the item to this space after loading: "project" or "user". '
-    "Use to customize system items."
+    'Copy the item to this space after resolving: "project" or "user". '
+    "ID mode only. Use to customize system items."
     "</description>"
     "<rules>"
     "<rule>Re-sign after copying or editing.</rule>"
     "</rules>"
 )
+
+FETCH_LIMIT_DESC = "Maximum number of results to return. Query mode only."
 
 # ---------------------------------------------------------------------------
 # sign

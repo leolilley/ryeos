@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:871ff38704df8ea74298eda270dba66dedc1c09ebbc7ab6f6cfc2e33eeed1a9d:r2ZASHX7-w2OwcA-RgbvVbKnxNRopbFF8pXyYRPk-vco5J3-Tzitxv8ZPDBipf2h7aptUmLmvgaQ8dA6XgkBCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:35c64be8b477c0321df28513de5ea5404ce2da4baf88d3e9c2f64f2e1a6a6113:lJFukeOYMdB3eU1_CdGqdG5Ra1d9PJ6r8N70SqKACHRD4uHDP06mvlUa4hzoFjZo4z-vE2PjhDFQHWt49sTfBA==:4b987fd4e40303ac -->
 
 ```yaml
 name: directive-format
@@ -93,12 +93,10 @@ Description of what this directive does.
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>*</directive>
-      </search>
-      <load>
         <knowledge>category/*</knowledge>
-      </load>
+      </fetch>
       <sign>
         <directive>*</directive>
       </sign>
@@ -248,7 +246,7 @@ Controls which LLM tier runs the directive.
 **Type:** element with hierarchical permission rules
 **Required:** Yes
 
-Declares capabilities this directive requires. Uses four primary actions with item-type children.
+Declares capabilities this directive requires. Uses three primary actions with item-type children.
 
 ```xml
 <permissions>
@@ -256,13 +254,11 @@ Declares capabilities this directive requires. Uses four primary actions with it
     <tool>rye.file-system.*</tool>
     <tool>rye.agent.threads.spawn_thread</tool>
   </execute>
-  <search>
+  <fetch>
     <directive>*</directive>
     <tool>rye.registry.*</tool>
-  </search>
-  <load>
     <knowledge>rye/core/*</knowledge>
-  </load>
+  </fetch>
   <sign>
     <directive>*</directive>
   </sign>
@@ -274,8 +270,7 @@ Declares capabilities this directive requires. Uses four primary actions with it
 | Element | Purpose |
 |---------|---------|
 | `<execute>` | Run/execute items |
-| `<search>` | Search for items |
-| `<load>` | Load/read item content |
+| `<fetch>` | Search for or load item content |
 | `<sign>` | Sign/validate items |
 
 **Item type children:** `<tool>`, `<directive>`, `<knowledge>`
@@ -287,8 +282,7 @@ Declares capabilities this directive requires. Uses four primary actions with it
 ```xml
 <permissions>*</permissions>              <!-- God mode — all permissions -->
 <execute>*</execute>                      <!-- Execute everything -->
-<search>*</search>                        <!-- Search everything -->
-<load>*</load>                            <!-- Load everything -->
+<fetch>*</fetch>                          <!-- Fetch everything -->
 <sign>*</sign>                            <!-- Sign everything -->
 <tool>rye.agent.*</tool>                  <!-- All tools under rye.agent -->
 ```
@@ -539,7 +533,7 @@ Process steps go **after** the XML fence. They contain natural language instruct
 <process>
   <step name="check_duplicates">
     Search for existing directives with a similar name.
-    `rye_search(item_type="directive", query="{input:name}")`
+    `rye_fetch(item_type="directive", query="{input:name}")`
   </step>
 
   <step name="write_file">
@@ -560,7 +554,7 @@ Process steps go **after** the XML fence. They contain natural language instruct
 <process>
   <step name="check_duplicates">
     <description>Search for existing directives to avoid duplicates.</description>
-    <search item_type="directive" query="{input:name}" />
+    <fetch item_type="directive" query="{input:name}" />
   </step>
 
   <step name="write_file">
@@ -583,7 +577,7 @@ Process steps go **after** the XML fence. They contain natural language instruct
 |-------|--------|
 | Backtick-wrapped | `` `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={...})` `` |
 | XML action element | `<execute item_type="tool" item_id="rye/file-system/write">` |
-| XML search | `<search item_type="directive" query="{input:name}" />` |
+| XML fetch | `<fetch item_type="directive" query="{input:name}" />` |
 | XML sign | `<sign item_type="directive" item_id="{input:name}" />` |
 
 ---
@@ -612,7 +606,7 @@ Each criterion should be **verifiable** — not vague ("it works") but specific 
 3. `version` must be valid semantic version (`X.Y.Z`)
 4. `model tier` attribute is required; value is user-defined string
 5. `category` must align with directory structure under `.ai/directives/`
-6. `permissions` must have at least one primary element (`<execute>`, `<search>`, `<load>`, `<sign>`) or `*` for god mode
+6. `permissions` must have at least one primary element (`<execute>`, `<fetch>`, `<sign>`) or `*` for god mode
 7. `cost` must have at least a `<context>` sub-element with `estimated_usage` and `turns` attributes
 8. Capability paths support wildcard `*` suffix (e.g., `rye.agent.*`)
 9. Relationship elements must be direct children of `<context>`
@@ -677,13 +671,10 @@ Deploy to staging and run integration tests with parallel verification.
         <tool>rye.shell.kubectl</tool>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>*</directive>
         <tool>*</tool>
-      </search>
-      <load>
-        <tool>*</tool>
-      </load>
+      </fetch>
     </permissions>
     <cost>
       <context estimated_usage="high" turns="20" spawn_threshold="5">100000</context>

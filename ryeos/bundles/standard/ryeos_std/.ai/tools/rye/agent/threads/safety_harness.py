@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:2b9a3fc615a3cb4b1eb281483753b1eefd13f9b0d3cc2a05d3fa2a394807f28b:FWxDD1e3A_OIlBPD-cj409xwB2jty-XxHRl1pU6_bnazsF4uyNeg_a1a9EVBwQQsuf2_VyV2wZYqKG646IdyAg==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:19:02Z:70a5ee46bedae1d286cbe7f2d6804c02e2ba079e2118d954b03441c936ad1ee3:EU9cFLSE7eH0DuDUZ2w5Xsm4BbCRbS1edX8_meEHK-wT9wIbXbFLPRjBb1VsrzhinpvBR9iCYiKJnSKhEg5ECQ==:4b987fd4e40303ac
 """
 safety_harness.py: Thread safety harness — limits, hooks, cancellation, permissions
 """
@@ -120,8 +120,7 @@ class SafetyHarness:
         Internal thread tools (rye/agent/threads/internal/*) are always allowed.
 
         Capability format depends on the primary action:
-          execute/load/sign: rye.<primary>.<item_type>.<item_id_dotted>
-          search:            rye.search.<item_type>
+          execute/fetch/sign: rye.<primary>.<item_type>.<item_id_dotted>
 
         Item IDs use / separators, capabilities use . separators with fnmatch wildcards.
         Example: capability "rye.execute.tool.rye.file-system.*"
@@ -145,7 +144,7 @@ class SafetyHarness:
             item_id_dotted = item_id.replace("/", ".")
             required = f"rye.{primary}.{item_type}.{item_id_dotted}"
         else:
-            # search has no item_id — check rye.search.<item_type>
+            # fetch query mode has no item_id — check rye.fetch.<item_type>
             required = f"rye.{primary}.{item_type}"
 
         for cap in self._capabilities:
@@ -232,7 +231,7 @@ class SafetyHarness:
         Unlike run_hooks(), this method:
         - Filters by the specified event (not hardcoded to thread_started)
         - Runs ALL matching hooks (no short-circuit)
-        - Maps LoadTool/ExecuteTool results to XML-wrapped context blocks
+        - Maps FetchTool/ExecuteTool results to XML-wrapped context blocks
         - Returns {"before": str, "after": str} keyed by hook position
 
         Hook position is controlled by the `position` field (default: "before"):
@@ -279,7 +278,7 @@ class SafetyHarness:
                 data = result.get("data", {})
                 content = (
                     data.get("content") or data.get("body") or data.get("raw", "")
-                    # LoadTool returns content at top level (no data wrapper)
+                    # FetchTool (ID mode) returns content at top level (no data wrapper)
                     or result.get("content") or result.get("body", "")
                 )
                 if content:

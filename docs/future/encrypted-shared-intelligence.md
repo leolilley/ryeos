@@ -555,12 +555,11 @@ Resolver checks standard directory first (existing behavior), then vault index. 
 
 ### What the agent experiences
 
-Nothing changes. The four MCP tools work identically:
+Nothing changes. The three MCP tools work identically:
 
 | Tool      | Without encryption        | With encryption                              |
 | --------- | ------------------------- | -------------------------------------------- |
-| `search`  | Search cleartext metadata | Search cleartext metadata (or decrypt index) |
-| `load`    | Read item content         | Decrypt + read item content                  |
+| `fetch`   | Read item content / search metadata | Decrypt + read / search decrypted index |
 | `execute` | Verify → run              | Verify → decrypt → run                       |
 | `sign`    | Sign item                 | Seal item (sign + encrypt)                   |
 

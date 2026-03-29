@@ -25,10 +25,10 @@ Test that the default_escalate_limit hook fires when turns limit is exceeded.
 <process>
   <step name="search_tools">
     <description>Search for available tools — this will use the 1 turn, next iteration should hit limit.</description>
-    <search item_type="tool" query="file system" />
+    <fetch scope="tool" query="file system" />
   </step>
   <step name="search_again">
     <description>Search again — should never reach this due to limit.</description>
-    <search item_type="tool" query="knowledge" />
+    <fetch scope="tool" query="knowledge" />
   </step>
 </process>

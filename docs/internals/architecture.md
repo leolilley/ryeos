@@ -30,11 +30,10 @@ Lillux primitives are pure I/O. They receive fully-resolved configuration and ex
 
 ## Layer 2: Rye MCP Server
 
-The orchestration layer. Rye implements the MCP (Model Context Protocol) server that AI agents interact with. It provides four MCP tools:
+The orchestration layer. Rye implements the MCP (Model Context Protocol) server that AI agents interact with. It provides three MCP tools:
 
+- **fetch** — Find items by ID (resolve content) or discover by query (keyword search)
 - **execute** — Run a tool by item ID (resolves chain, verifies integrity, delegates to Lillux)
-- **load** — Read a directive, tool, or knowledge entry (with metadata parsing)
-- **search** — Find items across all spaces by keyword
 - **sign** — Sign items with Ed25519 (batch signing via glob patterns)
 
 Key components in this layer:

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:7b8251408a3d6f38db9bdc1bd34be44bd57dff75bc745c518ac40bfc3997b517:zzc9yxv0aycLbMaout7c2ppTdYmi1Gd9H6a5HgS5dlYzIDHvtrVQlj20KlROeH0kh0oYr4L9b1Bs5jqLXUKgBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:09Z:783ced960ddcecdda6e720c8a8d2c088bb09f06a9a9951785d9a16acc1a37977:bJrqb3SXCn3jHgAZ0XglHqUIwk22Pb8LJ4o1Gku2xo4iCe8zS_036eebf2vhONkmfl06A3g00UHphbv2O5AzAw==:4b987fd4e40303ac -->
  -->
 ```yaml
 name: three-tier-spaces
@@ -158,16 +158,16 @@ Place a file with the same item ID in project or user space:
 # Override by creating: my-project/.ai/tools/rye/bash/bash.py
 ```
 
-Copy using `rye_load`:
+Copy using `rye_fetch`:
 
 ```python
-rye_load(item_type="tool", item_id="rye/bash/bash",
-         source="system", destination="project", project_path=".")
+rye_fetch(item_type="tool", item_id="rye/bash/bash",
+          source="system", destination="project", project_path=".")
 ```
 
 ## Search Deduplication
 
-`rye_search` checks all three spaces and deduplicates by item ID:
+`rye_fetch` checks all three spaces and deduplicates by item ID:
 
 - Project wins over user
 - User wins over system
@@ -175,7 +175,7 @@ rye_load(item_type="tool", item_id="rye/bash/bash",
 Restrict to a single space:
 
 ```python
-rye_search(scope="directive", query="create", project_path=".", space="system")
+rye_fetch(scope="directive", query="create", project_path=".", source="system")
 ```
 
 ## Installed Bundles

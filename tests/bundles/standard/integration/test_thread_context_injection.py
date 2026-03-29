@@ -158,7 +158,7 @@ class TestAcknowledgeParsing:
     <description>Test</description>
     <model tier="general" />
     <permissions>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 </directive>
@@ -252,8 +252,7 @@ class TestInvalidPermissionTags:
     <model tier="general" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
       <sign>*</sign>
       <acknowledge risk="elevated">Reason</acknowledge>
     </permissions>
@@ -262,7 +261,7 @@ class TestInvalidPermissionTags:
 ```
 '''
         result = md_parse(md)
-        assert len(result["permissions"]) == 4
+        assert len(result["permissions"]) == 3
         assert result["acknowledged_risks"][0]["risk"] == "elevated"
 
 
@@ -300,10 +299,10 @@ class TestSafetyHarnessPermissions:
         result = harness.check_permission("execute", "tool", "rye/bash/bash")
         assert result is not None
 
-    def test_search_wildcard(self, tmp_path):
-        perms = [{"tag": "cap", "content": "rye.search.*"}]
+    def test_fetch_wildcard(self, tmp_path):
+        perms = [{"tag": "cap", "content": "rye.fetch.*"}]
         harness = self._make_harness(permissions=perms, tmp_path=tmp_path)
-        result = harness.check_permission("search", "tool")
+        result = harness.check_permission("fetch", "tool")
         assert result is None
 
     def test_internal_always_allowed(self, tmp_path):
@@ -385,10 +384,10 @@ class TestCapabilityRisk:
         assert result is None
 
     def test_safe_capabilities_pass(self, risk_fn, tmp_path):
-        """rye.search.* and rye.load.* are safe."""
-        result = risk_fn(["rye.search.*"], [], "test-thread", tmp_path)
+        """rye.fetch.* is safe."""
+        result = risk_fn(["rye.fetch.*"], [], "test-thread", tmp_path)
         assert result is None
-        result = risk_fn(["rye.load.*"], [], "test-thread", tmp_path)
+        result = risk_fn(["rye.fetch.*"], [], "test-thread", tmp_path)
         assert result is None
 
     def test_file_system_write_allowed(self, risk_fn, tmp_path):
@@ -554,11 +553,10 @@ class TestCoreKnowledgeItems:
         content = (KNOWLEDGE_DIR / "Identity.md").read_text()
         assert "Rye" in content
 
-    def test_tool_protocol_mentions_four_tools(self):
+    def test_tool_protocol_mentions_three_tools(self):
         content = (KNOWLEDGE_DIR / "ToolProtocol.md").read_text()
         assert "rye_execute" in content
-        assert "rye_search" in content
-        assert "rye_load" in content
+        assert "rye_fetch" in content
         assert "rye_sign" in content
 
     def test_environment_has_template_vars(self):
@@ -656,45 +654,45 @@ class TestIsSuppressed:
 
     def test_suppress_by_hook_id(self):
         hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/tool-protocol"}}
         assert _harness_mod._is_suppressed(hook, ["system_tool_protocol"]) is True
 
     def test_suppress_by_full_item_id(self):
         hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/tool-protocol"}}
         assert _harness_mod._is_suppressed(hook, ["rye/agent/core/tool-protocol"]) is True
 
     def test_basename_does_not_match(self):
         """Basename matching is disabled to avoid ambiguous clashes."""
         hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/tool-protocol"}}
         assert _harness_mod._is_suppressed(hook, ["tool-protocol"]) is False
 
     def test_no_match(self):
         hook = {"id": "system_identity", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/identity"}}
         assert _harness_mod._is_suppressed(hook, ["tool-protocol"]) is False
 
     def test_empty_suppress_list(self):
         hook = {"id": "system_identity", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/identity"}}
         assert _harness_mod._is_suppressed(hook, []) is False
 
     def test_suppress_identity_by_hook_id(self):
         hook = {"id": "system_identity", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/identity"}}
         assert _harness_mod._is_suppressed(hook, ["system_identity"]) is True
 
     def test_partial_no_match(self):
         """Partial name like 'proto' should NOT match 'tool-protocol'."""
         hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "load", "item_type": "knowledge",
+                "action": {"primary": "fetch", "item_type": "knowledge",
                            "item_id": "rye/agent/core/tool-protocol"}}
         assert _harness_mod._is_suppressed(hook, ["proto"]) is False
 
@@ -714,7 +712,7 @@ class TestRunHooksContextSuppress:
                 "layer": 2,
                 "position": "before",
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "rye/agent/core/identity",
                 },
@@ -725,7 +723,7 @@ class TestRunHooksContextSuppress:
                 "layer": 2,
                 "position": "before",
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "rye/agent/core/tool-protocol",
                 },
@@ -853,7 +851,7 @@ class TestConditionalHookDispatch:
                 "position": "before",
                 "condition": {"path": "directive", "op": "contains", "value": "web"},
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "project/identities/web-agent",
                 },
@@ -884,7 +882,7 @@ class TestConditionalHookDispatch:
                 "position": "before",
                 "condition": {"path": "directive", "op": "contains", "value": "web"},
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "project/identities/web-agent",
                 },
@@ -922,7 +920,7 @@ class TestConditionalHookDispatch:
                     }
                 },
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "rye/agent/core/identity",
                 },
@@ -934,7 +932,7 @@ class TestConditionalHookDispatch:
                 "position": "before",
                 "condition": {"path": "directive", "op": "contains", "value": "web"},
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "project/identities/web-agent",
                 },
@@ -946,7 +944,7 @@ class TestConditionalHookDispatch:
                 "position": "before",
                 "condition": {"path": "directive", "op": "contains", "value": "deploy"},
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "project/identities/deploy-agent",
                 },
@@ -1003,7 +1001,7 @@ class TestContextHookIntegrityAbort:
                 "layer": 1,
                 "position": "before",
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "project/secrets",
                 },
@@ -1035,7 +1033,7 @@ class TestContextHookIntegrityAbort:
                 "layer": 1,
                 "position": "before",
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "missing/thing",
                 },
@@ -1046,7 +1044,7 @@ class TestContextHookIntegrityAbort:
                 "layer": 1,
                 "position": "after",
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "good/thing",
                 },
@@ -1078,7 +1076,7 @@ class TestContextHookIntegrityAbort:
                 "layer": 1,
                 "position": "before",
                 "action": {
-                    "primary": "load",
+                    "primary": "fetch",
                     "item_type": "knowledge",
                     "item_id": "secure/config",
                 },

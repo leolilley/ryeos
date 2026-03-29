@@ -310,7 +310,7 @@ rye.<primary>.<item_type>.<item_id_dotted>
 | Capability                           | Matches                           |
 | ------------------------------------ | --------------------------------- |
 | `rye.execute.tool.rye.file-system.*` | Any tool under `rye/file-system/` |
-| `rye.search.directive.*`             | Search any directive              |
+| `rye.fetch.directive.*`              | Search any directive              |
 | `rye.execute.tool.rye.bash`          | Only the bash tool                |
 
 **Rules:**

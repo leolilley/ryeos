@@ -17,8 +17,7 @@ and BASE_IDENTITY_PRESENT markers.
     <limits turns="4" tokens="4096" spend="0.10" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

@@ -17,6 +17,6 @@ Exploratory designs that build on Rye's existing architecture. These are not com
 | [Continuous Input Streams](continuous-input-streams.md) | Extend thread continuation to handle browser automation, live image flow, and high-volume data streams |
 | [Dynamic Personality](dynamic-personality.md) | RAG-indexed personality corpus as an alternative to static personality documents |
 | [Memory & Intent Resolution](memory-and-intent-resolution.md) | Shared thread memory, natural-language intent resolution, and predictive pre-fetching |
-| [ryeos-cli](ryeos-cli.md) | **Implemented** — Terminal CLI mapping shell verbs to the four primitives. `pip install ryeos-cli` |
+| [ryeos-cli](ryeos-cli.md) | **Implemented** — Terminal CLI mapping shell verbs to the three primitives. `pip install ryeos-cli` |
 | [Sovereign Inference](sovereign-inference.md) | Self-hosted LLM inference on your own hardware — inference calls, tool dispatch, and cluster routing all running through RYE's `execute` primitive |
 | [Execution Nodes](execution-nodes.md) | Self-describing execution nodes that advertise capabilities, accept signed requests, and route work across a multi-node cluster |

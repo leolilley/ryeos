@@ -13,7 +13,7 @@ End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tes
     <limits turns="6" tokens="4096" spend="1.00" depth="5" spawns="3" />
     <permissions>
       <execute><tool>*</tool></execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

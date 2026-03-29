@@ -19,9 +19,9 @@ Multi-thread orchestration pipeline that spawns multiple child directives in seq
       <execute>
         <directive>test/*</directive>
       </execute>
-      <search>
+      <fetch>
         <knowledge>*</knowledge>
-      </search>
+      </fetch>
     </permissions>
   </metadata>
 

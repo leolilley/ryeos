@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:dd03255660ee4da621e55c6381615eb649c1705ab9fe6c2689aff329af8eea84:AfdrLpLrA4rPaDGqZtflgbBY44_VEF0GJoVscMgcJ2f8YCKHj709HQdDqSvqrY7ZA56W3l6TUPUYcQ7XKn-7AA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:fcec919f22a3a4b4b2db8e30dde44c058334dcdb5623786b1934caa26cb14087:FiZlvecS04hnuWyEqZkwU2q0XxwydFX3ioEpMWtxY-d8yBfhJ_ZxB4jH6RcVudHpuj7_I7EXkwfmdFcvxD--Cg==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Graph Orchestrator
 
@@ -16,12 +16,10 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
       <execute>
         <tool>rye.execute.tool.*</tool>
       </execute>
-      <load>
+      <fetch>
         <knowledge>graphs/*</knowledge>
-      </load>
-      <search>
         <knowledge>*</knowledge>
-      </search>
+      </fetch>
     </permissions>
   </metadata>
 
@@ -65,11 +63,11 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
 
     **read_state** — Load the persisted state knowledge item for a graph run.
     Requires {input:graph_run_id}. The graph_id can be inferred from the run ID prefix.
-    `rye_load(item_type="knowledge", item_id="graphs/<graph_id>/{input:graph_run_id}")`
+    `rye_fetch(item_type="knowledge", item_id="graphs/<graph_id>/{input:graph_run_id}")`
     Returns the full state including frontmatter (status, current_node, step_count) and JSON body (accumulated state values).
 
     **list_runs** — Search for all graph run state entries, optionally filtered by graph_id.
-    `rye_search(item_type="knowledge", query="entry_type:graph_state {input:graph_id}")`
+    `rye_fetch(scope="knowledge", query="entry_type:graph_state {input:graph_id}")`
     Returns a list of graph runs with their status, step count, and timestamps.
 
     **cancel** — Cancel a running graph via SIGTERM signal.

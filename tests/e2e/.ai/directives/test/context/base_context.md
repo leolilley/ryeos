@@ -16,8 +16,7 @@ Root of an extends chain. Declares system context that should propagate to all c
     </context>
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

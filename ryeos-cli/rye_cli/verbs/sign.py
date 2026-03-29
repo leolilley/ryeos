@@ -14,7 +14,7 @@ def register(subparsers):
 
 
 def handle(args, project_path: str):
-    from rye.tools.sign import SignTool
+    from rye.actions.sign import SignTool
     from rye.utils.resolvers import get_user_space
 
     tool = SignTool(str(get_user_space()))

@@ -151,7 +151,7 @@ For items not found, a hint is provided:
 
 ## Verification
 
-When items are loaded or executed via `rye_load` or `rye_execute`, their integrity is verified against the stored signature. Verification fails if:
+When items are fetched or executed via `rye_fetch` or `rye_execute`, their integrity is verified against the stored signature. Verification fails if:
 
 - The file content has been modified since signing
 - The file was moved to a different path without re-signing

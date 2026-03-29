@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rye.tools.sign import SignTool
+from rye.actions.sign import SignTool
 
 
 @pytest.fixture

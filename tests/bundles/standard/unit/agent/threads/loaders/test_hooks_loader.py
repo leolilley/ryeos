@@ -55,7 +55,7 @@ class TestUserHooks:
   - id: "inject_style"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "personal/coding-style"
 """
@@ -80,7 +80,7 @@ class TestProjectHooks:
   - id: "inject_conventions"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "project/conventions"
   - id: "record_learnings"
@@ -113,7 +113,7 @@ class TestProjectHooks:
       op: "contains"
       value: "api"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "project/api-types"
 """
@@ -135,7 +135,7 @@ class TestMergeHooks:
   - id: "user_hook"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "user/style"
 """
@@ -167,7 +167,7 @@ class TestMergeHooks:
   - id: "project_hook"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "project/conventions"
 """
@@ -175,7 +175,7 @@ class TestMergeHooks:
 
         # Build directive hooks
         directive_hooks = [
-            {"id": "directive_hook", "event": "thread_started", "action": {"primary": "load"}}
+            {"id": "directive_hook", "event": "thread_started", "action": {"primary": "fetch"}}
         ]
 
         # Load a fresh hooks_loader

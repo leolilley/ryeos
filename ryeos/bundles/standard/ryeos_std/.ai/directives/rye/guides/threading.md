@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:1b9cb53d2ba75c7e4f7dc36e2ae26dc73465b7f0ce53a6e2c351bf0adac2f9e7:N9QWWvUiE7qCz1Nr3agl6_uwSKoWBxG-s_DHZwPaqri3SeklaIZbca5WXEjEzINMcNtz9tNBeao_hear_61UCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:148ce5f9c57809771e97db14f66d27f8d02db41677babaa0d2dc46aea4769b92:MOuvE1wW8TWwxthrcBwn0OHjIR6dB_2ISwQ3GhMfCQvbjlZlfrMwp_hrloFmynBVaj1ZhlJQx45gTtdqAPGzBg==:4b987fd4e40303ac -->
 # Threading
 
 Guide 7: The threading system — spawning LLM threads, limits, permissions, and orchestration.
@@ -16,12 +16,9 @@ Guide 7: The threading system — spawning LLM threads, limits, permissions, and
         <tool>rye.agent.*</tool>
         <tool>rye.core.system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <tool>*</tool>
-      </search>
-      <load>
-        <tool>*</tool>
-      </load>
+      </fetch>
     </permissions>
   </metadata>
 
@@ -52,7 +49,7 @@ Output ONLY the text inside the render block above. No step labels, no headers, 
   <step name="provider_check">
     <instruction>
 Search for provider configuration knowledge:
-<tool_call>rye_search(scope="knowledge", query="provider configuration")</tool_call>
+<tool_call>rye_fetch(scope="knowledge", query="provider configuration")</tool_call>
 <tool_call>rye_execute(item_type="knowledge", item_id="rye/agent/provider-configuration")</tool_call>
 </instruction>
     <render>
@@ -165,8 +162,8 @@ rye.<primary>.<item_type>.<item_id_dotted>
 
 Examples:
 - `rye.execute.tool.rye.file-system.*` — execute any file-system tool
-- `rye.search.directive.*` — search all directives
-- `rye.load.knowledge.my-project.*` — load knowledge under my-project/
+- `rye.fetch.directive.*` — fetch all directives
+- `rye.fetch.knowledge.my-project.*` — fetch knowledge under my-project/
 
 Declared in directive XML, enforced by the safety harness. The critical rule: **capabilities only attenuate down the hierarchy**. A child thread can never have MORE permissions than its parent. Parent has `rye.execute.tool.rye.file-system.*`? Child can have `rye.execute.tool.rye.file-system.write` but NOT `rye.execute.tool.rye.bash.*`.
 </render>

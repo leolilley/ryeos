@@ -102,17 +102,17 @@ class TestClassifyCapability:
         r = _tsl._classify_capability("rye.execute.tool.rye.file-system.read")
         assert r == {"action": "execute", "sub_type": "tool", "pattern": "rye/file-system/read"}
 
-    def test_search_wildcard(self):
-        r = _tsl._classify_capability("rye.search.*")
-        assert r == {"action": "search", "sub_type": None, "pattern": "*"}
+    def test_fetch_wildcard(self):
+        r = _tsl._classify_capability("rye.fetch.*")
+        assert r == {"action": "fetch", "sub_type": None, "pattern": "*"}
 
-    def test_search_scoped(self):
-        r = _tsl._classify_capability("rye.search.directive.*")
-        assert r == {"action": "search", "sub_type": "directive", "pattern": "*"}
+    def test_fetch_scoped(self):
+        r = _tsl._classify_capability("rye.fetch.directive.*")
+        assert r == {"action": "fetch", "sub_type": "directive", "pattern": "*"}
 
-    def test_load_scoped(self):
-        r = _tsl._classify_capability("rye.load.tool.rye.core.*")
-        assert r == {"action": "load", "sub_type": "tool", "pattern": "rye/core/*"}
+    def test_fetch_tool_scoped(self):
+        r = _tsl._classify_capability("rye.fetch.tool.rye.core.*")
+        assert r == {"action": "fetch", "sub_type": "tool", "pattern": "rye/core/*"}
 
     def test_sign_scoped(self):
         r = _tsl._classify_capability("rye.sign.knowledge.*")
@@ -213,21 +213,15 @@ _MOCK_PRIMARY_ACTIONS = [{
     }, "required": ["item_type", "item_id"]},
     "description": "Run a Rye item",
 }, {
-    "name": "rye_search",
-    "_item_id": "rye/search",
+    "name": "rye_fetch",
+    "_item_id": "rye/fetch",
     "schema": {"type": "object", "properties": {
         "query": {"type": "string"},
         "scope": {"type": "string"},
-    }, "required": ["query", "scope"]},
-    "description": "Discover item IDs",
-}, {
-    "name": "rye_load",
-    "_item_id": "rye/load",
-    "schema": {"type": "object", "properties": {
         "item_type": {"type": "string"},
         "item_id": {"type": "string"},
-    }, "required": ["item_type", "item_id"]},
-    "description": "Read raw content and metadata",
+    }, "required": ["query", "scope"]},
+    "description": "Find items by ID or discover by query",
 }, {
     "name": "rye_sign",
     "_item_id": "rye/sign",
@@ -270,9 +264,9 @@ class TestPreloadToolSchemas:
         assert bash_def["_primary"] == "execute"
 
     def test_non_tool_caps_without_primary_actions(self, tool_project):
-        """Without primary_actions arg, search/load/sign caps produce no output."""
+        """Without primary_actions arg, fetch/sign caps produce no output."""
         result = _tsl.preload_tool_schemas(
-            ["rye.search.*", "rye.load.knowledge.*"], tool_project,
+            ["rye.fetch.*", "rye.fetch.knowledge.*"], tool_project,
         )
         assert result["tool_defs"] == []
         assert result["capabilities_summary"] == []
@@ -331,21 +325,20 @@ class TestPreloadToolSchemas:
         assert ids.count("rye/bash/bash") == 1
 
     def test_primary_actions_registered_with_correct_primary(self, tool_project):
-        """Primary actions (search, load, sign) get _primary matching their action."""
+        """Primary actions (fetch, sign) get _primary matching their action."""
         from unittest.mock import patch
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
         with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
                 with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
                     result = _tsl.preload_tool_schemas(
-                        ["rye.execute.tool.rye.bash.*", "rye.search.*", "rye.load.*"],
+                        ["rye.execute.tool.rye.bash.*", "rye.fetch.*"],
                         tool_project,
                         primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
         by_name = {t["name"]: t for t in result["tool_defs"]}
-        assert by_name["rye_search"]["_primary"] == "search"
-        assert by_name["rye_load"]["_primary"] == "load"
+        assert by_name["rye_fetch"]["_primary"] == "fetch"
         # execute tools get _primary="execute"
         bash_defs = [t for t in result["tool_defs"] if t["_primary"] == "execute"]
         assert len(bash_defs) >= 1
@@ -395,8 +388,7 @@ class TestBaseDirectives:
         assert path.exists()
         content = path.read_text()
         assert "<execute>*</execute>" in content
-        assert "<search>*</search>" in content
-        assert "<load>*</load>" in content
+        assert "<fetch>*</fetch>" in content
         assert "<sign>*</sign>" in content
         assert "rye/agent/core/Identity" in content
         assert "rye/agent/core/Behavior" in content
@@ -406,8 +398,7 @@ class TestBaseDirectives:
         assert path.exists()
         content = path.read_text()
         assert "<execute>*</execute>" in content
-        assert "<search>" not in content
-        assert "<load>" not in content
+        assert "<fetch>" not in content
         assert "<sign>" not in content
         assert "rye/agent/core/protocol/search" not in content
 
@@ -425,7 +416,7 @@ class TestDecomposedProtocol:
     def test_all_protocol_items_exist(self):
         proto_dir = _STD_ROOT / ".ai" / "knowledge" / "rye" / "agent" / "core" / "protocol"
         assert proto_dir.is_dir()
-        for name in ("execute", "search", "load", "sign"):
+        for name in ("execute", "fetch", "sign"):
             path = proto_dir / f"{name}.md"
             assert path.exists(), f"Missing protocol item: {name}"
             content = path.read_text()

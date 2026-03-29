@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:76be10a81fcbc4bfb59b33712fd0576efa318d32ae1cc662109dd14bf65d16c6:vl9oDVqgfUnftP6aa5Xh6cLDPIIGCUWPl4hdPkVw1LUg2cRiDrKpJ8xailFGjo3RZzldCGA70VykeZlC4uJkDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:38:41Z:f20119fb13d64facded0b48d8fe719ef700561976da3857814e0adba3a1ad3f9:nHSnDYFCVfcZXsREMnID8lGYGdQNFBDhMOeex0BGZiq9UJlsoNrpj8rEhFKfnlQ6fSJ-Oyuapqx2YlsSMKG5AA==:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -72,8 +72,7 @@ Terminates on: `type: return` node, missing `next` (edge dead-end), `max_steps` 
 | `primary` | Tool Class | Method |
 | --- | --- | --- |
 | `execute` | `ExecuteTool` | `handle(item_type, item_id, project_path, parameters)` |
-| `search` | `SearchTool` | `handle(item_type, query, project_path, source, limit)` |
-| `load` | `LoadTool` | `handle(item_type, item_id, project_path, source)` |
+| `fetch` | `FetchTool` | `handle(item_id=..., query=..., project_path=..., ...)` |
 | `sign` | `SignTool` | `handle(item_type, item_id, project_path, source)` |
 
 Tool instances are lazily initialized via `_tools_instance()` with `get_user_space()` for space resolution.

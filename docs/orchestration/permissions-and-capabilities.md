@@ -30,8 +30,8 @@ Examples:
 |-----------|--------|
 | `rye.execute.tool.rye.file-system.*` | Execute any tool under `rye/file-system/` |
 | `rye.execute.tool.rye.agent.threads.thread_directive` | Required internally when `execute directive` spawns threads |
-| `rye.search.directive` | Search directives (search has no item_id) |
-| `rye.load.knowledge.agency-kiwi.*` | Load any knowledge under `agency-kiwi/` |
+| `rye.fetch.directive` | Search directives (search has no item_id) |
+| `rye.fetch.knowledge.agency-kiwi.*` | Load any knowledge under `agency-kiwi/` |
 | `rye.sign.directive.*` | Sign any directive |
 
 ## Declaring Permissions in Directives
@@ -44,13 +44,10 @@ Permissions are declared in the directive's XML `<permissions>` block using a hi
     <tool>rye.agent.threads.thread_directive</tool>
     <tool>rye.agent.threads.orchestrator</tool>
   </execute>
-  <search>
+  <fetch>
     <directive>agency-kiwi.*</directive>
     <knowledge>agency-kiwi.*</knowledge>
-  </search>
-  <load>
-    <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 ```
 
@@ -64,8 +61,8 @@ The parser extracts permissions as `{tag: "cap", content: "rye.<primary>.<item_t
 |----------------|-------------------|
 | `<execute><tool>rye.file-system.*</tool></execute>` | `rye.execute.tool.rye.file-system.*` |
 | `<execute><tool>rye.agent.threads.thread_directive</tool></execute>` | `rye.execute.tool.rye.agent.threads.thread_directive` |
-| `<search><directive>*</directive></search>` | `rye.search.directive.*` |
-| `<load><knowledge>agency-kiwi.*</knowledge></load>` | `rye.load.knowledge.agency-kiwi.*` |
+| `<fetch><directive>*</directive></fetch>` | `rye.fetch.directive.*` |
+| `<fetch><knowledge>agency-kiwi.*</knowledge></fetch>` | `rye.fetch.knowledge.agency-kiwi.*` |
 
 ### Wildcard Shortcuts
 
@@ -78,8 +75,8 @@ For directives that need broad access:
 <!-- All execute permissions -->
 <execute>*</execute>
 
-<!-- All search permissions -->
-<search>*</search>
+<!-- All fetch permissions -->
+<fetch>*</fetch>
 ```
 
 ## Fail-Closed Default
@@ -195,12 +192,14 @@ Consider this hierarchy:
     <tool>rye.agent.threads.thread_directive</tool>
     <tool>rye.agent.threads.orchestrator</tool>
   </execute>
-  <search><directive>agency-kiwi.*</directive></search>
-  <load><knowledge>agency-kiwi.*</knowledge></load>
+  <fetch>
+    <directive>agency-kiwi.*</directive>
+    <knowledge>agency-kiwi.*</knowledge>
+  </fetch>
 </permissions>
 ```
 
-Capabilities: can spawn threads, search agency-kiwi directives, load agency-kiwi knowledge.
+Capabilities: can spawn threads, fetch agency-kiwi directives and knowledge.
 
 **Sub-orchestrator `qualify_leads`** declares:
 ```xml
@@ -208,11 +207,11 @@ Capabilities: can spawn threads, search agency-kiwi directives, load agency-kiwi
   <execute>
     <tool>rye.agent.threads.thread_directive</tool>
   </execute>
-  <load><knowledge>agency-kiwi.*</knowledge></load>
+  <fetch><knowledge>agency-kiwi.*</knowledge></fetch>
 </permissions>
 ```
 
-Capabilities: can spawn threads (via `execute directive`) and load knowledge. **Cannot** use `orchestrator` operations or search directives — those capabilities were dropped.
+Capabilities: can spawn threads (via `execute directive`) and fetch knowledge. **Cannot** use `orchestrator` operations or fetch directives — those capabilities were dropped.
 
 **Execution leaf `score_lead`** declares:
 ```xml
@@ -242,17 +241,14 @@ Inherits parent's capabilities. If spawned by `qualify_leads`, it can spawn thre
     <tool>rye.agent.threads.thread_directive</tool>
     <tool>rye.agent.threads.orchestrator</tool>
   </execute>
-  <search>
+  <fetch>
     <directive>agency-kiwi.*</directive>
     <knowledge>agency-kiwi.*</knowledge>
-  </search>
-  <load>
-    <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 ```
 
-Needs `thread_directive` capability (used internally by `execute directive` to spawn child threads), `orchestrator` to wait/aggregate, and search/load for its domain knowledge.
+Needs `thread_directive` capability (used internally by `execute directive` to spawn child threads), `orchestrator` to wait/aggregate, and fetch for its domain knowledge.
 
 ### Discovery Leaf
 
@@ -261,13 +257,13 @@ Needs `thread_directive` capability (used internally by `execute directive` to s
   <execute>
     <tool>scraping.gmaps.scrape_gmaps</tool>
   </execute>
-  <load>
+  <fetch>
     <knowledge>agency-kiwi.*</knowledge>
-  </load>
+  </fetch>
 </permissions>
 ```
 
-Can execute exactly one scraping tool and load knowledge for context. Cannot spawn threads or search.
+Can execute exactly one scraping tool and fetch knowledge for context. Cannot spawn threads or fetch directives.
 
 ### Scoring Leaf
 
@@ -287,7 +283,7 @@ Design permissions from the bottom up:
 
 1. **Start with execution leaves** — each needs exactly the tools it calls
 2. **Sub-orchestrators** need the `thread_directive` capability (for `execute directive` to spawn children) plus whatever knowledge they load
-3. **Root orchestrators** need `thread_directive` capability, `orchestrator` (for wait/aggregate), and their domain's search/load
+3. **Root orchestrators** need `thread_directive` capability, `orchestrator` (for wait/aggregate), and their domain's fetch permissions
 4. **Never use `<permissions>*</permissions>`** in production — it defeats the purpose
 
 If a thread tries something it shouldn't, the LLM gets a clear error message explaining exactly which capability is missing. This makes debugging permission issues straightforward.
@@ -347,8 +343,7 @@ classifications:
 
   - risk: safe
     patterns:
-      - "rye.search.*"
-      - "rye.load.*"
+      - "rye.fetch.*"
     description: "Read-only discovery and inspection"
 ```
 

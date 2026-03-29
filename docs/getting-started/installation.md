@@ -52,7 +52,7 @@ pip install ryeos[all]
 pip install ryeos-cli
 ```
 
-The CLI maps shell verbs directly to the four primitives plus convenience verbs — no MCP transport, no JSON-RPC:
+The CLI maps shell verbs directly to the three primitives plus convenience verbs — no MCP transport, no JSON-RPC:
 
 ```bash
 rye search directive "lead generation"
@@ -125,16 +125,15 @@ Add to `~/.config/claude/claude_desktop_config.json` (Linux) or `~/Library/Appli
 
 ## Exposed MCP tools
 
-Once connected, the server registers four tools that your AI agent can call:
+Once connected, the server registers three tools that your AI agent can call:
 
 | MCP Tool      | Purpose                                                        |
 | ------------- | -------------------------------------------------------------- |
-| `rye_search`  | Find directives, tools, or knowledge by scope and query        |
-| `rye_load`    | Load item content for inspection, or copy items between spaces |
+| `rye_fetch`   | Find items by ID or discover by query                          |
 | `rye_execute` | Run a directive, tool, or knowledge item                       |
 | `rye_sign`    | Validate and cryptographically sign an item file               |
 
-These are the only four tools — every interaction with the `.ai/` directory goes through them.
+These are the only three tools — every interaction with the `.ai/` directory goes through them.
 
 ## Environment variables
 
@@ -159,10 +158,10 @@ ryeos-mcp
 
 ## Verify the installation
 
-After configuring your MCP client, verify that Rye OS is running by having your agent call `rye_search`:
+After configuring your MCP client, verify that Rye OS is running by having your agent call `rye_fetch`:
 
 ```
-rye_search(scope="directive", query="create", project_path="/path/to/your/project")
+rye_fetch(query="create", scope="directive", project_path="/path/to/your/project")
 ```
 
 If the installation is correct, this will return results from the system space — the built-in directives that ship with `ryeos`, such as `rye/core/create_directive`, `rye/core/create_tool`, and `rye/core/create_knowledge`.
@@ -170,7 +169,7 @@ If the installation is correct, this will return results from the system space �
 You can also search for tools:
 
 ```
-rye_search(scope="tool", query="bash", project_path="/path/to/your/project")
+rye_fetch(query="bash", scope="tool", project_path="/path/to/your/project")
 ```
 
 This should find the built-in `rye/bash` tool, confirming that the system bundles are discoverable.

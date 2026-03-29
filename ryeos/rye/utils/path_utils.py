@@ -280,7 +280,7 @@ def get_type_folder(item_type: str) -> str:
     """Get folder name for item type.
 
     Uses SIGNABLE_DIRS so config items resolve correctly in signing
-    and path-validation contexts.  Execute/load/search gate on
+    and path-validation contexts.  Execute/fetch/sign gate on
     TYPE_DIRS before calling path helpers, so config never leaks
     into those flows.
     """

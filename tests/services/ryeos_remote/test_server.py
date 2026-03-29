@@ -38,14 +38,13 @@ class TestRYEServer:
         assert server.debug is False
 
     def test_tools_registered(self):
-        """All 4 tools are registered."""
+        """All 3 tools are registered."""
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["USER_SPACE"] = tmpdir
             server = RYEServer()
 
             # Check that tools are instantiated
-            assert hasattr(server, "search")
-            assert hasattr(server, "load")
+            assert hasattr(server, "fetch")
             assert hasattr(server, "execute")
             assert hasattr(server, "sign")
 
@@ -58,8 +57,7 @@ class TestRYEServer:
             # Get registered tools from server
             # Note: This depends on Lillux MCP server implementation
             # For now, just verify server has the tool instances
-            assert server.search is not None
-            assert server.load is not None
+            assert server.fetch is not None
             assert server.execute is not None
             assert server.sign is not None
 
@@ -74,7 +72,6 @@ class TestServerIntegration:
             server = RYEServer()
 
             # Verify handle methods exist
-            assert callable(server.search.handle)
-            assert callable(server.load.handle)
+            assert callable(server.fetch.handle)
             assert callable(server.execute.handle)
             assert callable(server.sign.handle)

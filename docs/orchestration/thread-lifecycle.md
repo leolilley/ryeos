@@ -71,7 +71,7 @@ The thread is registered in the SQLite registry (`registry.db`) with status `cre
 
 The directive is loaded via `DirectiveResolver`, searching project → user → system spaces. The `markdown/xml` parser extracts metadata (limits, permissions, model, inputs) from the XML fence and preserves the raw content for the LLM prompt.
 
-For normal execution, the `inputs/validate` and `inputs/interpolate` processors handle input validation and interpolation. For resume/handoff, `LoadTool` is used instead (no input validation needed since the directive ran before).
+For normal execution, the `inputs/validate` and `inputs/interpolate` processors handle input validation and interpolation. For resume/handoff, `FetchTool` is used instead (no input validation needed since the directive ran before).
 
 ### Step 4: Resolve extends
 
@@ -131,7 +131,7 @@ User and project hooks use the same format as directive hooks — `id`, `event`,
 
 The `SafetyHarness` is constructed with the resolved limits, merged hooks, directive permissions, and parent capabilities.
 
-After capabilities are resolved and attached to the harness, **dynamic tool registration** runs. `tool_schema_loader.preload_tool_schemas()` scans capabilities for `rye.execute.tool.*` patterns, resolves matching tools across the 3-tier space, extracts `CONFIG_SCHEMA` and `__tool_description__` via AST, and returns structured `tool_defs`. Each tool gets a flattened API name (e.g., `rye_file_system_read`) and a `_primary` field for dispatch routing. Primary actions (`rye/search`, `rye/load`, `rye/sign`) are included as peers. The tool defs are set on `harness.available_tools` and registered in the LLM's native tool palette. A capabilities tree is also generated for transcript metadata. Token budget is ~2000.
+After capabilities are resolved and attached to the harness, **dynamic tool registration** runs. `tool_schema_loader.preload_tool_schemas()` scans capabilities for `rye.execute.tool.*` patterns, resolves matching tools across the 3-tier space, extracts `CONFIG_SCHEMA` and `__tool_description__` via AST, and returns structured `tool_defs`. Each tool gets a flattened API name (e.g., `rye_file_system_read`) and a `_primary` field for dispatch routing. Primary actions (`rye/fetch`, `rye/sign`) are included as peers. The tool defs are set on `harness.available_tools` and registered in the LLM's native tool palette. A capabilities tree is also generated for transcript metadata. Token budget is ~2000.
 
 ### Step 11: Reserve budget
 
@@ -163,7 +163,7 @@ The thread metadata file is written to `.ai/agent/threads/<thread_id>/thread.jso
   },
   "capabilities": [
     "rye.execute.tool.scraping.gmaps.scrape_gmaps",
-    "rye.load.knowledge.agency-kiwi.*"
+    "rye.fetch.knowledge.agency-kiwi.*"
   ]
 }
 ```
@@ -288,7 +288,7 @@ hooks:
   - id: "inject_project_conventions"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "project/conventions"
     description: "Inject project conventions into every thread"
@@ -300,7 +300,7 @@ hooks:
       op: "contains"
       value: "api"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "project/api-types"
     description: "Inject API types for API-related directives only"
@@ -334,9 +334,8 @@ hooks:
 
 Actions use the same format as directive hooks:
 
-- `primary: "load"` — Load a knowledge or directive item (for context injection)
+- `primary: "fetch"` — Fetch a knowledge or directive item (for context injection)
 - `primary: "execute"` — Execute a tool or directive
-- `primary: "search"` — Search for items
 
 ### Conditions
 

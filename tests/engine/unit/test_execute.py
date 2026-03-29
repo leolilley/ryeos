@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from conftest import get_bundle_path
-from rye.tools.execute import ExecuteTool
+from rye.actions.execute import ExecuteTool
 
 # Processors are data-driven core tools — load via bundle path
 _INTERPOLATE_PATH = get_bundle_path(
@@ -608,7 +608,7 @@ class TestInterpolateParsed:
     def test_interpolates_action_attributes(self):
         parsed = {
             "actions": [
-                {"primary": "search", "query": "{input:q}", "item_type": "knowledge"}
+                {"primary": "fetch", "query": "{input:q}", "item_type": "knowledge"}
             ]
         }
         _interpolate_parsed(parsed, {"q": "patterns"})

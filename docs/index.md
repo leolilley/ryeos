@@ -9,7 +9,7 @@ version: "1.0.0"
 
 # Rye OS Documentation
 
-Rye OS gives AI agents a portable `.ai/` directory system, accessible via MCP server or terminal CLI. Agents interact with it through 4 MCP tools to search, load, execute, and sign three item types: **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information).
+Rye OS gives AI agents a portable `.ai/` directory system, accessible via MCP server or terminal CLI. Agents interact with it through 3 MCP tools to fetch, execute, and sign three item types: **directives** (workflow instructions), **tools** (executable scripts), and **knowledge** (domain information).
 
 ---
 
@@ -21,16 +21,15 @@ Rye OS gives AI agents a portable `.ai/` directory system, accessible via MCP se
 
 ## MCP Tools Reference
 
-The 4 tools that agents use to interact with Rye OS:
+The 3 tools that agents use to interact with Rye OS:
 
+- [rye_fetch](tools-reference/fetch.md) — Find items by ID or discover by query
 - [rye_execute](tools-reference/execute.md) — Execute directives, tools, or knowledge items
-- [rye_load](tools-reference/load.md) — Load item content for inspection or copy between spaces
-- [rye_search](tools-reference/search.md) — Find items with keyword search, fuzzy matching, and BM25 scoring
 - [rye_sign](tools-reference/sign.md) — Validate and sign items with integrity hashes
 
 ## CLI
 
-Terminal-native interface — the same four primitives, from the shell:
+Terminal-native interface — the same three primitives, from the shell:
 
 - [ryeos-cli](future/ryeos-cli.md) — Verb mapping, graph operations, test runner, and parameter parsing
 

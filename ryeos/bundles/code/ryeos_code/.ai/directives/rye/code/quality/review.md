@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:814320d24deeb6f92aa9b924122cc1e8f3aab8908dd55806535eb6e376c0f4ce:YAejIUt0PmV49NmMJb-HGAuqhuCezt9QyCl1Ld0cDRHpRgJl_tvBGKlo-MJ_ZUYMQd4IctmRtCNscRCjj5nZAQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:19:02Z:4fae68cc242bce6c597db239d569c0455d31e74dfe4dd713d1c0f84896f93e3b:F741VNwYr5mwwUTTokBsSgPbSSpfXbKgacjkcW28RLKISN2VRrIUOZ1fObbSb3juk-QFltl32p_sXKh_0h-YCQ==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Quality Review
 
@@ -24,8 +24,7 @@ Review code changes for quality issues — runs gates then uses LLM analysis aga
         <tool>rye.file-system.grep</tool>
         <knowledge>*</knowledge>
       </execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

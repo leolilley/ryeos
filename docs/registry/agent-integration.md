@@ -15,14 +15,14 @@ This document covers how AI agents interact with the Rye OS registry at runtime 
 
 Agents discover items through two mechanisms with different scopes:
 
-### Local Search (via `rye_search`)
+### Local Search (via `rye_fetch`)
 
-The `rye_search` MCP tool searches the local filesystem only — project `.ai/`, user `~/.ai/`, and system (bundled) spaces:
+The `rye_fetch` MCP tool searches the local filesystem only — project `.ai/`, user `~/.ai/`, and system (bundled) spaces:
 
 ```
-rye_search(
-  item_type="tool",
-  query="web scraper"
+rye_fetch(
+  query="web scraper",
+  scope="tool"
 )
 ```
 
@@ -155,7 +155,7 @@ Fetches product data from a target URL using a registry-sourced scraper tool.
 
 Search locally for the web-scraper tool:
 ```
-rye_search(item_type="tool", query="web-scraper")
+rye_fetch(query="web-scraper", scope="tool")
 ```
 
 If not found locally, pull from registry:
@@ -303,7 +303,7 @@ This means even non-signable assets (images, data files) are covered by the mani
 
 | Limitation                          | Description                                                                                     |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------- |
-| **No automatic registry search**    | `rye_search` only searches the local filesystem. The agent must explicitly call the registry tool to discover remote items. |
+| **No automatic registry search**    | `rye_fetch` only searches the local filesystem. The agent must explicitly call the registry tool to discover remote items. |
 | **Agent must know the registry tool** | The agent needs to know that `rye/core/registry/registry` exists and how to call it with the right action/parameters. |
 | **Authentication required for pull** | Most registry operations require authentication. The agent must have an API key (created via `action: create_api_key` after OAuth login) or the `RYE_REGISTRY_API_KEY` env var set. |
 | **No dependency resolution**        | Pulling an item does not automatically pull its dependencies. If a tool depends on other tools, they must be pulled separately. |

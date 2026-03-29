@@ -102,11 +102,11 @@ Navigation:
 
 ## Loading Knowledge
 
-Knowledge is loaded via `rye_load` and injected into agent context:
+Knowledge is loaded via `rye_fetch` and injected into agent context:
 
 ```python
 # In a directive process step
-rye_load(item_type="knowledge", item_id="rye/core/terminology")
+rye_fetch(item_type="knowledge", item_id="rye/core/terminology")
 # Returns: "Use this knowledge to inform your decisions."
 ```
 
@@ -129,7 +129,7 @@ hooks:
   - id: "inject_terminology"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "rye/core/terminology"
 ```

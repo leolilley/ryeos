@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:2410ea09a2928b99f9c45ddddbdd09bb0d7b64dc0d797f565bb28bd7ec1d4feb:WeBKmhrfKm-QBwtNGPPhdYJh-m2luglEwIq1B68S_nAOPdL1pzukHioVzXNXrFrfpK_g6qawmGfYdiMT_JU0CQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:3a8867b33d952136b7cb9c09dd9b0666efdc303f6a1aa42db9953654b7f884b8:6qlRtHmnEVgzous-O54xpsTBjqe1zmlAFtr43ODILykbv-fI1pQE_-4Hn-C_Fguafj7bYn5a1jMa5AEugBG0Bw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -239,7 +239,7 @@ Directives can declare a `<context>` metadata section that specifies knowledge i
 
 ### Knowledge Item Loading
 
-Context entries reference knowledge items by ID. These are loaded via `LoadTool` (which cascades project → user → system) and injected at the declared position.
+Context entries reference knowledge items by ID. These are loaded via `FetchTool` (which cascades project → user → system) and injected at the declared position.
 
 ```xml
 <context>
@@ -301,13 +301,13 @@ Projects can customize the thread context without modifying system-level knowled
 
 ### Override via Knowledge Items
 
-`LoadTool` cascades project → user → system. To override the default identity:
+`FetchTool` cascades project → user → system. To override the default identity:
 
 1. Create `.ai/knowledge/rye/agent/core/Identity.md` in your project
 2. The project-level file will be loaded instead of the system default
 3. No directive changes needed — extends chains automatically pick up the override
 
-This works for any core knowledge item: `Identity`, `Behavior`, `Environment`, and the decomposed protocol items (`protocol/execute`, `protocol/search`, `protocol/load`, `protocol/sign`).
+This works for any core knowledge item: `Identity`, `Behavior`, `Environment`, and the decomposed protocol items (`protocol/execute`, `protocol/fetch`, `protocol/sign`).
 
 ### Override via Directive `<context>`
 

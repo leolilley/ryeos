@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:39Z:6b1c6a62a112919e8856b22f63811b4b18bb376fed0970ee947d9510ab8b9ae1:PciSd3fEe-ot1o1y-o8_-Od8vRzrSUgL-ov04goT8OzmSZAbwPTXlH8RnG9RmAIhwpzdGWB-vGxmXOuWRfmPCA==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:39:09Z:b91e06332a8fb0dcee0ab1ef8d6759115a8d1765c0e4eecdf22417e3219dd6ce:1pQlj5xUYGL_K02IO5py6KzyM_OuL1E1WHjSBiXbeHIwnFr0_sVt9xM5o6NzMcTwyqllRq_6KdsWbR7gTbscDA==:4b987fd4e40303ac
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -236,7 +236,7 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                         hook_data["content"] = hook.text.strip()
                     for hook_child in hook:
                         if hook_child.tag == "action":
-                            # Check for nested primary actions (<execute>, <load>, etc.)
+                            # Check for nested primary actions (<execute>, <fetch>, etc.)
                             sub_actions = []
                             for sub in hook_child:
                                 if sub.tag in PRIMARY_ACTIONS:
@@ -325,7 +325,7 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
         if inputs:
             result["inputs"] = inputs
 
-    # Extract actions (execute/search/load/sign tool calls) from anywhere
+    # Extract actions (execute/fetch/sign tool calls) from anywhere
     # in the directive tree, excluding metadata internals (where the same
     # tag names are used declaratively for permissions).
     _metadata_elems: set = set()

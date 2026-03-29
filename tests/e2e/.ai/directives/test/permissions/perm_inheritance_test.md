@@ -16,7 +16,7 @@ Test that child threads inherit parent capabilities when child declares none. Pa
         <tool>rye.file-system.*</tool>
         <tool>rye.agent.threads.*</tool>
       </execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
   <outputs>

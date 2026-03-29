@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:0b6d79a374a5f9128db3cc42964ea82b941b4ddb3f77ffdbc483f7f995d741b1:cvauNEbmklpGcwMsrXGJuQY4gnD8FqgZqezJ0g_nlwWvTh8De_9dytyEHuMwsBsdD0VxJtP6djdaMHZLXeI_AQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:059638d97aacfd6b33058cff4f40c61235cd9f9ebd728353632a8fa54379453c:tzCrRcD3XPpTdlWDQGKH0FAsTRs9xWFhsCie5Yg1foAgu0GydO5xQQerowiiiYIc9HzVitVyt_UBRkxQ4w2rDA==:4b987fd4e40303ac -->
 
 # The Basics
 
@@ -11,7 +11,7 @@ This guide introduces you to the primary items and tools that power Rye.
 ```xml
 <directive name="the_basics" version="1.0.0">
   <metadata>
-    <description>Guide 2: Introduction to the three primary items (directives, knowledge, tools) and four primary actions (execute, load, search, sign) across three-tier space resolution (project → user → system).</description>
+    <description>Guide 2: Introduction to the three primary items (directives, knowledge, tools) and three primary actions (fetch, execute, sign) across three-tier space resolution (project → user → system).</description>
     <category>rye/guides</category>
     <author>rye-os</author>
     <model tier="fast" />
@@ -28,7 +28,7 @@ This guide introduces you to the primary items and tools that power Rye.
   </inputs>
 
   <outputs>
-    <output name="understanding">User understands three primary items, four primary actions, and how they interact</output>
+    <output name="understanding">User understands three primary items, three primary actions, and how they interact</output>
   </outputs>
 </directive>
 ```
@@ -46,32 +46,28 @@ Every piece of automation in Rye is one of three types:
 
 All three live in `.ai/` directories and resolve across three spaces: **project** (your `.ai/`) → **user** (shared cross-project) → **system** (Rye built-ins). Project shadows user shadows system.
 
-## Four Primary Actions
+## Three Primary Actions
 
-Every interaction with items uses one of four actions:
+Every interaction with items uses one of three actions:
 
-| Tool      | What it does                              |
-| --------- | ----------------------------------------- |
-| `execute` | Run a directive, tool, or knowledge item  |
-| `load`    | Read item content or copy between spaces  |
-| `search`  | Find items by keyword across all spaces   |
-| `sign`    | Cryptographically sign items with Ed25519 |
+| Tool      | What it does                                              |
+| --------- | --------------------------------------------------------- |
+| `fetch`   | Read item content, search by keyword, or copy between spaces |
+| `execute` | Run a directive, tool, or knowledge item                  |
+| `sign`    | Cryptographically sign items with Ed25519                 |
 
 ## How They Connect
 
-Each item type works with all four primary actions. All commands are prefaced with `rye`:
+Each item type works with all three primary actions. All commands are prefaced with `rye`:
 
 | Command             | Example                                            |
 | ------------------- | -------------------------------------------------- |
+| `fetch directive`   | `rye fetch directive init`                         |
+| `fetch tool`        | `rye fetch tool rye/bash/bash`                     |
+| `fetch knowledge`   | `rye fetch knowledge rye/core/three-tier-spaces`   |
 | `execute directive` | `rye execute directive the_basics`                 |
 | `execute tool`      | `rye execute tool rye/bash/bash`                   |
 | `execute knowledge` | `rye execute knowledge rye/core/three-tier-spaces` |
-| `load directive`    | `rye load directive init`                          |
-| `load tool`         | `rye load tool rye/bash/bash`                      |
-| `load knowledge`    | `rye load knowledge rye/core/three-tier-spaces`    |
-| `search directive`  | `rye search directive init`                        |
-| `search tool`       | `rye search tool bash`                             |
-| `search knowledge`  | `rye search knowledge spaces`                      |
 | `sign directive`    | `rye sign directive my-project/hello`              |
 | `sign tool`         | `rye sign tool my-project/hello`                   |
 | `sign knowledge`    | `rye sign knowledge my-project/guide`              |
@@ -88,10 +84,10 @@ Output ONLY the render block above. No preamble, no commentary. Then wait for th
   <step name="directives_explore">
     <instruction>
       Search for the init directive to show how discovery works:
-      <tool_call>rye_search(scope="directive", query="init")</tool_call>
+      <tool_call>rye_fetch(scope="directive", query="init")</tool_call>
 
-      Then load it to inspect its content:
-      <tool_call>rye_load(item_type="directive", item_id="init")</tool_call>
+      Then fetch it to inspect its content:
+      <tool_call>rye_fetch(item_type="directive", item_id="init")</tool_call>
 
       After the results come back, output the render block below.
     </instruction>
@@ -106,7 +102,7 @@ This is data, not code. The LLM reads it and follows it. You're reading one righ
   <step name="directives_customize">
     <instruction>
       Copy the init directive to user space for customization:
-      <tool_call>rye_load(item_type="directive", item_id="init", destination="user")</tool_call>
+      <tool_call>rye_fetch(item_type="directive", item_id="init", destination="user")</tool_call>
 
       Then output the render block below.
 
@@ -122,7 +118,7 @@ Now you have your own copy in user space. You can edit it, change the welcome me
   <step name="knowledge_explore">
     <instruction>
       Search for knowledge entries about spaces:
-      <tool_call>rye_search(scope="knowledge", query="spaces")</tool_call>
+      <tool_call>rye_fetch(scope="knowledge", query="spaces")</tool_call>
 
       Then load a knowledge entry:
       <tool_call>rye_execute(item_type="knowledge", item_id="rye/core/three-tier-spaces")</tool_call>
@@ -225,8 +221,8 @@ rye execute directive core_utils
 </process>
 
 <success_criteria>
-<criterion>User has searched, loaded, and copied a directive (demonstrating directive discovery and three-tier override)</criterion>
-<criterion>User has searched and loaded a knowledge entry (demonstrating knowledge discovery)</criterion>
+<criterion>User has fetched and copied a directive (demonstrating directive discovery and three-tier override)</criterion>
+<criterion>User has fetched a knowledge entry (demonstrating knowledge discovery)</criterion>
 <criterion>User has created, signed, and executed a tool in user space (demonstrating the full tool lifecycle)</criterion>
 <criterion>User understands the three-layer executor chain</criterion>
 </success_criteria>

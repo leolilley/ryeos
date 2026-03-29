@@ -45,12 +45,10 @@ Description of what this directive does.
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>*</directive>
-      </search>
-      <load>
         <knowledge>category/*</knowledge>
-      </load>
+      </fetch>
       <sign>
         <directive>*</directive>
       </sign>
@@ -143,7 +141,7 @@ For threaded directives, complexity maps to defaults:
 
 ### Permissions
 
-Permissions declare what capabilities the directive needs. They use a hierarchical structure with four primary actions:
+Permissions declare what capabilities the directive needs. They use a hierarchical structure with three primary actions:
 
 ```xml
 <permissions>
@@ -151,13 +149,11 @@ Permissions declare what capabilities the directive needs. They use a hierarchic
     <tool>rye.file-system.*</tool>        <!-- Execute any file-system tool -->
     <tool>rye.agent.threads.spawn_thread</tool>  <!-- Execute specific tool -->
   </execute>
-  <search>
-    <directive>*</directive>              <!-- Search all directives -->
-    <tool>rye.registry.*</tool>           <!-- Search registry tools -->
-  </search>
-  <load>
-    <knowledge>rye/core/*</knowledge>     <!-- Load core knowledge entries -->
-  </load>
+  <fetch>
+    <directive>*</directive>              <!-- Fetch all directives -->
+    <tool>rye.registry.*</tool>           <!-- Fetch registry tools -->
+    <knowledge>rye/core/*</knowledge>     <!-- Fetch core knowledge entries -->
+  </fetch>
   <sign>
     <directive>*</directive>              <!-- Sign any directive -->
   </sign>
@@ -171,7 +167,7 @@ Wildcard shortcuts:
 ```xml
 <permissions>*</permissions>              <!-- God mode — all permissions -->
 <execute>*</execute>                      <!-- Execute everything -->
-<search>*</search>                        <!-- Search everything -->
+<fetch>*</fetch>                          <!-- Fetch everything -->
 ```
 
 ### Inputs and Outputs
@@ -237,7 +233,7 @@ Structured XML with action elements:
 <process>
   <step name="check_duplicates">
     Search for existing directives with a similar name to avoid duplicates.
-    `rye_search(item_type="directive", query="{input:name}")`
+    `rye_fetch(query="{input:name}", scope="directive")`
   </step>
 
   <step name="write_file">
@@ -261,7 +257,7 @@ Plain markdown with backtick-wrapped tool calls:
 
 **Check for duplicates**
 Search for existing directives with a similar name to avoid duplicates.
-`rye_search(item_type="directive", query="{input:name}")`
+`rye_fetch(query="{input:name}", scope="directive")`
 
 **Write directive file**
 Generate the directive and write it to .ai/directives/{input:category}/{input:name}.md
@@ -277,7 +273,7 @@ Steps can also use XML action elements for richer structure:
 ```xml
 <step name="check_duplicates">
   <description>Search for existing directives.</description>
-  <search item_type="directive" query="{input:name}" />
+  <fetch scope="directive" query="{input:name}" />
 </step>
 
 <step name="write_file">
@@ -340,9 +336,9 @@ Create minimal directives with essential fields only.
     <model tier="low" />
     <limits turns="6" tokens="4096" />
     <permissions>
-      <search>
+      <fetch>
         <directive>*</directive>
-      </search>
+      </fetch>
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
@@ -370,7 +366,7 @@ Create minimal directives with essential fields only.
   <process>
     <step name="check_duplicates">
       <description>Search for existing directives with a similar name to avoid creating duplicates.</description>
-      <search item_type="directive" query="{input:name}" />
+      <fetch scope="directive" query="{input:name}" />
     </step>
 
     <step name="validate_inputs">
@@ -409,8 +405,8 @@ Create minimal directives with essential fields only.
 **What to notice:**
 
 - `tier="low"` — this is a simple task, use cheap model
-- Minimal permissions: search directives, execute file-system tools, sign directives
-- Process steps use XML action elements (`<search>`, `<execute>`, `<sign>`)
+- Minimal permissions: fetch directives, execute file-system tools, sign directives
+- Process steps use XML action elements (`<fetch>`, `<execute>`, `<sign>`)
 - Success criteria are measurable conditions
 - Outputs provide both success and failure messages
 
@@ -437,12 +433,9 @@ Create a directive with full thread execution support — model configuration, c
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <directive>*</directive>
-      </search>
-      <load>
-        <directive>*</directive>
-      </load>
+      </fetch>
       <sign>
         <directive>*</directive>
       </sign>
@@ -463,7 +456,7 @@ Create a directive with full thread execution support — model configuration, c
       Complexity level: simple, moderate, or complex — determines default limits and turn counts
     </input>
     <input name="permissions_needed" type="string" required="true">
-      Comma-separated capability strings (e.g., rye.execute.tool.rye.file-system.*,rye.search.directive.*)
+      Comma-separated capability strings (e.g., rye.execute.tool.rye.file-system.*,rye.fetch.directive.*)
     </input>
     <input name="process_steps" type="string" required="false">
       Optional summary of the steps the directive should perform
@@ -480,12 +473,12 @@ Create a directive with full thread execution support — model configuration, c
 <process>
   <step name="search_existing">
     Search for similar existing directives to avoid duplication and gather patterns.
-    `rye_search(item_type="directive", query="{input:name} {input:category}")`
+    `rye_fetch(query="{input:name} {input:category}", scope="directive")`
   </step>
 
   <step name="load_reference">
     Load an example threaded directive to use as a structural reference.
-    `rye_load(item_type="directive", item_id="rye/core/create_threaded_directive")`
+    `rye_fetch(item_type="directive", item_id="rye/core/create_threaded_directive")`
   </step>
 
   <step name="determine_limits">
@@ -649,9 +642,9 @@ Deploy the current build to the staging environment.
         <tool>rye.bash.*</tool>
         <tool>rye.file-system.*</tool>
       </execute>
-      <load>
+      <fetch>
         <knowledge>project/deploy/*</knowledge>
-      </load>
+      </fetch>
       <acknowledge risk="elevated">
         Needs shell access to run deploy scripts and health checks.
       </acknowledge>

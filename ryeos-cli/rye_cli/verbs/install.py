@@ -27,7 +27,7 @@ def register(subparsers):
 
 def _handle_install(args, project_path: str):
     """Install a bundle by pulling from registry and materializing locally."""
-    from rye.tools.execute import ExecuteTool
+    from rye.actions.execute import ExecuteTool
     from rye.utils.resolvers import get_user_space
 
     # Parse bundle_spec: "bundle_id", "bundle_id@version",

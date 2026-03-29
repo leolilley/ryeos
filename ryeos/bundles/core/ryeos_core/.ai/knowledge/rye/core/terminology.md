@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:39Z:a506b6a12dba813bb5419168fa64a111f4b2c190eadf3b869ede031fca69844a:hvKFDdBL6uji2D4l-K0iuikwy066txKd18HiZgvTeIVbhtBg5W2HBCg3IdrqDc7G2AGia47cFv8nKdjAmPXjDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:09Z:b67b7f401be00b02f932d719929471e88d66bbff29f3a01de8c368427a25c001:QK-RlZQW-WRorKasNuZbhlcNVcb1-HuZA0T96fPG-ZLWtgmVXTME3fxcyeL-sYTueM3yPe5JFTurhATzdYvkBg==:4b987fd4e40303ac -->
 
 ```yaml
 name: terminology
@@ -95,14 +95,13 @@ rye/agent/    — thread orchestration system
 
 ## MCP Tool Names
 
-The four MCP-exposed tools use the `rye_` prefix:
+The three MCP-exposed tools use the `rye_` prefix:
 
-| MCP Tool      | Purpose                           |
-| ------------- | --------------------------------- |
+| MCP Tool      | Purpose                              |
+| ------------- | ------------------------------------ |
+| `rye_fetch`   | Find items by ID or discover by query |
 | `rye_execute` | Execute directives, tools, knowledge |
-| `rye_search`  | Search across items               |
-| `rye_load`    | Load/inspect/copy items           |
-| `rye_sign`    | Validate and sign items           |
+| `rye_sign`    | Validate and sign items              |
 
 ## Key Concepts
 

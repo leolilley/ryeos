@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:45Z:4427ac9b97a54f207bbba298a95357fa449e42607653e7d1cd27c9bf18532260:veIFXdhSfSxKuIYbLi45BrM_WhSw8Dym2m00Xl3BiwmDV0ubHA2ZfkflU1OVFsP1aFMaWniXbO0vFixj10eiBg==:4b987fd4e40303ac
+# rye:signed:2026-03-29T06:39:09Z:2f88a514f28420e56c3699a7c9563f8e79526e0a936d1f50f95dcd3ce06bf31b:bllhhUJdmPwYJiGPhdfr2PzKRCW_JP-ExpEozB-uRhFILrsUvNgBBNHTHXWzlIfrJfiVnCHq6IiASy51Eqc5Ag==:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -67,7 +67,7 @@ CONFIG_SCHEMA = {
 }
 
 
-_PRIMARY_ACTION_NAMES = ("rye_execute", "rye_search", "rye_load", "rye_sign")
+_PRIMARY_ACTION_NAMES = ("rye_execute", "rye_fetch", "rye_sign")
 
 
 def _build_primary_actions() -> list:
@@ -316,7 +316,7 @@ async def _resolve_directive_chain(
             "chain": [root_name, ..., leaf_name],
         }
     """
-    from rye.tools.load import LoadTool
+    from rye.actions._resolve import resolve_item
     from rye.utils.parser_router import ParserRouter
     from rye.utils.resolvers import get_user_space
 
@@ -334,8 +334,8 @@ async def _resolve_directive_chain(
             )
         seen.add(parent_id)
 
-        load_tool = LoadTool(user_space=str(get_user_space()))
-        result = await load_tool.handle(
+        result = await resolve_item(
+            str(get_user_space()),
             item_type="directive",
             item_id=parent_id,
             project_path=project_path,
@@ -493,11 +493,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
     user_space = str(get_user_space())
 
     if params.get("resume_messages"):
-        # Handoff/resume: use LoadTool (no input validation) then parse manually
-        from rye.tools.load import LoadTool
+        # Handoff/resume: use resolve_item (no input validation) then parse manually
+        from rye.actions._resolve import resolve_item
         from rye.utils.parser_router import ParserRouter
-        load_tool = LoadTool(user_space=user_space)
-        result = await load_tool.handle(
+        result = await resolve_item(
+            user_space,
             item_type="directive",
             item_id=directive_name,
             project_path=project_path,
@@ -510,7 +510,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         # Data-driven: parse via ParserRouter, validate+interpolate via ProcessorRouter
         from rye.utils.parser_router import ParserRouter
         from rye.utils.processor_router import ProcessorRouter
-        from rye.tools.execute import ExecuteTool
+        from rye.actions.execute import ExecuteTool
 
         exec_tool = ExecuteTool(user_space=user_space)
         file_path = exec_tool._find_item(project_path, "directive", directive_name)
@@ -584,7 +584,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             # Execute knowledge items for all context positions
             # (execute parses frontmatter and returns body only, unlike load
             # which returns raw content with YAML metadata and signatures)
-            from rye.tools.execute import ExecuteTool
+            from rye.actions.execute import ExecuteTool
             from rye.utils.resolvers import get_user_space
             exec_tool = ExecuteTool(user_space=str(get_user_space()))
             suppressed = set(chain_result["context"].get("suppress", []))
@@ -698,7 +698,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         # Parse continuation directive (just parse + interpolate, don't spawn a thread)
         from rye.utils.parser_router import ParserRouter
         from rye.utils.processor_router import ProcessorRouter
-        from rye.tools.execute import ExecuteTool
+        from rye.actions.execute import ExecuteTool
         cont_exec_tool = ExecuteTool(user_space=user_space)
         cont_file = cont_exec_tool._find_item(project_path, "directive", cont_directive_id)
         cont_prompt = cont_message

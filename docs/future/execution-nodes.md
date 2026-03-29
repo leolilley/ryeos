@@ -26,8 +26,8 @@ The key principle: **there is no special infrastructure for specific workload ty
 
 | Component                        | Location                         | What It Does                                                              |
 | -------------------------------- | -------------------------------- | ------------------------------------------------------------------------- |
-| `ExecuteTool._dispatch_remote()` | `ryeos/rye/tools/execute.py`     | Routes execution to a named remote via the remote tool                    |
-| `_parse_target()`                | `ryeos/rye/tools/execute.py`     | Parses `"remote:gpu"` → `("remote", "gpu")` — named remote syntax         |
+| `ExecuteTool._dispatch_remote()` | `ryeos/rye/actions/execute.py`   | Routes execution to a named remote via the remote tool                    |
+| `_parse_target()`                | `ryeos/rye/actions/execute.py`   | Parses `"remote:gpu"` → `("remote", "gpu")` — named remote syntax         |
 | `rye/core/remote/remote`         | Core bundle tool                 | CAS sync + HTTP POST to the remote server                                 |
 | `remote_config.py`               | Core bundle                      | Resolves named remotes from `cas/remote.yaml` via 3-tier resolution       |
 | `ryeos-remote` server            | `services/ryeos-remote/`         | FastAPI server: `/execute`, `/push`, CAS sync, threads, webhooks, secrets |

@@ -70,11 +70,11 @@ Every item in Rye OS is identified by its **item ID** — the relative path from
 | `project_conventions`                   | knowledge | `.ai/knowledge/project_conventions.md`                   |
 | `rye/core/directive-metadata-reference` | knowledge | `.ai/knowledge/rye/core/directive-metadata-reference.md` |
 
-The item ID is what you pass to `rye_execute`, `rye_load`, `rye_sign`, and `rye_search`:
+The item ID is what you pass to `rye_execute`, `rye_fetch`, and `rye_sign`:
 
 ```
 rye_execute(item_type="directive", item_id="rye/core/create_directive", ...)
-rye_load(item_type="tool", item_id="rye/bash", ...)
+rye_fetch(item_type="tool", item_id="rye/bash", ...)
 rye_sign(item_type="knowledge", item_id="project_conventions", ...)
 ```
 
@@ -112,7 +112,7 @@ Common namespace prefixes:
 Namespaces also work with search scopes. To search only within a namespace:
 
 ```
-rye_search(scope="tool.rye.bash.*", query="execute", project_path=".")
+rye_fetch(query="execute", scope="tool.rye.bash.*", project_path=".")
 ```
 
 ## The 3-tier space system
@@ -188,15 +188,15 @@ When you call `rye_execute(item_type="tool", item_id="rye/bash", ...)`, Rye OS r
 **First match wins.** This means you can override any system item by placing a file with the same item ID in your project or user space. For example, to customize the bash tool for your project, copy it into your project space:
 
 ```
-rye_load(item_type="tool", item_id="rye/bash", source="system", destination="project", project_path=".")
+rye_fetch(item_type="tool", item_id="rye/bash", source="system", destination="project", project_path=".")
 ```
 
 This copies the system version into `.ai/tools/rye/bash.py` in your project, where you can modify it. Your project's version will take priority over the system version.
 
-When searching, `rye_search` checks all three spaces by default and deduplicates by item ID (project wins over user, user wins over system). You can restrict the search to a specific space:
+When searching, `rye_fetch` checks all three spaces by default and deduplicates by item ID (project wins over user, user wins over system). You can restrict the search to a specific space:
 
 ```
-rye_search(scope="directive", query="create", project_path=".", space="system")
+rye_fetch(query="create", scope="directive", project_path=".", source="system")
 ```
 
 ## Bundles

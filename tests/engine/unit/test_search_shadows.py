@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rye.tools.search import SearchTool
+from rye.actions._search import SearchEngine
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ class TestSearchShadowDetection:
 
     async def test_detect_shadows_marks_duplicates(self):
         """Items with same ID from different spaces should be marked."""
-        tool = SearchTool("")
+        tool = SearchEngine("")
         results = [
             {"id": "test/item", "source": "project", "score": 0.9},
             {"id": "test/item", "source": "system", "score": 0.8},
@@ -86,7 +86,7 @@ class TestSearchShadowDetection:
 
     async def test_detect_shadows_multiple_spaces(self):
         """An item in project, user, and system should chain correctly."""
-        tool = SearchTool("")
+        tool = SearchEngine("")
         results = [
             {"id": "test/item", "source": "project", "score": 0.9},
             {"id": "test/item", "source": "user", "score": 0.8},
@@ -101,7 +101,7 @@ class TestSearchShadowDetection:
 
     async def test_detect_shadows_no_duplicates(self):
         """When no duplicates exist, no shadow info is added."""
-        tool = SearchTool("")
+        tool = SearchEngine("")
         results = [
             {"id": "a", "source": "project", "score": 0.9},
             {"id": "b", "source": "system", "score": 0.8},
@@ -115,9 +115,9 @@ class TestSearchShadowDetection:
 
     async def test_shadow_info_in_search_results(self, multi_space_project):
         """Integration: search across all spaces should include shadow data."""
-        tool = SearchTool("")
+        tool = SearchEngine("")
         result = await tool.handle(
-            scope="rye.search.directive.*",
+            scope="rye.fetch.directive.*",
             query="*",
             project_path=str(multi_space_project),
             source="all",

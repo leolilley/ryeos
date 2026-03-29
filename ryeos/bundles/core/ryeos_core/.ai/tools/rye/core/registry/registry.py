@@ -1,4 +1,4 @@
-# rye:signed:2026-03-16T11:23:39Z:7baac7996f52ac09a6e3396bf3ef025c14d885c93f80af23b4a4a22504777fb4:eLzKSAPHUFD21uZfaUEExDlKPFL0N7uYpKURKzrrkm23AHcoyWDHR8mOV-PX4mpqwbfzwrSxJ9sQBuPS83iyDQ==:4b987fd4e40303ac
+# rye:signed:2026-03-29T05:38:21Z:0bd4f177b9228bde39595e7e884f56392618cf85c15beb84ef49f925e7cb2a6b:nlAs05D33cIAnC2MKT7lPhisI93omWZ9LLTnGfhS1Ghl3-S4455h_RUuB249kyqsRY0-lML4wYSF4HxPbFyiCw==:4b987fd4e40303ac
 """
 Registry tool - auth and item management for Rye Registry.
 

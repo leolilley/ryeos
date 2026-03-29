@@ -18,8 +18,7 @@ This is NOT meant to be executed directly — it's a context provider for the ex
     </context>
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 </directive>

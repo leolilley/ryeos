@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:0958cfc9ba71b53e19521b669757af52627d1a862151befe711669b3293db362:OT-PzQlIk9vaehTfNVuxm2CUCfCh6D_JcVmUu2OK_OckFR7Tl98l-ctCl3PVFj5M3yveU8fgJUm-plS1cuEeAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:23201bac4e977aefd1ff72f7db6c45e678b5edc2a21b6092488d4ac137e20445:nJg5LLALlyZuFXNol2jc7PocHDpx3hPGNMM6vW3VKTfMFLzbvuoAAL0zt-hG1MXuEYqaXaoj4W9XqXRzArw2Ag==:4b987fd4e40303ac -->
 ```yaml
 name: orchestrator-patterns
 title: Orchestrator Patterns
@@ -123,7 +123,7 @@ load knowledge → read input → spawn children → wait → aggregate → proc
     <tool>rye.agent.threads.orchestrator</tool>
     <directive>domain.*</directive>
   </execute>
-  <load><knowledge>domain.*</knowledge></load>
+  <fetch><knowledge>domain.*</knowledge></fetch>
 </permissions>
 ```
 
@@ -150,11 +150,10 @@ load state → select targets → spawn discovery → qualify → outreach → u
     <tool>rye.agent.threads.orchestrator</tool>
     <directive>domain.*</directive>
   </execute>
-  <search>
+  <fetch>
     <directive>domain.*</directive>
     <knowledge>domain.*</knowledge>
-  </search>
-  <load><knowledge>domain.*</knowledge></load>
+  </fetch>
 </permissions>
 ```
 

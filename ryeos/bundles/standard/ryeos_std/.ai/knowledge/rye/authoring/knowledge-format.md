@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:62cb336c9bd7d1f67bf2161f457aa8805537d9243cc6e36f325a016f9b75b42d:CRnNCPasbSR-EeQzJjC0FizxW3nfGvjLg0Q2frldCeER6A4-uqQmcEDPJTj_WNn-2fx6avtPiFZUijbFd2eXAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:77b586cbbe089658dde2eeb9442cac8024e19382b241dc41e77c53467179b2bc:7bw04RuwPrOPqGXHQgG4ZFFAkRwQcFtJmHdf9J1NIa2vl9g5OUjDilt4nouh_zLuH9U7bbanDdWyHnkC-RXNBg==:4b987fd4e40303ac -->
 
 ```yaml
 name: knowledge-format
@@ -96,7 +96,7 @@ The file is parsed by the `markdown_frontmatter` parser, which extracts the YAML
 **Type:** string (kebab-case)
 **Required:** Yes
 
-Unique identifier for the knowledge entry. Used in cross-references, searches, and `rye_load` calls.
+Unique identifier for the knowledge entry. Used in cross-references, searches, and `rye_fetch` calls.
 
 ```yaml
 name: authentication-patterns
@@ -410,12 +410,12 @@ If an entry exceeds ~600 lines, consider splitting into multiple focused entries
 
 ## Loading Knowledge
 
-### Via `rye_load`
+### Via `rye_fetch`
 
 Knowledge is loaded and injected into agent context:
 
 ```python
-rye_load(item_type="knowledge", item_id="rye/core/terminology")
+rye_fetch(item_type="knowledge", item_id="rye/core/terminology")
 # Returns the markdown body as context
 ```
 
@@ -437,7 +437,7 @@ Automatically loaded when a thread starts:
 ```xml
 <step name="load_context">
   Load the format specification for reference.
-  `rye_load(item_type="knowledge", item_id="rye/authoring/directive-format")`
+  `rye_fetch(item_type="knowledge", item_id="rye/authoring/directive-format")`
 </step>
 ```
 

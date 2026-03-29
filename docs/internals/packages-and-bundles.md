@@ -69,7 +69,7 @@ pip install ryeos-mcp[code]
 ```
 pip install ryeos-engine   → engine only, no .ai/ data
 pip install ryeos-core     → engine + rye/core/* only
-pip install ryeos          → engine + core + standard items (rye/agent/*, rye/bash, rye/file-system/*, rye/mcp/*, rye/execute, rye/search, rye/load, rye/sign, rye/authoring/*, rye/guides/*)
+pip install ryeos          → engine + core + standard items (rye/agent/*, rye/bash, rye/file-system/*, rye/mcp/*, rye/execute, rye/fetch, rye/sign, rye/authoring/*, rye/guides/*)
 pip install ryeos[web]     → + rye/web/*
 pip install ryeos[code]    → + rye/code/*
 pip install ryeos[all]     → everything
@@ -126,7 +126,7 @@ Use `ryeos-engine` when you need the engine but no `.ai/` data at all (e.g., ser
 
 ```python
 # Direct execution without MCP:
-from rye.tools.execute import ExecuteTool
+from rye.actions.execute import ExecuteTool
 executor = ExecuteTool()
 result = await executor.run(item_type="tool", item_id="rye/bash", parameters={"command": "ls"})
 ```
@@ -209,7 +209,7 @@ The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so an
 **Dependencies:** `ryeos`, `pyyaml`
 **Bundle:** none — inherits bundles from its `ryeos` dependency
 
-The terminal-native CLI. Maps shell verbs (`search`, `load`, `execute`, `sign`, `thread`, `graph`, `test`, `registry`, `install`, `uninstall`) directly to the four RYE primitives — no MCP transport. Imports `ryeos` directly as a Python library for zero-overhead invocation.
+The terminal-native CLI. Maps shell verbs (`fetch`, `execute`, `sign`, `thread`, `graph`, `test`, `registry`, `install`, `uninstall`) directly to the three RYE primitives — no MCP transport. Imports `ryeos` directly as a Python library for zero-overhead invocation.
 
 Use `ryeos-cli` when you want to invoke RYE from the terminal without an MCP client — CI scripts, graph operations, test running, or interactive development.
 

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:a07c0727c956ef985c0bbf3e94b77cca4ee28025eba2093c48cd6a655683ab1f:Q7C-CPrcOqtdPfD4qqNLUxnfKUAdTmnPezlbUAkGYZQ1hPRqObluAphJFacMP5kKVRhnUlshFtybKyulc072DA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:2974a20b0a861cd2895b6fc6e7abf0d3b00c4ae64e16fd123f6fda5786b1c014:J0vJq72sTlAILfyr_U_Wa2oE4GQ5MFjA40vYS_Y_QhWGpwSZpl7nl65kgTscHOeLMU5nlkJGGXy2W5VgUG0gAw==:4b987fd4e40303ac -->
 # Create Directive
 
 Create a new directive file with proper metadata, validate, and sign it.
@@ -12,9 +12,9 @@ Create a new directive file with proper metadata, validate, and sign it.
     <model tier="fast" />
     <limits turns="6" tokens="4096" />
     <permissions>
-      <search>
+      <fetch>
         <directive>*</directive>
-      </search>
+      </fetch>
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
@@ -49,7 +49,7 @@ Create a new directive file with proper metadata, validate, and sign it.
 <process>
   <step name="check_duplicates">
     Search for existing directives with a similar name to avoid creating duplicates.
-    `rye_search(item_type="directive", query="{input:name}")`
+    `rye_fetch(scope="directive", query="{input:name}")`
     If a duplicate exists, stop and report it.
   </step>
 

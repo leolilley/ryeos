@@ -13,7 +13,7 @@ Test that the spend limit triggers escalation. Set spend=$0.001 — even a singl
     <limits turns="10" tokens="100000" spend="0.001" />
     <permissions>
       <execute><tool>rye.file-system.*</tool></execute>
-      <search>*</search>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

@@ -13,12 +13,9 @@ Research a topic by searching knowledge, loading the best match, then writing a 
     <model tier="fast" id="claude-3-5-haiku-20241022">Multi-tool research and report generation</model>
     <limits turns="6" tokens="3072" />
     <permissions>
-      <search>
+      <fetch>
         <knowledge>*</knowledge>
-      </search>
-      <load>
-        <knowledge>*</knowledge>
-      </load>
+      </fetch>
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>

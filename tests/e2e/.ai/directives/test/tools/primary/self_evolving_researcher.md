@@ -7,18 +7,15 @@ Self-evolution and research directive. Searches for existing knowledge, loads re
 ```xml
 <directive name="self_evolving_researcher" version="1.0.0">
   <metadata>
-    <description>Self-evolving researcher — searches knowledge, synthesizes a research report, creates a new knowledge entry from findings, signs it, and logs the evolution. Demonstrates search, load, execute, and sign across all item types.</description>
+    <description>Self-evolving researcher — searches knowledge, synthesizes a research report, creates a new knowledge entry from findings, signs it, and logs the evolution. Demonstrates fetch, execute, and sign across all item types.</description>
     <category>test/tools/primary</category>
     <author>rye-os</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Self-evolving research with knowledge creation and signing</model>
     <limits turns="12" tokens="4096" />
     <permissions>
-      <search>
+      <fetch>
         <knowledge>*</knowledge>
-      </search>
-      <load>
-        <knowledge>*</knowledge>
-      </load>
+      </fetch>
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>

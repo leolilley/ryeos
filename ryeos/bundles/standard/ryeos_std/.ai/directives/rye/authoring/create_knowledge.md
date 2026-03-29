@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:4dfcba526d81bdcdd03eb986ce67ecb20158b839f32695eb9b7408d3fbdb1ea1:iHeElidf2ktToQEBeuYoU26fzhqMNBFjnNUEkCeG80l9lfbZQsQUAdiT-PEiosxJL0u0kky_Mjcd7P-HwvMSDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:e043c00e425fbc318a481803881ffa1294816662c1c7647f654ea869ed13b452:kZHIY-7dXY6aqb8mRjODtGh1AVpSnSJkeL_itxfnkEcTiuLZ4jynbnRe1NSRzz2f65BtQECOvkZ14dd1oJv6Bw==:4b987fd4e40303ac -->
 # Create Knowledge Entry
 
 Create a new knowledge entry with proper metadata, validation, and signing.
@@ -15,9 +15,9 @@ Create a new knowledge entry with proper metadata, validation, and signing.
       <execute>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <knowledge>*</knowledge>
-      </search>
+      </fetch>
       <sign>
         <knowledge>*</knowledge>
       </sign>
@@ -52,7 +52,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
 <process>
   <step name="check_duplicates">
     Search for existing knowledge entries with a similar ID to avoid duplicates.
-    `rye_search(item_type="knowledge", query="{input:name}")`
+    `rye_fetch(scope="knowledge", query="{input:name}")`
   </step>
 
   <step name="write_entry">

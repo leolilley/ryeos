@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:77f4d2b814f35dba85e04c05661ae01b995eec8ed7fc59a073aae6aa16d8b7a6:fRIm12JDhqIcYHNAuZwMyJ5AF_ZOECcjJk52-_NlrAVr2sVo4RzO8f6Ujw0EBlL9Cewh2j6vpOUy0a0OHOhJCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:19:02Z:cc1e9410426bcfbd01f35308906135e5002010311f9da8df704b01422054072e:J2hxQKiPKEkMGlCc_G0c4eRYxvvtHB7Zi4BCtAAeUyXpFX-jF6MAOVtwlol6V6C9Ewp9o6k1NYXHvWgRx4y-Dw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Build With Review
 
@@ -23,8 +23,7 @@ Orchestrator pattern — runs a build directive, then reviews the output. Retrie
         <tool>rye.code.git.git</tool>
         <knowledge>*</knowledge>
       </execute>
-      <search>*</search>
-      <load>*</load>
+      <fetch>*</fetch>
     </permissions>
   </metadata>
 

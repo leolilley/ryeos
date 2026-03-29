@@ -24,7 +24,7 @@ The complete specification for directive metadata. Covers:
 - **Root element** — `<directive name="..." version="...">` with required `name` (kebab-case) and `version` (semver) attributes
 - **Required metadata** — `<description>`, `<category>`, `<author>`, `<model>`, `<permissions>`, `<cost>`
 - **Model tier** — User-defined string (e.g., `fast`, `general`, `orchestrator`, `reasoning`) — not an enum. Supports `fallback` and `id` attributes
-- **Permissions** — Hierarchical XML structure: `<permissions>` → `<execute>`/`<search>`/`<load>`/`<sign>` → `<tool>`/`<directive>`/`<knowledge>` → capability pattern. Supports wildcard `*` for broad access
+- **Permissions** — Hierarchical XML structure: `<permissions>` → `<execute>`/`<fetch>`/`<sign>` → `<tool>`/`<directive>`/`<knowledge>` → capability pattern. Supports wildcard `*` for broad access
 - **Capability strings** — Format: `rye.{primary}.{item_type}.{specifics}` (e.g., `rye.file-system.*`)
 - **Cost tracking** — `<cost>` with `<context estimated_usage="..." turns="..." spawn_threshold="...">`, optional `<duration>` and `<spend>`
 - **Optional fields** — `<context>` (related files, relationships), `<hooks>` (conditional actions triggered by events)
@@ -33,7 +33,7 @@ The complete specification for directive metadata. Covers:
 **Load it:**
 
 ```python
-rye_load(item_type="knowledge", item_id="rye/core/directive-metadata-reference")
+rye_fetch(item_type="knowledge", item_id="rye/core/directive-metadata-reference")
 ```
 
 ### 2. Tool Metadata Reference
@@ -53,7 +53,7 @@ The complete specification for tool metadata. Covers:
 **Load it:**
 
 ```python
-rye_load(item_type="knowledge", item_id="rye/core/tool-metadata-reference")
+rye_fetch(item_type="knowledge", item_id="rye/core/tool-metadata-reference")
 ```
 
 ### 3. Knowledge Metadata Reference
@@ -71,7 +71,7 @@ The complete specification for knowledge entry metadata. Covers:
 **Load it:**
 
 ```python
-rye_load(item_type="knowledge", item_id="rye/core/knowledge-metadata-reference")
+rye_fetch(item_type="knowledge", item_id="rye/core/knowledge-metadata-reference")
 ```
 
 ---
@@ -88,7 +88,7 @@ Directives can load knowledge in their process steps to inform the LLM's decisio
 <step name="load_specs">
   <description>Load the tool metadata spec before creating a new tool</description>
   <action>
-    rye_load(item_type="knowledge", item_id="rye/core/tool-metadata-reference")
+    rye_fetch(item_type="knowledge", item_id="rye/core/tool-metadata-reference")
   </action>
 </step>
 ```
@@ -115,7 +115,7 @@ hooks:
   - id: "inject_metadata_ref"
     event: "thread_started"
     action:
-      primary: "load"
+      primary: "fetch"
       item_type: "knowledge"
       item_id: "rye/core/directive-metadata-reference"
 ```
@@ -126,10 +126,10 @@ All knowledge entries — bundled and user-created — are searchable:
 
 ```python
 # Search across all knowledge
-rye_search(scope="knowledge", query="metadata specification")
+rye_fetch(scope="knowledge", query="metadata specification")
 
 # Search with specific source
-rye_search(scope="knowledge", query="tool parameters", source="system")
+rye_fetch(scope="knowledge", query="tool parameters", source="system")
 ```
 
 ---
@@ -154,13 +154,13 @@ Each entry needs the required frontmatter (`name`, `title`, `category`, `version
 Knowledge entries are searchable immediately after creation:
 
 ```python
-rye_search(scope="knowledge", query="deployment troubleshooting")
+rye_fetch(scope="knowledge", query="deployment troubleshooting")
 ```
 
 And loadable by any directive or thread:
 
 ```python
-rye_load(item_type="knowledge", item_id="troubleshooting/common-deploy-issues")
+rye_fetch(item_type="knowledge", item_id="troubleshooting/common-deploy-issues")
 ```
 
 This makes your project knowledge available to AI agents in the same way the bundled metadata references are — structured, searchable, and injectable at runtime.

@@ -7,8 +7,7 @@ description: "Test conditional branching, on_error recovery, and state accumulat
 permissions:
   - rye.execute.tool.*
   - rye.execute.directive.*
-  - rye.search.*
-  - rye.load.*
+  - rye.fetch.*
 
 config_schema:
   type: object

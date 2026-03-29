@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:45Z:9bedc1e2c8923e788a451c6fe5030bef5bd507211cd00bff9449e8150f5a6794:thO-2xez_rYyS0T_68mkhN41YFSTPosZLmfZ2jg1riD-XXyCPzH4_3BbL0yDbVhJiNUOn6PZ9ULgCo0kurrCBw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-03-29T06:39:14Z:828ccdde5bcf1c25c56a9ea61eaa1627f2fb56323198a332dceec2bae293692d:y9uf-XgwbyAT73rQ6jRNLKLI0l_pVDsudD9JTto1mmHED9rYHlvPCZ80FMUPefB17XvbNvxcD1Sl8M4y77fdDw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # MCP Add Server
 
@@ -17,9 +17,9 @@ Register a new MCP server with Rye OS end-to-end — creates server config, disc
         <tool>rye.mcp.*</tool>
         <tool>rye.file-system.*</tool>
       </execute>
-      <search>
+      <fetch>
         <tool>*</tool>
-      </search>
+      </fetch>
       <sign>
         <tool>*</tool>
       </sign>
