@@ -1,6 +1,6 @@
 """Subprocess execution primitive.
 
-All process operations go through lillux-proc. No POSIX fallbacks.
+All process operations go through lillux. No POSIX fallbacks.
 """
 
 import asyncio
@@ -81,32 +81,32 @@ class StatusResult:
 
 
 class SubprocessPrimitive:
-    """All process operations go through lillux-proc. No POSIX fallbacks."""
+    """All process operations go through lillux. No POSIX fallbacks."""
 
     def __init__(self):
-        self._lillux_proc: Optional[str] = self._find_lillux_proc()
-        if not self._lillux_proc:
+        self._lillux: Optional[str] = self._find_lillux()
+        if not self._lillux:
             raise ConfigurationError(
-                "lillux-proc binary not found on PATH. "
+                "lillux binary not found on PATH. "
                 "Ensure ryeos is installed correctly."
             )
 
     @staticmethod
-    def _find_lillux_proc() -> Optional[str]:
-        """Find lillux-proc, checking the running interpreter's bin dir first."""
+    def _find_lillux() -> Optional[str]:
+        """Find lillux, checking the running interpreter's bin dir first."""
         import sys
         bin_dir = Path(sys.executable).parent
-        candidate = bin_dir / "lillux-proc"
+        candidate = bin_dir / "lillux"
         if candidate.is_file():
             return str(candidate)
-        return shutil.which("lillux-proc")
+        return shutil.which("lillux")
 
     async def execute(
         self,
         config: Dict[str, Any],
         params: Dict[str, Any],
     ) -> SubprocessResult:
-        """Execute subprocess command via lillux-proc exec.
+        """Execute subprocess command via lillux exec run.
 
         Two-stage templating:
         1. Environment variable expansion: ${VAR:-default}
@@ -169,14 +169,14 @@ class SubprocessPrimitive:
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
-            # Build lillux-proc exec command
-            exec_args: List[str] = [self._lillux_proc, "exec", "--cmd", command]
+            # Build lillux exec run command
+            exec_args: List[str] = [self._lillux, "exec", "run", "--cmd", command]
             for arg in args:
                 exec_args.extend(["--arg", arg])
             if cwd:
                 exec_args.extend(["--cwd", cwd])
             if input_data:
-                # Signal lillux-proc to read stdin data from its own stdin
+                # Signal lillux to read stdin data from its own stdin
                 # instead of passing as CLI arg (avoids E2BIG on large payloads)
                 exec_args.append("--stdin-pipe")
             if timeout:
@@ -194,7 +194,7 @@ class SubprocessPrimitive:
                     env=process_env,
                 )
 
-                # lillux-proc handles its own timeout, add buffer for the wrapper
+                # lillux handles its own timeout, add buffer for the wrapper
                 wrapper_timeout = timeout + 10 if timeout else 310
                 pipe_input = input_data.encode("utf-8") if input_data else None
                 try:
@@ -209,12 +209,12 @@ class SubprocessPrimitive:
                     return SubprocessResult(
                         success=False,
                         stdout="",
-                        stderr=f"lillux-proc wrapper timed out after {wrapper_timeout} seconds",
+                        stderr=f"lillux wrapper timed out after {wrapper_timeout} seconds",
                         return_code=-1,
                         duration_ms=duration_ms,
                     )
 
-                # Parse lillux-proc JSON output
+                # Parse lillux JSON output
                 if proc.returncode == 0 and stdout_bytes:
                     try:
                         data = json.loads(stdout_bytes.strip())
@@ -228,7 +228,7 @@ class SubprocessPrimitive:
                     except json.JSONDecodeError:
                         pass
 
-                # lillux-proc itself failed
+                # lillux itself failed
                 duration_ms = (time.time() - start_time) * 1000
                 return SubprocessResult(
                     success=False,
@@ -243,7 +243,7 @@ class SubprocessPrimitive:
                 return SubprocessResult(
                     success=False,
                     stdout="",
-                    stderr=f"lillux-proc not found: {self._lillux_proc}",
+                    stderr=f"lillux not found: {self._lillux}",
                     return_code=127,
                     duration_ms=duration_ms,
                 )
@@ -266,8 +266,8 @@ class SubprocessPrimitive:
         envs: Optional[Dict[str, str]] = None,
         input_data: Optional[str] = None,
     ) -> SpawnResult:
-        """Detached spawn via lillux-proc spawn."""
-        exec_args = [self._lillux_proc, "spawn", "--cmd", cmd]
+        """Detached spawn via lillux exec spawn."""
+        exec_args = [self._lillux, "exec", "spawn", "--cmd", cmd]
         for arg in args:
             exec_args.extend(["--arg", arg])
         if log_path:
@@ -298,13 +298,13 @@ class SubprocessPrimitive:
         except (asyncio.TimeoutError, OSError, ValueError) as e:
             return SpawnResult(success=False, error=str(e))
 
-        return SpawnResult(success=False, error=f"lillux-proc exited {proc.returncode}")
+        return SpawnResult(success=False, error=f"lillux exited {proc.returncode}")
 
     async def kill(self, pid: int, grace: float = 3.0) -> KillResult:
-        """Kill via lillux-proc kill."""
+        """Kill via lillux exec kill."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._lillux_proc, "kill", "--pid", str(pid), "--grace", str(grace),
+                self._lillux, "exec", "kill", "--pid", str(pid), "--grace", str(grace),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -320,13 +320,13 @@ class SubprocessPrimitive:
         except (asyncio.TimeoutError, OSError, ValueError) as e:
             return KillResult(success=False, pid=pid, error=str(e))
 
-        return KillResult(success=False, pid=pid, error=f"lillux-proc exited {proc.returncode}")
+        return KillResult(success=False, pid=pid, error=f"lillux exited {proc.returncode}")
 
     async def status(self, pid: int) -> StatusResult:
-        """Status check via lillux-proc status."""
+        """Status check via lillux exec status."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                self._lillux_proc, "status", "--pid", str(pid),
+                self._lillux, "exec", "status", "--pid", str(pid),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )

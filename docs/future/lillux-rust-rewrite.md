@@ -4,13 +4,13 @@ title: "Lillux Rust Rewrite — The Kernel Goes Native"
 description: Full rewrite of the Lillux microkernel in Rust. Three primitives — Execute, Memory, Identity — plus a thin Time layer. Zero Python. One binary. The process boundary is the ring transition.
 category: future
 tags: [lillux, rust, kernel, microkernel, architecture, security, capability]
-version: "0.1.0"
-status: design-proposal
+version: "1.0.0"
+status: implemented
 ```
 
 # Lillux Rust Rewrite
 
-> **Status:** Design Proposal — architectural direction is decided, not scheduled for implementation.
+> **Status:** Implemented — unified `lillux` binary at `lillux/lillux/`, Python shims rewired, 1180 tests passing.
 
 ## Executive Summary
 
@@ -341,16 +341,28 @@ These are all inherited from `lillux-proc` and the existing Python primitives. N
 | Dir permissions race | low | `identity.rs` | `create_dir_all` uses default umask, then `set_perms(0o700)` tightens. Brief window. Fix: use `DirBuilder::new().mode(0o700)`. |
 | Fingerprint PEM vs DER | low | `identity.rs` | Fingerprint hashes PEM text bytes — CRLF conversion across platforms changes the hash. Fix: hash raw DER public key bytes instead. Deferred because changing this would break existing fingerprints and must match Python's current `hashlib.sha256(public_key_pem)` behavior. |
 
-### Migration strategy
+### Migration — done
 
-The Python `lillux.primitives` module stays as a thin shim with identical API. Internals change to shell out to the `lillux` binary. Callers don't change.
+The Python `lillux.primitives` module stays as a thin shim with identical API. Internals shell out to the `lillux` binary. Callers didn't change. 1180 tests pass.
 
-**Step 1 — `subprocess.py`:** Change `shutil.which("lillux-proc")` → `shutil.which("lillux")`, change `lillux-proc exec` → `lillux exec run`, `lillux-proc spawn` → `lillux exec spawn`, etc. Smallest diff, ~5 callers.
+**Step 1 — `subprocess.py`:** Changed `lillux-proc exec` → `lillux exec run`, `lillux-proc spawn` → `lillux exec spawn`, etc. Smallest diff.
 
-**Step 2 — `signing.py`:** Rewrite internals to call `lillux sign`, `lillux verify`, `lillux keypair generate`, `lillux keypair fingerprint`. Drop the `cryptography` dependency. ~60 callers, zero API changes.
+**Step 2 — `signing.py`:** Rewrote internals to call `lillux sign`, `lillux verify`, `lillux keypair generate`, `lillux keypair fingerprint`. Dropped the `cryptography` dependency. Zero API changes.
 
-**Step 3 — `cas.py`:** Rewrite to call `lillux cas store|fetch|has|verify`. ~25 callers.
+**Step 3 — `cas.py`:** Rewrote to call `lillux cas store|fetch`. Kept `has_*` as direct filesystem checks (faster than subprocess for existence checks).
 
-**Step 4 — `integrity.py`:** Keep as pure Python (10 lines of `json.dumps` + `hashlib.sha256`). Called in hot paths — subprocess overhead for every hash would be a regression. Rust CAS handles its own hashing internally. Both produce identical output.
+**Step 4 — `integrity.py`:** Stays pure Python (10 lines of `json.dumps` + `hashlib.sha256`). Called in hot paths — subprocess overhead for every hash would be a regression. Rust CAS handles its own hashing internally. Both produce identical output.
 
 Things that stay Python (userspace, now in `rye/runtime/` and `rye/schemas/`): `http_client.py`, `lockfile.py`, `env_resolver.py`, `auth.py`, `errors.py`, `schema_validator.py`.
+
+### Bugs hit during migration
+
+These are the integration bugs that surfaced when Python and Rust met at the process boundary. All fixed.
+
+| Bug | Root Cause | Fix |
+|---|---|---|
+| Signature verification fails for padded base64url | Python `base64.urlsafe_b64encode` produces trailing `=`, Rust `URL_SAFE_NO_PAD` rejects them | `identity.rs`: strip trailing `=` before decoding (`signature.trim_end_matches('=')`) |
+| Signatures starting with `-` rejected by CLI | Base64url can produce `-` as first char; clap parses `--signature -PVQ...` as unknown flag `-P` | `main.rs`: `#[arg(long, allow_hyphen_values = true)]` on the `--signature` arg |
+| `get_object` returns None for objects containing an `"error"` key | Python shim checked `if "error" in data` to detect CAS errors, but user data can have `"error"` fields too | `cas.rs`: `do_fetch` exits non-zero on not-found instead of returning error JSON; Python shim just checks return code |
+| CAS rejects invalid hashes with exit 0 | Hash validation returned `{"error":"..."}` through `main()` with exit 0, Python shim passed it through as valid data | `cas.rs`: invalid hash validation exits non-zero directly |
+| `_ensure_self_trusted` missing `version=` | Pre-existing bug in `transcript_signer.py` — `add_key()` call missing required `version` kwarg, only triggered by test ordering | Added `version="1.0.0"` |

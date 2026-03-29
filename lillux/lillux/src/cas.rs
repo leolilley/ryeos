@@ -50,7 +50,8 @@ pub fn run(action: CasAction) -> serde_json::Value {
             _ => unreachable!(),
         };
         if !valid_hash(h) {
-            return serde_json::json!({ "error": "invalid hash: expected 64 hex chars" });
+            eprintln!("invalid hash: expected 64 hex chars");
+            std::process::exit(1);
         }
     }
     match action {
@@ -172,6 +173,9 @@ fn do_fetch(root: &str, hash: &str, blob: bool) -> serde_json::Value {
             let _ = io::stdout().lock().write_all(&data);
             std::process::exit(0);
         }
-        Err(_) => serde_json::json!({ "error": "not found" }),
+        Err(_) => {
+            eprintln!("not found");
+            std::process::exit(1);
+        }
     }
 }

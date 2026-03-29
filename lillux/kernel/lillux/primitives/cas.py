@@ -6,17 +6,33 @@ Storage layout under a given root:
     blobs/ab/cd/<sha256>          — raw bytes
     objects/ab/cd/<sha256>.json   — canonical JSON
 
-All writes are atomic (tmp + rename) and idempotent (skip if exists).
+All writes are atomic and idempotent — delegated to the lillux Rust binary.
 """
 
-import hashlib
 import json
-import os
-import tempfile
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from lillux.primitives.integrity import canonical_json, compute_integrity
+_cached_binary: Optional[str] = None
+
+
+def _lillux() -> str:
+    """Find the lillux binary. Cached after first lookup."""
+    global _cached_binary
+    if _cached_binary is not None:
+        return _cached_binary
+    candidate = Path(sys.executable).parent / "lillux"
+    if candidate.is_file():
+        _cached_binary = str(candidate)
+        return _cached_binary
+    found = shutil.which("lillux")
+    if found:
+        _cached_binary = found
+        return _cached_binary
+    raise FileNotFoundError("lillux binary not found")
 
 
 def _shard_path(root: Path, namespace: str, hash_hex: str, ext: str = "") -> Path:
@@ -24,61 +40,51 @@ def _shard_path(root: Path, namespace: str, hash_hex: str, ext: str = "") -> Pat
     return root / namespace / hash_hex[:2] / hash_hex[2:4] / f"{hash_hex}{ext}"
 
 
-def _atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Write bytes atomically via tmp file + rename."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=target.parent)
-    closed = False
-    try:
-        os.write(fd, data)
-        os.close(fd)
-        closed = True
-        os.rename(tmp_path, target)
-    except BaseException:
-        if not closed:
-            os.close(fd)
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
 def store_blob(data: bytes, root: Path) -> str:
     """Store raw bytes, return sha256 hex digest. Skip if exists."""
-    hash_hex = hashlib.sha256(data).hexdigest()
-    target = _shard_path(root, "blobs", hash_hex)
-    if target.exists():
-        return hash_hex
-    _atomic_write_bytes(target, data)
-    return hash_hex
+    result = subprocess.run(
+        [_lillux(), "cas", "store", "--root", str(root), "--blob"],
+        input=data,
+        capture_output=True,
+    )
+    result.check_returncode()
+    return json.loads(result.stdout)["hash"]
 
 
 def store_object(data: dict, root: Path) -> str:
     """Store a dict as canonical JSON, return its integrity hash. Skip if exists."""
-    hash_hex = compute_integrity(data)
-    target = _shard_path(root, "objects", hash_hex, ext=".json")
-    if target.exists():
-        return hash_hex
-    encoded = canonical_json(data).encode("utf-8")
-    _atomic_write_bytes(target, encoded)
-    return hash_hex
+    result = subprocess.run(
+        [_lillux(), "cas", "store", "--root", str(root)],
+        input=json.dumps(data).encode("utf-8"),
+        capture_output=True,
+    )
+    result.check_returncode()
+    return json.loads(result.stdout)["hash"]
 
 
 def get_blob(hash_hex: str, root: Path) -> Optional[bytes]:
     """Read blob by hash. Returns None if not found."""
-    target = _shard_path(root, "blobs", hash_hex)
-    if target.exists():
-        return target.read_bytes()
-    return None
+    result = subprocess.run(
+        [_lillux(), "cas", "fetch", "--root", str(root), "--hash", hash_hex, "--blob"],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout
 
 
 def get_object(hash_hex: str, root: Path) -> Optional[dict]:
     """Read object by hash. Returns None if not found."""
-    target = _shard_path(root, "objects", hash_hex, ext=".json")
-    if target.exists():
-        return json.loads(target.read_bytes())
-    return None
+    result = subprocess.run(
+        [_lillux(), "cas", "fetch", "--root", str(root), "--hash", hash_hex],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 def has_blob(hash_hex: str, root: Path) -> bool:

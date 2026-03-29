@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:20Z:773f65e158e69b345a4789523fb4df1026207111a2ec73feffe4bbf985d011f6:M37Sehfigg9_2uufUDsjPJKoPCSnfXrUGc2Y5u41wbL9rkSS7a2v46V9q6XlpCOyJPImwXje32Xjwv6fPIJJAA==:4b987fd4e40303ac
+# rye:signed:2026-03-29T11:16:19Z:3884947e22e997b79d6c6a0fe1d87b0fea860b8f88ac5caf1ff33d41d373154f:J594VNV5t81ZkaYOmFkTsMtCNhqwhvBWqgKqKLx-zA2gRg1D5lp0peCr8DE28xT7tSdaS93GgDD8F3cX_F8CBA:4b987fd4e40303ac
 """Checkpoint signing for transcript integrity and JSON signing utilities.
 
 Signs transcript.jsonl at turn boundaries by appending checkpoint events
@@ -40,7 +40,7 @@ def _ensure_self_trusted(public_pem: bytes, fingerprint: str) -> None:
 
     trust_store = TrustStore()
     if not trust_store.is_trusted(fingerprint):
-        trust_store.add_key(public_pem, owner="self")
+        trust_store.add_key(public_pem, owner="self", version="1.0.0")
 
 
 class TranscriptSigner:

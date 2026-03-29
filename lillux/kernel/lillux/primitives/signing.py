@@ -1,19 +1,54 @@
 """Ed25519 signing primitives for content integrity.
 
-Pure cryptographic operations — no policy, no I/O beyond key material.
+Delegates all crypto operations to the ``lillux`` Rust binary via subprocess.
 """
 
-import base64
-import hashlib
+import json
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+_cached_binary: Optional[str] = None
+
+
+def _lillux() -> str:
+    """Locate the ``lillux`` binary, caching the result."""
+    global _cached_binary
+    if _cached_binary is not None:
+        return _cached_binary
+
+    # Check next to the running Python interpreter first
+    candidate = Path(sys.executable).parent / "lillux"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        _cached_binary = str(candidate)
+        return _cached_binary
+
+    found = shutil.which("lillux")
+    if found:
+        _cached_binary = found
+        return _cached_binary
+
+    raise FileNotFoundError(
+        "lillux binary not found — install it or place it next to the Python interpreter"
+    )
+
+
+def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run the lillux binary and return the completed process."""
+    result = subprocess.run(
+        [_lillux(), *args],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"lillux {' '.join(args)} failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+    return result
 
 
 def generate_keypair() -> Tuple[bytes, bytes]:
@@ -22,21 +57,14 @@ def generate_keypair() -> Tuple[bytes, bytes]:
     Returns:
         Tuple of (private_key_pem, public_key_pem)
     """
-    private_key = Ed25519PrivateKey.generate()
-    public_key = private_key.public_key()
-
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-
-    public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-
-    return private_pem, public_pem
+    tmpdir = tempfile.mkdtemp()
+    try:
+        _run(["keypair", "generate", "--key-dir", tmpdir])
+        private_pem = Path(tmpdir, "private_key.pem").read_bytes()
+        public_pem = Path(tmpdir, "public_key.pem").read_bytes()
+        return private_pem, public_pem
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
@@ -49,9 +77,17 @@ def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
     Returns:
         Base64url-encoded signature string
     """
-    private_key = serialization.load_pem_private_key(private_key_pem, password=None)
-    signature = private_key.sign(content_hash.encode("utf-8"))
-    return base64.urlsafe_b64encode(signature).decode("ascii")
+    tmpdir = tempfile.mkdtemp()
+    try:
+        key_path = Path(tmpdir, "private_key.pem")
+        key_path.write_bytes(private_key_pem)
+        os.chmod(key_path, 0o600)
+
+        result = _run(["sign", "--key-dir", tmpdir, "--hash", content_hash])
+        data = json.loads(result.stdout)
+        return data["signature"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def verify_signature(content_hash: str, signature_b64: str, public_key_pem: bytes) -> bool:
@@ -65,27 +101,48 @@ def verify_signature(content_hash: str, signature_b64: str, public_key_pem: byte
     Returns:
         True if signature is valid, False otherwise
     """
+    tmpfile = None
     try:
-        public_key = serialization.load_pem_public_key(public_key_pem)
-        signature = base64.urlsafe_b64decode(signature_b64)
-        public_key.verify(signature, content_hash.encode("utf-8"))
-        return True
+        fd, tmpfile = tempfile.mkstemp(suffix=".pem")
+        os.write(fd, public_key_pem)
+        os.close(fd)
+
+        result = _run([
+            "verify",
+            "--hash", content_hash,
+            "--signature", signature_b64,
+            "--public-key", tmpfile,
+        ])
+        data = json.loads(result.stdout)
+        return data["valid"]
     except Exception:
         return False
+    finally:
+        if tmpfile and os.path.exists(tmpfile):
+            os.unlink(tmpfile)
 
 
 def compute_key_fingerprint(public_key_pem: bytes) -> str:
     """Compute fingerprint of an Ed25519 public key.
 
-    Returns first 16 hex characters of SHA256(public_key_pem).
-
     Args:
         public_key_pem: Ed25519 public key in PEM format
 
     Returns:
-        16-character hex fingerprint
+        Fingerprint string
     """
-    return hashlib.sha256(public_key_pem).hexdigest()[:16]
+    tmpfile = None
+    try:
+        fd, tmpfile = tempfile.mkstemp(suffix=".pem")
+        os.write(fd, public_key_pem)
+        os.close(fd)
+
+        result = _run(["keypair", "fingerprint", "--public-key", tmpfile])
+        data = json.loads(result.stdout)
+        return data["fingerprint"]
+    finally:
+        if tmpfile and os.path.exists(tmpfile):
+            os.unlink(tmpfile)
 
 
 def save_keypair(
@@ -148,6 +205,5 @@ def ensure_keypair(key_dir: Path) -> Tuple[bytes, bytes]:
     try:
         return load_keypair(key_dir)
     except FileNotFoundError:
-        private_pem, public_pem = generate_keypair()
-        save_keypair(private_pem, public_pem, key_dir)
-        return private_pem, public_pem
+        _run(["keypair", "generate", "--key-dir", str(key_dir)])
+        return load_keypair(key_dir)

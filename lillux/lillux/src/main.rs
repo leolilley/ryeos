@@ -39,7 +39,7 @@ enum Command {
         #[arg(long)]
         hash: String,
         /// Base64url-encoded signature
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         signature: String,
         /// Path to public_key.pem
         #[arg(long)]

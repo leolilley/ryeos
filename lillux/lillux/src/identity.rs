@@ -55,7 +55,9 @@ pub fn verify(hash: &str, signature: &str, public_key_path: &str) -> serde_json:
         Ok(k) => k,
         Err(e) => return serde_json::json!({ "valid": false, "error": format!("parse public key: {e}") }),
     };
-    let sig_bytes = match URL_SAFE_NO_PAD.decode(signature) {
+    // Accept both padded and unpadded base64url (Python uses padding, Rust emits without)
+    let stripped = signature.trim_end_matches('=');
+    let sig_bytes = match URL_SAFE_NO_PAD.decode(stripped) {
         Ok(b) => b,
         Err(_) => return serde_json::json!({ "valid": false, "hash": hash }),
     };
