@@ -1,0 +1,21 @@
+# rye:signed:2026-03-29T13:54:26Z:7579db7b27eeb063d963c57c5d588e28d7956c123c42ef7d65b48577055e9222:OWSQ8pikHveGJZCtiucMhIx4ooveM6-bw8_GBJ_Bb8_JE1zlqHlB4czZmykdT_faw06Tii5OQ7Jomwt9gnuRAQ:4b987fd4e40303ac
+# Cluster routing policy.
+#
+# Loaded via 3-tier resolution (system → user → project).
+# Projects override with their own .ai/config/cluster/topology.yaml.
+# Deep merge: project can add policies without restating defaults.
+category: "cluster"
+version: "1.0.0"
+
+routing:
+  # Strategy: least-loaded | round-robin | affinity
+  strategy: least-loaded
+
+  # Consider node saturated above this load ratio (active / max_concurrent)
+  load_threshold: 0.9
+
+  # /status query timeout in seconds
+  timeout_seconds: 10
+
+  # Cache TTL for /status responses in seconds
+  status_ttl_seconds: 30

@@ -1,0 +1,23 @@
+# rye:signed:2026-03-29T13:54:26Z:7a9bcf133b12540a8f483c255298cbf7fea4ebaccf783618bae6489ece446202:-VsWRe4smx1xx1Wi9ezRZuoycZLGNRLW1MI4gYpdKkCJTqGf8B-tLbnpmlSCom1N6jB53JtXP1lpyHG5KpyABg:4b987fd4e40303ac
+version: "1.0.0"
+tool_type: config-schema
+executor_id: null
+category: rye/core/cluster
+description: "Schema for cluster/topology.yaml — routing policy for multi-node dispatch"
+
+target_config: cluster/topology.yaml
+
+schema:
+  type: object
+  properties:
+    routing:
+      type: object
+      properties:
+        strategy:
+          type: string
+        load_threshold:
+          type: number
+        timeout_seconds:
+          type: integer
+        status_ttl_seconds:
+          type: integer
