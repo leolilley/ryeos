@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:5f9a6da97fa22f34107670622fe8b896373d9650af0874d813c4792b80b0f0fc:RLjn7ljX7gnYwDF94IWjgAovvDhs1Q7yMnFWs6ExKV1Tk47W5CSIlVdOsisqIpySvoImT2d-DdSIXCJ_Z8rFDQ:4b987fd4e40303ac
+# rye:signed:2026-03-30T06:37:13Z:9dad6ac39d119521c86187702f914bd0a2b095f7a1b6cec82b3c07dd9f68f074:8CPHduH1DunwfD14PchNEiEK5W80bhsKUeCWlfnU8-o5OAIEY-CbcB8HkO6bnBIX36T4UxaHw4vsfnTUJ1k-BQ:4b987fd4e40303ac
 """
 Local encrypted secret store management.
 
@@ -6,7 +6,6 @@ Actions:
   set    - Store a secret in the local encrypted store.
   list   - List secret names (never values).
   delete - Remove a secret from the local store.
-  seal   - Seal all local secrets for a remote node's identity.
 """
 
 __version__ = "1.0.0"
@@ -37,7 +36,7 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["set", "list", "delete", "seal"]
+ACTIONS = ["set", "list", "delete"]
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -45,7 +44,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Secret store operation: set, list, delete, seal",
+            "description": "Secret store operation: set, list, delete",
         },
         "name": {
             "type": "string",
@@ -54,10 +53,6 @@ CONFIG_SCHEMA = {
         "value": {
             "type": "string",
             "description": "Secret value (for set)",
-        },
-        "remote": {
-            "type": "string",
-            "description": "Remote name for seal action (to fetch identity)",
         },
     },
     "required": ["action"],
@@ -71,7 +66,8 @@ CONFIG_SCHEMA = {
 
 def _get_key_dir() -> Path:
     """Return the signing key directory from env or default."""
-    return Path(os.environ.get("RYE_SIGNING_KEY_DIR", Path.home() / ".ai" / "signing"))
+    from rye.utils.path_utils import get_signing_key_dir
+    return get_signing_key_dir()
 
 
 def _derive_store_key(key_dir: Path) -> bytes:
@@ -190,47 +186,6 @@ async def _delete(project_path: Path, params: Dict) -> Dict:
     return {"deleted": name, "message": f"Secret '{name}' removed from local store"}
 
 
-async def _seal(project_path: Path, params: Dict) -> Dict:
-    """Seal all local secrets for a remote node's identity."""
-    from envelope import seal_secrets_for_identity
-    from remote_config import resolve_remote
-
-    key_dir = _get_key_dir()
-    store = _load_store(key_dir)
-
-    if not store:
-        return {"error": "No secrets in local store to seal"}
-
-    remote_name = params.get("remote")
-    config = resolve_remote(remote_name, project_path)
-
-    from rye.runtime.http_client import HttpClientPrimitive
-    http = HttpClientPrimitive()
-    result = await http.execute({
-        "method": "GET",
-        "url": f"{config.url.rstrip('/')}/public-key",
-        "headers": {
-            "Authorization": f"Bearer {config.api_key}",
-            "Content-Type": "application/json",
-        },
-        "timeout": 30,
-    }, {})
-
-    if not result.success:
-        return {"error": f"Failed to fetch remote identity: {result.error}"}
-
-    identity_doc = result.body
-    if isinstance(identity_doc, str):
-        identity_doc = json.loads(identity_doc)
-
-    envelope = seal_secrets_for_identity(store, identity_doc)
-    return {
-        "sealed": True,
-        "secret_count": len(store),
-        "envelope": envelope,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -239,7 +194,6 @@ _ACTION_MAP = {
     "set": _set,
     "list": _list,
     "delete": _delete,
-    "seal": _seal,
 }
 
 

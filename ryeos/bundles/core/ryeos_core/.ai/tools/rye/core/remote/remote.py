@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T05:12:14Z:3ac59b04975805c8f7e014678366eaceda84617d51cc14b30c6f7c8081053550:V29rJ6hqHfWY3w0IrXbEsppKIiCUniVe_5fovqBUMB8wgrdWNya-FeMBRmsF72VVN6jUjRRKAHcLhEwMdoIgCQ:4b987fd4e40303ac
+# rye:signed:2026-03-30T06:37:13Z:754805173ae37b5631e1ef4dc263d32f66b9837c6bbce0ec5d202362d14b170e:rnrYy5Q3fGinOGwI0oALsXV5o_BrRNkJvb6e4Ov2Rn7lFar4Fhg-y3EjXuLX3yTbLDcxKi4H0CRmE6qDZtG0Ag:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -7,6 +7,10 @@ Actions:
   pull           - Fetch new objects from remote (execution results).
   status         - Show local vs remote manifest hashes.
   execute        - Push + trigger remote execution + pull results.
+  seal           - Seal local secrets for a remote node's identity.
+  webhooks       - List webhook bindings on the remote.
+  webhook_create - Create a webhook binding for a tool or directive.
+  webhook_delete - Delete a webhook binding by hook_id.
 """
 
 __version__ = "1.0.0"
@@ -41,7 +45,8 @@ TOOL_METADATA = {
 }
 
 ACTIONS = [
-    "push", "pull", "status", "execute", "threads", "thread_status",
+    "push", "pull", "status", "execute", "seal", "threads", "thread_status",
+    "webhooks", "webhook_create", "webhook_delete",
 ]
 
 CONFIG_SCHEMA = {
@@ -50,7 +55,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Remote operation: push, pull, status, execute, threads, thread_status",
+            "description": "Remote operation: push, pull, status, execute, seal, threads, thread_status, webhooks, webhook_create, webhook_delete",
         },
         "item_type": {
             "type": "string",
@@ -79,6 +84,14 @@ CONFIG_SCHEMA = {
         "project_path": {
             "type": "string",
             "description": "Filter threads by project path",
+        },
+        "hook_id": {
+            "type": "string",
+            "description": "Webhook hook ID for webhook_delete",
+        },
+        "description": {
+            "type": "string",
+            "description": "Description for webhook_create",
         },
     },
     "required": ["action"],
@@ -165,6 +178,25 @@ class RemoteHttpClient:
             "headers": headers,
             "body": body,
             "timeout": timeout,
+        }
+        result = await http.execute(config, {})
+        return {
+            "success": result.success,
+            "status_code": result.status_code,
+            "body": result.body,
+            "error": result.error,
+        }
+
+
+    async def delete(self, path: str) -> Dict:
+        http = await self._get_http()
+        headers = {"Content-Type": "application/json"}
+        headers.update(self._sign_headers("DELETE", path))
+        config = {
+            "method": "DELETE",
+            "url": f"{self.base_url}{path}",
+            "headers": headers,
+            "timeout": 30,
         }
         result = await http.execute(config, {})
         return {
@@ -658,7 +690,8 @@ def _load_local_secrets() -> dict:
         from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-        key_dir = Path(os.environ.get("RYE_SIGNING_KEY_DIR", str(Path.home() / ".ai" / "signing")))
+        from rye.utils.path_utils import get_signing_key_dir
+        key_dir = get_signing_key_dir()
         private_pem, _ = load_keypair(key_dir)
 
         store_key = HKDF(
@@ -733,12 +766,8 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     local_secrets = _load_local_secrets()
     if local_secrets and identity_doc:
         try:
-            import importlib.util
-            _envelope_path = Path(__file__).resolve().parent.parent / "crypto" / "envelope.py"
-            _spec = importlib.util.spec_from_file_location("envelope", _envelope_path)
-            _envelope_mod = importlib.util.module_from_spec(_spec)
-            _spec.loader.exec_module(_envelope_mod)
-            secret_envelope = _envelope_mod.seal_secrets_for_identity(local_secrets, identity_doc)
+            from rye.primitives.sealed_envelope import seal_secrets_for_identity
+            secret_envelope = seal_secrets_for_identity(local_secrets, identity_doc)
         except Exception as e:
             logger.warning("Failed to seal secrets for remote: %s", e)
 
@@ -837,6 +866,103 @@ async def _thread_status(project_path: Path, params: Dict) -> Dict:
     return body
 
 
+async def _seal(project_path: Path, params: Dict) -> Dict:
+    """Seal local secrets for a remote node's identity."""
+    local_secrets = _load_local_secrets()
+    if not local_secrets:
+        return {"error": "No secrets in local store to seal"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+    identity_doc, key_err = await _fetch_verified_identity(client, remote_name)
+    if key_err:
+        return key_err
+
+    from rye.primitives.sealed_envelope import seal_secrets_for_identity
+    try:
+        envelope = seal_secrets_for_identity(local_secrets, identity_doc)
+    except Exception as e:
+        return {"error": f"Failed to seal secrets: {e}"}
+
+    return {
+        "sealed": True,
+        "secret_count": len(local_secrets),
+        "remote": remote_name or "default",
+        "envelope": envelope,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Webhook management
+# ---------------------------------------------------------------------------
+
+
+async def _webhooks(project_path: Path, params: Dict) -> Dict:
+    """List webhook bindings on the remote."""
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    resp = await client.get("/webhook-bindings")
+    if not resp["success"]:
+        return {"error": f"Failed to list webhooks: {resp.get('error')}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    return body
+
+
+async def _webhook_create(project_path: Path, params: Dict) -> Dict:
+    """Create a webhook binding for a tool or directive."""
+    item_type = params.get("item_type")
+    item_id = params.get("item_id")
+    if not item_type or not item_id:
+        return {"error": "item_type and item_id are required for webhook_create"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    from remote_config import get_project_path
+    proj_name = get_project_path(project_path)
+
+    body = {
+        "item_type": item_type,
+        "item_id": item_id,
+        "project_path": proj_name,
+    }
+    description = params.get("description")
+    if description:
+        body["description"] = description
+
+    resp = await client.post("/webhook-bindings", body)
+    if not resp["success"]:
+        return {"error": f"Failed to create webhook: {resp.get('error')}"}
+
+    resp_body = resp["body"]
+    if isinstance(resp_body, str):
+        resp_body = json.loads(resp_body)
+    return resp_body
+
+
+async def _webhook_delete(project_path: Path, params: Dict) -> Dict:
+    """Delete a webhook binding by hook_id."""
+    hook_id = params.get("hook_id")
+    if not hook_id:
+        return {"error": "hook_id is required for webhook_delete"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    resp = await client.delete(f"/webhook-bindings/{hook_id}")
+    if not resp["success"]:
+        return {"error": f"Failed to delete webhook: {resp.get('error')}"}
+
+    resp_body = resp["body"]
+    if isinstance(resp_body, str):
+        resp_body = json.loads(resp_body)
+    return resp_body
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -846,8 +972,12 @@ _ACTION_MAP = {
     "pull": _pull,
     "status": _status,
     "execute": _execute,
+    "seal": _seal,
     "threads": _threads,
     "thread_status": _thread_status,
+    "webhooks": _webhooks,
+    "webhook_create": _webhook_create,
+    "webhook_delete": _webhook_delete,
 }
 
 
