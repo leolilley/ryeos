@@ -25,7 +25,7 @@ Endpoints, auth flow, and semantics for the Rye OS item registry.
 
 ## Service Overview
 
-- **Server:** Built into ryeos-node at `services/ryeos-node/ryeos_node/`
+- **Server:** Built into ryeos-node at `ryeos-node/ryeos_node/`
 - **Client tool:** `.ai/tools/rye/core/registry/registry.py`
 - **Storage:** CAS-native (content-addressed, no external database)
 - **Auth:** Ed25519 signed requests + API keys

@@ -1,3 +1,4 @@
+# rye:signed:2026-03-30T04:33:44Z:9367ce1b467ed5b06e4242a34c0e1bfb017e01a8abcbb886dd8d587837a015a0:1RRsGsB8Z0aUTP_bvKkrOryJGsb2v6E6uIdvMaoEoxBvPQuw6JXt0jF4QwW00YzyUC4K8Z8NVuBazuDAc0coBw:4b987fd4e40303ac
 """
 Registry tool — publish, search, and pull items from a ryeos-node registry.
 
@@ -187,7 +188,7 @@ _REGISTRY_CONFIG_REL = "registry/registry.yaml"
 def _resolve_registry_url(project_path=None) -> str:
     """Resolve registry node URL from 3-tier config."""
     from rye.cas.manifest import _load_config_3tier
-    config = _load_config_3tier(_REGISTRY_CONFIG_REL, project_path)
+    config = _load_config_3tier(_REGISTRY_CONFIG_REL, Path(project_path) if project_path else None)
     reg = config.get("registry", {})
     url = reg.get("url", "")
     if not url:
@@ -205,8 +206,8 @@ def _resolve_registry_url(project_path=None) -> str:
 
 def _get_signing_key_dir() -> Path:
     """Get the signing key directory."""
-    from rye.utils.path_utils import get_user_space
-    return Path(get_user_space()) / "config" / "keys" / "signing"
+    from rye.utils.path_utils import get_signing_key_dir
+    return Path(get_signing_key_dir())
 
 
 def _get_signing_keys() -> Tuple[bytes, bytes]:
@@ -356,6 +357,16 @@ async def _fetch_registry_identity(
 # =============================================================================
 
 
+def _import_sign_request():
+    """Import sign_request from sibling crypto tool."""
+    import importlib.util
+    crypto_path = Path(__file__).parent.parent / "crypto" / "request_signing.py"
+    spec = importlib.util.spec_from_file_location("request_signing", crypto_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.sign_request
+
+
 async def _authed_get(
     client: RegistryHttpClient,
     path: str,
@@ -363,7 +374,7 @@ async def _authed_get(
     priv: bytes,
     pub: bytes,
 ) -> Dict:
-    from request_signing import sign_request
+    sign_request = _import_sign_request()
     headers = sign_request("GET", path, None, audience, priv, pub)
     return await client.get(path, headers=headers)
 
@@ -376,7 +387,7 @@ async def _authed_post(
     priv: bytes,
     pub: bytes,
 ) -> Dict:
-    from request_signing import sign_request
+    sign_request = _import_sign_request()
     body_bytes = json.dumps(body).encode()
     headers = sign_request("POST", path, body_bytes, audience, priv, pub)
     return await client.post(path, body, headers=headers)

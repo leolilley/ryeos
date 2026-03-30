@@ -81,7 +81,7 @@ Reference entries in `.ai/knowledge/` — metadata patterns, best practices, dom
 
 ## Layer 4: Registry (ryeos-node)
 
-The registry is a built-in feature of ryeos-node (`services/ryeos-node/`), not a separate service. It provides:
+The registry is a built-in feature of ryeos-node (`ryeos-node/`), not a separate service. It provides:
 
 - **POST /registry/push** — Validate and store items with the publisher's Ed25519 signature as sole provenance
 - **GET /registry/pull/{item_type}/{item_id}** — Download items with integrity verification
@@ -145,7 +145,7 @@ The only hardcoded knowledge in the system is the mapping from primitive IDs to 
 
 ## Remote Execution
 
-Remote execution is a deployment mode — it runs the same executor and graph walker on a remote server, synced via content-addressed storage rather than git. The remote server (`services/ryeos-node/`) provides CAS sync endpoints (`/objects/has`, `/objects/put`, `/objects/get`) and an `/execute` endpoint that materializes a temp `.ai/` directory from CAS manifests, runs the tool, and re-ingests outputs. The remote executor has its own Ed25519 signing identity — it never receives the user's private key. See [Remote Execution](remote-execution.md) and [Content-Addressed Store](cas.md) for details.
+Remote execution is a deployment mode — it runs the same executor and graph walker on a remote server, synced via content-addressed storage rather than git. The remote server (`ryeos-node/`) provides CAS sync endpoints (`/objects/has`, `/objects/put`, `/objects/get`) and an `/execute` endpoint that materializes a temp `.ai/` directory from CAS manifests, runs the tool, and re-ingests outputs. The remote executor has its own Ed25519 signing identity — it never receives the user's private key. See [Remote Execution](remote-execution.md) and [Content-Addressed Store](cas.md) for details.
 
 ## Package and Bundle Distribution
 

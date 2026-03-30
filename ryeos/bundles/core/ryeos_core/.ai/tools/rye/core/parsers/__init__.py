@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:c6f8f7f88b27ff48a79ca171332102e1a92985ebdc3aaf5777525b1aa3bdf445:rMjOQBaBvvskQlF-V9aKe8pXZ9H5wdqwnFCRcUZXOOoyjdaKdNvJGrGolVmEFF-6CTLofn1gBi3pCkQ6hdCYAg==:4b987fd4e40303ac
+# rye:signed:2026-03-30T04:30:49Z:c6f8f7f88b27ff48a79ca171332102e1a92985ebdc3aaf5777525b1aa3bdf445:rMjOQBaBvvskQlF-V9aKe8pXZ9H5wdqwnFCRcUZXOOoyjdaKdNvJGrGolVmEFF-6CTLofn1gBi3pCkQ6hdCYAg:4b987fd4e40303ac
 """Parser tools package."""
 
 __version__ = "1.0.0"

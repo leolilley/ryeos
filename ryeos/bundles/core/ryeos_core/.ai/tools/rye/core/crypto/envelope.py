@@ -1,3 +1,4 @@
+# rye:signed:2026-03-30T04:30:49Z:e574b89b9cf10675842c0958f9b7aa7132c57e24b0db9cc546a22f4373e4fcb9:NstloWSh6-QFsG6hQwIt00m6wnhJDfSdnmVh0YkqYpxS9b_P_F_SzUZQfnAtwpKEQy5hqdmOT7teIvMwnBe1DQ:4b987fd4e40303ac
 """Sealed secret envelope construction (HPKE-style).
 
 Shared utility importable by core bundle tools (like the remote tool)

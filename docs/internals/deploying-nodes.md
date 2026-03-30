@@ -214,8 +214,8 @@ services:
   - type: web
     name: ryeos-node
     runtime: docker
-    dockerfilePath: ./services/ryeos-node/Dockerfile
-    dockerContext: ./services/ryeos-node
+    dockerfilePath: ./ryeos-node/Dockerfile
+    dockerContext: ./ryeos-node
     healthCheckPath: /health
     disk:
       name: cas-storage
@@ -258,7 +258,7 @@ CAS_BASE_PATH=~/.ryeos-node uvicorn ryeos_node.server:app --port 8000
 ```yaml
 services:
   ryeos-node:
-    build: ./services/ryeos-node
+    build: ./ryeos-node
     ports:
       - "8000:8000"
     volumes:
@@ -301,13 +301,13 @@ The CPU node handles directive execution, browser automation, database writes. L
 
 | Component | File |
 |---|---|
-| Init module | `services/ryeos-node/ryeos_node/init.py` |
-| Modal deployment | `services/ryeos-node/modal_app.py` |
-| Dockerfile | `services/ryeos-node/Dockerfile` |
-| Docker Compose | `services/ryeos-node/docker-compose.yml` |
-| Render blueprint | `services/ryeos-node/render.yaml` |
-| Local run script | `services/ryeos-node/run.sh` |
-| Server README | `services/ryeos-node/README.md` |
+| Init module | `ryeos-node/ryeos_node/init.py` |
+| Modal deployment | `ryeos-node/modal_app.py` |
+| Dockerfile | `ryeos-node/Dockerfile` |
+| Docker Compose | `ryeos-node/docker-compose.yml` |
+| Render blueprint | `ryeos-node/render.yaml` |
+| Local run script | `ryeos-node/run.sh` |
+| Server README | `ryeos-node/README.md` |
 
 ## Relationship to Other Docs
 

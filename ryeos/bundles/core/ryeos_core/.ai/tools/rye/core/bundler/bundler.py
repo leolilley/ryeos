@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:1fa3ceb5be068ac2663b243316039b10a909398683484ebb72a59a9644ef2735:S7lO6REZsBxtXwn69QLDU96zR2mnqhVh2kuFjILg50vZbcF40boYuu3nZUTOZBC1QmyiikuTMcoTia8sdtTdCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-30T04:30:49Z:11fef8084a985265d5ae6efae6a0f373f0630047ff0dde0c1bc29f8d3d893d72:qIawpy0deQVPU6UY0NRC0n8mpCKtF7tnFw0eGOeF5Ad3Ik2gyARWxgIB__b7wYF9NgaMUUI-13FW54MlTB9QBg:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.

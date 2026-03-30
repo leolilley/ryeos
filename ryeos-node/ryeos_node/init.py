@@ -49,7 +49,7 @@ def ensure_node_space(cas_base_path: str) -> str:
             f"  gpus: 0\n"
             f"  memory_gb: 2\n"
             f"features:\n"
-            f"  registry: false\n"
+            f"  registry: true\n"
             f"  webhooks: true\n"
             f"limits:\n"
             f"  max_concurrent: 8\n"

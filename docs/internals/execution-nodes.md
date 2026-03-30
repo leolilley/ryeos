@@ -30,8 +30,8 @@ The key principle: **there is no special infrastructure for specific workload ty
 | `_parse_target()`                | `ryeos/rye/actions/execute.py`   | Parses `"remote:gpu"` → `("remote", "gpu")` — named remote syntax         |
 | `rye/core/remote/remote`         | Core bundle tool                 | CAS sync + HTTP POST to the remote server                                 |
 | `remote_config.py`               | Core bundle                      | Resolves named remotes from `cas/remote.yaml` via 3-tier resolution       |
-| `ryeos-node` server            | `services/ryeos-node/`         | FastAPI server: `/execute`, `/push`, CAS sync, threads, webhooks, secrets |
-| `modal_app.py`                   | `services/ryeos-node/`         | Modal deployment: volume-backed CAS, scheduled execution                  |
+| `ryeos-node` server            | `ryeos-node/`         | FastAPI server: `/execute`, `/push`, CAS sync, threads, webhooks, secrets |
+| `modal_app.py`                   | `ryeos-node/`         | Modal deployment: volume-backed CAS, scheduled execution                  |
 | `cas/remote.yaml`                | `.ai/config/cas/`                | Named remotes with URL + key_env, 3-tier resolved                         |
 | CAS sync protocol                | `rye/cas/sync.py`                | `has/put/get` object exchange                                             |
 | `create_execution_space()`       | `rye/cas/checkout.py`            | Materializes `.ai/` workspace from snapshot on the remote                 |
@@ -259,7 +259,7 @@ The same server, deployed on more machines. Nothing about the server code change
 | Identity      | Ed25519 key fingerprint   | Ed25519 key fingerprint (`fp:...`)          |
 | New endpoint  | —                         | `/status` with capability scanning          |
 
-The server at `services/ryeos-node/ryeos_node/server.py` doesn't assume Modal. Modal-specific parts are isolated in `modal_app.py`. Running the same `server.py` via uvicorn on bare metal works today.
+The server at `ryeos-node/ryeos_node/server.py` doesn't assume Modal. Modal-specific parts are isolated in `modal_app.py`. Running the same `server.py` via uvicorn on bare metal works today.
 
 ---
 
@@ -316,9 +316,9 @@ The server at `services/ryeos-node/ryeos_node/server.py` doesn't assume Modal. M
 | Node config schema | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/node/node.config-schema.yaml` |
 | Topology config | `ryeos/bundles/core/ryeos_core/.ai/config/cluster/topology.yaml` |
 | Topology schema | `ryeos/bundles/core/ryeos_core/.ai/tools/rye/core/cluster/topology.config-schema.yaml` |
-| Server config | `services/ryeos-node/ryeos_node/config.py` |
-| Server `/status` | `services/ryeos-node/ryeos_node/server.py` |
-| Init module | `services/ryeos-node/ryeos_node/init.py` |
+| Server config | `ryeos-node/ryeos_node/config.py` |
+| Server `/status` | `ryeos-node/ryeos_node/server.py` |
+| Init module | `ryeos-node/ryeos_node/init.py` |
 
 ## Open Design Questions
 

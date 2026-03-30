@@ -22,6 +22,7 @@ on:
           - ryeos-email
           - ryeos-mcp
           - ryeos-cli
+          - ryeos-node
 
 permissions:
   contents: read
@@ -55,8 +56,7 @@ jobs:
         run: |
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard \
                       -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
-                      -e ryeos-mcp -e ryeos-cli \
-                      -e services/ryeos-node
+                      -e ryeos-mcp -e ryeos-cli -e ryeos-node
           pip install pytest pytest-asyncio
 
       - name: Import CI signing key
@@ -119,6 +119,8 @@ jobs:
             path: ryeos-mcp
           - package: ryeos-cli
             path: ryeos-cli
+          - package: ryeos-node
+            path: ryeos-node
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -307,10 +309,15 @@ jobs:
           fi
           rye registry bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }}
 
+      - name: Configure registry URL
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          mkdir -p ~/.ai/config/registry
+          echo "registry:" > ~/.ai/config/registry/registry.yaml
+          echo "  url: ${{ secrets.RYE_REGISTRY_URL }}" >> ~/.ai/config/registry/registry.yaml
+
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'
-        env:
-          RYE_REGISTRY_API_KEY: ${{ secrets.RYE_REGISTRY_API_KEY }}
         run: rye -p ${{ steps.pkg.outputs.dir }} registry bundle push ${{ matrix.bundle }}
 
   # ── Build & publish Rust packages individually ───────────────────

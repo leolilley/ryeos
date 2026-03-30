@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:26:30Z:0f464f80bf5cca214add7779afe9f6fd746a13e385e7e3108825ea055973fd26:bmSRxi5CvcZAAtGJ2qWrJQ_R9NGzSAXiDXJwBhbDavYazeO2DFAvSgHFaaCig_KO7W7MVQ1ldqhxjmt6KLZqBw:4b987fd4e40303ac
+# rye:signed:2026-03-30T05:12:14Z:3ac59b04975805c8f7e014678366eaceda84617d51cc14b30c6f7c8081053550:V29rJ6hqHfWY3w0IrXbEsppKIiCUniVe_5fovqBUMB8wgrdWNya-FeMBRmsF72VVN6jUjRRKAHcLhEwMdoIgCQ:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -296,7 +296,7 @@ async def _push(project_path: Path, params: Dict) -> Dict:
                 ref_body = us_ref["body"]
                 if isinstance(ref_body, str):
                     ref_body = json.loads(ref_body)
-                current_rev = ref_body.get("snapshot_revision")
+                current_rev = ref_body.get("revision")
                 if current_rev is not None:
                     retry_resp = await client.post("/push/user-space", {
                         "user_manifest_hash": uh,
@@ -304,7 +304,21 @@ async def _push(project_path: Path, params: Dict) -> Dict:
                     })
                     user_space_pushed = retry_resp["success"]
         if not user_space_pushed:
-            logger.warning("Failed to push user space: %s", user_space_resp.get("error"))
+            # Extract the actual error detail from the response body
+            us_error = user_space_resp.get("error", "")
+            us_body = user_space_resp.get("body", {})
+            if isinstance(us_body, str):
+                try:
+                    us_body = json.loads(us_body)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            if isinstance(us_body, dict) and "detail" in us_body:
+                us_error = us_body["detail"]
+            logger.warning("Failed to push user space: %s", us_error)
+            return {
+                "error": f"User space push failed: {us_error}",
+                "detail": "User space contains trusted keys needed for signature verification during execution. Fix the issue and retry.",
+            }
 
     # Load expected_snapshot_hash from local ref tracking
     expected_snapshot_hash = _load_remote_snapshot_hash(project_path, effective_remote)

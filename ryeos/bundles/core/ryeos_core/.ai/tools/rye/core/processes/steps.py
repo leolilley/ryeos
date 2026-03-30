@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:5910c0a9b4fdf5200375b7331f5ccc1d0fb7f28f210741b7b2418ded2e606f19:HxIFbITJ2_cdW5V1wdDZcGJROSrLDlS0wGrlEDhbryNx42D3lCsy6-tNhRZLnWi6-8YwxKGfVT78WPGo4UjKAg==:4b987fd4e40303ac
+# rye:signed:2026-03-30T04:30:49Z:5910c0a9b4fdf5200375b7331f5ccc1d0fb7f28f210741b7b2418ded2e606f19:HxIFbITJ2_cdW5V1wdDZcGJROSrLDlS0wGrlEDhbryNx42D3lCsy6-tNhRZLnWi6-8YwxKGfVT78WPGo4UjKAg:4b987fd4e40303ac
 """Parse a graph run's transcript.jsonl and return a clean step summary."""
 
 import argparse

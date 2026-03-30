@@ -7,7 +7,7 @@ CAS-native execution node — accepts signed requests, executes directives and t
 ### Modal
 
 ```bash
-cd services/ryeos-node
+cd ryeos-node
 modal deploy modal_app.py
 ```
 
@@ -20,14 +20,14 @@ Push to a repo connected to Render. The `render.yaml` blueprint creates a web se
 ### Docker
 
 ```bash
-cd services/ryeos-node
+cd ryeos-node
 docker compose up
 ```
 
 ### Local
 
 ```bash
-cd services/ryeos-node
+cd ryeos-node
 pip install ryeos "fastapi[standard]" pydantic-settings pyyaml
 ./run.sh
 ```

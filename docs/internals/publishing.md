@@ -240,7 +240,7 @@ For a **first-time publish** of all packages, you may need to run the workflow m
 
 The ryeos-node server provides remote execution, CAS sync, and registry features. Deployed on Modal.
 
-- **Source:** `services/ryeos-node/`
+- **Source:** `ryeos-node/`
 - **Not a pip package** — deployed as a container
 - **Dependencies:** fastapi, httpx, pydantic, pydantic-settings, cryptography
 

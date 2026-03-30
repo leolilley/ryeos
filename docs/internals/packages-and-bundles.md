@@ -221,10 +221,10 @@ rye graph validate my-project/graphs/pipeline
 rye test my-project/tools/scraper --exclude-tags integration
 ```
 
-### services/ryeos-node
+### ryeos-node
 
 **Package name:** N/A (deployed as a service)
-**Source:** `services/ryeos-node/`
+**Source:** `ryeos-node/`
 **Dependencies:** `fastapi`, `httpx`, `pydantic`, `pydantic-settings`, `cryptography`
 
 The ryeos-node server provides remote execution, CAS sync, and registry features. Registry is a built-in feature of ryeos-node — no separate service. Deployed on Modal and accessed via the bundled remote and registry tools. Not installed as a pip package locally.
@@ -389,7 +389,7 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 | `ryeos/bundles/email/` | `ryeos-email` | `ryeos` | `ryeos-email` | `rye/email/*` |
 | `ryeos-mcp/` | `ryeos-mcp` | `ryeos`, `mcp` | — | — |
 | `ryeos-cli/` | `ryeos-cli` | `ryeos`, `pyyaml` | — | — |
-| `services/ryeos-node/` | — | `fastapi`, `httpx`, `cryptography`, etc. | — | — |
+| `ryeos-node/` | — | `fastapi`, `httpx`, `cryptography`, etc. | — | — |
 
 ## Publishing Order
 

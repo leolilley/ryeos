@@ -170,7 +170,7 @@ Search matches against bundle names and descriptions. Only public bundles are re
 
 ## Registry API Service
 
-**Location:** `services/ryeos-node/ryeos_node/` (registry is a feature of ryeos-node)
+**Location:** `ryeos-node/ryeos_node/` (registry is a feature of ryeos-node)
 
 Registry endpoints are built into the ryeos-node server. No separate service or external database — storage is CAS-native with Ed25519 authentication.
 

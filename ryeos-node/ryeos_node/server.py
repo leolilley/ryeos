@@ -232,6 +232,12 @@ def _check_system_version(client_version: str) -> None:
         )
 
 
+def _validation_error(detail: str, label: str) -> HTTPException:
+    """Log and raise a manifest validation error."""
+    logger.warning("Manifest validation failed (%s): %s", label, detail)
+    return HTTPException(status.HTTP_400_BAD_REQUEST, detail)
+
+
 def _validate_manifest_graph(
     manifest_hash: str,
     root: Path,
@@ -251,37 +257,31 @@ def _validate_manifest_graph(
     """
     manifest = cas.get_object(manifest_hash, root)
     if manifest is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{label} object {manifest_hash} not found in CAS. Upload objects first.",
+        raise _validation_error(
+            f"{label} object {manifest_hash} not found in CAS. Upload objects first.", label,
         )
     if manifest.get("kind") != "source_manifest":
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{label} {manifest_hash} has kind={manifest.get('kind')!r}, expected 'source_manifest'",
+        raise _validation_error(
+            f"{label} {manifest_hash} has kind={manifest.get('kind')!r}, expected 'source_manifest'", label,
         )
     if manifest.get("schema") != SCHEMA_VERSION:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{label} {manifest_hash} has unsupported schema version {manifest.get('schema')!r}",
+        raise _validation_error(
+            f"{label} {manifest_hash} has unsupported schema version {manifest.get('schema')!r}", label,
         )
     if manifest.get("space") != expected_space:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{label} {manifest_hash} has space={manifest.get('space')!r}, expected {expected_space!r}",
+        raise _validation_error(
+            f"{label} {manifest_hash} has space={manifest.get('space')!r}, expected {expected_space!r}", label,
         )
 
     items = manifest.get("items", {})
     files = manifest.get("files", {})
     if not isinstance(items, dict):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{label} {manifest_hash} has invalid items (expected object)",
+        raise _validation_error(
+            f"{label} {manifest_hash} has invalid items (expected object)", label,
         )
     if not isinstance(files, dict):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{label} {manifest_hash} has invalid files (expected object)",
+        raise _validation_error(
+            f"{label} {manifest_hash} has invalid files (expected object)", label,
         )
 
     # Dedupe: avoid re-checking the same hash multiple times
@@ -292,39 +292,34 @@ def _validate_manifest_graph(
         if item_hash not in validated_items:
             item_obj = cas.get_object(item_hash, root)
             if item_obj is None:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"{label} item '{rel_path}' references missing object {item_hash}",
+                raise _validation_error(
+                    f"{label} item '{rel_path}' references missing object {item_hash}", label,
                 )
             if item_obj.get("kind") != "item_source":
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
+                raise _validation_error(
                     f"{label} item '{rel_path}' references object {item_hash} "
-                    f"with kind={item_obj.get('kind')!r}, expected 'item_source'",
+                    f"with kind={item_obj.get('kind')!r}, expected 'item_source'", label,
                 )
             blob_hash = item_obj.get("content_blob_hash")
             if not isinstance(blob_hash, str) or not blob_hash:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"item_source {item_hash} for '{rel_path}' is missing content_blob_hash",
+                raise _validation_error(
+                    f"item_source {item_hash} for '{rel_path}' is missing content_blob_hash", label,
                 )
             validated_items[item_hash] = item_obj
 
         blob_hash = validated_items[item_hash]["content_blob_hash"]
         if blob_hash not in validated_blobs:
             if not cas.has_blob(blob_hash, root):
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"item_source {item_hash} for '{rel_path}' references missing blob {blob_hash}",
+                raise _validation_error(
+                    f"item_source {item_hash} for '{rel_path}' references missing blob {blob_hash}", label,
                 )
             validated_blobs.add(blob_hash)
 
     for rel_path, blob_hash in files.items():
         if blob_hash not in validated_blobs:
             if not cas.has_blob(blob_hash, root):
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"{label} file '{rel_path}' references missing blob {blob_hash}",
+                raise _validation_error(
+                    f"{label} file '{rel_path}' references missing blob {blob_hash}", label,
                 )
             validated_blobs.add(blob_hash)
 

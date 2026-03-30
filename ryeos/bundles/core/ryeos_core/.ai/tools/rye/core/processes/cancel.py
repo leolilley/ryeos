@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:7496f2c9e3cd2cf48532b6723a5a02eae260b64872596a9c16ff35d2e8e67aba:tHRitQ5n1RhNsxPs9wDCwnbOGMdW4GMy_jWraHavKKrqFVZk3wby4__THBmo-lbJmWQ8U7W7ioyAkXfPslo8Cw==:4b987fd4e40303ac
+# rye:signed:2026-03-30T04:30:49Z:e95b4fab43eb6f42d0627ff4d13df1f56a793275499554c7664afe429ea00381:yceZg0qTMyubLYCkqSOm24dyGUinI2hCa6yEHxTEJbAC8xp2QJ8zxM_vNCZPMSUfKsakIULSk6Yk3GDVaGgiBQ:4b987fd4e40303ac
 """Cancel a running process by run_id via SIGTERM."""
 
 import argparse

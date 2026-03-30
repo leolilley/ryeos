@@ -11,7 +11,7 @@ version: "1.0.0"
 
 Remote execution lets you run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage (CAS) for sync — no git, no file diffs. Objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects.
 
-The remote server is a FastAPI app at `services/ryeos-node/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-node-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 3 tools (fetch, execute, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
+The remote server is a FastAPI app at `ryeos-node/` deployed on Modal. The engine serves REST, MCP (`/mcp`), and webhooks from a single Modal deployment. The separate Railway proxy service (`ryeos-node-mcp`) has been removed. The server also mounts a FastMCP server at `/mcp` with 3 tools (fetch, execute, sign) that call the engine directly — no proxy. The client is a bundled tool at `.ai/tools/rye/core/remote/remote.py`.
 
 ## End-to-End Flow
 
@@ -109,7 +109,7 @@ class ExecutionPaths:
 
 ## Server Endpoints
 
-FastAPI app at `services/ryeos-node/ryeos_node/server.py`.
+FastAPI app at `ryeos-node/ryeos_node/server.py`.
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -188,7 +188,7 @@ The trust chain: you trust the remote by pinning its key. The remote proves iden
 
 ## Authentication
 
-Bearer token auth via `services/ryeos-node/ryeos_node/auth.py`. Ed25519 signed requests authenticate the caller:
+Bearer token auth via `ryeos-node/ryeos_node/auth.py`. Ed25519 signed requests authenticate the caller:
 
 **API key:** SHA256-hashed keys looked up in the local key store. Checks revocation and expiry.
 
@@ -306,9 +306,9 @@ Returns a list of `ProjectSnapshot` objects following `parent_hashes[0]` (mainli
 
 | Component | File |
 |-----------|------|
-| Server | `services/ryeos-node/ryeos_node/server.py` |
-| Server config | `services/ryeos-node/ryeos_node/config.py` |
-| Server auth | `services/ryeos-node/ryeos_node/auth.py` |
+| Server | `ryeos-node/ryeos_node/server.py` |
+| Server config | `ryeos-node/ryeos_node/config.py` |
+| Server auth | `ryeos-node/ryeos_node/auth.py` |
 | Sync protocol | `ryeos/rye/cas/sync.py` |
 | Materializer | `ryeos/rye/cas/materializer.py` |
 | Client tool | `.ai/tools/rye/core/remote/remote.py` |
@@ -317,5 +317,5 @@ Returns a list of `ProjectSnapshot` objects following `parent_hashes[0]` (mainli
 | CAS primitives | `lillux/kernel/lillux/primitives/cas.py` |
 | Checkout/spaces | `ryeos/rye/cas/checkout.py` |
 | Three-way merge | `ryeos/rye/cas/merge.py` |
-| MCP transport | `services/ryeos-node/ryeos_node/mcp.py` |
+| MCP transport | `ryeos-node/ryeos_node/mcp.py` |
 | Object model | `ryeos/rye/cas/objects.py` |

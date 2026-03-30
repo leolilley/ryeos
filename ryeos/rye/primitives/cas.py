@@ -68,7 +68,7 @@ def get_blob(hash_hex: str, root: Path) -> Optional[bytes]:
         [_lillux(), "cas", "fetch", "--root", str(root), "--hash", hash_hex, "--blob"],
         capture_output=True,
     )
-    if result.returncode != 0 or not result.stdout:
+    if result.returncode != 0:
         return None
     return result.stdout
 

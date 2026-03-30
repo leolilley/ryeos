@@ -107,6 +107,7 @@ def get_user_space() -> Path:
     return Path.home()
 
 
+
 def get_user_ai_path() -> Path:
     """Get .ai directory in user space (e.g., ~/.ai).
 

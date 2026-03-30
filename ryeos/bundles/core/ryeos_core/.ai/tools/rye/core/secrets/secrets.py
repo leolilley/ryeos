@@ -1,3 +1,4 @@
+# rye:signed:2026-03-30T04:30:49Z:5f9a6da97fa22f34107670622fe8b896373d9650af0874d813c4792b80b0f0fc:RLjn7ljX7gnYwDF94IWjgAovvDhs1Q7yMnFWs6ExKV1Tk47W5CSIlVdOsisqIpySvoImT2d-DdSIXCJ_Z8rFDQ:4b987fd4e40303ac
 """
 Local encrypted secret store management.
 
