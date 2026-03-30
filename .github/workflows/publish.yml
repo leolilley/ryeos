@@ -41,7 +41,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           working-directory: lillux/lillux
-          args: --release --out dist
+          args: --release --out dist-wheel
           manylinux: auto
 
       - name: Build lillux sdist
@@ -49,7 +49,13 @@ jobs:
         with:
           working-directory: lillux/lillux
           command: sdist
-          args: --out dist
+          args: --out dist-sdist
+
+      - name: Combine dist artifacts
+        run: |
+          mkdir -p lillux/lillux/dist
+          cp lillux/lillux/dist-wheel/* lillux/lillux/dist/
+          cp lillux/lillux/dist-sdist/* lillux/lillux/dist/
 
       - name: Upload lillux dist
         uses: actions/upload-artifact@v4
