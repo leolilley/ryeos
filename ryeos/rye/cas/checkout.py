@@ -103,11 +103,24 @@ def ensure_user_space_cached(
     if cached.exists() and marker.exists():
         return cached
 
+    logger.info(
+        "Materializing user space: manifest=%s, cas_root=%s, cache_root=%s",
+        user_manifest_hash, cas_root, cache_root,
+    )
+
     # Materialize into staging dir with unique name
     staging = cache_root / "user" / f".staging-{user_manifest_hash}-{uuid.uuid4().hex[:12]}"
     staging.mkdir(parents=True)
 
-    materialize_manifest(user_manifest_hash, staging, cas_root)
+    try:
+        materialize_manifest(user_manifest_hash, staging, cas_root)
+    except Exception:
+        logger.error(
+            "Failed to materialize user space manifest=%s from cas_root=%s",
+            user_manifest_hash, cas_root, exc_info=True,
+        )
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
     (staging / ".user_space_complete").write_text(user_manifest_hash)
     try:

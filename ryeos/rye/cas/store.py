@@ -149,7 +149,24 @@ def materialize_item(
     blob_hash = obj["content_blob_hash"]
     blob_data = cas.get_blob(blob_hash, root)
     if blob_data is None:
-        raise FileNotFoundError(f"Blob {blob_hash} not found in CAS")
+        # Enhanced diagnostics: check if blob exists on disk but lillux can't read it
+        blob_path = root / "blobs" / blob_hash[:2] / blob_hash[2:4] / blob_hash
+        exists_on_disk = blob_path.exists()
+        logger.error(
+            "Blob %s not found via lillux. root=%s, exists_on_disk=%s, blob_path=%s, "
+            "item_type=%s, item_id=%s, object_hash=%s",
+            blob_hash, root, exists_on_disk, blob_path,
+            obj.get("item_type"), obj.get("item_id"), object_hash,
+        )
+        if exists_on_disk:
+            try:
+                disk_size = blob_path.stat().st_size
+                logger.error("Blob file exists on disk: size=%d bytes", disk_size)
+            except Exception as e:
+                logger.error("Could not stat blob file: %s", e)
+        raise FileNotFoundError(
+            f"Blob {blob_hash} not found in CAS (root={root}, exists_on_disk={exists_on_disk})"
+        )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
 

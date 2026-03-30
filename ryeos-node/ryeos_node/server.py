@@ -686,6 +686,74 @@ async def objects_get(
     return handle_get_objects(req.hashes, root)
 
 
+class DebugCasRequest(BaseModel):
+    hash: str
+    kind: str = "blob"  # "blob" or "object"
+
+
+@app.post("/debug/cas")
+async def debug_cas(
+    req: DebugCasRequest,
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Diagnostic endpoint: check CAS blob/object existence and retrieval."""
+    require_capability(principal, "rye.objects.*")
+    root = _principal_cas_root(principal, settings)
+
+    result: Dict[str, Any] = {
+        "hash": req.hash,
+        "kind": req.kind,
+        "cas_root": str(root),
+    }
+
+    if req.kind == "blob":
+        # Check filesystem
+        blob_path = root / "blobs" / req.hash[:2] / req.hash[2:4] / req.hash
+        result["shard_path"] = str(blob_path)
+        result["exists_on_disk"] = blob_path.exists()
+        if blob_path.exists():
+            try:
+                stat = blob_path.stat()
+                result["file_size"] = stat.st_size
+                result["file_mode"] = oct(stat.st_mode)
+            except Exception as e:
+                result["stat_error"] = str(e)
+
+        # Check via has_blob (Python path check)
+        result["has_blob"] = cas.has_blob(req.hash, root)
+
+        # Check via lillux binary
+        import subprocess
+        try:
+            from rye.primitives.cas import _lillux
+            lillux_bin = _lillux()
+            result["lillux_binary"] = lillux_bin
+            proc = subprocess.run(
+                [lillux_bin, "cas", "fetch", "--root", str(root), "--hash", req.hash, "--blob"],
+                capture_output=True,
+            )
+            result["lillux_returncode"] = proc.returncode
+            result["lillux_stdout_len"] = len(proc.stdout)
+            result["lillux_stderr"] = proc.stderr.decode("utf-8", errors="replace")[:500]
+        except Exception as e:
+            result["lillux_error"] = str(e)
+
+        # Check via get_blob
+        blob_data = cas.get_blob(req.hash, root)
+        result["get_blob_result"] = (
+            f"bytes(len={len(blob_data)})" if blob_data is not None else "None"
+        )
+    else:
+        result["has_object"] = cas.has_object(req.hash, root)
+        obj = cas.get_object(req.hash, root)
+        result["get_object_result"] = (
+            f"dict(keys={list(obj.keys())})" if obj is not None else "None"
+        )
+
+    return result
+
+
 @app.post("/push")
 async def push(
     req: PushRequest,
