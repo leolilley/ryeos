@@ -31,8 +31,36 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  # ── Build lillux once and share via artifact ─────────────────────
+  build-lillux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build lillux wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: lillux/lillux
+          args: --release --out dist
+          manylinux: auto
+
+      - name: Build lillux sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: lillux/lillux
+          command: sdist
+          args: --out dist
+
+      - name: Upload lillux dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: lillux-dist
+          path: lillux/lillux/dist/
+          retention-days: 1
+
   # ── Re-sign with CI key and run tests ────────────────────────────
   test:
+    needs: build-lillux
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -42,12 +70,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Build lillux binary
-        uses: PyO3/maturin-action@v1
+      - name: Download lillux dist
+        uses: actions/download-artifact@v4
         with:
-          working-directory: lillux/lillux
-          args: --release --out dist
-          manylinux: auto
+          name: lillux-dist
+          path: lillux/lillux/dist
 
       - name: Install lillux wheel
         run: pip install lillux/lillux/dist/*.whl
@@ -145,13 +172,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Build lillux binary
+      - name: Download lillux dist
         if: steps.check.outputs.skip == 'false'
-        uses: PyO3/maturin-action@v1
+        uses: actions/download-artifact@v4
         with:
-          working-directory: lillux/lillux
-          args: --release --out dist
-          manylinux: auto
+          name: lillux-dist
+          path: lillux/lillux/dist
 
       - name: Install build tools and runtime
         if: steps.check.outputs.skip == 'false'
@@ -254,13 +280,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Build lillux binary
+      - name: Download lillux dist
         if: steps.check.outputs.skip == 'false'
-        uses: PyO3/maturin-action@v1
+        uses: actions/download-artifact@v4
         with:
-          working-directory: lillux/lillux
-          args: --release --out dist
-          manylinux: auto
+          name: lillux-dist
+          path: lillux/lillux/dist
 
       - name: Install from local checkout
         if: steps.check.outputs.skip == 'false'
@@ -320,16 +345,9 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: rye -p ${{ steps.pkg.outputs.dir }} registry bundle push ${{ matrix.bundle }}
 
-  # ── Build & publish Rust packages individually ───────────────────
+  # ── Publish lillux to PyPI ─────────────────────────────────────────
   publish-rust:
-    needs: test
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - package: lillux
-            manifest: lillux/lillux
+    needs: [test, build-lillux]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -340,38 +358,22 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "push" ]] || \
              [[ "${{ github.event.inputs.package }}" == "all" ]] || \
-             [[ "${{ github.event.inputs.package }}" == "${{ matrix.package }}" ]]; then
+             [[ "${{ github.event.inputs.package }}" == "lillux" ]]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v6
+      - name: Download lillux dist
         if: steps.check.outputs.skip == 'false'
-
-      - name: Create dist directory
-        if: steps.check.outputs.skip == 'false'
-        run: mkdir -p ${{ matrix.manifest }}/dist
-
-      - name: Build wheels (maturin)
-        if: steps.check.outputs.skip == 'false'
-        uses: PyO3/maturin-action@v1
+        uses: actions/download-artifact@v4
         with:
-          working-directory: ${{ matrix.manifest }}
-          args: --release --out dist
-          manylinux: auto
-
-      - name: Build sdist
-        if: steps.check.outputs.skip == 'false'
-        uses: PyO3/maturin-action@v1
-        with:
-          working-directory: ${{ matrix.manifest }}
-          command: sdist
-          args: --out dist
+          name: lillux-dist
+          path: dist
 
       - name: Publish to PyPI
         if: steps.check.outputs.skip == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: ${{ matrix.manifest }}/dist/
+          packages-dir: dist/
           skip-existing: true
