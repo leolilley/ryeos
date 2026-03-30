@@ -32,22 +32,20 @@ def _patch_config(config):
 class TestResolveRemote:
     """Tests for resolve_remote()."""
 
-    def test_named_remote_from_config(self, monkeypatch):
-        monkeypatch.setenv("RYE_GPU_API_KEY", "gpu-secret")
+    def test_named_remote_from_config(self):
         config = {
             "remotes": {
-                "gpu": {"url": "https://gpu.example.com", "key_env": "RYE_GPU_API_KEY"},
+                "gpu": {"url": "https://gpu.example.com", "node_id": "fp:abc123"},
             },
         }
         with _patch_config(config):
             rc = resolve_remote("gpu")
-        assert rc == RemoteConfig(name="gpu", url="https://gpu.example.com", api_key="gpu-secret")
+        assert rc == RemoteConfig(name="gpu", url="https://gpu.example.com", node_id="fp:abc123")
 
-    def test_default_remote_from_config(self, monkeypatch):
-        monkeypatch.setenv("RYE_REMOTE_API_KEY", "default-key")
+    def test_default_remote_from_config(self):
         config = {
             "remotes": {
-                "default": {"url": "https://default.example.com", "key_env": "RYE_REMOTE_API_KEY"},
+                "default": {"url": "https://default.example.com", "node_id": "fp:def456"},
             },
         }
         with _patch_config(config):
@@ -61,22 +59,21 @@ class TestResolveRemote:
                 resolve_remote()
 
     def test_named_remote_not_found(self):
-        with _patch_config({"remotes": {"default": {"url": "x", "key_env": "K"}}}):
+        with _patch_config({"remotes": {"default": {"url": "x"}}}):
             with pytest.raises(ValueError, match="'gpu' not found"):
                 resolve_remote("gpu")
 
-    def test_named_remote_missing_url(self, monkeypatch):
-        monkeypatch.setenv("K", "val")
-        with _patch_config({"remotes": {"gpu": {"key_env": "K"}}}):
+    def test_named_remote_missing_url(self):
+        with _patch_config({"remotes": {"gpu": {"node_id": "fp:x"}}}):
             with pytest.raises(ValueError, match="no url configured"):
                 resolve_remote("gpu")
 
-    def test_named_remote_missing_key_env(self, monkeypatch):
-        monkeypatch.delenv("MY_KEY", raising=False)
-        config = {"remotes": {"gpu": {"url": "https://gpu.example.com", "key_env": "MY_KEY"}}}
+    def test_missing_node_id_returns_empty(self):
+        """node_id is optional — empty string if not configured."""
+        config = {"remotes": {"gpu": {"url": "https://gpu.example.com"}}}
         with _patch_config(config):
-            with pytest.raises(ValueError, match="MY_KEY"):
-                resolve_remote("gpu")
+            rc = resolve_remote("gpu")
+        assert rc.node_id == ""
 
     def test_malformed_entry_not_dict(self):
         config = {"remotes": {"gpu": "https://example.com"}}
@@ -93,7 +90,6 @@ class TestResolveRemote:
     def test_env_vars_ignored_without_config(self, monkeypatch):
         """Env vars alone are not sufficient — config must declare remotes."""
         monkeypatch.setenv("RYE_REMOTE_URL", "https://env.example.com")
-        monkeypatch.setenv("RYE_REMOTE_API_KEY", "env-key")
         with _patch_config({}):
             with pytest.raises(ValueError, match="not found"):
                 resolve_remote()
@@ -120,31 +116,28 @@ class TestGetProjectPath:
 
 class TestListRemotes:
 
-    def test_lists_configured_remotes(self, monkeypatch):
-        monkeypatch.setenv("K1", "val")
-        monkeypatch.delenv("K2", raising=False)
+    def test_lists_configured_remotes(self):
         config = {
             "remotes": {
-                "default": {"url": "https://a.com", "key_env": "K1"},
-                "gpu": {"url": "https://b.com", "key_env": "K2"},
+                "default": {"url": "https://a.com", "node_id": "fp:abc"},
+                "gpu": {"url": "https://b.com"},
             },
         }
         with _patch_config(config):
             result = list_remotes()
-        assert result["default"]["key_set"] is True
-        assert result["gpu"]["key_set"] is False
+        assert result["default"]["node_id"] == "fp:abc"
+        assert result["gpu"]["node_id"] == ""
 
     def test_empty_config_returns_empty(self):
         with _patch_config({}):
             result = list_remotes()
         assert result == {}
 
-    def test_malformed_entry_skipped(self, monkeypatch):
-        monkeypatch.delenv("K", raising=False)
+    def test_malformed_entry_skipped(self):
         config = {
             "remotes": {
                 "bad": "string",
-                "good": {"url": "https://x.com", "key_env": "K"},
+                "good": {"url": "https://x.com", "node_id": "fp:xyz"},
             },
         }
         with _patch_config(config):
@@ -157,10 +150,9 @@ class TestListRemotes:
 class TestRemoteToolIntegration:
     """Verify remote.py uses resolve_remote for client creation."""
 
-    def test_get_client_uses_resolve_remote(self, monkeypatch):
+    def test_get_client_uses_resolve_remote(self):
         """_get_client() calls resolve_remote() and creates RemoteHttpClient."""
-        monkeypatch.setenv("MY_KEY", "test-key")
-        config = {"remotes": {"gpu": {"url": "https://gpu.example.com", "key_env": "MY_KEY"}}}
+        config = {"remotes": {"gpu": {"url": "https://gpu.example.com", "node_id": "fp:test123"}}}
         with _patch_config(config):
             import importlib
             import remote as remote_mod
@@ -168,7 +160,7 @@ class TestRemoteToolIntegration:
             importlib.reload(remote_mod)
             client = remote_mod._get_client("gpu", None)
             assert client.base_url == "https://gpu.example.com"
-            assert client.api_key == "test-key"
+            assert client.node_id == "fp:test123"
 
 
 class TestParseEnvFile:

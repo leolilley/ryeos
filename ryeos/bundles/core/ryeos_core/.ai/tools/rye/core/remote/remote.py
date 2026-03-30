@@ -1,3 +1,4 @@
+# rye:signed:2026-03-30T04:22:02Z:5f936696a17fa12b774ebee325363f82c8a598b3e9c8e89156bceaf57c5a230a:dmeQ9CxlEqgR4lSbnh-Hap4iNbVGP6yBMDZFGO-ERNNDHWrKVSwZ9dTEP49r_sPYAV7VIv6LMLy5oMIrcN31Dg:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -84,16 +85,16 @@ CONFIG_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# HTTP client (uses lillux primitive, same pattern as registry tool)
+# HTTP client (uses signed requests, same pattern as registry tool)
 # ---------------------------------------------------------------------------
 
 
 class RemoteHttpClient:
     """HTTP client for ryeos-node API calls."""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, node_id: str = ""):
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        self.node_id = node_id
         self._http = None
 
     async def _get_http(self):
@@ -102,15 +103,31 @@ class RemoteHttpClient:
             self._http = HttpClientPrimitive()
         return self._http
 
+    def _sign_headers(self, method: str, path: str, body: bytes | None = None) -> dict:
+        from rye.utils.path_utils import get_signing_key_dir
+        from rye.primitives.signing import load_keypair
+        from request_signing import sign_request
+
+        key_dir = get_signing_key_dir()
+        priv, pub = load_keypair(key_dir)
+        audience = self.node_id or ""
+        return sign_request(
+            method=method,
+            url_or_path=path,
+            body=body,
+            audience=audience,
+            private_key_pem=priv,
+            public_key_pem=pub,
+        )
+
     async def get(self, path: str) -> Dict:
         http = await self._get_http()
+        headers = {"Content-Type": "application/json"}
+        headers.update(self._sign_headers("GET", path))
         config = {
             "method": "GET",
             "url": f"{self.base_url}{path}",
-            "headers": {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            "headers": headers,
             "timeout": 30,
         }
         result = await http.execute(config, {})
@@ -123,13 +140,13 @@ class RemoteHttpClient:
 
     async def post(self, path: str, body: Dict, timeout: int = 60) -> Dict:
         http = await self._get_http()
+        body_bytes = json.dumps(body).encode() if body else None
+        headers = {"Content-Type": "application/json"}
+        headers.update(self._sign_headers("POST", path, body_bytes))
         config = {
             "method": "POST",
             "url": f"{self.base_url}{path}",
-            "headers": {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            "headers": headers,
             "body": body,
             "timeout": timeout,
         }
@@ -146,7 +163,7 @@ def _get_client(remote_name=None, project_path=None) -> RemoteHttpClient:
     """Create HTTP client using named remote config."""
     from remote_config import resolve_remote
     config = resolve_remote(remote_name, project_path)
-    return RemoteHttpClient(config.url, config.api_key)
+    return RemoteHttpClient(config.url, config.node_id)
 
 
 # ---------------------------------------------------------------------------

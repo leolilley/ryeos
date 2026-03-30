@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:1f2a842203595e6db4b0e8a0e9cc26ddcf0588f079ed6a8c968338af415fd297:Gacjt1ILTqcEoTfreyV0blCBgOrvgmRnfRHWHHyOBCRQib5hOlHapsQelXPL5fODsI4Qsy3iqh5LvExOWGNiCQ==:4b987fd4e40303ac
+# rye:signed:2026-03-30T04:22:02Z:d9f51d386deda66215ef9730c73a390b12a181b1215cc04a6660d58504bdae33:caOzPZBq-0pwBAFYnu91qko7oiOP0FJLKIHk8zakQz8BLqB9byo7Bkbu5UQbgL6NZEYa-p4GR3XmuOyQ5G0dBA:4b987fd4e40303ac
 """Named remote resolution for multi-remote execution.
 
 Resolves remote connection details (URL + API key) via 3-tier config
@@ -14,7 +14,7 @@ __tool_description__ = "Named remote config resolution library"
 
 import logging
 import os
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -29,7 +29,7 @@ class RemoteConfig:
 
     name: str
     url: str
-    api_key: str = dataclass_field(repr=False)
+    node_id: str = ""  # fp:<fingerprint> of the remote node (audience for request signing)
 
 
 def _load_remote_config(project_path: Optional[Path] = None) -> Dict:
@@ -69,18 +69,12 @@ def resolve_remote(
             f"got {type(entry).__name__}"
         )
     url = entry.get("url", "")
-    key_env = entry.get("key_env", "")
     if not url:
         raise ValueError(
             f"Remote '{name}' has no url configured in cas/remote.yaml"
         )
-    api_key = os.environ.get(key_env, "") if key_env else ""
-    if not api_key:
-        raise ValueError(
-            f"Remote '{name}': env var '{key_env}' is not set. "
-            f"Export it via: export {key_env}=your_key"
-        )
-    return RemoteConfig(name=name, url=url, api_key=api_key)
+    node_id = entry.get("node_id", "")
+    return RemoteConfig(name=name, url=url, node_id=node_id)
 
 
 def get_project_path(project_path: Optional[Path] = None) -> str:
@@ -104,10 +98,8 @@ def list_remotes(project_path: Optional[Path] = None) -> Dict[str, Dict]:
     for rname, entry in remotes.items():
         if not isinstance(entry, dict):
             continue
-        key_env = entry.get("key_env", "")
         result[rname] = {
             "url": entry.get("url", ""),
-            "key_env": key_env,
-            "key_set": bool(os.environ.get(key_env)) if key_env else False,
+            "node_id": entry.get("node_id", ""),
         }
     return result
