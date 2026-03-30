@@ -1,16 +1,17 @@
-# rye:signed:2026-03-30T06:37:13Z:754805173ae37b5631e1ef4dc263d32f66b9837c6bbce0ec5d202362d14b170e:rnrYy5Q3fGinOGwI0oALsXV5o_BrRNkJvb6e4Ov2Rn7lFar4Fhg-y3EjXuLX3yTbLDcxKi4H0CRmE6qDZtG0Ag:4b987fd4e40303ac
+# rye:signed:2026-03-30T07:09:00Z:07ee91c8dd56794a2a4beebb7696187ee01b113a86a0da90cd6832a7d721d2e3:i5x5tJFLH5zdbIxRdKcvkiDmpRCdCOANa-mL5WN4SebBz2Ri7TSn5c9m2BIpeOpftDAGZ31Md1lYc7Z4XyapDA:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
 Actions:
-  push           - Build manifests, sync missing objects to remote.
-  pull           - Fetch new objects from remote (execution results).
-  status         - Show local vs remote manifest hashes.
-  execute        - Push + trigger remote execution + pull results.
-  seal           - Seal local secrets for a remote node's identity.
-  webhooks       - List webhook bindings on the remote.
-  webhook_create - Create a webhook binding for a tool or directive.
-  webhook_delete - Delete a webhook binding by hook_id.
+  push            - Build manifests, sync missing objects to remote.
+  pull            - Fetch new objects from remote (execution results).
+  status          - Show local vs remote manifest hashes.
+  execute         - Push + trigger remote execution + pull results.
+  seal            - Seal local secrets for a remote node's identity.
+  webhooks        - List webhook bindings on the remote.
+  webhook_create  - Create a webhook binding for a tool or directive.
+  webhook_delete  - Delete a webhook binding by hook_id.
+  webhook_trigger - Fire a webhook binding via HMAC-authenticated POST.
 """
 
 __version__ = "1.0.0"
@@ -46,7 +47,7 @@ TOOL_METADATA = {
 
 ACTIONS = [
     "push", "pull", "status", "execute", "seal", "threads", "thread_status",
-    "webhooks", "webhook_create", "webhook_delete",
+    "webhooks", "webhook_create", "webhook_delete", "webhook_trigger",
 ]
 
 CONFIG_SCHEMA = {
@@ -55,7 +56,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Remote operation: push, pull, status, execute, seal, threads, thread_status, webhooks, webhook_create, webhook_delete",
+            "description": "Remote operation: push, pull, status, execute, seal, threads, thread_status, webhooks, webhook_create, webhook_delete, webhook_trigger",
         },
         "item_type": {
             "type": "string",
@@ -87,7 +88,11 @@ CONFIG_SCHEMA = {
         },
         "hook_id": {
             "type": "string",
-            "description": "Webhook hook ID for webhook_delete",
+            "description": "Webhook hook ID for webhook_delete or webhook_trigger",
+        },
+        "secret": {
+            "type": "string",
+            "description": "Webhook HMAC secret (whsec_...) for webhook_trigger. Can also be set via WEBHOOK_SECRET env var.",
         },
         "description": {
             "type": "string",
@@ -963,6 +968,77 @@ async def _webhook_delete(project_path: Path, params: Dict) -> Dict:
     return resp_body
 
 
+async def _webhook_trigger(project_path: Path, params: Dict) -> Dict:
+    """Fire a webhook binding via HMAC-authenticated POST.
+
+    Uses webhook HMAC auth (not signed-request auth). The server's
+    resolve_execution extracts item_type/item_id/project_path from the
+    binding — the caller only provides hook_id and optional parameters.
+    """
+    import hmac as hmac_mod
+    import uuid
+
+    hook_id = params.get("hook_id")
+    if not hook_id:
+        return {"error": "hook_id is required for webhook_trigger"}
+
+    secret = params.get("secret") or os.environ.get("WEBHOOK_SECRET", "")
+    if not secret:
+        return {"error": "secret is required for webhook_trigger (pass directly or set WEBHOOK_SECRET env var)"}
+
+    exec_params = params.get("parameters", {})
+    remote_name = params.get("remote")
+
+    # Build the request — only hook_id and parameters go in the body
+    from remote_config import resolve_remote
+    config = resolve_remote(remote_name, project_path)
+    url = config.url.rstrip("/") + "/execute"
+
+    body = {"hook_id": hook_id, "parameters": exec_params}
+    # Must match the serialization used by HttpClientPrimitive (json.dumps default)
+    body_bytes = json.dumps(body).encode()
+
+    timestamp = str(int(time.time()))
+    delivery_id = str(uuid.uuid4())
+
+    # HMAC-SHA256 over "timestamp.body"
+    signed = timestamp.encode() + b"." + body_bytes
+    signature = hmac_mod.new(
+        secret.encode(), signed, hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Webhook-Timestamp": timestamp,
+        "X-Webhook-Signature": f"sha256={signature}",
+        "X-Webhook-Delivery-Id": delivery_id,
+    }
+
+    from rye.runtime.http_client import HttpClientPrimitive
+    http = HttpClientPrimitive()
+    result = await http.execute({
+        "method": "POST",
+        "url": url,
+        "headers": headers,
+        "body": body,
+        "timeout": 300,
+    }, {})
+
+    if not result.success:
+        return {"error": f"Webhook trigger failed: {result.error}"}
+
+    resp_body = result.body
+    if isinstance(resp_body, str):
+        resp_body = json.loads(resp_body)
+
+    return {
+        "triggered": True,
+        "hook_id": hook_id,
+        "delivery_id": delivery_id,
+        "result": resp_body,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -978,6 +1054,7 @@ _ACTION_MAP = {
     "webhooks": _webhooks,
     "webhook_create": _webhook_create,
     "webhook_delete": _webhook_delete,
+    "webhook_trigger": _webhook_trigger,
 }
 
 

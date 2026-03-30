@@ -526,7 +526,8 @@ def _find_execution_snapshot_hash(project_path: Path) -> Optional[str]:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": get_system_version()}
+    from ryeos_node import __version__ as node_version
+    return {"status": "ok", "version": node_version, "engine_version": get_system_version()}
 
 
 def _scan_capabilities() -> tuple[list, list]:

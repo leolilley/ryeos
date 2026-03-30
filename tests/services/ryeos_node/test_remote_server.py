@@ -244,7 +244,9 @@ class TestHealth:
     def test_version_present(self, cas_env):
         c, _, _ = cas_env
         r = c.get("/health")
-        assert r.json()["version"] == get_system_version()
+        from ryeos_node import __version__ as node_version
+        assert r.json()["version"] == node_version
+        assert r.json()["engine_version"] == get_system_version()
 
 
 class TestPublicKey:
