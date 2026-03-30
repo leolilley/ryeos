@@ -70,11 +70,14 @@ def _load_authorized_key(fingerprint: str, settings: Settings) -> dict:
     if not sig_line.startswith("# rye:signed:"):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (unsigned)")
 
-    parts = sig_line[len("# rye:signed:"):].split(":", 3)
-    if len(parts) != 4:
+    # Format: <timestamp>:<content_hash>:<sig_b64>:<signer_fp>
+    # Timestamp is ISO 8601 with colons, so rsplit from the right.
+    remainder = sig_line[len("# rye:signed:"):]
+    rparts = remainder.rsplit(":", 3)
+    if len(rparts) != 4:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized key file (malformed sig)")
 
-    _sig_timestamp, content_hash, sig_b64, signer_fp = parts
+    _sig_timestamp, content_hash, sig_b64, signer_fp = rparts
 
     # Verify signature was made by this node's key
     from rye.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature

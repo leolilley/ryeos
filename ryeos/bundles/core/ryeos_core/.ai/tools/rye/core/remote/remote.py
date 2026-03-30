@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:22:02Z:5f936696a17fa12b774ebee325363f82c8a598b3e9c8e89156bceaf57c5a230a:dmeQ9CxlEqgR4lSbnh-Hap4iNbVGP6yBMDZFGO-ERNNDHWrKVSwZ9dTEP49r_sPYAV7VIv6LMLy5oMIrcN31Dg:4b987fd4e40303ac
+# rye:signed:2026-03-30T04:26:30Z:0f464f80bf5cca214add7779afe9f6fd746a13e385e7e3108825ea055973fd26:bmSRxi5CvcZAAtGJ2qWrJQ_R9NGzSAXiDXJwBhbDavYazeO2DFAvSgHFaaCig_KO7W7MVQ1ldqhxjmt6KLZqBw:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,20 +106,35 @@ class RemoteHttpClient:
 
     def _sign_headers(self, method: str, path: str, body: bytes | None = None) -> dict:
         from rye.utils.path_utils import get_signing_key_dir
-        from rye.primitives.signing import load_keypair
-        from request_signing import sign_request
+        from rye.primitives.signing import load_keypair, compute_key_fingerprint, sign_hash
 
         key_dir = get_signing_key_dir()
         priv, pub = load_keypair(key_dir)
         audience = self.node_id or ""
-        return sign_request(
-            method=method,
-            url_or_path=path,
-            body=body,
-            audience=audience,
-            private_key_pem=priv,
-            public_key_pem=pub,
-        )
+
+        fingerprint = compute_key_fingerprint(pub)
+        timestamp = str(int(time.time()))
+        nonce = os.urandom(16).hex()
+        body_hash = hashlib.sha256(body or b"").hexdigest()
+
+        string_to_sign = "\n".join([
+            "ryeos-request-v1",
+            method.upper(),
+            path,
+            body_hash,
+            timestamp,
+            nonce,
+            audience,
+        ])
+        content_hash = hashlib.sha256(string_to_sign.encode()).hexdigest()
+        signature = sign_hash(content_hash, priv)
+
+        return {
+            "X-Rye-Key-Id": f"fp:{fingerprint}",
+            "X-Rye-Timestamp": timestamp,
+            "X-Rye-Nonce": nonce,
+            "X-Rye-Signature": signature,
+        }
 
     async def get(self, path: str) -> Dict:
         http = await self._get_http()
