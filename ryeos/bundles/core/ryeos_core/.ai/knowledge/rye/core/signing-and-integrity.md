@@ -92,7 +92,7 @@ For bundles, provision signing keys with `action: trust, space: project`.
 ### Signing Steps
 
 ```python
-from lillux.primitives.signing import sign_hash, verify_signature
+from rye.primitives.signing import sign_hash, verify_signature
 
 # 1. Load existing keypair (fails if none exists)
 private_pem, public_pem = load_keypair(key_dir=~/.ai/config/keys/signing/)

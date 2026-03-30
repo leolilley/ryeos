@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import get_bundle_path
-from lillux.primitives.signing import compute_key_fingerprint
+from rye.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 
 SIGNER_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/persistence/transcript_signer.py')

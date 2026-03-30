@@ -19,9 +19,9 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
-from lillux.primitives import cas
-from lillux.primitives.integrity import canonical_json, compute_integrity
-from lillux.primitives.signing import (
+from rye.primitives import cas
+from rye.primitives.integrity import canonical_json, compute_integrity
+from rye.primitives.signing import (
     ensure_keypair,
     generate_keypair,
     save_keypair,
@@ -1059,7 +1059,7 @@ class TestRemoteKeyVerification:
         """Build a signed identity/v1 document for mock /public-key responses."""
         import base64 as _b64
         import hashlib as _hl
-        from lillux.primitives.signing import (
+        from rye.primitives.signing import (
             compute_key_fingerprint as _fp,
             sign_hash as _sign,
             ensure_full_keypair as _efk,
@@ -1201,7 +1201,7 @@ class TestCopyCasObjects:
         h = cas.store_blob(b"original", src)
 
         # Overwrite the blob file with different content (simulating corruption)
-        from lillux.primitives.cas import _shard_path
+        from rye.primitives.cas import _shard_path
         blob_path = _shard_path(src, "blobs", h)
         blob_path.write_bytes(b"tampered content")
 
@@ -3447,7 +3447,7 @@ class TestSealedEnvelope:
         import base64 as b64
 
         box_key, box_pub = _generate_box_keypair()
-        from lillux.primitives.signing import compute_box_fingerprint
+        from rye.primitives.signing import compute_box_fingerprint
         fp = compute_box_fingerprint(box_pub)
 
         identity_doc = {
@@ -3469,8 +3469,8 @@ class TestSealedEnvelopeLillux:
 
     def test_decrypt_and_inject(self, tmp_path):
         """decrypt_and_inject round-trips with seal_secrets."""
-        from lillux.primitives.signing import save_box_keypair
-        from lillux.primitives.sealed_envelope import decrypt_and_inject
+        from rye.primitives.signing import save_box_keypair
+        from rye.primitives.sealed_envelope import decrypt_and_inject
 
         box_key, box_pub = _generate_box_keypair()
         key_dir = tmp_path / "keys"
@@ -3486,7 +3486,7 @@ class TestSealedEnvelopeLillux:
 
     def test_is_safe_secret_name(self):
         """Validate secret name safety checks."""
-        from lillux.primitives.sealed_envelope import is_safe_secret_name
+        from rye.primitives.sealed_envelope import is_safe_secret_name
 
         assert is_safe_secret_name("MY_API_KEY") is True
         assert is_safe_secret_name("DATABASE_URL") is True
@@ -3505,7 +3505,7 @@ class TestSealedEnvelopeLillux:
 
     def test_validate_env_map(self):
         """Test env map validation limits."""
-        from lillux.primitives.sealed_envelope import validate_env_map, MAX_VARIABLE_COUNT
+        from rye.primitives.sealed_envelope import validate_env_map, MAX_VARIABLE_COUNT
 
         assert validate_env_map({"KEY": "value"}) == []
 
@@ -3518,8 +3518,8 @@ class TestSealedEnvelopeLillux:
 
     def test_unsafe_names_filtered(self, tmp_path):
         """Unsafe secret names are filtered out during decryption."""
-        from lillux.primitives.signing import save_box_keypair
-        from lillux.primitives.sealed_envelope import decrypt_and_inject
+        from rye.primitives.signing import save_box_keypair
+        from rye.primitives.sealed_envelope import decrypt_and_inject
 
         box_key, box_pub = _generate_box_keypair()
         key_dir = tmp_path / "keys"

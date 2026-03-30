@@ -14,8 +14,8 @@ import logging
 import os
 from pathlib import Path
 
-from lillux.primitives import cas
-from lillux.primitives.signing import verify_signature
+from rye.primitives import cas
+from rye.primitives.signing import verify_signature
 from rye.cas.refs import read_ref, write_ref_atomic
 
 logger = logging.getLogger(__name__)

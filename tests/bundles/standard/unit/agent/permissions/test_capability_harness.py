@@ -224,7 +224,7 @@ async def signed_project(temp_project, _setup_user_space):
     from rye.utils.trust_store import TrustStore
     from rye.utils.metadata_manager import MetadataManager
     from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
-    from lillux.primitives.signing import load_keypair
+    from rye.primitives.signing import load_keypair
     
     # Get signing key from user space
     user_space = Path(os.environ.get("USER_SPACE"))

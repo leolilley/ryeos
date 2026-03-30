@@ -77,7 +77,7 @@ def _load_authorized_key(fingerprint: str, settings: Settings) -> dict:
     _sig_timestamp, content_hash, sig_b64, signer_fp = parts
 
     # Verify signature was made by this node's key
-    from lillux.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature
+    from rye.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature
 
     try:
         _, node_pub = load_keypair(Path(settings.signing_key_dir))
@@ -168,7 +168,7 @@ def _verify_signed_request(request: Request, raw_body: bytes, settings: Settings
     public_key_pem = base64.b64decode(public_key_b64[8:])
 
     # Compute this node's audience (fp:<node_fingerprint>)
-    from lillux.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature
+    from rye.primitives.signing import load_keypair, compute_key_fingerprint, verify_signature
 
     _, node_pub = load_keypair(Path(settings.signing_key_dir))
     node_fp = compute_key_fingerprint(node_pub)

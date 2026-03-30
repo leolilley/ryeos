@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from lillux.primitives.subprocess import SubprocessPrimitive, SubprocessResult
+from rye.primitives.subprocess import SubprocessPrimitive, SubprocessResult
 from rye.runtime.http_client import HttpClientPrimitive, HttpResult
 from rye.runtime.env_resolver import EnvResolver
 

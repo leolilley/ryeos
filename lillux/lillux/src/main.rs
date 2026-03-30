@@ -1,4 +1,5 @@
 mod cas;
+mod envelope;
 mod exec;
 mod identity;
 mod time;
@@ -50,10 +51,26 @@ enum Command {
         #[command(subcommand)]
         action: identity::KeypairAction,
     },
+    /// Open a sealed secret envelope (decrypt + validate + filter)
+    Envelope {
+        #[command(subcommand)]
+        action: EnvelopeAction,
+    },
     /// Time primitive
     Time {
         #[command(subcommand)]
         action: time::TimeAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvelopeAction {
+    /// Decrypt a sealed envelope, validate env map, return safe entries.
+    /// Reads envelope JSON from stdin.
+    Open {
+        /// Directory containing box_key.pem
+        #[arg(long)]
+        key_dir: String,
     },
 }
 
@@ -68,6 +85,9 @@ fn main() {
             identity::verify(&hash, &signature, &public_key)
         }
         Command::Keypair { action } => identity::run(action),
+        Command::Envelope { action } => match action {
+            EnvelopeAction::Open { key_dir } => envelope::open(&key_dir),
+        },
         Command::Time { action } => time::run(action),
     };
 

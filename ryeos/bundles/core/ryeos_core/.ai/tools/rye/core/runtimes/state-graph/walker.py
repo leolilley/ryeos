@@ -180,7 +180,7 @@ class GraphTranscript:
     def _store_state_snapshot(self, state: Dict) -> Optional[str]:
         """Store state dict as CAS state_snapshot object. Returns hash or None."""
         try:
-            from lillux.primitives import cas
+            from rye.primitives import cas
             from rye.cas.objects import StateSnapshot
             from rye.cas.store import cas_root
 
@@ -197,7 +197,7 @@ class GraphTranscript:
         """Load the latest execution_snapshot from CAS via ref."""
         try:
             from rye.cas.store import cas_root, read_ref
-            from lillux.primitives import cas
+            from rye.primitives import cas
 
             root = cas_root(self._project_path)
             ref_path = (
@@ -917,7 +917,7 @@ def _compute_node_result_hash(result: Dict, project_path: str = "") -> str:
 
     if project_path:
         try:
-            from lillux.primitives import cas
+            from rye.primitives import cas
             from rye.cas.store import cas_root
             root = cas_root(Path(project_path))
             return cas.store_object(node_result.to_dict(), root)
@@ -925,7 +925,7 @@ def _compute_node_result_hash(result: Dict, project_path: str = "") -> str:
             logger.warning("Failed to store NodeResult in CAS", exc_info=True)
             return ""
 
-    from lillux.primitives.integrity import compute_integrity
+    from rye.primitives.integrity import compute_integrity
     return compute_integrity(node_result.to_dict())
 
 
@@ -939,7 +939,7 @@ def _store_node_receipt(
 ) -> Optional[str]:
     """Create and store a NodeReceipt as a CAS object. Returns hash or None."""
     try:
-        from lillux.primitives import cas
+        from rye.primitives import cas
         from rye.cas.objects import NodeReceipt
         from rye.cas.store import cas_root
 
@@ -1059,7 +1059,7 @@ async def _persist_state(
     Returns execution_snapshot hash, or None on failure.
     """
     try:
-        from lillux.primitives import cas
+        from rye.primitives import cas
         from rye.cas.objects import ExecutionSnapshot, StateSnapshot
         from rye.cas.store import cas_root, write_ref
 
@@ -1411,7 +1411,7 @@ def _load_resume_state(
     Returns None if ref not found or CAS objects missing.
     """
     from rye.cas.store import read_ref, cas_root
-    from lillux.primitives import cas
+    from rye.primitives import cas
 
     proj = Path(project_path)
     root = cas_root(proj)

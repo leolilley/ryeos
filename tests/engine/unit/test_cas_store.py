@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from lillux.primitives import cas
+from rye.primitives import cas
 from rye.cas.objects import (
     ItemSource,
     SourceManifest,

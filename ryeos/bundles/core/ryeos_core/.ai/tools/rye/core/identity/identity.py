@@ -64,8 +64,8 @@ def execute(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 def _create(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Generate identity document, sign it, store in CAS."""
-    from lillux.primitives import cas
-    from lillux.primitives.signing import (
+    from rye.primitives import cas
+    from rye.primitives.signing import (
         compute_key_fingerprint,
         compute_box_fingerprint,
         ensure_full_keypair,
@@ -149,7 +149,7 @@ def _create(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 def _show(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Display current identity (fingerprint, public keys)."""
-    from lillux.primitives.signing import (
+    from rye.primitives.signing import (
         compute_key_fingerprint,
         compute_box_fingerprint,
         load_box_keypair,
@@ -199,7 +199,7 @@ def _show(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 def _export(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Export identity document for publishing to registry/peers."""
-    from lillux.primitives import cas
+    from rye.primitives import cas
     from rye.cas.store import user_cas_root
     from rye.utils.path_utils import get_user_space
 

@@ -444,7 +444,7 @@ async def _fetch_verified_identity(
     # Verify identity document signature
     sig_block = body.get("_signature")
     if sig_block:
-        from lillux.primitives.signing import verify_signature
+        from rye.primitives.signing import verify_signature
 
         payload = json.dumps(
             {k: v for k, v in body.items() if k != "_signature"},
@@ -455,7 +455,7 @@ async def _fetch_verified_identity(
             return None, {"error": "Remote identity document signature verification failed"}
 
     # TOFU key pinning
-    from lillux.primitives.signing import compute_key_fingerprint
+    from rye.primitives.signing import compute_key_fingerprint
     from rye.utils.trust_store import TrustStore
 
     remote_fp = compute_key_fingerprint(remote_pem)
@@ -519,7 +519,7 @@ def _materialize_runtime_outputs(
 
     Returns count of files materialized.
     """
-    from lillux.primitives import cas
+    from rye.primitives import cas
 
     root = cas_root(project_path)
     obj = cas.get_object(bundle_hash, root)
@@ -606,7 +606,7 @@ def _load_local_secrets() -> dict:
         return {}
 
     try:
-        from lillux.primitives.signing import load_keypair
+        from rye.primitives.signing import load_keypair
         from cryptography.hazmat.primitives.hashes import SHA256
         from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from lillux.primitives import cas
+from rye.primitives import cas
 
 
 # ---------------------------------------------------------------------------

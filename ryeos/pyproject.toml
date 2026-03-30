@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-engine"
-version = "0.1.18"
+version = "0.1.19"
 description = "RYE Engine — execution engine for Rye OS (resolver, executor, signing)"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,7 +13,7 @@ classifiers = [
 dependencies = [
     "lillux",
     "pyyaml",
-    "cryptography",
+    "cryptography>=41.0",
     "httpx>=0.26.0",
     "packaging>=21.0",
 ]

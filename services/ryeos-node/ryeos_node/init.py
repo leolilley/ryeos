@@ -27,7 +27,7 @@ def ensure_node_space(cas_base_path: str) -> str:
 
     # 1. Generate signing key if missing
     signing_dir.mkdir(parents=True, exist_ok=True)
-    from lillux.primitives.signing import (
+    from rye.primitives.signing import (
         compute_key_fingerprint,
         ensure_full_keypair,
     )

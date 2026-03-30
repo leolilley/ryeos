@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import FrozenSet, List, Optional
 
-from lillux.primitives.signing import compute_key_fingerprint
+from rye.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 from rye.utils.metadata_manager import ToolMetadataStrategy, compute_content_hash
 from rye.utils.path_utils import get_signing_key_dir, get_user_space
@@ -169,7 +169,7 @@ class TrustStore:
                 f"got {actual_hash[:16]}…)"
             )
 
-        from lillux.primitives.signing import verify_signature
+        from rye.primitives.signing import verify_signature
 
         # Self-signed: the signing key is the key described in the file
         if pubkey_fp == key_info.fingerprint:

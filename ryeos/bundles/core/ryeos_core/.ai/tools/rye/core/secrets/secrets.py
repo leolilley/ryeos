@@ -24,8 +24,8 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from lillux.primitives.sealed_envelope import is_safe_secret_name
-from lillux.primitives.signing import load_keypair
+from rye.primitives.sealed_envelope import is_safe_secret_name
+from rye.primitives.signing import load_keypair
 
 logger = logging.getLogger(__name__)
 

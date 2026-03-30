@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from lillux.primitives import cas
+from rye.primitives import cas
 from rye.cas.objects import ArtifactIndex
 from rye.cas.store import cas_root
 

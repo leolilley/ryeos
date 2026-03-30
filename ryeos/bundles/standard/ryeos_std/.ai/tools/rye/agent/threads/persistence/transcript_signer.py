@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 def _get_keypair():
     """Load or generate the user's Ed25519 keypair."""
     from rye.utils.path_utils import get_signing_key_dir
-    from lillux.primitives.signing import ensure_keypair
+    from rye.primitives.signing import ensure_keypair
 
     key_dir = get_signing_key_dir()
     return ensure_keypair(key_dir)
@@ -67,7 +67,7 @@ class TranscriptSigner:
         if not self._jsonl_path.exists():
             return
 
-        from lillux.primitives.signing import sign_hash, compute_key_fingerprint
+        from rye.primitives.signing import sign_hash, compute_key_fingerprint
 
         private_pem, public_pem = _get_keypair()
         pubkey_fp = compute_key_fingerprint(public_pem)
@@ -131,7 +131,7 @@ class TranscriptSigner:
         if not checkpoints:
             return {"valid": True, "checkpoints": 0, "unsigned": True}
 
-        from lillux.primitives.signing import verify_signature
+        from rye.primitives.signing import verify_signature
         from rye.utils.trust_store import TrustStore
 
         trust_store = TrustStore()
@@ -198,7 +198,7 @@ def sign_json(data: dict) -> dict:
     Uses canonical serialization (sorted keys, compact separators)
     so the hash is reproducible on verification.
     """
-    from lillux.primitives.signing import sign_hash, compute_key_fingerprint
+    from rye.primitives.signing import sign_hash, compute_key_fingerprint
 
     private_pem, public_pem = _get_keypair()
     pubkey_fp = compute_key_fingerprint(public_pem)
@@ -248,7 +248,7 @@ def verify_json(data: dict) -> bool:
     if not parsed:
         return False
 
-    from lillux.primitives.signing import verify_signature
+    from rye.primitives.signing import verify_signature
     from rye.utils.trust_store import TrustStore
 
     content = {k: v for k, v in data.items() if k != "_signature"}

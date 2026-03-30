@@ -60,7 +60,7 @@ Kernel-level, type-agnostic. Same layer as `integrity.py` and `signing.py`. Lill
 ### Write Path
 
 ```python
-from lillux.primitives.cas import store_blob, store_object
+from rye.primitives.cas import store_blob, store_object
 
 # Store raw bytes → SHA256 hex
 blob_hash = store_blob(file_bytes, root=objects_dir)
@@ -74,7 +74,7 @@ obj_hash = store_object({"kind": "item_source", ...}, root=objects_dir)
 ### Read Path
 
 ```python
-from lillux.primitives.cas import get_blob, get_object, has
+from rye.primitives.cas import get_blob, get_object, has
 
 if has(some_hash, root=objects_dir):
     data = get_blob(some_hash, root=objects_dir)  # bytes | None

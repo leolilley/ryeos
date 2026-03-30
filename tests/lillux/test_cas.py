@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from lillux.primitives import cas
-from lillux.primitives.integrity import canonical_json, compute_integrity
+from rye.primitives import cas
+from rye.primitives.integrity import canonical_json, compute_integrity
 
 
 class TestStoreBlob:

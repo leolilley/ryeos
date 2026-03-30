@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from lillux.primitives import cas
+from rye.primitives import cas
 
 from rye.cas.store import materialize_item
 

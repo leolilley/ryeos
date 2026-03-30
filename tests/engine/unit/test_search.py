@@ -53,7 +53,7 @@ def temp_project(_setup_user_space):
         # Get the signing public key from the setup fixture
         user_space = Path(os.environ.get("USER_SPACE"))
         signing_key_dir = user_space / RYE_AI_DIR / "config" / "keys" / "signing"
-        from lillux.primitives.signing import load_keypair
+        from rye.primitives.signing import load_keypair
         _, public_pem_signing = load_keypair(signing_key_dir)
         
         # Trust the signing key in this project

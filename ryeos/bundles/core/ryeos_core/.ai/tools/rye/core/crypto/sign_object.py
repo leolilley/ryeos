@@ -30,7 +30,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lillux.primitives.signing import (
+from rye.primitives.signing import (
     compute_key_fingerprint,
     load_keypair,
     sign_hash,

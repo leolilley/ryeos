@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from lillux.primitives import cas
+from rye.primitives import cas
 
 from rye.cas.objects import SourceManifest
 from rye.cas.store import cas_root, ingest_item, item_type_from_path

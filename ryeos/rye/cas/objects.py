@@ -310,7 +310,7 @@ def get_history(snapshot_hash: str, cas_root: Path, limit: int = 50) -> List[dic
 
     Each entry includes its own hash as "_hash" for client convenience.
     """
-    from lillux.primitives import cas
+    from rye.primitives import cas
 
     history: List[dict] = []
     current: Optional[str] = snapshot_hash

@@ -30,7 +30,7 @@ import time
 from typing import Dict, Optional
 from urllib.parse import urlparse, parse_qsl, urlencode
 
-from lillux.primitives.signing import (
+from rye.primitives.signing import (
     compute_key_fingerprint,
     sign_hash,
 )
@@ -133,7 +133,7 @@ def verify_request_signature(
         True if signature is valid and request is fresh, False otherwise.
     """
     try:
-        from lillux.primitives.signing import verify_signature
+        from rye.primitives.signing import verify_signature
 
         key_id = headers.get("X-Rye-Key-Id", headers.get("x-rye-key-id", ""))
         timestamp = headers.get("X-Rye-Timestamp", headers.get("x-rye-timestamp", ""))

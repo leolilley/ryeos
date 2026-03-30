@@ -211,13 +211,13 @@ def _get_signing_key_dir() -> Path:
 
 def _get_signing_keys() -> Tuple[bytes, bytes]:
     """Load local Ed25519 keypair for signing requests."""
-    from lillux.primitives.signing import load_keypair
+    from rye.primitives.signing import load_keypair
     return load_keypair(_get_signing_key_dir())
 
 
 def _get_fingerprint() -> str:
     """Get local key fingerprint."""
-    from lillux.primitives.signing import compute_key_fingerprint
+    from rye.primitives.signing import compute_key_fingerprint
     _, pub = _get_signing_keys()
     return compute_key_fingerprint(pub)
 
@@ -313,7 +313,7 @@ async def _fetch_registry_identity(
 
     sig_block = body.get("_signature")
     if sig_block:
-        from lillux.primitives.signing import verify_signature
+        from rye.primitives.signing import verify_signature
         payload = json.dumps(
             {k: v for k, v in body.items() if k != "_signature"},
             sort_keys=True, separators=(",", ":"),
@@ -322,7 +322,7 @@ async def _fetch_registry_identity(
         if not verify_signature(content_hash, sig_block["sig"], remote_pem):
             return None, {"error": "Registry identity signature verification failed"}
 
-    from lillux.primitives.signing import compute_key_fingerprint
+    from rye.primitives.signing import compute_key_fingerprint
     from rye.utils.trust_store import TrustStore
     from urllib.parse import urlparse
 
@@ -400,7 +400,7 @@ async def _get_client_and_audience(project_path=None) -> Tuple[RegistryHttpClien
 
 async def _login(params: Dict, project_path: str) -> Dict:
     """Create identity document and publish to registry node."""
-    from lillux.primitives.signing import ensure_full_keypair, compute_key_fingerprint
+    from rye.primitives.signing import ensure_full_keypair, compute_key_fingerprint
     from sign_object import sign_object
 
     key_dir = _get_signing_key_dir()
@@ -442,7 +442,7 @@ async def _login(params: Dict, project_path: str) -> Dict:
 async def _whoami(params: Dict, project_path: str) -> Dict:
     """Show current identity (local keypair fingerprint)."""
     try:
-        from lillux.primitives.signing import compute_key_fingerprint
+        from rye.primitives.signing import compute_key_fingerprint
         _, pub = _get_signing_keys()
         fp = compute_key_fingerprint(pub)
         return {
@@ -587,7 +587,7 @@ async def _pull(params: Dict, project_path: str) -> Dict:
         import_objects(entries, root)
 
     # Load manifest and pull remaining objects
-    from lillux.primitives import cas
+    from rye.primitives import cas
     manifest = cas.get_object(manifest_hash, root)
     if manifest is None:
         return {"error": "Failed to load manifest after pull"}
@@ -772,7 +772,7 @@ async def _claim(params: Dict, project_path: str) -> Dict:
     if not namespace:
         return {"error": "Required: namespace", "usage": "claim(namespace='myname')"}
 
-    from lillux.primitives.signing import compute_key_fingerprint
+    from rye.primitives.signing import compute_key_fingerprint
     from sign_object import sign_object
 
     priv, pub = _get_signing_keys()

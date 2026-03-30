@@ -69,7 +69,7 @@ async def launch_detached(
         Dict with ``success``, ``pid``, and optional ``error``.
     """
     try:
-        from lillux.primitives.subprocess import SubprocessPrimitive
+        from rye.primitives.subprocess import SubprocessPrimitive
 
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "spawn.log"

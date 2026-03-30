@@ -128,7 +128,7 @@ class TestStoreNodeReceiptWithError:
                 )
                 assert h is not None
 
-                from lillux.primitives import cas
+                from rye.primitives import cas
                 from rye.cas.store import cas_root
 
                 obj = cas.get_object(h, cas_root(project))
@@ -156,7 +156,7 @@ class TestStoreNodeReceiptWithError:
                 )
                 assert h is not None
 
-                from lillux.primitives import cas
+                from rye.primitives import cas
                 from rye.cas.store import cas_root
 
                 obj = cas.get_object(h, cas_root(project))
@@ -190,7 +190,7 @@ class TestPersistStateWithErrors:
                 )
                 assert h is not None
 
-                from lillux.primitives import cas
+                from rye.primitives import cas
                 from rye.cas.store import cas_root
 
                 snap = cas.get_object(h, cas_root(project))
@@ -220,7 +220,7 @@ class TestPersistStateWithErrors:
                 )
                 assert h is not None
 
-                from lillux.primitives import cas
+                from rye.primitives import cas
                 from rye.cas.store import cas_root
 
                 snap = cas.get_object(h, cas_root(project))

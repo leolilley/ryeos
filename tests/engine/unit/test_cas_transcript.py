@@ -41,7 +41,7 @@ class TestPersistStateCAS:
 
                 # Verify ref points to valid object
                 from rye.cas.store import read_ref, cas_root
-                from lillux.primitives import cas
+                from rye.primitives import cas
 
                 ref_hash = read_ref(ref_path)
                 assert ref_hash == result
@@ -133,7 +133,7 @@ class TestCheckpointCAS:
                 assert payload["state_hash"]  # non-empty
 
                 # Verify state is in CAS
-                from lillux.primitives import cas
+                from rye.primitives import cas
                 from rye.cas.store import cas_root
                 state_obj = cas.get_object(payload["state_hash"], cas_root(project))
                 assert state_obj is not None

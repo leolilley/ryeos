@@ -339,7 +339,7 @@ def _sign_manifest(content: str) -> str:
     Uses the same Ed25519 signing infrastructure as all other rye items.
     """
     from rye.utils.metadata_manager import compute_content_hash, generate_timestamp
-    from lillux.primitives.signing import (
+    from rye.primitives.signing import (
         ensure_keypair,
         sign_hash,
         compute_key_fingerprint,

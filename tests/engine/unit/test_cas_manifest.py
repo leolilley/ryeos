@@ -4,7 +4,7 @@ import os
 import re
 import pytest
 
-from lillux.primitives import cas
+from rye.primitives import cas
 from rye.cas.manifest import (
     build_manifest,
     _is_hard_excluded,

@@ -73,7 +73,7 @@ def get_bundle_path(bundle_type: str, relative_path: str) -> Path:
 
 import pytest
 
-from lillux.primitives.signing import (
+from rye.primitives.signing import (
     generate_keypair,
     save_keypair,
     compute_key_fingerprint,

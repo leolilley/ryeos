@@ -57,7 +57,7 @@ class TestLaunchDetached:
         mock_proc = AsyncMock()
         mock_proc.spawn = AsyncMock(return_value=mock_result)
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
+        with patch("rye.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
             result = await launch_detached(
                 cmd=["python", "-c", "pass"],
                 thread_id="test-thread-1",
@@ -74,7 +74,7 @@ class TestLaunchDetached:
         mock_proc = AsyncMock()
         mock_proc.spawn = AsyncMock(return_value=mock_result)
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
+        with patch("rye.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
             result = await launch_detached(
                 cmd=["nonexistent"],
                 thread_id="test-thread-2",
@@ -89,7 +89,7 @@ class TestLaunchDetached:
         mock_proc = AsyncMock()
         mock_proc.spawn = AsyncMock(return_value=mock_result)
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
+        with patch("rye.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
             await launch_detached(
                 cmd=["python", "script.py"],
                 thread_id="test-thread-3",
@@ -106,7 +106,7 @@ class TestLaunchDetached:
         mock_proc = AsyncMock()
         mock_proc.spawn = AsyncMock(return_value=mock_result)
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
+        with patch("rye.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
             await launch_detached(
                 cmd=["python", "script.py"],
                 thread_id="test-thread-4",
@@ -125,7 +125,7 @@ class TestLaunchDetached:
         mock_proc = AsyncMock()
         mock_proc.spawn = AsyncMock(return_value=mock_result)
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
+        with patch("rye.primitives.subprocess.SubprocessPrimitive", return_value=mock_proc):
             await launch_detached(
                 cmd=["echo"],
                 thread_id="test-thread-5",
@@ -140,7 +140,7 @@ class TestLaunchDetached:
     @pytest.mark.asyncio
     async def test_exception_returns_error_dict(self, tmp_path):
         with patch(
-            "lillux.primitives.subprocess.SubprocessPrimitive",
+            "rye.primitives.subprocess.SubprocessPrimitive",
             side_effect=RuntimeError("lillux not installed"),
         ):
             result = await launch_detached(
@@ -180,7 +180,7 @@ class TestSpawnThread:
         """On success: register → running → update PID with child pid."""
         reg = self._mock_registry()
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive",
+        with patch("rye.primitives.subprocess.SubprocessPrimitive",
                    return_value=self._mock_spawn_success(pid=42)):
             result = await spawn_thread(
                 registry=reg,
@@ -201,7 +201,7 @@ class TestSpawnThread:
         """On failure: register → running → error status, no PID update."""
         reg = self._mock_registry()
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive",
+        with patch("rye.primitives.subprocess.SubprocessPrimitive",
                    return_value=self._mock_spawn_failure("proc died")):
             result = await spawn_thread(
                 registry=reg,
@@ -225,7 +225,7 @@ class TestSpawnThread:
         """parent_id is passed through to registry.register()."""
         reg = self._mock_registry()
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive",
+        with patch("rye.primitives.subprocess.SubprocessPrimitive",
                    return_value=self._mock_spawn_success()):
             await spawn_thread(
                 registry=reg,
@@ -244,7 +244,7 @@ class TestSpawnThread:
         reg = self._mock_registry()
         mock_proc = self._mock_spawn_success()
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive",
+        with patch("rye.primitives.subprocess.SubprocessPrimitive",
                    return_value=mock_proc):
             await spawn_thread(
                 registry=reg,
@@ -264,7 +264,7 @@ class TestSpawnThread:
         reg = self._mock_registry()
         log_dir = tmp_path / "deep" / "nested" / "dir"
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive",
+        with patch("rye.primitives.subprocess.SubprocessPrimitive",
                    return_value=self._mock_spawn_success()):
             await spawn_thread(
                 registry=reg,
@@ -282,7 +282,7 @@ class TestSpawnThread:
         reg = self._mock_registry()
         child_pid = 99999
 
-        with patch("lillux.primitives.subprocess.SubprocessPrimitive",
+        with patch("rye.primitives.subprocess.SubprocessPrimitive",
                    return_value=self._mock_spawn_success(pid=child_pid)):
             result = await spawn_thread(
                 registry=reg,

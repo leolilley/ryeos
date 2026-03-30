@@ -99,7 +99,7 @@ def execute(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 def _generate(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Generate an Ed25519 keypair (or return existing)."""
-    from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
+    from rye.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_signing_key_dir
 
     key_dir = get_signing_key_dir()
@@ -141,7 +141,7 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """
     import os
     from cryptography.hazmat.primitives import serialization
-    from lillux.primitives.signing import (
+    from rye.primitives.signing import (
         save_keypair,
         compute_key_fingerprint,
     )
@@ -211,7 +211,7 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Show current key fingerprint and public key."""
-    from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
+    from rye.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_signing_key_dir
 
     key_dir = get_signing_key_dir()
@@ -244,7 +244,7 @@ def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
 def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Add the current signing key to a space's config/keys/trusted."""
-    from lillux.primitives.signing import ensure_keypair, compute_key_fingerprint
+    from rye.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_signing_key_dir
     from rye.utils.trust_store import TrustStore
 

@@ -16,7 +16,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from lillux.primitives import cas
+from rye.primitives import cas
 
 from rye.cas.materializer import materialize_manifest, materialize_manifest_dict
 

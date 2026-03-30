@@ -72,7 +72,7 @@ def main():
         # Get the signing public key from the setup fixture (already in user_space trust store)
         user_space = Path(os.environ.get("USER_SPACE"))
         signing_key_dir = user_space / RYE_AI_DIR / "config" / "keys" / "signing"
-        from lillux.primitives.signing import load_keypair, compute_key_fingerprint
+        from rye.primitives.signing import load_keypair, compute_key_fingerprint
         _, public_pem_signing = load_keypair(signing_key_dir)
         signing_fp = compute_key_fingerprint(public_pem_signing)
         

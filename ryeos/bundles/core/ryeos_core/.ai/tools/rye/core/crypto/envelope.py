@@ -48,7 +48,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from lillux.primitives.signing import compute_box_fingerprint
+from rye.primitives.signing import compute_box_fingerprint
 
 
 def _canonical_json(data: dict) -> bytes:

@@ -65,8 +65,8 @@ from ryeos_node.registry import (
     lookup_identity,
 )
 
-from lillux.primitives import cas
-from lillux.primitives.integrity import compute_integrity
+from rye.primitives import cas
+from rye.primitives.integrity import compute_integrity
 
 from rye.cas.objects import ExecutionSnapshot, ProjectSnapshot, RuntimeOutputsBundle, SourceManifest, SCHEMA_VERSION, get_history
 from rye.cas.sync import (
@@ -572,7 +572,7 @@ def _scan_capabilities() -> tuple[list, list]:
 async def node_status(settings: Settings = Depends(get_settings)):
     """Node status for routing decisions. No auth required."""
     import base64
-    from lillux.primitives.signing import compute_key_fingerprint, ensure_full_keypair
+    from rye.primitives.signing import compute_key_fingerprint, ensure_full_keypair
 
     key_dir = Path(settings.signing_key_dir)
     _, pub, _, _ = ensure_full_keypair(key_dir)
@@ -610,7 +610,7 @@ async def public_key(settings: Settings = Depends(get_settings)):
         return _identity_cache
 
     import base64
-    from lillux.primitives.signing import (
+    from rye.primitives.signing import (
         compute_key_fingerprint,
         ensure_full_keypair,
     )
@@ -629,7 +629,7 @@ async def public_key(settings: Settings = Depends(get_settings)):
 
     # Sign with the node's own key
     import hashlib as _hl
-    from lillux.primitives.signing import sign_hash
+    from rye.primitives.signing import sign_hash
     payload = json.dumps(
         {k: v for k, v in identity_doc.items() if k != "_signature"},
         sort_keys=True, separators=(",", ":"),
@@ -1044,7 +1044,7 @@ async def _execute_from_head(
             injected_secrets: dict = {}
             prior_env: dict = {}
             if secret_envelope:
-                from lillux.primitives.sealed_envelope import decrypt_and_inject
+                from rye.primitives.sealed_envelope import decrypt_and_inject
                 injected_secrets = decrypt_and_inject(secret_envelope, settings.signing_key_dir)
                 for key in injected_secrets:
                     if key in os.environ:

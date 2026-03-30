@@ -2,7 +2,7 @@
 
 import pytest
 
-from lillux.primitives import cas
+from rye.primitives import cas
 from rye.cas.manifest import build_manifest
 from rye.cas.materializer import (
     ExecutionPaths,

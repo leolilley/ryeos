@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from lillux.primitives.integrity import (
+from rye.primitives.integrity import (
     canonical_json,
     compute_integrity,
 )

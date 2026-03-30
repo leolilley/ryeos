@@ -142,7 +142,7 @@ class TestMergeHooks:
         )
         # Trust the env signing key so bundle config integrity checks pass.
         from tests.conftest import get_env_signing_pubkey
-        from lillux.primitives.signing import generate_keypair, save_keypair
+        from rye.primitives.signing import generate_keypair, save_keypair
         real_signing_pubkey = get_env_signing_pubkey()
 
         monkeypatch.setenv("USER_SPACE", str(user_space))

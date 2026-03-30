@@ -92,7 +92,7 @@ async def _execute_async(params: dict, project_path: str) -> dict:
             "status": status,
         }
 
-    from lillux.primitives.subprocess import SubprocessPrimitive
+    from rye.primitives.subprocess import SubprocessPrimitive
 
     sp = SubprocessPrimitive()
     kill_result = await sp.kill(pid, grace=grace)

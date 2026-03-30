@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from lillux.primitives import cas
+from rye.primitives import cas
 from rye.cas.objects import NodeInput, NodeResult
 
 logger = logging.getLogger(__name__)

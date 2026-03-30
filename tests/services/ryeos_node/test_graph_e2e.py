@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from lillux.primitives import cas
+from rye.primitives import cas
 from rye.cas.objects import NodeReceipt, NodeResult
 from rye.cas.store import cas_root, read_ref
 from rye.constants import AI_DIR

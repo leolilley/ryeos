@@ -67,7 +67,7 @@ def compute_hash(item_type, content, file_path=None, project_path=None):
 For Lillux-level integrity (used in lockfiles and bundle manifests), `lillux/primitives/integrity.py` provides a generic `compute_integrity(data)` function. Lillux is type-agnostic — callers construct the data dict with whatever fields are relevant:
 
 ```python
-from lillux.primitives.integrity import compute_integrity
+from rye.primitives.integrity import compute_integrity
 
 # Caller structures the dict for their item type:
 tool_hash = compute_integrity({
@@ -116,7 +116,7 @@ The key directory itself is set to mode `0700`. Keys are generated via `Ed25519P
 ### Signing Flow
 
 ```python
-from lillux.primitives.signing import sign_hash, compute_key_fingerprint
+from rye.primitives.signing import sign_hash, compute_key_fingerprint
 
 # 1. Compute content hash
 content_hash = MetadataManager.compute_hash(item_type, content)
@@ -136,7 +136,7 @@ fingerprint = compute_key_fingerprint(public_key_pem)
 ### Verification Flow
 
 ```python
-from lillux.primitives.signing import verify_signature
+from rye.primitives.signing import verify_signature
 
 # Verify Ed25519 signature
 is_valid = verify_signature(content_hash, signature_b64, public_key_pem)

@@ -91,7 +91,7 @@ def verify_item(
         ed25519_sig = sig_info["ed25519_sig"]
         pubkey_fp = sig_info["pubkey_fp"]
 
-        from lillux.primitives.signing import verify_signature
+        from rye.primitives.signing import verify_signature
         from rye.utils.trust_store import TrustStore
 
         trust_store = TrustStore(project_path=project_path)

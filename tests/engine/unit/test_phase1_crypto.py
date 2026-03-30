@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lillux.primitives.signing import (
+from rye.primitives.signing import (
     compute_box_fingerprint,
     compute_key_fingerprint,
     ensure_full_keypair,

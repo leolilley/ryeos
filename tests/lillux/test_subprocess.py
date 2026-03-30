@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from lillux.primitives.subprocess import (
+from rye.primitives.subprocess import (
     SubprocessPrimitive,
     SubprocessResult,
     SpawnResult,
@@ -103,8 +103,8 @@ class TestConfigurationError:
 
     def test_raises_when_lillux_missing(self):
         # Mock both shutil.which and Path.is_file to simulate missing lillux
-        with patch("lillux.primitives.subprocess.shutil.which", return_value=None), \
-             patch("lillux.primitives.subprocess.Path.is_file", return_value=False):
+        with patch("rye.primitives.subprocess.shutil.which", return_value=None), \
+             patch("rye.primitives.subprocess.Path.is_file", return_value=False):
             with pytest.raises(ConfigurationError, match="lillux"):
                 SubprocessPrimitive()
 

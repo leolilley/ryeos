@@ -12,7 +12,7 @@ import json as _json
 import shutil
 from pathlib import Path
 
-from lillux.primitives.subprocess import SubprocessPrimitive
+from rye.primitives.subprocess import SubprocessPrimitive
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent

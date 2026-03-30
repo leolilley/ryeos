@@ -53,7 +53,7 @@ def _get_registry(project_path: Path):
 
 async def _check_pid(pid: int) -> dict:
     """Check if PID is alive via SubprocessPrimitive."""
-    from lillux.primitives.subprocess import SubprocessPrimitive
+    from rye.primitives.subprocess import SubprocessPrimitive
 
     sp = SubprocessPrimitive()
     result = await sp.status(pid)

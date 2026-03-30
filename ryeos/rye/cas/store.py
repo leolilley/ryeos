@@ -13,8 +13,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from lillux.primitives import cas
-from lillux.primitives.integrity import compute_integrity
+from rye.primitives import cas
+from rye.primitives.integrity import compute_integrity
 
 from rye.cas.objects import ItemRef, ItemSource
 from rye.constants import AI_DIR, ItemType
