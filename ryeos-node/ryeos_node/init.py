@@ -17,16 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> None:
-    """Create first authorized key from BOOTSTRAP_AUTHORIZED_KEY env var.
+    """Create first authorized key from BOOTSTRAP_PUBLIC_KEY env var.
 
-    Format: "fp:<fingerprint>" or just "<fingerprint>"
-    Optional: "fp:<fingerprint>:<owner>" to set owner name (defaults to "bootstrap")
+    Env vars:
+        BOOTSTRAP_PUBLIC_KEY  — required, format: "ed25519:<base64>" (the PEM content, base64-encoded)
+        BOOTSTRAP_LABEL       — optional, human label (default: "bootstrap")
 
     Only acts when the authorized_keys dir is empty (first boot).
     The key file is signed by the node's own signing key.
+    Fingerprint is derived from the public key server-side.
     """
-    bootstrap = os.environ.get("BOOTSTRAP_AUTHORIZED_KEY", "").strip()
-    if not bootstrap:
+    pub_key_env = os.environ.get("BOOTSTRAP_PUBLIC_KEY", "").strip()
+    if not pub_key_env:
         return
 
     # Skip if any keys already exist
@@ -34,17 +36,11 @@ def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> N
     if existing:
         return
 
-    # Parse: fp:abc123:owner or fp:abc123 or abc123
-    parts = bootstrap.split(":")
-    if parts[0] == "fp":
-        parts = parts[1:]
-    fp = parts[0]
-    owner = parts[1] if len(parts) > 1 else "bootstrap"
-
-    if not fp:
-        logger.warning("BOOTSTRAP_AUTHORIZED_KEY set but empty fingerprint, skipping")
+    if not pub_key_env.startswith("ed25519:"):
+        logger.warning("BOOTSTRAP_PUBLIC_KEY must start with 'ed25519:', skipping")
         return
 
+    import base64
     import hashlib
     import time
     from rye.primitives.signing import (
@@ -53,24 +49,31 @@ def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> N
         sign_hash,
     )
 
-    caps_toml = '"rye.*"'
+    # Derive fingerprint from the provided public key
+    pub_pem = base64.b64decode(pub_key_env[len("ed25519:"):])
+    fp = compute_key_fingerprint(pub_pem)
+    label = os.environ.get("BOOTSTRAP_LABEL", "bootstrap").strip()
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
     body = (
         f'fingerprint = "{fp}"\n'
-        f'owner = "{owner}"\n'
-        f'capabilities = [{caps_toml}]\n'
+        f'public_key = "{pub_key_env}"\n'
+        f'label = "{label}"\n'
+        f'capabilities = ["*"]\n'
+        f'created_via = "bootstrap_env"\n'
+        f'created_at = "{timestamp}"\n'
     )
 
     node_priv, node_pub = load_keypair(signing_dir)
     node_fp = compute_key_fingerprint(node_pub)
     content_hash = hashlib.sha256(body.encode()).hexdigest()
     sig_b64 = sign_hash(content_hash, node_priv)
-    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     signed_content = f"# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{node_fp}\n{body}"
 
     key_file = authorized_keys_dir / f"{fp}.toml"
     key_file.write_text(signed_content, encoding="utf-8")
-    logger.info("Bootstrapped authorized key: fp:%s (owner=%s)", fp, owner)
+    logger.info("Bootstrapped authorized key: fp:%s (label=%s)", fp, label)
 
 
 def ensure_node_space(cas_base_path: str) -> str:

@@ -180,6 +180,12 @@ class CreateWebhookBindingRequest(BaseModel):
     description: Optional[str] = None
 
 
+class AuthorizeKeyRequest(BaseModel):
+    public_key: str  # ed25519:<base64>
+    label: str = "operator"
+    capabilities: List[str] = ["rye.*"]
+
+
 class PublishRequest(BaseModel):
     item_type: str
     item_id: str
@@ -1577,3 +1583,168 @@ async def registry_lookup_identity(
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Identity not found: {fingerprint}")
     return doc
+
+
+# --- Admin: authorized key management ---
+
+
+@app.post("/admin/authorized-keys")
+async def admin_authorize_key(
+    req: AuthorizeKeyRequest,
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Authorize a new key on this node. Requires '*' or 'node.auth.manage' capability."""
+    require_capability(principal, "node.auth.manage")
+
+    if not req.public_key.startswith("ed25519:"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "public_key must start with 'ed25519:'",
+        )
+
+    import base64
+    import time as _time
+    from rye.primitives.signing import (
+        compute_key_fingerprint,
+        load_keypair,
+        sign_hash,
+    )
+
+    pub_pem = base64.b64decode(req.public_key[len("ed25519:"):])
+    fp = compute_key_fingerprint(pub_pem)
+    timestamp = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+
+    caps_toml = ", ".join(f'"{c}"' for c in req.capabilities)
+    body = (
+        f'fingerprint = "{fp}"\n'
+        f'public_key = "{req.public_key}"\n'
+        f'label = "{req.label}"\n'
+        f'capabilities = [{caps_toml}]\n'
+        f'created_via = "api"\n'
+        f'created_at = "{timestamp}"\n'
+        f'created_by = "fp:{principal.fingerprint}"\n'
+    )
+
+    node_priv, node_pub = load_keypair(Path(settings.signing_key_dir))
+    node_fp = compute_key_fingerprint(node_pub)
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    sig_b64 = sign_hash(content_hash, node_priv)
+
+    signed_content = f"# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{node_fp}\n{body}"
+
+    auth_dir = settings.authorized_keys_dir()
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    key_file = auth_dir / f"{fp}.toml"
+    key_file.write_text(signed_content, encoding="utf-8")
+
+    logger.info(
+        "Authorized key fp:%s (label=%s) by fp:%s",
+        fp, req.label, principal.fingerprint,
+    )
+
+    return {
+        "fingerprint": f"fp:{fp}",
+        "label": req.label,
+        "capabilities": req.capabilities,
+        "authorized_by": f"fp:{principal.fingerprint}",
+    }
+
+
+@app.get("/admin/authorized-keys")
+async def admin_list_keys(
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """List authorized keys on this node."""
+    require_capability(principal, "node.auth.manage")
+
+    auth_dir = settings.authorized_keys_dir()
+    if not auth_dir.is_dir():
+        return {"keys": []}
+
+    keys = []
+    for f in sorted(auth_dir.iterdir()):
+        if f.suffix != ".toml":
+            continue
+        try:
+            raw = f.read_text()
+            lines = raw.split("\n", 1)
+            body = lines[1] if len(lines) > 1 else ""
+            try:
+                import tomllib as _tomllib
+            except ModuleNotFoundError:
+                import tomli as _tomllib  # type: ignore[no-redef]
+            data = _tomllib.loads(body)
+            keys.append({
+                "fingerprint": f"fp:{data.get('fingerprint', f.stem)}",
+                "label": data.get("label", data.get("owner", "")),
+                "capabilities": data.get("capabilities", []),
+                "created_via": data.get("created_via", "unknown"),
+                "created_at": data.get("created_at", ""),
+            })
+        except Exception:
+            continue
+
+    return {"keys": keys}
+
+
+@app.delete("/admin/authorized-keys/{fingerprint}")
+async def admin_revoke_key(
+    fingerprint: str,
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Revoke an authorized key. Cannot revoke the last key with admin capability."""
+    require_capability(principal, "node.auth.manage")
+
+    auth_dir = settings.authorized_keys_dir()
+    key_file = auth_dir / f"{fingerprint}.toml"
+    if not key_file.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Key fp:{fingerprint} not found")
+
+    # Prevent revoking the last admin key
+    admin_count = 0
+    for f in auth_dir.iterdir():
+        if f.suffix != ".toml":
+            continue
+        try:
+            raw = f.read_text()
+            lines = raw.split("\n", 1)
+            body = lines[1] if len(lines) > 1 else ""
+            try:
+                import tomllib as _tomllib2
+            except ModuleNotFoundError:
+                import tomli as _tomllib2  # type: ignore[no-redef]
+            data = _tomllib2.loads(body)
+            caps = data.get("capabilities", [])
+            if "*" in caps or "node.auth.manage" in caps:
+                admin_count += 1
+        except Exception:
+            continue
+
+    # Check if we're about to remove an admin key
+    try:
+        raw = key_file.read_text()
+        lines = raw.split("\n", 1)
+        body = lines[1] if len(lines) > 1 else ""
+        try:
+            import tomllib as _tomllib3
+        except ModuleNotFoundError:
+            import tomli as _tomllib3  # type: ignore[no-redef]
+        data = _tomllib3.loads(body)
+        caps = data.get("capabilities", [])
+        is_admin = "*" in caps or "node.auth.manage" in caps
+    except Exception:
+        is_admin = False
+
+    if is_admin and admin_count <= 1:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Cannot revoke the last admin key",
+        )
+
+    key_file.unlink()
+    logger.info("Revoked key fp:%s by fp:%s", fingerprint, principal.fingerprint)
+
+    return {"revoked": f"fp:{fingerprint}"}
