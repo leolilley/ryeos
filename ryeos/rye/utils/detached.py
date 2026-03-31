@@ -13,10 +13,25 @@ full register → spawn → update PID → error-on-failure sequence.
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def generate_thread_id(item_id: str) -> str:
+    """Generate a name-based thread ID for async/fork execution.
+
+    Convention::
+
+        {item_id}/{bare_name}-{epoch_ms}
+
+    Graph run IDs are managed separately by the walker.
+    """
+    epoch_ms = int(time.time() * 1000)
+    bare_name = item_id.rsplit("/", 1)[-1]
+    return f"{item_id}/{bare_name}-{epoch_ms}"
 
 # Env var prefixes forwarded to detached child processes.
 # lillux-proc daemonizes with a clean env — only explicitly passed vars survive.
@@ -119,7 +134,7 @@ async def spawn_thread(
     Args:
         registry: ThreadRegistry instance (must support register,
             update_status, update_pid).
-        thread_id: UUID thread identifier.
+        thread_id: Thread identifier (from ``generate_thread_id()``).
         directive: Directive/item string for registry (e.g. "tool/my-tool").
         cmd: Command list for the child process.
         log_dir: Directory for spawn.log.

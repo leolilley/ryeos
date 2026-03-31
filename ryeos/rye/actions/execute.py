@@ -117,6 +117,12 @@ class ExecuteTool:
                     remote_name=remote_name,
                     async_exec=async_exec,
                 )
+            elif item_type == ItemType.DIRECTIVE:
+                result = await self._run_directive(
+                    item_id, project_path, parameters, dry_run,
+                    thread=thread,
+                    async_exec=async_exec,
+                )
             elif async_exec:
                 result = await self._launch_async(
                     item_type=item_type,
@@ -124,11 +130,6 @@ class ExecuteTool:
                     project_path=project_path,
                     parameters=parameters,
                     target="local",
-                    thread=thread,
-                )
-            elif item_type == ItemType.DIRECTIVE:
-                result = await self._run_directive(
-                    item_id, project_path, parameters, dry_run,
                     thread=thread,
                 )
             elif item_type == ItemType.TOOL:
@@ -364,21 +365,26 @@ class ExecuteTool:
         dry_run: bool,
         *,
         thread: str = "inline",
+        async_exec: bool = False,
     ) -> Dict[str, Any]:
         """Run a directive — parse, validate, and dispatch to execution mode.
 
-        Two modes controlled by the ``thread`` parameter:
+        Three modes controlled by ``thread`` and ``async_exec``:
 
-        - **Inline** (default, ``"inline"``): Parse, validate inputs,
-          interpolate placeholders, and return the directive content with an
+        - **Inline** (default): Parse, validate inputs, interpolate
+          placeholders, and return the directive content with an
           ``your_directions`` field.  The calling agent follows the steps
           in its own context.  No LLM infrastructure required.
 
-        - **Fork** (``"fork"``): After validation, spawn a managed thread
-          via ``rye/agent/threads/thread_directive`` (LLM loop, safety
-          harness, budgets).  ``model`` and ``limit_overrides`` are read
-          from ``parameters``.
+        - **Fork** (``thread="fork"``): Spawn a managed thread via
+          ``rye/agent/threads/thread_directive`` (LLM loop, safety
+          harness, budgets).  Blocks until the thread completes.
 
+        - **Fork + async** (``thread="fork", async_exec=True``): Same as
+          fork but returns immediately with a thread_id handle.
+          ``thread_directive`` owns the full lifecycle — no wrapper process.
+
+        ``model`` and ``limit_overrides`` are read from ``parameters``.
         Validation is always done eagerly for fast feedback on bad inputs.
         """
         model = parameters.pop("model", None)
@@ -448,6 +454,7 @@ class ExecuteTool:
             td_params: Dict[str, Any] = {
                 "directive_id": item_id,
                 "inputs": validation["inputs"],
+                "async": async_exec,
             }
             if model:
                 td_params["model"] = model
@@ -476,13 +483,18 @@ class ExecuteTool:
                         data = _json.loads(data["stdout"])
                     except (ValueError, TypeError):
                         data = {"raw": data["stdout"]}
-                return {
+                resp = {
                     "status": "success" if data.get("success", True) else "error",
                     "type": ItemType.DIRECTIVE,
                     "item_id": item_id,
                     **{k: v for k, v in data.items() if k != "success"},
                     "metadata": thread_result.get("metadata", {}),
                 }
+                if async_exec:
+                    resp["async"] = True
+                    resp["execution_mode"] = "fork"
+                    resp["state"] = data.get("status", "running")
+                return resp
 
             return thread_result
 
@@ -570,16 +582,13 @@ class ExecuteTool:
         target: str = "local",
         thread: str = "inline",
     ) -> Dict[str, Any]:
-        """Launch execution in a detached child process, return immediately.
+        """Launch a tool in a detached child process, return immediately.
 
-        Generates a uuid-based thread_id, registers in the ThreadRegistry,
-        spawns ``async_runner.py`` via ``launch_detached()``, and returns
-        a handle dict with thread_id + pid.
+        Used for async tool execution only.  Directive async is handled
+        by ``thread_directive`` via ``_run_directive(async_exec=True)``.
 
-        Follows the same pattern as thread_directive.py's async spawn path:
-        thread_id registered in ThreadRegistry, log dir at
-        ``.ai/agent/threads/{thread_id}/``, results stored via
-        ``registry.set_result()``.
+        Generates a uuid-based thread_id, registers in ThreadRegistry,
+        spawns ``async_runner.py``, and returns a handle dict.
         """
         import json as _json
         import sys

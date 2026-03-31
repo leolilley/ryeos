@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T06:39:09Z:64fb3776bf426d1814898a709357bf87e5bcb7a5bf25ae7e6e35b2e8c0dc23a0:11WvbnjD4hjh0mcF7QriQstwhYFHe7u-cDVBe0vojYKNR4Mo28aPnNSSzhAGdKg2Ir65-7Q3Z_2HzRm-ozY2AA==:4b987fd4e40303ac
+# rye:signed:2026-03-31T07:27:23Z:64fb3776bf426d1814898a709357bf87e5bcb7a5bf25ae7e6e35b2e8c0dc23a0:11WvbnjD4hjh0mcF7QriQstwhYFHe7u-cDVBe0vojYKNR4Mo28aPnNSSzhAGdKg2Ir65-7Q3Z_2HzRm-ozY2AA:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 

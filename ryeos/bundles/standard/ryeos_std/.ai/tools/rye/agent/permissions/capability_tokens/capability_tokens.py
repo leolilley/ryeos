@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T06:19:02Z:89cea3eab8f4fee6e56b9c34ca8614b27bc6c144e740aef98974815d9d53a000:unirbCV_qvhtnQHiijeinFEngad5ewvVkNV7KiztgLz_YXEBKScWCLOSp1YBY6yaUXiJlBAyJ5AENpmnd5yGCg==:4b987fd4e40303ac
+# rye:signed:2026-03-31T07:27:23Z:1a0e5889046a5066ab411973ae9a80c52dbf4e101bb3c2a38040e6b85fff9fa8:4BJoFewMOCDc_Yp0XxI4FU2S2bq6LXzaizHH6z3TlEPXmiEdVZ31eOzKEdzhFegSMsp8d-xdv5-1HA4xOCQZBw:4b987fd4e40303ac
 # PROTECTED: Core RYE tool - do not override
 """
 Capability Token System
