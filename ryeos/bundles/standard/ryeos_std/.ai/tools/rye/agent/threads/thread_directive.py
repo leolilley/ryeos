@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T06:39:09Z:2f88a514f28420e56c3699a7c9563f8e79526e0a936d1f50f95dcd3ce06bf31b:bllhhUJdmPwYJiGPhdfr2PzKRCW_JP-ExpEozB-uRhFILrsUvNgBBNHTHXWzlIfrJfiVnCHq6IiASy51Eqc5Ag==:4b987fd4e40303ac
+# rye:signed:2026-03-31T07:42:54Z:e17140d73216382725d0dbac76adb15f6badaca3bee1677b540811b05b09de0a:ASN6lhRs_xU_g-u6nfMk99Qy5um4PthnvgTyQoJyaqer4HYM3AL4MjcRn-7NYpJq39snepJwj2uomiIO8j6FCg:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -101,9 +101,8 @@ def _build_primary_actions() -> list:
 
 
 def _generate_thread_id(directive_name: str) -> str:
-    epoch_ms = int(time.time() * 1000)
-    bare_name = directive_name.rsplit("/", 1)[-1]
-    return f"{directive_name}/{bare_name}-{epoch_ms}"
+    from rye.utils.detached import generate_thread_id
+    return generate_thread_id(directive_name)
 
 
 def _write_thread_meta(
