@@ -1,4 +1,4 @@
-// rye:signed:2026-03-16T11:23:58Z:126649acb11b5cdd77133f94df91d5f9856af65931449306d04521667c2c5d66:EhViGqruUJCQ9Ys8QcCmx7xHAquAKFom6T69tZannt5I6yVG9rPgZWRkInx_qEGFwGrJUCtM-rQDjEzYV2ETBw==:4b987fd4e40303ac
+// rye:signed:2026-03-31T00:13:58Z:10f1bddb3a09b9a39ec0f43f1bf0d5ef15c32b3477e61b7c3332b4194434b827:RQOfpballj7viEDcet-RSOMlGYRP6xlIlg6f_BKNOCrUo-9JhIJ0Fqxmvcu2-nGOwkM5wBTdx_eEWkM_8Y2mDw:4b987fd4e40303ac
 // rye:unsigned
 import { parseArgs } from "node:util";
 import { execSync } from "node:child_process";
@@ -101,6 +101,7 @@ const VALID_COMMANDS = new Set([
 
 // Default browser config — uses Playwright's bundled chromium (no channel)
 const DEFAULT_BROWSER_CONFIG = {
+  playwrightCliPath: "playwright-cli",
   browser: {
     browserName: "chromium",
     launchOptions: {
@@ -226,6 +227,7 @@ function getBrowserCacheDir(projectPath: string): string {
 }
 
 function buildCommand(params: Params, projectPath: string): string[] {
+  const config = resolveBrowserConfig(projectPath);
   const session = params.session ?? DEFAULT_SESSION;
   const args = params.args ?? [];
   const userFlags = params.flags ? { ...params.flags } : {};
@@ -245,9 +247,10 @@ function buildCommand(params: Params, projectPath: string): string[] {
   }
 
   const flags = buildFlags(userFlags);
+  const playwrightCliPath = config.playwrightCliPath ?? DEFAULT_BROWSER_CONFIG.playwrightCliPath;
 
   return [
-    "playwright-cli",
+    playwrightCliPath,
     `-s=${session}`,
     params.command,
     ...args,
