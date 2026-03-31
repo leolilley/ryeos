@@ -59,7 +59,7 @@ def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> N
         f'fingerprint = "{fp}"\n'
         f'public_key = "{pub_key_env}"\n'
         f'label = "{label}"\n'
-        f'capabilities = ["*"]\n'
+        f'scopes = ["*"]\n'
         f'created_via = "bootstrap_env"\n'
         f'created_at = "{timestamp}"\n'
     )

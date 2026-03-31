@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T00:35:19Z:958adfea2bfc60860059dbabe0644267b2dccb9a7605f8f4ea860bbdcaa0cc7e:ku-C98K793L3-O5_P8FCEiPSDHOb1xHWQlc-nmP5BizuBSMP39y3erSOWLpcECsKC_gIWeRA528blZCszUNQAA:4b987fd4e40303ac
+# rye:signed:2026-03-31T03:40:32Z:97d094d2098f53d279e1f0a70976f185cb26847e52b88ee354cd623e08224843:ZTG2adSY0laUbg3OdESf7q9TQKoP0cfTief9kgQApR9qcXRvOuuLDOqaz49lblS0WlZZNsyynNW6EGtDzw3hBA:4b987fd4e40303ac
 """Node management tool — init, start, stop, authorize, and configure ryeos-node.
 
 Actions:
@@ -67,10 +67,10 @@ CONFIG_SCHEMA = {
             "type": "string",
             "description": "Owner label for authorized key. Default: 'local'",
         },
-        "capabilities": {
+        "scopes": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Capability fnmatch patterns for authorized key. Default: ['*']",
+            "description": "Access scopes for authorized key. Default: ['*']",
         },
         "public_key": {
             "type": "string",
@@ -203,7 +203,7 @@ def _authorize(params: Dict, project_path: str) -> Dict:
 
     fp = params.get("fingerprint", "")
     owner = params.get("owner", "local")
-    capabilities = params.get("capabilities", ["*"])
+    scopes = params.get("scopes", ["*"])
 
     if not fp:
         # Default: authorize the current user's signing key
@@ -228,12 +228,12 @@ def _authorize(params: Dict, project_path: str) -> Dict:
         fp = fp[3:]
 
     # Build the authorized key TOML body
-    caps_toml = ", ".join(f'"{c}"' for c in capabilities)
+    scopes_toml = ", ".join(f'"{s}"' for s in scopes)
     body = (
         f'fingerprint = "{fp}"\n'
         f'owner = "{owner}"\n'
         f'public_key = "ed25519:{pub_b64}"\n'
-        f'capabilities = [{caps_toml}]\n'
+        f'scopes = [{scopes_toml}]\n'
     )
 
     # Sign with the node's key
@@ -254,7 +254,7 @@ def _authorize(params: Dict, project_path: str) -> Dict:
         "success": True,
         "fingerprint": f"fp:{fp}",
         "owner": owner,
-        "capabilities": capabilities,
+        "scopes": scopes,
         "key_file": str(key_file),
         "signed_by": f"fp:{node_fp}",
     }

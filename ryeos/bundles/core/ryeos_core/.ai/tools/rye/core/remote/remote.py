@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T07:09:00Z:07ee91c8dd56794a2a4beebb7696187ee01b113a86a0da90cd6832a7d721d2e3:i5x5tJFLH5zdbIxRdKcvkiDmpRCdCOANa-mL5WN4SebBz2Ri7TSn5c9m2BIpeOpftDAGZ31Md1lYc7Z4XyapDA:4b987fd4e40303ac
+# rye:signed:2026-03-31T03:26:50Z:34235cfaa1d7323bd7f2d6005ea504548e102f4a492111132ed0ab908077ceb3:EvumMI16_bMRUZa_3yOhqPMeWZViLA1JrQmOi8BuJ7RILH10T1h84y2Vmg6KO0emhpfSKdYIx-dWe9kNRRo0Ag:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -8,6 +8,9 @@ Actions:
   status          - Show local vs remote manifest hashes.
   execute         - Push + trigger remote execution + pull results.
   seal            - Seal local secrets for a remote node's identity.
+  vault_set       - Store a secret in the node's vault.
+  vault_list      - List secret names in the node's vault.
+  vault_delete    - Delete a secret from the node's vault.
   webhooks        - List webhook bindings on the remote.
   webhook_create  - Create a webhook binding for a tool or directive.
   webhook_delete  - Delete a webhook binding by hook_id.
@@ -46,7 +49,9 @@ TOOL_METADATA = {
 }
 
 ACTIONS = [
-    "push", "pull", "status", "execute", "seal", "threads", "thread_status",
+    "push", "pull", "status", "execute", "seal",
+    "vault_set", "vault_list", "vault_delete",
+    "threads", "thread_status",
     "webhooks", "webhook_create", "webhook_delete", "webhook_trigger",
 ]
 
@@ -56,7 +61,7 @@ CONFIG_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ACTIONS,
-            "description": "Remote operation: push, pull, status, execute, seal, threads, thread_status, webhooks, webhook_create, webhook_delete, webhook_trigger",
+            "description": "Remote operation: push, pull, status, execute, seal, vault_set, vault_list, vault_delete, threads, thread_status, webhooks, webhook_create, webhook_delete, webhook_trigger",
         },
         "item_type": {
             "type": "string",
@@ -97,6 +102,19 @@ CONFIG_SCHEMA = {
         "description": {
             "type": "string",
             "description": "Description for webhook_create",
+        },
+        "secret_name": {
+            "type": "string",
+            "description": "Secret name for vault_set or vault_delete",
+        },
+        "secret_value": {
+            "type": "string",
+            "description": "Secret value for vault_set (will be sealed to the node's identity)",
+        },
+        "vault_keys": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Vault secret names to inject at execution time (for webhook_create or execute)",
         },
     },
     "required": ["action"],
@@ -788,6 +806,9 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     }
     if secret_envelope:
         exec_body["secret_envelope"] = secret_envelope
+    vault_keys = params.get("vault_keys")
+    if vault_keys:
+        exec_body["vault_keys"] = vault_keys
     exec_resp = await client.post("/execute", exec_body, timeout=300)
 
     if not exec_resp["success"]:
@@ -898,6 +919,76 @@ async def _seal(project_path: Path, params: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Vault management
+# ---------------------------------------------------------------------------
+
+
+async def _vault_set(project_path: Path, params: Dict) -> Dict:
+    """Seal and store a secret in the node's vault."""
+    name = params.get("secret_name")
+    value = params.get("secret_value")
+    if not name:
+        return {"error": "secret_name is required for vault_set"}
+    if not value:
+        return {"error": "secret_value is required for vault_set"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+    identity_doc, key_err = await _fetch_verified_identity(client, remote_name)
+    if key_err:
+        return key_err
+
+    from rye.primitives.sealed_envelope import seal_secrets_for_identity
+    try:
+        envelope = seal_secrets_for_identity({name: value}, identity_doc)
+    except Exception as e:
+        return {"error": f"Failed to seal secret: {e}"}
+
+    resp = await client.post("/vault/set", {"name": name, "envelope": envelope})
+    if not resp["success"]:
+        return {"error": f"Failed to store secret: {resp.get('error')}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    return body
+
+
+async def _vault_list(project_path: Path, params: Dict) -> Dict:
+    """List secret names in the node's vault."""
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    resp = await client.get("/vault/list")
+    if not resp["success"]:
+        return {"error": f"Failed to list vault secrets: {resp.get('error')}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    return body
+
+
+async def _vault_delete(project_path: Path, params: Dict) -> Dict:
+    """Delete a secret from the node's vault."""
+    name = params.get("secret_name")
+    if not name:
+        return {"error": "secret_name is required for vault_delete"}
+
+    remote_name = params.get("remote")
+    client = _get_client(remote_name, project_path)
+
+    resp = await client.post("/vault/delete", {"name": name})
+    if not resp["success"]:
+        return {"error": f"Failed to delete secret: {resp.get('error')}"}
+
+    body = resp["body"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    return body
+
+
+# ---------------------------------------------------------------------------
 # Webhook management
 # ---------------------------------------------------------------------------
 
@@ -938,6 +1029,9 @@ async def _webhook_create(project_path: Path, params: Dict) -> Dict:
     description = params.get("description")
     if description:
         body["description"] = description
+    vault_keys = params.get("vault_keys")
+    if vault_keys:
+        body["vault_keys"] = vault_keys
 
     resp = await client.post("/webhook-bindings", body)
     if not resp["success"]:
@@ -1049,6 +1143,9 @@ _ACTION_MAP = {
     "status": _status,
     "execute": _execute,
     "seal": _seal,
+    "vault_set": _vault_set,
+    "vault_list": _vault_list,
+    "vault_delete": _vault_delete,
     "threads": _threads,
     "thread_status": _thread_status,
     "webhooks": _webhooks,

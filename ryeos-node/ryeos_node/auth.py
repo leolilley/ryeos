@@ -5,12 +5,11 @@ Dual auth: signed-request (Ed25519) and HMAC (webhook).
 - Webhook: HMAC-SHA256 signature verification via webhook_bindings table.
 """
 
-import fnmatch
 import hashlib
 import hmac as hmac_mod
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -36,11 +35,11 @@ class Principal:
     """Authenticated caller identity.
 
     fingerprint: Ed25519 key fingerprint (the identity)
-    capabilities: fnmatch patterns from authorized key file
+    scopes: access scopes from authorized key file
     owner: human-readable label from authorized key file
     """
     fingerprint: str
-    capabilities: list[str]
+    scopes: list[str] = field(default_factory=lambda: ["*"])
     owner: str = ""
 
 
@@ -212,22 +211,8 @@ def _verify_signed_request(request: Request, raw_body: bytes, settings: Settings
 
     return Principal(
         fingerprint=fingerprint,
-        capabilities=auth_data.get("capabilities", []),
+        scopes=auth_data.get("scopes", ["*"]),
         owner=auth_data.get("owner", ""),
-    )
-
-
-def require_capability(principal: Principal, action: str) -> None:
-    """Raise 403 if principal doesn't have a matching capability.
-
-    Capabilities use fnmatch patterns (e.g., 'rye.execute.tool.*').
-    """
-    for cap in principal.capabilities:
-        if fnmatch.fnmatch(action, cap):
-            return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Missing required capability: {action}",
     )
 
 
@@ -299,3 +284,4 @@ class ResolvedExecution:
     parameters: dict
     thread: str
     secret_envelope: dict | None = None
+    vault_keys: list[str] | None = None

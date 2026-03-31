@@ -30,7 +30,6 @@ from ryeos_node.auth import (
     ResolvedExecution,
     _verify_signed_request,
     get_current_principal,
-    require_capability,
     verify_hmac,
     verify_timestamp,
 )
@@ -179,12 +178,13 @@ class CreateWebhookBindingRequest(BaseModel):
     project_path: str
     description: Optional[str] = None
     secret_envelope: Optional[dict] = None
+    vault_keys: Optional[List[str]] = None
 
 
 class AuthorizeKeyRequest(BaseModel):
     public_key: str  # ed25519:<base64>
     label: str = "operator"
-    capabilities: List[str] = ["rye.*"]
+    scopes: List[str] = ["*"]
 
 
 class PublishRequest(BaseModel):
@@ -656,7 +656,6 @@ async def objects_has(
     principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    require_capability(principal, "rye.objects.*")
     root = _principal_cas_root(principal, settings)
     return handle_has_objects(req.hashes, root)
 
@@ -667,7 +666,6 @@ async def objects_put(
     principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    require_capability(principal, "rye.objects.*")
     _check_user_quota(principal, settings)
     root = _principal_cas_root(principal, settings)
     result = handle_put_objects(req.entries, root)
@@ -682,7 +680,6 @@ async def objects_get(
     principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    require_capability(principal, "rye.objects.*")
     root = _principal_cas_root(principal, settings)
     return handle_get_objects(req.hashes, root)
 
@@ -699,7 +696,6 @@ async def debug_cas(
     settings: Settings = Depends(get_settings),
 ):
     """Diagnostic endpoint: check CAS blob/object existence and retrieval."""
-    require_capability(principal, "rye.objects.*")
     root = _principal_cas_root(principal, settings)
 
     result: Dict[str, Any] = {
@@ -762,7 +758,6 @@ async def push(
     settings: Settings = Depends(get_settings),
 ):
     """Finalize a push — validate manifest graph, create snapshot, advance HEAD."""
-    require_capability(principal, "rye.push.*")
     root = _principal_cas_root(principal, settings)
 
     # Deep validation: verify manifest schema + full transitive object graph
@@ -832,7 +827,6 @@ async def push_user_space(
     settings: Settings = Depends(get_settings),
 ):
     """Push user space independently from projects."""
-    require_capability(principal, "rye.push.*")
     root = _principal_cas_root(principal, settings)
 
     # Deep validation: verify manifest schema + full transitive object graph
@@ -861,7 +855,6 @@ async def get_user_space(
     settings: Settings = Depends(get_settings),
 ):
     """Get current user space ref."""
-    require_capability(principal, "rye.push.*")
     ref = resolve_user_space_ref(settings.cas_base_path, principal.fingerprint)
     if not ref:
         raise HTTPException(
@@ -891,11 +884,9 @@ def _resolve_principal_from_binding(binding: dict) -> Principal:
     """Resolve the Principal who owns a webhook binding.
 
     The binding's user_id is the principal fingerprint.
-    Webhook bindings carry their own capabilities (inherited from when created).
     """
     return Principal(
         fingerprint=binding["user_id"],
-        capabilities=binding.get("capabilities", ["rye.execute.*"]),
         owner=binding.get("owner", ""),
     )
 
@@ -968,12 +959,11 @@ async def resolve_execution(
             parameters=parameters,
             thread=thread,
             secret_envelope=binding.get("secret_envelope"),
+            vault_keys=binding.get("vault_keys") or None,
         )
 
     # Signed-request path — caller controls everything
     principal = _verify_signed_request(request, raw_body, settings)
-    require_capability(principal, "rye.execute.*")
-
     item_type = body.get("item_type")
     item_id = body.get("item_id")
     project_path = body.get("project_path")
@@ -1015,6 +1005,12 @@ async def resolve_execution(
             f"Tools must use thread=inline on remote, got thread={thread!r}",
         )
 
+    vault_keys = body.get("vault_keys")
+    if vault_keys is not None:
+        if not isinstance(vault_keys, list) or not all(isinstance(k, str) for k in vault_keys):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "vault_keys must be a list of strings")
+    validated_vault_keys = vault_keys or None
+
     return ResolvedExecution(
         principal=principal,
         item_type=item_type,
@@ -1023,6 +1019,7 @@ async def resolve_execution(
         parameters=parameters,
         thread=thread,
         secret_envelope=body.get("secret_envelope"),
+        vault_keys=validated_vault_keys,
     )
 
 
@@ -1040,6 +1037,7 @@ async def execute(
         parameters=resolved.parameters,
         thread=resolved.thread,
         secret_envelope=resolved.secret_envelope,
+        vault_keys=resolved.vault_keys,
     )
 
 
@@ -1058,6 +1056,7 @@ async def _execute_from_head(
     parameters: Dict[str, Any],
     thread: str,
     secret_envelope: dict | None = None,
+    vault_keys: list[str] | None = None,
 ):
     """Execute from project HEAD — isolated mutable checkout with fold-back."""
     ref = _resolve_project_ref_or_404(settings, principal, project_path)
@@ -1122,7 +1121,16 @@ async def _execute_from_head(
                 empty_user.mkdir(exist_ok=True)
                 exec_env["USER_SPACE"] = str(empty_user)
 
-            # Decrypt sealed envelope into per-execution env
+            # Resolve vault secrets into per-execution env
+            if vault_keys:
+                from ryeos_node.vault import resolve_vault_env
+                vault_env = resolve_vault_env(
+                    settings.cas_base_path, principal.fingerprint,
+                    vault_keys, settings.signing_key_dir,
+                )
+                exec_env.update(vault_env)
+
+            # Decrypt sealed envelope into per-execution env (overrides vault)
             if secret_envelope:
                 from rye.primitives.sealed_envelope import decrypt_and_inject
                 decrypted = decrypt_and_inject(secret_envelope, settings.signing_key_dir)
@@ -1446,7 +1454,6 @@ async def list_threads(
     settings: Settings = Depends(get_settings),
 ):
     """List principal's remote executions on this remote."""
-    require_capability(principal, "rye.threads.*")
     threads = list_executions(
         settings.cas_base_path, principal.fingerprint,
         project_path=project_path, limit=limit,
@@ -1461,7 +1468,6 @@ async def get_thread(
     settings: Settings = Depends(get_settings),
 ):
     """Get status of a specific thread."""
-    require_capability(principal, "rye.threads.*")
     record = get_execution(settings.cas_base_path, principal.fingerprint, thread_id)
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Thread {thread_id} not found")
@@ -1503,7 +1509,6 @@ async def history(
     settings: Settings = Depends(get_settings),
 ):
     """Walk first-parent snapshot chain from project HEAD."""
-    require_capability(principal, "rye.threads.*")
     ref = _resolve_project_ref_or_404(settings, principal, project_path)
     root = _principal_cas_root(principal, settings)
     snapshots = get_history(ref["snapshot_hash"], root, limit=min(limit, 200))
@@ -1513,6 +1518,63 @@ async def history(
         "snapshots": snapshots,
         "remote_name": settings.rye_remote_name,
     }
+
+
+# --- Vault (per-principal secret store) ---
+
+
+class VaultSetRequest(BaseModel):
+    name: str
+    envelope: dict
+
+
+class VaultDeleteRequest(BaseModel):
+    name: str
+
+
+@app.post("/vault/set")
+async def vault_set(
+    req: VaultSetRequest,
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Store a sealed envelope as a named secret in the principal's vault."""
+    from ryeos_node.vault import set_secret
+    try:
+        set_secret(settings.cas_base_path, principal.fingerprint, req.name, req.envelope, settings.signing_key_dir)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+    return {"stored": req.name}
+
+
+@app.get("/vault/list")
+async def vault_list(
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """List secret names in the principal's vault (no values)."""
+    from ryeos_node.vault import list_secrets
+    names = list_secrets(settings.cas_base_path, principal.fingerprint)
+    return {"names": names}
+
+
+@app.post("/vault/delete")
+async def vault_delete(
+    req: VaultDeleteRequest,
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Delete a named secret from the principal's vault."""
+    from ryeos_node.vault import delete_secret
+    try:
+        deleted = delete_secret(settings.cas_base_path, principal.fingerprint, req.name)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Secret '{req.name}' not found")
+    return {"deleted": req.name}
 
 
 # --- Webhook binding management ---
@@ -1525,8 +1587,6 @@ async def create_webhook_binding(
     settings: Settings = Depends(get_settings),
 ):
     """Create a webhook binding. Returns hook_id and hmac_secret (shown once)."""
-    require_capability(principal, "rye.webhook-bindings.*")
-
     if req.item_type not in ("tool", "directive"):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -1537,8 +1597,8 @@ async def create_webhook_binding(
         settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
         req.item_type, req.item_id, req.project_path, req.description,
         req.secret_envelope,
-        capabilities=principal.capabilities,
         owner=principal.owner,
+        vault_keys=req.vault_keys,
     )
 
 
@@ -1548,7 +1608,6 @@ async def list_webhook_bindings(
     settings: Settings = Depends(get_settings),
 ):
     """List principal's webhook bindings (hmac_secret excluded)."""
-    require_capability(principal, "rye.webhook-bindings.*")
     bindings_list = list_bindings(
         settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
     )
@@ -1562,7 +1621,6 @@ async def revoke_webhook_binding(
     settings: Settings = Depends(get_settings),
 ):
     """Revoke a webhook binding (soft delete via revoked_at)."""
-    require_capability(principal, "rye.webhook-bindings.*")
     if not revoke_binding(
         settings.cas_base_path, hook_id, principal.fingerprint, settings.rye_remote_name,
     ):
@@ -1584,8 +1642,6 @@ async def registry_publish(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    require_capability(principal, "rye.registry.publish")
-
     result = publish_item(
         settings.cas_base_path,
         body.item_type,
@@ -1610,8 +1666,6 @@ async def registry_search(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    require_capability(principal, "rye.registry.search")
-
     results = search_items(settings.cas_base_path, query, item_type, namespace, limit)
     return {"results": results, "total": len(results)}
 
@@ -1626,8 +1680,6 @@ async def registry_get_version(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    require_capability(principal, "rye.registry.search")
-
     ver = get_version(settings.cas_base_path, item_type, item_id, version)
     if ver is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Version not found: {item_type}/{item_id}@{version}")
@@ -1643,8 +1695,6 @@ async def registry_get_item(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    require_capability(principal, "rye.registry.search")
-
     item = get_item(settings.cas_base_path, item_type, item_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Item not found: {item_type}/{item_id}")
@@ -1659,8 +1709,6 @@ async def registry_claim_namespace(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    require_capability(principal, "rye.registry.publish")
-
     result = claim_namespace(settings.cas_base_path, body.claim)
     if not result.get("ok"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, result.get("error", "Claim failed"))
@@ -1706,9 +1754,7 @@ async def admin_authorize_key(
     principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    """Authorize a new key on this node. Requires '*' or 'node.auth.manage' capability."""
-    require_capability(principal, "node.auth.manage")
-
+    """Authorize a new key on this node."""
     if not req.public_key.startswith("ed25519:"):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -1727,12 +1773,12 @@ async def admin_authorize_key(
     fp = compute_key_fingerprint(pub_pem)
     timestamp = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
 
-    caps_toml = ", ".join(f'"{c}"' for c in req.capabilities)
+    caps_toml = ", ".join(f'"{c}"' for c in req.scopes)
     body = (
         f'fingerprint = "{fp}"\n'
         f'public_key = "{req.public_key}"\n'
         f'label = "{req.label}"\n'
-        f'capabilities = [{caps_toml}]\n'
+        f'scopes = [{caps_toml}]\n'
         f'created_via = "api"\n'
         f'created_at = "{timestamp}"\n'
         f'created_by = "fp:{principal.fingerprint}"\n'
@@ -1758,7 +1804,7 @@ async def admin_authorize_key(
     return {
         "fingerprint": f"fp:{fp}",
         "label": req.label,
-        "capabilities": req.capabilities,
+        "scopes": req.scopes,
         "authorized_by": f"fp:{principal.fingerprint}",
     }
 
@@ -1769,8 +1815,6 @@ async def admin_list_keys(
     settings: Settings = Depends(get_settings),
 ):
     """List authorized keys on this node."""
-    require_capability(principal, "node.auth.manage")
-
     auth_dir = settings.authorized_keys_dir()
     if not auth_dir.is_dir():
         return {"keys": []}
@@ -1791,7 +1835,7 @@ async def admin_list_keys(
             keys.append({
                 "fingerprint": f"fp:{data.get('fingerprint', f.stem)}",
                 "label": data.get("label", data.get("owner", "")),
-                "capabilities": data.get("capabilities", []),
+                "scopes": data.get("scopes", []),
                 "created_via": data.get("created_via", "unknown"),
                 "created_at": data.get("created_at", ""),
             })
@@ -1808,8 +1852,6 @@ async def admin_revoke_key(
     settings: Settings = Depends(get_settings),
 ):
     """Revoke an authorized key. Cannot revoke the last key with admin capability."""
-    require_capability(principal, "node.auth.manage")
-
     auth_dir = settings.authorized_keys_dir()
     key_file = auth_dir / f"{fingerprint}.toml"
     if not key_file.exists():
@@ -1829,7 +1871,7 @@ async def admin_revoke_key(
             except ModuleNotFoundError:
                 import tomli as _tomllib2  # type: ignore[no-redef]
             data = _tomllib2.loads(body)
-            caps = data.get("capabilities", [])
+            caps = data.get("scopes", [])
             if "*" in caps or "node.auth.manage" in caps:
                 admin_count += 1
         except Exception:
@@ -1845,7 +1887,7 @@ async def admin_revoke_key(
         except ModuleNotFoundError:
             import tomli as _tomllib3  # type: ignore[no-redef]
         data = _tomllib3.loads(body)
-        caps = data.get("capabilities", [])
+        caps = data.get("scopes", [])
         is_admin = "*" in caps or "node.auth.manage" in caps
     except Exception:
         is_admin = False

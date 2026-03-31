@@ -47,8 +47,8 @@ def create_binding(
     project_path: str,
     description: str | None = None,
     secret_envelope: dict | None = None,
-    capabilities: list[str] | None = None,
     owner: str = "",
+    vault_keys: list[str] | None = None,
 ) -> dict:
     hook_id = f"wh_{secrets.token_hex(16)}"
     hmac_secret = f"whsec_{secrets.token_hex(32)}"
@@ -62,7 +62,7 @@ def create_binding(
         "project_path": project_path,
         "description": description,
         "secret_envelope": secret_envelope,
-        "capabilities": capabilities or ["rye.execute.*"],
+        "vault_keys": vault_keys or [],
         "owner": owner,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "revoked_at": None,
@@ -87,6 +87,7 @@ def create_binding(
         "item_id": item_id,
         "project_path": project_path,
         "has_secret_envelope": secret_envelope is not None,
+        "vault_keys": vault_keys or [],
     }
 
 
@@ -104,6 +105,7 @@ def list_bindings(cas_base: str, user_fp: str, remote_name: str) -> list[dict]:
                 "created_at": binding["created_at"],
                 "revoked_at": binding["revoked_at"],
                 "has_secret_envelope": binding.get("secret_envelope") is not None,
+                "vault_keys": binding.get("vault_keys", []),
                 "owner": binding.get("owner", ""),
             })
     results.sort(key=lambda b: b["created_at"], reverse=True)
