@@ -1,6 +1,7 @@
 """Configuration for ryeos-node server."""
 
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,8 +19,9 @@ def _load_node_yaml(node_config_dir: str, cas_base_path: str) -> Dict[str, Any]:
     Maps nested node.yaml fields to flat Settings field names.
     Returns empty dict if file doesn't exist or fails to parse.
     """
+    ai_dir = os.environ.get("AI_DIR", ".ai")
     config_root = Path(node_config_dir) if node_config_dir else Path(cas_base_path) / "config"
-    node_yaml_path = config_root / ".ai" / "config" / "node" / "node.yaml"
+    node_yaml_path = config_root / ai_dir / "config" / "node" / "node.yaml"
 
     if not node_yaml_path.is_file():
         return {}
@@ -117,7 +119,8 @@ class Settings(BaseSettings):
         return self._node_config() / "authorized_keys"
 
     def node_yaml_path(self) -> Path:
-        return self._node_config() / ".ai" / "config" / "node" / "node.yaml"
+        ai_dir = os.environ.get("AI_DIR", ".ai")
+        return self._node_config() / ai_dir / "config" / "node" / "node.yaml"
 
     def hardware_descriptors(self) -> Dict[str, Any]:
         """Read hardware section from node.yaml. Returns empty dict if unavailable."""
@@ -137,7 +140,8 @@ class Settings(BaseSettings):
         return {}
 
     def user_cas_root(self, fingerprint: str) -> Path:
-        return Path(self.cas_base_path) / fingerprint / ".ai" / "objects"
+        ai_dir = os.environ.get("AI_DIR", ".ai")
+        return Path(self.cas_base_path) / fingerprint / ai_dir / "objects"
 
     def cache_root(self, fingerprint: str) -> Path:
         return Path(self.cas_base_path) / fingerprint / "cache"

@@ -178,6 +178,7 @@ class CreateWebhookBindingRequest(BaseModel):
     item_id: str
     project_path: str
     description: Optional[str] = None
+    secret_envelope: Optional[dict] = None
 
 
 class AuthorizeKeyRequest(BaseModel):
@@ -966,6 +967,7 @@ async def resolve_execution(
             project_path=binding["project_path"],
             parameters=parameters,
             thread=thread,
+            secret_envelope=binding.get("secret_envelope"),
         )
 
     # Signed-request path — caller controls everything
@@ -1108,47 +1110,37 @@ async def _execute_from_head(
                 user_manifest_hash, root, cache,
             ) if user_manifest_hash else None
 
-            os.environ["RYE_SIGNING_KEY_DIR"] = settings.signing_key_dir
+            # Build per-execution env (never mutate process-global os.environ)
+            exec_env: dict[str, str] = {
+                "RYE_SIGNING_KEY_DIR": settings.signing_key_dir,
+            }
 
-            # Decrypt sealed envelope and inject secrets into env for subprocess
-            injected_secrets: dict = {}
-            prior_env: dict = {}
+            if user_space:
+                exec_env["USER_SPACE"] = str(user_space)
+            else:
+                empty_user = exec_space / ".empty_user_space"
+                empty_user.mkdir(exist_ok=True)
+                exec_env["USER_SPACE"] = str(empty_user)
+
+            # Decrypt sealed envelope into per-execution env
             if secret_envelope:
                 from rye.primitives.sealed_envelope import decrypt_and_inject
-                injected_secrets = decrypt_and_inject(secret_envelope, settings.signing_key_dir)
-                for key in injected_secrets:
-                    if key in os.environ:
-                        prior_env[key] = os.environ[key]
-                os.environ.update(injected_secrets)
+                decrypted = decrypt_and_inject(secret_envelope, settings.signing_key_dir)
+                exec_env.update(decrypted)
 
-            try:
-                # Set USER_SPACE so resolvers/walkers find pushed user-space items
-                # (safe under max_inputs=1 — one request per container process)
-                if user_space:
-                    os.environ["USER_SPACE"] = str(user_space)
-                else:
-                    empty_user = exec_space / ".empty_user_space"
-                    empty_user.mkdir(exist_ok=True)
-                    os.environ["USER_SPACE"] = str(empty_user)
+            tool = ExecuteTool(
+                user_space=str(user_space) if user_space else None,
+                project_path=str(exec_space),
+                extra_env=exec_env,
+            )
 
-                tool = ExecuteTool(
-                    user_space=str(user_space) if user_space else None,
-                    project_path=str(exec_space),
-                )
-
-                result = await tool.handle(
-                    item_type=item_type,
-                    item_id=item_id,
-                    project_path=str(exec_space),
-                    parameters=parameters,
-                    thread=thread,
-                )
-            finally:
-                for key in injected_secrets:
-                    if key in prior_env:
-                        os.environ[key] = prior_env[key]
-                    else:
-                        os.environ.pop(key, None)
+            result = await tool.handle(
+                item_type=item_type,
+                item_id=item_id,
+                project_path=str(exec_space),
+                parameters=parameters,
+                thread=thread,
+            )
 
             # Promote execution-local CAS into user CAS
             exec_cas = exec_space / AI_DIR / "objects"
@@ -1197,6 +1189,7 @@ async def _execute_from_head(
                     settings.cas_base_path, principal.fingerprint, thread_id,
                     state="completed" if exec_status == "success" else "error",
                     snapshot_hash=exec_snapshot_hash,
+                    execution_snapshot_hash=exec_snapshot_hash,
                     runtime_outputs_bundle_hash=bundle_hash or None,
                 )
                 return {
@@ -1239,6 +1232,7 @@ async def _execute_from_head(
                 settings.cas_base_path, principal.fingerprint, thread_id,
                 state="completed" if exec_status == "success" else "error",
                 snapshot_hash=fold_result["snapshot_hash"],
+                execution_snapshot_hash=exec_snapshot_hash,
                 runtime_outputs_bundle_hash=bundle_hash or None,
             )
 
@@ -1255,13 +1249,35 @@ async def _execute_from_head(
                 **({k: fold_result[k] for k in ("conflicts", "unmerged_snapshot") if k in fold_result}),
             }
         except FileNotFoundError as e:
-            complete_execution(settings.cas_base_path, principal.fingerprint, thread_id, state="error")
+            complete_execution(
+                settings.cas_base_path, principal.fingerprint, thread_id,
+                state="error",
+                error_message=str(e),
+                error_phase="materialization",
+            )
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
-        except Exception:
-            complete_execution(settings.cas_base_path, principal.fingerprint, thread_id, state="error")
-            raise
+        except Exception as e:
+            logger.error(
+                "Execution failed for thread %s (%s/%s): %s",
+                thread_id, item_type, item_id, e, exc_info=True,
+            )
+            complete_execution(
+                settings.cas_base_path, principal.fingerprint, thread_id,
+                state="error",
+                error_message=str(e),
+                error_phase="execution",
+            )
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": str(e),
+                    "thread_id": thread_id,
+                    "item_type": item_type,
+                    "item_id": item_id,
+                    "phase": "execution",
+                },
+            )
         finally:
-            os.environ.pop("USER_SPACE", None)
             if exec_space:
                 cleanup_execution_space(exec_space)
     finally:
@@ -1449,6 +1465,30 @@ async def get_thread(
     record = get_execution(settings.cas_base_path, principal.fingerprint, thread_id)
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Thread {thread_id} not found")
+
+    root = _principal_cas_root(principal, settings)
+
+    # Prefer execution_snapshot_hash (always an ExecutionSnapshot with errors)
+    # Fall back to snapshot_hash for older records
+    exec_snap_hash = record.get("execution_snapshot_hash") or record.get("snapshot_hash")
+    if exec_snap_hash:
+        snapshot = cas.get_object(exec_snap_hash, root)
+        if snapshot and snapshot.get("kind") == "execution_snapshot":
+            errors = snapshot.get("errors")
+            if errors:
+                record["execution_errors"] = errors
+            snap_status = snapshot.get("status")
+            if snap_status:
+                record["execution_status"] = snap_status
+
+    bundle_hash = record.get("runtime_outputs_bundle_hash")
+    if bundle_hash:
+        bundle = cas.get_object(bundle_hash, root)
+        if bundle:
+            files = bundle.get("files")
+            if files is not None:
+                record["runtime_output_files"] = len(files)
+
     return record
 
 
@@ -1496,6 +1536,9 @@ async def create_webhook_binding(
     return create_binding(
         settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
         req.item_type, req.item_id, req.project_path, req.description,
+        req.secret_envelope,
+        capabilities=principal.capabilities,
+        owner=principal.owner,
     )
 
 

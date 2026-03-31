@@ -58,17 +58,21 @@ class ExecuteTool:
         self,
         user_space: Optional[str] = None,
         project_path: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ):
         """Initialize execute tool.
 
         Args:
             user_space: User space base path (~ or $USER_SPACE)
             project_path: Project root path for .ai/ resolution
+            extra_env: Extra environment variables to pass to subprocess
+                execution without mutating os.environ.
         """
         self.user_space = user_space or str(get_user_space())
         self.project_path = project_path
         self.parser_router = ParserRouter()
         self.processor_router = ProcessorRouter()
+        self.extra_env = extra_env or {}
 
         # Lazy-loaded executor (created per-project)
         self._executor: Optional[PrimitiveExecutor] = None
@@ -529,6 +533,7 @@ class ExecuteTool:
             item_id=item_id,
             parameters=parameters,
             validate_chain=True,
+            extra_env=self.extra_env,
         )
 
         if result.success:

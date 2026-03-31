@@ -15,6 +15,7 @@ status: implemented
 ## Goal
 
 Get `ryeos-node` running on three targets so CPU execution nodes can:
+
 - Accept signed requests and webhook triggers
 - Execute directives (fork threads) and tools (inline)
 - Dispatch to remote GPU nodes when routing tools are present
@@ -24,20 +25,20 @@ Get `ryeos-node` running on three targets so CPU execution nodes can:
 
 ## What Exists
 
-| Component | Status |
-|---|---|
-| `ryeos-node` server | ✅ FastAPI server with /execute, /push, /status, webhooks, registry |
-| `modal_app.py` | ✅ Working Modal deployment (volume-backed /cas) |
-| `node.yaml` config | ✅ Identity, hardware, features, limits, coordination |
-| Config schema validation | ✅ `node.config-schema.yaml` |
-| `/status` endpoint | ✅ Reports capabilities, hardware, load |
-| Route tool + status cache | ✅ Capability-based dispatch with topology config |
-| `cluster/topology.yaml` | ✅ Routing policy (strategy, thresholds, TTLs) |
-| Authorized key auth | ✅ Ed25519 signed requests, TOML key files |
-| First-boot init | ✅ `ryeos_node/init.py` — idempotent, generates keys + scaffolds node.yaml |
-| Dockerfile | ✅ Multi-target container build |
-| `render.yaml` | ✅ One-click Render blueprint |
-| Local run script | ✅ `run.sh` — defaults to `~/.ryeos-node` |
+| Component                 | Status                                                                     |
+| ------------------------- | -------------------------------------------------------------------------- |
+| `ryeos-node` server       | ✅ FastAPI server with /execute, /push, /status, webhooks, registry        |
+| `modal_app.py`            | ✅ Working Modal deployment (volume-backed /cas)                           |
+| `node.yaml` config        | ✅ Identity, hardware, features, limits, coordination                      |
+| Config schema validation  | ✅ `node.config-schema.yaml`                                               |
+| `/status` endpoint        | ✅ Reports capabilities, hardware, load                                    |
+| Route tool + status cache | ✅ Capability-based dispatch with topology config                          |
+| `cluster/topology.yaml`   | ✅ Routing policy (strategy, thresholds, TTLs)                             |
+| Authorized key auth       | ✅ Ed25519 signed requests, TOML key files                                 |
+| First-boot init           | ✅ `ryeos_node/init.py` — idempotent, generates keys + scaffolds node.yaml |
+| Dockerfile                | ✅ Multi-target container build                                            |
+| `render.yaml`             | ✅ One-click Render blueprint                                              |
+| Local run script          | ✅ `run.sh` — defaults to `~/.ai/node`                                  |
 
 ---
 
@@ -93,13 +94,13 @@ Settings loads this via `@model_validator(mode='before')` — node.yaml values a
 
 ### What changes from current `modal_app.py`
 
-| Change | Why |
-|---|---|
-| Rename `remote_server` → `node` | Matches rename |
-| Add first-boot init hook | Generate signing key + scaffold node space on empty volume |
-| Add `node.yaml` to volume | Replace env var sprawl |
-| Bump `max_inputs` | Current `max_inputs=1` is conservative |
-| Add health check | Modal supports `@app.function(keep_warm=1)` for always-on |
+| Change                          | Why                                                        |
+| ------------------------------- | ---------------------------------------------------------- |
+| Rename `remote_server` → `node` | Matches rename                                             |
+| Add first-boot init hook        | Generate signing key + scaffold node space on empty volume |
+| Add `node.yaml` to volume       | Replace env var sprawl                                     |
+| Bump `max_inputs`               | Current `max_inputs=1` is conservative                     |
+| Add health check                | Modal supports `@app.function(keep_warm=1)` for always-on  |
 
 ### `modal_app.py` updates
 
@@ -177,10 +178,10 @@ EOF
 
 ### What's needed
 
-| Artifact | Purpose |
-|---|---|
-| `Dockerfile` | Standard container build |
-| `render.yaml` | Blueprint for one-click deploy |
+| Artifact        | Purpose                                               |
+| --------------- | ----------------------------------------------------- |
+| `Dockerfile`    | Standard container build                              |
+| `render.yaml`   | Blueprint for one-click deploy                        |
 | Persistent disk | Mounted at `/cas` for CAS + signing key + node config |
 
 ### Dockerfile
@@ -241,16 +242,16 @@ Render's persistent disk survives redeploys. First deploy generates signing key 
 pip install ryeos "fastapi[standard]" pydantic-settings
 
 # Init node space (creates signing key, scaffolds node.yaml)
-python -m ryeos_node.init ~/.ryeos-node
+python -m ryeos_node.init ~/.ai/node
 
 # Add your own key as authorized
-cp ~/.ai/signing/id_ed25519.pub ~/.ryeos-node/config/authorized_keys/$(rye identity fingerprint).toml
+cp ~/.ai/signing/id_ed25519.pub ~/.ai/node/config/authorized_keys/$(rye identity fingerprint).toml
 
 # Edit node.yaml
-vim ~/.ryeos-node/config/.ai/config/node/node.yaml
+vim ~/.ai/node/config/.ai/config/node/node.yaml
 
 # Run
-CAS_BASE_PATH=~/.ryeos-node uvicorn ryeos_node.server:app --port 8000
+CAS_BASE_PATH=~/.ai/node uvicorn ryeos_node.server:app --port 8000
 ```
 
 ### Docker compose
@@ -275,7 +276,7 @@ volumes:
 ```bash
 #!/bin/bash
 # Quick-start a local ryeos-node
-CAS=${CAS_BASE_PATH:-$HOME/.ryeos-node}
+CAS=${CAS_BASE_PATH:-$HOME/.ai/node}
 export CAS_BASE_PATH="$CAS"
 
 python -m ryeos_node.init "$CAS"
@@ -299,20 +300,20 @@ The CPU node handles directive execution, browser automation, database writes. L
 
 ## Implementation Files
 
-| Component | File |
-|---|---|
-| Init module | `ryeos-node/ryeos_node/init.py` |
-| Modal deployment | `ryeos-node/modal_app.py` |
-| Dockerfile | `ryeos-node/Dockerfile` |
-| Docker Compose | `ryeos-node/docker-compose.yml` |
-| Render blueprint | `ryeos-node/render.yaml` |
-| Local run script | `ryeos-node/run.sh` |
-| Server README | `ryeos-node/README.md` |
+| Component        | File                            |
+| ---------------- | ------------------------------- |
+| Init module      | `ryeos-node/ryeos_node/init.py` |
+| Modal deployment | `ryeos-node/modal_app.py`       |
+| Dockerfile       | `ryeos-node/Dockerfile`         |
+| Docker Compose   | `ryeos-node/docker-compose.yml` |
+| Render blueprint | `ryeos-node/render.yaml`        |
+| Local run script | `ryeos-node/run.sh`             |
+| Server README    | `ryeos-node/README.md`          |
 
 ## Relationship to Other Docs
 
-| Doc | Relationship |
-|---|---|
-| [Execution Nodes](execution-nodes.md) | Architecture — routing tool, status cache, topology config. This doc is the operational guide. |
-| [Remote Execution](remote-execution.md) | Protocol layer — CAS sync, materializer, trust model. |
-| [Sovereign Inference](../future/sovereign-inference.md) | GPU nodes and completions server come after this. This doc is the foundation. |
+| Doc                                                     | Relationship                                                                                   |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [Execution Nodes](execution-nodes.md)                   | Architecture — routing tool, status cache, topology config. This doc is the operational guide. |
+| [Remote Execution](remote-execution.md)                 | Protocol layer — CAS sync, materializer, trust model.                                          |
+| [Sovereign Inference](../future/sovereign-inference.md) | GPU nodes and completions server come after this. This doc is the foundation.                  |

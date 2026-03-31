@@ -159,6 +159,7 @@ class PrimitiveExecutor:
         validate_chain: bool = True,
         use_lockfile: bool = True,
         trace: bool = False,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> ExecutionResult:
         """Execute a tool by resolving its executor chain recursively.
 
@@ -393,7 +394,7 @@ class PrimitiveExecutor:
             # Inject anchor context vars so {runtime_lib}, {anchor_path},
             # {tool_dir}, {tool_parent} are available for subprocess templating
             parameters = {**anchor_ctx, **(parameters or {})}
-            result = await self._execute_chain(chain, parameters, resolved_env)
+            result = await self._execute_chain(chain, parameters, resolved_env, extra_env=extra_env)
 
             # 7. Create lockfile if execution succeeded and none exists
             if use_lockfile and result.get("success") and not lockfile_used and version:
@@ -858,6 +859,7 @@ class PrimitiveExecutor:
         chain: List[ChainElement],
         parameters: Dict[str, Any],
         resolved_env: Dict[str, str],
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Execute via the root element in the chain.
 
@@ -885,6 +887,8 @@ class PrimitiveExecutor:
 
         # Build config from chain
         config = self._build_execution_config(chain, resolved_env, parameters)
+        if extra_env:
+            config.setdefault("env", {}).update(extra_env)
 
         # Add executor context
         config["project_path"] = str(self.project_path)

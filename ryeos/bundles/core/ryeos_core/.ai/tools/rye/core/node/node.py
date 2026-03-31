@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T05:09:18Z:7a480cd0becd1d5444463802c150a33d44d3281561474107db26297838b35c5b:o_zdN8mlq6R8BnrrS5l1y8kryJZX03-GXzhi9u4JA6ffc0JhbfOlXNKohy2tWYwoxOSMwQbWSOfQqsYYKzqbBg:4b987fd4e40303ac
+# rye:signed:2026-03-31T00:35:19Z:958adfea2bfc60860059dbabe0644267b2dccb9a7605f8f4ea860bbdcaa0cc7e:ku-C98K793L3-O5_P8FCEiPSDHOb1xHWQlc-nmP5BizuBSMP39y3erSOWLpcECsKC_gIWeRA528blZCszUNQAA:4b987fd4e40303ac
 """Node management tool — init, start, stop, authorize, and configure ryeos-node.
 
 Actions:
@@ -41,7 +41,7 @@ CONFIG_SCHEMA = {
         },
         "path": {
             "type": "string",
-            "description": "CAS base path for the node. Default: ~/.ryeos-node",
+            "description": "CAS base path for the node. Default: ~/.ai/node",
         },
         "port": {
             "type": "integer",
@@ -84,7 +84,7 @@ CONFIG_SCHEMA = {
     "required": ["action"],
 }
 
-_PID_FILE = ".ryeos-node.pid"
+_PID_FILE = "node.pid"
 
 
 def execute(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
@@ -112,7 +112,8 @@ def _resolve_cas_path(params: Dict) -> Path:
     raw = params.get("path", "")
     if raw:
         return Path(raw).expanduser().resolve()
-    return Path.home() / ".ryeos-node"
+    ai_dir = os.environ.get("AI_DIR", ".ai")
+    return Path.home() / ai_dir / "node"
 
 
 def _pid_file(cas_path: Path) -> Path:
@@ -128,7 +129,8 @@ def _init(params: Dict, project_path: str) -> Dict:
     signing_dir = cas_path / "signing"
     config_root = cas_path / "config"
     authorized_keys_dir = config_root / "authorized_keys"
-    node_yaml_dir = config_root / ".ai" / "config" / "node"
+    ai_dir = os.environ.get("AI_DIR", ".ai")
+    node_yaml_dir = config_root / ai_dir / "config" / "node"
     node_yaml_path = node_yaml_dir / "node.yaml"
 
     signing_dir.mkdir(parents=True, exist_ok=True)
@@ -444,7 +446,8 @@ def _configure(params: Dict, project_path: str) -> Dict:
         node_id = params.get("node_id", "")
 
     proj = Path(project_path)
-    config_dir = proj / ".ai" / "config" / "cas"
+    ai_dir = os.environ.get("AI_DIR", ".ai")
+    config_dir = proj / ai_dir / "config" / "cas"
     config_dir.mkdir(parents=True, exist_ok=True)
     remote_yaml = config_dir / "remote.yaml"
 

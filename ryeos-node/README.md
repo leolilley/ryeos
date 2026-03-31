@@ -32,7 +32,7 @@ pip install ryeos "fastapi[standard]" pydantic-settings pyyaml
 ./run.sh
 ```
 
-Defaults to `~/.ryeos-node` for CAS storage. Override with `CAS_BASE_PATH`.
+Defaults to `~/.ai/node` for CAS storage. Override with `CAS_BASE_PATH`.
 
 ## First Boot
 

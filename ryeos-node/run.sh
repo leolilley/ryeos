@@ -2,12 +2,12 @@
 # Quick-start a local ryeos-node.
 #
 # Usage:
-#   ./run.sh                              # defaults to ~/.ryeos-node
+#   ./run.sh                              # defaults to ~/${AI_DIR:-.ai}/node
 #   CAS_BASE_PATH=/data/cas ./run.sh      # custom CAS path
 #   PORT=9000 ./run.sh                    # custom port
 set -e
 
-CAS="${CAS_BASE_PATH:-$HOME/.ryeos-node}"
+CAS="${CAS_BASE_PATH:-$HOME/${AI_DIR:-.ai}/node}"
 export CAS_BASE_PATH="$CAS"
 
 python -m ryeos_node.init "$CAS"

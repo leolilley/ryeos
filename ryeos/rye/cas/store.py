@@ -144,7 +144,10 @@ def materialize_item(
     """Read item_source object → extract blob → write to target_path."""
     obj = cas.get_object(object_hash, root)
     if obj is None:
-        raise FileNotFoundError(f"Object {object_hash} not found in CAS")
+        raise FileNotFoundError(
+            f"Object {object_hash} not found in CAS "
+            f"(root={root}, target={target_path})"
+        )
 
     blob_hash = obj["content_blob_hash"]
     blob_data = cas.get_blob(blob_hash, root)
@@ -165,7 +168,9 @@ def materialize_item(
             except Exception as e:
                 logger.error("Could not stat blob file: %s", e)
         raise FileNotFoundError(
-            f"Blob {blob_hash} not found in CAS (root={root}, exists_on_disk={exists_on_disk})"
+            f"Blob {blob_hash} not found in CAS "
+            f"(root={root}, exists_on_disk={exists_on_disk}, "
+            f"item_type={obj.get('item_type')}, item_id={obj.get('item_id')})"
         )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)

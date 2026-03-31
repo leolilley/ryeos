@@ -1,6 +1,6 @@
 """Local filesystem execution record tracking.
 
-Replaces Supabase threads table with running files, append-only
+Threads table with running files, append-only
 execution log, and by-id index for O(1) lookup.
 """
 
@@ -53,9 +53,12 @@ def complete_execution(
     thread_id: str,
     state: str,
     snapshot_hash: str | None = None,
+    execution_snapshot_hash: str | None = None,
     runtime_outputs_bundle_hash: str | None = None,
     merge_conflicts: dict | None = None,
     unmerged_snapshot_hash: str | None = None,
+    error_message: str | None = None,
+    error_phase: str | None = None,
 ) -> None:
     try:
         base = Path(cas_base) / user_fp
@@ -72,9 +75,12 @@ def complete_execution(
             "state": state,
             "completed_at": completed_at,
             "snapshot_hash": snapshot_hash,
+            "execution_snapshot_hash": execution_snapshot_hash,
             "runtime_outputs_bundle_hash": runtime_outputs_bundle_hash,
             "merge_conflicts": merge_conflicts,
             "unmerged_snapshot_hash": unmerged_snapshot_hash,
+            "error_message": error_message,
+            "error_phase": error_phase,
         })
 
         # Write by-id index

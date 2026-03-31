@@ -5,7 +5,7 @@ Idempotent — safe to call on every startup.
 
 Usage:
     python -m ryeos_node.init /cas
-    python -m ryeos_node.init ~/.ryeos-node
+    python -m ryeos_node.init ~/.ai/node
 """
 
 import logging
@@ -82,7 +82,8 @@ def ensure_node_space(cas_base_path: str) -> str:
     signing_dir = cas / "signing"
     config_root = cas / "config"
     authorized_keys_dir = config_root / "authorized_keys"
-    node_yaml_dir = config_root / ".ai" / "config" / "node"
+    ai_dir = os.environ.get("AI_DIR", ".ai")
+    node_yaml_dir = config_root / ai_dir / "config" / "node"
     node_yaml_path = node_yaml_dir / "node.yaml"
 
     # 1. Generate signing key if missing

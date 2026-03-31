@@ -47,7 +47,8 @@ def ensure_snapshot_cached(
     if snapshot is None:
         shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
-            f"ProjectSnapshot {snapshot_hash} not found in CAS"
+            f"ProjectSnapshot {snapshot_hash} not found in CAS "
+            f"(cas_root={cas_root}, cache_root={cache_root})"
         )
 
     manifest_hash = snapshot["project_manifest_hash"]
@@ -55,7 +56,8 @@ def ensure_snapshot_cached(
     if manifest is None:
         shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
-            f"Manifest {manifest_hash} not found in CAS"
+            f"Manifest {manifest_hash} not found in CAS "
+            f"(cas_root={cas_root}, snapshot={snapshot_hash})"
         )
 
     materialize_manifest_dict(manifest, staging, cas_root)
