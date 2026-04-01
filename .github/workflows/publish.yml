@@ -338,7 +338,7 @@ jobs:
               rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
             done
           fi
-          rye remote bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }}
+          rye remote bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }} --version "${GITHUB_REF_NAME#v}"
 
       - name: Configure registry remote
         if: steps.check.outputs.skip == 'false'
