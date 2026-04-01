@@ -65,9 +65,9 @@ The workflow has four jobs that run in sequence:
 
 **`publish-rust`** — builds and publishes Rust binaries (maturin), no signing needed:
 
-| Package | Build path       |
-| ------- | ---------------- |
-| lillux  | `lillux/lillux`  |
+| Package | Build path      |
+| ------- | --------------- |
+| lillux  | `lillux/lillux` |
 
 Python and Rust jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
 
@@ -78,6 +78,7 @@ Each publishing job uses the `pypi` GitHub environment and `id-token: write` per
 Bundle items (directives, tools, knowledge, configs) are signed with Ed25519 for integrity. Developers sign with their personal key locally, but published packages use a dedicated CI key (`6ea18199041a1ea8`).
 
 Each CI job that handles bundles:
+
 1. Imports the CI keypair from `RYE_SIGNING_KEY` and `RYE_SIGNING_PUBKEY` secrets
 2. Trusts the CI key in the runner's user space
 3. Re-signs all bundle items with the CI key

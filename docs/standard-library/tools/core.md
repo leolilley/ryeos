@@ -77,6 +77,38 @@ Optional `status` filter (`running`, `completed`, `cancelled`, `error`, `killed`
 
 ---
 
+## Garbage Collection — `rye/core/gc/gc`
+
+Mark-and-sweep garbage collection for the content-addressed store. Works identically locally and remotely (`--target remote`). Operates on the project's CAS at `project_path / AI_DIR / "objects"`.
+
+| Action   | Description                                      |
+| -------- | ------------------------------------------------ |
+| `run`    | Execute GC — mark reachable objects, sweep unreachable |
+| `dry-run`| Preview what would be deleted without changing anything |
+| `status` | Show CAS usage stats (object/blob counts, total size)  |
+
+Parameters:
+
+| Parameter    | Type    | Default | Description                      |
+| ------------ | ------- | ------- | -------------------------------- |
+| `action`     | string  | —       | Required. One of: run, dry-run, status |
+| `aggressive` | boolean | false   | Shorter grace window (300s vs 3600s)   |
+
+```bash
+# Local GC dry-run
+rye execute tool rye/core/gc/gc with {"action": "dry-run"}
+
+# Run GC on remote node
+rye execute tool rye/core/gc/gc with {"action": "run"} --target remote
+
+# Check CAS usage
+rye execute tool rye/core/gc/gc with {"action": "status"}
+```
+
+On the server side, GC also runs automatically when users exceed storage quota. See [Garbage Collection](../../internals/garbage-collection.md) for the full architecture.
+
+---
+
 ## Remote Execution — `rye/core/remote/`
 
 Execute tools and directives on remote ryeos servers. Uses content-addressed storage (CAS) for sync — objects are synced by hash, execution happens in a temp-materialized `.ai/` directory on the remote.

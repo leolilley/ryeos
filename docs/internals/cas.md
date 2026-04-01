@@ -40,16 +40,16 @@ Kernel-level, type-agnostic. Same layer as `integrity.py` and `signing.py`. Lill
 
 ### Interface
 
-| Function | Description |
-|----------|-------------|
-| `store_blob(data: bytes, root: Path) -> str` | Store raw bytes, return SHA256 hex digest. Skip if exists. Atomic (tmp + rename). |
-| `store_object(data: dict, root: Path) -> str` | Canonical JSON via `compute_integrity()`, store as `.json`. Return integrity hash. |
-| `get_blob(hash: str, root: Path) -> bytes \| None` | Read blob by hash. |
-| `get_object(hash: str, root: Path) -> dict \| None` | Read object by hash. |
-| `has(hash: str, root: Path) -> bool` | Check existence (blob or object). Delegates to `has_blob()` and `has_object()`. |
-| `has_blob(hash: str, root: Path) -> bool` | Check if hash exists as a blob specifically (not objects). |
-| `has_object(hash: str, root: Path) -> bool` | Check if hash exists as an object specifically (not blobs). |
-| `has_many(hashes: list[str], root: Path) -> dict[str, bool]` | Batch existence check. |
+| Function                                                     | Description                                                                        |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `store_blob(data: bytes, root: Path) -> str`                 | Store raw bytes, return SHA256 hex digest. Skip if exists. Atomic (tmp + rename).  |
+| `store_object(data: dict, root: Path) -> str`                | Canonical JSON via `compute_integrity()`, store as `.json`. Return integrity hash. |
+| `get_blob(hash: str, root: Path) -> bytes \| None`           | Read blob by hash.                                                                 |
+| `get_object(hash: str, root: Path) -> dict \| None`          | Read object by hash.                                                               |
+| `has(hash: str, root: Path) -> bool`                         | Check existence (blob or object). Delegates to `has_blob()` and `has_object()`.    |
+| `has_blob(hash: str, root: Path) -> bool`                    | Check if hash exists as a blob specifically (not objects).                         |
+| `has_object(hash: str, root: Path) -> bool`                  | Check if hash exists as an object specifically (not blobs).                        |
+| `has_many(hashes: list[str], root: Path) -> dict[str, bool]` | Batch existence check.                                                             |
 
 ### Rules
 
@@ -89,15 +89,15 @@ Rye-level layer. Knows about item types, spaces, and manifests. Built on Lillux 
 
 ### Interface
 
-| Function | Description |
-|----------|-------------|
-| `cas_root(project_path) -> Path` | Returns `{project}/.ai/objects/` |
-| `user_cas_root() -> Path` | Returns `{USER_SPACE}/.ai/objects/` |
-| `ingest_item(item_type, file_path, project_path) -> ItemRef` | Read file → store as blob + create `item_source` object → return `ItemRef(blob_hash, object_hash, integrity, signature_info)` |
+| Function                                                      | Description                                                                                                                         |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `cas_root(project_path) -> Path`                              | Returns `{project}/.ai/objects/`                                                                                                    |
+| `user_cas_root() -> Path`                                     | Returns `{USER_SPACE}/.ai/objects/`                                                                                                 |
+| `ingest_item(item_type, file_path, project_path) -> ItemRef`  | Read file → store as blob + create `item_source` object → return `ItemRef(blob_hash, object_hash, integrity, signature_info)`       |
 | `ingest_directory(base_path, project_path) -> dict[str, str]` | Walk `.ai/` tree → ingest all items → return `{relative_path: object_hash}`. Skips `.ai/objects/` and `.ai/agent/` (runtime state). |
-| `materialize_item(object_hash, target_path, root) -> Path` | Read `item_source` object → extract blob → write to target_path |
-| `write_ref(ref_path, hash_hex) -> None` | Atomically write a mutable ref pointer |
-| `read_ref(ref_path) -> str \| None` | Read a ref pointer |
+| `materialize_item(object_hash, target_path, root) -> Path`    | Read `item_source` object → extract blob → write to target_path                                                                     |
+| `write_ref(ref_path, hash_hex) -> None`                       | Atomically write a mutable ref pointer                                                                                              |
+| `read_ref(ref_path) -> str \| None`                           | Read a ref pointer                                                                                                                  |
 
 ### Ingest Flow
 
@@ -124,19 +124,19 @@ All objects are JSON dicts with a `schema` version (currently `1`) and a `kind` 
 
 ### Object Kinds
 
-| Kind | Key Fields | Purpose |
-|------|------------|---------|
-| `item_source` | `item_type, item_id, content_blob_hash, integrity, signature_info` | Versioned snapshot of a tool/directive/knowledge file |
-| `source_manifest` | `space, items: {path: item_source_hash}, files: {path: blob_hash}` | Filesystem closure — everything needed to materialize a space |
-| `config_snapshot` | `resolved_config: {agent.yaml: {...}, ...}` | Merged config state after 3-tier resolution |
-| `node_input` | `graph_hash, node_name, interpolated_action, lockfile_hash, config_snapshot_hash` | Cache key for node execution — must be deterministic |
-| `node_result` | `result: {...}` | Cached execution output |
-| `node_receipt` | `node_input_hash, node_result_hash, cache_hit, elapsed_ms, timestamp` | Audit record for a single node execution |
-| `execution_snapshot` | `graph_run_id, graph_id, project_manifest_hash, user_manifest_hash, system_version, step, status, state_hash, node_receipts[]` | Immutable run checkpoint |
-| `state_snapshot` | `state: {...}` | Graph state at a point in time |
-| `artifact_index` | `thread_id, entries: {call_id: {blob_hash, ...}}` | Per-thread artifact mapping |
-| `project_snapshot` | `project_manifest_hash, user_manifest_hash, parent_hashes[], source, source_detail, timestamp, metadata` | Point-in-time project state commit with parent lineage (like a git commit) |
-| `runtime_outputs_bundle` | `remote_thread_id, execution_snapshot_hash, files: {path: blob_hash}` | Maps runtime-produced files to CAS blobs for remote output sync |
+| Kind                     | Key Fields                                                                                                                     | Purpose                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `item_source`            | `item_type, item_id, content_blob_hash, integrity, signature_info`                                                             | Versioned snapshot of a tool/directive/knowledge file                      |
+| `source_manifest`        | `space, items: {path: item_source_hash}, files: {path: blob_hash}`                                                             | Filesystem closure — everything needed to materialize a space              |
+| `config_snapshot`        | `resolved_config: {agent.yaml: {...}, ...}`                                                                                    | Merged config state after 3-tier resolution                                |
+| `node_input`             | `graph_hash, node_name, interpolated_action, lockfile_hash, config_snapshot_hash`                                              | Cache key for node execution — must be deterministic                       |
+| `node_result`            | `result: {...}`                                                                                                                | Cached execution output                                                    |
+| `node_receipt`           | `node_input_hash, node_result_hash, cache_hit, elapsed_ms, timestamp`                                                          | Audit record for a single node execution                                   |
+| `execution_snapshot`     | `graph_run_id, graph_id, project_manifest_hash, user_manifest_hash, system_version, step, status, state_hash, node_receipts[]` | Immutable run checkpoint                                                   |
+| `state_snapshot`         | `state: {...}`                                                                                                                 | Graph state at a point in time                                             |
+| `artifact_index`         | `thread_id, entries: {call_id: {blob_hash, ...}}`                                                                              | Per-thread artifact mapping                                                |
+| `project_snapshot`       | `project_manifest_hash, user_manifest_hash, parent_hashes[], source, source_detail, timestamp, metadata`                       | Point-in-time project state commit with parent lineage (like a git commit) |
+| `runtime_outputs_bundle` | `remote_thread_id, execution_snapshot_hash, files: {path: blob_hash}`                                                          | Maps runtime-produced files to CAS blobs for remote output sync            |
 
 ### Example: item_source
 
@@ -203,7 +203,7 @@ Parent conventions: `[0]` = previous HEAD (mainline), `[1]` = merged branch (for
 Only refs are mutable. Everything they point to is immutable. Refs are stored as simple JSON:
 
 ```json
-{"hash": "a1b2c3d4e5f6..."}
+{ "hash": "a1b2c3d4e5f6..." }
 ```
 
 `write_ref` uses atomic writes (tmp + rename) to prevent partial pointer updates. `read_ref` returns `None` if the ref doesn't exist.
@@ -219,11 +219,16 @@ Refs act as the "latest" cursor for graph execution. After each step, the runner
 
 The CAS integrity model composes with Rye's signing system. `item_source` objects record the original file's `integrity` and `signature_info`, so signature verification can be performed against materialized files without re-reading the original.
 
+## Garbage Collection
+
+CAS objects accumulate indefinitely. The GC system prunes derived caches, compacts ProjectSnapshot DAG history, and mark-and-sweeps unreachable objects. See [Garbage Collection](./garbage-collection.md) for the full architecture, pipeline, configuration, and server integration.
+
 ## Implementation Files
 
-| Component | File |
-|-----------|------|
-| CAS primitives | `lillux/kernel/lillux/primitives/cas.py` |
-| Rye CAS store | `ryeos/rye/cas/store.py` |
-| Object model | `ryeos/rye/cas/objects.py` |
+| Component            | File                                           |
+| -------------------- | ---------------------------------------------- |
+| CAS primitives       | `lillux/kernel/lillux/primitives/cas.py`       |
+| Rye CAS store        | `ryeos/rye/cas/store.py`                       |
+| Object model         | `ryeos/rye/cas/objects.py`                     |
+| GC engine            | `ryeos/rye/cas/gc.py`                          |
 | Integrity primitives | `lillux/kernel/lillux/primitives/integrity.py` |
