@@ -28,8 +28,9 @@ Validation ownership:
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from rye.constants import AI_DIR, ItemType
 from rye.executor import ExecutionResult, PrimitiveExecutor
@@ -45,6 +46,25 @@ from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.resolvers import get_user_space
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExecutionSpec:
+    """Declares what a callee owns in its lifecycle."""
+
+    owner: Literal["engine", "callee"] = "engine"
+    native_async: bool = False
+    native_resume: bool = False
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """Resolved routing decision for a single execution request."""
+
+    owner: Literal["engine", "callee", "remote"]
+    launch_mode: Literal["direct", "engine_detach", "forward_remote"]
+    native_async: bool = False
+    native_resume: bool = False
 
 
 class ExecuteTool:
@@ -79,14 +99,26 @@ class ExecuteTool:
 
     async def handle(self, **kwargs) -> Dict[str, Any]:
         """Handle execute request."""
-        item_type: str = kwargs["item_type"]
-        item_id: str = kwargs["item_id"]
+        item_type: str = kwargs.get("item_type", "")
+        item_id: str = kwargs.get("item_id", "")
         project_path = kwargs["project_path"]
         parameters: Dict[str, Any] = kwargs.get("parameters", {})
         dry_run = kwargs.get("dry_run", False)
         target = kwargs.get("target", "local")
         thread = kwargs.get("thread", "inline")
         async_exec = kwargs.get("async", False)
+        resume_thread_id = kwargs.get("resume_thread_id")
+
+        # Resume mode: look up thread, route to its callee
+        if resume_thread_id:
+            return await self._resume(
+                resume_thread_id, item_type, item_id,
+                project_path, parameters, thread, async_exec,
+            )
+
+        # Outside resume, item_type and item_id are required
+        if not item_type or not item_id:
+            return {"status": "error", "error": "item_type and item_id are required."}
 
         # Parse target (validates format, extracts remote name)
         try:
@@ -107,7 +139,13 @@ class ExecuteTool:
         try:
             start = time.time()
 
-            if target_mode == "remote":
+            # Resolve execution plan
+            spec = await self._read_execution_spec(item_type, item_id, project_path)
+            plan = self._resolve_execution_plan(
+                item_type, target_mode, thread, async_exec, spec,
+            )
+
+            if plan.launch_mode == "forward_remote":
                 result = await self._dispatch_remote(
                     item_type=item_type,
                     item_id=item_id,
@@ -123,7 +161,7 @@ class ExecuteTool:
                     thread=thread,
                     async_exec=async_exec,
                 )
-            elif async_exec:
+            elif plan.launch_mode == "engine_detach":
                 result = await self._launch_async(
                     item_type=item_type,
                     item_id=item_id,
@@ -133,6 +171,14 @@ class ExecuteTool:
                     thread=thread,
                 )
             elif item_type == ItemType.TOOL:
+                if async_exec:
+                    if not plan.native_async:
+                        return {
+                            "status": "error",
+                            "error": "Tool does not support async execution (native_async=False)",
+                            "item_id": item_id,
+                        }
+                    parameters = {**(parameters or {}), "async": True}
                 result = await self._run_tool(
                     item_id, project_path, parameters, dry_run,
                 )
@@ -224,6 +270,173 @@ class ExecuteTool:
 
         return None
 
+    async def _read_execution_spec(
+        self, item_type: str, item_id: str, project_path: str,
+    ) -> ExecutionSpec:
+        """Read execution ownership dunders from the resolved executor chain.
+
+        Only tools have executor chains. Directives and knowledge always
+        return the default (engine-owned) spec — their lifecycle is
+        handled by higher-level dispatch (``_run_directive``,
+        ``_run_knowledge``).
+
+        For tools, builds the executor chain via PrimitiveExecutor and
+        walks it looking for ``execution_owner``.  The first element in
+        the chain that declares ownership wins (leaf tool first, then
+        runtimes up the chain).  This lets runtimes like
+        ``state-graph/runtime`` declare ownership on behalf of the walker.
+        """
+        if item_type != ItemType.TOOL:
+            return ExecutionSpec()
+
+        try:
+            executor = self._get_executor(project_path)
+            chain = await executor._build_chain(item_id)
+            if not chain:
+                return ExecutionSpec()
+
+            # Walk chain: first element that declares execution_owner wins
+            for element in chain:
+                metadata = executor._load_metadata_cached(element.path)
+                owner = metadata.get("execution_owner")
+                if owner is not None:
+                    if owner not in ("engine", "callee"):
+                        logger.warning(
+                            "Tool %s (chain element %s) declares unknown "
+                            "execution_owner=%r, defaulting to engine",
+                            item_id, element.item_id, owner,
+                        )
+                        owner = "engine"
+                    return ExecutionSpec(
+                        owner=owner,
+                        native_async=bool(metadata.get("native_async", False)),
+                        native_resume=bool(metadata.get("native_resume", False)),
+                    )
+
+            return ExecutionSpec()
+        except Exception:
+            logger.warning("Could not read execution spec for %s, defaulting to engine", item_id)
+            return ExecutionSpec()
+
+    @staticmethod
+    def _resolve_execution_plan(
+        item_type: str,
+        target: str,
+        thread: str,
+        async_exec: bool,
+        spec: ExecutionSpec,
+    ) -> ExecutionPlan:
+        """Resolve execution routing from spec + request parameters.
+
+        One resolver, one routing decision — no hardcoded item type checks.
+        """
+        if target == "remote":
+            return ExecutionPlan(owner="remote", launch_mode="forward_remote")
+
+        if spec.owner == "callee":
+            return ExecutionPlan(
+                owner="callee",
+                launch_mode="direct",
+                native_async=spec.native_async,
+                native_resume=spec.native_resume,
+            )
+
+        if async_exec:
+            return ExecutionPlan(owner="engine", launch_mode="engine_detach")
+
+        return ExecutionPlan(owner="engine", launch_mode="direct")
+
+    async def _resume(
+        self,
+        resume_thread_id: str,
+        item_type: str,
+        item_id: str,
+        project_path: str,
+        parameters: Dict[str, Any],
+        thread: str,
+        async_exec: bool,
+    ) -> Dict[str, Any]:
+        """Resume a completed or interrupted thread.
+
+        Looks up the thread in the registry to determine the original
+        item, reads the execution spec, and routes to the right callee
+        with resume parameters.
+
+        - Directives: re-invokes ``thread_directive`` with
+          ``previous_thread_id`` for transcript reconstruction.
+        - Graphs: re-invokes the graph tool with ``resume=True`` and
+          ``graph_run_id`` for checkpoint reload.
+        """
+        proj = Path(project_path)
+        registry = self._get_registry(proj)
+        thread_record = registry.get_thread(resume_thread_id) if registry else None
+
+        if not thread_record:
+            return {
+                "status": "error",
+                "error": f"Thread not found: {resume_thread_id}",
+                "resume_thread_id": resume_thread_id,
+            }
+
+        # Determine the item from the registry record
+        directive_field = thread_record.get("directive", "")
+
+        # Graph threads store graph_id in directive field
+        # Directive threads store directive item_id
+        # Use the caller-provided item_type/item_id if given, else infer
+        if item_id:
+            resolved_item_id = item_id
+            resolved_item_type = item_type or ItemType.DIRECTIVE
+        else:
+            resolved_item_id = directive_field
+            resolved_item_type = item_type or ItemType.DIRECTIVE
+
+        if not resolved_item_id:
+            return {
+                "status": "error",
+                "error": (
+                    "Cannot determine item_id for resume: not provided "
+                    "and thread record has no directive field."
+                ),
+                "resume_thread_id": resume_thread_id,
+            }
+
+        # Route to the callee with resume params
+        # Directives always support resume via transcript reconstruction
+        # (previous_thread_id). Only tools need native_resume from spec.
+        if resolved_item_type == ItemType.DIRECTIVE:
+            parameters["previous_thread_id"] = resume_thread_id
+            return await self._run_directive(
+                resolved_item_id, project_path, parameters,
+                dry_run=False,
+                thread="fork",
+                async_exec=async_exec,
+            )
+        elif resolved_item_type == ItemType.TOOL:
+            spec = await self._read_execution_spec(
+                resolved_item_type, resolved_item_id, project_path,
+            )
+            if not spec.native_resume:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Tool {resolved_item_id} does not support resume "
+                        f"(native_resume=False)."
+                    ),
+                    "resume_thread_id": resume_thread_id,
+                }
+            parameters["resume"] = True
+            parameters["graph_run_id"] = resume_thread_id
+            return await self._run_tool(
+                resolved_item_id, project_path, parameters, dry_run=False,
+            )
+        else:
+            return {
+                "status": "error",
+                "error": f"Resume not supported for item_type={resolved_item_type!r}",
+                "resume_thread_id": resume_thread_id,
+            }
+
     @staticmethod
     def _parse_target(target: str) -> tuple:
         """Parse target string into ``(target_mode, remote_name)``.
@@ -303,16 +516,6 @@ class ExecuteTool:
         else:
             send_params = parameters
 
-        if async_exec:
-            return await self._launch_async(
-                item_type=item_type,
-                item_id=item_id,
-                project_path=project_path,
-                parameters=send_params,
-                target=f"remote:{remote_name}" if remote_name else "remote",
-                thread=thread,
-            )
-
         remote_tool = "rye/core/remote/remote"
         if not self._find_item(project_path, ItemType.TOOL, remote_tool):
             return {
@@ -333,6 +536,8 @@ class ExecuteTool:
         }
         if remote_name is not None:
             remote_params["remote"] = remote_name
+        if async_exec:
+            remote_params["async"] = True
 
         remote_result = await self._run_tool(
             remote_tool, project_path, remote_params, dry_run=False,
@@ -587,14 +792,14 @@ class ExecuteTool:
         Used for async tool execution only.  Directive async is handled
         by ``thread_directive`` via ``_run_directive(async_exec=True)``.
 
-        Generates a uuid-based thread_id, registers in ThreadRegistry,
+        Generates a name-based thread_id, registers in ThreadRegistry,
         spawns ``async_runner.py``, and returns a handle dict.
         """
         import json as _json
         import sys
-        import uuid as _uuid
+        from rye.utils.detached import generate_thread_id
 
-        thread_id = str(_uuid.uuid4())
+        thread_id = generate_thread_id(item_id)
         proj = Path(project_path)
 
         registry = self._get_registry(proj)

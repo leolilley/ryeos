@@ -714,6 +714,9 @@ class PrimitiveExecutor:
             "__executor_id__": "executor_id",
             "__category__": "category",
             "__tool_description__": "tool_description",
+            "__execution_owner__": "execution_owner",
+            "__native_async__": "native_async",
+            "__native_resume__": "native_resume",
         }
 
         for dunder_key, field_name in _DUNDER_FIELDS.items():

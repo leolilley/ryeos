@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:bd0a05009729c0a425f99f8a675cb3490f5fa56d80c760df31bb9d5d9bedf229:eUkmuotDAHrHWTEco40_mp27Aoa4TjVQ44cNK0j61oPV0Jdowdh4eUERKS1C7qsokhL4-Jh_pT1Ve_PblO5zCg:4b987fd4e40303ac
+# rye:signed:2026-03-31T09:32:32Z:1d6b2ea45d60fa2adb4e3cc8c93319fc5e12028d3247bcbacb230f03e76e0361:K24RWi4oOhFcF93aY5vGCsT9izPfgSOdlGDmFFp_etYhz2uU53Cpt6IyZmuCUxDEet_kZlV62gk5RYPq4nc1Dw:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -14,6 +14,9 @@ __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/core/runtimes/state-graph"
 __tool_description__ = "State graph walker — traverses graph YAML tools"
+__execution_owner__ = "callee"
+__native_async__ = True
+__native_resume__ = True
 
 import argparse
 import asyncio

@@ -642,3 +642,284 @@ class TestParseTarget:
     def test_unknown_target_raises(self):
         with pytest.raises(ValueError, match="Unknown target"):
             ExecuteTool._parse_target("banana")
+
+
+# ---------------------------------------------------------------------------
+# Contract tests — execution ownership
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionSpec:
+    """Test _read_execution_spec and _resolve_execution_plan contracts."""
+
+    def test_spec_omission_defaults_to_engine(self):
+        """Tool without dunders defaults to engine-owned (safe default)."""
+        from rye.actions.execute import ExecutionSpec, ExecutionPlan
+
+        spec = ExecutionSpec()
+        assert spec.owner == "engine"
+        assert spec.native_async is False
+        assert spec.native_resume is False
+
+    def test_spec_non_tool_returns_engine(self):
+        """Directives and knowledge always return engine-owned spec."""
+        from rye.actions.execute import ExecutionSpec
+
+        tool = ExecuteTool("")
+        loop = asyncio.new_event_loop()
+        try:
+            spec = loop.run_until_complete(
+                tool._read_execution_spec("directive", "anything", "/tmp")
+            )
+            assert spec.owner == "engine"
+            spec_k = loop.run_until_complete(
+                tool._read_execution_spec("knowledge", "anything", "/tmp")
+            )
+            assert spec_k.owner == "engine"
+        finally:
+            loop.close()
+
+    def test_plan_remote_always_forward(self):
+        """Remote target always produces forward_remote regardless of spec."""
+        from rye.actions.execute import ExecutionSpec, ExecutionPlan
+
+        callee_spec = ExecutionSpec(owner="callee", native_async=True)
+        plan = ExecuteTool._resolve_execution_plan(
+            "tool", "remote", "inline", False, callee_spec,
+        )
+        assert plan.owner == "remote"
+        assert plan.launch_mode == "forward_remote"
+
+    def test_plan_callee_owned_direct(self):
+        """Callee-owned spec produces direct launch, never engine_detach."""
+        from rye.actions.execute import ExecutionSpec
+
+        spec = ExecutionSpec(owner="callee", native_async=True, native_resume=True)
+        plan = ExecuteTool._resolve_execution_plan(
+            "tool", "local", "inline", True, spec,
+        )
+        assert plan.owner == "callee"
+        assert plan.launch_mode == "direct"
+        assert plan.native_async is True
+        assert plan.native_resume is True
+
+    def test_plan_engine_owned_async_detach(self):
+        """Engine-owned + async produces engine_detach."""
+        from rye.actions.execute import ExecutionSpec
+
+        spec = ExecutionSpec()  # engine-owned
+        plan = ExecuteTool._resolve_execution_plan(
+            "tool", "local", "inline", True, spec,
+        )
+        assert plan.owner == "engine"
+        assert plan.launch_mode == "engine_detach"
+
+    def test_plan_engine_owned_sync_direct(self):
+        """Engine-owned + sync produces direct."""
+        from rye.actions.execute import ExecutionSpec
+
+        spec = ExecutionSpec()
+        plan = ExecuteTool._resolve_execution_plan(
+            "tool", "local", "inline", False, spec,
+        )
+        assert plan.owner == "engine"
+        assert plan.launch_mode == "direct"
+
+
+@pytest.mark.asyncio
+class TestExecutionOwnershipContracts:
+    """Contract tests: callee-owned tools never go through _launch_async."""
+
+    async def test_callee_owned_async_does_not_launch_async(self, temp_project):
+        """Callee-owned tool with async=True must NOT call _launch_async.
+
+        Contract 1: engine does NOT call _launch_async() when spec says callee.
+        """
+        tool = ExecuteTool("")
+
+        # Create a callee-owned tool
+        tools_dir = temp_project / ".ai" / "tools"
+        (tools_dir / "callee_tool.py").write_text('''
+__version__ = "1.0.0"
+__tool_type__ = "primitive"
+__executor_id__ = None
+__category__ = "test"
+__execution_owner__ = "callee"
+__native_async__ = True
+__native_resume__ = True
+
+def main():
+    print("callee")
+''')
+        from rye.utils.metadata_manager import MetadataManager
+        from rye.constants import ItemType
+        content = (tools_dir / "callee_tool.py").read_text()
+        signed = MetadataManager.sign_content(
+            ItemType.TOOL, content,
+            file_path=tools_dir / "callee_tool.py",
+            project_path=temp_project,
+        )
+        (tools_dir / "callee_tool.py").write_text(signed)
+
+        spec = await tool._read_execution_spec("tool", "callee_tool", str(temp_project))
+        assert spec.owner == "callee"
+        assert spec.native_async is True
+
+        plan = ExecuteTool._resolve_execution_plan(
+            "tool", "local", "inline", True, spec,
+        )
+        assert plan.launch_mode == "direct"
+        assert plan.owner == "callee"
+
+    async def test_engine_owned_async_uses_engine_detach(self, temp_project):
+        """Engine-owned tool with async=True produces engine_detach.
+
+        Contract 2: engine DOES use _launch_async() when spec says engine.
+        """
+        tool = ExecuteTool("")
+
+        # The default mytool.py has no execution dunders
+        spec = await tool._read_execution_spec("tool", "mytool", str(temp_project))
+        assert spec.owner == "engine"
+        assert spec.native_async is False
+
+        plan = ExecuteTool._resolve_execution_plan(
+            "tool", "local", "inline", True, spec,
+        )
+        assert plan.launch_mode == "engine_detach"
+        assert plan.owner == "engine"
+
+    async def test_graph_spec_from_chain(self, temp_project):
+        """Tool resolving through a runtime with execution dunders reads spec.
+
+        Contract 3: engine reads execution spec from runtime in chain.
+        """
+        from rye.utils.metadata_manager import MetadataManager
+        from rye.constants import ItemType
+
+        tools_dir = temp_project / ".ai" / "tools"
+
+        # Create a runtime that declares callee ownership
+        runtime_dir = tools_dir / "test_runtime"
+        runtime_dir.mkdir(parents=True)
+
+        (runtime_dir / "runtime.yaml").write_text('''version: "1.0.0"
+tool_type: runtime
+executor_id: null
+category: test_runtime
+execution_owner: callee
+native_async: true
+native_resume: true
+config:
+  command: echo
+  args: ["hello"]
+''')
+        content = (runtime_dir / "runtime.yaml").read_text()
+        signed = MetadataManager.sign_content(
+            ItemType.TOOL, content,
+            file_path=runtime_dir / "runtime.yaml",
+            project_path=temp_project,
+        )
+        (runtime_dir / "runtime.yaml").write_text(signed)
+
+        # Create a tool that chains through the runtime
+        (tools_dir / "graph_like.yaml").write_text('''version: "1.0.0"
+tool_type: graph
+executor_id: test_runtime/runtime
+category: test
+config:
+  start: node1
+  nodes:
+    node1:
+      action: echo
+''')
+        content = (tools_dir / "graph_like.yaml").read_text()
+        signed = MetadataManager.sign_content(
+            ItemType.TOOL, content,
+            file_path=tools_dir / "graph_like.yaml",
+            project_path=temp_project,
+        )
+        (tools_dir / "graph_like.yaml").write_text(signed)
+
+        tool = ExecuteTool("")
+        spec = await tool._read_execution_spec("tool", "graph_like", str(temp_project))
+        assert spec.owner == "callee"
+        assert spec.native_async is True
+        assert spec.native_resume is True
+
+    async def test_remote_forward_async(self):
+        """Client forwards async to server, does NOT wrap locally.
+
+        Contract 4: remote always produces forward_remote regardless of async.
+        """
+        from rye.actions.execute import ExecutionSpec
+
+        spec = ExecutionSpec(owner="callee", native_async=True)
+        plan = ExecuteTool._resolve_execution_plan(
+            "directive", "remote", "fork", True, spec,
+        )
+        assert plan.launch_mode == "forward_remote"
+        assert plan.owner == "remote"
+
+    async def test_spec_omission_defaults_engine(self, temp_project):
+        """Tool without execution dunders defaults to engine-owned.
+
+        Contract 5: safe default when dunders are omitted.
+        """
+        tool = ExecuteTool("")
+        spec = await tool._read_execution_spec("tool", "mytool", str(temp_project))
+        assert spec.owner == "engine"
+        assert spec.native_async is False
+        assert spec.native_resume is False
+
+    async def test_chain_first_declarer_wins(self, temp_project):
+        """First element in chain that declares ownership wins.
+
+        Contract 6: leaf tool declaration takes precedence over runtime.
+        """
+        from rye.utils.metadata_manager import MetadataManager
+        from rye.constants import ItemType
+
+        tools_dir = temp_project / ".ai" / "tools"
+
+        # Create a runtime with NO ownership dunders
+        rt_dir = tools_dir / "plain_rt"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "runtime.yaml").write_text('''version: "1.0.0"
+tool_type: runtime
+executor_id: null
+category: plain_rt
+config:
+  command: echo
+  args: ["hello"]
+''')
+        content = (rt_dir / "runtime.yaml").read_text()
+        signed = MetadataManager.sign_content(
+            ItemType.TOOL, content,
+            file_path=rt_dir / "runtime.yaml",
+            project_path=temp_project,
+        )
+        (rt_dir / "runtime.yaml").write_text(signed)
+
+        # Create a leaf tool that declares callee ownership via the runtime
+        (tools_dir / "leaf_callee.py").write_text('''
+__version__ = "1.0.0"
+__tool_type__ = "python"
+__executor_id__ = "plain_rt/runtime"
+__category__ = "test"
+__execution_owner__ = "callee"
+__native_async__ = True
+''')
+        content = (tools_dir / "leaf_callee.py").read_text()
+        signed = MetadataManager.sign_content(
+            ItemType.TOOL, content,
+            file_path=tools_dir / "leaf_callee.py",
+            project_path=temp_project,
+        )
+        (tools_dir / "leaf_callee.py").write_text(signed)
+
+        tool = ExecuteTool("")
+        spec = await tool._read_execution_spec("tool", "leaf_callee", str(temp_project))
+        # Leaf tool (first in chain) declares callee
+        assert spec.owner == "callee"
+        assert spec.native_async is True

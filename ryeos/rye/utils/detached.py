@@ -25,13 +25,18 @@ def generate_thread_id(item_id: str) -> str:
 
     Convention::
 
-        {item_id}/{bare_name}-{epoch_ms}
+        {item_id}/{bare_name}-{epoch_ms}-{pid}-{rand}
+
+    Includes PID and random suffix to avoid collisions when the same
+    item is spawned multiple times within the same millisecond.
 
     Graph run IDs are managed separately by the walker.
     """
+    import secrets
+
     epoch_ms = int(time.time() * 1000)
     bare_name = item_id.rsplit("/", 1)[-1]
-    return f"{item_id}/{bare_name}-{epoch_ms}"
+    return f"{item_id}/{bare_name}-{epoch_ms}-{os.getpid()}-{secrets.token_hex(2)}"
 
 # Env var prefixes forwarded to detached child processes.
 # lillux-proc daemonizes with a clean env — only explicitly passed vars survive.

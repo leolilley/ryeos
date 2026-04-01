@@ -1081,7 +1081,7 @@ async def _execute_from_head(
     root = _principal_cas_root(principal, settings)
     cache = settings.cache_root(principal.fingerprint)
     exec_root = settings.exec_root(principal.fingerprint)
-    thread_id = f"rye-remote-{uuid.uuid4().hex[:12]}"
+    thread_id = f"rye-remote-{item_id.replace('/', '-')}-{int(__import__('time').time() * 1000)}"
     exec_space: Path | None = None
 
     # Derive project_manifest_hash from snapshot for registration
@@ -1150,6 +1150,11 @@ async def _execute_from_head(
                 thread=thread,
             )
 
+            # Callee-owned tools (e.g. thread_directive, walker) generate
+            # their own thread ID.  Separate it from the node's execution
+            # record ID so callers can query status on the right handle.
+            callee_thread_id = result.get("thread_id")
+
             # Promote execution-local CAS into user CAS
             exec_cas = exec_space / AI_DIR / "objects"
             new_hashes = _copy_cas_objects(exec_cas, root)
@@ -1203,6 +1208,7 @@ async def _execute_from_head(
                 return {
                     "status": exec_status,
                     "thread_id": thread_id,
+                    "callee_thread_id": callee_thread_id,
                     "snapshot_hash": base_snapshot_hash,
                     "merge_type": "no-op",
                     "execution_snapshot_hash": exec_snapshot_hash,
@@ -1247,6 +1253,7 @@ async def _execute_from_head(
             return {
                 "status": exec_status,
                 "thread_id": thread_id,
+                "callee_thread_id": callee_thread_id,
                 "snapshot_hash": fold_result["snapshot_hash"],
                 "merge_type": fold_result["merge_type"],
                 "execution_snapshot_hash": exec_snapshot_hash,

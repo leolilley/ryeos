@@ -19,6 +19,7 @@ from rye.primary_action_descriptions import (
     EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
     EXECUTE_PARAMETERS_DESC,
+    EXECUTE_RESUME_THREAD_ID_DESC,
     EXECUTE_TARGET_DESC,
     EXECUTE_THREAD_DESC,
     EXECUTE_TOOL_DESC,
@@ -165,6 +166,10 @@ class RYEServer:
                                 "type": "boolean",
                                 "default": False,
                                 "description": EXECUTE_ASYNC_DESC,
+                            },
+                            "resume_thread_id": {
+                                "type": "string",
+                                "description": EXECUTE_RESUME_THREAD_ID_DESC,
                             },
                         },
                         "required": ["item_type", "item_id", "project_path"],

@@ -1,9 +1,12 @@
-# rye:signed:2026-03-31T07:42:54Z:e17140d73216382725d0dbac76adb15f6badaca3bee1677b540811b05b09de0a:ASN6lhRs_xU_g-u6nfMk99Qy5um4PthnvgTyQoJyaqer4HYM3AL4MjcRn-7NYpJq39snepJwj2uomiIO8j6FCg:4b987fd4e40303ac
+# rye:signed:2026-03-31T08:40:04Z:00ba8d755a621a68dad0a2dbc219f73d28b1ffc7332b48391da3aef48eefb5f2:IgG2WejvqKx3br52DH26FpF-96_nS_syIEeLEILcErLRwLC6dn0Vc2ewwmFaP7tKFn1qNids2GRTNHnGNevvDw:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Execute a directive in a managed thread with LLM loop"
+__execution_owner__ = "callee"
+__native_async__ = True
+__native_resume__ = True
 
 import argparse
 import asyncio

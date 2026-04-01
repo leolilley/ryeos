@@ -117,6 +117,13 @@ EXECUTE_ASYNC_DESC = (
     "</description>"
 )
 
+EXECUTE_RESUME_THREAD_ID_DESC = (
+    "<description>"
+    "Thread ID to resume. Routes to the original callee with resume params. "
+    "Directives resume via transcript reconstruction, graphs via checkpoint reload."
+    "</description>"
+)
+
 # ---------------------------------------------------------------------------
 # fetch
 # ---------------------------------------------------------------------------
