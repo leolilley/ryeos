@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-core"
-version = "0.1.36"
+version = "0.1.37"
 description = "RYE Core Bundle — runtimes, primitives, extractors, and bundler"
 requires-python = ">=3.10"
 license = "MIT"
