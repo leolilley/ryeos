@@ -1,4 +1,4 @@
-# rye:signed:2026-04-01T05:25:51Z:91f5561da045aa5b901a403ca7335bc27cbdcbc06191bb52f8e9552c0d962408:VZH5HkD-HHEOQvxMco0DKFOTLc_oD8au3WeuvrFw2pk2yK4VQEXguAlrcggcKnHk3fxpZnCrzlOwRVUaWlMyDg:4b987fd4e40303ac
+# rye:signed:2026-04-01T06:20:01Z:aa9df47dce7f7f4c3ab2e13b0d90838549d43b0928a74c6e9050daf222661dd7:3BWkxmMGVfg9tp9aoMuZpK4khxltr-plvjRIWy0sICzHaDVk8PwEcaR29Bx20wxuIRTFowNEpQUTg4tUcDU5Cw:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -1293,7 +1293,7 @@ async def _push_bundle(project_path: Path, params: Dict) -> Dict:
         entries = export_objects(missing, root)
         put_resp = await client.post("/objects/put", {
             "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
-        })
+        }, timeout=300)
         if not put_resp["success"]:
             return {"error": f"Failed to upload objects: {put_resp['error']}"}
 
