@@ -65,10 +65,9 @@ The workflow has four jobs that run in sequence:
 
 **`publish-rust`** — builds and publishes Rust binaries (maturin), no signing needed:
 
-| Package      | Build path     |
-| ------------ | -------------- |
-| lillux-proc  | `lillux/proc`  |
-| lillux-watch | `lillux/watch` |
+| Package | Build path       |
+| ------- | ---------------- |
+| lillux  | `lillux/lillux`  |
 
 Python and Rust jobs use `max-parallel: 1` because PyPI's OIDC pending publisher system can only match one publisher per token at a time.
 
@@ -135,8 +134,6 @@ No secrets or protection rules are needed — OIDC handles authentication.
 | Package      | Status |
 | ------------ | ------ |
 | lillux       | Active |
-| lillux-proc  | Active |
-| lillux-watch | Active |
 | ryeos-engine | Active |
 | ryeos-core   | Active |
 | ryeos        | Active |
@@ -165,7 +162,6 @@ ryeos/bundles/email/pyproject.toml            → ryeos-email
 ryeos-node/pyproject.toml                     → ryeos-node
 ryeos-mcp/pyproject.toml                      → ryeos-mcp
 ryeos-cli/pyproject.toml                      → ryeos-cli
-lillux/kernel/pyproject.toml                  → lillux
 ```
 
 ### Rust packages (pyproject.toml AND Cargo.toml)
@@ -173,10 +169,8 @@ lillux/kernel/pyproject.toml                  → lillux
 Rust packages have **two** version fields that must be kept in sync **with each other** (pyproject.toml and Cargo.toml for the same package):
 
 ```
-lillux/proc/pyproject.toml                    → lillux-proc (maturin uses this for wheel version)
-lillux/proc/Cargo.toml                        → lillux-proc (Rust binary version)
-lillux/watch/pyproject.toml                   → lillux-watch (maturin uses this for wheel version)
-lillux/watch/Cargo.toml                       → lillux-watch (Rust binary version)
+lillux/lillux/pyproject.toml                  → lillux (maturin uses this for wheel version)
+lillux/lillux/Cargo.toml                      → lillux (Rust binary version)
 ```
 
 > **Important:** Maturin reads the version from `pyproject.toml`, not `Cargo.toml`. If you only bump `Cargo.toml`, the wheel will still have the old version. Always bump both files for Rust packages.
@@ -227,12 +221,11 @@ git push origin v0.1.2
 Packages must be published in dependency order. The workflow uses `max-parallel: 1` and matrix ordering to handle this, but be aware of the layers:
 
 ```
-Layer 1 — lillux-proc, lillux-watch       (standalone Rust, no deps)
-Layer 2 — lillux                          (depends on lillux-proc)
-Layer 3 — ryeos-engine                    (depends on lillux)
-Layer 4 — ryeos-core                      (depends on ryeos-engine)
-Layer 5 — ryeos                           (depends on ryeos-core)
-Layer 6 — ryeos-web, ryeos-code, ryeos-email, ryeos-mcp, ryeos-cli (depend on ryeos)
+Layer 1 — lillux                          (standalone Rust binary)
+Layer 2 — ryeos-engine                    (depends on lillux)
+Layer 3 — ryeos-core                      (depends on ryeos-engine)
+Layer 4 — ryeos                           (depends on ryeos-core)
+Layer 5 — ryeos-node, ryeos-web, ryeos-code, ryeos-email, ryeos-mcp, ryeos-cli
 ```
 
 For a **first-time publish** of all packages, you may need to run the workflow multiple times — later layers will fail if their dependencies haven't been uploaded yet. Subsequent releases (where deps already exist on PyPI) publish cleanly in a single run.
