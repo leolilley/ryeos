@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T03:26:50Z:34235cfaa1d7323bd7f2d6005ea504548e102f4a492111132ed0ab908077ceb3:EvumMI16_bMRUZa_3yOhqPMeWZViLA1JrQmOi8BuJ7RILH10T1h84y2Vmg6KO0emhpfSKdYIx-dWe9kNRRo0Ag:4b987fd4e40303ac
+# rye:signed:2026-04-01T05:25:51Z:91f5561da045aa5b901a403ca7335bc27cbdcbc06191bb52f8e9552c0d962408:VZH5HkD-HHEOQvxMco0DKFOTLc_oD8au3WeuvrFw2pk2yK4VQEXguAlrcggcKnHk3fxpZnCrzlOwRVUaWlMyDg:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -53,6 +53,7 @@ ACTIONS = [
     "vault_set", "vault_list", "vault_delete",
     "threads", "thread_status",
     "webhooks", "webhook_create", "webhook_delete", "webhook_trigger",
+    "publish", "registry_search", "push_bundle", "pull_bundle",
 ]
 
 CONFIG_SCHEMA = {
@@ -593,11 +594,15 @@ async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[s
     """Fetch remote identity and verify against pinned fingerprint.
 
     TOFU: pins on first contact. Hard-fails on fingerprint mismatch or
-    fetch failure. Returns error dict on failure, None if OK.
+    fetch failure. Auto-discovers node_id if not already set on client.
+    Returns error dict on failure, None if OK.
     """
-    _identity, err = await _fetch_verified_identity(client, remote_name)
+    identity, err = await _fetch_verified_identity(client, remote_name)
     if err:
         return err
+    # Auto-discover node_id (audience for request signing)
+    if not client.node_id and identity:
+        client.node_id = identity.get("principal_id", "")
     return None
 
 
@@ -1134,6 +1139,296 @@ async def _webhook_trigger(project_path: Path, params: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Registry actions
+# ---------------------------------------------------------------------------
+
+
+async def _publish(project_path: Path, params: Dict) -> Dict:
+    """Register an item in the registry index on a remote node."""
+    remote_name = params.get("remote")
+    item_type = params.get("item_type")
+    item_id = params.get("item_id")
+    version = params.get("version")
+
+    if not item_type or not item_id:
+        return {"error": "Required: item_type, item_id"}
+
+    client = _get_client(remote_name, project_path)
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    root = cas_root(project_path)
+    ph, pm = build_manifest(project_path, "project")
+    all_hashes = list(set(collect_object_hashes(pm, root) + [ph]))
+
+    has_resp = await client.post("/objects/has", {"hashes": all_hashes})
+    if not has_resp["success"]:
+        return {"error": f"Failed to check objects: {has_resp['error']}"}
+
+    has_body = has_resp["body"]
+    if isinstance(has_body, str):
+        has_body = json.loads(has_body)
+    missing = has_body.get("missing", [])
+
+    if missing:
+        entries = export_objects(missing, root)
+        put_resp = await client.post("/objects/put", {
+            "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
+        })
+        if not put_resp["success"]:
+            return {"error": f"Failed to upload objects: {put_resp['error']}"}
+
+    result = await client.post("/registry/publish", {
+        "item_type": item_type,
+        "item_id": item_id,
+        "version": version,
+        "manifest_hash": ph,
+    })
+
+    if not result["success"]:
+        body = result.get("body", {})
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        detail = body.get("detail", result.get("error", "Unknown error")) if isinstance(body, dict) else result.get("error")
+        return {"error": f"Publish failed: {detail}"}
+
+    return {
+        "status": "published",
+        "item_type": item_type,
+        "item_id": item_id,
+        "version": version,
+        "manifest_hash": ph,
+        "objects_synced": len(missing),
+    }
+
+
+async def _registry_search(project_path: Path, params: Dict) -> Dict:
+    """Search the registry index on a remote node."""
+    remote_name = params.get("remote")
+    query = params.get("query")
+    if not query:
+        return {"error": "Required: query"}
+
+    client = _get_client(remote_name, project_path)
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    search_params = f"?query={query}"
+    item_type = params.get("item_type")
+    namespace = params.get("namespace")
+    limit = params.get("limit", 20)
+    if item_type:
+        search_params += f"&item_type={item_type}"
+    if namespace:
+        search_params += f"&namespace={namespace}"
+    search_params += f"&limit={limit}"
+
+    result = await client.get(f"/registry/search{search_params}")
+
+    if not result["success"]:
+        return {"error": f"Search failed: {result.get('error')}"}
+
+    body = result.get("body", {})
+    if isinstance(body, str):
+        body = json.loads(body)
+
+    return {
+        "query": query,
+        "results": body.get("results", []),
+        "total": body.get("total", 0),
+    }
+
+
+async def _push_bundle(project_path: Path, params: Dict) -> Dict:
+    """Push a bundle to a remote node's registry."""
+    import yaml
+
+    remote_name = params.get("remote")
+    bundle_id = params.get("bundle_id")
+    if not bundle_id:
+        return {"error": "Required: bundle_id"}
+
+    manifest_path = project_path / AI_DIR / "bundles" / bundle_id / "manifest.yaml"
+    if not manifest_path.exists():
+        return {
+            "error": f"Bundle manifest not found: {manifest_path}",
+            "hint": "Run 'rye registry bundle build' first",
+        }
+
+    raw = manifest_path.read_text()
+    lines = raw.splitlines(keepends=True)
+    if lines and lines[0].startswith("# rye:signed:"):
+        raw = "".join(lines[1:])
+    manifest_data = yaml.safe_load(raw)
+
+    bundle_meta = manifest_data.get("bundle", {})
+    version = params.get("version") or bundle_meta.get("version")
+    if not version:
+        return {"error": "Version required but not found in manifest"}
+
+    client = _get_client(remote_name, project_path)
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    root = cas_root(project_path)
+    ph, pm = build_manifest(project_path, "project")
+    all_hashes = list(set(collect_object_hashes(pm, root) + [ph]))
+
+    has_resp = await client.post("/objects/has", {"hashes": all_hashes})
+    if not has_resp["success"]:
+        return {"error": f"Failed to check objects: {has_resp['error']}"}
+
+    has_body = has_resp["body"]
+    if isinstance(has_body, str):
+        has_body = json.loads(has_body)
+    missing = has_body.get("missing", [])
+
+    if missing:
+        entries = export_objects(missing, root)
+        put_resp = await client.post("/objects/put", {
+            "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
+        })
+        if not put_resp["success"]:
+            return {"error": f"Failed to upload objects: {put_resp['error']}"}
+
+    result = await client.post("/registry/publish", {
+        "item_type": "bundle",
+        "item_id": bundle_id,
+        "version": version,
+        "manifest_hash": ph,
+    })
+
+    if not result["success"]:
+        body = result.get("body", {})
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        detail = body.get("detail", result.get("error", "Unknown error")) if isinstance(body, dict) else result.get("error")
+        return {"error": f"Publish failed: {detail}"}
+
+    return {
+        "status": "published",
+        "item_type": "bundle",
+        "bundle_id": bundle_id,
+        "version": version,
+        "manifest_hash": ph,
+        "objects_synced": len(missing),
+    }
+
+
+async def _pull_bundle(project_path: Path, params: Dict) -> Dict:
+    """Pull a bundle from a remote node's registry into local CAS and materialize.
+
+    Flow:
+      1. Query registry for bundle version → manifest_hash
+      2. Pull manifest object from remote CAS
+      3. Parse manifest, collect all transitive object hashes
+      4. Pull missing objects from remote CAS
+      5. Materialize into target directory
+    """
+    from rye.primitives import cas
+    from rye.cas.materializer import materialize_manifest
+
+    remote_name = params.get("remote")
+    bundle_id = params.get("bundle_id")
+    version = params.get("version")
+    if not bundle_id:
+        return {"error": "Required: bundle_id"}
+
+    client = _get_client(remote_name, project_path)
+    key_err = await _verify_remote_key(client, remote_name)
+    if key_err:
+        return key_err
+
+    # 1. Look up bundle in registry index
+    version_path = f"/registry/items/bundle/{bundle_id}"
+    if version:
+        version_path += f"/versions/{version}"
+    ver_resp = await client.get(version_path)
+    if not ver_resp["success"]:
+        return {"error": f"Bundle not found: {bundle_id} ({ver_resp.get('error')})"}
+
+    ver_body = ver_resp["body"]
+    if isinstance(ver_body, str):
+        ver_body = json.loads(ver_body)
+
+    manifest_hash = ver_body.get("manifest_hash")
+    if not manifest_hash:
+        return {"error": f"No manifest_hash in registry response for {bundle_id}"}
+
+    resolved_version = ver_body.get("version") or version or "latest"
+
+    # 2. Pull manifest object
+    root = cas_root(project_path)
+    manifest_obj = cas.get_object(manifest_hash, root)
+
+    if manifest_obj is None:
+        get_resp = await client.post("/objects/get", {"hashes": [manifest_hash]})
+        if not get_resp["success"]:
+            return {"error": f"Failed to fetch manifest: {get_resp.get('error')}"}
+
+        get_body = get_resp["body"]
+        if isinstance(get_body, str):
+            get_body = json.loads(get_body)
+
+        entries = get_body.get("entries", [])
+        if entries:
+            import_objects(entries, root)
+
+        manifest_obj = cas.get_object(manifest_hash, root)
+        if manifest_obj is None:
+            return {"error": f"Manifest {manifest_hash[:16]} not found after pull"}
+
+    # 3. Collect transitive hashes we're missing locally
+    all_hashes = list(set(collect_object_hashes(manifest_obj, root)))
+    missing = [h for h in all_hashes if cas.get_blob(h, root) is None and cas.get_object(h, root) is None]
+
+    # 4. Pull missing objects
+    objects_pulled = 0
+    if missing:
+        get_resp = await client.post("/objects/get", {"hashes": missing})
+        if not get_resp["success"]:
+            return {"error": f"Failed to fetch objects: {get_resp.get('error')}"}
+
+        get_body = get_resp["body"]
+        if isinstance(get_body, str):
+            get_body = json.loads(get_body)
+
+        entries = get_body.get("entries", [])
+        if entries:
+            stored = import_objects(entries, root)
+            objects_pulled = len(stored)
+
+    # 5. Materialize into target directory
+    target = project_path
+    target_override = params.get("project_path")
+    if target_override:
+        target = Path(target_override)
+
+    materialize_manifest(manifest_hash, target, root)
+
+    # Count files written
+    file_count = len(manifest_obj.get("items", {})) + len(manifest_obj.get("files", {}))
+
+    return {
+        "status": "pulled",
+        "bundle_id": bundle_id,
+        "version": resolved_version,
+        "manifest_hash": manifest_hash,
+        "objects_pulled": objects_pulled,
+        "file_count": file_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1152,6 +1447,10 @@ _ACTION_MAP = {
     "webhook_create": _webhook_create,
     "webhook_delete": _webhook_delete,
     "webhook_trigger": _webhook_trigger,
+    "publish": _publish,
+    "registry_search": _registry_search,
+    "push_bundle": _push_bundle,
+    "pull_bundle": _pull_bundle,
 }
 
 

@@ -65,9 +65,10 @@ def _handle_install(args, project_path: str):
 
     params["project_path"] = target_path
 
+    params["remote"] = "registry"
     result = run_async(tool.handle(
         item_type="tool",
-        item_id="rye/core/registry/registry",
+        item_id="rye/core/remote/remote",
         project_path=target_path,
         parameters=params,
     ))

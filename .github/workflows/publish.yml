@@ -226,9 +226,9 @@ jobs:
             done
           fi
           # Rebuild manifest so hashes match the re-signed files
-          rye registry bundle build "$PACKAGE_DIR" --bundle-id ${{ matrix.package }}
+          rye remote bundle build "$PACKAGE_DIR" --bundle-id ${{ matrix.package }}
           # Verify the rebuilt manifest
-          rye -p "$PACKAGE_DIR" registry bundle verify ${{ matrix.package }}
+          rye -p "$PACKAGE_DIR" remote bundle verify ${{ matrix.package }}
 
       - name: Build wheel
         if: steps.check.outputs.skip == 'false'
@@ -338,18 +338,19 @@ jobs:
               rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
             done
           fi
-          rye registry bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }}
+          rye remote bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }}
 
-      - name: Configure registry URL
+      - name: Configure registry remote
         if: steps.check.outputs.skip == 'false'
+        env:
+          RYE_REGISTRY_URL: ${{ secrets.RYE_REGISTRY_URL }}
         run: |
-          mkdir -p ~/.ai/config/registry
-          echo "registry:" > ~/.ai/config/registry/registry.yaml
-          echo "  url: ${{ secrets.RYE_REGISTRY_URL }}" >> ~/.ai/config/registry/registry.yaml
+          mkdir -p ~/.ai/config/cas
+          printf 'remotes:\n  registry:\n    url: %s\n' "$RYE_REGISTRY_URL" > ~/.ai/config/cas/remote.yaml
 
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'
-        run: rye -p ${{ steps.pkg.outputs.dir }} registry bundle push ${{ matrix.bundle }}
+        run: rye -p ${{ steps.pkg.outputs.dir }} remote bundle push ${{ matrix.bundle }}
 
   # ── Publish lillux to PyPI ─────────────────────────────────────────
   publish-rust:
