@@ -726,7 +726,7 @@ class TestRequestLimits:
         filler = root / "filler.bin"
         filler.write_bytes(b"x" * 2048)
 
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
         small_settings = _make_settings(
             root.parent.parent.parent,  # cas_base
             tmp_path / "signing",
@@ -742,7 +742,7 @@ class TestRequestLimits:
     def _apply_overrides(settings):
         import unittest.mock
         app.dependency_overrides[get_current_principal] = lambda: Principal(
-            fingerprint="test-user", capabilities=["rye.*"], owner="tester",
+            fingerprint="test-user", scopes=["*"], owner="tester",
         )
         app.dependency_overrides[get_settings] = lambda: settings
         get_settings.cache_clear()
@@ -1600,7 +1600,7 @@ class TestTryAdvanceHead:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
 
         # Set up initial ref
         init_project_ref(str(cas_base), user.fingerprint, "my-project", "old_hash")
@@ -1617,7 +1617,7 @@ class TestTryAdvanceHead:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
 
         init_project_ref(str(cas_base), user.fingerprint, "my-project", "old_hash")
 
@@ -1634,7 +1634,7 @@ class TestFoldBack:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
         root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
         cache = settings.cache_root(user.fingerprint)
@@ -2204,7 +2204,7 @@ class TestConcurrentExecution:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
         root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
         cache = settings.cache_root(user.fingerprint)
@@ -2692,7 +2692,7 @@ class TestUpdateSnapshotCache:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
         root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
         cache = settings.cache_root(user.fingerprint)
@@ -2714,7 +2714,7 @@ class TestUpdateSnapshotCache:
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
         settings = _make_settings(cas_base, signing_dir)
-        user = Principal(fingerprint="test-user", capabilities=["rye.*"], owner="tester")
+        user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
         root = settings.user_cas_root(user.fingerprint)
         root.mkdir(parents=True)
         cache = settings.cache_root(user.fingerprint)
@@ -2874,17 +2874,17 @@ class TestLookupBinding:
 
 class TestResolvePrincipalFromBinding:
     def test_valid_principal(self):
-        binding = {"user_id": "fp-abc123", "capabilities": ["rye.execute.*"], "owner": "leo"}
+        binding = {"user_id": "fp-abc123", "owner": "leo"}
         principal = _resolve_principal_from_binding(binding)
         assert principal.fingerprint == "fp-abc123"
         assert principal.owner == "leo"
-        assert principal.capabilities == ["rye.execute.*"]
+        assert principal.scopes == ["*"]
 
-    def test_default_capabilities(self):
+    def test_default_owner(self):
         binding = {"user_id": "fp-abc123"}
         principal = _resolve_principal_from_binding(binding)
         assert principal.fingerprint == "fp-abc123"
-        assert principal.capabilities == ["rye.execute.*"]
+        assert principal.owner == ""
 
 
 # ============================================================================
