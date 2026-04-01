@@ -591,46 +591,42 @@ def unpin_snapshot(
 # ---------------------------------------------------------------------------
 
 
-def mark_reachable(user_root: Path, cas_root: Path) -> Set[str]:
-    """Walk all live refs and return the set of reachable object+blob hashes.
+def _collect_roots_server(user_root: Path) -> List[str]:
+    """Collect GC root hashes from server-side per-user layout."""
+    roots: List[str] = []
 
-    Uses iterative BFS (deque) — safe for 100K+ objects.
-    """
-    reachable: Set[str] = set()
-    to_visit: collections.deque[str] = collections.deque()
-
-    # 1. Project HEAD refs
+    # Project HEAD refs
     projects_dir = user_root / "refs" / "projects"
     if projects_dir.is_dir():
         for head_file in projects_dir.glob("*/head"):
             try:
                 h = head_file.read_text(encoding="utf-8").strip()
                 if h:
-                    to_visit.append(h)
+                    roots.append(h)
             except OSError:
                 continue
 
-    # 2. User-space HEAD
+    # User-space HEAD
     user_head = user_root / "refs" / "user-space" / "head"
     try:
         h = user_head.read_text(encoding="utf-8").strip()
         if h:
-            to_visit.append(h)
+            roots.append(h)
     except (FileNotFoundError, OSError):
         pass
 
-    # 3. Pin refs
+    # Pin refs
     pins_dir = user_root / "refs" / "pins"
     if pins_dir.is_dir():
         for head_file in pins_dir.rglob("head"):
             try:
                 h = head_file.read_text(encoding="utf-8").strip()
                 if h:
-                    to_visit.append(h)
+                    roots.append(h)
             except OSError:
                 continue
 
-    # 4. Retained execution snapshots (files may or may not have .json extension)
+    # Retained execution snapshots (files may or may not have .json extension)
     exec_dir = user_root / "executions" / "by-id"
     if exec_dir.is_dir():
         for exec_file in exec_dir.iterdir():
@@ -647,9 +643,9 @@ def mark_reachable(user_root: Path, cas_root: Path) -> Set[str]:
             ):
                 h = data.get(key)
                 if h:
-                    to_visit.append(h)
+                    roots.append(h)
 
-    # 5. Running markers
+    # Running markers
     running_dir = user_root / "running"
     if running_dir.is_dir():
         for running_file in running_dir.iterdir():
@@ -659,10 +655,9 @@ def mark_reachable(user_root: Path, cas_root: Path) -> Set[str]:
                 data = json.loads(running_file.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, ValueError):
                 continue
-            for h in _extract_all_hashes(data):
-                to_visit.append(h)
+            roots.extend(_extract_all_hashes(data))
 
-    # 6. In-flight writer epoch roots (ephemeral)
+    # In-flight writer epoch roots (ephemeral)
     inflight_dir = user_root / "inflight"
     if inflight_dir.is_dir():
         for epoch_file in inflight_dir.iterdir():
@@ -674,7 +669,62 @@ def mark_reachable(user_root: Path, cas_root: Path) -> Set[str]:
                 continue
             for h in epoch_data.get("root_hashes", []):
                 if h:
-                    to_visit.append(h)
+                    roots.append(h)
+
+    return roots
+
+
+def _collect_roots_local(cas_root: Path) -> List[str]:
+    """Collect GC root hashes from local project CAS layout.
+
+    Local layout: cas_root/refs/ contains graphs/, remotes/, artifacts/
+    with JSON files that hold snapshot/hash references.
+    """
+    roots: List[str] = []
+    refs_dir = cas_root / "refs"
+    if not refs_dir.is_dir():
+        return roots
+
+    for ref_file in refs_dir.rglob("*.json"):
+        try:
+            data = json.loads(ref_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        # Extract any hash-like values from the ref
+        for key in ("hash", "snapshot_hash", "execution_snapshot_hash",
+                     "runtime_outputs_bundle_hash", "manifest_hash"):
+            h = data.get(key)
+            if h and isinstance(h, str):
+                roots.append(h)
+        # Also check entries dict (artifact refs)
+        entries = data.get("entries")
+        if isinstance(entries, dict):
+            for v in entries.values():
+                if isinstance(v, dict):
+                    for bh in v.values():
+                        if isinstance(bh, str) and len(bh) == 64:
+                            roots.append(bh)
+                elif isinstance(v, str) and len(v) == 64:
+                    roots.append(v)
+
+    return roots
+
+
+def mark_reachable(user_root: Path, cas_root: Path) -> Set[str]:
+    """Walk all live refs and return the set of reachable object+blob hashes.
+
+    Uses iterative BFS (deque) — safe for 100K+ objects.
+    Supports both server-side (user_root != cas_root parent) and local
+    (cas_root/refs/) CAS layouts.
+    """
+    reachable: Set[str] = set()
+    to_visit: collections.deque[str] = collections.deque()
+
+    # Collect roots from server layout
+    to_visit.extend(_collect_roots_server(user_root))
+
+    # Also collect roots from local layout (cas_root/refs/)
+    to_visit.extend(_collect_roots_local(cas_root))
 
     # --- Iterative traversal ---
     while to_visit:
