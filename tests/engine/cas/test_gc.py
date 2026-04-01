@@ -365,8 +365,8 @@ class TestCompactProjectHistory:
 
     def test_short_chain_no_compaction(self, tmp_path):
         user_root, cas_root, mock = _setup_cas_dirs(tmp_path)
-        # Only 2 snapshots — both within daily window
-        hashes, head = self._build_chain(mock, cas_root, 2)
+        # 2 manual push snapshots — both within daily window and both retained by push policy
+        hashes, head = self._build_chain(mock, cas_root, 2, source="push")
 
         proj_dir = user_root / "refs" / "projects" / "proj1"
         proj_dir.mkdir(parents=True)

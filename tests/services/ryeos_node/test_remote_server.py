@@ -55,7 +55,7 @@ from rye.cas.sync import (
 )
 from rye.constants import AI_DIR
 
-from ryeos_node.auth import Principal, ResolvedExecution, get_current_principal, require_capability
+from ryeos_node.auth import Principal, ResolvedExecution, get_current_principal
 from ryeos_node.config import Settings, get_settings
 from ryeos_node.server import (
     app,
@@ -103,7 +103,7 @@ def _make_settings(cas_base, signing_dir, **overrides):
 
 TEST_PRINCIPAL = Principal(
     fingerprint="test-user",
-    capabilities=["rye.*"],
+    scopes=["*"],
     owner="tester",
 )
 
