@@ -49,6 +49,7 @@ The workflow has four jobs that run in sequence:
 | ryeos-web    | `ryeos/bundles/web`      |
 | ryeos-code   | `ryeos/bundles/code`     |
 | ryeos-email  | `ryeos/bundles/email`    |
+| ryeos-node   | `ryeos-node`             |
 | ryeos-mcp    | `ryeos-mcp`              |
 | ryeos-cli    | `ryeos-cli`              |
 
@@ -141,6 +142,7 @@ No secrets or protection rules are needed — OIDC handles authentication.
 | ryeos        | Active |
 | ryeos-web    | Active |
 | ryeos-code   | Active |
+| ryeos-node   | Active |
 | ryeos-mcp    | Active |
 | ryeos-cli    | Active |
 | ryeos-email  | Active |
@@ -160,6 +162,7 @@ ryeos/bundles/standard/pyproject.toml         → ryeos
 ryeos/bundles/web/pyproject.toml              → ryeos-web
 ryeos/bundles/code/pyproject.toml             → ryeos-code
 ryeos/bundles/email/pyproject.toml            → ryeos-email
+ryeos-node/pyproject.toml                     → ryeos-node
 ryeos-mcp/pyproject.toml                      → ryeos-mcp
 ryeos-cli/pyproject.toml                      → ryeos-cli
 lillux/kernel/pyproject.toml                  → lillux
@@ -238,13 +241,15 @@ For a **first-time publish** of all packages, you may need to run the workflow m
 
 ### ryeos-node
 
-The ryeos-node server provides remote execution, CAS sync, and registry features. Deployed on Modal.
+The ryeos-node server provides remote execution, CAS sync, registry, and GC features.
 
 - **Source:** `ryeos-node/`
-- **Not a pip package** — deployed as a container
-- **Dependencies:** fastapi, httpx, pydantic, pydantic-settings, cryptography
+- **PyPI package:** `ryeos-node` (pip installable, used in Dockerfiles)
+- **Dependencies:** fastapi, uvicorn, pydantic, pydantic-settings
+- **Runtime deps:** ryeos-engine, ryeos-core (CAS primitives, GC engine)
+- **Deployment:** Dockerized, deployed on Railway (track-blox) with a `/cas` volume
 
-Deployment is managed separately from the PyPI publishing workflow.
+The Dockerfile pins minimum versions for ryeos-node, ryeos-engine, and ryeos-core. Update these pins when publishing new versions with breaking changes (e.g., GC integration).
 
 ## Registry Bundle Publishing
 
