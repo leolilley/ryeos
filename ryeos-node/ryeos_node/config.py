@@ -63,6 +63,21 @@ def _load_node_yaml(node_config_dir: str, cas_base_path: str) -> Dict[str, Any]:
         if "max_user_storage_bytes" in limits:
             result["max_user_storage_bytes"] = limits["max_user_storage_bytes"]
 
+    gc = data.get("gc")
+    if isinstance(gc, dict):
+        _gc_map = {
+            "retention_days": "gc_retention_days",
+            "max_manual_pushes": "gc_max_manual_pushes",
+            "max_executions_per_graph": "gc_max_executions",
+            "cache_max_age_hours": "gc_cache_max_age_hours",
+            "auto_gc_enabled": "gc_auto_enabled",
+            "auto_gc_cooldown_seconds": "gc_auto_cooldown",
+            "grace_window_seconds": "gc_grace_window",
+        }
+        for yaml_key, settings_key in _gc_map.items():
+            if yaml_key in gc:
+                result[settings_key] = gc[yaml_key]
+
     return result
 
 
@@ -93,7 +108,16 @@ class Settings(BaseSettings):
 
     # Limits
     max_request_bytes: int = 50 * 1024 * 1024  # 50MB
-    max_user_storage_bytes: int = 1024 * 1024 * 1024  # 1GB
+    max_user_storage_bytes: int = 10 * 1024 * 1024 * 1024  # 10GB
+
+    # GC
+    gc_retention_days: int = 7
+    gc_max_manual_pushes: int = 3
+    gc_max_executions: int = 10
+    gc_cache_max_age_hours: int = 24
+    gc_auto_enabled: bool = True
+    gc_auto_cooldown: int = 600  # seconds between auto-GC runs
+    gc_grace_window: int = 3600  # sweep grace period seconds
 
     @model_validator(mode="before")
     @classmethod
@@ -138,6 +162,10 @@ class Settings(BaseSettings):
         except Exception:
             logger.debug("Failed to read hardware from node.yaml", exc_info=True)
         return {}
+
+    def user_root(self, fingerprint: str) -> Path:
+        """Per-user top-level directory (cache, executions, refs, locks)."""
+        return Path(self.cas_base_path) / fingerprint
 
     def user_cas_root(self, fingerprint: str) -> Path:
         ai_dir = os.environ.get("AI_DIR", ".ai")

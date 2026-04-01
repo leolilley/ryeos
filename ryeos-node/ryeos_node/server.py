@@ -4,6 +4,7 @@ Endpoints: /health, /public-key, /objects/has, /objects/put, /objects/get,
            /push, /push/user-space, /user-space,
            /execute,
            /threads, /threads/{thread_id},
+           /gc (POST), /gc/stats (GET),
            /webhook-bindings (POST, GET), /webhook-bindings/{hook_id} (DELETE)
 """
 
@@ -82,6 +83,12 @@ from rye.cas.checkout import (
 )
 from rye.cas.manifest import build_manifest
 from rye.cas.merge import three_way_merge
+from rye.cas.gc import prune_cache, prune_executions, mark_reachable, sweep, run_gc
+from rye.cas.gc import compact_project_history, load_retention_policy, emit_gc_event
+from rye.cas.gc_types import RetentionPolicy, GCResult
+from rye.cas.gc_epochs import register_epoch, complete_epoch
+from rye.cas.gc_incremental import load_gc_state
+from rye.cas.gc_lock import read_lock as read_gc_lock
 from rye.constants import AI_DIR
 from rye.actions.execute import ExecuteTool
 
@@ -209,16 +216,92 @@ def _principal_cas_root(principal: Principal, settings: Settings) -> Path:
     return settings.user_cas_root(principal.fingerprint)
 
 
+def _measure_usage(root: Path) -> int:
+    """Sum file sizes under a directory tree."""
+    total = 0
+    try:
+        for f in root.rglob("*"):
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _get_last_gc_time(user_root: Path) -> float | None:
+    """Return timestamp of last GC run, or None."""
+    state = load_gc_state(user_root)
+    if state and state.last_gc_at:
+        try:
+            return datetime.datetime.fromisoformat(state.last_gc_at).timestamp()
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def _check_user_quota(principal: Principal, settings: Settings) -> None:
-    """Reject if principal CAS exceeds storage quota."""
-    root = _principal_cas_root(principal, settings)
-    if not root.exists():
+    """Check quota and auto-GC if over limit. Raise 507 only if GC can't reclaim enough."""
+    user_root = settings.user_root(principal.fingerprint)
+    if not user_root.exists():
         return
-    total = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
-    if total > settings.max_user_storage_bytes:
+
+    total = _measure_usage(user_root)
+    quota = settings.max_user_storage_bytes
+    if total <= quota:
+        return
+
+    if not settings.gc_auto_enabled:
         raise HTTPException(
             status.HTTP_507_INSUFFICIENT_STORAGE,
-            f"User storage quota exceeded ({total} bytes > {settings.max_user_storage_bytes})",
+            f"User storage quota exceeded ({total} bytes > {quota})",
+        )
+
+    # Rate limit: don't auto-GC more than once per cooldown period
+    import time as _time
+    last_gc = _get_last_gc_time(user_root)
+    if last_gc and (_time.time() - last_gc) < settings.gc_auto_cooldown:
+        raise HTTPException(
+            status.HTTP_507_INSUFFICIENT_STORAGE,
+            f"User storage quota exceeded ({total} > {quota}), GC ran recently",
+        )
+
+    cas_root = _principal_cas_root(principal, settings)
+    logger.info(
+        "Auto-GC triggered for %s: %d bytes > %d quota",
+        principal.fingerprint, total, quota,
+    )
+
+    # Phase 1: quick cache prune (always safe, fast)
+    prune_cache(user_root, emergency=True)
+    total = _measure_usage(user_root)
+    if total <= quota:
+        return
+
+    # Full GC with aggressive retention
+    try:
+        run_gc(
+            user_root,
+            cas_root,
+            node_id=f"{settings.rye_remote_name}-auto-{os.getpid()}",
+            aggressive=True,
+            policy=RetentionPolicy(
+                manual_pushes=1,
+                daily_checkpoints=1,
+                max_success_executions=5,
+                max_failure_executions=5,
+            ),
+        )
+    except Exception:
+        logger.warning("Auto-GC failed for %s", principal.fingerprint, exc_info=True)
+
+    total = _measure_usage(user_root)
+    if total > quota:
+        raise HTTPException(
+            status.HTTP_507_INSUFFICIENT_STORAGE,
+            f"User storage quota exceeded after GC ({total} > {quota})",
         )
 
 
@@ -787,29 +870,39 @@ async def push(
                 },
             )
 
-    # Resolve user space hash for snapshot (may be None if never pushed)
-    user_ref = resolve_user_space_ref(settings.cas_base_path, principal.fingerprint)
-    user_manifest_hash = user_ref["user_manifest_hash"] if user_ref else None
-
-    # Create ProjectSnapshot
-    snapshot = ProjectSnapshot(
-        project_manifest_hash=req.project_manifest_hash,
-        user_manifest_hash=user_manifest_hash,
-        parent_hashes=[current_head] if current_head else [],
-        source="push",
-        timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    # Writer epoch: register BEFORE creating CAS objects
+    user_root = settings.user_root(principal.fingerprint)
+    epoch_id = register_epoch(
+        user_root, settings.rye_remote_name, principal.fingerprint,
+        [current_head] if current_head else [],
     )
-    snapshot_hash = cas.store_object(snapshot.to_dict(), root)
 
-    # Advance HEAD (compare-and-swap on snapshot hash)
-    if not advance_project_ref(
-        settings.cas_base_path, principal.fingerprint,
-        req.project_path, snapshot_hash, current_head,
-    ):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "HEAD moved during push. Pull and retry.",
+    try:
+        # Resolve user space hash for snapshot (may be None if never pushed)
+        user_ref = resolve_user_space_ref(settings.cas_base_path, principal.fingerprint)
+        user_manifest_hash = user_ref["user_manifest_hash"] if user_ref else None
+
+        # Create ProjectSnapshot
+        snapshot = ProjectSnapshot(
+            project_manifest_hash=req.project_manifest_hash,
+            user_manifest_hash=user_manifest_hash,
+            parent_hashes=[current_head] if current_head else [],
+            source="push",
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
+        snapshot_hash = cas.store_object(snapshot.to_dict(), root)
+
+        # Advance HEAD (compare-and-swap on snapshot hash)
+        if not advance_project_ref(
+            settings.cas_base_path, principal.fingerprint,
+            req.project_path, snapshot_hash, current_head,
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "HEAD moved during push. Pull and retry.",
+            )
+    finally:
+        complete_epoch(user_root, epoch_id)
 
     return {
         "status": "ok",
@@ -1099,6 +1192,13 @@ async def _execute_from_head(
         system_version=get_system_version(),
     )
 
+    # Writer epoch: protect in-flight CAS objects from GC sweep
+    user_root = settings.user_root(principal.fingerprint)
+    epoch_id = register_epoch(
+        user_root, settings.rye_remote_name, principal.fingerprint,
+        [base_snapshot_hash],
+    )
+
     try:
         try:
             # Checkout mutable copy from snapshot cache
@@ -1296,6 +1396,7 @@ async def _execute_from_head(
             if exec_space:
                 cleanup_execution_space(exec_space)
     finally:
+        complete_epoch(user_root, epoch_id)
         _exec_counter.decrement()
 
 
@@ -1582,6 +1683,103 @@ async def vault_delete(
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Secret '{req.name}' not found")
     return {"deleted": req.name}
+
+
+# --- GC endpoints ---
+
+
+class GCRequest(BaseModel):
+    dry_run: bool = False
+    aggressive: bool = False
+    retention_days: int = 7
+    max_manual_pushes: int = 3
+
+
+@app.post("/gc")
+async def gc_endpoint(
+    req: GCRequest,
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Run GC for the authenticated user's CAS store."""
+    user_root = settings.user_root(principal.fingerprint)
+    cas_root = _principal_cas_root(principal, settings)
+
+    if not user_root.exists():
+        return {"status": "ok", "message": "No CAS data for this user"}
+
+    policy = RetentionPolicy(
+        manual_pushes=req.max_manual_pushes,
+        daily_checkpoints=req.retention_days,
+        max_success_executions=settings.gc_max_executions,
+        max_failure_executions=settings.gc_max_executions,
+    )
+
+    result = run_gc(
+        user_root,
+        cas_root,
+        node_id=settings.rye_remote_name,
+        dry_run=req.dry_run,
+        aggressive=req.aggressive,
+        policy=policy,
+    )
+    return result.to_dict()
+
+
+def _human_bytes(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(v) < 1024:
+            return f"{v:.1f} {unit}"
+        v /= 1024
+    return f"{v:.1f} TB"
+
+
+@app.get("/gc/stats")
+async def gc_stats(
+    principal: Principal = Depends(get_current_principal),
+    settings: Settings = Depends(get_settings),
+):
+    """Return GC state and recent history for the authenticated user."""
+    user_root = settings.user_root(principal.fingerprint)
+
+    total_bytes = _measure_usage(user_root) if user_root.exists() else 0
+
+    gc_state = load_gc_state(user_root)
+    lock = read_gc_lock(user_root)
+
+    gc_log = user_root / "logs" / "gc.jsonl"
+    recent_events: list = []
+    if gc_log.is_file():
+        try:
+            lines = gc_log.read_text(encoding="utf-8").strip().split("\n")
+            for line in lines[-10:]:
+                if line.strip():
+                    try:
+                        recent_events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+
+    inflight_count = 0
+    inflight_dir = user_root / "inflight"
+    if inflight_dir.is_dir():
+        try:
+            inflight_count = sum(1 for f in inflight_dir.iterdir() if f.is_file())
+        except OSError:
+            pass
+
+    return {
+        "usage_bytes": total_bytes,
+        "usage_human": _human_bytes(total_bytes),
+        "quota_bytes": settings.max_user_storage_bytes,
+        "quota_percent": round((total_bytes / settings.max_user_storage_bytes) * 100, 1) if settings.max_user_storage_bytes else 0,
+        "gc_state": gc_state.to_dict() if gc_state else None,
+        "gc_lock": lock.to_dict() if lock else None,
+        "recent_events": recent_events,
+        "inflight_epochs": inflight_count,
+    }
 
 
 # --- Webhook binding management ---
