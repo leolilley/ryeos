@@ -1,4 +1,4 @@
-# rye:signed:2026-04-01T06:20:01Z:aa9df47dce7f7f4c3ab2e13b0d90838549d43b0928a74c6e9050daf222661dd7:3BWkxmMGVfg9tp9aoMuZpK4khxltr-plvjRIWy0sICzHaDVk8PwEcaR29Bx20wxuIRTFowNEpQUTg4tUcDU5Cw:4b987fd4e40303ac
+# rye:signed:2026-04-01T06:45:27Z:d2126205fc3cd4a7333b24adae8db11d40d22459df77d5cc7e35697a4f611314:VFCRBpV0onhwyAPHl3G2dgvEvQUMCKiBU9Z0l4GohKrNFuc7XRc4rH_3yaZnK_agBvPOtyL3vc8s3bqmeKuxBw:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -1302,7 +1302,7 @@ async def _push_bundle(project_path: Path, params: Dict) -> Dict:
         "item_id": bundle_id,
         "version": version,
         "manifest_hash": ph,
-    })
+    }, timeout=300)
 
     if not result["success"]:
         body = result.get("body", {})
