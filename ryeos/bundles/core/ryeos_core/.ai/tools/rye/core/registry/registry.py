@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:33:44Z:9367ce1b467ed5b06e4242a34c0e1bfb017e01a8abcbb886dd8d587837a015a0:1RRsGsB8Z0aUTP_bvKkrOryJGsb2v6E6uIdvMaoEoxBvPQuw6JXt0jF4QwW00YzyUC4K8Z8NVuBazuDAc0coBw:4b987fd4e40303ac
+# rye:signed:2026-04-01T05:01:49Z:05780f761190f5d94199bc7743bb50f1a9b6625b942f3b3e5af6a6b874f60eab:pkF1gwrMjBGpHpH_5NLbHnSudYpyxiKs0hYxYDc_RiCNl1FcTZhEsTlaHtkVzKvte5JofP6GrcZrvDhHMBIsAw:4b987fd4e40303ac
 """
 Registry tool — publish, search, and pull items from a ryeos-node registry.
 
@@ -54,7 +54,7 @@ TOOL_METADATA = {
     "protected": True,
 }
 
-ACTIONS = ["login", "whoami", "search", "pull", "push", "claim"]
+ACTIONS = ["login", "whoami", "search", "pull", "push", "push_bundle", "claim"]
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -777,6 +777,101 @@ async def _push(params: Dict, project_path: str) -> Dict:
     }
 
 
+async def _push_bundle(params: Dict, project_path: str) -> Dict:
+    """Push a bundle to the registry.
+
+    Reads the bundle manifest, CAS-syncs all objects, and registers the
+    bundle in the registry index.
+    """
+    import yaml
+
+    bundle_id = params.get("bundle_id")
+    if not bundle_id:
+        return {"error": "Required: bundle_id", "usage": "push_bundle(bundle_id='ryeos-code')"}
+
+    manifest_path = Path(project_path) / AI_DIR / "bundles" / bundle_id / "manifest.yaml"
+    if not manifest_path.exists():
+        return {
+            "error": f"Bundle manifest not found: {manifest_path}",
+            "hint": f"Run 'rye registry bundle build' first to create the manifest",
+        }
+
+    raw = manifest_path.read_text()
+    lines = raw.splitlines(keepends=True)
+    if lines and lines[0].startswith("# rye:signed:"):
+        raw = "".join(lines[1:])
+    manifest_data = yaml.safe_load(raw)
+
+    bundle_meta = manifest_data.get("bundle", {})
+    version = params.get("version") or bundle_meta.get("version")
+    if not version:
+        return {"error": "Version required but not found in manifest"}
+
+    from rye.cas.manifest import build_manifest
+    from rye.cas.store import cas_root as get_cas_root
+    from rye.cas.sync import collect_object_hashes, export_objects
+
+    root = get_cas_root(Path(project_path))
+    manifest_hash, manifest = build_manifest(Path(project_path), "project")
+
+    client, audience, err = await _get_client_and_audience(project_path)
+    if err:
+        return err
+
+    priv, pub = _get_signing_keys()
+
+    all_hashes = list(set(collect_object_hashes(manifest, root) + [manifest_hash]))
+
+    has_resp = await _authed_post(
+        client, "/objects/has",
+        {"hashes": all_hashes},
+        audience, priv, pub,
+    )
+
+    if not has_resp["success"]:
+        return {"error": f"Failed to check objects: {has_resp.get('error')}"}
+
+    has_body = has_resp.get("body", {})
+    if isinstance(has_body, str):
+        has_body = json.loads(has_body)
+    missing = has_body.get("missing", [])
+
+    if missing:
+        entries = export_objects(missing, root)
+        put_resp = await _authed_post(
+            client, "/objects/put",
+            {"entries": [e if isinstance(e, dict) else e.to_dict() for e in entries]},
+            audience, priv, pub,
+        )
+        if not put_resp["success"]:
+            return {"error": f"Failed to upload objects: {put_resp.get('error')}"}
+
+    result = await _authed_post(
+        client, "/registry/publish",
+        {
+            "item_type": "bundle",
+            "item_id": bundle_id,
+            "version": version,
+            "manifest_hash": manifest_hash,
+        },
+        audience, priv, pub,
+    )
+
+    if not result["success"]:
+        body = result.get("body", {})
+        detail = body.get("detail", result.get("error", "Unknown error")) if isinstance(body, dict) else result.get("error")
+        return {"error": f"Publish failed: {detail}"}
+
+    return {
+        "status": "published",
+        "item_type": "bundle",
+        "bundle_id": bundle_id,
+        "version": version,
+        "manifest_hash": manifest_hash,
+        "objects_synced": len(missing),
+    }
+
+
 async def _claim(params: Dict, project_path: str) -> Dict:
     """Claim a namespace."""
     namespace = params.get("namespace")
@@ -835,6 +930,7 @@ _ACTION_MAP = {
     "search": _search,
     "pull": _pull,
     "push": _push,
+    "push_bundle": _push_bundle,
     "claim": _claim,
 }
 

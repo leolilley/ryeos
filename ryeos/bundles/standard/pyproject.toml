@@ -47,6 +47,8 @@ exclude = [
     "*.pyc",
     "**/lockfiles/**",
 ]
-
-[tool.hatch.build.targets.wheel.force-include]
-"ryeos_std/.ai" = "ryeos_std/.ai"
+# Include all files from source tree, don't filter by .gitignore
+# (the root .gitignore has rules like */.ai/ that would
+# incorrectly exclude bundled .ai/ content from the wheel)
+only-packages = false
+ignore-vcs = true
