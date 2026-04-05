@@ -37,10 +37,12 @@ class Principal:
     fingerprint: Ed25519 key fingerprint (the identity)
     scopes: access scopes from authorized key file
     owner: human-readable label from authorized key file
+    publish_namespaces: namespace patterns this key may publish under
     """
     fingerprint: str
     scopes: list[str] = field(default_factory=lambda: ["*"])
     owner: str = ""
+    publish_namespaces: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +215,7 @@ def _verify_signed_request(request: Request, raw_body: bytes, settings: Settings
         fingerprint=fingerprint,
         scopes=auth_data.get("scopes", ["*"]),
         owner=auth_data.get("owner", ""),
+        publish_namespaces=auth_data.get("publish_namespaces", []),
     )
 
 
@@ -223,6 +226,29 @@ async def get_current_principal(
     """FastAPI dependency: authenticate via signed request headers."""
     raw_body = await request.body()
     return _verify_signed_request(request, raw_body, settings)
+
+
+def require_publish_namespace(principal: Principal, namespace: str) -> None:
+    """Check principal is allowed to publish under the given namespace.
+
+    Uses fnmatch patterns from the authorized key's publish_namespaces field.
+    Empty publish_namespaces means no publish access.
+    """
+    allowed = principal.publish_namespaces
+    if not allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Key fp:{principal.fingerprint} has no publish_namespaces configured",
+        )
+    if "*" in allowed:
+        return
+    if any(fnmatch.fnmatch(namespace, pat) for pat in allowed):
+        return
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        f"Not allowed to publish under namespace '{namespace}'. "
+        f"Allowed: {allowed}",
+    )
 
 
 # ---------------------------------------------------------------------------

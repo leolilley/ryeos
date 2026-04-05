@@ -101,7 +101,8 @@ def authorize_key(
         f'fingerprint = "{fp}"\n'
         f'owner = "{owner}"\n'
         f'public_key = "ed25519:{pub_b64}"\n'
-        f'capabilities = [{caps_toml}]\n'
+        f'scopes = [{caps_toml}]\n'
+        f'publish_namespaces = ["*"]\n'
     )
 
     # Sign with node's key
@@ -126,5 +127,44 @@ def authorize_key(
         "signed_by": f"fp:{node_fp}",
         "key_file": str(key_file),
     }
+    print(result)
+    return result
+
+
+@app.function(
+    image=image,
+    volumes={"/cas": cas_volume},
+    timeout=60,
+)
+def claim_namespaces(
+    owner_fp: str,
+    namespaces: str,
+):
+    """Claim namespaces on the node volume for a principal.
+
+    Usage:
+      modal run modal_app.py::claim_namespaces \
+        --owner-fp fp:6ea18199041a1ea8 \
+        --namespaces 'ryeos-core,ryeos,ryeos-web,ryeos-code,ryeos-email'
+    """
+    import json
+    from pathlib import Path
+
+    ns_dir = Path("/cas/registry/namespaces")
+    ns_dir.mkdir(parents=True, exist_ok=True)
+
+    fp = owner_fp if owner_fp.startswith("fp:") else f"fp:{owner_fp}"
+    claimed = []
+    for ns in namespaces.split(","):
+        ns = ns.strip()
+        if not ns:
+            continue
+        ns_file = ns_dir / ns
+        record = {"owner": fp}
+        ns_file.write_text(json.dumps(record), encoding="utf-8")
+        claimed.append(ns)
+
+    cas_volume.commit()
+    result = {"claimed": claimed, "owner": fp}
     print(result)
     return result

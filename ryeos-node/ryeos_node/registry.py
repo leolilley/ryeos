@@ -20,7 +20,7 @@ from rye.cas.refs import read_ref, write_ref_atomic
 
 logger = logging.getLogger(__name__)
 
-VALID_ITEM_TYPES = ("tool", "directive", "knowledge")
+VALID_ITEM_TYPES = ("tool", "directive", "knowledge", "bundle")
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +131,6 @@ def publish_item(
         return {"ok": False, "error": "Missing required field"}
 
     namespace = item_id.split("/")[0] if "/" in item_id else item_id
-
-    # Verify publisher owns the namespace
-    ns_err = verify_namespace_owner(cas_base, namespace, publisher_fp)
-    if ns_err:
-        return {"ok": False, "error": ns_err}
 
     lock_path = _registry_dir(cas_base) / "index.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)

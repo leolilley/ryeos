@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:0c64fe62ae2dc9b6ab38c89d32da863e1be45eb04041f6020e92cc1260fbd0ad:d_2J6aQCUXKxJ0TKIoUQuraKxRMw7xBsPY7tPj4ojJ5MosqxtTGhJUsNm9nRQFfXG4wcqgVcNS8WP5xQ_jHbDw==:4b987fd4e40303ac
+# rye:signed:2026-04-02T00:55:21Z:d7d269fcb5849c864f6e162a20634aa49d2681f96ff631e7e4985abd40e271fa:rlf9AarKRaQhsxS31gm04XGd1LIjJh2WQMFU2gEFi8DIU3bgfpYYLu0Bp2VJ5zB5cdnxqOfY-oYADfxaz1EVCA:4b987fd4e40303ac
 # config/resilience.yaml
 category: "agent"
 tool_type: "config"
@@ -29,8 +29,8 @@ retry:
 limits:
   defaults:
     turns: 25
-    tokens: 200000
-    spend: 1.0
+    tokens: 1000000
+    spend: 5.0
     spend_currency: "USD"
     spawns: 50
     depth: 10

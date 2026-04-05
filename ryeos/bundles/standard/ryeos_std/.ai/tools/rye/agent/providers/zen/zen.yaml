@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T07:27:23Z:6fe6e1677f0876626da85efbc764e019817438fd68e06c09222777999cc53a93:rsLzIHXnLMBW9Y8V1c1aJuWXLlGery9XFFGQ3hA1-g31xM4ArZU1m4iCOOWjwYkgcdCqyWNv1q_qwhewMYsSBA:4b987fd4e40303ac
+# rye:signed:2026-04-01T09:26:15Z:0c830a7904743d8dd4e181c3cdb4a16c56ebbd9b91635e0b3f6c030490997c19:F7Oi41MVEHBbtyUt27cOihvq5GQyzOFo9wQ_D-TU8qeJSkUreRgrJV9bkseaz2mvaFn2W2uLsOC1LIBPw5JVAQ:4b987fd4e40303ac
 tool_id: zen
 tool_type: http
 version: "1.0.0"
@@ -125,7 +125,7 @@ parameters:
   - name: max_tokens
     type: integer
     required: false
-    default: 4096
+    default: 65536
   - name: messages
     type: array
     required: true

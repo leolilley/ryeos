@@ -53,6 +53,8 @@ def _load_node_yaml(node_config_dir: str, cas_base_path: str) -> Dict[str, Any]:
     if isinstance(features, dict):
         if "registry" in features:
             result["registry_enabled"] = features["registry"]
+        if "require_namespaces" in features:
+            result["require_namespaces"] = features["require_namespaces"]
 
     limits = data.get("limits")
     if isinstance(limits, dict):
@@ -98,6 +100,7 @@ class Settings(BaseSettings):
 
     # Registry
     registry_enabled: bool = False
+    require_namespaces: bool = False
 
     # Concurrency
     max_concurrent: int = 8

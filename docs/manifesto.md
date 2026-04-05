@@ -1,6 +1,6 @@
 I built a cryptographically signed AI execution system that inverts how agents work.
 
-Before I get into this, a quick note. I started building this before OpenClaw blew up. I think if we keep building on the architecture it lays its foundations on, we're collectively heading toward a mistake. There is a more secure, more principled way to build agents. RYE OS is my attempt at showing what that actually looks like. I'm not a researcher. I don't work for a lab. I'm just a developer who wanted a better MCP for my own workflows and kept pulling the thread until the full picture came clear.
+Before I get into this, a quick note. I started building this before OpenClaw blew up. But I think if we keep building on the architecture it lays its foundations on, we're collectively heading toward a mistake. There is a more secure, more principled way to build agents. RYE OS is my attempt at showing what that actually looks like. I'm not a researcher. I don't work for a lab. I'm just a developer who wanted a better MCP for my own workflows and kept pulling the thread until the full picture came clear.
 
 ---
 
@@ -18,9 +18,9 @@ After working with AI over these past few years I've come to realise that to rea
 
 Strip away the abstractions and every agent does two things: it retrieves something, and it acts on it. Every framework, every harness, every workflow is some variation of retrieve and act.
 
-If you're trying to derive the right primitives for agents, you don't need to invent the retrieval half. Computing already answered it at every layer. The CPU's fetch-execute cycle. git fetch. The browser's Fetch API. Each one arrived at the same reduction independently: one operation, you point at a thing and you get it back. Whether you're pointing by address, by URL, by query, or by content hash doesn't matter. How you point at it is a parameter, not a different operation.
+If you're trying to derive the right primitives for agents, you don't need to reinvent it. Computing already answered it at every layer. The CPU's fetch-execute cycle arrived at the same reduction operation, you point at a thing and you get it back. Whether you're pointing by address, by URL, by query, or by content hash doesn't matter. How you point at it is a parameter, not a different operation.
 
-So retrieval reduces to Fetch. Acts on it is the obvious half. You run the thing. Execute. In RYE that means resolving a tool through its execution chain down to a primitive that Lillux can run. Every agent framework you've seen is already doing some version of these two. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured Fetch. When Claude Code finds a skill and runs it, that's Fetch, Execute. When OpenClaw routes a task to a sub-agent, same thing.
+Retrieval reduces to Fetch. Acts on it is the obvious half. You run the thing. Execute. In RYE that means resolving a tool through its execution chain down to a primitive that Lillux can run. Every agent framework you've seen is already doing some version of these two. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured Fetch. When Claude Code finds a skill and runs it, that's Fetch, Execute. When OpenClaw routes a task to a sub-agent, same thing.
 
 None of them have the third primitive. Sign. That's what makes the other 2 secure. Other frameworks treat agent security as a runtime problem, watch what the agent does and intervene when it steps out of bounds. In RYE permissions aren't enforced after the fact. They're declared, signed, and verified before execution ever starts. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
 
@@ -116,7 +116,7 @@ Every agent framework today puts the model at the centre. Memory, tools, files o
 
 RYE inverts this. The substrate is inert. Nodes sit idle. Objects sit hashed. Nothing executes until a key shows up. The agent is the signing key.
 
-The cryptographically unique key is what signs every item into existence. It is what authenticates to nodes. It is what makes every action, every thread, every tool call attributable to a single identity. When your TUI connects to ryeosd, it signs the request with your cryptographically unique key. When you push to a remote node, your key authenticates. When a webhook fires, it traces back to the fingerprint of the key that created the binding. Everything that passes through your key gets cryptographically bound to it. The workspace, the directives, the execution history, all of it is data that flows through the key and becomes provably yours. The substrate comes alive because a key activates it.
+The cryptographically unique key that signs every item into existence. It is what authenticates to nodes. It is what makes every action, every thread, every tool call attributable to a single identity. When your TUI connects to ryeosd, it signs the request with your cryptographically unique key. When you push to a remote node, your key authenticates. When a webhook fires, it traces back to the fingerprint of the key that created the binding. Everything that passes through your key gets cryptographically bound to it. The workspace, the directives, the execution history, all of it is data that flows through the key and becomes provably yours. The substrate comes alive because a key activates it.
 
 An Ed25519 keypair is mathematically unique. Not an account a platform assigned you. Not a username you configured. The key is unique to you because the mathematics guarantee it. That's why it works as identity. Not identity by convention. Identity by proof.
 

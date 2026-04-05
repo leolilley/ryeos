@@ -594,6 +594,7 @@ class ExecuteTool:
         """
         model = parameters.pop("model", None)
         limit_overrides = parameters.pop("limit_overrides", None)
+        previous_thread_id = parameters.pop("previous_thread_id", None)
         # 1. Find the directive file
         file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
         if not file_path:
@@ -665,6 +666,8 @@ class ExecuteTool:
                 td_params["model"] = model
             if limit_overrides:
                 td_params["limit_overrides"] = limit_overrides
+            if previous_thread_id:
+                td_params["previous_thread_id"] = previous_thread_id
 
             # Forward parent thread context if present
             parent_tid = os.environ.get("RYE_PARENT_THREAD_ID")

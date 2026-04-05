@@ -15,28 +15,16 @@ tags:
     security,
   ]
 version: "0.1.0"
-status: in-progress
+status: done
 ```
 
 # Node Vault — Per-Principal Encrypted Secret Store
 
-> **Status:** V1 in progress. V2/V3 exploratory.
+> **Status:** V1 done. V2/V3 exploratory.
 
-## Current State
+## V1 — File-Per-Secret (Done)
 
-Secrets reach executions via `secret_envelope` — sealed with X25519, decrypted at exec time by the node. This works for signed `/execute` requests where the caller constructs the envelope per-call.
-
-Problems:
-
-- **Webhook bindings bake the envelope at creation time.** The sealed secret is stored in the binding. Rotating a secret means recreating every binding that uses it.
-- **Hosted nodes (Railway, Render) require manual env var management.** Users set secrets on the hosting platform's dashboard. No programmatic access from the agent.
-- **No secret management API.** An agent can't set, list, or rotate secrets on a node it controls.
-
----
-
-## V1 — File-Per-Secret (Implementing Now)
-
-Simple file-backed store reusing existing crypto infrastructure.
+Simple file-backed store reusing existing crypto infrastructure. Implemented in `ryeos-node/ryeos_node/vault.py` and `server.py`.
 
 ### Storage
 
@@ -48,35 +36,44 @@ Each file contains a sealed envelope — the same `secret_envelope` format used 
 
 ### Server API
 
-| Endpoint        | Method   | Description                      |
-| --------------- | -------- | -------------------------------- |
-| `/vault/set`    | `POST`   | Store a sealed secret by name    |
-| `/vault/list`   | `GET`    | List secret names (never values) |
-| `/vault/delete` | `DELETE` | Remove a secret                  |
+| Endpoint        | Method | Description                      |
+| --------------- | ------ | -------------------------------- |
+| `/vault/set`    | `POST` | Store a sealed secret by name    |
+| `/vault/list`   | `GET`  | List secret names (never values) |
+| `/vault/delete` | `POST` | Remove a secret                  |
 
 ### Usage in Executions
 
-Webhook bindings gain a `vault_keys` field:
+Webhook bindings support a `vault_keys` field:
 
 ```yaml
 vault_keys: ["OPENAI_API_KEY", "DATABASE_URL"]
 ```
 
-At execution time, the node reads the named secrets from the vault, decrypts them, and injects them into the execution environment. No more baked-in envelopes — rotating a secret is a single `/vault/set` call; all bindings referencing that name pick up the new value on next execution.
+At execution time, the node reads the named secrets from the vault, decrypts them, and injects them into the execution environment (`server.py:1225-1232`). Rotating a secret is a single `/vault/set` call; all bindings referencing that name pick up the new value on next execution. Inline `secret_envelope` on `/execute` overrides vault-resolved values.
 
 Signed `/execute` requests can also specify `vault_keys` alongside or instead of inline `secret_envelope`.
 
 ### Client Side
 
-New actions on the remote tool:
+Actions on the remote tool (`remote/remote.py`):
 
-- `vault_set` — seal and upload a secret
+- `vault_set` — seal with node identity and upload a secret
 - `vault_list` — list secret names on a node
 - `vault_delete` — remove a secret
 
 ### Validation
 
 Reuses existing `is_safe_secret_name()` for name validation and `validate_env_map()` for blocked name enforcement.
+
+### Security
+
+All vault endpoints require signed-request auth (`get_current_principal`). File permissions enforced: vault directories `0700`, secret files `0600`. Atomic writes via temp file + `os.replace` + `fsync`. Secret values never logged or returned in API responses.
+
+### Known Gaps
+
+- **`/vault/delete` uses `POST` instead of `DELETE`.** Doc originally specified `DELETE` method; implementation settled on `POST` for consistency with signed-request auth payload handling. Low priority to change.
+- **No `rye.vault.*` capability gating on endpoints.** The original spec called for fine-grained LLM capability gating (e.g. `rye.vault.set` without `rye.vault.delete`). Since vault operations are node-side (not LLM-initiated), capability gating is handled differently — via node-level auth and principal identity rather than LLM caps. No change planned here.
 
 ---
 

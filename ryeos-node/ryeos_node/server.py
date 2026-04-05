@@ -31,6 +31,7 @@ from ryeos_node.auth import (
     ResolvedExecution,
     _verify_signed_request,
     get_current_principal,
+    require_publish_namespace,
     verify_hmac,
     verify_timestamp,
 )
@@ -1847,6 +1848,8 @@ async def registry_publish(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
+    namespace = body.item_id.split("/")[0] if "/" in body.item_id else body.item_id
+    require_publish_namespace(principal, namespace)
     result = publish_item(
         settings.cas_base_path,
         body.item_type,
