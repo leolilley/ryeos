@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:d6f54b76bce5c407b03972def2596fb0856e76dc46ae6ac359d58a28a83358d5:j7ueeO9QBT_tYDlGCYcxpREoOHv70XtjNlX9uJkyfGOA77ogc3oTMDMiqp9E_q1Ba-842uxFgwUVTRRASseQAw:4b987fd4e40303ac
+# rye:signed:2026-04-05T03:17:01Z:bca95f9842244e2b57a12acc9a071eccab031d01ca63cb1a9eb29571c49f4979:dzy4thLqJgXMh6phzSb_05m0J22IVUkN9LvZEzT8QzLto3pLXKWf7g8FsTHQZ_SQiCQt96N865pOxATM_wNeCA:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -8,6 +8,10 @@ description: "Bash runtime - executes shell commands directly"
 env_config:
   env:
     PATH: "${PATH}"
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
 
 config:
   command: "/bin/bash"

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:db4f67d1b56e0f86a879bab5a0cc74193efd19574b744e62f4b07aa8dd5e3939:FJUbjPO-R1a-ZhBnd5MoWpfMD55F8MVTLAHZdlEB0-yYavZPe-iy2y6oXZpopPa9VOgblOICtExMMxMa-rJKBQ:4b987fd4e40303ac
+# rye:signed:2026-04-05T03:17:01Z:de0f85db3524f52f12c873a113ae6d1c1bbc51b2600ae34f96e5f0a4ad7136cf:HtXxK_j78ICnaRSf4QVxXK7bZh08JzILISEsj2AdWqC-mZwWm-LUKp281lP8Xi1FIq154Ox4tr7GFS7joflCDQ:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -35,6 +35,10 @@ verify_deps:
   recursive: true
   extensions: [".js", ".ts", ".mjs", ".cjs", ".yaml", ".yml"]
   exclude_dirs: ["node_modules", "__pycache__", ".git", "dist", "build"]
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
 
 config:
   command: "${RYE_NODE}"

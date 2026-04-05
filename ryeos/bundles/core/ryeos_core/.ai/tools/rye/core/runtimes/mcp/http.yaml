@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:f2c528f5cff2afc4a6163cbb2556e48982feca01318544b666b0dfbfe0bb8606:Yuo7cVm8WoemWgKbZQNEyHuMS5NO4SKYFd3XXuxmn28V5THCTOibHQBG9rH0PuHxgsL4mtZVVnEE14WxXY_8Bw:4b987fd4e40303ac
+# rye:signed:2026-04-05T03:17:01Z:360e3476b2e46588aa8c7d63ff9757197c3346d1a392fdd608d69412d062e445:VSYYKk5OggXt4YFumQUNbgsEOx38sP-mvXD6D2ckw_WvdwprckosiI7l-n5AG-1K96gb873ApXV0dVKb3-amBw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -8,6 +8,10 @@ description: "MCP HTTP runtime - executes MCP tools via HTTP transport"
 env_config:
   env:
     PYTHONUNBUFFERED: "1"
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
 
 config:
   command: "${RYE_KERNEL_PYTHON}"

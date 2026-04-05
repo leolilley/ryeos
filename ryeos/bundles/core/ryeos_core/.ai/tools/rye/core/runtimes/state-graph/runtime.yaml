@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T09:32:32Z:b07b944bd4b05e7afce8bffb20ddbfff28948c43f1e778463d69b4dbeeb08bb0:CZJaYfFLoc62D603vDF3TAxW5y1d9wvIFtIpoxP-gsbzp-eLJBLDdgdyfPDpgNz9HC80WYTrpQkwOXUb-siABQ:4b987fd4e40303ac
+# rye:signed:2026-04-05T03:17:01Z:5b257d3eee128c305138a73d56a98b8c13c420d01648c49cbb4683ba59e5705d:VWxIxkn1QKsM38At5Roh0MkXcHqw5j_rFRUVvuR4azq0RHIhhrxHGb8-ZZ8xgvs_dCEZ9Lk0VW3raMfb9oeNDA:4b987fd4e40303ac
 # rye:unsigned
 version: "1.0.0"
 tool_type: runtime
@@ -36,6 +36,10 @@ verify_deps:
   recursive: true
   extensions: [".py", ".yaml", ".yml", ".json"]
   exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
 
 config:
   command: "${RYE_PYTHON}"

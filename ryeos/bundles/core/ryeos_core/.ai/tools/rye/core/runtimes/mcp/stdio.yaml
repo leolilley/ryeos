@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:c8ce530a87bbef587727d09401b13c12c525e09dacc910041cf7bd5421c92e6a:gO24hqlW3t0jE_pmoQZu2DFcS8bS0KR5ZeXGx8_2vByWgCGMgfS7owgSR9HowLyecjmGGigxYZL87EFcnrh3Cg:4b987fd4e40303ac
+# rye:signed:2026-04-05T03:17:01Z:65e8a09c3316fa131e4bc97dfb9daeecd4781494aa85a511dfe9b22e9a55bf98:H6yTF9sLtuOYxy8mCjn4z8Vqsi6GxOfltKkfWYopuXcuqParmdaYTcyMI6xJHXUAE8JhJ5H2DiUNLmZB5E-OAA:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/subprocess
@@ -8,6 +8,10 @@ description: "MCP stdio runtime - executes MCP tools via stdio transport"
 env_config:
   env:
     PYTHONUNBUFFERED: "1"
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
 
 config:
   command: "${RYE_KERNEL_PYTHON}"

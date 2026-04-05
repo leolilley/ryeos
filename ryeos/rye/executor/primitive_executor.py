@@ -383,12 +383,26 @@ class PrimitiveExecutor:
                 cwd = self._template_string(anchor_cfg["cwd"], anchor_ctx)
                 parameters = {**(parameters or {}), "cwd": cwd}
 
-            # 5.7 Resolve tool config if declared
-            tool_config_resolve = chain[0].config_resolve if chain else None
-            if tool_config_resolve:
-                resolved_config = self._resolve_tool_config(tool_config_resolve)
-                if resolved_config:
-                    parameters["resolved_config"] = resolved_config
+            # 5.7 Resolve config from chain elements
+            # chain[0] = tool: resolved config → parameters["resolved_config"] (for tool code)
+            # chain[1:] = runtime/primitive: resolved config → execution overrides (timeout, cwd, etc.)
+            tool_id = chain[0].item_id if chain else None
+            for _ci, _element in enumerate(chain):
+                if not _element.config_resolve:
+                    continue
+                _resolved = self._resolve_tool_config(_element.config_resolve)
+                if not _resolved:
+                    continue
+                if _ci == 0:
+                    parameters["resolved_config"] = _resolved
+                else:
+                    # Execution config: merge defaults + per-tool overrides
+                    _exec_defaults = _resolved.get("defaults", {})
+                    _tool_overrides = _resolved.get("tools", {}).get(tool_id, {}) if tool_id else {}
+                    _exec_config = {**_exec_defaults, **_tool_overrides}
+                    for _ek, _ev in _exec_config.items():
+                        if _ek not in parameters:
+                            parameters[_ek] = _ev
 
             # 6. Execute via the root primitive
             # Inject anchor context vars so {runtime_lib}, {anchor_path},
