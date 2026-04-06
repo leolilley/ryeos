@@ -166,6 +166,7 @@ function ensureCacheDir(projectPath: string, subdir: string): string {
   const dir = join(
     projectPath,
     ".ai",
+    "state",
     "cache",
     "tools",
     "rye",
@@ -206,7 +207,7 @@ function resolveBrowserConfig(projectPath: string): Record<string, any> {
  * Ensure playwright-cli config is written to the project cache dir.
  * Returns the path to the config file for --config flag.
  * 
- * Config is written to .ai/cache/tools/rye/web/browser/.playwright/cli.config.json
+ * Config is written to .ai/state/cache/tools/rye/web/browser/.playwright/cli.config.json
  * so that playwright-cli's .playwright-cli/ output also lands in the cache dir
  * (not inside the tool dir, where it would trip integrity checks).
  */

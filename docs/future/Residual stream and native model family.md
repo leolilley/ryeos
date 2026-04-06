@@ -46,7 +46,7 @@ The infrastructure this proposal builds on — all live in the codebase:
 | Component                 | Location                                                        | What It Does                                                                                                  |
 | ------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Thread orchestration      | `orchestrator.py`, `coordination.yaml`                          | Spawn, cancel, wait, budget cascade across child threads                                                      |
-| Thread transcripts        | `.ai/agent/threads/{thread_id}/transcript.jsonl`                | Full JSONL per thread — reasoning, tool calls, results                                                        |
+| Thread transcripts        | `.ai/state/threads/{thread_id}/transcript.jsonl`                | Full JSONL per thread — reasoning, tool calls, results                                                        |
 | Artifact store            | `rye/agent/threads/persistence/artifact_store`                  | Stores large outputs outside conversation context, content-addressed                                          |
 | Budget ledger             | `rye/agent/threads/persistence/budgets`                         | Hierarchical atomic budget tracking across concurrent forks                                                   |
 | Capability attenuation    | fnmatch patterns (e.g., `rye.execute.tool.rye.bash`)            | Granular permission control cascading down thread hierarchy                                                   |
@@ -56,7 +56,7 @@ The infrastructure this proposal builds on — all live in the codebase:
 | Dynamic tool registration | `tool_schema_loader.py`, `runner.py`                            | Each capability-granted tool registered as a real API-level tool with `_primary` dispatch field               |
 | Provider adapter          | `rye/agent/threads/adapters/http_provider`                      | HTTP-based LLM provider bridge (Anthropic, OpenAI)                                                            |
 | Streaming tool parser     | `rye/agent/threads/events/streaming_tool_parser`                | Parse streaming tool call responses from LLM providers                                                        |
-| Lillux primitives         | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — **no embedding or residual-export primitive exists today**              |
+| Lillux primitives         | `execute`, `signing`, `integrity`, `cas`                        | The full set of OS-level primitives — **no embedding or residual-export primitive exists today**              |
 
 The key gap: threads communicate exclusively through token-level transcript text. There is no mechanism to carry geometric reasoning state between threads, no specialised models for tool dispatch or context prefetching, and no training pipeline fed by execution traces.
 
@@ -82,7 +82,7 @@ Orchestrators that pull these artifacts can perform cross-attention over child r
 
 #### New Lillux Primitive Required
 
-Lillux currently has five primitives: `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`. This proposal requires a sixth and seventh:
+Lillux currently has primitives: `execute`, `signing`, `integrity`, `cas`. This proposal requires two new ones:
 
 - **`embedding`** — compute embeddings via a configurable provider (also required by [Memory & Intent Resolution](memory-and-intent-resolution.md))
 - **`residual_export`** — tap the inference runtime's internal tensor state at a named layer before vocabulary projection, serialise, and return as a typed artifact
@@ -429,7 +429,7 @@ The moat is not the code — RYE is MIT licensed. It is not the models — those
 | Three MCP tools (`fetch`, `execute`, `sign`)          | Same interface, no changes                                                                  |
 | Capability attenuation (fnmatch patterns)            | Unchanged — capability masking extends it at the model level, does not replace it           |
 | Three-tier space resolution                          | Unchanged                                                                                   |
-| Ed25519 signing, lockfiles, chain verification       | Unchanged                                                                                   |
+| Ed25519 signing, chain verification                  | Unchanged                                                                                   |
 | Thread orchestration and budget cascading            | Unchanged                                                                                   |
 | Dynamic tool registration (`_primary` dispatch)      | Unchanged — intent router targets the same registered tools                                 |
 | Existing Lillux primitives                           | Unchanged — two new primitives are additions                                                |

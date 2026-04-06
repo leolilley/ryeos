@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:06135583feb69fcbdeb0d97479376fdd3b315b4f29fb6586bdc442210137e1cb:rENdxqAUid2NyR6W3sG4csvJb32ai5m9nYuJMTaNX_XfstuFg3OEFFTjvcSiLJwJhpvtqyYtShyngUmEWqNVBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:e3a4c01b52db8678424464b8d0bda1bea02688e7d8ec42160aef6b0b9fd3cdac:NodgYAUBruVWMXkKC5KdjcX_HMWYodM5YYagL_QmGKvQwRMW4tekmiPdnYJYTs7cMtFsJeOcNKDfJkJS_2cRDw:4b987fd4e40303ac -->
 
 ```yaml
 name: standard-runtimes
@@ -72,7 +72,7 @@ Lillux execution layer
 | **python/function** | Python | In-process | local_binary (same as script) | Pure functions, fast execution |
 | **node/node** | JavaScript/TypeScript | Subprocess | local_binary (`node_modules/.bin/tsx`) | Node.js tools, npm packages |
 | **bash/bash** | Bash/Shell | Subprocess | System binary (`which bash`) | Shell scripts, CLI tools |
-| **rust/runtime** | Rust | Subprocess | system_binary (`lillux-watch`, `lillux-proc`) | Native performance, OS-level operations |
+| **rust/runtime** | Rust | Subprocess | system_binary (`lillux`) | Native performance, OS-level operations |
 | **mcp/stdio** | MCP (stdio protocol) | Subprocess + stdio | N/A (launches MCP server) | MCP servers via stdio |
 | **mcp/http** | MCP (HTTP protocol) | HTTP client | N/A (connects via HTTP) | Remote MCP servers, APIs |
 | **state-graph/runtime** | State graphs | In-process state machine | N/A (orchestration) | Multi-step workflows, graphs |
@@ -340,8 +340,7 @@ echo "$result"
 
 Executes compiled Rust binaries via `system_binary` interpreter resolution. Two binaries ship with Rye OS:
 
-- **`lillux-watch`** — Push-based file watcher for `registry.db`. Uses OS-native watchers (inotify/FSEvents/ReadDirectoryChangesW). CLI: `lillux-watch --db <path> --thread-id <id> --timeout <seconds>`. Prints JSON to stdout.
-- **`lillux-proc`** — Cross-platform process lifecycle manager. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin, cwd, env), `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). All output is JSON to stdout. lillux-proc is a hard dependency — `SubprocessPrimitive.__init__()` raises `ConfigurationError` if it's not on PATH.
+- **`lillux`** — Unified Rust binary. Cross-platform process lifecycle manager. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin, cwd, env), `spawn` (detached process), `kill` (graceful→force), `status` (is-alive). All output is JSON to stdout. lillux is a hard dependency — `ExecutePrimitive.__init__()` raises `ConfigurationError` if it's not on PATH.
 
 ### Config
 
@@ -349,7 +348,7 @@ Executes compiled Rust binaries via `system_binary` interpreter resolution. Two 
 env_config:
   interpreter:
     type: system_binary
-    binary: lillux-watch  # or lillux-proc
+    binary: lillux
     var: LILLUX_WATCH
 ```
 

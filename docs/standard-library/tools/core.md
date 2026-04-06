@@ -55,7 +55,7 @@ Use `space: project` with `trust` to provision a signing key into a bundle's `.a
 
 ## Process Management — `rye/core/processes/`
 
-Tools for managing running processes — graphs, threads, and async tool executions. All processes register in the ThreadRegistry (SQLite at `.ai/agent/threads/registry.db`); these tools query and control them.
+Tools for managing running processes — graphs, threads, and async tool executions. All processes register in the ThreadRegistry (SQLite at `.ai/state/threads/registry.db`); these tools query and control them.
 
 | Tool     | Item ID                       | Description                                            |
 | -------- | ----------------------------- | ------------------------------------------------------ |
@@ -65,11 +65,11 @@ Tools for managing running processes — graphs, threads, and async tool executi
 
 ### `status`
 
-Takes `run_id`. Looks up PID from thread registry, then checks liveness via `SubprocessPrimitive.status(pid)`. Returns `{alive, pid, status, run_id, directive, created_at}`.
+Takes `run_id`. Looks up PID from thread registry, then checks liveness via `ExecutePrimitive.status(pid)`. Returns `{alive, pid, status, run_id, directive, created_at}`.
 
 ### `cancel`
 
-Takes `run_id` and optional `grace` (default 5s). Sends SIGTERM via `SubprocessPrimitive.kill(pid, grace)`. For graph walkers, the SIGTERM triggers a signal handler that performs clean shutdown — persists CAS state as "cancelled", updates registry, writes transcript event, then exits. Updates registry status to "cancelled".
+Takes `run_id` and optional `grace` (default 5s). Sends SIGTERM via `ExecutePrimitive.kill(pid, grace)`. For graph walkers, the SIGTERM triggers a signal handler that performs clean shutdown — persists CAS state as "cancelled", updates registry, writes transcript event, then exits. Updates registry status to "cancelled".
 
 ### `list`
 
@@ -124,11 +124,11 @@ Execute tools and directives on remote ryeos servers. Uses content-addressed sto
 | `threads` | List remote executions |
 | `thread_status` | Get status of a specific remote thread |
 
-Named remotes are configured in `cas/remote.yaml`. TOFU key pinning verifies remote server identity.
+Named remotes are configured in `remotes/remotes.yaml`. TOFU key pinning verifies remote server identity.
 
 ### `remote_config` — `rye/core/remote/remote_config`
 
-Resolve named remotes from `cas/remote.yaml` config. Provides `resolve_remote(name, project_path)` → `RemoteConfig(name, url, api_key)` and `list_remotes(project_path)`.
+Resolve named remotes from `remotes/remotes.yaml` config. Provides `resolve_remote(name, project_path)` → `RemoteConfig(name, url, api_key)` and `list_remotes(project_path)`.
 
 See [Remote Execution](../internals/remote-execution.md) for the full architecture.
 
@@ -251,10 +251,9 @@ The `lib/python/module_loader.py` handles dynamic Python module loading for thre
 
 Low-level YAML configs for system operations:
 
-| Config             | Purpose                                  |
-| ------------------ | ---------------------------------------- |
-| `subprocess.yaml`  | Shell subprocess execution configuration |
-| `http_client.yaml` | HTTP client configuration                |
+| Config         | Purpose                          |
+| -------------- | -------------------------------- |
+| `execute.yaml` | Execution primitive configuration |
 
 ---
 

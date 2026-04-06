@@ -302,7 +302,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
             rel = str(file_path.relative_to(project_path))
             files.append(_ingest_file(file_path, project_path, rel))
 
-    # Plans and lockfiles (use slug: bundle_id with / -> _)
+    # Plans (use slug: bundle_id with / -> _)
     bundle_slug = bundle_id.replace("/", "_")
 
     plans_dir = project_path / AI_DIR / "plans" / bundle_slug
@@ -312,14 +312,6 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
                 continue
             rel = str(file_path.relative_to(project_path))
             files.append(_ingest_file(file_path, project_path, rel))
-
-    lockfiles_dir = project_path / AI_DIR / "lockfiles"
-    if lockfiles_dir.is_dir():
-        prefix = f"{bundle_slug}_"
-        for file_path in sorted(lockfiles_dir.iterdir()):
-            if file_path.is_file() and file_path.name.startswith(prefix):
-                rel = str(file_path.relative_to(project_path))
-                files.append(_ingest_file(file_path, project_path, rel))
 
     return files
 

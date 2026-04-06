@@ -130,7 +130,7 @@ Items in `over` can be dicts, enabling dotted access: if `task` is `{text: "..."
 State graphs follow the same execution chain pattern as any Rye tool:
 
 ```
-graph tool YAML  →  state-graph/runtime  →  subprocess primitive
+graph tool YAML  →  state-graph/runtime  →  execute primitive
 (nodes/edges)       (walks graph,              (runs the walker
                      dispatches rye_execute)     Python script)
 ```
@@ -525,8 +525,8 @@ The background process:
 
 - Detaches a background process that runs independently of the caller
 - Runs the graph to completion, updating the thread registry
-- Writes stderr to `.ai/agent/threads/<graph_run_id>/async.log` for debugging
-- Emits events to `.ai/agent/threads/<graph_run_id>/transcript.jsonl` (JSONL event log)
+- Writes stderr to `.ai/state/threads/<graph_run_id>/async.log` for debugging
+- Emits events to `.ai/state/threads/<graph_run_id>/transcript.jsonl` (JSONL event log)
 - Re-renders `.ai/knowledge/agent/threads/<graph_id>/<graph_run_id>.md` (signed knowledge markdown) at each step
 - Updates registry status to `completed` or `error` on finish
 
@@ -534,7 +534,7 @@ Monitor progress three ways:
 
 ```bash
 # 1. Raw event stream
-tail -f .ai/agent/threads/<graph_run_id>/transcript.jsonl
+tail -f .ai/state/threads/<graph_run_id>/transcript.jsonl
 
 # 2. Visual state + history (re-rendered at each step)
 cat .ai/knowledge/agent/threads/<graph_id>/<graph_run_id>.md
@@ -666,7 +666,7 @@ During execution, the walker prints one-line progress messages to stderr:
 
 ### JSONL Event Log
 
-**Path:** `{project}/.ai/agent/threads/{graph_run_id}/transcript.jsonl`
+**Path:** `{project}/.ai/state/threads/{graph_run_id}/transcript.jsonl`
 
 An append-only log of graph lifecycle events. Each line is a JSON object:
 
@@ -706,7 +706,7 @@ The file is signed via `MetadataManager.create_signature` after each re-render.
 **Raw event stream** — watch events as they happen:
 
 ```bash
-tail -f .ai/agent/threads/<graph_run_id>/transcript.jsonl
+tail -f .ai/state/threads/<graph_run_id>/transcript.jsonl
 ```
 
 **Visual state + history** — human-readable snapshot (re-rendered at each step):
@@ -808,7 +808,7 @@ Graph execution persists immutable snapshots to the [Content-Addressed Store](..
 
 ### Refs
 
-Mutable pointers at `.ai/objects/refs/graphs/<graph_run_id>.json` point to the latest `ExecutionSnapshot` hash for each run. Only refs are mutable — everything they point to is immutable.
+Mutable pointers at `.ai/state/objects/refs/graphs/<graph_run_id>.json` point to the latest `ExecutionSnapshot` hash for each run. Only refs are mutable — everything they point to is immutable.
 
 ### Retrace
 
@@ -823,7 +823,7 @@ Cross-run provenance: same `node_input_hash` across runs = same inputs.
 
 ## Node Caching
 
-Nodes can opt into execution caching with `cache_result: true`. When enabled, the walker computes a deterministic cache key from the interpolated action, graph hash, lockfile hash, and config snapshot hash. If the cache key matches a previous execution, the cached result is used without re-execution.
+Nodes can opt into execution caching with `cache_result: true`. When enabled, the walker computes a deterministic cache key from the interpolated action, graph hash, and config snapshot hash. If the cache key matches a previous execution, the cached result is used without re-execution.
 
 ```yaml
 nodes:

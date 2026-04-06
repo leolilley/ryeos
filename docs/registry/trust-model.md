@@ -311,12 +311,7 @@ All three files must be signed and verified before `my-tool.py` executes.
 
 ### Lockfile Integrity
 
-When a lockfile exists for a tool, the executor performs additional checks:
-
-1. **Root integrity** — The lockfile's recorded hash for the root tool must match the current file's computed hash
-2. **Chain element integrity** — Every chain element recorded in the lockfile must still exist and have the same hash
-
-If any hash mismatches, execution fails with a message to re-sign and delete the stale lockfile.
+Chain integrity is verified on every execution — the executor computes hashes for each chain element and verifies Ed25519 signatures. Any hash mismatch or unsigned item causes execution to fail with a message to re-sign.
 
 ### Dependency Verification
 

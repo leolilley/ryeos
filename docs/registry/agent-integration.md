@@ -244,7 +244,7 @@ rye_execute(
 3. **Write all files** — Each file is written to its relative path (e.g., `.ai/tools/rye/core/registry/registry.py`)
 4. **Verify manifest** — `verify_item(manifest_path, ItemType.TOOL)` checks the manifest's Ed25519 signature
 5. **Verify per-file hashes** — The bundler's `validate_bundle_manifest()` re-ingests each file via CAS and compares the `object_hash` to the manifest's recorded hash
-6. **Write lockfile** — Creates `.ai/bundles/{bundle_id}/.bundle-lock.json` recording installed files for clean uninstall
+6. **Write install receipt** — Creates `.ai/bundles/{bundle_id}/install-receipt.json` recording installed files for clean uninstall
 
 ### CLI Installation (Preferred)
 

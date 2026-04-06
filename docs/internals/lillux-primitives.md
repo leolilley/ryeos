@@ -1,9 +1,9 @@
 ```yaml
 id: lillux-primitives
 title: "Lillux Primitives & Rye Runtime Modules"
-description: The microkernel layer — subprocess, signing, and integrity — plus runtime modules that moved from Lillux to Rye
+description: The microkernel layer — execute, signing, and integrity — plus runtime modules that moved from Lillux to Rye
 category: internals
-tags: [lillux, primitives, microkernel, subprocess, rye, runtime]
+tags: [lillux, primitives, microkernel, execute, rye, runtime]
 version: "1.1.0"
 ```
 
@@ -13,39 +13,39 @@ Lillux is the microkernel layer of Rye OS. It provides stateless, async-first pr
 
 All Lillux code lives in `lillux/kernel/`.
 
-> **Note:** As part of the kernel/userspace separation, several modules that were previously Lillux primitives have moved to Rye. Specifically, `http_client`, `lockfile`, `env_resolver`, `auth`, and `schema_validator` now live under `rye/runtime/` or `rye/schemas/`. These were always userspace concerns — networking, file I/O metadata, environment resolution, and authentication policy — and are now properly located in the Rye layer.
+> **Note:** As part of the kernel/userspace separation, several modules that were previously Lillux primitives have moved to Rye. Specifically, `env_resolver`, `auth`, and `schema_validator` now live under `rye/runtime/` or `rye/schemas/`. These were always userspace concerns — environment resolution, and authentication policy — and are now properly located in the Rye layer.
 
-## SubprocessPrimitive
+## ExecutePrimitive
 
-**Location:** `lillux/primitives/subprocess.py`
+**Location:** `lillux/primitives/execute.py`
 
-Unified process management primitive. All process operations — inline execution, detached spawning, killing, and status checks — go through the `lillux-proc` Rust binary. No POSIX fallbacks.
+Unified process management primitive. All process operations — inline execution, detached spawning, killing, and status checks — go through the `lillux` Rust binary. No POSIX fallbacks.
 
-### Hard Dependency: lillux-proc
+### Hard Dependency: lillux
 
-`SubprocessPrimitive.__init__()` resolves `lillux-proc` via `shutil.which()`. If the binary is not found on `$PATH`, it raises `ConfigurationError`. This is intentional — lillux-proc is a hard requirement for all process operations.
+`ExecutePrimitive.__init__()` resolves `lillux` via `shutil.which()`. If the binary is not found on `$PATH`, it raises `ConfigurationError`. This is intentional — lillux is a hard requirement for all process operations.
 
 ```python
-class SubprocessPrimitive:
+class ExecutePrimitive:
     def __init__(self):
-        self._lillux_proc = shutil.which("lillux-proc")
-        if not self._lillux_proc:
-            raise ConfigurationError("lillux-proc binary not found on PATH.")
+        self._lillux = shutil.which("lillux")
+        if not self._lillux:
+            raise ConfigurationError("lillux binary not found on PATH.")
 ```
 
-### lillux-proc CLI Flags
+### lillux CLI Flags
 
 | Flag            | Subcommand | Description                                                                 |
 | --------------- | ---------- | --------------------------------------------------------------------------- |
 | `--stdin-pipe`  | `exec`     | Read stdin data from the process's real stdin instead of a `--stdin` argument. Avoids the 128KB per-argument OS limit. |
 
-Environment variables are no longer passed as `--env` CLI arguments. Instead, lillux-proc inherits the environment from its parent process (set via `asyncio.create_subprocess_exec(env=...)`).
+Environment variables are no longer passed as `--env` CLI arguments. Instead, lillux inherits the environment from its parent process (set via `asyncio.create_subprocess_exec(env=...)`).
 
 ### Interface
 
 ```python
-class SubprocessPrimitive:
-    async def execute(self, config: Dict, params: Dict) -> SubprocessResult
+class ExecutePrimitive:
+    async def execute(self, config: Dict, params: Dict) -> ExecuteResult
     async def spawn(self, cmd, args, log_path=None, envs=None) -> SpawnResult
     async def kill(self, pid, grace=3.0) -> KillResult
     async def status(self, pid) -> StatusResult
@@ -53,11 +53,11 @@ class SubprocessPrimitive:
 
 ### execute() — Inline Run-and-Wait
 
-Delegates to `lillux-proc exec`. Two-stage templating (env vars then runtime params) stays in Python; the actual process execution is handled by lillux-proc.
+Delegates to `lillux exec`. Two-stage templating (env vars then runtime params) stays in Python; the actual process execution is handled by lillux.
 
-When `input_data` is provided, it is piped through real stdin (via the `--stdin-pipe` flag on lillux-proc) rather than passed as a `--stdin` CLI argument. This avoids the 128KB per-argument OS limit that would cause failures with large payloads.
+When `input_data` is provided, it is piped through real stdin (via the `--stdin-pipe` flag on lillux) rather than passed as a `--stdin` CLI argument. This avoids the 128KB per-argument OS limit that would cause failures with large payloads.
 
-Environment variables are passed via the `env` parameter to `asyncio.create_subprocess_exec()` so that lillux-proc inherits them from its parent process, rather than serialized as `--env` CLI arguments. This avoids `E2BIG` errors when the combined environment + arguments would exceed OS limits.
+Environment variables are passed via the `env` parameter to `asyncio.create_subprocess_exec()` so that lillux inherits them from its parent process, rather than serialized as `--env` CLI arguments. This avoids `E2BIG` errors when the combined environment + arguments would exceed OS limits.
 
 **Config keys:**
 
@@ -72,7 +72,7 @@ Environment variables are passed via the `env` parameter to `asyncio.create_subp
 
 ### spawn() — Detached Process
 
-Delegates to `lillux-proc spawn`. Returns immediately with a PID.
+Delegates to `lillux spawn`. Returns immediately with a PID.
 
 ```python
 result = await primitive.spawn("python", ["worker.py"], log_path="/tmp/worker.log")
@@ -81,7 +81,7 @@ result = await primitive.spawn("python", ["worker.py"], log_path="/tmp/worker.lo
 
 ### kill() — Graceful Then Force
 
-Delegates to `lillux-proc kill`. Sends SIGTERM, waits `grace` seconds, then SIGKILL.
+Delegates to `lillux kill`. Sends SIGTERM, waits `grace` seconds, then SIGKILL.
 
 ```python
 result = await primitive.kill(12345, grace=3.0)
@@ -90,7 +90,7 @@ result = await primitive.kill(12345, grace=3.0)
 
 ### status() — Is Process Alive
 
-Delegates to `lillux-proc status`.
+Delegates to `lillux status`.
 
 ```python
 result = await primitive.status(12345)
@@ -106,7 +106,7 @@ Both stages run on `command`, `args`, `cwd`, and `input_data` within `execute()`
 
 ### Environment Merge Heuristic
 
-The merged environment dict is passed to `asyncio.create_subprocess_exec(env=...)` so that lillux-proc inherits it directly. This replaces the previous approach of passing individual `--env KEY=VALUE` CLI arguments, which could trigger `E2BIG` errors when the total argument size exceeded OS limits.
+The merged environment dict is passed to `asyncio.create_subprocess_exec(env=...)` so that lillux inherits it directly. This replaces the previous approach of passing individual `--env KEY=VALUE` CLI arguments, which could trigger `E2BIG` errors when the total argument size exceeded OS limits.
 
 ```python
 if len(config_env) < 50:
@@ -122,7 +122,7 @@ else:
 
 ```python
 @dataclass
-class SubprocessResult:
+class ExecuteResult:
     success: bool       # True if return code is 0
     stdout: str         # Standard output
     stderr: str         # Standard error
@@ -150,102 +150,16 @@ class StatusResult:
 
 ### Timeout Handling
 
-lillux-proc handles timeouts natively. On timeout, the child process is killed and a `SubprocessResult` is returned with `success=False` and stderr `"Command timed out after {timeout} seconds"`.
+lillux handles timeouts natively. On timeout, the child process is killed and an `ExecuteResult` is returned with `success=False` and stderr `"Command timed out after {timeout} seconds"`.
 
 ### Error Cases
 
 | Condition            | Return Code | Stderr                                        |
 | -------------------- | ----------- | --------------------------------------------- |
-| lillux-proc not on PATH | N/A         | `ConfigurationError` raised at `__init__`     |
+| lillux not on PATH      | N/A         | `ConfigurationError` raised at `__init__`     |
 | Command not found    | -1          | `"Failed to spawn: {error}"`                 |
 | Timeout              | -1          | `"Command timed out after {timeout} seconds"` |
 | No command specified | -1          | `"No command specified"`                      |
-
-## HttpClientPrimitive
-
-**Location:** `rye/runtime/http_client.py`
-
-Makes HTTP requests with retry logic, authentication, and SSE streaming support. Uses `httpx` for async HTTP with connection pooling.
-
-### Interface
-
-```python
-class HttpClientPrimitive:
-    async def execute(self, config: Dict, params: Dict) -> HttpResult
-```
-
-### Modes
-
-**Sync mode** (`mode: "sync"`, default):
-
-Standard request/response. Config keys:
-
-| Key       | Type | Default  | Description                                                   |
-| --------- | ---- | -------- | ------------------------------------------------------------- |
-| `method`  | str  | `"GET"`  | HTTP method                                                   |
-| `url`     | str  | required | Request URL (supports `{param}` templating)                   |
-| `headers` | dict | `{}`     | Request headers                                               |
-| `body`    | any  | None     | Request body (JSON-serialized for POST/PUT/PATCH)             |
-| `timeout` | int  | `30`     | Request timeout in seconds                                    |
-| `retry`   | dict | `{}`     | Retry config: `max_attempts`, `backoff` (exponential/linear)  |
-| `auth`    | dict | `{}`     | Auth config: `type` (bearer/api_key), `token`/`key`, `header` |
-
-**Stream mode** (`mode: "stream"`):
-
-SSE streaming with destination fan-out. Reads `data:` lines from the response and dispatches to sink objects. Supports `ReturnSink` for buffering events into the result.
-
-### Authentication
-
-```yaml
-# Bearer token:
-auth:
-  type: bearer
-  token: "${API_KEY}"
-
-# API key header:
-auth:
-  type: api_key
-  key: "${API_KEY}"
-  header: X-API-Key  # default
-```
-
-Environment variables in auth values are resolved via `${VAR:-default}` syntax.
-
-### Retry Logic
-
-```yaml
-retry:
-  max_attempts: 3
-  backoff: exponential # 1s, 2s, 4s...
-```
-
-Retries on `TimeoutException`, `ConnectError`, and `RequestError`. Exponential backoff uses `2^attempt` seconds.
-
-### Result
-
-```python
-@dataclass
-class HttpResult:
-    success: bool          # True if 200 <= status < 400
-    status_code: int
-    body: Any              # Parsed JSON or raw text
-    headers: Dict[str, str]
-    duration_ms: int
-    error: Optional[str]   # None on success, "HTTP {code}: {reason}" on failure
-    stream_events_count: Optional[int]     # For stream mode
-    stream_destinations: Optional[List[str]]  # Sink class names
-```
-
-### Connection Pooling
-
-The HTTP client is lazily initialized and reused:
-
-```python
-httpx.AsyncClient(
-    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
-    timeout=httpx.Timeout(30.0),
-)
-```
 
 ## Signing Primitives
 
@@ -301,42 +215,6 @@ json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 ```
 
 This guarantees the same input always produces the same hash, regardless of dict ordering or whitespace in the original data.
-
-## Lockfile I/O
-
-**Location:** `rye/runtime/lockfile.py`
-
-Pure lockfile I/O with explicit paths. No path resolution, no creation logic — that's handled by Rye's `LockfileResolver`.
-
-### Data Structures
-
-```python
-@dataclass
-class LockfileRoot:
-    tool_id: str       # Tool identifier
-    version: str       # Semver
-    integrity: str     # SHA256 hash
-
-@dataclass
-class Lockfile:
-    lockfile_version: int            # Format version (currently 1)
-    generated_at: str                # ISO timestamp
-    root: LockfileRoot               # Root tool metadata
-    resolved_chain: List[Any]        # Chain element dicts with integrity hashes
-    registry: Optional[Dict]         # Optional registry metadata
-    verified_deps: Optional[Dict]    # Optional dependency verification hashes
-```
-
-### LockfileManager
-
-```python
-class LockfileManager:
-    def load(self, path: Path) -> Lockfile    # Load and validate JSON structure
-    def save(self, lockfile: Lockfile, path: Path) -> Path  # Save as indented JSON
-    def exists(self, path: Path) -> bool      # Check existence
-```
-
-The manager validates required fields on load (`lockfile_version`, `generated_at`, `root`, `resolved_chain`) and raises `LockfileError` for invalid structure.
 
 ## EnvResolver
 

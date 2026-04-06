@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:f20119fb13d64facded0b48d8fe719ef700561976da3857814e0adba3a1ad3f9:nHSnDYFCVfcZXsREMnID8lGYGdQNFBDhMOeex0BGZiq9UJlsoNrpj8rEhFKfnlQ6fSJ-Oyuapqx2YlsSMKG5AA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:2fb8b0101ef6d5296aa3ecec9a9658ffd812840270cf10b60eb335bf0490ce11:Xmo9d23ObszczIN5CMBAJsb6rH0giFCVzvdC8k4Nrjwg1xPAK4V19XYfvLmD_Amf3CHCnHhd3X_0MlG3x_wcBA:4b987fd4e40303ac -->
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -217,7 +217,7 @@ my_node:
 
 **When NOT to use:** Nodes that write files, mutate state on disk, or produce outputs consumed by downstream nodes via the filesystem. A cache hit returns the prior result but skips re-execution, so files won't be created/updated.
 
-Cache key is computed from: `graph_hash + node_name + interpolated_action + lockfile_hash + config_snapshot_hash`. Cache entries are stored as CAS objects in `.ai/objects/cache/nodes/`.
+Cache key is computed from: `graph_hash + node_name + interpolated_action + config_snapshot_hash`. Cache entries are stored as CAS objects in `.ai/state/objects/cache/nodes/`.
 
 ## Error Visibility (`completed_with_errors`)
 
@@ -284,7 +284,7 @@ This handles context-limit handoffs transparently — the walker doesn't impleme
 
 1. Pre-generates `graph_run_id` and pre-registers in thread registry
 2. Forks via `os.fork()`, child calls `os.setsid()` to daemonize
-3. Child redirects stderr → `.ai/agent/threads/<graph_run_id>/async.log`, stdout → `/dev/null`
+3. Child redirects stderr → `.ai/state/threads/<graph_run_id>/async.log`, stdout → `/dev/null`
 4. Parent returns immediately: `{success, graph_run_id, graph_id, status: "running", pid}`
 5. Child runs `execute()` to completion, updates registry status
 
@@ -301,7 +301,7 @@ The CLI is a thin parameter translator — it constructs the same `walker.run_sy
 
 ## Cancellation
 
-The walker checks for a `cancel` sentinel file at `.ai/agent/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
+The walker checks for a `cancel` sentinel file at `.ai/state/threads/<graph_run_id>/cancel` after each step. If found, persists state as `cancelled` and returns.
 
 ## Streaming Progress
 

@@ -11,24 +11,24 @@ class TestComputeCacheKey:
     """Test cache key computation."""
 
     def test_deterministic(self):
-        k1 = compute_cache_key("gh", "node1", {"item_type": "tool"}, None, "cs")
-        k2 = compute_cache_key("gh", "node1", {"item_type": "tool"}, None, "cs")
+        k1 = compute_cache_key("gh", "node1", {"item_type": "tool"}, "cs")
+        k2 = compute_cache_key("gh", "node1", {"item_type": "tool"}, "cs")
         assert k1 == k2
         assert len(k1) == 64
 
     def test_different_action_different_key(self):
-        k1 = compute_cache_key("gh", "node1", {"item_id": "a"}, None, "cs")
-        k2 = compute_cache_key("gh", "node1", {"item_id": "b"}, None, "cs")
+        k1 = compute_cache_key("gh", "node1", {"item_id": "a"}, "cs")
+        k2 = compute_cache_key("gh", "node1", {"item_id": "b"}, "cs")
         assert k1 != k2
 
     def test_different_node_different_key(self):
-        k1 = compute_cache_key("gh", "node1", {"item_id": "a"}, None, "cs")
-        k2 = compute_cache_key("gh", "node2", {"item_id": "a"}, None, "cs")
+        k1 = compute_cache_key("gh", "node1", {"item_id": "a"}, "cs")
+        k2 = compute_cache_key("gh", "node2", {"item_id": "a"}, "cs")
         assert k1 != k2
 
     def test_different_config_different_key(self):
-        k1 = compute_cache_key("gh", "n", {}, None, "cs1")
-        k2 = compute_cache_key("gh", "n", {}, None, "cs2")
+        k1 = compute_cache_key("gh", "n", {}, "cs1")
+        k2 = compute_cache_key("gh", "n", {}, "cs2")
         assert k1 != k2
 
 
@@ -38,13 +38,15 @@ class TestCacheLookupStore:
     def test_miss_returns_none(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
-            (project / ".ai" / "objects" / "cache" / "nodes").mkdir(parents=True)
+            (project / ".ai" / "state" / "objects" / "cache" / "nodes").mkdir(
+                parents=True
+            )
             assert cache_lookup("nonexistent", project) is None
 
     def test_store_then_lookup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
-            (project / ".ai" / "objects").mkdir(parents=True)
+            (project / ".ai" / "state" / "objects").mkdir(parents=True)
 
             result = {"status": "ok", "data": "hello"}
             result_hash = cache_store("testkey", result, project, "node1", 100)
@@ -60,7 +62,7 @@ class TestCacheLookupStore:
         """Verify that cache_store works for error results too (caller decides)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
-            (project / ".ai" / "objects").mkdir(parents=True)
+            (project / ".ai" / "state" / "objects").mkdir(parents=True)
 
             result = {"status": "error", "error": "failed"}
             result_hash = cache_store("errkey", result, project, "node1", 50)

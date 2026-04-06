@@ -35,7 +35,7 @@ The `.ai/` directory is a portable data bundle that gives AI agents structured a
 │       ├── websearch.yaml
 │       └── browser.json
 ├── bundles/              # Bundle manifests
-├── lockfiles/            # Integrity pinning
+├── state/                # Runtime state (gitignored)
 ├── threads/              # Thread execution state (auto-generated at runtime)
 └── outputs/              # Tool output artifacts (auto-generated at runtime)
 ```
@@ -53,7 +53,7 @@ The `.ai/` directory is a portable data bundle that gives AI agents structured a
 | Directory    | Purpose                                                                                                                         |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | `bundles/`   | Bundle manifests (`manifest.yaml`) that declare which items belong to a bundle, with SHA-256 hashes for integrity verification. |
-| `lockfiles/` | Integrity pinning files that lock item versions and hashes.                                                                     |
+| `state/` | Runtime state — threads, graphs, CAS objects, and cache. Auto-generated and gitignored.                                          |
 | `threads/`   | Auto-generated at runtime. Stores thread execution state when directives run as threaded workflows.                             |
 | `outputs/`   | Auto-generated at runtime. Stores artifacts produced by tool executions.                                                        |
 

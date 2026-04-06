@@ -1,4 +1,4 @@
-# rye:signed:2026-02-26T05:12:54Z:10dcac9fa59f041bf26e65bdcc2347d16fefa83d0480ac761d30edf2c2d99f3e:XOnCROvv_Kq1WVfRfvEcsLZRKoAnpOHejJNrvqgZ_lxpgsBYNxXhcXCOAS5w7XN_yT8GfVUY1OI1xDZWNccvDQ==:4b987fd4e40303ac
+# rye:unsigned
 bundle:
   id: rye-core
   version: 0.1.3
@@ -115,11 +115,8 @@ files:
   .ai/tools/rye/core/primitives/__init__.py:
     sha256: 9bf7cb84c2817d941b3ec889bbdef059ee21c07309a3a2e6f883bcbffb88a5fc
     inline_signed: true
-  .ai/tools/rye/core/primitives/http_client.yaml:
-    sha256: 41b64a96b07d2d4cec41963702437a0af1cb360243c05ac3ebd9dc95c2ec257a
-    inline_signed: true
-  .ai/tools/rye/core/primitives/subprocess.yaml:
-    sha256: 4b11e28930ec9051c199722b20944e07cff39d840a4eefe9724055f48e9cf755
+  .ai/tools/rye/core/primitives/execute.yaml:
+    sha256: 0000000000000000000000000000000000000000000000000000000000000000
     inline_signed: true
   .ai/tools/rye/core/registry/__init__.py:
     sha256: 4c4c9e9e50834f4f5e11eb0dde8f62c390d8462aebd12a944bfc48079c1d0566

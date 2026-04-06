@@ -4,7 +4,7 @@
 Resolves remote connection details (URL + API key) via 3-tier config
 resolution (system → user → project).
 
-Config path: .ai/config/cas/remote.yaml
+Config path: .ai/config/remotes/remotes.yaml
 """
 
 __version__ = "1.0.0"
@@ -20,7 +20,7 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_REL_PATH = "cas/remote.yaml"
+_CONFIG_REL_PATH = "remotes/remotes.yaml"
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ def resolve_remote(
     """Resolve a named remote to connection details.
 
     Looks up *name* (default: ``"default"``) in the merged ``remotes:``
-    map from ``cas/remote.yaml``.
+    map from ``remotes/remotes.yaml``.
 
     Raises:
         ValueError: If remote cannot be resolved.
@@ -58,7 +58,7 @@ def resolve_remote(
 
     if name not in remotes:
         raise ValueError(
-            f"Remote '{name}' not found in cas/remote.yaml. "
+            f"Remote '{name}' not found in remotes/remotes.yaml. "
             f"Available remotes: {list(remotes.keys()) or ['(none)']}"
         )
 
@@ -71,7 +71,7 @@ def resolve_remote(
     url = entry.get("url", "")
     if not url:
         raise ValueError(
-            f"Remote '{name}' has no url configured in cas/remote.yaml"
+            f"Remote '{name}' has no url configured in remotes/remotes.yaml"
         )
     node_id = entry.get("node_id", "")
     return RemoteConfig(name=name, url=url, node_id=node_id)

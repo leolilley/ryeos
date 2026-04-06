@@ -78,7 +78,7 @@ Use asynchronous execution when spawning multiple children that can run in paral
 
 **How async works internally:** There are two async paths depending on the execution mode:
 
-- **Directive + fork + async:** `execute directive` delegates to `thread_directive`, which spawns itself as a detached child process via `launch_detached()` (using the `lillux-proc spawn` Rust binary). The child rebuilds all state from scratch — no inherited in-process state. The parent returns immediately with the `thread_id` and `pid`.
+- **Directive + fork + async:** `execute directive` delegates to `thread_directive`, which spawns itself as a detached child process via `launch_detached()` (using the `lillux exec spawn` Rust binary). The child rebuilds all state from scratch — no inherited in-process state. The parent returns immediately with the `thread_id` and `pid`.
 
 - **Tool + async or remote + async:** `execute` calls `_launch_async()`, which generates a UUID-based thread_id, registers in the ThreadRegistry (SQLite), and spawns `async_runner.py` as a detached child via `launch_detached()`. The child reads the execution payload from stdin, calls `ExecuteTool.handle()`, and updates the ThreadRegistry on completion. Results are stored via `registry.set_result()`.
 
@@ -184,7 +184,7 @@ rye_execute(
 
 - **In-process threads:** Each thread has an `asyncio.Event`. `wait_threads` awaits the event with `asyncio.wait_for(event.wait(), timeout)`. When `runner.run()` completes, it calls `complete_thread()` which sets the event.
 
-- **Cross-process threads (async):** The child runs in a separate process — no shared event. `wait_threads` uses the `lillux-watch` Rust binary for push-based file watching (inotify/FSEvents/ReadDirectoryChangesW) on the registry, with a 500ms polling fallback.
+- **Cross-process threads (async):** The child runs in a separate process — no shared event. `wait_threads` uses the `lillux` binary for push-based file watching (inotify/FSEvents/ReadDirectoryChangesW) on the registry, with a 500ms polling fallback.
 
 - **Continuation chains:** Before waiting, `resolve_thread_chain()` follows any `continued` → `continued` → ... links to find the terminal thread. This means if a thread was handed off, waiting on the original ID still works correctly.
 
@@ -299,7 +299,7 @@ rye_execute(
 )
 ```
 
-Uses `lillux-proc kill` (cross-platform Rust binary) to terminate the process, with a POSIX `os.kill` fallback. Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then escalates to `SIGKILL` if the process is still alive.
+Uses `lillux exec kill` (cross-platform Rust binary) to terminate the process, with a POSIX `os.kill` fallback. Sends `SIGTERM`, waits 3 seconds for graceful shutdown, then escalates to `SIGKILL` if the process is still alive.
 
 ## Remote Execution
 
@@ -317,7 +317,7 @@ rye_execute(
 
 The remote server materializes a `.ai/` directory from CAS manifests, runs the executor, and returns results. Objects are synced by hash — only missing objects cross the wire.
 
-Named remotes are configured in `cas/remote.yaml`. Use `"remote:name"` to target a specific server (e.g., `"remote:gpu"` for GPU workloads). See [Remote Execution](../internals/remote-execution.md) for the full architecture.
+Named remotes are configured in `remotes/remotes.yaml`. Use `"remote:name"` to target a specific server (e.g., `"remote:gpu"` for GPU workloads). See [Remote Execution](../internals/remote-execution.md) for the full architecture.
 
 ### Per-Node Remote Dispatch
 

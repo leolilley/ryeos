@@ -28,8 +28,8 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` (system space). You ca
 │   └── lib/                             # Shared Python runtime libraries
 ├── rust/
 │   ├── runtime.yaml                     # Rust binary runtime
-│   ├── lillux-proc/                      # Process lifecycle manager
-│   └── lillux-watch/                     # Push-based registry watcher (src/)
+│   ├── lillux/                            # Process lifecycle manager
+│   └── (lillux binary handles all Rust operations)
 └── state-graph/
     ├── runtime.yaml                     # Walk declarative graph YAML
     └── walker.py                        # Graph walking engine
@@ -295,7 +295,7 @@ A custom runtime is just a YAML file in `.ai/tools/rye/core/runtimes/`:
 # .ai/tools/rye/core/runtimes/ruby_runtime.yaml
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes
 description: "Ruby runtime — executes Ruby scripts with bundler support"
 
@@ -387,11 +387,11 @@ rye_execute my/ruby_example --name Alice
 # rye/core/runtimes/python/function
 # Fastest option: imports Python module and calls execute() directly
 # Use for: pure Python logic, compute-heavy tasks, no subprocess needed
-# Executor: rye/core/primitives/subprocess (uses inline Python code)
+# Executor: rye/core/primitives/execute (uses inline Python code)
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/python
 description: "Python function runtime - calls execute(params, project_path) in-process"
 
@@ -461,11 +461,11 @@ config_schema:
 # rye/core/runtimes/python/script
 # Runs Python tool with __main__ entry point
 # Use for: subprocess isolation, long-running tasks, I/O, subprocess commands
-# Executor: rye/core/primitives/subprocess
+# Executor: rye/core/primitives/execute
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/python
 description: "Python script runtime - runs Python scripts with __main__ entry point"
 
@@ -531,11 +531,11 @@ config_schema:
 # rye/core/runtimes/node/node
 # Runs JavaScript/TypeScript with Node.js
 # Use for: JavaScript tools, TypeScript (via tsx), Node ecosystem
-# Executor: rye/core/primitives/subprocess
+# Executor: rye/core/primitives/execute
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/node
 description: "Node.js runtime executor - runs JavaScript/TypeScript with Node interpreter resolution"
 
@@ -599,11 +599,11 @@ config_schema:
 # rye/core/runtimes/bash/bash
 # Executes shell commands via /bin/bash
 # Use for: shell scripts, system administration, CLI composition, jq pipes
-# Executor: rye/core/primitives/subprocess
+# Executor: rye/core/primitives/execute
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/bash
 description: "Bash runtime - executes shell commands directly"
 
@@ -635,11 +635,11 @@ config_schema:
 # rye/core/runtimes/mcp/http
 # Calls MCP tools via HTTP/SSE transport
 # Use for: external MCP servers, long-lived HTTP connections, streaming
-# Executor: rye/core/primitives/subprocess (launches connect.py)
+# Executor: rye/core/primitives/execute (launches connect.py)
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/mcp
 description: "MCP HTTP runtime - executes MCP tools via HTTP transport"
 
@@ -689,11 +689,11 @@ config_schema:
 # rye/core/runtimes/mcp/stdio
 # Spawns MCP servers and calls tools via stdin/stdout
 # Use for: local MCP servers, lightweight stdio transports
-# Executor: rye/core/primitives/subprocess (launches connect.py)
+# Executor: rye/core/primitives/execute (launches connect.py)
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/mcp
 description: "MCP stdio runtime - executes MCP tools via stdio transport"
 
@@ -739,27 +739,26 @@ config_schema:
 
 ### Rust Runtime
 
-The Rust runtime executes compiled Rust binaries found on `$PATH`. It ships two binaries:
+The Rust runtime executes the `lillux` Rust binary found on `$PATH`:
 
-- **`lillux-watch`**: Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the orchestrator's `_poll_registry` as a push-based alternative to polling.
-- **`lillux-proc`**: Cross-platform process lifecycle manager with subcommands `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), and `status` (is-alive check). All process operations in `SubprocessPrimitive` delegate to lillux-proc — it is a hard dependency (no POSIX fallbacks).
+- **`lillux`**: Unified Rust binary. Subcommands include `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), `status` (is-alive check), plus `cas`, `sign`, `verify`, `keypair`, `envelope`, and `time`. All process operations in `ExecutePrimitive` delegate to lillux — it is a hard dependency (no POSIX fallbacks).
 
 ```yaml
 # rye/core/runtimes/rust/runtime
 # Executes compiled Rust binaries found on PATH
 # Use for: cross-platform process management, file watching, performance-critical operations
-# Executor: rye/core/primitives/subprocess
+# Executor: rye/core/primitives/execute
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/rust
 description: "Rust runtime — executes compiled Rust binaries found on PATH"
 
 env_config:
   interpreter:
     type: system_binary
-    binary: lillux-watch
+    binary: lillux
     var: LILLUX_WATCH
   env:
     RUST_BACKTRACE: "0"
@@ -782,11 +781,11 @@ config:
 # rye/core/runtimes/state-graph/runtime
 # Walks declarative graph YAML, dispatching rye_execute for each node
 # Use for: declarative workflows, condition branches, node-by-node execution
-# Executor: rye/core/primitives/subprocess
+# Executor: rye/core/primitives/execute
 
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/state-graph
 description: "State graph runtime — walks graph YAML tools, dispatching rye_execute for each node"
 

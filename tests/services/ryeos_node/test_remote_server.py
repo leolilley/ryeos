@@ -112,7 +112,7 @@ TEST_PRINCIPAL = Principal(
 def cas_env(tmp_path):
     """Set up temp CAS, override auth + settings, yield (TestClient, user_cas_root, tmp_path)."""
     cas_base = tmp_path / "cas"
-    user_cas = cas_base / "test-user" / ".ai" / "objects"
+    user_cas = cas_base / "test-user" / ".ai" / "state" / "objects"
     user_cas.mkdir(parents=True)
 
     signing_dir = tmp_path / "signing"
@@ -639,7 +639,7 @@ class TestRequestLimits:
     def test_body_exceeds_limit(self, tmp_path):
         """POST body > limit → 413."""
         cas_base = tmp_path / "cas"
-        user_cas = cas_base / "test-user" / ".ai" / "objects"
+        user_cas = cas_base / "test-user" / ".ai" / "state" / "objects"
         user_cas.mkdir(parents=True)
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
@@ -658,7 +658,7 @@ class TestRequestLimits:
     def test_user_quota_exceeded(self, tmp_path):
         """User CAS > quota → 507 on put_objects."""
         cas_base = tmp_path / "cas"
-        user_cas = cas_base / "test-user" / ".ai" / "objects"
+        user_cas = cas_base / "test-user" / ".ai" / "state" / "objects"
         user_cas.mkdir(parents=True)
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
@@ -684,7 +684,7 @@ class TestRequestLimits:
     def test_request_no_content_length(self, tmp_path):
         """POST without Content-Length header, body > limit → 413."""
         cas_base = tmp_path / "cas"
-        user_cas = cas_base / "test-user" / ".ai" / "objects"
+        user_cas = cas_base / "test-user" / ".ai" / "state" / "objects"
         user_cas.mkdir(parents=True)
         signing_dir = tmp_path / "signing"
         signing_dir.mkdir()
@@ -728,7 +728,7 @@ class TestRequestLimits:
 
         user = Principal(fingerprint="test-user", scopes=["*"], owner="tester")
         small_settings = _make_settings(
-            root.parent.parent.parent,  # cas_base
+            tmp_path / "cas",
             tmp_path / "signing",
             max_user_storage_bytes=1024,
         )
@@ -890,7 +890,7 @@ class TestArtifactStore:
     def _make_store(self, tmp_path, thread_id="thread-001"):
         project_path = tmp_path / "project"
         project_path.mkdir(exist_ok=True)
-        (project_path / AI_DIR / "objects").mkdir(parents=True, exist_ok=True)
+        (project_path / AI_DIR / "state" / "objects").mkdir(parents=True, exist_ok=True)
         return ArtifactStore(thread_id, project_path), project_path
 
     def test_store_retrieve_roundtrip(self, tmp_path):
@@ -931,7 +931,7 @@ class TestArtifactStore:
 
         # Write a ref pointing to a non-existent object
         ref_path = (
-            project_path / AI_DIR / "objects" / "refs"
+            project_path / AI_DIR / "state" / "objects" / "refs"
             / "artifacts" / "thread-corrupt.json"
         )
         write_ref(ref_path, "0" * 64)
@@ -1293,18 +1293,18 @@ class TestIngestRuntimeOutputs:
         project = tmp_path / "project"
         project.mkdir()
 
-        dst_root = project / AI_DIR / "objects"
+        dst_root = project / AI_DIR / "state" / "objects"
         dst_root.mkdir(parents=True)
 
         # Graph transcript
-        graph_dir = project / AI_DIR / "agent" / "graphs" / "run-123"
+        graph_dir = project / AI_DIR / "state" / "graphs" / "run-123"
         graph_dir.mkdir(parents=True)
         (graph_dir / "transcript.jsonl").write_text(
             '{"event": "step_started", "node": "setup"}\n'
         )
 
         # Thread transcript + metadata
-        thread_dir = project / AI_DIR / "agent" / "threads" / "t-abc"
+        thread_dir = project / AI_DIR / "state" / "threads" / "t-abc"
         thread_dir.mkdir(parents=True)
         (thread_dir / "transcript.jsonl").write_text(
             '{"event": "cognition_in", "text": "hello"}\n'
@@ -1315,12 +1315,12 @@ class TestIngestRuntimeOutputs:
         (thread_dir / "capabilities.md").write_text("# Capabilities\n")
 
         # Knowledge markdown
-        knowledge_dir = project / AI_DIR / "knowledge" / "agent" / "graphs" / "test"
+        knowledge_dir = project / AI_DIR / "knowledge" / "state" / "graphs" / "test"
         knowledge_dir.mkdir(parents=True)
         (knowledge_dir / "run-123.md").write_text("# Graph Report\n")
 
         # Ref pointer
-        refs_dir = project / AI_DIR / "objects" / "refs" / "graphs"
+        refs_dir = project / AI_DIR / "state" / "objects" / "refs" / "graphs"
         refs_dir.mkdir(parents=True)
         (refs_dir / "run-123.json").write_text('{"hash": "deadbeef"}')
 
@@ -1371,12 +1371,12 @@ class TestIngestRuntimeOutputs:
     def test_rejects_symlinks(self, tmp_path):
         project, dst_root = self._setup_project(tmp_path)
 
-        # Create a symlink in agent dir pointing outside
-        agent_dir = project / AI_DIR / "agent" / "graphs" / "evil"
-        agent_dir.mkdir(parents=True)
+        # Create a symlink in state dir pointing outside
+        state_dir = project / AI_DIR / "state" / "graphs" / "evil"
+        state_dir.mkdir(parents=True)
         target = tmp_path / "secret.txt"
         target.write_text("sensitive data")
-        (agent_dir / "link.jsonl").symlink_to(target)
+        (state_dir / "link.jsonl").symlink_to(target)
 
         bundle_hash, new_hashes = _ingest_runtime_outputs(
             project, dst_root, "thread-1", "snap-hash",
@@ -1390,7 +1390,7 @@ class TestIngestRuntimeOutputs:
     def test_empty_project_returns_no_bundle(self, tmp_path):
         project = tmp_path / "empty"
         project.mkdir()
-        (project / AI_DIR / "objects").mkdir(parents=True)
+        (project / AI_DIR / "state" / "objects").mkdir(parents=True)
 
         bundle_hash, new_hashes = _ingest_runtime_outputs(
             project, tmp_path / "cas", "thread-1", "snap-hash",
@@ -1404,14 +1404,14 @@ class TestIngestRuntimeOutputs:
         bundle = RuntimeOutputsBundle(
             remote_thread_id="t-1",
             execution_snapshot_hash="snap-1",
-            files={".ai/agent/test.jsonl": "abc123"},
+            files={".ai/state/test.jsonl": "abc123"},
         )
         d = bundle.to_dict()
         assert d["kind"] == "runtime_outputs_bundle"
         assert d["schema"] == 1
         assert d["remote_thread_id"] == "t-1"
         assert d["execution_snapshot_hash"] == "snap-1"
-        assert d["files"] == {".ai/agent/test.jsonl": "abc123"}
+        assert d["files"] == {".ai/state/test.jsonl": "abc123"}
 
 
 # ============================================================================
@@ -1452,45 +1452,45 @@ class TestMaterializeRuntimeOutputs:
         project.mkdir()
 
         bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/agent/graphs/run-1/transcript.jsonl": '{"event": "started"}\n',
-            ".ai/agent/threads/t-1/thread.json": '{"status": "completed"}\n',
-            ".ai/knowledge/agent/graphs/test/run-1.md": "# Report\n",
+            ".ai/state/graphs/run-1/transcript.jsonl": '{"event": "started"}\n',
+            ".ai/state/threads/t-1/thread.json": '{"status": "completed"}\n',
+            ".ai/knowledge/state/graphs/test/run-1.md": "# Report\n",
         })
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 3
 
-        assert (project / ".ai/agent/graphs/run-1/transcript.jsonl").exists()
-        assert (project / ".ai/agent/threads/t-1/thread.json").exists()
-        assert (project / ".ai/knowledge/agent/graphs/test/run-1.md").exists()
+        assert (project / ".ai/state/graphs/run-1/transcript.jsonl").exists()
+        assert (project / ".ai/state/threads/t-1/thread.json").exists()
+        assert (project / ".ai/knowledge/state/graphs/test/run-1.md").exists()
 
         # Content should match
-        assert (project / ".ai/agent/graphs/run-1/transcript.jsonl").read_text() == '{"event": "started"}\n'
+        assert (project / ".ai/state/graphs/run-1/transcript.jsonl").read_text() == '{"event": "started"}\n'
 
     def test_refs_materialized(self, tmp_path):
         project = tmp_path / "project"
         project.mkdir()
 
         bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/objects/refs/graphs/run-1.json": '{"hash": "abc"}',
+            ".ai/state/objects/refs/graphs/run-1.json": '{"hash": "abc"}',
         })
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 1
-        assert (project / ".ai/objects/refs/graphs/run-1.json").read_text() == '{"hash": "abc"}'
+        assert (project / ".ai/state/objects/refs/graphs/run-1.json").read_text() == '{"hash": "abc"}'
 
     def test_rejects_paths_outside_allowlist(self, tmp_path):
         project = tmp_path / "project"
         project.mkdir()
 
         bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/agent/graphs/run-1/transcript.jsonl": "ok",
+            ".ai/state/graphs/run-1/transcript.jsonl": "ok",
             ".ai/tools/evil.py": "import os; os.system('rm -rf /')",
             "src/main.py": "print('injected')",
         })
 
         count = _materialize_runtime_outputs(bundle_hash, project)
-        assert count == 1  # only the agent file
+        assert count == 1  # only the state file
         assert not (project / ".ai/tools/evil.py").exists()
         assert not (project / "src/main.py").exists()
 
@@ -1499,7 +1499,7 @@ class TestMaterializeRuntimeOutputs:
         project.mkdir()
 
         bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/agent/../../etc/passwd": "root:x:0:0",
+            ".ai/state/../../etc/passwd": "root:x:0:0",
         })
 
         count = _materialize_runtime_outputs(bundle_hash, project)
@@ -1508,7 +1508,7 @@ class TestMaterializeRuntimeOutputs:
     def test_missing_bundle_returns_zero(self, tmp_path):
         project = tmp_path / "project"
         project.mkdir()
-        (project / AI_DIR / "objects").mkdir(parents=True)
+        (project / AI_DIR / "state" / "objects").mkdir(parents=True)
 
         count = _materialize_runtime_outputs("nonexistent_hash", project)
         assert count == 0
@@ -1523,7 +1523,7 @@ class TestMaterializeRuntimeOutputs:
         bundle = RuntimeOutputsBundle(
             remote_thread_id="t-1",
             execution_snapshot_hash="s-1",
-            files={".ai/agent/test/transcript.jsonl": "0" * 64},
+            files={".ai/state/test/transcript.jsonl": "0" * 64},
         )
         bundle_hash = cas.store_object(bundle.to_dict(), root)
 
@@ -2538,7 +2538,7 @@ class TestConcurrentExecution:
             space="project",
             items={
                 f"{AI_DIR}/knowledge/base.md": base_item_hash,
-                f"{AI_DIR}/config/cas/remote.yaml": sync_item_hash,
+                f"{AI_DIR}/config/cas/manifest.yaml": sync_item_hash,
             },
             files={"readme.txt": base_file_blob},
         )

@@ -25,14 +25,20 @@ from rye.utils.path_utils import (
     get_type_folder,
     get_user_type_path,
 )
-from rye.utils.extensions import get_item_extensions, get_parsers_map, get_tool_extensions
+from rye.utils.extensions import (
+    get_item_extensions,
+    get_parsers_map,
+    get_tool_extensions,
+)
 from rye.utils.resolvers import get_user_space
 from rye.utils.validators import apply_field_mapping, validate_parsed_data
 
 logger = logging.getLogger(__name__)
 
 
-def _load_collect_config(project_path: Optional[Path] = None) -> tuple[frozenset, frozenset]:
+def _load_collect_config(
+    project_path: Optional[Path] = None,
+) -> tuple[frozenset, frozenset]:
     """Load exclude_dirs and exclude_files from collect.yaml via 3-tier resolution.
 
     Uses the same config the bundler uses so signing and bundling
@@ -113,7 +119,9 @@ class SignTool:
                 sys_dir = bundle.root_path / AI_DIR / type_folder
                 if not sys_dir.exists():
                     continue
-                all_items.extend(self._glob_in_dir(sys_dir, item_type, pattern, project_path))
+                all_items.extend(
+                    self._glob_in_dir(sys_dir, item_type, pattern, project_path)
+                )
             return all_items
         else:
             return []
@@ -155,7 +163,9 @@ class SignTool:
         items = []
         for ext in extensions:
             if "/" in pattern:
-                glob_pattern = f"{pattern}{ext}" if not pattern.endswith(ext) else pattern
+                glob_pattern = (
+                    f"{pattern}{ext}" if not pattern.endswith(ext) else pattern
+                )
             else:
                 glob_pattern = f"**/{pattern}{ext}" if pattern != "*" else f"**/*{ext}"
             for path in base_dir.glob(glob_pattern):
@@ -235,14 +245,19 @@ class SignTool:
                 elif item_type == "config":
                     result = await self._sign_config(item_id, project_path, source)
                 else:
-                    result = {"status": "error", "error": f"Unknown item type: {item_type}"}
+                    result = {
+                        "status": "error",
+                        "error": f"Unknown item type: {item_type}",
+                    }
 
                 if result.get("status") == "error":
-                    results["failed"].append({
-                        "item": item_id,
-                        "error": result.get("error"),
-                        "details": result.get("issues", [])[:2],
-                    })
+                    results["failed"].append(
+                        {
+                            "item": item_id,
+                            "error": result.get("error"),
+                            "details": result.get("issues", [])[:2],
+                        }
+                    )
                 else:
                     results["signed"].append(item_id)
             except Exception as e:
@@ -396,18 +411,6 @@ class SignTool:
         )
         file_path.write_text(signed_content)
 
-        # Invalidate stale lockfile — signing changes the integrity hash
-        version = parsed.get("version", "0.0.0")
-        try:
-            from rye.executor.lockfile_resolver import LockfileResolver
-            resolver = LockfileResolver(
-                project_path=Path(project_path) if project_path else None,
-            )
-            if resolver.delete_lockfile(item_id, version):
-                logger.info(f"Deleted stale lockfile for {item_id}@{version}")
-        except Exception as e:
-            logger.debug(f"Lockfile cleanup skipped: {e}")
-
         sig_info = MetadataManager.get_signature_info(
             ItemType.TOOL,
             signed_content,
@@ -461,9 +464,7 @@ class SignTool:
 
         if not validation_result["valid"]:
             issues = validation_result["issues"]
-            all_missing = issues and all(
-                "Missing required field" in i for i in issues
-            )
+            all_missing = issues and all("Missing required field" in i for i in issues)
             error_msg = "Validation failed"
             if all_missing:
                 error_msg = (
@@ -588,6 +589,7 @@ class SignTool:
 
         # Phase 2: Content validation (structural shape)
         from rye.utils.config_validators import validate_config_content
+
         content_result = validate_config_content(
             config_id=item_id,
             config_data=parsed,
@@ -595,7 +597,9 @@ class SignTool:
         )
 
         issues = metadata_result["issues"] + content_result["issues"]
-        warnings = metadata_result.get("warnings", []) + content_result.get("warnings", [])
+        warnings = metadata_result.get("warnings", []) + content_result.get(
+            "warnings", []
+        )
 
         if issues:
             return {
@@ -607,13 +611,16 @@ class SignTool:
 
         # Sign content
         signed_content = MetadataManager.sign_content(
-            "config", content, file_path=file_path,
+            "config",
+            content,
+            file_path=file_path,
             project_path=proj,
         )
         file_path.write_text(signed_content)
 
         sig_info = MetadataManager.get_signature_info(
-            "config", signed_content,
+            "config",
+            signed_content,
             file_path=file_path,
             project_path=proj,
         )
@@ -632,7 +639,7 @@ class SignTool:
         self, project_path: str, source: str, item_type: str, item_id: str
     ) -> Optional[Path]:
         """Find item file by relative path ID in specified source location.
-        
+
         Args:
             item_id: Relative path from .ai/<type>/ without extension.
                     e.g., "rye/core/registry/registry" -> .ai/tools/rye/core/registry/registry.py
@@ -646,7 +653,9 @@ class SignTool:
         elif source == "user":
             base = get_user_type_path(item_type)
         elif source == "system":
-            extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
+            extensions = get_item_extensions(
+                item_type, Path(project_path) if project_path else None
+            )
 
             type_folder = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
             for bundle in get_system_spaces():
@@ -664,7 +673,9 @@ class SignTool:
         if not base.exists():
             return None
 
-        extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
+        extensions = get_item_extensions(
+            item_type, Path(project_path) if project_path else None
+        )
 
         for ext in extensions:
             file_path = base / f"{item_id}{ext}"

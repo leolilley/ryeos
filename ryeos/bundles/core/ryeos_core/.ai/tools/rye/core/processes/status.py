@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:850cb8d11a6585ba00b8c2b157d03b92954023f37496aa299b0bff77e02a6c05:1kafehxKIbQNVSNW-jGbepq5ru_LpoSP1V9zfjznN3LVXxwejhwWkU05FjJ_THIixs43VLLSXF9LER820-H1DA:4b987fd4e40303ac
+# rye:signed:2026-04-06T02:50:45Z:cc0172b06d15ae4005f497a93d924e59ebf721c5766607fbc1bc115c9191e984:kLYmUPqN-hYPKucEku2DIA82wBvz34-HlbV7fwyklXfZnqumN9lYfJEMrgt-EgVOAM6L3iVgLqb-xSaqsPRGCg:4b987fd4e40303ac
 """Check status of a running process by run_id."""
 
 import argparse
@@ -52,10 +52,10 @@ def _get_registry(project_path: Path):
 
 
 async def _check_pid(pid: int) -> dict:
-    """Check if PID is alive via SubprocessPrimitive."""
-    from rye.primitives.subprocess import SubprocessPrimitive
+    """Check if PID is alive via ExecutePrimitive."""
+    from rye.primitives.execute import ExecutePrimitive
 
-    sp = SubprocessPrimitive()
+    sp = ExecutePrimitive()
     result = await sp.status(pid)
     return {"alive": result.alive, "pid": result.pid}
 

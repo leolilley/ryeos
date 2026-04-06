@@ -1,4 +1,4 @@
-"""Rye runtime services — HTTP, auth, env resolution, lockfile I/O."""
+"""Rye runtime services — HTTP, auth, env resolution."""
 
 from rye.runtime.env_resolver import EnvResolver
 from rye.runtime.auth import AuthStore

@@ -214,7 +214,7 @@ Webhook callers can only provide `parameters` — the binding controls `item_typ
 | `max_request_bytes` | 50 MB | Request middleware (Content-Length header + stream-based) |
 | `max_user_storage_bytes` | 1 GB | Before `put_objects` and after execution |
 
-Per-user CAS isolation: each user's objects live at `{cas_base_path}/{user_id}/.ai/objects/`. One user cannot read or write another user's objects.
+Per-user CAS isolation: each user's objects live at `{cas_base_path}/{user_id}/.ai/state/objects/`. One user cannot read or write another user's objects.
 
 ## Secrets
 
@@ -242,11 +242,11 @@ Bundled at `.ai/tools/rye/core/remote/remote.py`.
 | `threads` | List remote executions from the server |
 | `thread_status` | Get status of a specific remote thread by thread_id |
 
-Remotes are configured as named entries in `cas/remote.yaml` (under `.ai/config/`). Use `resolve_remote(name, project_path)` to resolve a named remote to its URL and API key. The default remote name is `"default"`. All remotes must be declared in config.
+Remotes are configured as named entries in `remotes/remotes.yaml` (under `.ai/config/`). Use `resolve_remote(name, project_path)` to resolve a named remote to its URL and API key. The default remote name is `"default"`. All remotes must be declared in config.
 
 ## Named Remotes
 
-Remotes are configured in `cas/remote.yaml` under `.ai/config/`:
+Remotes are configured in `remotes/remotes.yaml` under `.ai/config/`:
 
 ```yaml
 remotes:

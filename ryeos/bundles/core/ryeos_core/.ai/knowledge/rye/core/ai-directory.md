@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:b58106238e4a57df8173179ec4daf71f5295da093c2a7f6a1fb1e87ad522d858:qK2M5xTGaR4rqRzRt-7ct_kiUL78y39fy-cranahBB_HKn1bdTUwK5FTAAXzsmD1XL5d0xKn-8SffEY6kL_PCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:92119c85dcd73d06f1d23809be71344427304c85b330f143b1c488504e4a329b:vUh2KKJovzYacSnTDlSFCa4sH7wo1itwNJGkJOGRqRkqSyx3O9eyD7KL4oZUC9vAqd6EAEkM1X_mbsVxyO9eDg:4b987fd4e40303ac -->
 
 ```yaml
 name: ai-directory
@@ -18,7 +18,7 @@ tags:
   - tools
   - knowledge
   - bundles
-  - lockfiles
+  - state
 references:
   - terminology
   - three-tier-spaces
@@ -53,9 +53,11 @@ Layout and conventions for the `.ai/` portable data bundle.
 │       ├── websearch.yaml
 │       └── browser.json
 ├── bundles/       # Bundle manifests
-├── lockfiles/     # Integrity pinning
-├── threads/       # Thread execution state  (auto-generated)
-└── outputs/       # Tool output artifacts   (auto-generated)
+└── state/         # Runtime state (auto-generated, gitignored)
+    ├── threads/   # Thread execution state
+    ├── graphs/    # Graph run state
+    ├── objects/   # CAS blobs
+    └── cache/     # Tool runtime cache
 ```
 
 ## Core Directories
@@ -71,9 +73,7 @@ Layout and conventions for the `.ai/` portable data bundle.
 | Directory    | Purpose                                                                    | Auto-Generated |
 | ------------ | -------------------------------------------------------------------------- | -------------- |
 | `bundles/`   | Bundle manifests (`manifest.yaml`) with SHA-256 hashes per item            | No             |
-| `lockfiles/` | Chain integrity pinning files (`{tool_id}@{version}.lock.json`)            | Yes (on first execution) |
-| `threads/`   | Thread execution state — registry, transcripts, budgets, artifacts         | Yes            |
-| `outputs/`   | Artifacts produced by tool executions                                      | Yes            |
+| `state/`     | Runtime state — threads, graphs, CAS objects, cache (gitignored)           | Yes            |
 
 ## Item ID ↔ File Path Mapping
 

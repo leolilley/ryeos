@@ -3,7 +3,7 @@
 Validates that async_runner uses the established ThreadRegistry pattern:
 - Results stored via registry.set_result() (not result.json files)
 - Status transitions match (running → completed/error)
-- No .ai/agent/runs/ directory created
+- No .ai/state/runs/ directory created
 - Thread ID format matches thread_directive convention (uuid)
 """
 
@@ -77,27 +77,31 @@ class TestRegistryIntegration:
     """Verify async_runner uses ThreadRegistry, not result.json files."""
 
     def test_no_runs_directory_created(self, tmp_path):
-        """async_runner must not create .ai/agent/runs/ — that was the old pattern."""
-        runs_dir = tmp_path / ".ai" / "agent" / "runs"
+        """async_runner must not create .ai/state/runs/ — that was the old pattern."""
+        runs_dir = tmp_path / ".ai" / "state" / "runs"
         assert not runs_dir.exists()
 
     def test_no_write_result_log_function(self):
         """_write_result_log should not exist in the module."""
         import rye.utils.async_runner as mod
+
         assert not hasattr(mod, "_write_result_log")
 
     def test_no_duplicate_get_registry(self):
         """async_runner should not have its own _get_registry — uses ExecuteTool's."""
         import rye.utils.async_runner as mod
+
         assert not hasattr(mod, "_get_registry")
 
     def test_uses_thread_id_arg(self):
         """CLI accepts --thread-id (not --run-id)."""
         import argparse
         from rye.utils.async_runner import main
+
         # Verify the argument parser accepts --thread-id
         # We can't easily run main() but we can check the source
         import inspect
+
         source = inspect.getsource(main)
         assert "--thread-id" in source
         assert "--run-id" not in source
@@ -115,10 +119,13 @@ class TestRegistryIntegration:
 
             # Simulate what main() does after _run()
             import asyncio
-            actual_result = asyncio.run(_run(
-                {"item_type": "tool", "item_id": "x", "parameters": {}},
-                str(tmp_path),
-            ))
+
+            actual_result = asyncio.run(
+                _run(
+                    {"item_type": "tool", "item_id": "x", "parameters": {}},
+                    str(tmp_path),
+                )
+            )
 
             # Simulate registry updates (as main() does)
             status = "completed" if actual_result.get("status") != "error" else "error"
@@ -140,10 +147,13 @@ class TestRegistryIntegration:
             MockET._get_registry = MagicMock(return_value=mock_registry)
 
             import asyncio
-            actual_result = asyncio.run(_run(
-                {"item_type": "tool", "item_id": "x", "parameters": {}},
-                str(tmp_path),
-            ))
+
+            actual_result = asyncio.run(
+                _run(
+                    {"item_type": "tool", "item_id": "x", "parameters": {}},
+                    str(tmp_path),
+                )
+            )
 
             status = "completed" if actual_result.get("status") != "error" else "error"
             mock_registry.update_status(thread_id, status)

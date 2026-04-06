@@ -18,7 +18,7 @@ if _VENV_ROOT.exists():
         # Process .pth files so editable installs are found
         import site
         site.addsitedir(_SITE_PKG)
-    # Add venv bin/ to PATH so venv-installed binaries (e.g. lillux-proc) are found
+    # Add venv bin/ to PATH so venv-installed binaries (e.g. lillux) are found
     _VENV_BIN = str(_VENV_ROOT / "bin")
     if _VENV_BIN not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _VENV_BIN + os.pathsep + os.environ.get("PATH", "")

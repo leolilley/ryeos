@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:175fb2d452df6146866e71baef0ec23e9170eca01dfda32bc7dcc11a16271d18:1I7lraR6mLyn2lSoLKCsL92U87-cKipsO9V03KV30foAorscfNxsSb7BQiURoYSOEpgxyVB8GHZdP1RHeWQzBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:14:32Z:d056f853eb8868fc97fb1938b813e48632749ce0f65e8994d003d4e9d02cf47e:ExScHLKJ3NKnrtdb2vS-K9WsI6r8ty-6--0ccLiTSAV3MQxxbwwZFFwfRKzHlMMa3cqUYGAH5L4on7Z1pS0vAw:4b987fd4e40303ac -->
 ```yaml
 name: spawning-patterns
 title: Spawning Patterns
@@ -56,7 +56,7 @@ Returns:
 
 ### Async Internals
 
-`spawn_detached()` delegates to `SubprocessPrimitive.spawn()`, which calls `lillux-proc spawn` (cross-platform Rust binary). No POSIX fallbacks — lillux-proc is a hard dependency. Child process:
+`spawn_detached()` delegates to `ExecutePrimitive.spawn()`, which calls `lillux spawn` (cross-platform Rust binary). No POSIX fallbacks — lillux is a hard dependency. Child process:
 1. Runs as a detached subprocess (`__main__` with `--thread-id` and `--pre-registered` flags)
 2. Runs LLM loop to completion
 3. Finalizes (report spend, update registry, write `thread.json`)
@@ -124,7 +124,7 @@ rye_execute(
 | Thread Type        | Mechanism                                              |
 |--------------------|--------------------------------------------------------|
 | In-process         | `asyncio.Event` — awaits `event.wait()` with timeout   |
-| Cross-process      | Push-based `lillux-watch` on registry.db with 500ms polling fallback |
+| Cross-process      | 500ms polling on registry.db                           |
 | Continuation chain | `resolve_thread_chain()` follows links to terminal thread |
 
 Default timeout from `coordination.yaml` (typically 600s). Override with `timeout` parameter.
@@ -191,4 +191,4 @@ rye_execute(
 )
 ```
 
-Delegates to `SubprocessPrimitive.kill()`, which calls `lillux-proc kill` (graceful→force). No POSIX fallbacks.
+Delegates to `ExecutePrimitive.kill()`, which calls `lillux kill` (graceful→force). No POSIX fallbacks.

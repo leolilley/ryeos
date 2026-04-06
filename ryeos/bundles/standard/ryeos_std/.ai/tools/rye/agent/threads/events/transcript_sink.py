@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T07:27:23Z:7f2fedf84868c8525220bff7a03f18f936c722c548a6c6d903f4e4e867bbab4b:noCOHq84HKZ0pSKrkoWlp1mWlY-OHpUkpTB0LCg56pvxkV_gCFmZ9PaS4gpAbVMksjF-0SYwCbxFDQsaNqEwDg:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:de05f62956404a69893644deb6d5bd1f0f571a2b5ec63b09d674acdea0e18cf8:OiRKJHp0nblOPs_RXd2k3OO2aNWnWKhrye27c30KMD2h7U1zNLtUVPDqzpMPqJQHOAtox1zIZFyYHjjWzJQeBA:4b987fd4e40303ac
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/events"
@@ -13,8 +13,8 @@ from typing import Any, Optional
 class TranscriptSink:
     """Sink that writes token_delta events to both transcript JSONL and knowledge markdown.
 
-    Implements the write/close interface expected by HttpClientPrimitive's
-    streaming fan-out. Each SSE event is parsed and written as a JSONL line
+    Implements the write/close interface expected by the streaming provider
+    adapter's fan-out. Each SSE event is parsed and written as a JSONL line
     so `tail -f transcript.jsonl` shows tokens arriving in real-time.
 
     When knowledge_path is set, text deltas are also appended to the

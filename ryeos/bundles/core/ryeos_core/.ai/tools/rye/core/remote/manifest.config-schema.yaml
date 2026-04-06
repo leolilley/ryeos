@@ -1,0 +1,22 @@
+version: "1.0.0"
+tool_type: config-schema
+executor_id: null
+category: rye/core/remote
+description: "Schema for cas/manifest.yaml — sync policy and exclusions"
+
+target_config: cas/manifest.yaml
+
+schema:
+  type: object
+  properties:
+    sync:
+      type: object
+      properties:
+        include:
+          type: array
+          items:
+            type: string
+        exclude:
+          type: array
+          items:
+            type: string

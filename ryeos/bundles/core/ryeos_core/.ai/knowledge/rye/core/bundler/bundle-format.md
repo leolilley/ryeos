@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:e9686c4bd697acda1b4641778c5632fedc60a4090dc3649a5ed40bee6c453796:auRm1ntpikkkK-6KYqy7bfDAQNKSwHhqXCxGXEQfVdU2TFVUcV2u3IGK_C_vCPm37py923WoMyfV3Ux1KCdiCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:8e063d3e061414ddda6538e097ce89675c1fad610162bb411456829445294a37:hNiE74sEd9pCm_93V75qDV_l-kDK12R3Aoa6hu_Ojivuz3d974BTgr2ZcPXmfG55Y3RR9lHl3sgGsF-PcGvXDg:4b987fd4e40303ac -->
 
 ```yaml
 name: bundle-format
@@ -50,12 +50,12 @@ How Rye OS packages register and load `.ai/` item bundles into the system space.
 │  bundle: ryeos-code → rye/code/* items            │
 ├───────────────────────────────────────────────────┤
 │  lillux             (stateless microkernel)        │
-│  deps: cryptography, httpx, lillux-proc            │
+│  deps: cryptography, httpx, lillux                 │
 │  bundle: none (pure library, no .ai/ items)       │
 └───────────────────────────────────────────────────┘
 ```
 
-**lillux-proc dependency:** lillux depends on `lillux-proc` (hard dep, no fallbacks). The Rust binaries `lillux-proc` and `lillux-watch` live in `lillux/proc/` and `lillux/watch/` at the monorepo top level.
+**lillux dependency:** lillux depends on the `lillux` Rust binary (hard dep, no fallbacks). The `lillux` Rust binary lives in `lillux/lillux/` at the monorepo top level.
 
 **node_modules not shipped:** Web and code bundles do not ship `node_modules`. Dependencies are installed on first use via the anchor system.
 
@@ -237,7 +237,7 @@ Non-signable assets (images, data files) are covered by manifest per-file CAS `o
 
 ## Lockfile Format
 
-When a bundle is installed via `rye install`, a `.bundle-lock.json` is written to `.ai/bundles/{bundle_id}/`:
+When a bundle is installed via `rye install`, a `install-receipt.json` is written to `.ai/bundles/{bundle_id}/`:
 
 ```json
 {
@@ -252,7 +252,7 @@ When a bundle is installed via `rye install`, a `.bundle-lock.json` is written t
 }
 ```
 
-`rye uninstall` reads this lockfile to remove exactly the files that were installed, then cleans up empty parent directories and the bundle metadata directory.
+`rye uninstall` reads this install receipt to remove exactly the files that were installed, then cleans up empty parent directories and the bundle metadata directory.
 
 ## Bundled Tools vs Package Dependencies
 

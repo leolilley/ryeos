@@ -16,7 +16,7 @@ The executor chain is how Rye routes a tool call from an AI agent down to an OS-
 ```
 Layer 3: Tool          __executor_id__ = "rye/core/runtimes/python/script"
                                 │
-Layer 2: Runtime       __executor_id__ = "rye/core/primitives/subprocess"
+Layer 2: Runtime       __executor_id__ = "rye/core/primitives/execute"
                                 │
 Layer 1: Primitive     __executor_id__ = None  →  direct Lillux execution
 ```
@@ -27,8 +27,7 @@ Primitives are the terminal nodes. They have `__executor_id__ = None` and map di
 
 ```python
 PRIMITIVE_MAP = {
-    "rye/core/primitives/subprocess": SubprocessPrimitive,
-    "rye/core/primitives/http_client": HttpClientPrimitive,
+    "rye/core/primitives/execute": ExecutePrimitive,
 }
 ```
 
@@ -40,7 +39,7 @@ Example — `python/script` runtime:
 
 ```yaml
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 
 env_config:
   interpreter:
@@ -100,13 +99,13 @@ Step 1: Resolve "rye/bash"
 
 Step 2: Resolve "rye/core/runtimes/python/script"
   → .ai/tools/rye/core/runtimes/python/script.yaml (system space)
-  → executor_id = "rye/core/primitives/subprocess"
+  → executor_id = "rye/core/primitives/execute"
 
-Step 3: Resolve "rye/core/primitives/subprocess"
+Step 3: Resolve "rye/core/primitives/execute"
   → Matches PRIMITIVE_MAP key (no file needed)
   → executor_id = None (terminal)
 
-Chain: [bash.py, python/script.yaml, subprocess primitive]
+Chain: [bash.py, python/script.yaml, execute primitive]
 ```
 
 ## Chain Validation
@@ -231,7 +230,6 @@ Trace events are emitted at each stage:
 
 | Step               | Fields                                              | Purpose                                       |
 | ------------------ | --------------------------------------------------- | --------------------------------------------- |
-| `lockfile`         | `item_id`, `version`, `status`                      | Whether a lockfile was found and used          |
 | `resolve`          | `item_id`, `path`, `space`, `shadowed`               | Which file was resolved and what it shadows    |
 | `verify_integrity` | `item_id`, `verified`, `key_fp`                      | Signature verification result per chain element |
 | `resolve_env`      | `contributed_by`, `keys`                             | Which env vars each chain element contributes  |
@@ -252,35 +250,4 @@ The `shadowed` field in resolve events lists items in lower-precedence spaces th
 
 Trace mode has no effect on execution — the same chain is built, verified, and run. It only adds observability.
 
-## Lockfile Verification
 
-Before building the chain, `PrimitiveExecutor.execute()` checks for an existing lockfile:
-
-1. Load lockfile via `LockfileResolver.get_lockfile(item_id, version)`
-2. Verify root integrity: compute current hash of the tool file, compare to `lockfile.root.integrity`
-3. Verify chain elements: for each entry in `lockfile.resolved_chain`, resolve the path and compare its current hash to the pinned `integrity` value
-4. **Any mismatch** → return `ExecutionResult(success=False)` with message to re-sign and delete stale lockfile
-
-After successful execution (if no lockfile existed), a new lockfile is created with `LockfileResolver.create_lockfile()` and saved to the project space.
-
-Lockfile format (`{tool_id}@{version}.lock.json`):
-
-```json
-{
-  "lockfile_version": 1,
-  "generated_at": "2026-02-15T12:00:00+00:00",
-  "root": {
-    "tool_id": "rye/bash",
-    "version": "1.0.0",
-    "integrity": "a1b2c3..."
-  },
-  "resolved_chain": [
-    { "item_id": "rye/bash", "space": "system", "integrity": "a1b2c3..." },
-    {
-      "item_id": "rye/core/runtimes/python/script",
-      "space": "system",
-      "integrity": "d4e5f6..."
-    }
-  ]
-}
-```

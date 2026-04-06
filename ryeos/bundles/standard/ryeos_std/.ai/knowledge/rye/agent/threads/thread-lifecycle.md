@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:2f2c5b0303529a25861e317a8bb110e5cf20ee8c6729eb0a504eb67038455be5:nNZc6EISgj8swaLXIZzqgoSL9FHj_rQGig0sXjaulrLSN1NshqlXegyBEnKMewxsnpeobYrn2nUZJKJENjQ-Aw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:14:32Z:7da75de3d210e74cb2304c91b254b6676adf08e52cfc013ac5b11b28331c0580:VDUh0QNvpMl6tWBW0YleSdmpB2WPuVMDN_Pf6dC4tuZusCJOc1W0YWleJZxCOhFiyIpjLtRfmfJS1L2hOwpBBg:4b987fd4e40303ac -->
 
 ```yaml
 name: thread-lifecycle
@@ -126,7 +126,7 @@ Prompt built from directive raw content (markdown minus signature). Model resolv
 
 ### Step 10: Write initial thread.json
 
-Written to `.ai/agent/threads/<thread_id>/thread.json`:
+Written to `.ai/state/threads/<thread_id>/thread.json`:
 
 ```json
 {
@@ -146,7 +146,7 @@ Written to `.ai/agent/threads/<thread_id>/thread.json`:
 ### Step 12: Spawn or run
 
 - **Synchronous** (default): `runner.run()` blocks until completion
-- **Asynchronous** (`async: true`): `spawn_detached()` launches a child subprocess via `lillux-proc spawn` (hard dependency, no fallbacks). Child runs `__main__` with `--thread-id` and `--pre-registered` flags. Parent returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): `spawn_detached()` launches a child subprocess via `lillux spawn` (hard dependency, no fallbacks). Child runs `__main__` with `--thread-id` and `--pre-registered` flags. Parent returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 13: Run LLM loop
 
@@ -200,7 +200,7 @@ Each turn:
 
 ## Thread Storage
 
-Each thread creates `.ai/agent/threads/<thread_id>/`:
+Each thread creates `.ai/state/threads/<thread_id>/`:
 
 | File              | Purpose                                  |
 |-------------------|------------------------------------------|
@@ -208,7 +208,7 @@ Each thread creates `.ai/agent/threads/<thread_id>/`:
 | `transcript.jsonl` | Append-only event log with checkpoint signatures |
 | `capabilities.md` | Signed tool definitions + capabilities tree |
 
-Shared databases at `.ai/agent/threads/`:
+Shared databases at `.ai/state/threads/`:
 - `registry.db` — thread registry (SQLite)
 - `budget_ledger.db` — hierarchical budget tracking (SQLite)
 

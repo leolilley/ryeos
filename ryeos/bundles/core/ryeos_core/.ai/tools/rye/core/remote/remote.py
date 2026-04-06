@@ -49,11 +49,24 @@ TOOL_METADATA = {
 }
 
 ACTIONS = [
-    "push", "pull", "status", "execute", "seal",
-    "vault_set", "vault_list", "vault_delete",
-    "threads", "thread_status",
-    "webhooks", "webhook_create", "webhook_delete", "webhook_trigger",
-    "publish", "registry_search", "push_bundle", "pull_bundle",
+    "push",
+    "pull",
+    "status",
+    "execute",
+    "seal",
+    "vault_set",
+    "vault_list",
+    "vault_delete",
+    "threads",
+    "thread_status",
+    "webhooks",
+    "webhook_create",
+    "webhook_delete",
+    "webhook_trigger",
+    "publish",
+    "registry_search",
+    "push_bundle",
+    "pull_bundle",
 ]
 
 CONFIG_SCHEMA = {
@@ -78,7 +91,7 @@ CONFIG_SCHEMA = {
         },
         "remote": {
             "type": "string",
-            "description": "Named remote to target (from cas/remote.yaml). Defaults to 'default'.",
+            "description": "Named remote to target (from remotes/remotes.yaml). Defaults to 'default'.",
         },
         "thread_id": {
             "type": "string",
@@ -123,7 +136,7 @@ CONFIG_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# HTTP client (uses signed requests, same pattern as registry tool)
+# HTTP client (uses signed requests via httpx)
 # ---------------------------------------------------------------------------
 
 
@@ -137,13 +150,18 @@ class RemoteHttpClient:
 
     async def _get_http(self):
         if self._http is None:
-            from rye.runtime.http_client import HttpClientPrimitive
-            self._http = HttpClientPrimitive()
+            import httpx
+
+            self._http = httpx.AsyncClient()
         return self._http
 
     def _sign_headers(self, method: str, path: str, body: bytes | None = None) -> dict:
         from rye.utils.path_utils import get_signing_key_dir
-        from rye.primitives.signing import load_keypair, compute_key_fingerprint, sign_hash
+        from rye.primitives.signing import (
+            load_keypair,
+            compute_key_fingerprint,
+            sign_hash,
+        )
 
         key_dir = get_signing_key_dir()
         priv, pub = load_keypair(key_dir)
@@ -154,15 +172,17 @@ class RemoteHttpClient:
         nonce = os.urandom(16).hex()
         body_hash = hashlib.sha256(body or b"").hexdigest()
 
-        string_to_sign = "\n".join([
-            "ryeos-request-v1",
-            method.upper(),
-            path,
-            body_hash,
-            timestamp,
-            nonce,
-            audience,
-        ])
+        string_to_sign = "\n".join(
+            [
+                "ryeos-request-v1",
+                method.upper(),
+                path,
+                body_hash,
+                timestamp,
+                nonce,
+                audience,
+            ]
+        )
         content_hash = hashlib.sha256(string_to_sign.encode()).hexdigest()
         signature = sign_hash(content_hash, priv)
 
@@ -174,66 +194,83 @@ class RemoteHttpClient:
         }
 
     async def get(self, path: str) -> Dict:
-        http = await self._get_http()
+        client = await self._get_http()
         headers = {"Content-Type": "application/json"}
         headers.update(self._sign_headers("GET", path))
-        config = {
-            "method": "GET",
-            "url": f"{self.base_url}{path}",
-            "headers": headers,
-            "timeout": 30,
-        }
-        result = await http.execute(config, {})
-        return {
-            "success": result.success,
-            "status_code": result.status_code,
-            "body": result.body,
-            "error": result.error,
-        }
+        try:
+            resp = await client.get(
+                f"{self.base_url}{path}", headers=headers, timeout=30
+            )
+            body = resp.json() if resp.content else {}
+            return {
+                "success": 200 <= resp.status_code < 300,
+                "status_code": resp.status_code,
+                "body": body,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status_code": 0,
+                "body": None,
+                "error": str(exc),
+            }
 
     async def post(self, path: str, body: Dict, timeout: int = 60) -> Dict:
-        http = await self._get_http()
+        client = await self._get_http()
         body_bytes = json.dumps(body).encode() if body else None
         headers = {"Content-Type": "application/json"}
         headers.update(self._sign_headers("POST", path, body_bytes))
-        config = {
-            "method": "POST",
-            "url": f"{self.base_url}{path}",
-            "headers": headers,
-            "body": body,
-            "timeout": timeout,
-        }
-        result = await http.execute(config, {})
-        return {
-            "success": result.success,
-            "status_code": result.status_code,
-            "body": result.body,
-            "error": result.error,
-        }
-
+        try:
+            resp = await client.post(
+                f"{self.base_url}{path}",
+                content=body_bytes,
+                headers=headers,
+                timeout=timeout,
+            )
+            resp_body = resp.json() if resp.content else {}
+            return {
+                "success": 200 <= resp.status_code < 300,
+                "status_code": resp.status_code,
+                "body": resp_body,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status_code": 0,
+                "body": None,
+                "error": str(exc),
+            }
 
     async def delete(self, path: str) -> Dict:
-        http = await self._get_http()
+        client = await self._get_http()
         headers = {"Content-Type": "application/json"}
         headers.update(self._sign_headers("DELETE", path))
-        config = {
-            "method": "DELETE",
-            "url": f"{self.base_url}{path}",
-            "headers": headers,
-            "timeout": 30,
-        }
-        result = await http.execute(config, {})
-        return {
-            "success": result.success,
-            "status_code": result.status_code,
-            "body": result.body,
-            "error": result.error,
-        }
+        try:
+            resp = await client.delete(
+                f"{self.base_url}{path}", headers=headers, timeout=30
+            )
+            body = resp.json() if resp.content else {}
+            return {
+                "success": 200 <= resp.status_code < 300,
+                "status_code": resp.status_code,
+                "body": body,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status_code": 0,
+                "body": None,
+                "error": str(exc),
+            }
 
 
 def _get_client(remote_name=None, project_path=None) -> RemoteHttpClient:
     """Create HTTP client using named remote config."""
     from remote_config import resolve_remote
+
     config = resolve_remote(remote_name, project_path)
     return RemoteHttpClient(config.url, config.node_id)
 
@@ -245,7 +282,9 @@ def _get_client(remote_name=None, project_path=None) -> RemoteHttpClient:
 
 def _remote_ref_path(project_path: Path, remote_name: str) -> Path:
     """Path to the local file tracking a remote's HEAD snapshot hash."""
-    return project_path / AI_DIR / "objects" / "refs" / "remotes" / f"{remote_name}.json"
+    return (
+        project_path / AI_DIR / "objects" / "refs" / "remotes" / f"{remote_name}.json"
+    )
 
 
 def _load_remote_snapshot_hash(project_path: Path, remote_name: str) -> Optional[str]:
@@ -261,7 +300,9 @@ def _load_remote_snapshot_hash(project_path: Path, remote_name: str) -> Optional
         return None
 
 
-def _store_remote_snapshot_hash(project_path: Path, remote_name: str, snapshot_hash: str) -> None:
+def _store_remote_snapshot_hash(
+    project_path: Path, remote_name: str, snapshot_hash: str
+) -> None:
     """Store the remote's HEAD snapshot_hash locally for next push."""
     ref_file = _remote_ref_path(project_path, remote_name)
     ref_file.parent.mkdir(parents=True, exist_ok=True)
@@ -296,15 +337,16 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     ph, pm = build_manifest(project_path, "project")
 
     from rye.utils.path_utils import get_user_space
+
     user_root = get_user_space()
     uh, um = build_manifest(user_root, "user", project_path=project_path)
 
     # Collect all object hashes (transitive)
-    all_hashes = list(set(
-        collect_object_hashes(pm, root)
-        + collect_object_hashes(um, root)
-        + [ph, uh]
-    ))
+    all_hashes = list(
+        set(
+            collect_object_hashes(pm, root) + collect_object_hashes(um, root) + [ph, uh]
+        )
+    )
 
     # Check which objects remote already has
     has_resp = await client.post("/objects/has", {"hashes": all_hashes})
@@ -320,9 +362,12 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     if missing:
         # Export and upload missing objects
         entries = export_objects(missing, root)
-        put_resp = await client.post("/objects/put", {
-            "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
-        })
+        put_resp = await client.post(
+            "/objects/put",
+            {
+                "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
+            },
+        )
         if not put_resp["success"]:
             return {"error": f"Failed to upload objects: {put_resp['error']}"}
 
@@ -332,15 +377,19 @@ async def _push(project_path: Path, params: Dict) -> Dict:
         objects_synced = len(put_body.get("stored", []))
 
     from remote_config import get_project_path
+
     proj_name = get_project_path(project_path)
     sys_ver = get_system_version()
     effective_remote = remote_name or "default"
 
     # Push user space first — project snapshot references user_manifest_hash
     user_space_pushed = False
-    user_space_resp = await client.post("/push/user-space", {
-        "user_manifest_hash": uh,
-    })
+    user_space_resp = await client.post(
+        "/push/user-space",
+        {
+            "user_manifest_hash": uh,
+        },
+    )
     if user_space_resp["success"]:
         user_space_pushed = True
     else:
@@ -354,10 +403,13 @@ async def _push(project_path: Path, params: Dict) -> Dict:
                     ref_body = json.loads(ref_body)
                 current_rev = ref_body.get("revision")
                 if current_rev is not None:
-                    retry_resp = await client.post("/push/user-space", {
-                        "user_manifest_hash": uh,
-                        "expected_revision": current_rev,
-                    })
+                    retry_resp = await client.post(
+                        "/push/user-space",
+                        {
+                            "user_manifest_hash": uh,
+                            "expected_revision": current_rev,
+                        },
+                    )
                     user_space_pushed = retry_resp["success"]
         if not user_space_pushed:
             # Extract the actual error detail from the response body
@@ -380,12 +432,15 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     expected_snapshot_hash = _load_remote_snapshot_hash(project_path, effective_remote)
 
     # Publish project ref on remote (user space already pushed above)
-    push_resp = await client.post("/push", {
-        "project_path": proj_name,
-        "project_manifest_hash": ph,
-        "system_version": sys_ver,
-        "expected_snapshot_hash": expected_snapshot_hash,
-    })
+    push_resp = await client.post(
+        "/push",
+        {
+            "project_path": proj_name,
+            "project_manifest_hash": ph,
+            "system_version": sys_ver,
+            "expected_snapshot_hash": expected_snapshot_hash,
+        },
+    )
 
     push_body = push_resp.get("body", {})
     if isinstance(push_body, str):
@@ -395,17 +450,22 @@ async def _push(project_path: Path, params: Dict) -> Dict:
 
     # 409 = HEAD moved (e.g. fold-back from execution), retry with current HEAD
     if not ref_published and push_resp.get("status_code") == 409:
-        detail = push_body.get("detail", push_body) if isinstance(push_body, dict) else {}
+        detail = (
+            push_body.get("detail", push_body) if isinstance(push_body, dict) else {}
+        )
         actual_head = detail.get("actual") if isinstance(detail, dict) else None
         if actual_head is not None:
             logger.info("HEAD moved, retrying push with actual=%s", actual_head)
             _store_remote_snapshot_hash(project_path, effective_remote, actual_head)
-            retry_resp = await client.post("/push", {
-                "project_path": proj_name,
-                "project_manifest_hash": ph,
-                "system_version": sys_ver,
-                "expected_snapshot_hash": actual_head,
-            })
+            retry_resp = await client.post(
+                "/push",
+                {
+                    "project_path": proj_name,
+                    "project_manifest_hash": ph,
+                    "system_version": sys_ver,
+                    "expected_snapshot_hash": actual_head,
+                },
+            )
             retry_body = retry_resp.get("body", {})
             if isinstance(retry_body, str):
                 retry_body = json.loads(retry_body)
@@ -420,7 +480,9 @@ async def _push(project_path: Path, params: Dict) -> Dict:
     # Store returned snapshot_hash for next push
     if ref_published and push_body.get("snapshot_hash"):
         _store_remote_snapshot_hash(
-            project_path, effective_remote, push_body["snapshot_hash"],
+            project_path,
+            effective_remote,
+            push_body["snapshot_hash"],
         )
 
     result = {
@@ -433,10 +495,14 @@ async def _push(project_path: Path, params: Dict) -> Dict:
         "total_objects": len(all_hashes),
         "ref_published": ref_published,
         "user_space_pushed": user_space_pushed,
-        "message": f"Synced {len(missing)} objects to remote" if missing else "Remote is up to date",
+        "message": f"Synced {len(missing)} objects to remote"
+        if missing
+        else "Remote is up to date",
     }
     if not ref_published:
-        result["ref_warning"] = f"Objects uploaded but project ref not published: {push_resp.get('error')}"
+        result["ref_warning"] = (
+            f"Objects uploaded but project ref not published: {push_resp.get('error')}"
+        )
     return result
 
 
@@ -486,14 +552,15 @@ async def _status(project_path: Path, params: Dict) -> Dict:
     ph, pm = build_manifest(project_path, "project")
 
     from rye.utils.path_utils import get_user_space
+
     user_root = get_user_space()
     uh, um = build_manifest(user_root, "user", project_path=project_path)
 
-    all_hashes = list(set(
-        collect_object_hashes(pm, root)
-        + collect_object_hashes(um, root)
-        + [ph, uh]
-    ))
+    all_hashes = list(
+        set(
+            collect_object_hashes(pm, root) + collect_object_hashes(um, root) + [ph, uh]
+        )
+    )
 
     result = {
         "project_manifest_hash": ph,
@@ -506,10 +573,15 @@ async def _status(project_path: Path, params: Dict) -> Dict:
     }
 
     from remote_config import list_remotes
+
     remote_name = params.get("remote")
     if remote_name:
         # Show status for a specific remote
-        result["remotes"] = {remote_name: list_remotes(project_path).get(remote_name, {"error": "not found"})}
+        result["remotes"] = {
+            remote_name: list_remotes(project_path).get(
+                remote_name, {"error": "not found"}
+            )
+        }
     else:
         # Show all configured remotes
         result["remotes"] = list_remotes(project_path)
@@ -518,7 +590,8 @@ async def _status(project_path: Path, params: Dict) -> Dict:
 
 
 async def _fetch_verified_identity(
-    client: "RemoteHttpClient", remote_name: Optional[str] = None,
+    client: "RemoteHttpClient",
+    remote_name: Optional[str] = None,
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     """Fetch and verify remote identity document.
 
@@ -551,11 +624,14 @@ async def _fetch_verified_identity(
 
         payload = json.dumps(
             {k: v for k, v in body.items() if k != "_signature"},
-            sort_keys=True, separators=(",", ":"),
+            sort_keys=True,
+            separators=(",", ":"),
         )
         content_hash = hashlib.sha256(payload.encode()).hexdigest()
         if not verify_signature(content_hash, sig_block["sig"], remote_pem):
-            return None, {"error": "Remote identity document signature verification failed"}
+            return None, {
+                "error": "Remote identity document signature verification failed"
+            }
 
     # TOFU key pinning
     from rye.primitives.signing import compute_key_fingerprint
@@ -564,6 +640,7 @@ async def _fetch_verified_identity(
     remote_fp = compute_key_fingerprint(remote_pem)
     trust_store = TrustStore()
     from urllib.parse import urlparse
+
     host = urlparse(client.base_url).netloc
     name = remote_name or "default"
     owner = f"remote:{name}:{host}"
@@ -590,7 +667,9 @@ async def _fetch_verified_identity(
     }
 
 
-async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[str] = None) -> Optional[Dict]:
+async def _verify_remote_key(
+    client: "RemoteHttpClient", remote_name: Optional[str] = None
+) -> Optional[Dict]:
     """Fetch remote identity and verify against pinned fingerprint.
 
     TOFU: pins on first contact. Hard-fails on fingerprint mismatch or
@@ -608,9 +687,9 @@ async def _verify_remote_key(client: "RemoteHttpClient", remote_name: Optional[s
 
 # Allowlisted path prefixes for runtime output materialization.
 _RUNTIME_OUTPUT_PREFIXES = (
-    ".ai/agent/",
-    ".ai/knowledge/agent/",
-    ".ai/objects/refs/",
+    ".ai/state/",
+    ".ai/knowledge/state/",
+    ".ai/state/objects/refs/",
 )
 
 
@@ -622,7 +701,7 @@ def _materialize_runtime_outputs(
 
     Reads the bundle object from local CAS, then for each file entry,
     reads the blob and writes it to the corresponding local path.
-    Refs (.ai/objects/refs/) are written last so targets exist first.
+    Refs (.ai/state/objects/refs/) are written last so targets exist first.
 
     Returns count of files materialized.
     """
@@ -631,7 +710,9 @@ def _materialize_runtime_outputs(
     root = cas_root(project_path)
     obj = cas.get_object(bundle_hash, root)
     if obj is None:
-        logger.warning("RuntimeOutputsBundle %s not found in local CAS", bundle_hash[:16])
+        logger.warning(
+            "RuntimeOutputsBundle %s not found in local CAS", bundle_hash[:16]
+        )
         return 0
 
     if obj.get("kind") != "runtime_outputs_bundle":
@@ -649,7 +730,7 @@ def _materialize_runtime_outputs(
     regular_files = {}
     ref_files = {}
     for rel_path, blob_hash in files.items():
-        if rel_path.startswith(".ai/objects/refs/"):
+        if rel_path.startswith(".ai/state/objects/refs/"):
             ref_files[rel_path] = blob_hash
         else:
             regular_files[rel_path] = blob_hash
@@ -674,7 +755,8 @@ def _materialize_runtime_outputs(
             if blob_data is None:
                 logger.warning(
                     "Blob %s for %s not found in local CAS",
-                    blob_hash[:16], rel_path,
+                    blob_hash[:16],
+                    rel_path,
                 )
                 continue
 
@@ -697,7 +779,8 @@ def _materialize_runtime_outputs(
     if count:
         logger.info(
             "Materialized %d runtime output files from bundle %s",
-            count, bundle_hash[:16],
+            count,
+            bundle_hash[:16],
         )
 
     return count
@@ -719,6 +802,7 @@ def _load_local_secrets() -> dict:
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
         from rye.utils.path_utils import get_signing_key_dir
+
         key_dir = get_signing_key_dir()
         private_pem, _ = load_keypair(key_dir)
 
@@ -795,12 +879,14 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     if local_secrets and identity_doc:
         try:
             from rye.primitives.sealed_envelope import seal_secrets_for_identity
+
             secret_envelope = seal_secrets_for_identity(local_secrets, identity_doc)
         except Exception as e:
             logger.warning("Failed to seal secrets for remote: %s", e)
 
     # 4. Execute on remote (longer timeout for execution)
     from remote_config import get_project_path
+
     proj_name = get_project_path(project_path)
     exec_body = {
         "project_path": proj_name,
@@ -832,7 +918,9 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     new_object_hashes = exec_body.get("new_object_hashes", [])
     pull_hashes.extend(new_object_hashes)
     if pull_hashes:
-        pull_result = await _pull(project_path, {"hashes": pull_hashes, "remote": remote_name})
+        pull_result = await _pull(
+            project_path, {"hashes": pull_hashes, "remote": remote_name}
+        )
     else:
         pull_result = {"fetched": 0}
 
@@ -840,7 +928,8 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     outputs_materialized = 0
     if bundle_hash:
         outputs_materialized = _materialize_runtime_outputs(
-            bundle_hash, project_path,
+            bundle_hash,
+            project_path,
         )
 
     return {
@@ -910,6 +999,7 @@ async def _seal(project_path: Path, params: Dict) -> Dict:
         return key_err
 
     from rye.primitives.sealed_envelope import seal_secrets_for_identity
+
     try:
         envelope = seal_secrets_for_identity(local_secrets, identity_doc)
     except Exception as e:
@@ -944,6 +1034,7 @@ async def _vault_set(project_path: Path, params: Dict) -> Dict:
         return key_err
 
     from rye.primitives.sealed_envelope import seal_secrets_for_identity
+
     try:
         envelope = seal_secrets_for_identity({name: value}, identity_doc)
     except Exception as e:
@@ -1024,6 +1115,7 @@ async def _webhook_create(project_path: Path, params: Dict) -> Dict:
     client = _get_client(remote_name, project_path)
 
     from remote_config import get_project_path
+
     proj_name = get_project_path(project_path)
 
     body = {
@@ -1083,18 +1175,20 @@ async def _webhook_trigger(project_path: Path, params: Dict) -> Dict:
 
     secret = params.get("secret") or os.environ.get("WEBHOOK_SECRET", "")
     if not secret:
-        return {"error": "secret is required for webhook_trigger (pass directly or set WEBHOOK_SECRET env var)"}
+        return {
+            "error": "secret is required for webhook_trigger (pass directly or set WEBHOOK_SECRET env var)"
+        }
 
     exec_params = params.get("parameters", {})
     remote_name = params.get("remote")
 
     # Build the request — only hook_id and parameters go in the body
     from remote_config import resolve_remote
+
     config = resolve_remote(remote_name, project_path)
     url = config.url.rstrip("/") + "/execute"
 
     body = {"hook_id": hook_id, "parameters": exec_params}
-    # Must match the serialization used by HttpClientPrimitive (json.dumps default)
     body_bytes = json.dumps(body).encode()
 
     timestamp = str(int(time.time()))
@@ -1103,7 +1197,9 @@ async def _webhook_trigger(project_path: Path, params: Dict) -> Dict:
     # HMAC-SHA256 over "timestamp.body"
     signed = timestamp.encode() + b"." + body_bytes
     signature = hmac_mod.new(
-        secret.encode(), signed, hashlib.sha256,
+        secret.encode(),
+        signed,
+        hashlib.sha256,
     ).hexdigest()
 
     headers = {
@@ -1113,22 +1209,24 @@ async def _webhook_trigger(project_path: Path, params: Dict) -> Dict:
         "X-Webhook-Delivery-Id": delivery_id,
     }
 
-    from rye.runtime.http_client import HttpClientPrimitive
-    http = HttpClientPrimitive()
-    result = await http.execute({
-        "method": "POST",
-        "url": url,
-        "headers": headers,
-        "body": body,
-        "timeout": 300,
-    }, {})
+    import httpx
 
-    if not result.success:
-        return {"error": f"Webhook trigger failed: {result.error}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                content=body_bytes,
+                headers=headers,
+                timeout=300,
+            )
+        success = 200 <= resp.status_code < 300
+    except Exception as e:
+        return {"error": f"Webhook trigger failed: {e}"}
 
-    resp_body = result.body
-    if isinstance(resp_body, str):
-        resp_body = json.loads(resp_body)
+    if not success:
+        return {"error": f"Webhook trigger failed: HTTP {resp.status_code}"}
+
+    resp_body = resp.json()
 
     return {
         "triggered": True,
@@ -1173,18 +1271,24 @@ async def _publish(project_path: Path, params: Dict) -> Dict:
 
     if missing:
         entries = export_objects(missing, root)
-        put_resp = await client.post("/objects/put", {
-            "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
-        })
+        put_resp = await client.post(
+            "/objects/put",
+            {
+                "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
+            },
+        )
         if not put_resp["success"]:
             return {"error": f"Failed to upload objects: {put_resp['error']}"}
 
-    result = await client.post("/registry/publish", {
-        "item_type": item_type,
-        "item_id": item_id,
-        "version": version,
-        "manifest_hash": ph,
-    })
+    result = await client.post(
+        "/registry/publish",
+        {
+            "item_type": item_type,
+            "item_id": item_id,
+            "version": version,
+            "manifest_hash": ph,
+        },
+    )
 
     if not result["success"]:
         body = result.get("body", {})
@@ -1193,7 +1297,11 @@ async def _publish(project_path: Path, params: Dict) -> Dict:
                 body = json.loads(body)
             except (json.JSONDecodeError, ValueError):
                 pass
-        detail = body.get("detail", result.get("error", "Unknown error")) if isinstance(body, dict) else result.get("error")
+        detail = (
+            body.get("detail", result.get("error", "Unknown error"))
+            if isinstance(body, dict)
+            else result.get("error")
+        )
         return {"error": f"Publish failed: {detail}"}
 
     return {
@@ -1291,18 +1399,26 @@ async def _push_bundle(project_path: Path, params: Dict) -> Dict:
 
     if missing:
         entries = export_objects(missing, root)
-        put_resp = await client.post("/objects/put", {
-            "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
-        }, timeout=300)
+        put_resp = await client.post(
+            "/objects/put",
+            {
+                "entries": [e if isinstance(e, dict) else e.to_dict() for e in entries],
+            },
+            timeout=300,
+        )
         if not put_resp["success"]:
             return {"error": f"Failed to upload objects: {put_resp['error']}"}
 
-    result = await client.post("/registry/publish", {
-        "item_type": "bundle",
-        "item_id": bundle_id,
-        "version": version,
-        "manifest_hash": ph,
-    }, timeout=300)
+    result = await client.post(
+        "/registry/publish",
+        {
+            "item_type": "bundle",
+            "item_id": bundle_id,
+            "version": version,
+            "manifest_hash": ph,
+        },
+        timeout=300,
+    )
 
     if not result["success"]:
         body = result.get("body", {})
@@ -1311,7 +1427,11 @@ async def _push_bundle(project_path: Path, params: Dict) -> Dict:
                 body = json.loads(body)
             except (json.JSONDecodeError, ValueError):
                 pass
-        detail = body.get("detail", result.get("error", "Unknown error")) if isinstance(body, dict) else result.get("error")
+        detail = (
+            body.get("detail", result.get("error", "Unknown error"))
+            if isinstance(body, dict)
+            else result.get("error")
+        )
         return {"error": f"Publish failed: {detail}"}
 
     return {
@@ -1389,7 +1509,11 @@ async def _pull_bundle(project_path: Path, params: Dict) -> Dict:
 
     # 3. Collect transitive hashes we're missing locally
     all_hashes = list(set(collect_object_hashes(manifest_obj, root)))
-    missing = [h for h in all_hashes if cas.get_blob(h, root) is None and cas.get_object(h, root) is None]
+    missing = [
+        h
+        for h in all_hashes
+        if cas.get_blob(h, root) is None and cas.get_object(h, root) is None
+    ]
 
     # 4. Pull missing objects
     objects_pulled = 0
@@ -1460,11 +1584,18 @@ async def execute(params: dict, project_path: str) -> dict:
     if not action:
         return {"success": False, "error": "action required in params"}
     if action not in ACTIONS:
-        return {"success": False, "error": f"Unknown action: {action}", "valid_actions": ACTIONS}
+        return {
+            "success": False,
+            "error": f"Unknown action: {action}",
+            "valid_actions": ACTIONS,
+        }
 
     pp = Path(project_path).resolve()
     if not pp.is_dir():
-        return {"success": False, "error": f"Project path does not exist: {project_path}"}
+        return {
+            "success": False,
+            "error": f"Project path does not exist: {project_path}",
+        }
 
     result = await _ACTION_MAP[action](pp, params)
     if "error" in result:

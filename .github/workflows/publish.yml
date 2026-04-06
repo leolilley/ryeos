@@ -345,8 +345,8 @@ jobs:
         env:
           RYE_REGISTRY_URL: ${{ secrets.RYE_REGISTRY_URL }}
         run: |
-          mkdir -p ~/.ai/config/cas
-          printf 'remotes:\n  registry:\n    url: %s\n' "$RYE_REGISTRY_URL" > ~/.ai/config/cas/remote.yaml
+          mkdir -p ~/.ai/config/remotes
+          printf 'remotes:\n  registry:\n    url: %s\n    roles: [registry]\n' "$RYE_REGISTRY_URL" > ~/.ai/config/remotes/remotes.yaml
 
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'

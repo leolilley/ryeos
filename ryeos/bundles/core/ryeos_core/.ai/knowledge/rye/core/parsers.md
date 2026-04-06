@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:422a5ac02c7706dc7a32a6e6b2047a9480ce8318adc7797984eaf34eaf5605c4:NrGvw92GKyrB--tMdnT8OOklmNOME6L6tfIcbJDReLUrwVsAgyJvO-lmguIFCrvCd97Jq5Vos2djGeie3zMtCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:f381532f6f41ccabe5f89a5bf700adcb36ebee90a00faad8a3371f189d006d78:EdytXy6m0E0V6xOQ-VumtPfBZOz0ZIDrQQa55-Doxm4Da8nn6cjF5exuQmtfLTQC2_0Vwv9AFuzh6mrtDuoGCQ:4b987fd4e40303ac -->
 
 ```yaml
 name: parsers
@@ -216,7 +216,7 @@ Parses YAML files for runtime configs and tool definitions.
 ```yaml
 tool_id: rye/core/runtimes/python/script
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 
 env_config:
   interpreter:

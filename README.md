@@ -110,7 +110,7 @@ Run tools and state graphs on a remote server without exposing your private sign
 pip install ryeos-node          # server package (deployed on Modal)
 ```
 
-Named remotes are configured in `cas/remote.yaml`:
+Named remotes are configured in `remotes/remotes.yaml`:
 
 ```yaml
 remotes:

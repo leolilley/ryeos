@@ -16,17 +16,17 @@ Threads now stream LLM tokens in real-time to both `transcript.jsonl` and knowle
 ```
 HttpProvider
   └── dispatcher (create_streaming_completion)
-        └── HttpClientPrimitive (SSE mode)
+        └── httpx SSE connection
               └── sink fan-out
                     ├── TranscriptSink  → transcript.jsonl + knowledge.md
                     └── ReturnSink     → in-memory response assembly
 ```
 
-`HttpProvider` checks `supports_streaming` on the provider adapter. If true, it calls `create_streaming_completion()` instead of `create_completion()`. The `HttpClientPrimitive` opens an SSE connection and fans out parsed events to registered sinks.
+`HttpProvider` checks `supports_streaming` on the provider adapter. If true, it calls `create_streaming_completion()` instead of `create_completion()`. The provider opens an SSE connection via httpx and fans out parsed events to registered sinks.
 
 ## TranscriptSink
 
-`TranscriptSink` implements `write(event)` and `close()` for the `HttpClientPrimitive` fan-out interface. On each content delta:
+`TranscriptSink` implements `write(event)` and `close()` for the streaming fan-out interface. On each content delta:
 
 1. **JSONL** — Appends a `token_delta` event to `transcript.jsonl`
 2. **Knowledge markdown** — Appends the raw text to the knowledge markdown file at `.ai/knowledge/threads/{thread_id}.md`
@@ -38,7 +38,7 @@ This means both files update in real-time as the model generates tokens.
 ### JSONL transcript
 
 ```bash
-tail -f .ai/agent/threads/<thread_id>/transcript.jsonl
+tail -f .ai/state/threads/<thread_id>/transcript.jsonl
 ```
 
 ### Knowledge markdown
@@ -52,7 +52,7 @@ Use `-F` (capital) for knowledge markdown — `render_knowledge()` rewrites the 
 ### Pretty-printed text deltas
 
 ```bash
-tail -f .ai/agent/threads/<thread_id>/transcript.jsonl \
+tail -f .ai/state/threads/<thread_id>/transcript.jsonl \
   | python3 -c "import sys,json;[print(json.loads(l).get('payload',{}).get('text',''),end='',flush=True) for l in sys.stdin]"
 ```
 
@@ -67,7 +67,7 @@ result = rye_execute(
     async=True,
 )
 thread_id = result["thread_id"]
-# Now tail -f .ai/agent/threads/{thread_id}/transcript.jsonl
+# Now tail -f .ai/state/threads/{thread_id}/transcript.jsonl
 ```
 
 ## Event Format
@@ -88,7 +88,7 @@ Each streaming token produces a `token_delta` event in the JSONL transcript:
 
 ## SSE Format Handling
 
-The `HttpClientPrimitive` handles two SSE wire formats:
+The HTTP provider handles two SSE wire formats:
 
 | Provider | SSE Format | Content Delta Event |
 |----------|-----------|---------------------|

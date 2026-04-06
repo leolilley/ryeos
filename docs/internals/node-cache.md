@@ -29,12 +29,11 @@ The cache key is a SHA256 of canonical JSON containing:
         "item_id": "rye/agent/threads/thread_directive",
         "params": {"directive": "summarize", "context": "actual resolved value"}
     },
-    "lockfile_hash": "ab23...",
     "config_snapshot_hash": "cd45...",
 }
 ```
 
-This means: same graph + same node + same resolved parameters + same lockfile + same config = cache hit.
+This means: same graph + same node + same resolved parameters + same config = cache hit.
 
 The `config_snapshot_hash` comes from `compute_agent_config_snapshot()` in `rye/cas/config_snapshot.py`, which loads `agent.yaml`, `resilience.yaml`, `coordination.yaml`, and `hooks.yaml` via 3-tier merge (system → user → project), combines them, and hashes. Any config change invalidates all caches.
 
@@ -64,11 +63,11 @@ nodes:
 
 | Function | Description |
 |----------|-------------|
-| `compute_cache_key(graph_hash, node_name, interpolated_action, lockfile_hash, config_snapshot_hash) -> str` | Compute deterministic SHA256 cache key |
+| `compute_cache_key(graph_hash, node_name, interpolated_action, config_snapshot_hash) -> str` | Compute deterministic SHA256 cache key |
 | `cache_lookup(cache_key, project_path) -> dict | None` | Returns `{"result": ..., "node_result_hash": ...}` on hit, `None` on miss |
 | `cache_store(cache_key, result, project_path, node_name, elapsed_ms) -> str | None` | Store result as `NodeResult` CAS object, write cache pointer. Returns `node_result_hash`. |
 
-Cache pointer files stored at `.ai/objects/cache/nodes/{cache_key}.json`:
+Cache pointer files stored at `.ai/state/objects/cache/nodes/{cache_key}.json`:
 
 ```json
 {
@@ -125,11 +124,11 @@ Caches invalidate automatically when any input changes:
 |--------|--------|
 | Graph YAML modified | `graph_hash` changes → all nodes miss |
 | Node action params change | `interpolated_action` changes → that node misses |
-| Lockfile updated | `lockfile_hash` changes → affected nodes miss |
+| Config updated | `config_snapshot_hash` changes → affected nodes miss |
 | Config file edited | `config_snapshot_hash` changes → all nodes miss |
 | State from upstream changes | Different `interpolated_action` → miss |
 
-No manual cache invalidation needed. Delete `.ai/objects/cache/nodes/` to force re-execution of everything.
+No manual cache invalidation needed. Delete `.ai/state/objects/cache/nodes/` to force re-execution of everything.
 
 ## Implementation Files
 

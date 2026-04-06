@@ -21,7 +21,7 @@ class TestPersistStateCAS:
         """_persist_state should create state_snapshot and execution_snapshot in CAS."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
-            (project / ".ai" / "objects").mkdir(parents=True)
+            (project / ".ai" / "state" / "objects").mkdir(parents=True)
 
             walker_dir = _WALKER_DIR
             sys.path.insert(0, walker_dir)
@@ -36,7 +36,7 @@ class TestPersistStateCAS:
                 assert result is not None  # snapshot hash
 
                 # Verify ref was written
-                ref_path = project / ".ai" / "objects" / "refs" / "graphs" / "run-123.json"
+                ref_path = project / ".ai" / "state" / "objects" / "refs" / "graphs" / "run-123.json"
                 assert ref_path.exists()
 
                 # Verify ref points to valid object
@@ -66,7 +66,7 @@ class TestPersistStateCAS:
         """Each _persist_state call should update the mutable ref."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
-            (project / ".ai" / "objects").mkdir(parents=True)
+            (project / ".ai" / "state" / "objects").mkdir(parents=True)
 
             walker_dir = _WALKER_DIR
             sys.path.insert(0, walker_dir)
@@ -90,7 +90,7 @@ class TestPersistStateCAS:
 
                 # Ref should point to latest
                 from rye.cas.store import read_ref
-                ref_path = project / ".ai" / "objects" / "refs" / "graphs" / "r1.json"
+                ref_path = project / ".ai" / "state" / "objects" / "refs" / "graphs" / "r1.json"
                 assert read_ref(ref_path) == h2
             finally:
                 sys.path.remove(walker_dir)
@@ -103,7 +103,7 @@ class TestCheckpointCAS:
         """Checkpoint should emit state_checkpoint with state_hash."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
-            (project / ".ai" / "objects").mkdir(parents=True)
+            (project / ".ai" / "state" / "objects").mkdir(parents=True)
 
             walker_dir = _WALKER_DIR
             sys.path.insert(0, walker_dir)
@@ -114,7 +114,7 @@ class TestCheckpointCAS:
                 transcript.checkpoint(1, state={"x": 1}, current_node="n1")
 
                 # Read JSONL
-                jsonl_path = project / ".ai" / "agent" / "graphs" / "run-1" / "transcript.jsonl"
+                jsonl_path = project / ".ai" / "state" / "graphs" / "run-1" / "transcript.jsonl"
                 events = []
                 with open(jsonl_path) as f:
                     for line in f:

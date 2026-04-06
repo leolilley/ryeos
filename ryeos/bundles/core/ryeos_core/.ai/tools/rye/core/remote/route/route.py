@@ -66,21 +66,28 @@ class _SimpleClient:
 
     async def get(self, path: str) -> dict:
         if self._http is None:
-            from rye.runtime.http_client import HttpClientPrimitive
-            self._http = HttpClientPrimitive()
-        config = {
-            "method": "GET",
-            "url": f"{self.base_url}{path}",
-            "headers": {"Content-Type": "application/json"},
-            "timeout": self.timeout,
-        }
-        result = await self._http.execute(config, {})
-        return {
-            "success": result.success,
-            "status_code": result.status_code,
-            "body": result.body,
-            "error": result.error,
-        }
+            import httpx
+            self._http = httpx.AsyncClient()
+        try:
+            resp = await self._http.get(
+                f"{self.base_url}{path}",
+                headers={"Content-Type": "application/json"},
+                timeout=self.timeout,
+            )
+            body = resp.json() if resp.content else {}
+            return {
+                "success": 200 <= resp.status_code < 300,
+                "status_code": resp.status_code,
+                "body": body,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status_code": 0,
+                "body": None,
+                "error": str(exc),
+            }
 
 
 async def _route(params: Dict, project_path: str) -> Dict:
@@ -110,7 +117,7 @@ async def _route(params: Dict, project_path: str) -> Dict:
 
     remotes = list_remotes(Path(project_path) if project_path else None)
     if not remotes:
-        return {"error": "No remotes configured in cas/remote.yaml"}
+        return {"error": "No remotes configured in remotes/remotes.yaml"}
 
     # Query /status on all remotes (cached)
     from status_cache import StatusCache

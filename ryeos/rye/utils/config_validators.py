@@ -1,7 +1,7 @@
 """Config content validation — loads .config-schema.yaml tools and validates config dicts.
 
 Schema tools live under .ai/tools/ and declare which config they validate
-via ``target_config`` (a path relative to .ai/config/, e.g. ``cas/remote.yaml``).
+via ``target_config`` (a path relative to .ai/config/, e.g. ``remotes/remotes.yaml``).
 Schemas are discovered once via rglob across 3-tier tools roots and cached.
 
 Separate from validators.py which handles extractor-driven METADATA validation.

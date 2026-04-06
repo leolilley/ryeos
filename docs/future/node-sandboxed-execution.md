@@ -44,14 +44,14 @@ This is why enforcement can't live at the node level alone. The node is Python. 
 
 ## What Node Attestation Looks Like
 
-On first boot (or on environment change), the node produces a signed attestation:
+Node state lives at `~/.ai/node/` — machine-local, never in project space, signed by the node's own Ed25519 key (stored at `~/.ai/node/identity/`). On first boot (or on environment change), the node produces a signed attestation at `~/.ai/node/attestation/`:
 
 - Hardware: CPU architecture, GPU models, memory, storage
 - Isolation: container runtime, namespace configuration, resource cgroups
 - Capabilities: what tool IDs this node can execute (already exists via `/status`)
 - Restrictions: what's not available, what's firewalled, what resource limits apply
 
-This attestation is signed by the node's key and published. Callers can verify it before dispatching execution. TOFU pins the node and its attested environment together.
+This attestation is signed by the node's key (from `~/.ai/node/identity/`) and published. Callers can verify it before dispatching execution. TOFU pins the node and its attested environment together. Authorized callers are tracked in `~/.ai/node/authorized-keys/`.
 
 ## How This Connects
 

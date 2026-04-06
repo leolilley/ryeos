@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:b67b7f401be00b02f932d719929471e88d66bbff29f3a01de8c368427a25c001:QK-RlZQW-WRorKasNuZbhlcNVcb1-HuZA0T96fPG-ZLWtgmVXTME3fxcyeL-sYTueM3yPe5JFTurhATzdYvkBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:cf5fb5435acaadf1a631864d1aff32d71069b0c16dfb9784a254a45c2932f608:-bgk_OTIdBphvFLKYcxqzwY69COsPzd2Vf2bzCUVAY8rvKVGKmDqY8aaGefZM5MzHvoIQ3sK8wAQJRpFFeGRAA:4b987fd4e40303ac -->
 
 ```yaml
 name: terminology
@@ -113,7 +113,7 @@ The three MCP-exposed tools use the `rye_` prefix:
 | **runtime**        | YAML config defining how a tool type is executed                  |
 | **bundle**         | Packaged collection of items distributed as a Python package      |
 | **integrity**      | SHA-256 content hash + Ed25519 signature verification             |
-| **lockfile**       | Pinned chain with integrity hashes for reproducible execution     |
+| **install receipt** | Record of installed bundle files for clean uninstallation          |
 | **capability**     | Permission token controlling what a thread can do                 |
 | **thread**         | Isolated LLM execution context with limits and permissions        |
 | **anchor**         | Module resolution root for multi-file tool dependencies           |

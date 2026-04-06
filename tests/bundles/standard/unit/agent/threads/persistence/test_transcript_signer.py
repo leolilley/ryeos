@@ -10,7 +10,9 @@ from conftest import get_bundle_path
 from rye.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 
-SIGNER_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/persistence/transcript_signer.py')
+SIGNER_PATH = get_bundle_path(
+    "standard", "tools/rye/agent/threads/persistence/transcript_signer.py"
+)
 _spec = importlib.util.spec_from_file_location("transcript_signer", SIGNER_PATH)
 _signer_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_signer_mod)
@@ -29,7 +31,9 @@ def temp_env(tmp_path, _setup_user_space):
     key_dir = user_space / AI_DIR / "keys"
     private_pem = (key_dir / "private_key.pem").read_text()
     public_pem = (key_dir / "public_key.pem").read_text()
-    fp = compute_key_fingerprint(public_pem.encode() if isinstance(public_pem, str) else public_pem)
+    fp = compute_key_fingerprint(
+        public_pem.encode() if isinstance(public_pem, str) else public_pem
+    )
 
     thread_dir = tmp_path / "project" / AI_DIR / "agent" / "threads" / "test-thread"
     thread_dir.mkdir(parents=True)

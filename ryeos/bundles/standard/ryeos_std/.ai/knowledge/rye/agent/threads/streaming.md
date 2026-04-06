@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:3bdbca5c92f2de56849a49c620c77416ab78db31f291a190377847425a3b1472:VWXu-QI0DeHzz85BDX0yj2LPaexM-fUcgbsR6GL5QrTdz7-V2PrsnUzfpuFWF-phiRXOvhUJ9k1zzZA0LLugBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:14:32Z:da49a0a77334095e1c81c826079fce0c4b3bfe8dff1a92f2cad13812fbdd200b:rliCO0065TvZXEzNtzebAgivITW7Gafd3ePZPBrVZ2UFmu1ajjtcK1GXjMaxr7FZf6uqj7ATHMjcVhf3e-48Dw:4b987fd4e40303ac -->
 
 ```yaml
 name: streaming
@@ -25,7 +25,7 @@ Real-time token streaming from LLM providers to `transcript.jsonl` (as `token_de
 
 ## Sink Architecture
 
-`TranscriptSink` implements `write(event)` and `close()` for the `HttpClientPrimitive` fan-out interface. During streaming, the primitive dispatches each parsed SSE event to all registered sinks:
+`TranscriptSink` implements `write(event)` and `close()` for the streaming fan-out interface. During streaming, the provider dispatches each parsed SSE event to all registered sinks:
 
 ```python
 class TranscriptSink:

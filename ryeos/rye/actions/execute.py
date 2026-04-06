@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from rye.constants import AI_DIR, ItemType
+from rye.constants import AI_DIR, ItemType, STATE_DIR, STATE_THREADS
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
@@ -112,8 +112,13 @@ class ExecuteTool:
         # Resume mode: look up thread, route to its callee
         if resume_thread_id:
             return await self._resume(
-                resume_thread_id, item_type, item_id,
-                project_path, parameters, thread, async_exec,
+                resume_thread_id,
+                item_type,
+                item_id,
+                project_path,
+                parameters,
+                thread,
+                async_exec,
             )
 
         # Outside resume, item_type and item_id are required
@@ -132,7 +137,9 @@ class ExecuteTool:
         )
 
         # Validate the full execution triple
-        err = self._validate_execution(item_type, target_mode, thread, async_exec, dry_run)
+        err = self._validate_execution(
+            item_type, target_mode, thread, async_exec, dry_run
+        )
         if err:
             return {"status": "error", "error": err, "item_id": item_id}
 
@@ -142,7 +149,11 @@ class ExecuteTool:
             # Resolve execution plan
             spec = await self._read_execution_spec(item_type, item_id, project_path)
             plan = self._resolve_execution_plan(
-                item_type, target_mode, thread, async_exec, spec,
+                item_type,
+                target_mode,
+                thread,
+                async_exec,
+                spec,
             )
 
             if plan.launch_mode == "forward_remote":
@@ -157,7 +168,10 @@ class ExecuteTool:
                 )
             elif item_type == ItemType.DIRECTIVE:
                 result = await self._run_directive(
-                    item_id, project_path, parameters, dry_run,
+                    item_id,
+                    project_path,
+                    parameters,
+                    dry_run,
                     thread=thread,
                     async_exec=async_exec,
                 )
@@ -180,7 +194,10 @@ class ExecuteTool:
                         }
                     parameters = {**(parameters or {}), "async": True}
                 result = await self._run_tool(
-                    item_id, project_path, parameters, dry_run,
+                    item_id,
+                    project_path,
+                    parameters,
+                    dry_run,
                 )
             elif item_type == ItemType.KNOWLEDGE:
                 result = await self._run_knowledge(item_id, project_path)
@@ -196,7 +213,12 @@ class ExecuteTool:
 
         except IntegrityError as e:
             logger.error(f"Integrity error: {e}")
-            return {"status": "error", "error": str(e), "error_type": "integrity", "item_id": item_id}
+            return {
+                "status": "error",
+                "error": str(e),
+                "error_type": "integrity",
+                "item_id": item_id,
+            }
         except Exception as e:
             logger.error(f"Execute error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}
@@ -271,7 +293,10 @@ class ExecuteTool:
         return None
 
     async def _read_execution_spec(
-        self, item_type: str, item_id: str, project_path: str,
+        self,
+        item_type: str,
+        item_id: str,
+        project_path: str,
     ) -> ExecutionSpec:
         """Read execution ownership dunders from the resolved executor chain.
 
@@ -304,7 +329,9 @@ class ExecuteTool:
                         logger.warning(
                             "Tool %s (chain element %s) declares unknown "
                             "execution_owner=%r, defaulting to engine",
-                            item_id, element.item_id, owner,
+                            item_id,
+                            element.item_id,
+                            owner,
                         )
                         owner = "engine"
                     return ExecutionSpec(
@@ -315,7 +342,9 @@ class ExecuteTool:
 
             return ExecutionSpec()
         except Exception:
-            logger.warning("Could not read execution spec for %s, defaulting to engine", item_id)
+            logger.warning(
+                "Could not read execution spec for %s, defaulting to engine", item_id
+            )
             return ExecutionSpec()
 
     @staticmethod
@@ -407,14 +436,18 @@ class ExecuteTool:
         if resolved_item_type == ItemType.DIRECTIVE:
             parameters["previous_thread_id"] = resume_thread_id
             return await self._run_directive(
-                resolved_item_id, project_path, parameters,
+                resolved_item_id,
+                project_path,
+                parameters,
                 dry_run=False,
                 thread="fork",
                 async_exec=async_exec,
             )
         elif resolved_item_type == ItemType.TOOL:
             spec = await self._read_execution_spec(
-                resolved_item_type, resolved_item_id, project_path,
+                resolved_item_type,
+                resolved_item_id,
+                project_path,
             )
             if not spec.native_resume:
                 return {
@@ -428,7 +461,10 @@ class ExecuteTool:
             parameters["resume"] = True
             parameters["graph_run_id"] = resume_thread_id
             return await self._run_tool(
-                resolved_item_id, project_path, parameters, dry_run=False,
+                resolved_item_id,
+                project_path,
+                parameters,
+                dry_run=False,
             )
         else:
             return {
@@ -455,7 +491,7 @@ class ExecuteTool:
             "remote:gpu"   -> ("remote", "gpu")
         """
         if target.startswith("remote:"):
-            name = target[len("remote:"):]
+            name = target[len("remote:") :]
             if not name:
                 raise ValueError(
                     'Invalid target "remote:" — remote name cannot be empty. '
@@ -503,7 +539,11 @@ class ExecuteTool:
             content = file_path.read_text(encoding="utf-8")
             parsed = self.parser_router.parse("markdown/xml", content)
             if "error" in parsed:
-                return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
+                return {
+                    "status": "error",
+                    "error": parsed.get("error"),
+                    "item_id": item_id,
+                }
 
             processor_router = ProcessorRouter(proj_path)
             validation = processor_router.run("inputs/validate", parsed, parameters)
@@ -540,13 +580,17 @@ class ExecuteTool:
             remote_params["async"] = True
 
         remote_result = await self._run_tool(
-            remote_tool, project_path, remote_params, dry_run=False,
+            remote_tool,
+            project_path,
+            remote_params,
+            dry_run=False,
         )
 
         if remote_result.get("status") == "success" and remote_result.get("data"):
             data = remote_result["data"]
             if isinstance(data, dict) and "stdout" in data:
                 import json as _json
+
                 try:
                     data = _json.loads(data["stdout"])
                 except (ValueError, TypeError):
@@ -649,9 +693,9 @@ class ExecuteTool:
                 return {
                     "status": "error",
                     "error": (
-                        "thread=\"fork\" requires the rye/agent thread infrastructure "
+                        'thread="fork" requires the rye/agent thread infrastructure '
                         f"(tool '{td_tool}' not found). "
-                        "Either install the rye-agent package or use thread=\"inline\" "
+                        'Either install the rye-agent package or use thread="inline" '
                         "to execute the directive inline."
                     ),
                     "item_id": item_id,
@@ -687,6 +731,7 @@ class ExecuteTool:
                 # Unwrap: PrimitiveExecutor wraps stdout JSON in data.stdout
                 if isinstance(data, dict) and "stdout" in data:
                     import json as _json
+
                     try:
                         data = _json.loads(data["stdout"])
                     except (ValueError, TypeError):
@@ -806,7 +851,7 @@ class ExecuteTool:
         proj = Path(project_path)
 
         registry = self._get_registry(proj)
-        thread_dir = proj / ".ai" / "agent" / "threads" / thread_id
+        thread_dir = proj / AI_DIR / STATE_DIR / STATE_THREADS / thread_id
 
         payload = {
             "item_type": item_type,
@@ -817,13 +862,18 @@ class ExecuteTool:
         }
 
         cmd = [
-            sys.executable, "-m", "rye.utils.async_runner",
-            "--project-path", project_path,
-            "--thread-id", thread_id,
+            sys.executable,
+            "-m",
+            "rye.utils.async_runner",
+            "--project-path",
+            project_path,
+            "--thread-id",
+            thread_id,
         ]
 
         if registry:
             from rye.utils.detached import spawn_thread
+
             spawn_result = await spawn_thread(
                 registry=registry,
                 thread_id=thread_id,
@@ -834,6 +884,7 @@ class ExecuteTool:
             )
         else:
             from rye.utils.detached import launch_detached
+
             spawn_result = await launch_detached(
                 cmd,
                 thread_id=thread_id,
@@ -868,12 +919,18 @@ class ExecuteTool:
 
             for bundle in get_system_spaces():
                 mod_path = (
-                    bundle.root_path / _AI_DIR / "tools"
-                    / "rye" / "agent" / "threads" / "persistence"
+                    bundle.root_path
+                    / _AI_DIR
+                    / "tools"
+                    / "rye"
+                    / "agent"
+                    / "threads"
+                    / "persistence"
                     / "thread_registry.py"
                 )
                 if mod_path.is_file():
                     import importlib.util
+
                     spec = importlib.util.spec_from_file_location(
                         "thread_registry", mod_path
                     )
@@ -906,7 +963,11 @@ class ExecuteTool:
         if not file_path:
             return {"status": "error", "error": f"Knowledge entry not found: {item_id}"}
 
-        verify_item(file_path, ItemType.KNOWLEDGE, project_path=Path(project_path) if project_path else None)
+        verify_item(
+            file_path,
+            ItemType.KNOWLEDGE,
+            project_path=Path(project_path) if project_path else None,
+        )
 
         content = file_path.read_text(encoding="utf-8")
         parsed = self.parser_router.parse("markdown/frontmatter", content)
@@ -947,7 +1008,9 @@ class ExecuteTool:
         for bundle in get_system_spaces():
             search_bases.append(bundle.root_path / AI_DIR / type_folder)
 
-        extensions = get_item_extensions(item_type, Path(project_path) if project_path else None)
+        extensions = get_item_extensions(
+            item_type, Path(project_path) if project_path else None
+        )
 
         for base in search_bases:
             if not base.exists():

@@ -107,7 +107,6 @@ def get_user_space() -> Path:
     return Path.home()
 
 
-
 def get_user_ai_path() -> Path:
     """Get .ai directory in user space (e.g., ~/.ai).
 
@@ -127,6 +126,55 @@ def get_signing_key_dir() -> Path:
     if env_dir:
         return Path(env_dir)
     return get_user_space() / AI_DIR / "config" / "keys" / "signing"
+
+
+# ---------------------------------------------------------------------------
+# Node paths — user-space only (~/.ai/node/)
+#
+# Node state is machine-local identity and mutable state. It NEVER resolves
+# through the 3-tier config system (project → user → system). All node path
+# getters read from ~/.ai/node/ exclusively. Project-space .ai/node/ is
+# never consulted for node state.
+# ---------------------------------------------------------------------------
+
+
+def get_node_dir() -> Path:
+    """Get the node state root directory (~/.ai/node/).
+
+    This is the machine-local node state directory. Subdirectories are
+    defined in NodeDir constants: identity, attestation, authorized-keys,
+    vault, executions, logs.
+
+    User-space ONLY. Never resolved from project space.
+    """
+    from rye.constants import NodeDir
+
+    return get_user_space() / AI_DIR / NodeDir.DIR
+
+
+def get_node_path(subdir: str) -> Path:
+    """Get a node subdirectory path (~/.ai/node/{subdir}/).
+
+    Uses NodeDir constants for valid subdirectory names. Creates the
+    directory on first access.
+
+    Args:
+        subdir: One of NodeDir.ALL (identity, attestation, authorized-keys,
+                vault, executions, logs).
+
+    Returns:
+        Path to the node subdirectory, created if it didn't exist.
+
+    Raises:
+        ValueError: If subdir is not a valid NodeDir constant.
+    """
+    from rye.constants import NodeDir
+
+    if subdir not in NodeDir.ALL:
+        raise ValueError(
+            f"Invalid node subdir {subdir!r}. Must be one of: {NodeDir.ALL}"
+        )
+    return ensure_directory(get_node_dir() / subdir)
 
 
 def _parse_bundle_entry_point(ep_name: str, result: Any) -> Optional[BundleInfo]:

@@ -59,7 +59,7 @@ Every node's identity and configuration lives in its **node space** — the `.ai
 │   ├── id_ed25519
 │   └── id_ed25519.pub
 ├── <user-fp-1>/                     ← per-user CAS storage
-│   ├── .ai/objects/
+│   ├── .ai/state/objects/
 │   ├── cache/
 │   └── executions/
 └── <user-fp-2>/

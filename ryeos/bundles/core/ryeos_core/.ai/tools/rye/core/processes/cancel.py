@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:e95b4fab43eb6f42d0627ff4d13df1f56a793275499554c7664afe429ea00381:yceZg0qTMyubLYCkqSOm24dyGUinI2hCa6yEHxTEJbAC8xp2QJ8zxM_vNCZPMSUfKsakIULSk6Yk3GDVaGgiBQ:4b987fd4e40303ac
+# rye:signed:2026-04-06T02:50:45Z:0e8c720461d8f3dc334d308cbd4ea266fbb470370a3aa565231c05b9d3433c8b:tOowIwsVQBrFDInCieHBfpjSL4fkXTCHAhqSqxI3B3DRWwIckFK0mtxD432vcQ_N0K30Wg6NPnTtk9usPCIQCg:4b987fd4e40303ac
 """Cancel a running process by run_id via SIGTERM."""
 
 import argparse
@@ -92,9 +92,9 @@ async def _execute_async(params: dict, project_path: str) -> dict:
             "status": status,
         }
 
-    from rye.primitives.subprocess import SubprocessPrimitive
+    from rye.primitives.execute import ExecutePrimitive
 
-    sp = SubprocessPrimitive()
+    sp = ExecutePrimitive()
     kill_result = await sp.kill(pid, grace=grace)
 
     if kill_result.success:

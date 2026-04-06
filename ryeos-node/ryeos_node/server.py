@@ -69,7 +69,14 @@ from ryeos_node.registry import (
 from rye.primitives import cas
 from rye.primitives.integrity import compute_integrity
 
-from rye.cas.objects import ExecutionSnapshot, ProjectSnapshot, RuntimeOutputsBundle, SourceManifest, SCHEMA_VERSION, get_history
+from rye.cas.objects import (
+    ExecutionSnapshot,
+    ProjectSnapshot,
+    RuntimeOutputsBundle,
+    SourceManifest,
+    SCHEMA_VERSION,
+    get_history,
+)
 from rye.cas.sync import (
     handle_has_objects,
     handle_put_objects,
@@ -98,6 +105,7 @@ logger = logging.getLogger(__name__)
 
 class _ExecutionCounter:
     """Thread-safe active execution counter."""
+
     def __init__(self):
         self._lock = threading.Lock()
         self._active = 0
@@ -116,6 +124,7 @@ class _ExecutionCounter:
         with self._lock:
             self._active = max(0, self._active - 1)
             return self._active
+
 
 _exec_counter = _ExecutionCounter()
 
@@ -262,6 +271,7 @@ def _check_user_quota(principal: Principal, settings: Settings) -> None:
 
     # Rate limit: don't auto-GC more than once per cooldown period
     import time as _time
+
     last_gc = _get_last_gc_time(user_root)
     if last_gc and (_time.time() - last_gc) < settings.gc_auto_cooldown:
         raise HTTPException(
@@ -272,7 +282,9 @@ def _check_user_quota(principal: Principal, settings: Settings) -> None:
     cas_root = _principal_cas_root(principal, settings)
     logger.info(
         "Auto-GC triggered for %s: %d bytes > %d quota",
-        principal.fingerprint, total, quota,
+        principal.fingerprint,
+        total,
+        quota,
     )
 
     # Phase 1: quick cache prune (always safe, fast)
@@ -349,30 +361,36 @@ def _validate_manifest_graph(
     manifest = cas.get_object(manifest_hash, root)
     if manifest is None:
         raise _validation_error(
-            f"{label} object {manifest_hash} not found in CAS. Upload objects first.", label,
+            f"{label} object {manifest_hash} not found in CAS. Upload objects first.",
+            label,
         )
     if manifest.get("kind") != "source_manifest":
         raise _validation_error(
-            f"{label} {manifest_hash} has kind={manifest.get('kind')!r}, expected 'source_manifest'", label,
+            f"{label} {manifest_hash} has kind={manifest.get('kind')!r}, expected 'source_manifest'",
+            label,
         )
     if manifest.get("schema") != SCHEMA_VERSION:
         raise _validation_error(
-            f"{label} {manifest_hash} has unsupported schema version {manifest.get('schema')!r}", label,
+            f"{label} {manifest_hash} has unsupported schema version {manifest.get('schema')!r}",
+            label,
         )
     if manifest.get("space") != expected_space:
         raise _validation_error(
-            f"{label} {manifest_hash} has space={manifest.get('space')!r}, expected {expected_space!r}", label,
+            f"{label} {manifest_hash} has space={manifest.get('space')!r}, expected {expected_space!r}",
+            label,
         )
 
     items = manifest.get("items", {})
     files = manifest.get("files", {})
     if not isinstance(items, dict):
         raise _validation_error(
-            f"{label} {manifest_hash} has invalid items (expected object)", label,
+            f"{label} {manifest_hash} has invalid items (expected object)",
+            label,
         )
     if not isinstance(files, dict):
         raise _validation_error(
-            f"{label} {manifest_hash} has invalid files (expected object)", label,
+            f"{label} {manifest_hash} has invalid files (expected object)",
+            label,
         )
 
     # Dedupe: avoid re-checking the same hash multiple times
@@ -384,17 +402,20 @@ def _validate_manifest_graph(
             item_obj = cas.get_object(item_hash, root)
             if item_obj is None:
                 raise _validation_error(
-                    f"{label} item '{rel_path}' references missing object {item_hash}", label,
+                    f"{label} item '{rel_path}' references missing object {item_hash}",
+                    label,
                 )
             if item_obj.get("kind") != "item_source":
                 raise _validation_error(
                     f"{label} item '{rel_path}' references object {item_hash} "
-                    f"with kind={item_obj.get('kind')!r}, expected 'item_source'", label,
+                    f"with kind={item_obj.get('kind')!r}, expected 'item_source'",
+                    label,
                 )
             blob_hash = item_obj.get("content_blob_hash")
             if not isinstance(blob_hash, str) or not blob_hash:
                 raise _validation_error(
-                    f"item_source {item_hash} for '{rel_path}' is missing content_blob_hash", label,
+                    f"item_source {item_hash} for '{rel_path}' is missing content_blob_hash",
+                    label,
                 )
             validated_items[item_hash] = item_obj
 
@@ -402,7 +423,8 @@ def _validate_manifest_graph(
         if blob_hash not in validated_blobs:
             if not cas.has_blob(blob_hash, root):
                 raise _validation_error(
-                    f"item_source {item_hash} for '{rel_path}' references missing blob {blob_hash}", label,
+                    f"item_source {item_hash} for '{rel_path}' references missing blob {blob_hash}",
+                    label,
                 )
             validated_blobs.add(blob_hash)
 
@@ -410,7 +432,8 @@ def _validate_manifest_graph(
         if blob_hash not in validated_blobs:
             if not cas.has_blob(blob_hash, root):
                 raise _validation_error(
-                    f"{label} file '{rel_path}' references missing blob {blob_hash}", label,
+                    f"{label} file '{rel_path}' references missing blob {blob_hash}",
+                    label,
                 )
             validated_blobs.add(blob_hash)
 
@@ -476,9 +499,9 @@ def _copy_cas_objects(src_root: Path, dst_root: Path) -> List[str]:
 
 # Allowlisted path prefixes for runtime outputs (relative to project root).
 _RUNTIME_OUTPUT_PREFIXES = (
-    f"{AI_DIR}/agent/",
-    f"{AI_DIR}/knowledge/agent/",
-    f"{AI_DIR}/objects/refs/",
+    f"{AI_DIR}/state/",
+    f"{AI_DIR}/knowledge/state/",
+    f"{AI_DIR}/state/objects/refs/",
 )
 
 
@@ -515,18 +538,14 @@ def _ingest_runtime_outputs(
 
                 # Reject symlinks (prevents exfiltration of server files)
                 if file_path.is_symlink():
-                    logger.warning(
-                        "Skipping symlink in runtime outputs: %s", file_path
-                    )
+                    logger.warning("Skipping symlink in runtime outputs: %s", file_path)
                     continue
 
                 # Validate path stays under project root
                 try:
                     resolved = file_path.resolve()
                     if not resolved.is_relative_to(resolved_root):
-                        logger.warning(
-                            "Path escapes project root: %s", file_path
-                        )
+                        logger.warning("Path escapes project root: %s", file_path)
                         continue
                 except (ValueError, OSError):
                     continue
@@ -544,7 +563,8 @@ def _ingest_runtime_outputs(
                 except Exception:
                     logger.warning(
                         "Failed to ingest runtime output: %s",
-                        rel_path, exc_info=True,
+                        rel_path,
+                        exc_info=True,
                     )
 
     if not files:
@@ -560,7 +580,9 @@ def _ingest_runtime_outputs(
 
     logger.info(
         "Ingested %d runtime output files (%s) for %s",
-        len(files), bundle_hash[:16], thread_id,
+        len(files),
+        bundle_hash[:16],
+        thread_id,
     )
 
     return bundle_hash, new_hashes
@@ -576,7 +598,9 @@ def _resolve_project_ref_or_404(
     Returns dict with snapshot_hash, project_path.
     Raises HTTPException(404) if not found.
     """
-    ref = resolve_project_ref(settings.cas_base_path, principal.fingerprint, project_path)
+    ref = resolve_project_ref(
+        settings.cas_base_path, principal.fingerprint, project_path
+    )
     if not ref:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -588,7 +612,7 @@ def _resolve_project_ref_or_404(
 
 def _find_execution_snapshot_hash(project_path: Path) -> Optional[str]:
     """Find the walker's real execution_snapshot hash from graph refs."""
-    refs_dir = project_path / AI_DIR / "objects" / "refs" / "graphs"
+    refs_dir = project_path / AI_DIR / "state" / "objects" / "refs" / "graphs"
     if not refs_dir.is_dir():
         return None
     refs = sorted(
@@ -612,7 +636,12 @@ def _find_execution_snapshot_hash(project_path: Path) -> Optional[str]:
 @app.get("/health")
 async def health():
     from ryeos_node import __version__ as node_version
-    return {"status": "ok", "version": node_version, "engine_version": get_system_version()}
+
+    return {
+        "status": "ok",
+        "version": node_version,
+        "engine_version": get_system_version(),
+    }
 
 
 def _scan_capabilities() -> tuple[list, list]:
@@ -711,15 +740,19 @@ async def public_key(settings: Settings = Depends(get_settings)):
         "principal_id": f"fp:{fingerprint}",
         "signing_key": f"ed25519:{base64.b64encode(pub).decode()}",
         "box_key": f"x25519:{base64.b64encode(box_pub).decode()}",
-        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
     }
 
     # Sign with the node's own key
     import hashlib as _hl
     from rye.primitives.signing import sign_hash
+
     payload = json.dumps(
         {k: v for k, v in identity_doc.items() if k != "_signature"},
-        sort_keys=True, separators=(",", ":"),
+        sort_keys=True,
+        separators=(",", ":"),
     )
     content_hash = _hl.sha256(payload.encode()).hexdigest()
     sig_b64 = sign_hash(content_hash, priv)
@@ -806,17 +839,30 @@ async def debug_cas(
 
         # Check via lillux binary
         import subprocess
+
         try:
             from rye.primitives.cas import _lillux
+
             lillux_bin = _lillux()
             result["lillux_binary"] = lillux_bin
             proc = subprocess.run(
-                [lillux_bin, "cas", "fetch", "--root", str(root), "--hash", req.hash, "--blob"],
+                [
+                    lillux_bin,
+                    "cas",
+                    "fetch",
+                    "--root",
+                    str(root),
+                    "--hash",
+                    req.hash,
+                    "--blob",
+                ],
                 capture_output=True,
             )
             result["lillux_returncode"] = proc.returncode
             result["lillux_stdout_len"] = len(proc.stdout)
-            result["lillux_stderr"] = proc.stderr.decode("utf-8", errors="replace")[:500]
+            result["lillux_stderr"] = proc.stderr.decode("utf-8", errors="replace")[
+                :500
+            ]
         except Exception as e:
             result["lillux_error"] = str(e)
 
@@ -856,7 +902,9 @@ async def push(
         _check_system_version(req.system_version)
 
     # Resolve current HEAD (if any)
-    ref = resolve_project_ref(settings.cas_base_path, principal.fingerprint, req.project_path)
+    ref = resolve_project_ref(
+        settings.cas_base_path, principal.fingerprint, req.project_path
+    )
     current_head = ref["snapshot_hash"] if ref else None
 
     # Reject if client is behind (expected_snapshot_hash mismatch)
@@ -874,7 +922,9 @@ async def push(
     # Writer epoch: register BEFORE creating CAS objects
     user_root = settings.user_root(principal.fingerprint)
     epoch_id = register_epoch(
-        user_root, settings.rye_remote_name, principal.fingerprint,
+        user_root,
+        settings.rye_remote_name,
+        principal.fingerprint,
         [current_head] if current_head else [],
     )
 
@@ -895,8 +945,11 @@ async def push(
 
         # Advance HEAD (compare-and-swap on snapshot hash)
         if not advance_project_ref(
-            settings.cas_base_path, principal.fingerprint,
-            req.project_path, snapshot_hash, current_head,
+            settings.cas_base_path,
+            principal.fingerprint,
+            req.project_path,
+            snapshot_hash,
+            current_head,
         ):
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -932,8 +985,10 @@ async def push_user_space(
     )
 
     advance_user_space_ref(
-        settings.cas_base_path, principal.fingerprint,
-        req.user_manifest_hash, req.expected_revision,
+        settings.cas_base_path,
+        principal.fingerprint,
+        req.user_manifest_hash,
+        req.expected_revision,
     )
 
     return {
@@ -1024,7 +1079,9 @@ async def resolve_execution(
         delivery_id = request.headers.get("x-webhook-delivery-id", "")
         hook_id = body.get("hook_id")
         if not hook_id:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Webhook request requires hook_id")
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Webhook request requires hook_id"
+            )
 
         binding = _lookup_binding(hook_id, settings)
         verify_timestamp(timestamp)
@@ -1036,14 +1093,18 @@ async def resolve_execution(
             if not guard.check_and_record(hook_id, delivery_id):
                 raise HTTPException(status.HTTP_200_OK, "Already processed")
         else:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "X-Webhook-Delivery-Id header required")
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "X-Webhook-Delivery-Id header required"
+            )
 
         principal = _resolve_principal_from_binding(binding)
         thread = "fork" if binding["item_type"] == "directive" else "inline"
 
         parameters = body.get("parameters", {})
         if not isinstance(parameters, dict):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "parameters must be an object")
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "parameters must be an object"
+            )
 
         return ResolvedExecution(
             principal=principal,
@@ -1101,8 +1162,12 @@ async def resolve_execution(
 
     vault_keys = body.get("vault_keys")
     if vault_keys is not None:
-        if not isinstance(vault_keys, list) or not all(isinstance(k, str) for k in vault_keys):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "vault_keys must be a list of strings")
+        if not isinstance(vault_keys, list) or not all(
+            isinstance(k, str) for k in vault_keys
+        ):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "vault_keys must be a list of strings"
+            )
     validated_vault_keys = vault_keys or None
 
     return ResolvedExecution(
@@ -1179,11 +1244,17 @@ async def _execute_from_head(
     exec_space: Path | None = None
 
     # Derive project_manifest_hash from snapshot for registration
-    base_snap_obj = cas.get_object(base_snapshot_hash, _principal_cas_root(principal, settings))
-    base_manifest_hash = base_snap_obj["project_manifest_hash"] if base_snap_obj else None
+    base_snap_obj = cas.get_object(
+        base_snapshot_hash, _principal_cas_root(principal, settings)
+    )
+    base_manifest_hash = (
+        base_snap_obj["project_manifest_hash"] if base_snap_obj else None
+    )
 
     register_execution(
-        settings.cas_base_path, principal.fingerprint, thread_id,
+        settings.cas_base_path,
+        principal.fingerprint,
+        thread_id,
         item_type=item_type,
         item_id=item_id,
         project_manifest_hash=base_manifest_hash or "",
@@ -1196,7 +1267,9 @@ async def _execute_from_head(
     # Writer epoch: protect in-flight CAS objects from GC sweep
     user_root = settings.user_root(principal.fingerprint)
     epoch_id = register_epoch(
-        user_root, settings.rye_remote_name, principal.fingerprint,
+        user_root,
+        settings.rye_remote_name,
+        principal.fingerprint,
         [base_snapshot_hash],
     )
 
@@ -1204,11 +1277,21 @@ async def _execute_from_head(
         try:
             # Checkout mutable copy from snapshot cache
             exec_space = create_execution_space(
-                base_snapshot_hash, thread_id, root, cache, exec_root,
+                base_snapshot_hash,
+                thread_id,
+                root,
+                cache,
+                exec_root,
             )
-            user_space = ensure_user_space_cached(
-                user_manifest_hash, root, cache,
-            ) if user_manifest_hash else None
+            user_space = (
+                ensure_user_space_cached(
+                    user_manifest_hash,
+                    root,
+                    cache,
+                )
+                if user_manifest_hash
+                else None
+            )
 
             # Build per-execution env (never mutate process-global os.environ)
             exec_env: dict[str, str] = {
@@ -1225,16 +1308,22 @@ async def _execute_from_head(
             # Resolve vault secrets into per-execution env
             if vault_keys:
                 from ryeos_node.vault import resolve_vault_env
+
                 vault_env = resolve_vault_env(
-                    settings.cas_base_path, principal.fingerprint,
-                    vault_keys, settings.signing_key_dir,
+                    settings.cas_base_path,
+                    principal.fingerprint,
+                    vault_keys,
+                    settings.signing_key_dir,
                 )
                 exec_env.update(vault_env)
 
             # Decrypt sealed envelope into per-execution env (overrides vault)
             if secret_envelope:
                 from rye.primitives.sealed_envelope import decrypt_and_inject
-                decrypted = decrypt_and_inject(secret_envelope, settings.signing_key_dir)
+
+                decrypted = decrypt_and_inject(
+                    secret_envelope, settings.signing_key_dir
+                )
                 exec_env.update(decrypted)
 
             tool = ExecuteTool(
@@ -1257,7 +1346,7 @@ async def _execute_from_head(
             callee_thread_id = result.get("thread_id")
 
             # Promote execution-local CAS into user CAS
-            exec_cas = exec_space / AI_DIR / "objects"
+            exec_cas = exec_space / AI_DIR / "state" / "objects"
             new_hashes = _copy_cas_objects(exec_cas, root)
 
             # Ingest runtime outputs (transcripts, knowledge, refs) into CAS
@@ -1275,22 +1364,29 @@ async def _execute_from_head(
                     system_version=get_system_version(),
                     step=0,
                     status=fallback_status,
-                    errors=[{"message": error_msg, "phase": "execution"}] if error_msg else [],
+                    errors=[{"message": error_msg, "phase": "execution"}]
+                    if error_msg
+                    else [],
                 )
                 exec_snapshot_hash = cas.store_object(es.to_dict(), root)
                 new_hashes.append(exec_snapshot_hash)
 
             bundle_hash, output_hashes = _ingest_runtime_outputs(
-                exec_space, root, thread_id, exec_snapshot_hash,
+                exec_space,
+                root,
+                thread_id,
+                exec_snapshot_hash,
             )
             new_hashes.extend(output_hashes)
 
             # Build new manifest from execution space, compare to base
             exec_manifest_hash, _ = build_manifest(
-                exec_space, "project", project_path=exec_space,
+                exec_space,
+                "project",
+                project_path=exec_space,
             )
             # Promote manifest objects into user CAS
-            exec_manifest_cas = exec_space / AI_DIR / "objects"
+            exec_manifest_cas = exec_space / AI_DIR / "state" / "objects"
             new_hashes.extend(_copy_cas_objects(exec_manifest_cas, root))
 
             base_snapshot_obj = cas.get_object(base_snapshot_hash, root)
@@ -1300,7 +1396,9 @@ async def _execute_from_head(
                 # No-op — manifest unchanged, skip fold-back
                 exec_status = result.get("status", "unknown")
                 complete_execution(
-                    settings.cas_base_path, principal.fingerprint, thread_id,
+                    settings.cas_base_path,
+                    principal.fingerprint,
+                    thread_id,
                     state="completed" if exec_status == "success" else "error",
                     snapshot_hash=exec_snapshot_hash,
                     execution_snapshot_hash=exec_snapshot_hash,
@@ -1334,9 +1432,14 @@ async def _execute_from_head(
 
             # Fold back into HEAD
             fold_result = await _fold_back(
-                principal, settings, project_path,
-                base_snapshot_hash, proj_snapshot_hash,
-                root, cache, thread_id,
+                principal,
+                settings,
+                project_path,
+                base_snapshot_hash,
+                proj_snapshot_hash,
+                root,
+                cache,
+                thread_id,
                 user_manifest_hash=user_manifest_hash,
             )
 
@@ -1344,7 +1447,9 @@ async def _execute_from_head(
 
             exec_status = result.get("status", "unknown")
             complete_execution(
-                settings.cas_base_path, principal.fingerprint, thread_id,
+                settings.cas_base_path,
+                principal.fingerprint,
+                thread_id,
                 state="completed" if exec_status == "success" else "error",
                 snapshot_hash=fold_result["snapshot_hash"],
                 execution_snapshot_hash=exec_snapshot_hash,
@@ -1362,11 +1467,19 @@ async def _execute_from_head(
                 "new_object_hashes": new_hashes,
                 "result": result,
                 "system_version": get_system_version(),
-                **({k: fold_result[k] for k in ("conflicts", "unmerged_snapshot") if k in fold_result}),
+                **(
+                    {
+                        k: fold_result[k]
+                        for k in ("conflicts", "unmerged_snapshot")
+                        if k in fold_result
+                    }
+                ),
             }
         except FileNotFoundError as e:
             complete_execution(
-                settings.cas_base_path, principal.fingerprint, thread_id,
+                settings.cas_base_path,
+                principal.fingerprint,
+                thread_id,
                 state="error",
                 error_message=str(e),
                 error_phase="materialization",
@@ -1375,10 +1488,16 @@ async def _execute_from_head(
         except Exception as e:
             logger.error(
                 "Execution failed for thread %s (%s/%s): %s",
-                thread_id, item_type, item_id, e, exc_info=True,
+                thread_id,
+                item_type,
+                item_id,
+                e,
+                exc_info=True,
             )
             complete_execution(
-                settings.cas_base_path, principal.fingerprint, thread_id,
+                settings.cas_base_path,
+                principal.fingerprint,
+                thread_id,
                 state="error",
                 error_message=str(e),
                 error_phase="execution",
@@ -1402,7 +1521,8 @@ async def _execute_from_head(
 
 
 def _load_manifest_from_snapshot(
-    snapshot_hash: str, cas_root: Path,
+    snapshot_hash: str,
+    cas_root: Path,
 ) -> dict:
     """Load the SourceManifest dict referenced by a ProjectSnapshot."""
     snapshot = cas.get_object(snapshot_hash, cas_root)
@@ -1435,20 +1555,32 @@ async def _fold_back(
     current_head = base_snapshot_hash  # fallback for retry_exhausted
 
     for attempt in range(MAX_FOLD_BACK_RETRIES):
-        ref = resolve_project_ref(settings.cas_base_path, principal.fingerprint, project_path)
+        ref = resolve_project_ref(
+            settings.cas_base_path, principal.fingerprint, project_path
+        )
         current_head = ref["snapshot_hash"] if ref else base_snapshot_hash
 
         if current_head == base_snapshot_hash:
             # Fast-forward — HEAD hasn't moved
             if _try_advance_head(
-                settings, principal, project_path,
-                exec_snapshot_hash, current_head,
+                settings,
+                principal,
+                project_path,
+                exec_snapshot_hash,
+                current_head,
             ):
                 _update_snapshot_cache(
-                    settings, principal, project_path,
-                    exec_snapshot_hash, cas_root, cache_root,
+                    settings,
+                    principal,
+                    project_path,
+                    exec_snapshot_hash,
+                    cas_root,
+                    cache_root,
                 )
-                return {"snapshot_hash": exec_snapshot_hash, "merge_type": "fast-forward"}
+                return {
+                    "snapshot_hash": exec_snapshot_hash,
+                    "merge_type": "fast-forward",
+                }
         else:
             # HEAD moved — three-way merge
             base_manifest = _load_manifest_from_snapshot(base_snapshot_hash, cas_root)
@@ -1456,12 +1588,16 @@ async def _fold_back(
             exec_manifest = _load_manifest_from_snapshot(exec_snapshot_hash, cas_root)
 
             merge_result = three_way_merge(
-                base_manifest, head_manifest, exec_manifest, cas_root,
+                base_manifest,
+                head_manifest,
+                exec_manifest,
+                cas_root,
             )
 
             if merge_result.has_conflicts:
                 store_conflict_record(
-                    settings.cas_base_path, principal.fingerprint,
+                    settings.cas_base_path,
+                    principal.fingerprint,
                     thread_id=thread_id,
                     conflicts=merge_result.conflicts,
                     unmerged_snapshot=exec_snapshot_hash,
@@ -1480,7 +1616,8 @@ async def _fold_back(
                 files=merge_result.merged_files,
             )
             merged_manifest_hash = cas.store_object(
-                merged_manifest.to_dict(), cas_root,
+                merged_manifest.to_dict(),
+                cas_root,
             )
 
             merge_snapshot = ProjectSnapshot(
@@ -1492,26 +1629,35 @@ async def _fold_back(
                 metadata={"base": base_snapshot_hash, "thread_id": thread_id},
             )
             merge_snapshot_hash = cas.store_object(
-                merge_snapshot.to_dict(), cas_root,
+                merge_snapshot.to_dict(),
+                cas_root,
             )
 
             if _try_advance_head(
-                settings, principal, project_path,
-                merge_snapshot_hash, current_head,
+                settings,
+                principal,
+                project_path,
+                merge_snapshot_hash,
+                current_head,
             ):
                 _update_snapshot_cache(
-                    settings, principal, project_path,
-                    merge_snapshot_hash, cas_root, cache_root,
+                    settings,
+                    principal,
+                    project_path,
+                    merge_snapshot_hash,
+                    cas_root,
+                    cache_root,
                 )
                 return {"snapshot_hash": merge_snapshot_hash, "merge_type": "merge"}
 
         # CAS update raced — back off with jitter and retry
-        jitter = FOLD_BACK_BASE_JITTER_MS * (2 ** attempt) + random.randint(0, 50)
+        jitter = FOLD_BACK_BASE_JITTER_MS * (2**attempt) + random.randint(0, 50)
         await asyncio.sleep(jitter / 1000)
 
     # Exhausted retries — persist unmerged snapshot for later inspection
     store_conflict_record(
-        settings.cas_base_path, principal.fingerprint,
+        settings.cas_base_path,
+        principal.fingerprint,
         thread_id=thread_id,
         conflicts={"retry_exhausted": True, "attempts": MAX_FOLD_BACK_RETRIES},
         unmerged_snapshot=exec_snapshot_hash,
@@ -1532,8 +1678,11 @@ def _try_advance_head(
 ) -> bool:
     """Compare-and-swap on snapshot hash. Returns True if update succeeded."""
     return advance_project_ref(
-        settings.cas_base_path, principal.fingerprint,
-        project_path, new_snapshot_hash, expected_snapshot_hash,
+        settings.cas_base_path,
+        principal.fingerprint,
+        project_path,
+        new_snapshot_hash,
+        expected_snapshot_hash,
     )
 
 
@@ -1551,7 +1700,9 @@ def _update_snapshot_cache(
     except Exception:
         logger.warning(
             "Failed to cache snapshot %s for %s",
-            new_snapshot_hash[:16], project_path, exc_info=True,
+            new_snapshot_hash[:16],
+            project_path,
+            exc_info=True,
         )
 
 
@@ -1564,8 +1715,10 @@ async def list_threads(
 ):
     """List principal's remote executions on this remote."""
     threads = list_executions(
-        settings.cas_base_path, principal.fingerprint,
-        project_path=project_path, limit=limit,
+        settings.cas_base_path,
+        principal.fingerprint,
+        project_path=project_path,
+        limit=limit,
     )
     return {"threads": threads, "remote_name": settings.rye_remote_name}
 
@@ -1585,7 +1738,9 @@ async def get_thread(
 
     # Prefer execution_snapshot_hash (always an ExecutionSnapshot with errors)
     # Fall back to snapshot_hash for older records
-    exec_snap_hash = record.get("execution_snapshot_hash") or record.get("snapshot_hash")
+    exec_snap_hash = record.get("execution_snapshot_hash") or record.get(
+        "snapshot_hash"
+    )
     if exec_snap_hash:
         snapshot = cas.get_object(exec_snap_hash, root)
         if snapshot and snapshot.get("kind") == "execution_snapshot":
@@ -1649,8 +1804,15 @@ async def vault_set(
 ):
     """Store a sealed envelope as a named secret in the principal's vault."""
     from ryeos_node.vault import set_secret
+
     try:
-        set_secret(settings.cas_base_path, principal.fingerprint, req.name, req.envelope, settings.signing_key_dir)
+        set_secret(
+            settings.cas_base_path,
+            principal.fingerprint,
+            req.name,
+            req.envelope,
+            settings.signing_key_dir,
+        )
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -1664,6 +1826,7 @@ async def vault_list(
 ):
     """List secret names in the principal's vault (no values)."""
     from ryeos_node.vault import list_secrets
+
     names = list_secrets(settings.cas_base_path, principal.fingerprint)
     return {"names": names}
 
@@ -1676,6 +1839,7 @@ async def vault_delete(
 ):
     """Delete a named secret from the principal's vault."""
     from ryeos_node.vault import delete_secret
+
     try:
         deleted = delete_secret(settings.cas_base_path, principal.fingerprint, req.name)
     except ValueError as e:
@@ -1775,7 +1939,9 @@ async def gc_stats(
         "usage_bytes": total_bytes,
         "usage_human": _human_bytes(total_bytes),
         "quota_bytes": settings.max_user_storage_bytes,
-        "quota_percent": round((total_bytes / settings.max_user_storage_bytes) * 100, 1) if settings.max_user_storage_bytes else 0,
+        "quota_percent": round((total_bytes / settings.max_user_storage_bytes) * 100, 1)
+        if settings.max_user_storage_bytes
+        else 0,
         "gc_state": gc_state.to_dict() if gc_state else None,
         "gc_lock": lock.to_dict() if lock else None,
         "recent_events": recent_events,
@@ -1800,8 +1966,13 @@ async def create_webhook_binding(
         )
 
     return create_binding(
-        settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
-        req.item_type, req.item_id, req.project_path, req.description,
+        settings.cas_base_path,
+        principal.fingerprint,
+        settings.rye_remote_name,
+        req.item_type,
+        req.item_id,
+        req.project_path,
+        req.description,
         req.secret_envelope,
         owner=principal.owner,
         vault_keys=req.vault_keys,
@@ -1815,7 +1986,9 @@ async def list_webhook_bindings(
 ):
     """List principal's webhook bindings (hmac_secret excluded)."""
     bindings_list = list_bindings(
-        settings.cas_base_path, principal.fingerprint, settings.rye_remote_name,
+        settings.cas_base_path,
+        principal.fingerprint,
+        settings.rye_remote_name,
     )
     return {"bindings": bindings_list}
 
@@ -1828,7 +2001,10 @@ async def revoke_webhook_binding(
 ):
     """Revoke a webhook binding (soft delete via revoked_at)."""
     if not revoke_binding(
-        settings.cas_base_path, hook_id, principal.fingerprint, settings.rye_remote_name,
+        settings.cas_base_path,
+        hook_id,
+        principal.fingerprint,
+        settings.rye_remote_name,
     ):
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -1859,7 +2035,9 @@ async def registry_publish(
         f"fp:{principal.fingerprint}",
     )
     if not result.get("ok"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, result.get("error", "Publish failed"))
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, result.get("error", "Publish failed")
+        )
     return result
 
 
@@ -1890,7 +2068,10 @@ async def registry_get_version(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
     ver = get_version(settings.cas_base_path, item_type, item_id, version)
     if ver is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Version not found: {item_type}/{item_id}@{version}")
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Version not found: {item_type}/{item_id}@{version}",
+        )
     return ver
 
 
@@ -1905,7 +2086,9 @@ async def registry_get_item(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
     item = get_item(settings.cas_base_path, item_type, item_id)
     if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Item not found: {item_type}/{item_id}")
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Item not found: {item_type}/{item_id}"
+        )
     return item
 
 
@@ -1919,7 +2102,9 @@ async def registry_claim_namespace(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
     result = claim_namespace(settings.cas_base_path, body.claim)
     if not result.get("ok"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, result.get("error", "Claim failed"))
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, result.get("error", "Claim failed")
+        )
     return result
 
 
@@ -1934,7 +2119,9 @@ async def registry_register_identity(
 
     result = register_identity(settings.cas_base_path, body.identity)
     if not result.get("ok"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, result.get("error", "Registration failed"))
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, result.get("error", "Registration failed")
+        )
     return result
 
 
@@ -1949,7 +2136,9 @@ async def registry_lookup_identity(
 
     doc = lookup_identity(settings.cas_base_path, fingerprint)
     if doc is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Identity not found: {fingerprint}")
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Identity not found: {fingerprint}"
+        )
     return doc
 
 
@@ -1977,7 +2166,7 @@ async def admin_authorize_key(
         sign_hash,
     )
 
-    pub_pem = base64.b64decode(req.public_key[len("ed25519:"):])
+    pub_pem = base64.b64decode(req.public_key[len("ed25519:") :])
     fp = compute_key_fingerprint(pub_pem)
     timestamp = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
 
@@ -1986,7 +2175,7 @@ async def admin_authorize_key(
         f'fingerprint = "{fp}"\n'
         f'public_key = "{req.public_key}"\n'
         f'label = "{req.label}"\n'
-        f'scopes = [{caps_toml}]\n'
+        f"scopes = [{caps_toml}]\n"
         f'created_via = "api"\n'
         f'created_at = "{timestamp}"\n'
         f'created_by = "fp:{principal.fingerprint}"\n'
@@ -1997,7 +2186,9 @@ async def admin_authorize_key(
     content_hash = hashlib.sha256(body.encode()).hexdigest()
     sig_b64 = sign_hash(content_hash, node_priv)
 
-    signed_content = f"# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{node_fp}\n{body}"
+    signed_content = (
+        f"# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{node_fp}\n{body}"
+    )
 
     auth_dir = settings.authorized_keys_dir()
     auth_dir.mkdir(parents=True, exist_ok=True)
@@ -2006,7 +2197,9 @@ async def admin_authorize_key(
 
     logger.info(
         "Authorized key fp:%s (label=%s) by fp:%s",
-        fp, req.label, principal.fingerprint,
+        fp,
+        req.label,
+        principal.fingerprint,
     )
 
     return {
@@ -2040,13 +2233,15 @@ async def admin_list_keys(
             except ModuleNotFoundError:
                 import tomli as _tomllib  # type: ignore[no-redef]
             data = _tomllib.loads(body)
-            keys.append({
-                "fingerprint": f"fp:{data.get('fingerprint', f.stem)}",
-                "label": data.get("label", data.get("owner", "")),
-                "scopes": data.get("scopes", []),
-                "created_via": data.get("created_via", "unknown"),
-                "created_at": data.get("created_at", ""),
-            })
+            keys.append(
+                {
+                    "fingerprint": f"fp:{data.get('fingerprint', f.stem)}",
+                    "label": data.get("label", data.get("owner", "")),
+                    "scopes": data.get("scopes", []),
+                    "created_via": data.get("created_via", "unknown"),
+                    "created_at": data.get("created_at", ""),
+                }
+            )
         except Exception:
             continue
 
@@ -2063,7 +2258,9 @@ async def admin_revoke_key(
     auth_dir = settings.authorized_keys_dir()
     key_file = auth_dir / f"{fingerprint}.toml"
     if not key_file.exists():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Key fp:{fingerprint} not found")
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Key fp:{fingerprint} not found"
+        )
 
     # Prevent revoking the last admin key
     admin_count = 0

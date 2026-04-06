@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:783ced960ddcecdda6e720c8a8d2c088bb09f06a9a9951785d9a16acc1a37977:bJrqb3SXCn3jHgAZ0XglHqUIwk22Pb8LJ4o1Gku2xo4iCe8zS_036eebf2vhONkmfl06A3g00UHphbv2O5AzAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:2e52bcffca71ddc4bcfd67763fffaa6467c4c452801d3aa1fb7b2e69c4f309ec:tXJf-fWQcMQLGl-DtM_qxWR3ptcjB5oZQjPEOgixE_fvBY5qeq_QAoANbfEVavaJqwrJoswDY0xaM6cohaOUAw:4b987fd4e40303ac -->
  -->
 ```yaml
 name: three-tier-spaces
@@ -183,7 +183,7 @@ rye_fetch(scope="directive", query="create", project_path=".", source="system")
 `rye install` merges registry bundle items into the target space's `.ai/` layout. Items are found via normal project → user → system resolution — **no special bundle scanning**.
 
 - Items go to `.ai/tools/`, `.ai/directives/`, `.ai/knowledge/`, etc.
-- Bundle metadata lives at `.ai/bundles/{bundle_id}/` (manifest.yaml + `.bundle-lock.json`)
+- Bundle metadata lives at `.ai/bundles/{bundle_id}/` (manifest.yaml + `install-receipt.json`)
 - Lockfile tracks installed files for clean `rye uninstall`
 - No nested `.ai/` inside bundles
 

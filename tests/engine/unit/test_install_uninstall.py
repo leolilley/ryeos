@@ -13,7 +13,7 @@ class TestLockfile:
     """Tests for bundle lockfile format and content."""
 
     def _make_lockfile(self, bundle_dir, **overrides):
-        """Helper to create a .bundle-lock.json."""
+        """Helper to create a install-receipt.json."""
         from datetime import datetime, timezone
         lock_data = {
             "bundle_id": "test-bundle",
@@ -24,7 +24,7 @@ class TestLockfile:
         }
         lock_data.update(overrides)
         bundle_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = bundle_dir / ".bundle-lock.json"
+        lock_path = bundle_dir / "install-receipt.json"
         lock_path.write_text(json.dumps(lock_data, indent=2))
         return lock_path
 
@@ -91,7 +91,7 @@ class TestUninstallVerb:
             "installed_at": "2026-03-16T00:00:00+00:00",
             "files": list(files.keys()),
         }
-        (bundle_dir / ".bundle-lock.json").write_text(json.dumps(lock_data, indent=2))
+        (bundle_dir / "install-receipt.json").write_text(json.dumps(lock_data, indent=2))
 
         return bundle_dir
 

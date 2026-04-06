@@ -83,7 +83,7 @@ class TestMaterialize:
         project.mkdir()
         _make_project(project, {
             ".ai/tools/x.py": "tool\n",
-            ".ai/config/cas/remote.yaml": (
+            ".ai/config/cas/manifest.yaml": (
                 "sync:\n"
                 "  include:\n"
                 "    - src/\n"

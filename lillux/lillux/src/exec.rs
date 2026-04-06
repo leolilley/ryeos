@@ -46,6 +46,23 @@ pub enum ExecAction {
         #[arg(long, default_value_t = 3.0)]
         grace: f64,
     },
+    /// Stream a command's output with raw passthrough (no JSON wrapping)
+    Stream {
+        #[arg(long)]
+        cmd: String,
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        stdin: Option<String>,
+        #[arg(long)]
+        stdin_pipe: bool,
+        #[arg(long = "env")]
+        envs: Vec<String>,
+        #[arg(long, default_value_t = 300.0)]
+        timeout: f64,
+    },
     /// Check if a process is alive
     Status {
         #[arg(long)]
@@ -100,6 +117,10 @@ pub fn run(action: ExecAction) -> serde_json::Value {
                 Ok(pid) => serde_json::json!({ "success": true, "pid": pid }),
                 Err(e) => serde_json::json!({ "success": false, "error": e }),
             }
+        }
+        ExecAction::Stream { cmd, args, cwd, stdin, stdin_pipe, envs, timeout } => {
+            let code = do_stream(&cmd, &args, cwd.as_deref(), resolve_stdin(stdin, stdin_pipe).as_deref(), &envs, timeout);
+            process::exit(code);
         }
         ExecAction::Kill { pid, grace } => match kill_process(pid, grace) {
             Ok(method) => serde_json::json!({ "success": true, "pid": pid, "method": method }),
@@ -174,6 +195,91 @@ fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&st
                     "success": false, "stdout": "", "stderr": format!("Wait failed: {e}"),
                     "return_code": -1, "duration_ms": start.elapsed().as_secs_f64() * 1000.0,
                 });
+            }
+        }
+    }
+}
+
+/// Stream mode: raw passthrough of child stdout/stderr, no JSON wrapping.
+/// Returns: child exit code, 124 on timeout, 125 on spawn failure.
+fn do_stream(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> i32 {
+    let mut command = process::Command::new(cmd);
+    command.args(args);
+    set_envs(&mut command, envs);
+    // Set PYTHONUNBUFFERED for Python children to ensure streaming latency
+    command.env("PYTHONUNBUFFERED", "1");
+    if let Some(dir) = cwd { command.current_dir(dir); }
+    command.stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to spawn: {e}");
+            return 125;
+        }
+    };
+    write_stdin(&mut child, stdin_data);
+
+    let stderr_handle = child.stderr.take();
+    let stderr_thread = thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        if let Some(mut err) = stderr_handle {
+            let mut stderr_out = std::io::stderr();
+            loop {
+                match err.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => { let _ = stderr_out.write_all(&buf[..n]); let _ = stderr_out.flush(); }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    // Forward stdout: raw chunks with flush
+    let stdout_handle = child.stdout.take();
+    let stdout_thread = thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        if let Some(mut out) = stdout_handle {
+            let mut stdout_out = std::io::stdout();
+            loop {
+                match out.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => { let _ = stdout_out.write_all(&buf[..n]); let _ = stdout_out.flush(); }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    // Wait with timeout
+    let timeout_dur = Duration::from_secs_f64(timeout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _timer = thread::spawn(move || { thread::sleep(timeout_dur); let _ = tx.send(()); });
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return status.code().unwrap_or(1);
+            }
+            Ok(None) => {
+                if rx.try_recv().is_ok() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    eprintln!("Command timed out after {timeout} seconds");
+                    return 124;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                eprintln!("Wait failed: {e}");
+                return 125;
             }
         }
     }

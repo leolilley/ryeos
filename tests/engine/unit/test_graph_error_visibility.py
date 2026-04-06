@@ -161,7 +161,10 @@ class TestStoreNodeReceiptWithError:
 
                 obj = cas.get_object(h, cas_root(project))
                 assert obj["kind"] == "node_receipt"
-                assert obj["error"] == "Lockfile integrity mismatch for rye/agent/threads/thread_directive"
+                assert (
+                    obj["error"]
+                    == "Lockfile integrity mismatch for rye/agent/threads/thread_directive"
+                )
             finally:
                 sys.path.remove(_WALKER_DIR)
 
@@ -185,8 +188,13 @@ class TestPersistStateWithErrors:
                 from walker import _persist_state
 
                 h = await _persist_state(
-                    str(project), "test-graph", "run-1",
-                    {"key": "value"}, "node1", "completed", 5,
+                    str(project),
+                    "test-graph",
+                    "run-1",
+                    {"key": "value"},
+                    "node1",
+                    "completed",
+                    5,
                 )
                 assert h is not None
 
@@ -214,8 +222,13 @@ class TestPersistStateWithErrors:
                     {"step": 3, "node": "analyze_second", "error": "Lockfile mismatch"},
                 ]
                 h = await _persist_state(
-                    str(project), "test-graph", "run-1",
-                    {"key": "value"}, "node1", "completed_with_errors", 5,
+                    str(project),
+                    "test-graph",
+                    "run-1",
+                    {"key": "value"},
+                    "node1",
+                    "completed_with_errors",
+                    5,
                     errors=errors,
                 )
                 assert h is not None
@@ -240,7 +253,9 @@ class TestThreadRegistryCompletedWithErrors:
     """ThreadRegistry should treat completed_with_errors as a terminal status."""
 
     def test_completed_with_errors_sets_completed_at(self, tmp_path):
-        sys.path.insert(0, str(get_bundle_path("standard", "tools/rye/agent/threads/persistence")))
+        sys.path.insert(
+            0, str(get_bundle_path("standard", "tools/rye/agent/threads/persistence"))
+        )
         try:
             from thread_registry import ThreadRegistry
 
@@ -256,7 +271,9 @@ class TestThreadRegistryCompletedWithErrors:
             sys.path.pop(0)
 
     def test_completed_with_errors_excluded_from_list_active(self, tmp_path):
-        sys.path.insert(0, str(get_bundle_path("standard", "tools/rye/agent/threads/persistence")))
+        sys.path.insert(
+            0, str(get_bundle_path("standard", "tools/rye/agent/threads/persistence"))
+        )
         try:
             from thread_registry import ThreadRegistry
 
@@ -275,7 +292,9 @@ class TestThreadRegistryCompletedWithErrors:
             sys.path.pop(0)
 
     def test_completed_status_still_works(self, tmp_path):
-        sys.path.insert(0, str(get_bundle_path("standard", "tools/rye/agent/threads/persistence")))
+        sys.path.insert(
+            0, str(get_bundle_path("standard", "tools/rye/agent/threads/persistence"))
+        )
         try:
             from thread_registry import ThreadRegistry
 
@@ -309,6 +328,7 @@ class TestProcessStatusErrorCount:
         db_path.mkdir(parents=True)
 
         import sqlite3
+
         with sqlite3.connect(db_path / "registry.db") as conn:
             conn.execute("""
                 CREATE TABLE threads (
@@ -323,21 +343,43 @@ class TestProcessStatusErrorCount:
                     pid INTEGER
                 )
             """)
-            result_json = json.dumps({
-                "success": True,
-                "status": "completed_with_errors",
-                "errors_suppressed": 3,
-                "errors": [
-                    {"step": 4, "node": "analyze_first", "error": "Lockfile mismatch"},
-                    {"step": 5, "node": "analyze_second", "error": "Lockfile mismatch"},
-                    {"step": 9, "node": "run_quick_summary", "error": "Lockfile mismatch"},
-                ],
-            })
+            result_json = json.dumps(
+                {
+                    "success": True,
+                    "status": "completed_with_errors",
+                    "errors_suppressed": 3,
+                    "errors": [
+                        {
+                            "step": 4,
+                            "node": "analyze_first",
+                            "error": "Lockfile mismatch",
+                        },
+                        {
+                            "step": 5,
+                            "node": "analyze_second",
+                            "error": "Lockfile mismatch",
+                        },
+                        {
+                            "step": 9,
+                            "node": "run_quick_summary",
+                            "error": "Lockfile mismatch",
+                        },
+                    ],
+                }
+            )
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("run-123", "graphs/test", None, "completed_with_errors",
-                 "2026-03-11T00:00:00Z", "2026-03-11T00:01:00Z",
-                 "2026-03-11T00:01:00Z", result_json, 12345),
+                (
+                    "run-123",
+                    "graphs/test",
+                    None,
+                    "completed_with_errors",
+                    "2026-03-11T00:00:00Z",
+                    "2026-03-11T00:01:00Z",
+                    "2026-03-11T00:01:00Z",
+                    result_json,
+                    12345,
+                ),
             )
             conn.commit()
 
@@ -346,6 +388,7 @@ class TestProcessStatusErrorCount:
         try:
             import importlib
             import status as status_mod
+
             importlib.reload(status_mod)
 
             result = status_mod.execute({"run_id": "run-123"}, str(tmp_path))
@@ -362,6 +405,7 @@ class TestProcessStatusErrorCount:
         db_path.mkdir(parents=True)
 
         import sqlite3
+
         with sqlite3.connect(db_path / "registry.db") as conn:
             conn.execute("""
                 CREATE TABLE threads (
@@ -378,9 +422,17 @@ class TestProcessStatusErrorCount:
             """)
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("run-456", "graphs/test", None, "completed",
-                 "2026-03-11T00:00:00Z", "2026-03-11T00:01:00Z",
-                 "2026-03-11T00:01:00Z", None, 12345),
+                (
+                    "run-456",
+                    "graphs/test",
+                    None,
+                    "completed",
+                    "2026-03-11T00:00:00Z",
+                    "2026-03-11T00:01:00Z",
+                    "2026-03-11T00:01:00Z",
+                    None,
+                    12345,
+                ),
             )
             conn.commit()
 
@@ -389,6 +441,7 @@ class TestProcessStatusErrorCount:
         try:
             import importlib
             import status as status_mod
+
             importlib.reload(status_mod)
 
             result = status_mod.execute({"run_id": "run-456"}, str(tmp_path))
@@ -414,6 +467,7 @@ class TestProcessListErrorCount:
         db_path.mkdir(parents=True)
 
         import sqlite3
+
         with sqlite3.connect(db_path / "registry.db") as conn:
             conn.execute("""
                 CREATE TABLE threads (
@@ -428,16 +482,26 @@ class TestProcessListErrorCount:
                     pid INTEGER
                 )
             """)
-            result_json = json.dumps({
-                "success": True,
-                "status": "completed_with_errors",
-                "errors_suppressed": 2,
-            })
+            result_json = json.dumps(
+                {
+                    "success": True,
+                    "status": "completed_with_errors",
+                    "errors_suppressed": 2,
+                }
+            )
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("run-789", "graphs/pipeline", None, "completed_with_errors",
-                 "2026-03-11T00:00:00Z", "2026-03-11T00:01:00Z",
-                 "2026-03-11T00:01:00Z", result_json, 99999),
+                (
+                    "run-789",
+                    "graphs/pipeline",
+                    None,
+                    "completed_with_errors",
+                    "2026-03-11T00:00:00Z",
+                    "2026-03-11T00:01:00Z",
+                    "2026-03-11T00:01:00Z",
+                    result_json,
+                    99999,
+                ),
             )
             conn.commit()
 
@@ -445,12 +509,16 @@ class TestProcessListErrorCount:
         sys.path.insert(0, list_dir)
         try:
             import importlib
+
             # Use importlib to avoid name collision with builtins
             import list as list_mod
+
             importlib.reload(list_mod)
 
             # Filter by completed_with_errors status
-            result = list_mod.execute({"status": "completed_with_errors"}, str(tmp_path))
+            result = list_mod.execute(
+                {"status": "completed_with_errors"}, str(tmp_path)
+            )
             assert result["success"] is True
             assert result["count"] == 1
             entry = result["runs"][0]
@@ -466,6 +534,7 @@ class TestProcessListErrorCount:
         db_path.mkdir(parents=True)
 
         import sqlite3
+
         with sqlite3.connect(db_path / "registry.db") as conn:
             conn.execute("""
                 CREATE TABLE threads (
@@ -482,15 +551,31 @@ class TestProcessListErrorCount:
             """)
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("run-done", "graphs/a", None, "completed_with_errors",
-                 "2026-03-11T00:00:00Z", "2026-03-11T00:01:00Z",
-                 "2026-03-11T00:01:00Z", '{"errors_suppressed": 1}', 111),
+                (
+                    "run-done",
+                    "graphs/a",
+                    None,
+                    "completed_with_errors",
+                    "2026-03-11T00:00:00Z",
+                    "2026-03-11T00:01:00Z",
+                    "2026-03-11T00:01:00Z",
+                    '{"errors_suppressed": 1}',
+                    111,
+                ),
             )
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("run-active", "graphs/b", None, "running",
-                 "2026-03-11T00:00:00Z", "2026-03-11T00:01:00Z",
-                 None, None, 222),
+                (
+                    "run-active",
+                    "graphs/b",
+                    None,
+                    "running",
+                    "2026-03-11T00:00:00Z",
+                    "2026-03-11T00:01:00Z",
+                    None,
+                    None,
+                    222,
+                ),
             )
             conn.commit()
 
@@ -499,6 +584,7 @@ class TestProcessListErrorCount:
         try:
             import importlib
             import list as list_mod
+
             importlib.reload(list_mod)
 
             # Default (active only) should exclude completed_with_errors
@@ -515,6 +601,7 @@ class TestProcessListErrorCount:
         db_path.mkdir(parents=True)
 
         import sqlite3
+
         with sqlite3.connect(db_path / "registry.db") as conn:
             conn.execute("""
                 CREATE TABLE threads (
@@ -531,9 +618,17 @@ class TestProcessListErrorCount:
             """)
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("run-ok", "graphs/clean", None, "completed",
-                 "2026-03-11T00:00:00Z", "2026-03-11T00:01:00Z",
-                 "2026-03-11T00:01:00Z", None, 333),
+                (
+                    "run-ok",
+                    "graphs/clean",
+                    None,
+                    "completed",
+                    "2026-03-11T00:00:00Z",
+                    "2026-03-11T00:01:00Z",
+                    "2026-03-11T00:01:00Z",
+                    None,
+                    333,
+                ),
             )
             conn.commit()
 
@@ -542,6 +637,7 @@ class TestProcessListErrorCount:
         try:
             import importlib
             import list as list_mod
+
             importlib.reload(list_mod)
 
             result = list_mod.execute({"status": "completed"}, str(tmp_path))

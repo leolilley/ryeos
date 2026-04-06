@@ -16,8 +16,8 @@ Rye OS is distributed as 10 pip packages organized in a monorepo. Each package h
 ```
 lillux/
   kernel/            → pip: lillux        (microkernel + primitives)
-  proc/              → pip: lillux-proc   (process lifecycle, Rust binary)
-  watch/             → pip: lillux-watch  (file watcher, Rust binary)
+  proc/              → pip: lillux   (process lifecycle, Rust binary)
+  watch/             → pip: lillux  (file watcher, Rust binary)
 
 ryeos/               → pip: ryeos-engine  (ships rye/ module, no .ai/ data)
   bundles/
@@ -87,28 +87,28 @@ pip install ryeos my-tools → standard + my-tools/*
 ┌─────────────────────────────────────────────────────┐
 │  lillux                                              │
 │  Stateless microkernel primitives                   │
-│  deps: cryptography, httpx, lillux-proc              │
+│  deps: cryptography, httpx, lillux              │
 │  bundle: none (no .ai/ items)                       │
 ├─────────────────────────────────────────────────────┤
-│  lillux-proc                                         │
+│  lillux                                         │
 │  Process lifecycle manager (Rust binary)             │
 │  Hard dependency of lillux — all process operations  │
-│  delegate to lillux-proc                             │
+│  delegate to lillux                             │
 ├─────────────────────────────────────────────────────┤
-│  lillux-watch                                        │
+│  lillux                                        │
 │  Push-based file watcher (Rust binary)              │
 │  Used by the Rust runtime for registry watching     │
 │  Optional — installed when needed                   │
 └─────────────────────────────────────────────────────┘
 ```
 
-**`lillux`** — The microkernel. Provides stateless async primitives: subprocess execution, HTTP client, Ed25519 signing, integrity hashing, lockfile I/O, and environment resolution. Lillux is **type-agnostic** — it has no knowledge of tools, directives, knowledge, `.ai/` directories, or Rye itself.
+**`lillux`** — The microkernel. Provides stateless async primitives: subprocess execution, Ed25519 signing, integrity hashing, and environment resolution. Lillux is **type-agnostic** — it has no knowledge of tools, directives, knowledge, `.ai/` directories, or Rye itself.
 
-Lillux depends on `lillux-proc` as a hard dependency — `SubprocessPrimitive.__init__()` resolves the `lillux-proc` binary via `shutil.which()` and raises `ConfigurationError` if not found. All process operations (exec, spawn, kill, status) delegate to `lillux-proc`.
+Lillux depends on `lillux` as a hard dependency — `ExecutePrimitive.__init__()` resolves the `lillux` binary via `shutil.which()` and raises `ConfigurationError` if not found. All process operations (exec, spawn, kill, status) delegate to `lillux`.
 
-**`lillux-proc`** — Cross-platform process lifecycle manager compiled as a Rust binary. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), `status` (is-alive check). Installed as a pip package that places the binary on `$PATH`.
+**`lillux`** — Cross-platform process lifecycle manager compiled as a Rust binary. Subcommands: `exec` (run-and-wait with stdout/stderr capture, timeout, stdin piping, cwd, and env support), `spawn` (detached/daemonized), `kill` (graceful SIGTERM → SIGKILL / TerminateProcess), `status` (is-alive check). Installed as a pip package that places the binary on `$PATH`.
 
-**`lillux-watch`** — Push-based file watcher compiled as a Rust binary. Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the Rust runtime's `lillux-watch` tool as a push-based alternative to polling. Not a hard dependency — only needed when using the Rust runtime for thread watching.
+**`lillux`** — Push-based file watcher compiled as a Rust binary. Watches `registry.db` for thread status changes using OS-native file watchers (inotify on Linux, FSEvents/kqueue on macOS, ReadDirectoryChangesW on Windows). Used by the Rust runtime's `lillux` tool as a push-based alternative to polling. Not a hard dependency — only needed when using the Rust runtime for thread watching.
 
 Lillux does **not** contribute a bundle because it has no `.ai/` directory. It's pure library code.
 
@@ -339,7 +339,7 @@ ryeos-mcp
   │     ├── ryeos-core
   │     │     └── ryeos-engine
   │     │           ├── lillux
-  │     │           │     ├── lillux-proc      (hard dep — process lifecycle manager)
+  │     │           │     ├── lillux      (hard dep — process lifecycle manager)
   │     │           │     ├── cryptography    (signing, auth encryption)
   │     │           │     └── httpx           (HTTP client primitive, OAuth2 refresh)
   │     │           ├── pyyaml               (YAML parsing for runtimes, configs)
@@ -378,9 +378,9 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 
 | Package | pip name | Dependencies | Bundle ID | Bundle scope |
 | --- | --- | --- | --- | --- |
-| `lillux/kernel/` | `lillux` | `lillux-proc`, `cryptography`, `httpx` | — | — |
-| `lillux/proc/` | `lillux-proc` | (Rust binary) | — | — |
-| `lillux/watch/` | `lillux-watch` | (Rust binary) | — | — |
+| `lillux/kernel/` | `lillux` | `lillux`, `cryptography`, `httpx` | — | — |
+| `lillux/proc/` | `lillux` | (Rust binary) | — | — |
+| `lillux/watch/` | `lillux` | (Rust binary) | — | — |
 | `ryeos/` | `ryeos-engine` | `lillux`, `pyyaml`, `cryptography`, `packaging` | — | — |
 | `ryeos/bundles/core/` | `ryeos-core` | `ryeos-engine` | `ryeos-core` | `rye/core/*` |
 | `ryeos/bundles/standard/` | `ryeos` | `ryeos-core` | `ryeos` | standard `rye/*` |
@@ -393,20 +393,20 @@ Node.js tools (in `ryeos-code`) do not ship `node_modules`. Dependencies are ins
 
 ## Publishing Order
 
-Packages must be published to PyPI in dependency order. The two Rust packages (`lillux-proc`, `lillux-watch`) have no Python dependencies and can be published first. Then each layer unlocks the next:
+Packages must be published to PyPI in dependency order. The two Rust packages (`lillux`, `lillux`) have no Python dependencies and can be published first. Then each layer unlocks the next:
 
 ```
  ┌─────────────────────────────────────────────────────────────────┐
  │  LAYER 1 — Standalone (no Python deps)                         │
  │                                                                 │
- │   lillux-proc   (Rust binary, maturin)                          │
- │   lillux-watch  (Rust binary, maturin)                          │
+ │   lillux   (Rust binary, maturin)                          │
+ │   lillux  (Rust binary, maturin)                          │
  └──────────────────────┬──────────────────────────────────────────┘
                         │
  ┌──────────────────────▼──────────────────────────────────────────┐
  │  LAYER 2 — Microkernel                                         │
  │                                                                 │
- │   lillux        (Python, depends on lillux-proc)                 │
+ │   lillux        (Python, depends on lillux)                 │
  └──────────────────────┬──────────────────────────────────────────┘
                         │
  ┌──────────────────────▼──────────────────────────────────────────┐
@@ -443,8 +443,8 @@ Code packages contain Python or Rust source code that implements functionality:
 
 | Package        | Type                  | What it ships                                      |
 | -------------- | --------------------- | -------------------------------------------------- |
-| `lillux-proc`  | Rust binary           | Process lifecycle manager                          |
-| `lillux-watch` | Rust binary           | File watcher                                       |
+| `lillux`  | Rust binary           | Process lifecycle manager                          |
+| `lillux` | Rust binary           | File watcher                                       |
 | `lillux`       | Python library        | Microkernel primitives (subprocess, signing, HTTP) |
 | `ryeos-engine` | Python library        | Execution engine (`rye/` module), no `.ai/` data   |
 | `ryeos-mcp`    | Python library        | MCP server transport (`rye_mcp/` module)           |

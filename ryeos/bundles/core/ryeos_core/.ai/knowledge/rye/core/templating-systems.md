@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:99c424da9c120f365890fd5c38a0bcffa86535a5c62765272e072a1041bb9285:o2Y8rUdIaxFZLTIiFri3gZlkOJcOgUNB-vciI4G6sZZRSCqvxkM8h_g0M8cVTI5m7VQYMNObtGppGYv14WanAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:3ce1664196c37b7a7785b2e609ff2430e505b1bebd03e13cb2d2d522eef89e56:MRTYmpy4y5pmUeRzJ0-MHuTvehkl-1uxyZGRcDW3aMucoz3wIchAEq687I2_YjOmHZdE60TaayknaY_ManC6Dw:4b987fd4e40303ac -->
 ```yaml
 name: templating-systems
 title: Templating and Interpolation Systems
@@ -33,8 +33,8 @@ Rye has four distinct templating systems. Each uses a different syntax, runs at 
 
 | #   | Syntax                       | Regex                        | Resolver                                                  | Runs On                                  | Stage                                  |
 | --- | ---------------------------- | ---------------------------- | --------------------------------------------------------- | ---------------------------------------- | -------------------------------------- |
-| 1   | `${VAR}` / `${VAR:-default}` | `[A-Z_][A-Z0-9_]*(:-...)?`   | `PrimitiveExecutor`, `SubprocessPrimitive`, `EnvResolver` | Runtime YAML config, command/args        | Tool execution (chain config building) |
-| 2   | `{param_name}`               | `\{(\w+)\}` or `\{([^}]+)\}` | `PrimitiveExecutor`, `SubprocessPrimitive`                | Runtime YAML config, command/args        | Tool execution (after env expansion)   |
+| 1   | `${VAR}` / `${VAR:-default}` | `[A-Z_][A-Z0-9_]*(:-...)?`   | `PrimitiveExecutor`, `ExecutePrimitive`, `EnvResolver` | Runtime YAML config, command/args        | Tool execution (chain config building) |
+| 2   | `{param_name}`               | `\{(\w+)\}` or `\{([^}]+)\}` | `PrimitiveExecutor`, `ExecutePrimitive`                | Runtime YAML config, command/args        | Tool execution (after env expansion)   |
 | 3   | `${dotted.path}`             | `\$\{([^}]+)\}`              | `loaders/interpolation.py`                                | Hook action params, graph node templates | Before dispatch (hooks, graph walker)  |
 | 4   | `{input:key}`                | `\{input:(\w+)(...)\}`       | `execute.py._resolve_input_refs()`                        | Directive body, actions, content         | Directive execution                    |
 
@@ -47,7 +47,7 @@ Rye has four distinct templating systems. Each uses a different syntax, runs at 
 **Where it runs:**
 
 - `PrimitiveExecutor._template_config()` — Pass 1 on merged execution config
-- `SubprocessPrimitive._template_env_vars()` — Stage 1 on command/args/cwd
+- `ExecutePrimitive._template_env_vars()` — Stage 1 on command/args/cwd
 - `EnvResolver._expand_variables()` — on static env values in `env_config.env`
 
 **Examples in YAML:**
@@ -73,7 +73,7 @@ config:
 **Where it runs:**
 
 - `PrimitiveExecutor._template_config()` — Pass 2 on merged execution config (up to 3 iterations until stable)
-- `SubprocessPrimitive._template_params()` — Stage 2 on command/args/cwd
+- `ExecutePrimitive._template_params()` — Stage 2 on command/args/cwd
 - `PrimitiveExecutor._template_string()` — on anchor env_paths
 
 **Available parameters:**
@@ -170,8 +170,8 @@ When a tool is executed through the full chain, templating happens in this order
 2. Context interpolation (${state.X})     — interpolation.py, in hooks/graph walker
 3. Env var expansion (${VAR})             — PrimitiveExecutor Pass 1
 4. Runtime param substitution ({param})   — PrimitiveExecutor Pass 2
-5. Env var expansion (${VAR})             — SubprocessPrimitive Stage 1 (redundant but safe)
-6. Runtime param substitution ({param})   — SubprocessPrimitive Stage 2 (redundant but safe)
+5. Env var expansion (${VAR})             — ExecutePrimitive Stage 1 (redundant but safe)
+6. Runtime param substitution ({param})   — ExecutePrimitive Stage 2 (redundant but safe)
 ```
 
 Steps 5-6 are redundant with 3-4 but harmless — they catch any templates that survived the PrimitiveExecutor pass (e.g., if a parameter value itself contains `{project_path}`).

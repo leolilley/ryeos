@@ -260,7 +260,7 @@ The existing Lillux primitives (`lillux/kernel/lillux/primitives/`) are:
 | `http_client`  | HTTP requests                     |
 | `signing`      | Ed25519 content signing           |
 | `integrity`    | SHA256 content hashing            |
-| `lockfile`     | File locking                      |
+| `cas`          | Content-addressed storage          |
 
 Both retrieval modes require **a new `embedding` primitive** that does not currently exist in Lillux. This primitive would:
 
@@ -307,7 +307,7 @@ These tools **do not currently exist** in the Rye standard library. They would b
 | Ed25519 signing                    | **Exists**  | All items signed, verified on load                                          |
 | Hook system                        | **Exists**  | `hook_conditions.yaml` with error/limit/pressure/step/complete/return events|
 | Event system                       | **Exists**  | `events.yaml` defining lifecycle, cognition, tool, error events             |
-| Lillux primitives                   | **Exists**  | subprocess, http_client, signing, integrity, lockfile                       |
+| Lillux primitives                   | **Exists**  | execute, signing, integrity, cas                                            |
 | `.ai/personality/` directory       | **Proposed**| New top-level category in `.ai/` structure                                  |
 | "How it went" summary section      | **Proposed**| Extension to `thread_summary` directive output format                       |
 | `character_rag` tool               | **Proposed**| RAG retrieval over personality corpus                                       |

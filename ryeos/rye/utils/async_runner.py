@@ -5,8 +5,8 @@ Reads an execute payload from stdin, runs ExecuteTool.handle() synchronously,
 and updates the ThreadRegistry on completion.
 
 Uses the established thread system: thread_id registered in ThreadRegistry
-(SQLite at .ai/agent/threads/registry.db), log dir at
-.ai/agent/threads/{thread_id}/, results stored via registry.set_result().
+    (SQLite at .ai/state/threads/registry.db), log dir at
+    .ai/state/threads/{thread_id}/, results stored via registry.set_result().
 
 Usage (internal — spawned by launch_detached, not called directly):
     python -m rye.utils.async_runner --project-path /path --thread-id <uuid>
@@ -65,6 +65,7 @@ def main():
 
     # Get registry (optional — degrades gracefully)
     from rye.actions.execute import ExecuteTool
+
     registry = ExecuteTool._get_registry(proj)
 
     try:
@@ -76,7 +77,7 @@ def main():
             registry.update_status(thread_id, status)
             registry.set_result(thread_id, result)
 
-        # Print result to stdout (captured in spawn.log by lillux-proc)
+        # Print result to stdout (captured in spawn.log by lillux)
         print(json.dumps(result, default=str))
 
     except Exception as exc:

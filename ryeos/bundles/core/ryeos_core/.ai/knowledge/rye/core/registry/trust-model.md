@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:e4cc8eec79c6651ddbcadf46966c8f9448b3f214b055974a9fe7c0def01b4aa3:K-_dW7LyWlpfJir95PR3gFMFZu42O1fscgvKD_P0ET1I7esa4Rar2LN4LAX5eAS6dj_3yYYHjK99672ygmpABw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:15c93321ae30e2bf0d86451cf8b03fa503efea8b90e497293d85c429326fd1ce:ALKudKzpfDej3EQ3rsGAB6Lzo_-lhBMnfTM-t3NIqfzuppoLb8gG7ZGY0RWCE9MLOArdsBvKxceAddtYAH8dDQ:4b987fd4e40303ac -->
 
 ```yaml
 name: trust-model
@@ -234,11 +234,11 @@ All three must be signed and verified before `my-tool.py` executes.
 
 ### Lockfile Integrity
 
-When a lockfile exists:
-1. **Root integrity** — Lockfile's recorded hash must match current file's computed hash
+Chain integrity is verified on every execution:
+1. **Root integrity** — Recorded hash must match current file's computed hash
 2. **Chain element integrity** — Every recorded chain element must still exist with same hash
 
-Hash mismatch → execution fails → re-sign and delete stale lockfile.
+Hash mismatch → execution fails → re-sign to fix.
 
 ### Dependency Verification
 

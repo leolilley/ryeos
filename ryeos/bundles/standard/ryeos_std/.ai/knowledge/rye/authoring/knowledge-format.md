@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:77b586cbbe089658dde2eeb9442cac8024e19382b241dc41e77c53467179b2bc:7bw04RuwPrOPqGXHQgG4ZFFAkRwQcFtJmHdf9J1NIa2vl9g5OUjDilt4nouh_zLuH9U7bbanDdWyHnkC-RXNBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:14:32Z:77b586cbbe089658dde2eeb9442cac8024e19382b241dc41e77c53467179b2bc:7bw04RuwPrOPqGXHQgG4ZFFAkRwQcFtJmHdf9J1NIa2vl9g5OUjDilt4nouh_zLuH9U7bbanDdWyHnkC-RXNBg:4b987fd4e40303ac -->
 
 ```yaml
 name: knowledge-format

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:f0ca499123e79e0c3790172b7f7ea62a34be6179639b6deeba457183ca1e6165:f3lXncjECv4aib5kWJ7R2ngUpeJFMD5io6Wif__IBCinwcHjTz64SjUmj5m1a3ZUK-G2fu2FgjvXgVdjhESQAA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:3a7882de1e6c5f39190b830039fba522c15a27b5523f7dec051c9b42374e68fd:kIY_D0t40dSMrPP5oHauQVnPS3oVqjTC9jMJU1mM3ARfY_oFy6AoN19zTJGMZZCmdyVBt4AUCIEq41hz9pedCw:4b987fd4e40303ac -->
 
 ```yaml
 name: executor-chain
@@ -39,7 +39,7 @@ How tools are resolved and executed through the three-layer chain.
 ```
 Layer 3: Tool        __executor_id__ = "rye/core/runtimes/python/script"
                               │
-Layer 2: Runtime     __executor_id__ = "rye/core/primitives/subprocess"
+Layer 2: Runtime     __executor_id__ = "rye/core/primitives/execute"
                               │
 Layer 1: Primitive   __executor_id__ = None  →  direct Lilux execution
 ```
@@ -50,8 +50,7 @@ Terminal nodes. `__executor_id__ = None`. Map to Lilux classes via `PRIMITIVE_MA
 
 ```python
 PRIMITIVE_MAP = {
-    "rye/core/primitives/subprocess": SubprocessPrimitive,
-    "rye/core/primitives/http_client": HttpClientPrimitive,
+    "rye/core/primitives/execute": ExecutePrimitive,
 }
 ```
 
@@ -63,7 +62,7 @@ YAML configs at `.ai/tools/rye/core/runtimes/`. Point to a primitive. Add config
 
 ```yaml
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 
 env_config:
   interpreter:
@@ -137,9 +136,9 @@ Step 1: Resolve "rye/bash/bash"
 
 Step 2: Resolve "rye/core/runtimes/python/script"
   → .ai/tools/rye/core/runtimes/python/script.yaml (system space)
-  → executor_id = "rye/core/primitives/subprocess"
+  → executor_id = "rye/core/primitives/execute"
 
-Step 3: Resolve "rye/core/primitives/subprocess"
+Step 3: Resolve "rye/core/primitives/execute"
   → Matches PRIMITIVE_MAP key (no file needed)
   → executor_id = None (terminal)
 
@@ -233,7 +232,7 @@ Cache invalidation is automatic: if any file hash differs, the cached entry is d
 ```json
 {
   "status": "validation_passed",
-  "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/subprocess"],
+  "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/execute"],
   "validated_pairs": [
     {"child": "rye/file-system/write", "parent": "python/script", "space_ok": true, "io_ok": true},
     {"child": "python/script", "parent": "subprocess", "space_ok": true, "io_ok": true}

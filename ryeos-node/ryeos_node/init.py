@@ -41,35 +41,30 @@ def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> N
         return
 
     import base64
-    import hashlib
-    import time
     from rye.primitives.signing import (
         compute_key_fingerprint,
         load_keypair,
-        sign_hash,
+    )
+    from rye.utils.authorized_keys import (
+        build_authorized_key_body,
+        sign_authorized_key,
     )
 
     # Derive fingerprint from the provided public key
     pub_pem = base64.b64decode(pub_key_env[len("ed25519:"):])
     fp = compute_key_fingerprint(pub_pem)
     label = os.environ.get("BOOTSTRAP_LABEL", "bootstrap").strip()
-    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    body = (
-        f'fingerprint = "{fp}"\n'
-        f'public_key = "{pub_key_env}"\n'
-        f'label = "{label}"\n'
-        f'scopes = ["*"]\n'
-        f'created_via = "bootstrap_env"\n'
-        f'created_at = "{timestamp}"\n'
+    body, timestamp = build_authorized_key_body(
+        fingerprint=fp,
+        public_key_encoded=pub_key_env,
+        label=label,
+        scopes=["*"],
+        extra_fields={"created_via": "bootstrap_env"},
     )
 
     node_priv, node_pub = load_keypair(signing_dir)
-    node_fp = compute_key_fingerprint(node_pub)
-    content_hash = hashlib.sha256(body.encode()).hexdigest()
-    sig_b64 = sign_hash(content_hash, node_priv)
-
-    signed_content = f"# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{node_fp}\n{body}"
+    signed_content = sign_authorized_key(body, timestamp, node_priv, node_pub)
 
     key_file = authorized_keys_dir / f"{fp}.toml"
     key_file.write_text(signed_content, encoding="utf-8")

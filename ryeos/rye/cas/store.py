@@ -17,7 +17,7 @@ from rye.primitives import cas
 from rye.primitives.integrity import compute_integrity
 
 from rye.cas.objects import ItemRef, ItemSource
-from rye.constants import AI_DIR, ItemType
+from rye.constants import AI_DIR, ItemType, STATE_DIR, STATE_OBJECTS
 from rye.utils.metadata_manager import MetadataManager, compute_content_hash
 from rye.utils.path_utils import get_user_space
 
@@ -25,13 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 def cas_root(project_path: Path) -> Path:
-    """Returns {project}/.ai/objects/"""
-    return project_path / AI_DIR / "objects"
+    """Returns {project}/.ai/state/objects/"""
+    return project_path / AI_DIR / STATE_DIR / STATE_OBJECTS
 
 
 def user_cas_root() -> Path:
-    """Returns {USER_SPACE}/.ai/objects/"""
-    return get_user_space() / AI_DIR / "objects"
+    """Returns {USER_SPACE}/.ai/state/objects/"""
+    return get_user_space() / AI_DIR / STATE_DIR / STATE_OBJECTS
 
 
 def ingest_item(
@@ -57,11 +57,13 @@ def ingest_item(
     signature_info: Optional[Dict[str, str]] = None
     try:
         signature_info = MetadataManager.get_signature_info(
-            item_type, content_text,
-            file_path=file_path, project_path=project_path,
+            item_type,
+            content_text,
+            file_path=file_path,
+            project_path=project_path,
         )
     except ValueError:
-        pass  # unsigned file — expected for lockfiles, PEM keys, etc.
+        pass  # unsigned file — expected for PEM keys, etc.
 
     # Derive item_id from path relative to .ai/{type_dir}/
     type_dir_name = ItemType.TYPE_DIRS.get(item_type, item_type)
@@ -71,7 +73,7 @@ def ingest_item(
     for i, part in enumerate(parts):
         if part == AI_DIR and i + 1 < len(parts) and parts[i + 1] == type_dir_name:
             # Everything after .ai/{type_dir}/ minus extension is the item_id
-            relative = file_path.relative_to(Path(*parts[:i + 2]))
+            relative = file_path.relative_to(Path(*parts[: i + 2]))
             item_id = relative.with_suffix("").as_posix()
             break
 
@@ -99,13 +101,13 @@ def ingest_directory(
 ) -> Dict[str, str]:
     """Walk .ai/ tree → ingest all items → return {relative_path: object_hash}.
 
-    Skips .ai/objects/ and .ai/agent/ (runtime state).
+    Skips .ai/state/ (runtime state).
     """
     ai_path = base_path / AI_DIR
     if not ai_path.is_dir():
         return {}
 
-    skip_dirs = {"objects", "agent"}
+    skip_dirs = {STATE_DIR}
     results: Dict[str, str] = {}
 
     for dirpath, dirnames, filenames in os.walk(ai_path):
@@ -113,8 +115,7 @@ def ingest_directory(
 
         # Skip runtime directories
         dirnames[:] = [
-            d for d in dirnames
-            if not (rel_dir == Path(AI_DIR) and d in skip_dirs)
+            d for d in dirnames if not (rel_dir == Path(AI_DIR) and d in skip_dirs)
         ]
 
         for filename in filenames:
@@ -145,8 +146,7 @@ def materialize_item(
     obj = cas.get_object(object_hash, root)
     if obj is None:
         raise FileNotFoundError(
-            f"Object {object_hash} not found in CAS "
-            f"(root={root}, target={target_path})"
+            f"Object {object_hash} not found in CAS (root={root}, target={target_path})"
         )
 
     blob_hash = obj["content_blob_hash"]
@@ -158,8 +158,13 @@ def materialize_item(
         logger.error(
             "Blob %s not found via lillux. root=%s, exists_on_disk=%s, blob_path=%s, "
             "item_type=%s, item_id=%s, object_hash=%s",
-            blob_hash, root, exists_on_disk, blob_path,
-            obj.get("item_type"), obj.get("item_id"), object_hash,
+            blob_hash,
+            root,
+            exists_on_disk,
+            blob_path,
+            obj.get("item_type"),
+            obj.get("item_id"),
+            object_hash,
         )
         if exists_on_disk:
             try:

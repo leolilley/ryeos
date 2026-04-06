@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T07:27:23Z:1da30f2dff34b3e6042fa7bd1117f79e14abdd36ad684383b6cb652469490608:hUnXxQMMqboKuoefd7FKUxYXoOLvJWXcQoFquu_9rMDDRlQIlFzEcsk3VdfGHl5qE7U-DEGMOxf_ZxaQrktWCw:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:470b3a56f0ab6f36ada26038f9a311db726b181484d5861ecb8ae2fe8c169927:IkO7fAAoftDahq7luzfnWrMepU6zUEgKPQc-j6ps99mL_9hhYn9bIGTIg5Umfwh7d9T6D8_zd785hCsTgo-qAQ:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
@@ -9,10 +9,9 @@ from typing import Any, Dict, List, Optional
 
 import asyncio
 import json as _json
-import shutil
 from pathlib import Path
 
-from rye.primitives.subprocess import SubprocessPrimitive
+from rye.primitives.execute import ExecutePrimitive
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
@@ -154,26 +153,7 @@ async def _wait_single(thread_id: str, timeout: float, project_path: Path) -> Di
 
 
 async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
-    """Wait for thread completion using lillux-watch (push) or polling (fallback)."""
-    # Try push-based watcher first
-    lillux_watch = shutil.which("lillux-watch")
-    if lillux_watch and hasattr(registry, "db_path"):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                lillux_watch,
-                "--db", str(registry.db_path),
-                "--thread-id", thread_id,
-                "--timeout", str(timeout),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
-            if proc.returncode == 0 and stdout:
-                return _json.loads(stdout.strip())
-        except (asyncio.TimeoutError, OSError, ValueError):
-            pass  # fall through to polling
-
-    # Fallback: 500ms polling
+    """Wait for thread completion via polling."""
     import time
     deadline = time.monotonic() + timeout
     poll_interval = 0.5
@@ -189,11 +169,11 @@ async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
     return {"status": "timeout", "thread_id": thread_id}
 
 
-_subprocess = SubprocessPrimitive()
+_subprocess = ExecutePrimitive()
 
 
 async def _kill_pid(pid: int, grace: float = 3.0) -> Dict:
-    """Kill a process by PID via SubprocessPrimitive."""
+    """Kill a process by PID via ExecutePrimitive."""
     result = await _subprocess.kill(pid, grace=grace)
     return {"success": result.success, "pid": pid, "method": result.method, "error": result.error}
 
@@ -204,7 +184,7 @@ async def spawn_detached(
     envs: Optional[Dict[str, str]] = None,
     input_data: Optional[str] = None,
 ) -> Dict:
-    """Spawn a detached process via SubprocessPrimitive.
+    """Spawn a detached process via ExecutePrimitive.
 
     Returns dict with 'success' and 'pid' on success.
     """

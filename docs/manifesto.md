@@ -16,13 +16,13 @@ Yes that's a lot of jargon but it's truly the TL;DR of what this is. There is a 
 
 After working with AI over these past few years I've come to realise that to really turn an LLM into an agent, you first need to understand the core primitives of agentic operation.
 
-Strip away the abstractions and every agent does two things: it retrieves something, and it acts on it. Every framework, every harness, every workflow is some variation of retrieve and act.
+Strip away the abstractions and every agent does two things: it retrieves data, and it acts on it. Every framework, every harness, every workflow is some variation of retrieve and act.
 
 If you're trying to derive the right primitives for agents, you don't need to reinvent it. Computing already answered it at every layer. The CPU's fetch-execute cycle arrived at the same reduction operation, you point at a thing and you get it back. Whether you're pointing by address, by URL, by query, or by content hash doesn't matter. How you point at it is a parameter, not a different operation.
 
-Retrieval reduces to Fetch. Acts on it is the obvious half. You run the thing. Execute. In RYE that means resolving a tool through its execution chain down to a primitive that Lillux can run. Every agent framework you've seen is already doing some version of these two. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured Fetch. When Claude Code finds a skill and runs it, that's Fetch, Execute. When OpenClaw routes a task to a sub-agent, same thing.
+Retrieval reduces to Fetch. The "act" is the obvious half. You run the thing. Execute. In RYE that means resolving a tool through its execution chain down to a primitive that can run. Every agent framework you've seen is already doing some version of these two. When your harness comes prebuilt with filesystem or web search tools, you've pre-configured Fetch. When Claude Code finds a skill and runs it, that's Fetch, Execute. When OpenClaw routes a task to a sub-agent, same thing.
 
-None of them have the third primitive. Sign. That's what makes the other 2 secure. Other frameworks treat agent security as a runtime problem, watch what the agent does and intervene when it steps out of bounds. In RYE permissions aren't enforced after the fact. They're declared, signed, and verified before execution ever starts. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
+None of them have the final action primitive. Sign. That's what makes the other 2 secure. Other frameworks treat agent security as a runtime problem, watch what the agent does and intervene when it steps out of bounds. In RYE permissions aren't enforced after the fact. They're declared, signed, and verified before execution ever starts. But to understand what gets signed, and why it changes everything, you need to understand what RYE actually works with.
 
 ---
 

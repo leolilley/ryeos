@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:6cf1548d491df70dc1169e02941feb0ff1edf529ef909898d9587ef664b8b096:-Ek4awu5TAta8cWEwtgPO1ewAEoSH4PcbPH4CNsjNDnw5JUQ1bFMabZ6DQ2Icy_e8ASwk6C0JJjkceM80cjPDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:30445a641b0addbbce52e2dc689f0f0671ee3745d95d663924669abb4c188944:-z471owT-5Hq49pxdfKjqgX-AAyGFPmYBNJBzll-LVoLUItRzyAYRyNUNdOkZOeUP0MMTBYAQAvNUoeK2ySwDg:4b987fd4e40303ac -->
 ```yaml
 name: object-kinds
 title: CAS Object Kinds
@@ -55,7 +55,6 @@ Merged config state after 3-tier resolution.
 Cache key for node execution — must be deterministic.
 - `graph_hash`, `node_name` — identify the node
 - `interpolated_action` — resolved action after template substitution
-- `lockfile_hash` — optional lockfile reference
 - `config_snapshot_hash` — config at time of execution
 
 ### 5. NodeResult (`node_result`)

@@ -87,7 +87,7 @@ Execute a directive in a managed thread with a full LLM loop. This is the primar
 #### Synchronous vs Async
 
 - **Sync** (default): blocks until the thread completes, returns the full result
-- **Async** (`async: true`): spawns a detached child process via `launch_detached()` (using lillux-proc's `SubprocessPrimitive.spawn()` for cross-platform support). Returns immediately with `thread_id` and `pid`. The child rebuilds all state from scratch — no inherited in-process state.
+- **Async** (`async: true`): spawns a detached child process via `launch_detached()` (using lillux's `ExecutePrimitive.spawn()` for cross-platform support). Returns immediately with `thread_id` and `pid`. The child rebuilds all state from scratch — no inherited in-process state.
 
 #### Output
 
@@ -376,11 +376,11 @@ Routes tool calls from the LLM to `rye_execute`. The runner uses a `tool_primary
 
 ## Persistence
 
-All thread state is persisted to disk under `.ai/agent/threads/<thread_id>/`.
+All thread state is persisted to disk under `.ai/state/threads/<thread_id>/`.
 
 ### Thread Registry (`persistence/thread_registry`)
 
-Tracks all threads in `.ai/agent/threads/registry.db` (SQLite):
+Tracks all threads in `.ai/state/threads/registry.db` (SQLite):
 
 - Registration (thread_id, directive, parent_id, timestamp)
 - Status updates (created → running → completed/error/cancelled/continued)
@@ -391,7 +391,7 @@ Tracks all threads in `.ai/agent/threads/registry.db` (SQLite):
 
 ### Transcript (`persistence/transcript`)
 
-Records the full conversation to `.ai/agent/threads/<thread_id>/transcript.jsonl`:
+Records the full conversation to `.ai/state/threads/<thread_id>/transcript.jsonl`:
 
 - All LLM messages (user, assistant, tool results)
 - Event markers (thread_started, thread_completed, etc.)
@@ -409,7 +409,7 @@ Stores large tool results outside the conversation context. When a tool result e
 
 ### Budget Ledger (`persistence/budgets`)
 
-Hierarchical budget tracking in `.ai/agent/threads/budget_ledger.json`:
+Hierarchical budget tracking in `.ai/state/threads/budget_ledger.json`:
 
 - **Register** — create a new budget entry with max spend
 - **Reserve** — child threads reserve budget from parent

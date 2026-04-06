@@ -1,7 +1,8 @@
-# rye:signed:2026-04-05T03:17:01Z:704b92afd358b3045dc0a56646c65a2f98572c065a8fe2870b232c80c3ac8d55:MoQrhgCQy7hueRDXTf0kndtdgXZND_tW0nncXMDT6LIytpvTx99Jkm7lcvSSKHspz7Tm-Gnb0FiF6SmH5JOUDQ:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:01Z:39eaa0ad64655870b3c2f8c588c0d931bb298fbe49dc1c2f9452dee17835d0d8:r-XkP36Os-G-EBuRQ1vih43tD9yC0qjol_umMi6zDul3qtoxWaOiiSL4fHGYFTlLbRo78ZpcYx9I8zDSvhyXAw:4b987fd4e40303ac
+# rye:unsigned
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/python
 description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
 

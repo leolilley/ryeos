@@ -4,12 +4,10 @@ from rye.errors import (
     AuthenticationRequired,
     ConfigurationError,
     IntegrityError,
-    LockfileError,
     RefreshError,
     ToolExecutionError,
     ValidationError,
 )
-from rye.runtime.http_client import HttpClientPrimitive, HttpResult, ReturnSink
 from rye.primitives.cas import (
     get_blob,
     get_object,
@@ -18,17 +16,16 @@ from rye.primitives.cas import (
     store_blob,
     store_object,
 )
-from rye.primitives.integrity import (
-    canonical_json,
-    compute_integrity,
-)
-from rye.runtime.lockfile import Lockfile, LockfileManager, LockfileRoot
-from rye.primitives.subprocess import (
-    SubprocessPrimitive,
-    SubprocessResult,
+from rye.primitives.execute import (
+    ExecutePrimitive,
+    ExecuteResult,
     SpawnResult,
     KillResult,
     StatusResult,
+)
+from rye.primitives.integrity import (
+    canonical_json,
+    compute_integrity,
 )
 
 __all__ = [
@@ -43,25 +40,16 @@ __all__ = [
     "ValidationError",
     "ToolExecutionError",
     "IntegrityError",
-    "LockfileError",
     "ConfigurationError",
     "AuthenticationRequired",
     "RefreshError",
     # Integrity
     "canonical_json",
     "compute_integrity",
-    # Lockfile
-    "LockfileRoot",
-    "Lockfile",
-    "LockfileManager",
-    # Subprocess
-    "SubprocessResult",
-    "SubprocessPrimitive",
+    # Execute
+    "ExecuteResult",
+    "ExecutePrimitive",
     "SpawnResult",
     "KillResult",
     "StatusResult",
-    # HTTP Client
-    "HttpResult",
-    "HttpClientPrimitive",
-    "ReturnSink",
 ]

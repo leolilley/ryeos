@@ -5,7 +5,6 @@ from rye.errors import (
     ValidationError,
     ToolExecutionError,
     IntegrityError,
-    LockfileError,
     ConfigurationError,
     AuthenticationRequired,
     RefreshError,
@@ -59,22 +58,6 @@ class TestIntegrityError:
         """IntegrityError works with just message."""
         err = IntegrityError("corrupted file")
         assert "corrupted file" in str(err)
-
-
-class TestLockfileError:
-    """LockfileError for lockfile problems."""
-
-    def test_create_lockfile_error(self):
-        """LockfileError(message, path=None)."""
-        err = LockfileError("invalid format", path="/path/to/lockfile.json")
-        assert "invalid format" in str(err)
-        assert err.path == "/path/to/lockfile.json"
-
-    def test_lockfile_error_no_path(self):
-        """LockfileError works without path."""
-        err = LockfileError("lockfile not found")
-        assert "lockfile not found" in str(err)
-        assert err.path is None
 
 
 class TestConfigurationError:
@@ -135,10 +118,6 @@ class TestErrorHierarchy:
     def test_integrity_error_is_tool_execution_error(self):
         """IntegrityError is a ToolExecutionError subclass."""
         assert issubclass(IntegrityError, ToolExecutionError)
-
-    def test_lockfile_error_is_tool_execution_error(self):
-        """LockfileError is a ToolExecutionError subclass."""
-        assert issubclass(LockfileError, ToolExecutionError)
 
     def test_configuration_error_is_tool_execution_error(self):
         """ConfigurationError is a ToolExecutionError subclass."""

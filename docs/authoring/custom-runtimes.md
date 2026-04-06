@@ -25,7 +25,7 @@ A runtime is a YAML file that describes:
 # .ai/tools/rye/core/runtimes/go/go.yaml
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/go
 description: "Go runtime - executes Go binaries"
 
@@ -216,7 +216,7 @@ Create `.ai/tools/rye/core/runtimes/ruby/ruby.yaml`:
 ```yaml
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/ruby
 description: "Ruby runtime - executes Ruby scripts with bundler support"
 

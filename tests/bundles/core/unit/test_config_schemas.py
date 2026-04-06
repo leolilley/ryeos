@@ -104,18 +104,17 @@ class TestConfigSchemas:
         assert result["valid"]
         assert result["issues"] == []
 
-    def test_cas_remote_schema(self):
+    def test_remotes_schema(self):
         """Core bundle config schema discovered via target_config."""
-        result = validate_config_content("cas/remote", {
+        result = validate_config_content("remotes/remotes", {
             "project_name": "test-project",
             "remotes": {"default": {"url": "https://x.com", "key_env": "K"}},
-            "sync": {"include": [".ai/"], "exclude": [".git/"]},
         })
         assert result["valid"]
         assert result["issues"] == []
 
-    def test_cas_remote_invalid_type(self):
-        result = validate_config_content("cas/remote", {
+    def test_remotes_invalid_type(self):
+        result = validate_config_content("remotes/remotes", {
             "project_name": 123,
         })
         assert not result["valid"]
@@ -123,7 +122,7 @@ class TestConfigSchemas:
 
     def test_cache_scoped_by_project_path(self, tmp_path):
         """Different project_path values get independent cache entries."""
-        r1 = validate_config_content("cas/remote", {"project_name": 123})
-        r2 = validate_config_content("cas/remote", {"project_name": 123}, project_path=tmp_path)
+        r1 = validate_config_content("remotes/remotes", {"project_name": 123})
+        r2 = validate_config_content("remotes/remotes", {"project_name": 123}, project_path=tmp_path)
         assert not r1["valid"]
         assert not r2["valid"]

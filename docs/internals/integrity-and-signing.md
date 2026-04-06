@@ -1,15 +1,15 @@
 ```yaml
 id: integrity-and-signing
 title: "Integrity and Signing"
-description: Content hashing, Ed25519 signatures, and lockfile-based pinning
+description: Content hashing, Ed25519 signatures, and trust management
 category: internals
-tags: [integrity, signing, security, lockfiles, ed25519]
+tags: [integrity, signing, security, ed25519]
 version: "1.0.0"
 ```
 
 # Integrity and Signing
 
-Every item in Rye OS is signed with Ed25519. Unsigned or tampered items are rejected at execution time. This page covers the signature format, verification flow, lockfile pinning, and trust management.
+Every item in Rye OS is signed with Ed25519. Unsigned or tampered items are rejected at execution time. This page covers the signature format, verification flow, and trust management.
 
 ## Signature Format
 
@@ -64,7 +64,7 @@ def compute_hash(item_type, content, file_path=None, project_path=None):
     return hashlib.sha256(content.encode()).hexdigest()
 ```
 
-For Lillux-level integrity (used in lockfiles and bundle manifests), `lillux/primitives/integrity.py` provides a generic `compute_integrity(data)` function. Lillux is type-agnostic — callers construct the data dict with whatever fields are relevant:
+For Lillux-level integrity (used in bundle manifests), `lillux/primitives/integrity.py` provides a generic `compute_integrity(data)` function. Lillux is type-agnostic — callers construct the data dict with whatever fields are relevant:
 
 ```python
 from rye.primitives.integrity import compute_integrity
@@ -275,83 +275,6 @@ This ensures the trust store cannot be silently tampered with.
 | Registry key | TOFU-pinned on first pull (`owner="rye-registry"`) | Verifies registry-pulled items |
 | Peer key | Manually trusted via `rye_sign` | Verifies collaborator items |
 
-## Lockfile Pinning
-
-Lockfiles pin exact versions of an entire executor chain. They are checked **before** chain building during execution.
-
-### Lockfile Structure
-
-Stored as `{tool_id}@{version}.lock.json`:
-
-```json
-{
-  "lockfile_version": 1,
-  "generated_at": "2026-02-15T12:00:00+00:00",
-  "root": {
-    "tool_id": "rye/bash",
-    "version": "1.0.0",
-    "integrity": "a1b2c3d4e5f6..."
-  },
-  "resolved_chain": [
-    {
-      "item_id": "rye/bash",
-      "space": "system",
-      "tool_type": "python",
-      "executor_id": "rye/core/runtimes/python/script",
-      "integrity": "a1b2c3d4e5f6..."
-    },
-    {
-      "item_id": "rye/core/runtimes/python/script",
-      "space": "system",
-      "tool_type": "runtime",
-      "executor_id": "rye/core/primitives/subprocess",
-      "integrity": "f6e5d4c3b2a1..."
-    }
-  ]
-}
-```
-
-### Lockfile Resolution
-
-`LockfileResolver` uses three-tier precedence for reading lockfiles:
-
-```
-Read:  project/.ai/lockfiles/ → user/.ai/lockfiles/ → system/.ai/lockfiles/
-Write: Always to project space (if available), else user space
-```
-
-System lockfiles are read-only (bundled with the package).
-
-### Lockfile Verification Flow
-
-During `PrimitiveExecutor.execute()`:
-
-1. Look up lockfile via `LockfileResolver.get_lockfile(item_id, version)`
-2. If found, verify root integrity:
-   - Compute current hash of the root tool file
-   - Compare to `lockfile.root.integrity`
-   - **Mismatch → execution fails** with "Re-sign and delete stale lockfile"
-3. Verify each chain element:
-   - Resolve each `item_id` to its current path
-   - Compute current hash
-   - Compare to pinned `integrity` value
-   - **Any mismatch → execution fails**
-4. If all checks pass, proceed with execution using the cached chain
-
-### Lockfile Creation
-
-After successful execution (when no lockfile existed), a new lockfile is automatically created:
-
-```python
-lockfile = lockfile_resolver.create_lockfile(
-    tool_id=item_id,
-    version=version,
-    integrity=root_hash,
-    resolved_chain=chain_dicts,
-)
-lockfile_resolver.save_lockfile(lockfile, space=chain[0].space)
-```
-
 ## Transcript Integrity
 
 Thread transcripts (JSONL event logs) are signed at turn boundaries using inline checkpoint events. This provides crash-resilient integrity — partial transcripts are still verifiable up to the last checkpoint.
@@ -414,15 +337,14 @@ Each thread writes a `capabilities.md` file alongside `transcript.jsonl` in the 
 
 ### Knowledge Entry Export
 
-Transcripts are exported as signed knowledge entries at `.ai/knowledge/agent/threads/{directive}/{thread_id}.md`. These use cognition-style framing and standard knowledge metadata with `entry_type: thread_transcript`. The frontmatter includes a `capabilities_ref` field pointing to `.ai/agent/threads/{thread_id}/capabilities.md` instead of embedding tool definitions inline. The knowledge entry is updated at each checkpoint and at finalization.
+Transcripts are exported as signed knowledge entries at `.ai/knowledge/agent/threads/{directive}/{thread_id}.md`. These use cognition-style framing and standard knowledge metadata with `entry_type: thread_transcript`. The frontmatter includes a `capabilities_ref` field pointing to `.ai/state/threads/{thread_id}/capabilities.md` instead of embedding tool definitions inline. The knowledge entry is updated at each checkpoint and at finalization.
 
 ## What Breaks Integrity
 
 | Action                            | Result                                                                                |
 | --------------------------------- | ------------------------------------------------------------------------------------- |
 | Editing a file without re-signing | Content hash mismatch → `IntegrityError`                                              |
-| Moving a file to a different path | Signature still valid (hash is content-based), but lockfile will fail if paths change |
-| Deleting and recreating a file    | New hash won't match lockfile → must delete lockfile                                  |
+| Moving a file to a different path | Signature still valid (hash is content-based)                                         |
 | Using a key not in trust store    | `Untrusted key` error                                                                 |
 
 ## Batch Signing

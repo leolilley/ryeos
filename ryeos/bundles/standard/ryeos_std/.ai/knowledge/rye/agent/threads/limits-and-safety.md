@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:575f1954970b639ed22cd5d1dde7389fd4c8a7f6546cd61602825b8a1febb481:baoVZjxW8w4ZV8Xr8D1oF2sMYDxdiqWplqrTNYWy1gaHcJxb5jo89hCkm_I1tD-_McibNrsTyxvBvazC1PzIBA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:14:32Z:1960ff7bab447bfbf1bbefb7c9651fe48a17ff53dfcb44b3de492c816083ac02:WvKb3U-RDp3ZWEswpiKAgZM6Kof3Kifo3sFb1Lzf7VHe52iyEJ6YZQwJ5Fv_4h48ONWHeV4Pp_AcFg--6ElaBg:4b987fd4e40303ac -->
 
 ```yaml
 name: limits-and-safety
@@ -131,7 +131,7 @@ When exceeded:
 
 ## Budget Ledger
 
-SQLite-backed hierarchical cost tracking at `.ai/agent/threads/budget_ledger.db`.
+SQLite-backed hierarchical cost tracking at `.ai/state/threads/budget_ledger.db`.
 
 ### Operations
 

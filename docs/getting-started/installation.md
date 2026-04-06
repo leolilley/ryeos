@@ -23,7 +23,7 @@ This pulls in the full dependency chain:
 - **`ryeos`** — the standard bundle (~3MB) with agent, bash, file-system, MCP, primary, core, authoring, and guide items. Depends on `ryeos-core`.
 - **`ryeos-core`** — the core runtimes, primitives, and extractors (`rye/core/*` items). Depends on `ryeos-engine`.
 - **`ryeos-engine`** — the orchestration layer with the resolver, executor, signing, and metadata.
-- **`lillux`** — the microkernel with stateless primitives (subprocess, HTTP, signing, integrity hashing). Depends on `lillux-proc` (Rust binary for process lifecycle management).
+- **`lillux`** — the unified Rust binary providing process execution, CAS operations, signing, verification, and integrity hashing.
 
 ### Optional extras
 

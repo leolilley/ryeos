@@ -144,7 +144,7 @@ If the parent has insufficient remaining budget, the reservation fails and the t
 
 ### Step 12: Write initial thread.json
 
-The thread metadata file is written to `.ai/agent/threads/<thread_id>/thread.json`:
+The thread metadata file is written to `.ai/state/threads/<thread_id>/thread.json`:
 
 ```json
 {
@@ -177,7 +177,7 @@ The `thread.json` file is signed using canonical JSON serialization with a `_sig
 ### Step 14: Run thread synchronously / spawn async
 
 - **Synchronous** (default): Calls `runner.run()` directly and blocks until completion
-- **Asynchronous** (`async: true`): Triggered by `execute directive` with `async: true`, which delegates to `thread_directive` internally. `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `lillux-proc spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
+- **Asynchronous** (`async: true`): Triggered by `execute directive` with `async: true`, which delegates to `thread_directive` internally. `spawn_detached()` launches a subprocess that re-executes `thread_directive.py` with `--thread-id` and `--pre-registered` flags. The child rebuilds all state from scratch. Detached spawning uses the `lillux exec spawn` Rust binary for cross-platform support, with a POSIX `subprocess.Popen` fallback. The parent process returns immediately with `{"thread_id": "...", "status": "running"}`
 
 ### Step 15: Report spend and finalize
 
@@ -245,7 +245,7 @@ After the turn loop exits and `render_knowledge_transcript()` runs, the runner d
 
 ## Thread Storage
 
-Each thread creates a directory at `.ai/agent/threads/<thread_id>/` containing:
+Each thread creates a directory at `.ai/state/threads/<thread_id>/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -255,7 +255,7 @@ Each thread creates a directory at `.ai/agent/threads/<thread_id>/` containing:
 
 Thread transcripts are also exported as signed knowledge entries at `.ai/knowledge/agent/threads/{directive}/{thread_id}.md` for discoverability via `rye search knowledge`. The knowledge frontmatter includes a `capabilities_ref` field pointing to the capabilities file.
 
-The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/agent/threads/`.
+The thread registry (`registry.db`) and budget ledger (`budget_ledger.db`) are shared SQLite databases at `.ai/state/threads/`.
 
 ## Thread Registry
 

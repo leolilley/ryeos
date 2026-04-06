@@ -93,7 +93,7 @@ Internally, this delegates to `thread_directive` — but the LLM never calls tha
 
 Synchronous execution blocks until the child completes and returns its result. Asynchronous execution (`async: true`) forks the process and returns a `thread_id` immediately — the parent can then continue spawning more children and wait for all of them later.
 
-Remote execution (`thread="remote"` or `thread="remote:gpu"`) pushes the directive to a remote ryeos server for execution. This is useful for compute-heavy workloads or when you need GPU access. Named remotes are configured in `cas/remote.yaml`.
+Remote execution (`thread="remote"` or `thread="remote:gpu"`) pushes the directive to a remote ryeos server for execution. This is useful for compute-heavy workloads or when you need GPU access. Named remotes are configured in `remotes/remotes.yaml`.
 
 ## The Hierarchy
 

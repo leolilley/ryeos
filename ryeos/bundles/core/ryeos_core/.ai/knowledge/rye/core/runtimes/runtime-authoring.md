@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:eab3d2aeb2fd97770aee5ec8accdee4e3086d9c24bf468c93ad76e9b8a871c28:vtzgyVUT_s5OOzqnzpmED8_FTZd6ikrq-2cg0XWChhkG-yoYuP0OW0rFVnNciSTEfcUya_FYOOxrBobzjDYRCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:765c9e4c3631c1e76b0383691005d92a25cd9d598fd4e1aec509899901ea2cdd:KvJyYwdODR7juX61e63UZYmcLB0vznmlRlKCMboT2o-rN2EPb2gLIVePTqaPTvKiWltGoojsOwL-LAFeiKKqDw:4b987fd4e40303ac -->
 
 ```yaml
 name: runtime-authoring
@@ -50,7 +50,7 @@ How to create a new runtime YAML to add support for a language or protocol not c
 # Metadata
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess   # Points to primitive (or custom)
+executor_id: rye/core/primitives/execute   # Points to primitive (or custom)
 category: category/path
 
 # Configuration
@@ -85,11 +85,10 @@ Every runtime points to a **primitive** — the underlying executor:
 
 | Primitive | For | Examples |
 |-----------|-----|----------|
-| `rye/core/primitives/subprocess` | Language CLIs, scripts | Python, Node, Ruby, Go, Bash |
-| `rye/core/primitives/http_client` | HTTP APIs, REST | Web services, remote tools |
+| `rye/core/primitives/execute` | Language CLIs, scripts, any command | Python, Node, Ruby, Go, Bash |
 | Custom primitive | Specialized execution | Domain-specific engines |
 
-Most custom runtimes use `subprocess`.
+Most custom runtimes use the execute primitive.
 
 ## Step 2: Configure Interpreter Resolution
 
@@ -303,7 +302,7 @@ This schema is informational — actual validation is done at the tool level via
 # rye:signed:TIMESTAMP:HASH:SIG:FP
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/ruby
 description: "Ruby runtime executor - executes Ruby scripts with Bundler support"
 

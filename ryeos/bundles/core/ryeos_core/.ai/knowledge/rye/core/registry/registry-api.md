@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T13:37:45Z:2ea58ee810e905d6f988caf3075d6fe81b193b8d50589f0f2ccaeb225587c307:XuzF_XLbV_DGgwWybXK4arDxDLemnddbBYhpZKHX5EO7zCgiZIv3IfzvoVmNZuhe6I2WroNdTOX9wBIDLoKwBA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:99ab4c088b38bb26900f8428ac4eb14115556397903ad033405a944208000412:-OyhXqh0uT-SYZXsiiavgcHCKq1mYGqrNhkAnB3faBm3S8hvTsL44Y8JsTKMIC8zHyj5YFYF5rKPugkHaiEUDw:4b987fd4e40303ac -->
 
 ```yaml
 name: registry-api
@@ -214,7 +214,7 @@ New bundles default to `public` on push.
 3. Write each file to its relative path
 4. `verify_item(manifest_path, ItemType.TOOL)` — manifest Ed25519 check
 5. `validate_bundle_manifest()` — re-ingests files via CAS, compares `object_hash`
-6. Write `.bundle-lock.json` — records installed files for clean uninstall
+6. Write `install-receipt.json` — records installed files for clean uninstall
 
 ### Client Bundle Actions
 
@@ -293,7 +293,7 @@ rye_execute(item_id="rye/core/registry/registry",
 
 ```bash
 rye install my-bundle[@version]    # Pull + verify + materialize
-rye uninstall my-bundle            # Remove installed files via lockfile
+rye uninstall my-bundle            # Remove installed files via install receipt
 ```
 
 Items are merged into `.ai/tools/`, `.ai/directives/`, etc. — found via normal space resolution.

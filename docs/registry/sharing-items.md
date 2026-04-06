@@ -330,4 +330,4 @@ rye uninstall my-bundle
 rye uninstall my-bundle --space project
 ```
 
-Installation writes a lockfile at `.ai/bundles/{bundle_id}/.bundle-lock.json` tracking installed files. Uninstallation reads this lockfile to remove exactly what was installed.
+Installation writes an install receipt at `.ai/bundles/{bundle_id}/install-receipt.json` tracking installed files. Uninstallation reads this receipt to remove exactly what was installed.

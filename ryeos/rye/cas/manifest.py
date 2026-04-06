@@ -5,7 +5,7 @@ Walks .ai/ to produce `items` (wrapped as item_source objects),
 and optionally walks non-.ai/ directories to produce `files` (raw blobs).
 
 Exclusion policy and default sync config are loaded from
-.ai/config/cas/manifest.yaml and .ai/config/cas/remote.yaml
+.ai/config/cas/manifest.yaml and .ai/config/remotes/remotes.yaml
 via 3-tier resolution (system → user → project, deep merge).
 Hard excludes are a floor — projects can add patterns but never remove them.
 """
@@ -164,8 +164,8 @@ def _is_hard_excluded(
 
 
 def _load_sync_config(project_path: Optional[Path] = None) -> Dict[str, List[str]]:
-    """Load sync config from .ai/config/cas/remote.yaml via 3-tier resolution."""
-    config = _load_config_3tier("cas/remote.yaml", project_path)
+    """Load sync config from .ai/config/cas/manifest.yaml via 3-tier resolution."""
+    config = _load_config_3tier("cas/manifest.yaml", project_path)
     return config.get("sync", {})
 
 

@@ -1,9 +1,8 @@
-# rye:signed:2026-03-29T13:30:11Z:e92e13ac65a7f1af8209efe81240d7302d4c1f0534a03c893fcdde6aae2df010:mKaRQt4bUagxgWM5F9sKwLOBA-D9kyMmHF4rgH4d9vhxzxVQzuq5cZO52SAURtu0IQ3gar9p-drv5_KA9oGFAw:4b987fd4e40303ac
 # Remote CAS configuration.
 #
 # Loaded via 3-tier resolution (system → user → project).
-# Projects override with their own .ai/config/cas/remote.yaml.
-# Deep merge: project can add remotes/includes/excludes without restating defaults.
+# Projects override with their own .ai/config/remotes/remotes.yaml.
+# Deep merge: project can add remotes without restating defaults.
 category: "cas"
 version: "1.0.0"
 
@@ -11,9 +10,10 @@ version: "1.0.0"
 #                             # Falls back to directory basename if unset.
 
 # Named remotes (like git remotes).
-# Each entry: name → {url, key_env}.
+# Each entry: name → {url, key_env, roles}.
 # "default" is used when no remote name is specified.
 # key_env references an env var name (never store keys in config).
+# roles: optional list marking special-purpose remotes (e.g., [registry])
 #
 # remotes:
 #   default:
@@ -22,6 +22,10 @@ version: "1.0.0"
 #   gpu:
 #     url: https://ryeos-gpu--mcp-server.modal.run
 #     key_env: RYE_GPU_API_KEY
+#   registry:
+#     url: https://ryeos-registry.example.com
+#     key_env: RYE_REGISTRY_KEY
+#     roles: [registry]
 #
 # Cluster example — routing tools query /status on each node to discover
 # capabilities automatically. No need to declare capabilities in config.
@@ -36,14 +40,3 @@ version: "1.0.0"
 #   gpu-small:
 #     url: https://gpu-small.example.com
 #     key_env: RYE_GPU_SMALL_API_KEY
-
-sync:
-  include:
-    - .ai/
-  exclude:
-    - .ai/objects/
-    - .ai/agent/
-    - node_modules/
-    - .venv/
-    - __pycache__/
-    - .git/

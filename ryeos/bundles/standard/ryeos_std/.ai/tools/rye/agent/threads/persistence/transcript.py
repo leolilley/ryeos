@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T07:27:23Z:eb18faaa427c905115c76d6d1bec9787ae8853f4cff833380c00bf7cd2ee2864:s-TMEqZbAP4wwxf6XuEdfAvZxk550ZefuRmGYezxnPIWP_xbYfqKiCvhyvroKJsn2Rx5wlRk0aTk2MMXUs4CCA:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:a8b27975a6bac001a8b53347bacaa3bf18b6d5de13914343b9d3e44bfed32ed3:slQDeQjwPP66X4sVvzK2VUir5fvOmS3xcvZ0uPZScIywEjOWKgi8EAXW0caQ0HGOb2hy_-ZS2JYDTbrE-supCA:4b987fd4e40303ac
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -30,7 +30,7 @@ class Transcript:
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
         self._project_path = project_path
-        self._dir = project_path / AI_DIR / "agent" / "threads" / thread_id
+        self._dir = project_path / AI_DIR / "state" / "threads" / thread_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "transcript.jsonl"
         self._events: List[Dict[str, Any]] = []
@@ -260,7 +260,7 @@ class Transcript:
         if permissions:
             perms_str = ", ".join(permissions)
             frontmatter += f"permissions: [{perms_str}]\n"
-        frontmatter += f"capabilities_ref: .ai/agent/threads/{self.thread_id}/capabilities.md\n"
+        frontmatter += f"capabilities_ref: .ai/state/threads/{self.thread_id}/capabilities.md\n"
         frontmatter += (
             f"```\n\n"
         )

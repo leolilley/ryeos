@@ -1,0 +1,26 @@
+version: "1.0.0"
+tool_type: config-schema
+executor_id: null
+category: rye/core/remote
+description: "Schema for remotes/remotes.yaml — named remotes configuration"
+
+target_config: remotes/remotes.yaml
+
+schema:
+  type: object
+  properties:
+    project_name:
+      type: string
+    remotes:
+      type: object
+      additionalProperties:
+        type: object
+        properties:
+          url:
+            type: string
+          key_env:
+            type: string
+          roles:
+            type: array
+            items:
+              type: string

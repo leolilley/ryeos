@@ -30,11 +30,11 @@ from rye.constants import AI_DIR
 
 class TestCasRoot:
     def test_project_cas_root(self, tmp_path):
-        assert cas_root(tmp_path) == tmp_path / AI_DIR / "objects"
+        assert cas_root(tmp_path) == tmp_path / AI_DIR / "state" / "objects"
 
     def test_user_cas_root(self, monkeypatch, tmp_path):
         monkeypatch.setenv("USER_SPACE", str(tmp_path))
-        assert user_cas_root() == tmp_path / AI_DIR / "objects"
+        assert user_cas_root() == tmp_path / AI_DIR / "state" / "objects"
 
 
 class TestIngestAndMaterialize:

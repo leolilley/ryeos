@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:d10e0c7be09f959d09f687883050313acc39ccc245db5be848c6c5a55f83d211:CEMcqPwcrsBUrvjkXrVGDrz1ErQhwRDBSX2s_8P9v7DBVAX5fbvsjUvCoGXkpR9tHnFElJ33mia5BJjy1Tb9AQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:cb5a9a3a650dd0f5c42e4d3d5f1fb6367f419cb6d22895a6b68240dcfdb91772:9rhNSaNkKwYmnuDzPG90uZZ8S3axgJcAr8nZJx97mpJ3VIA3zdDylN6Lfzsf1Ya6EpYEQyTaE8t_Fzg_K5D-Aw:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -29,7 +29,7 @@ Check if a running process is alive.
 | -------- | -------- | ---------------------------------- |
 | `run_id` | yes      | The `graph_run_id` or `thread_id`  |
 
-Looks up the PID from the thread registry and checks liveness via `SubprocessPrimitive.status(pid)`.
+Looks up the PID from the thread registry and checks liveness via `ExecutePrimitive.status(pid)`.
 
 **Returns:**
 
@@ -61,7 +61,7 @@ Cancel a running process via SIGTERM.
 | `run_id`| yes      | The `graph_run_id` or `thread_id`    |
 | `grace` | no       | Grace period in seconds (default: 5) |
 
-Sends SIGTERM via `SubprocessPrimitive.kill(pid, grace)`, which triggers the walker's SIGTERM handler for clean graph shutdown with CAS state persistence. Updates the registry status to `"cancelled"`.
+Sends SIGTERM via `ExecutePrimitive.kill(pid, grace)`, which triggers the walker's SIGTERM handler for clean graph shutdown with CAS state persistence. Updates the registry status to `"cancelled"`.
 
 **Returns:**
 
@@ -131,6 +131,6 @@ The `cancel` tool uses SIGTERM for clean process shutdown, replacing the old can
    - Updates the thread registry entry
    - Writes a transcript event recording the cancellation
    - Exits the process
-4. **Trigger** — `rye/core/processes/cancel` sends SIGTERM via `SubprocessPrimitive.kill(pid, grace)`, which triggers this handler
+4. **Trigger** — `rye/core/processes/cancel` sends SIGTERM via `ExecutePrimitive.kill(pid, grace)`, which triggers this handler
 
 This approach is reliable and immediate — no filesystem polling delay, no stale cancel files.

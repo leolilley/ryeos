@@ -19,7 +19,7 @@ CAS lives in two layers:
 ## Storage Layout
 
 ```
-.ai/objects/
+.ai/state/objects/
   blobs/
     ab/cd/<sha256>              — raw bytes (file contents, large outputs)
   objects/
@@ -91,10 +91,10 @@ Rye-level layer. Knows about item types, spaces, and manifests. Built on Lillux 
 
 | Function                                                      | Description                                                                                                                         |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `cas_root(project_path) -> Path`                              | Returns `{project}/.ai/objects/`                                                                                                    |
-| `user_cas_root() -> Path`                                     | Returns `{USER_SPACE}/.ai/objects/`                                                                                                 |
+| `cas_root(project_path) -> Path`                              | Returns `{project}/.ai/state/objects/`                                                                                              |
+| `user_cas_root() -> Path`                                     | Returns `{USER_SPACE}/.ai/state/objects/`                                                                                           |
 | `ingest_item(item_type, file_path, project_path) -> ItemRef`  | Read file → store as blob + create `item_source` object → return `ItemRef(blob_hash, object_hash, integrity, signature_info)`       |
-| `ingest_directory(base_path, project_path) -> dict[str, str]` | Walk `.ai/` tree → ingest all items → return `{relative_path: object_hash}`. Skips `.ai/objects/` and `.ai/agent/` (runtime state). |
+| `ingest_directory(base_path, project_path) -> dict[str, str]` | Walk `.ai/` tree → ingest all items → return `{relative_path: object_hash}`. Skips `.ai/state/objects/` (the store itself) and `.ai/state/` (runtime state). |
 | `materialize_item(object_hash, target_path, root) -> Path`    | Read `item_source` object → extract blob → write to target_path                                                                     |
 | `write_ref(ref_path, hash_hex) -> None`                       | Atomically write a mutable ref pointer                                                                                              |
 | `read_ref(ref_path) -> str \| None`                           | Read a ref pointer                                                                                                                  |
@@ -110,7 +110,7 @@ Rye-level layer. Knows about item types, spaces, and manifests. Built on Lillux 
 5. `store_object(item_source_dict)` → `object_hash`
 6. Return `ItemRef(blob_hash, object_hash, integrity, signature_info)`
 
-`ingest_directory` walks the `.ai/` tree and calls `ingest_item` for each file, building a mapping of `{relative_path: object_hash}`. It skips `.ai/objects/` (the store itself) and `.ai/agent/` (runtime state like threads and transcripts).
+`ingest_directory` walks the `.ai/` tree and calls `ingest_item` for each file, building a mapping of `{relative_path: object_hash}`. It skips `.ai/state/objects/` (the store itself) and `.ai/state/` (runtime state like threads and transcripts).
 
 ### Materialization
 
@@ -129,7 +129,7 @@ All objects are JSON dicts with a `schema` version (currently `1`) and a `kind` 
 | `item_source`            | `item_type, item_id, content_blob_hash, integrity, signature_info`                                                             | Versioned snapshot of a tool/directive/knowledge file                      |
 | `source_manifest`        | `space, items: {path: item_source_hash}, files: {path: blob_hash}`                                                             | Filesystem closure — everything needed to materialize a space              |
 | `config_snapshot`        | `resolved_config: {agent.yaml: {...}, ...}`                                                                                    | Merged config state after 3-tier resolution                                |
-| `node_input`             | `graph_hash, node_name, interpolated_action, lockfile_hash, config_snapshot_hash`                                              | Cache key for node execution — must be deterministic                       |
+| `node_input`             | `graph_hash, node_name, interpolated_action, config_snapshot_hash`                                                             | Cache key for node execution — must be deterministic                       |
 | `node_result`            | `result: {...}`                                                                                                                | Cached execution output                                                    |
 | `node_receipt`           | `node_input_hash, node_result_hash, cache_hit, elapsed_ms, timestamp`                                                          | Audit record for a single node execution                                   |
 | `execution_snapshot`     | `graph_run_id, graph_id, project_manifest_hash, user_manifest_hash, system_version, step, status, state_hash, node_receipts[]` | Immutable run checkpoint                                                   |
@@ -196,7 +196,7 @@ Parent conventions: `[0]` = previous HEAD (mainline), `[1]` = merged branch (for
 ## Refs (Mutable Pointers)
 
 ```
-.ai/objects/refs/
+.ai/state/objects/refs/
   graphs/<graph_run_id>.json    → latest execution_snapshot hash
 ```
 

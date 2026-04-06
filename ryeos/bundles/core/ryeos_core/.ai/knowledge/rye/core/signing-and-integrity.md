@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:09Z:ad2b6752c5cf0a521fd4e1cfe844893d1ef559f4780f832de31f427a6df211a0:4CcLWBubA_OkFZ0j2mSuOGn6yKL24y3VdzHpkenSuCI-bhM9NaAIKGnHFyx14bQcNMQPlGLpPwRP4jDUTIAJCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:05d243a48386be658613bd23d40475e61e726d4c912ec2779e734606d0bd178b:nCj3qV7xTSrARe9HmgCF6p4EPwXSAkDVfOdxC1tqWr2JtxH2DKnZNamiwYQWw23vV04p3gpBPJa2izON_3BbDA:4b987fd4e40303ac -->
 
 ```yaml
 name: signing-and-integrity
@@ -14,7 +14,6 @@ tags:
   - security
   - hashing
   - ed25519
-  - lockfile
   - trust
   - verification
   - rye-sign
@@ -25,7 +24,7 @@ references:
 
 # Signing & Integrity
 
-Content hashing, Ed25519 signatures, lockfile pinning, and trust management.
+Content hashing, Ed25519 signatures, and trust management.
 
 ## Signature Format
 
@@ -206,59 +205,6 @@ First match wins. The system bundle ships the author's key at `rye/.ai/config/ke
 | Bundle author key | Shipped as `.toml` in system bundle, resolved via 3-tier lookup | Verifies system items |
 | Registry key | TOFU-pinned on first pull (`owner="rye-registry"`) | Verifies registry-pulled items |
 | Peer key | Manually trusted via `rye_sign` | Verifies collaborator items |
-
-## Lockfile Format
-
-Stored as `{tool_id}@{version}.lock.json`:
-
-```json
-{
-  "lockfile_version": 1,
-  "generated_at": "2026-02-15T12:00:00+00:00",
-  "root": {
-    "tool_id": "rye/bash/bash",
-    "version": "1.0.0",
-    "integrity": "a1b2c3d4e5f6..."
-  },
-  "resolved_chain": [
-    {
-      "item_id": "rye/bash/bash",
-      "space": "system",
-      "tool_type": "python",
-      "executor_id": "rye/core/runtimes/python/script",
-      "integrity": "a1b2c3d4e5f6..."
-    },
-    {
-      "item_id": "rye/core/runtimes/python/script",
-      "space": "system",
-      "tool_type": "runtime",
-      "executor_id": "rye/core/primitives/subprocess",
-      "integrity": "f6e5d4c3b2a1..."
-    }
-  ]
-}
-```
-
-## Lockfile Resolution
-
-Three-tier precedence for reading:
-
-```
-Read:  project/.ai/lockfiles/ → user/.ai/lockfiles/ → system/.ai/lockfiles/
-Write: Always to project space (if available), else user space
-```
-
-System lockfiles are read-only.
-
-## Lockfile Verification Flow
-
-During `PrimitiveExecutor.execute()`:
-
-1. Look up lockfile via `LockfileResolver.get_lockfile(item_id, version)`
-2. Verify root integrity (compute hash, compare to `lockfile.root.integrity`)
-3. Verify each chain element (resolve path, compute hash, compare to pinned `integrity`)
-4. **Any mismatch → execution fails** with "Re-sign and delete stale lockfile"
-5. After successful execution (no lockfile existed), auto-create one
 
 ## Batch Signing
 

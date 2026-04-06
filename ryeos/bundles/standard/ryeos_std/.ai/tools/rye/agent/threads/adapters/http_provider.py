@@ -1,12 +1,11 @@
-# rye:signed:2026-03-31T07:27:23Z:bb6c247390fbd95d9e806813539a297737b8126cd1b9a8281a630dfb42b199f4:MKgbqGCmmAuqVVoeHOihbZpQmcC8traEO19NBo1mGoj_TV_EDcI9p_N0gqrs1O020sYCtcQlypYdY8zLaTDhBw:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:bb499e7bf397a37e2a30a90d42082bc6f5e6ca6ce02096f66382b8a3e3b9d990:TmxiFc5CggRsaxZ6ZQSD27RLs8Ivbtp4V-MYLncxJPV7HUJSVvO2ugnY3uB_lqXgaGTP8_HUTnHWLdDyplKUAw:4b987fd4e40303ac
 """
-http_provider.py: ProviderAdapter that dispatches through the tool execution chain.
+http_provider.py: ProviderAdapter for LLM HTTP API calls.
 
-Delegates HTTP calls to the provider tool (e.g., rye/agent/providers/anthropic)
-via ToolDispatcher → ExecuteTool → PrimitiveExecutor → http_client primitive.
-The primitive handles auth, env resolution, retries, HTTP transport.
+Makes HTTP calls to LLM providers (Anthropic, OpenAI, etc.) using httpx directly.
+Auth, env resolution, retries, and SSE streaming are handled inline.
 
-This adapter only handles:
+This adapter handles:
 1. Formatting messages/tools into params the provider tool expects
 2. Parsing the API response using the provider YAML's response_schema config
 3. Converting messages using the provider YAML's message_schema config
@@ -23,12 +22,51 @@ __tool_description__ = "HTTP provider adapter for LLM API calls"
 import json
 import logging
 import os
+import re as _re
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from .provider_adapter import ProviderAdapter
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _HttpResult:
+    """Lightweight result object matching the interface _raise_on_error expects."""
+    success: bool
+    status_code: int
+    body: Any = None
+    headers: Dict[str, str] = field(default_factory=dict)
+    error: Optional[str] = None
+
+
+class _ReturnSink:
+    """In-memory sink that buffers SSE event strings for response assembly."""
+
+    def __init__(self):
+        self._events: List[str] = []
+
+    async def write(self, event: str) -> None:
+        self._events.append(event)
+
+    async def close(self) -> None:
+        pass
+
+    def get_events(self) -> List[str]:
+        return self._events
+
+
+def _resolve_env(value: str) -> str:
+    """Resolve ``${VAR}`` and ``${VAR:-default}`` placeholders in a string."""
+    def _sub(m):
+        var = m.group(1)
+        default = m.group(3)  # may be None
+        return os.environ.get(var, default if default is not None else "")
+    return _re.sub(r"\$\{(\w+)(:-(.*?))?\}", _sub, value)
 
 
 class HttpProvider(ProviderAdapter):
@@ -401,10 +439,13 @@ class HttpProvider(ProviderAdapter):
         return self._apply_template(body_template, params)
 
     async def _get_http_client(self):
-        """Lazily import and return the http_client primitive."""
-        from rye.runtime.http_client import HttpClientPrimitive
+        """Lazily create and return the httpx client."""
+        import httpx
         if not hasattr(self, "_http_client"):
-            self._http_client = HttpClientPrimitive()
+            self._http_client = httpx.AsyncClient(
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+                timeout=httpx.Timeout(30.0),
+            )
         return self._http_client
 
     def _inject_system_prompt(self, body: Dict, system: str) -> None:
@@ -426,31 +467,126 @@ class HttpProvider(ProviderAdapter):
             if template:
                 body.update(self._apply_template(template, {"system": system}))
 
-    async def _execute_http(self, params: Dict) -> Dict:
-        """Execute HTTP request directly using merged provider config.
-
-        Uses the http_client primitive directly with the merged config
-        (including profile overrides). This avoids re-loading the raw YAML
-        through the dispatch chain, which wouldn't have profile merges.
-        """
+    async def _execute_http(self, params: Dict) -> "_HttpResult":
+        """Execute HTTP request using httpx with merged provider config."""
         config = dict(self._http_config)
         mode = params.pop("mode", "sync")
         system = params.pop("system", "")
+        sinks = params.pop("__sinks", [])
 
-        # Use stream_url when streaming if the provider defines one (e.g., Gemini)
         url_key = "stream_url" if mode == "stream" and "stream_url" in config else "url"
-        config["url"] = config.get(url_key, config.get("url", "")).format(**params)
-        config["body"] = self._build_body(params)
+        url = _resolve_env(config.get(url_key, config.get("url", "")).format(**params))
+        body = self._build_body(params)
 
-        # Inject system prompt into request body if provided
         if system:
-            self._inject_system_prompt(config["body"], system)
+            self._inject_system_prompt(body, system)
 
+        headers = {}
+        for k, v in config.get("headers", {}).items():
+            headers[k] = _resolve_env(str(v))
+
+        auth_config = config.get("auth", {})
+        if auth_config:
+            auth_type = auth_config.get("type")
+            if auth_type == "bearer":
+                headers["Authorization"] = f"Bearer {_resolve_env(auth_config.get('token', ''))}"
+            elif auth_type == "api_key":
+                headers[auth_config.get("header", "X-API-Key")] = _resolve_env(auth_config.get("key", ""))
+
+        timeout = config.get("timeout", 30)
+        retry_config = config.get("retry", {})
         client = await self._get_http_client()
 
         if mode == "stream":
-            return await client._execute_stream(config, params)
-        return await client._execute_sync(config, params)
+            return await self._do_stream(client, url, headers, body, timeout, sinks)
+        return await self._do_sync(client, url, headers, body, timeout, retry_config)
+
+    async def _do_sync(self, client, url, headers, body, timeout, retry_config) -> "_HttpResult":
+        """Synchronous HTTP request with retry."""
+        import asyncio as _asyncio
+        max_attempts = retry_config.get("max_attempts", 1)
+        backoff = retry_config.get("backoff", "exponential")
+        last_error = None
+
+        for attempt in range(max_attempts):
+            try:
+                resp = await client.request(
+                    method="POST", url=url, headers=headers,
+                    content=json.dumps(body) if body else None, timeout=timeout,
+                )
+                try:
+                    resp_body = resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    resp_body = resp.text
+                success = 200 <= resp.status_code < 400
+                return _HttpResult(
+                    success=success, status_code=resp.status_code, body=resp_body,
+                    headers=dict(resp.headers),
+                    error=None if success else f"HTTP {resp.status_code}: {resp.reason_phrase}",
+                )
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_attempts - 1:
+                    delay = 2**attempt if backoff == "exponential" else 1
+                    await _asyncio.sleep(delay)
+
+        return _HttpResult(
+            success=False, status_code=0, body=None, headers={},
+            error=f"Request failed after {max_attempts} attempts: {last_error}",
+        )
+
+    async def _do_stream(self, client, url, headers, body, timeout, sinks) -> "_HttpResult":
+        """Streaming HTTP request (SSE) with sink fan-out."""
+        try:
+            async with client.stream(
+                method="POST", url=url, headers=headers,
+                content=json.dumps(body) if body else None, timeout=timeout,
+            ) as resp:
+                success = 200 <= resp.status_code < 400
+                if not success:
+                    raw = await resp.aread()
+                    try:
+                        err_body = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        err_body = {"raw": raw.decode("utf-8", errors="replace")}
+                    return _HttpResult(
+                        success=False, status_code=resp.status_code, body=err_body,
+                        headers=dict(resp.headers),
+                        error=f"HTTP {resp.status_code}: {resp.reason_phrase}",
+                    )
+
+                event_count = 0
+                async for line in resp.aiter_lines():
+                    if line.startswith("data:"):
+                        event_data = line[5:].strip()
+                        if event_data:
+                            event_count += 1
+                            for sink in sinks:
+                                await sink.write(event_data)
+
+                for sink in sinks:
+                    await sink.close()
+
+                buffered = None
+                for s in sinks:
+                    if hasattr(s, "get_events"):
+                        buffered = s.get_events()
+                        break
+
+                return _HttpResult(
+                    success=True, status_code=resp.status_code, body=buffered,
+                    headers=dict(resp.headers),
+                )
+        except Exception as e:
+            for sink in sinks:
+                try:
+                    await sink.close()
+                except Exception:
+                    pass
+            return _HttpResult(
+                success=False, status_code=0, body=None, headers={},
+                error=f"Unexpected error: {e}",
+            )
 
     def _raise_on_error(self, result, streaming: bool = False):
         """Convert http_client result to ProviderCallError if failed."""
@@ -530,12 +666,10 @@ class HttpProvider(ProviderAdapter):
         """Send messages to LLM via streaming, with real-time sink fan-out.
 
         Sinks receive raw SSE events as they arrive (for transcript writing).
-        A ReturnSink is always added to buffer events for final response assembly.
+        A _ReturnSink is always added to buffer events for final response assembly.
 
         Returns the same response dict as create_completion().
         """
-        from rye.runtime.http_client import ReturnSink
-
         converted_messages = self._convert_messages(messages, system_prompt=system_prompt)
         formatted_tools = self._format_tools(tools) if tools else []
 
@@ -551,7 +685,7 @@ class HttpProvider(ProviderAdapter):
         if system_prompt:
             params["system"] = system_prompt
 
-        return_sink = ReturnSink()
+        return_sink = _ReturnSink()
         all_sinks = [return_sink] + (sinks or [])
         params["__sinks"] = all_sinks
 

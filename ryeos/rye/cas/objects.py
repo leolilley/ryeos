@@ -34,7 +34,7 @@ class ItemRef:
 class ItemSource:
     """Versioned snapshot of a signed or unsigned .ai/ file.
 
-    signature_info is None for unsigned files (lockfiles, PEM keys).
+    signature_info is None for unsigned files (PEM keys).
     integrity is always populated (SHA256 of content blob).
     """
 
@@ -103,7 +103,6 @@ class NodeInput:
     graph_hash: str = ""
     node_name: str = ""
     interpolated_action: Dict[str, Any] = field(default_factory=dict)
-    lockfile_hash: Optional[str] = None
     config_snapshot_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -113,7 +112,6 @@ class NodeInput:
             "graph_hash": self.graph_hash,
             "node_name": self.node_name,
             "interpolated_action": self.interpolated_action,
-            "lockfile_hash": self.lockfile_hash,
             "config_snapshot_hash": self.config_snapshot_hash,
         }
 
@@ -280,7 +278,7 @@ class RuntimeOutputsBundle:
     back into the local project tree.
 
     files: {relative_path_from_project_root: blob_hash}
-      e.g. ".ai/agent/graphs/run-123/transcript.jsonl" → "abc123..."
+      e.g. ".ai/state/graphs/run-123/transcript.jsonl" → "abc123..."
     """
 
     kind: str = field(default="runtime_outputs_bundle", init=False)

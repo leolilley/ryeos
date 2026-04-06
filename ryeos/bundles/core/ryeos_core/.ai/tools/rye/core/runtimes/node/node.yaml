@@ -1,7 +1,8 @@
-# rye:signed:2026-04-05T03:17:01Z:de0f85db3524f52f12c873a113ae6d1c1bbc51b2600ae34f96e5f0a4ad7136cf:HtXxK_j78ICnaRSf4QVxXK7bZh08JzILISEsj2AdWqC-mZwWm-LUKp281lP8Xi1FIq154Ox4tr7GFS7joflCDQ:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:01Z:2c143ee152336e5a4eeaf2dceb8679a3aa6f6aeb27ee9c102a38f67c0c63cc75:BpN0LO0EJzOSck6t6plvv6r4_cFCMICxd9rn58pPvs_zBtk8DiGJfU0Kw3pYCuQbN45MIlvllJxmfsjt1pOKAQ:4b987fd4e40303ac
+# rye:unsigned
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/node
 description: "Node.js runtime executor - runs JavaScript/TypeScript with Node interpreter resolution"
 

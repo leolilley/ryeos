@@ -7,6 +7,13 @@ Centralized constants for the AI directory name, item types, and tool actions.
 # Every space follows: base_path / AI_DIR / {type_dir} / {item_id}
 AI_DIR = ".ai"
 
+# Runtime state directory (engine-managed, gitignored)
+STATE_DIR = "state"
+STATE_THREADS = "threads"
+STATE_GRAPHS = "graphs"
+STATE_OBJECTS = "objects"
+STATE_CACHE = "cache"
+
 
 class ItemType:
     """Item type constants."""
@@ -39,6 +46,26 @@ class ItemType:
         DIRECTIVE: [".md"],
         KNOWLEDGE: [".md", ".yaml", ".yml"],
     }
+
+
+class NodeDir:
+    """Node state directory constants.
+
+    Node state lives at ~/.ai/node/ only — never in project space.
+    These map node domain names to their subdirectory names.
+    """
+
+    DIR = "node"
+
+    IDENTITY = "identity"
+    ATTESTATION = "attestation"
+    AUTHORIZED_KEYS = "authorized-keys"
+    VAULT = "vault"
+    EXECUTIONS = "executions"
+    LOGS = "logs"
+
+    # All valid node subdirectories
+    ALL = [IDENTITY, ATTESTATION, AUTHORIZED_KEYS, VAULT, EXECUTIONS, LOGS]
 
 
 class Action:

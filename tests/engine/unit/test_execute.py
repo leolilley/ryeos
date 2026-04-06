@@ -143,7 +143,7 @@ class TestExecuteTool:
         )
 
         # The tool is a primitive with executor_id=None but not a known primitive
-        # (subprocess, http_client), so it returns an error
+        # (execute), so it returns an error
         assert "error" in result
 
     async def test_execute_knowledge(self, temp_project):
@@ -205,7 +205,7 @@ class TestExecuteTool:
             parameters={"arg1": "value1"},
         )
 
-        # Unknown primitive returns error (mytool is not subprocess/http_client)
+        # Unknown primitive returns error (mytool is not a registered primitive)
         assert "error" in result
 
 
@@ -535,7 +535,7 @@ class TestLaunchAsync:
     async def test_tool_async_spawn_failure(self, temp_project):
         from unittest.mock import AsyncMock, patch
 
-        mock_spawn = AsyncMock(return_value={"success": False, "error": "no lillux-proc"})
+        mock_spawn = AsyncMock(return_value={"success": False, "error": "no lillux"})
         tool = ExecuteTool("")
 
         with patch("rye.utils.detached.launch_detached", mock_spawn):

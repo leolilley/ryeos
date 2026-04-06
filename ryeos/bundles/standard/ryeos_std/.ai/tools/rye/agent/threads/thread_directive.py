@@ -1,4 +1,4 @@
-# rye:signed:2026-03-31T08:40:04Z:00ba8d755a621a68dad0a2dbc219f73d28b1ffc7332b48391da3aef48eefb5f2:IgG2WejvqKx3br52DH26FpF-96_nS_syIEeLEILcErLRwLC6dn0Vc2ewwmFaP7tKFn1qNids2GRTNHnGNevvDw:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:00ba8d755a621a68dad0a2dbc219f73d28b1ffc7332b48391da3aef48eefb5f2:IgG2WejvqKx3br52DH26FpF-96_nS_syIEeLEILcErLRwLC6dn0Vc2ewwmFaP7tKFn1qNids2GRTNHnGNevvDw:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"

@@ -18,7 +18,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from rye.cas.gc_epochs import cleanup_stale_epochs, list_active_epochs, oldest_epoch_time
+from rye.cas.gc_epochs import (
+    cleanup_stale_epochs,
+    list_active_epochs,
+    oldest_epoch_time,
+)
 from rye.cas.gc_lock import acquire, release, update_phase as update_lock_phase
 from rye.cas.gc_types import (
     DEFAULT_RETENTION,
@@ -65,7 +69,6 @@ HASH_FIELDS: Dict[str, list] = {
     ],
     "node_input": [
         "graph_hash",
-        "lockfile_hash",
         "config_snapshot_hash",
     ],
     "runtime_outputs_bundle": [
@@ -103,7 +106,9 @@ def _extract_refs(obj: dict) -> List[str]:
                     if isinstance(value, dict):
                         for inner in value.values():
                             if isinstance(inner, dict):
-                                refs.extend(h for h in inner.values() if isinstance(h, str))
+                                refs.extend(
+                                    h for h in inner.values() if isinstance(h, str)
+                                )
             else:
                 h = obj.get(field_spec)
                 if h and isinstance(h, str):
@@ -264,7 +269,11 @@ def prune_executions(
             graph_id = f"{data.get('item_type', '')}/{data.get('item_id', '')}"
         key = (data.get("project_path", ""), graph_id)
         # Records use "state" not "status", "created_at"/"completed_at" not "timestamp"
-        timestamp = data.get("timestamp", "") or data.get("completed_at", "") or data.get("created_at", "")
+        timestamp = (
+            data.get("timestamp", "")
+            or data.get("completed_at", "")
+            or data.get("created_at", "")
+        )
         status = data.get("status", "") or data.get("state", "")
         groups.setdefault(key, []).append((timestamp, status, exec_file))
 
@@ -691,8 +700,13 @@ def _collect_roots_local(cas_root: Path) -> List[str]:
         except (OSError, json.JSONDecodeError, ValueError):
             continue
         # Extract any hash-like values from the ref
-        for key in ("hash", "snapshot_hash", "execution_snapshot_hash",
-                     "runtime_outputs_bundle_hash", "manifest_hash"):
+        for key in (
+            "hash",
+            "snapshot_hash",
+            "execution_snapshot_hash",
+            "runtime_outputs_bundle_hash",
+            "manifest_hash",
+        ):
             h = data.get(key)
             if h and isinstance(h, str):
                 roots.append(h)
@@ -894,9 +908,7 @@ def emit_gc_event(
     except OSError:
         logger.warning("Failed to write GC event to %s", gc_log, exc_info=True)
 
-    logger.info(
-        "GC complete: freed %s in %dms", _human_bytes(total_freed), duration_ms
-    )
+    logger.info("GC complete: freed %s in %dms", _human_bytes(total_freed), duration_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -993,18 +1005,12 @@ def run_gc(
         # Phase 3: Mark
         update_lock_phase(user_root, node_id, "mark")
 
-        any_compacted = any(
-            r.discarded_count > 0 for r in compaction_results.values()
-        )
+        any_compacted = any(r.discarded_count > 0 for r in compaction_results.values())
         prev_state = load_gc_state(user_root) if use_incremental else None
 
         # durable_reachable is persisted for incremental; reachable is the full sweep set
         durable_reachable: Optional[Set[str]] = None
-        if (
-            prev_state
-            and not prev_state.invalidated
-            and not any_compacted
-        ):
+        if prev_state and not prev_state.invalidated and not any_compacted:
             reachable, was_full = mark_reachable_incremental(
                 user_root, cas_root, prev_state
             )
@@ -1012,6 +1018,7 @@ def run_gc(
             # for persistence we need durable only — re-collect it
             if not was_full:
                 from rye.cas.gc_incremental import _collect_durable_root_hashes
+
                 # The durable set is the cached blob + new durable roots (already computed)
                 # Re-load from the blob and add new roots — but simpler to just
                 # compute durable roots fresh and walk them (cheap vs full mark)

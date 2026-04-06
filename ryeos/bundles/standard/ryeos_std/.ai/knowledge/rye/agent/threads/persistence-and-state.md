@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:16934a55247103d14e32d0239d74be9e3593925775ace86f5f6491fefcb83ee5:RCSqzLLby187d8tHhrcFYvL_dImhQ6-wEGUKA3D33uWN2MHuTvPWDsf6KEEOhPECle8fULPFkkowSqNU7e1uDA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:14:32Z:d3d683d5114c9719b7c187ceb207f8e73d647a7aa09107635afe21b896ac3200:WkeHbb5F7Gy719MQFdiCeeJKtPD_hMLzLh8nhyMmKShgSem7jcmjr6_5qfzaz7YOU2WHkVjUt6VKXckJEcNUDQ:4b987fd4e40303ac -->
 
 ```yaml
 name: persistence-and-state
@@ -26,7 +26,7 @@ How threads persist state, handle context limits via continuation, and support u
 ## Storage Layout
 
 ```
-.ai/agent/threads/
+.ai/state/threads/
 ├── registry.db              # Thread registry (SQLite)
 ├── budget_ledger.db         # Hierarchical budget tracking (SQLite)
 ├── <thread_id>/             # Thread transcripts
@@ -113,13 +113,13 @@ Signed markdown file written once before the LLM loop starts. Contains the threa
 
 ### Knowledge Entry (`.ai/knowledge/agent/threads/{directive}/{thread_id}.md`)
 
-Signed knowledge entry with cognition-framed markdown. Contains YAML frontmatter with thread-specific fields (`thread_id`, `directive`, `status`, `model`, `turns`, `spend`, `capabilities_ref`) and `entry_type: thread_transcript`. The `capabilities_ref` field points to `.ai/agent/threads/{thread_id}/capabilities.md` rather than embedding tool definitions inline. Updated at each checkpoint and finalization. Discoverable via `rye search knowledge`.
+Signed knowledge entry with cognition-framed markdown. Contains YAML frontmatter with thread-specific fields (`thread_id`, `directive`, `status`, `model`, `turns`, `spend`, `capabilities_ref`) and `entry_type: thread_transcript`. The `capabilities_ref` field points to `.ai/state/threads/{thread_id}/capabilities.md` rather than embedding tool definitions inline. Updated at each checkpoint and finalization. Discoverable via `rye search knowledge`.
 
 ### Graph Transcripts
 
 Graph executions use the same two-stream observability pattern as threads:
 
-1. **JSONL event log** — `.ai/agent/threads/{graph_run_id}/transcript.jsonl`. Append-only, checkpoint-signed at step boundaries using the same `TranscriptSigner`.
+1. **JSONL event log** — `.ai/state/threads/{graph_run_id}/transcript.jsonl`. Append-only, checkpoint-signed at step boundaries using the same `TranscriptSigner`.
 2. **Knowledge markdown** — `.ai/knowledge/agent/threads/{graph_id}/{graph_run_id}.md`. Contains a visual node status table (✅ completed, 🔄 running, ⏳ pending, ❌ error) and event history. Re-rendered from JSONL at each step (overwritten, not appended). Signed via `MetadataManager.create_signature`.
 
 Graph event types:
@@ -141,7 +141,7 @@ Key differences from thread transcripts:
 - **Overwrite, not append** — knowledge markdown is fully re-rendered from JSONL at each step
 - **State file separate** — resumable graph state lives at `.ai/knowledge/graphs/{graph_id}/{graph_run_id}.md` (signed JSON), unchanged from before
 
-Cross-process watching in `orchestrator.py` (`_poll_registry`) uses `lillux-watch` (push-based, OS-native file watcher on `registry.db`) with 500ms polling fallback.
+Cross-process watching in `orchestrator.py` (`_poll_registry`) uses 500ms polling on `registry.db`.
 
 ## Context Limit Detection
 

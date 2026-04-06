@@ -172,7 +172,7 @@ class Settings(BaseSettings):
 
     def user_cas_root(self, fingerprint: str) -> Path:
         ai_dir = os.environ.get("AI_DIR", ".ai")
-        return Path(self.cas_base_path) / fingerprint / ai_dir / "objects"
+        return Path(self.cas_base_path) / fingerprint / ai_dir / "state" / "objects"
 
     def cache_root(self, fingerprint: str) -> Path:
         return Path(self.cas_base_path) / fingerprint / "cache"

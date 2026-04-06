@@ -160,7 +160,7 @@ llm/complete/meta-llama/llama-3-1-8b (tool)
   → return structured response
 ```
 
-No `http_client` primitive. No subprocess. No server. The model is process state.
+No HTTP. No subprocess. No server. The model is process state.
 
 ### What Changes in RYE Configuration
 
@@ -264,7 +264,7 @@ Agent threads call the completions server via `http_provider` — same path as A
                               ← on CPU-only execution node: routing to capable remote
 ```
 
-On a GPU execution node, the tool loads the tinygrad model into the `ryeos-node` process at startup and holds it in GPU memory. The tool's `execute()` calls `model.generate()` directly — no chain to `http_client`, no subprocess. The model is process state, and the `TinyJit` system compiles and replays GPU kernels after the second call.
+On a GPU execution node, the tool loads the tinygrad model into the `ryeos-node` process at startup and holds it in GPU memory. The tool's `execute()` calls `model.generate()` directly — no HTTP chain, no subprocess. The model is process state, and the `TinyJit` system compiles and replays GPU kernels after the second call.
 
 On a CPU-only execution node, the same tool ID has a different implementation that queries `/status` on known remotes, matches capabilities, and dispatches via `_dispatch_remote()`.
 
@@ -276,7 +276,7 @@ The inference call inherits everything that tool execution provides for free:
 | ----------------------- | ---------------------------------------------------------------------- |
 | Chain validation        | `ChainValidator` validates the tool chain before execution             |
 | Integrity verification  | `verify_item()` checks Ed25519 signatures on the tool file             |
-| Lockfile caching        | `LockfileResolver` caches the resolved chain for fast repeat execution |
+| Chain caching           | `PrimitiveExecutor` caches resolved chains for fast repeat execution   |
 | Trace and observability | `ExecutionResult` captures duration, chain, metadata, trace events     |
 | Data-driven formatting  | `llm/format` processor + model family config handles chat template     |
 | Data-driven parsing     | `llm/tool-calls` parser + model family config extracts tool calls      |
@@ -441,7 +441,7 @@ RYE does the same thing, but the hardware is compute clusters, models, and tools
 
 **Any program becomes an agent.** Any system that can POST to `/v1/chat/completions` is running inside RYE's execution environment without knowing it. It thinks it's talking to an LLM. It's talking to a completions server backed by an OS that happens to speak OpenAI. Tools, routing, observability — all available, all transparent.
 
-**The network is the machine.** 15 machines, 30 GPUs, unified `execute` surface behind the completions server. There's no meaningful distinction between local and remote execution — it's all just `execute` resolving to wherever the resource lives. The physical topology is an implementation detail managed by `cas/remote.yaml` and node-reported capabilities.
+**The network is the machine.** 15 machines, 30 GPUs, unified `execute` surface behind the completions server. There's no meaningful distinction between local and remote execution — it's all just `execute` resolving to wherever the resource lives. The physical topology is an implementation detail managed by `remotes/remotes.yaml` and node-reported capabilities.
 
 ### No control plane
 
@@ -497,8 +497,8 @@ Cluster routing config (`cluster/topology.yaml`) and node capability reporting a
 | `ProcessorRouter`                                      | Unchanged — `llm/format` registers alongside existing processors                  |
 | `ParserRouter`                                         | Unchanged — `llm/tool-calls` registers alongside existing parsers                 |
 | `_dispatch_remote()` — remote execution                | Unchanged — routing implementations use existing `remote:<name>` targeting        |
-| `cas/remote.yaml` — named remotes                      | Unchanged — nodes are named remotes with the same config shape                    |
-| `ChainValidator`, `LockfileResolver` — chain integrity | Unchanged — inference tool chains validated and lockfiled like any other          |
+| `remotes/remotes.yaml` — named remotes                      | Unchanged — nodes are named remotes with the same config shape                    |
+| `ChainValidator` — chain integrity                     | Unchanged — inference tool chains validated like any other                        |
 | Ed25519 signing                                        | Unchanged — inference tool files are signed items                                 |
 | 3-tier space resolution (project → user → system)      | Unchanged — same tool ID, different implementations per node via space resolution |
 | fnmatch pattern matching                               | Unchanged — same matching used for node capability routing                        |

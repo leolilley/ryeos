@@ -15,8 +15,8 @@ Rye has four templating systems. Each uses a different syntax, runs at a differe
 
 | #   | Syntax           | Purpose               | Resolver                                                  |
 | --- | ---------------- | --------------------- | --------------------------------------------------------- |
-| 1   | `${VAR}`         | Environment variables | `PrimitiveExecutor`, `SubprocessPrimitive`, `EnvResolver` |
-| 2   | `{param}`        | Runtime parameters    | `PrimitiveExecutor`, `SubprocessPrimitive`                |
+| 1   | `${VAR}`         | Environment variables | `PrimitiveExecutor`, `ExecutePrimitive`, `EnvResolver` |
+| 2   | `{param}`        | Runtime parameters    | `PrimitiveExecutor`, `ExecutePrimitive`                |
 | 3   | `${dotted.path}` | Context interpolation | `loaders/interpolation.py`                                |
 | 4   | `{input:key}`    | Directive inputs      | `execute.py`                                              |
 
@@ -32,7 +32,7 @@ Variable names are constrained to uppercase letters, digits, and underscores. Th
 
 1. `EnvResolver._expand_variables()` — resolves `${VAR}` in static env values from `env_config.env`
 2. `PrimitiveExecutor._template_config()` Pass 1 — resolves `${VAR}` across the merged execution config
-3. `SubprocessPrimitive._template_env_vars()` Stage 1 — resolves `${VAR}` in command/args/cwd
+3. `ExecutePrimitive._template_env_vars()` Stage 1 — resolves `${VAR}` in command/args/cwd
 
 **Missing variables:** resolve to `""`, or to the default if `:-default` is specified.
 
@@ -50,12 +50,12 @@ env_config:
 
 **Syntax:** `{param_name}`
 
-**Regex:** `\{(\w+)\}` (PrimitiveExecutor) or `\{([^}]+)\}` (SubprocessPrimitive)
+**Regex:** `\{(\w+)\}` (PrimitiveExecutor) or `\{([^}]+)\}` (ExecutePrimitive)
 
 **Where it runs:**
 
 1. `PrimitiveExecutor._template_config()` Pass 2 — substitutes `{param}` in merged config, iterates up to 3 times until stable
-2. `SubprocessPrimitive._template_params()` Stage 2 — substitutes `{param}` in command/args/cwd
+2. `ExecutePrimitive._template_params()` Stage 2 — substitutes `{param}` in command/args/cwd
 3. `PrimitiveExecutor._template_string()` — substitutes `{var}` in anchor env_paths
 
 **Available parameters:**
@@ -155,8 +155,8 @@ When a tool executes through the full chain, templating runs in this order:
    ─── dispatch boundary ───
 3. ${VAR}             — PrimitiveExecutor._template_config() Pass 1
 4. {param}            — PrimitiveExecutor._template_config() Pass 2
-5. ${VAR}             — SubprocessPrimitive._template_env_vars() Stage 1
-6. {param}            — SubprocessPrimitive._template_params() Stage 2
+5. ${VAR}             — ExecutePrimitive._template_env_vars() Stage 1
+6. {param}            — ExecutePrimitive._template_params() Stage 2
 ```
 
 Steps 5-6 are redundant with 3-4 but harmless — they catch templates that survived the PrimitiveExecutor pass.

@@ -54,7 +54,7 @@ Validates inputs, then spawns a managed thread to execute the directive. The thr
 
 #### Remote mode (`target="remote"` or `target="remote:name"`)
 
-Validates inputs, then pushes execution to a remote ryeos server via the `rye/core/remote/remote` tool. The remote server materializes a `.ai/` directory from CAS manifests, runs the executor, and returns results. Directives require `thread="fork"` when targeting a remote server. Use the `"remote:name"` syntax on the `target` parameter to target a specific named remote (e.g., `"remote:gpu"`). Named remotes are configured in `cas/remote.yaml`.
+Validates inputs, then pushes execution to a remote ryeos server via the `rye/core/remote/remote` tool. The remote server materializes a `.ai/` directory from CAS manifests, runs the executor, and returns results. Directives require `thread="fork"` when targeting a remote server. Use the `"remote:name"` syntax on the `target` parameter to target a specific named remote (e.g., `"remote:gpu"`). Named remotes are configured in `remotes/remotes.yaml`.
 
 If `async: true`, the execution is wrapped in a detached child process via `_launch_async()` → `async_runner.py`, which re-enters `ExecuteTool.handle()` with the remote target.
 
@@ -123,7 +123,7 @@ If `async: true`, the execution is wrapped in a detached child process via `_lau
 }
 ```
 
-Async execution for tools and remote directives uses `_launch_async()`, which generates a UUID-based thread_id, registers in the ThreadRegistry (SQLite), spawns `async_runner.py` as a detached child process via `launch_detached()`, and returns immediately. Results are stored in the ThreadRegistry via `registry.set_result()`. Thread log dir is at `.ai/agent/threads/{thread_id}/`.
+Async execution for tools and remote directives uses `_launch_async()`, which generates a UUID-based thread_id, registers in the ThreadRegistry (SQLite), spawns `async_runner.py` as a detached child process via `launch_detached()`, and returns immediately. Results are stored in the ThreadRegistry via `registry.set_result()`. Thread log dir is at `.ai/state/threads/{thread_id}/`.
 
 **Dry run:** Returns `"status": "validation_passed"` after parsing and input validation, without executing or spawning a thread.
 
@@ -146,7 +146,7 @@ Executes through the PrimitiveExecutor with recursive chain resolution:
   "type": "tool",
   "item_id": "rye/file-system/write",
   "data": { "...execution output..." },
-  "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/subprocess"],
+  "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/execute"],
   "metadata": { "duration_ms": 45 }
 }
 ```

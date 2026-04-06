@@ -1,20 +1,19 @@
-# rye:signed:2026-03-16T11:29:10Z:b24e112ebe3f092f00187feca6b5e7c972a792907095c34d22d3ccc226dafb47:HT5-rTvmhUnNn-vB7Y-9zXSHHMRzOaIBmLr-eRc3zktBidetDLGmPCqPqpf-7_nyQayZp74UYGJ1WbXuCucHDg==:4b987fd4e40303ac
-# CAS manifest policy — exclusion rules for source manifest builder.
+# Manifest/sync policy configuration.
 #
-# The engine loads this via 3-tier resolution (system → user → project).
-# Hard excludes are a floor: projects can ADD patterns but never remove
-# the system defaults (union, never subtract).
+# Loaded via 3-tier resolution (system → user → project).
+# Projects override with their own .ai/config/cas/manifest.yaml.
+# Deep merge: project can add exclusions without restating defaults.
 category: "cas"
 version: "1.0.0"
 
+# Manifest policy: directory skipping and hard file exclusion.
 manifest:
-  # Directories under .ai/ to skip (runtime state / CAS itself)
   skip_dirs:
-    - objects
-    - agent
-
-  # Hard exclusions — NEVER included regardless of directory.
-  # Safety invariant: these cannot be weakened by project/user overrides.
+    - state
+    - node_modules
+    - .venv
+    - __pycache__
+    - .git
   hard_exclude:
     names:
       - private_key.pem
@@ -22,3 +21,14 @@ manifest:
       - "^\\.env$"
       - "^\\.env\\."
       - ".*\\.secrets?$"
+
+# Sync policy: which files to include/exclude from pushes.
+sync:
+  include:
+    - .ai/
+  exclude:
+    - .ai/state/
+    - node_modules/
+    - .venv/
+    - __pycache__/
+    - .git/

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:518e70899db6d94d0b5980616aa1f3f1c76fdb092574f12dfd41b06e07dfc505:ztj47VWIC9vf6P1wTiSm9NjaDpbYRGI4qNEc4ANaEIFn6qXjHKGBCtC-gbgOIDfxTSG43Xlrk1BLAMyNirvgDw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:4ecb6561c200370e4b0a5d45b7d5cbe8f4ea1c71db6c36c2f8a3be7c5a1ea6f9:Fkg_Xg7RqXPu8pPPT-2mH9GtyTNsvz-mIlQI6GFr9wgR76OtKBhoMwH1NBLZH_U6cYWHBWU8C9XIZeqoGTdXDw:4b987fd4e40303ac -->
 ```yaml
 name: remote-architecture
 title: CAS Remote Architecture
@@ -104,7 +104,7 @@ LOCAL                              REMOTE
 
 ## Configuration
 
-Remotes are configured in `.ai/config/cas/remote.yaml`:
+Remotes are configured in `.ai/config/remotes/remotes.yaml`:
 
 ```yaml
 remotes:

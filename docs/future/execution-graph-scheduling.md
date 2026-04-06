@@ -261,7 +261,7 @@ Speculative nodes must be:
 | Chain resolution        | Unchanged — chains resolve the same way, just tracked as graph edges                                     |
 | `_dispatch_remote()`    | Unchanged — still the mechanism for sending work to a remote node                                        |
 | CAS sync protocol       | Unchanged — still how workspaces materialize on remote nodes                                             |
-| `cas/remote.yaml`       | Unchanged — still how nodes are named and addressed                                                      |
+| `remotes/remotes.yaml`       | Unchanged — still how nodes are named and addressed                                                      |
 | Ed25519 signing         | Unchanged — signed items are signed items                                                                |
 | 3-tier space resolution | Unchanged — same resolution model                                                                        |
 | `/status` endpoint      | Still useful for capacity reporting — but routing decisions are graph-informed, not purely status-driven |

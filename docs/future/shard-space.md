@@ -30,7 +30,7 @@ Other users' solar systems are visible. Their stars glow different colors. Their
 
 ### Planets: Projects
 
-Each project is a planet orbiting its user's star. Its atmosphere is the `.ai/` directory — project-specific directives, tools, knowledge, state graphs, lockfiles.
+Each project is a planet orbiting its user's star. Its atmosphere is the `.ai/` directory — project-specific directives, tools, knowledge, state graphs.
 
 Project-space items orbit the planet. The most specific, most volatile, most numerous shards. The first layer the resolver checks.
 
@@ -53,7 +53,7 @@ Every shard is a CAS object. Its visual properties are derived from its content.
 | Property     | Derived from                                                                                                                                           |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Geometry** | Content hash — same content = same shape. Change one byte and the geometry shifts.                                                                     |
-| **Position** | Space ring + hash prefix clustering. Objects with similar hash prefixes cluster together, mirroring the `ab/cd/` directory sharding in `.ai/objects/`. |
+| **Position** | Space ring + hash prefix clustering. Objects with similar hash prefixes cluster together, mirroring the `ab/cd/` directory sharding in `.ai/state/objects/`. |
 | **Color**    | Item type. Directives, tools, knowledge each carry a distinct hue.                                                                                     |
 | **Glow**     | Signature status. Signed items glow with their author's spectral color. Unsigned items are dark.                                                       |
 | **Size**     | Content weight. Complex tools and rich knowledge are larger shards.                                                                                    |
@@ -81,7 +81,7 @@ Vectors are the lines between shards. Every structural relationship in the syste
 Every tool has an `executor_id` → its runtime. Every runtime has an `executor_id` → a primitive. Permanent structural vectors wiring outer items to inner primitives.
 
 ```
-browser.ts → rye/core/runtimes/node/node → rye/core/primitives/subprocess
+browser.ts → rye/core/runtimes/node/node → rye/core/primitives/execute
 ```
 
 Three shards. Two vectors. Always visible. These are the gravity wells — the paths that lead inward toward the kernel. During execution, they ignite.
@@ -100,7 +100,7 @@ Items outside any trust web are untrusted — no glow, no trust vectors, visuall
 
 ### Lockfile Anchors
 
-A lockfile pins a tool to a specific version. A rigid constraint vector. Lockfiles are unsigned but they anchor the tools they pin — a pinned tool's position is fixed relative to its lockfile.
+An install receipt records which bundle files were materialized. A rigid constraint vector. Install receipts anchor the tools they track — a tracked tool's position is fixed relative to its receipt.
 
 ### Sync Lines
 

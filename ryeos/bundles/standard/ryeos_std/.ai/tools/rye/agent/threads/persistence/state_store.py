@@ -1,8 +1,8 @@
-# rye:signed:2026-03-31T07:27:23Z:b91d4c24e8884f9abe3c4df4407a5b61c3534fa30f2c133e9c92751d82b42c40:0PrT5_Dh9cwkYrgfHxrtV0pbN06DmLtDBbBwNw0w6hLSuWxvDQO_mqK4N17m6IiVcyj2MBDeNyIS9emR1JtlBA:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:2127910366218e15b1729457bdadd21bb62ce220fb55fadc1eb5ca30d00aeadf:0uscUOgOyfbL9Sy2g6JY12kvMns0PSkB7zraiqYGtGLHU-spGH1Ztz8SNvRDpieslPz_zxg3K1F4enexjYmbAw:4b987fd4e40303ac
 """
 persistence/state_store.py: Atomic thread state persistence
 
-Persists thread state to state.json in .ai/agent/threads/
+Persists thread state to state.json in .ai/state/threads/
 """
 
 __version__ = "1.0.0"
@@ -23,13 +23,13 @@ class StateStore:
 
     def __init__(self, project_path: Path):
         self.project_path = Path(project_path)
-        self.state_dir = self.project_path / AI_DIR / "agent" / "threads"
+        self.state_dir = self.project_path / AI_DIR / "state" / "threads"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def save_state(self, thread_id: str, state: Dict[str, Any]):
         """Save thread state atomically.
 
-        Writes to .ai/agent/threads/{thread_id}/state.json
+        Writes to .ai/state/threads/{thread_id}/state.json
         """
         thread_dir = self.state_dir / thread_id
         thread_dir.mkdir(parents=True, exist_ok=True)

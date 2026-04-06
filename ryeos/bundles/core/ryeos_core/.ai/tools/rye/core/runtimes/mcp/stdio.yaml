@@ -1,7 +1,8 @@
-# rye:signed:2026-04-05T03:17:01Z:65e8a09c3316fa131e4bc97dfb9daeecd4781494aa85a511dfe9b22e9a55bf98:H6yTF9sLtuOYxy8mCjn4z8Vqsi6GxOfltKkfWYopuXcuqParmdaYTcyMI6xJHXUAE8JhJ5H2DiUNLmZB5E-OAA:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:01Z:19ef1835c63e42f493ed7d92208e5677824a934f6fdeb2c0235c1842e105a2d4:det_hJutk0_6MbUnr_4JkhSLoghJhWFD76eUV0viOa3JbWNFO635lwb1r-7ZWe1rOZdvX0haTykfLrNSIBylBw:4b987fd4e40303ac
+# rye:unsigned
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/mcp
 description: "MCP stdio runtime - executes MCP tools via stdio transport"
 

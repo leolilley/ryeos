@@ -45,25 +45,68 @@ def _make_project(tmp_path, files=None):
 
 class TestHardExclusions:
     def test_private_key(self):
-        assert _is_hard_excluded("private_key.pem", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is True
+        assert (
+            _is_hard_excluded(
+                "private_key.pem", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is True
+        )
 
     def test_env(self):
-        assert _is_hard_excluded(".env", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is True
+        assert (
+            _is_hard_excluded(".env", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS)
+            is True
+        )
 
     def test_env_local(self):
-        assert _is_hard_excluded(".env.local", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is True
+        assert (
+            _is_hard_excluded(
+                ".env.local", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is True
+        )
 
     def test_env_production(self):
-        assert _is_hard_excluded(".env.production", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is True
+        assert (
+            _is_hard_excluded(
+                ".env.production", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is True
+        )
 
     def test_secrets_file(self):
-        assert _is_hard_excluded("db.secret", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is True
-        assert _is_hard_excluded("api.secrets", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is True
+        assert (
+            _is_hard_excluded(
+                "db.secret", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is True
+        )
+        assert (
+            _is_hard_excluded(
+                "api.secrets", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is True
+        )
 
     def test_normal_files_pass(self):
-        assert _is_hard_excluded("tool.py", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is False
-        assert _is_hard_excluded("agent.yaml", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is False
-        assert _is_hard_excluded("public_key.pem", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS) is False
+        assert (
+            _is_hard_excluded(
+                "tool.py", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is False
+        )
+        assert (
+            _is_hard_excluded(
+                "agent.yaml", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is False
+        )
+        assert (
+            _is_hard_excluded(
+                "public_key.pem", _DEFAULT_EXCLUDE_NAMES, _DEFAULT_EXCLUDE_PATTERNS
+            )
+            is False
+        )
 
 
 class TestWalkAiItems:
@@ -76,28 +119,37 @@ class TestWalkAiItems:
         assert ".ai/config/agent/agent.yaml" in items
 
     def test_skips_objects_dir(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/tools/x.py": "x\n",
-            ".ai/objects/blobs/ab/cd/deadbeef": "should skip",
-        })
+        _make_project(
+            tmp_path,
+            {
+                ".ai/tools/x.py": "x\n",
+                ".ai/state/objects/blobs/ab/cd/deadbeef": "should skip",
+            },
+        )
         items = _walk_ai_items(tmp_path, tmp_path)
-        assert not any("objects" in k for k in items)
+        assert not any("state/objects" in k for k in items)
 
-    def test_skips_agent_dir(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/tools/x.py": "x\n",
-            ".ai/agent/threads/t1/state.json": "should skip",
-        })
+    def test_skips_state_dir(self, tmp_path):
+        _make_project(
+            tmp_path,
+            {
+                ".ai/tools/x.py": "x\n",
+                ".ai/state/threads/t1/state.json": "should skip",
+            },
+        )
         items = _walk_ai_items(tmp_path, tmp_path)
-        assert not any("agent" in k for k in items)
+        assert not any("state" in k for k in items)
 
     def test_skips_hard_excluded(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/tools/x.py": "x\n",
-            ".ai/config/keys/signing/private_key.pem": "SECRET",
-            ".ai/.env": "API_KEY=abc",
-            ".ai/db.secret": "password",
-        })
+        _make_project(
+            tmp_path,
+            {
+                ".ai/tools/x.py": "x\n",
+                ".ai/config/keys/signing/private_key.pem": "SECRET",
+                ".ai/.env": "API_KEY=abc",
+                ".ai/db.secret": "password",
+            },
+        )
         items = _walk_ai_items(tmp_path, tmp_path)
         assert ".ai/tools/x.py" in items
         assert not any("private_key" in k for k in items)
@@ -116,14 +168,18 @@ class TestWalkAiItems:
 
 class TestWalkProjectFiles:
     def test_includes_matched_files(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/tools/x.py": "x\n",
-        })
+        _make_project(
+            tmp_path,
+            {
+                ".ai/tools/x.py": "x\n",
+            },
+        )
         (tmp_path / "src" / "main.py").parent.mkdir(parents=True)
         (tmp_path / "src" / "main.py").write_text("print(1)\n")
 
         files = _walk_project_files(
-            tmp_path, tmp_path,
+            tmp_path,
+            tmp_path,
             include=["src/"],
             exclude=[],
         )
@@ -136,7 +192,8 @@ class TestWalkProjectFiles:
         (tmp_path / "node_modules" / "pkg.js").write_text("skip\n")
 
         files = _walk_project_files(
-            tmp_path, tmp_path,
+            tmp_path,
+            tmp_path,
             include=["src/", "node_modules/"],
             exclude=["node_modules/"],
         )
@@ -144,11 +201,15 @@ class TestWalkProjectFiles:
         assert "node_modules/pkg.js" not in files
 
     def test_ai_dir_always_excluded_from_files(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/tools/x.py": "x\n",
-        })
+        _make_project(
+            tmp_path,
+            {
+                ".ai/tools/x.py": "x\n",
+            },
+        )
         files = _walk_project_files(
-            tmp_path, tmp_path,
+            tmp_path,
+            tmp_path,
             include=[".ai/"],
             exclude=[],
         )
@@ -168,7 +229,8 @@ class TestWalkProjectFiles:
         (tmp_path / "src" / "db.secret").write_text("pw\n")
 
         files = _walk_project_files(
-            tmp_path, tmp_path,
+            tmp_path,
+            tmp_path,
             include=["src/"],
             exclude=[],
         )
@@ -190,16 +252,15 @@ class TestBuildManifest:
         assert len(h) == 64
 
     def test_project_manifest_with_remote_config(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/tools/x.py": "x\n",
-            ".ai/config/cas/remote.yaml": (
-                "sync:\n"
-                "  include:\n"
-                "    - src/\n"
-                "  exclude:\n"
-                "    - node_modules/\n"
-            ),
-        })
+        _make_project(
+            tmp_path,
+            {
+                ".ai/tools/x.py": "x\n",
+                ".ai/config/cas/manifest.yaml": (
+                    "sync:\n  include:\n    - src/\n  exclude:\n    - node_modules/\n"
+                ),
+            },
+        )
         (tmp_path / "src" / "app.py").parent.mkdir(parents=True)
         (tmp_path / "src" / "app.py").write_text("code\n")
         (tmp_path / "node_modules" / "pkg.js").parent.mkdir(parents=True)
@@ -212,10 +273,13 @@ class TestBuildManifest:
         assert ".ai/tools/x.py" in m["items"]
 
     def test_user_manifest_no_files(self, tmp_path):
-        _make_project(tmp_path, {
-            ".ai/config/agent/agent.yaml": "model: gpt-4\n",
-            ".ai/config/keys/signing/public_key.pem": "PEM DATA\n",
-        })
+        _make_project(
+            tmp_path,
+            {
+                ".ai/config/agent/agent.yaml": "model: gpt-4\n",
+                ".ai/config/keys/signing/public_key.pem": "PEM DATA\n",
+            },
+        )
         h, m = build_manifest(tmp_path, "user")
         assert m["space"] == "user"
         assert m["files"] == {}

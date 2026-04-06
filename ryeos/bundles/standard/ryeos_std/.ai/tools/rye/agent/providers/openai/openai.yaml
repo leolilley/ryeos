@@ -1,9 +1,9 @@
-# rye:signed:2026-03-31T07:27:23Z:9e69da04af63f133f0f63e0bb45eb96aaa215b86e2ae4015df3eeae6e2040f41:MQA33cp77neA3uIMpTI_33jzrt4KxY4ZXHFaRPV-_Yru5DVbz2EhSFXRruw1avj9UF61-Z02UV80Z-SvZ4FrAA:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:25Z:0e7b8e0c34fa93a98d88a0d8fc35dc1dd413fba6fe4c3d9f60e43d970fb90233:H3C3fK9grQ1SEAYdXNZtIMNCvcJIac33mUk3HAt3s0pAWby6aG6j1d258VpsKwF3glUXKjDqNC-I8_cKU7J-Dg:4b987fd4e40303ac
 tool_id: openai
 tool_type: http
 version: "1.0.0"
 description: "OpenAI Chat Completions API provider for thread execution"
-executor_id: rye/core/primitives/http_client
+executor_id: rye/core/primitives/execute
 category: rye/agent/providers/openai
 
 requires:

@@ -1,4 +1,4 @@
-"""Tests for subprocess primitive."""
+"""Tests for execute primitive."""
 
 import asyncio
 import shutil
@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from rye.primitives.subprocess import (
-    SubprocessPrimitive,
-    SubprocessResult,
+from rye.primitives.execute import (
+    ExecutePrimitive,
+    ExecuteResult,
     SpawnResult,
     KillResult,
     StatusResult,
@@ -17,19 +17,19 @@ from rye.primitives.subprocess import (
 from rye.errors import ConfigurationError
 
 
-# Skip all tests if lillux-proc is not on PATH
+# Skip all tests if lillux is not on PATH
 pytestmark = pytest.mark.skipif(
     shutil.which("lillux") is None,
     reason="lillux binary not found on PATH",
 )
 
 
-class TestSubprocessResult:
-    """Test SubprocessResult dataclass."""
+class TestExecuteResult:
+    """Test ExecuteResult dataclass."""
 
-    def test_create_subprocess_result_success(self):
-        """Create successful SubprocessResult."""
-        result = SubprocessResult(
+    def test_create_execute_result_success(self):
+        """Create successful ExecuteResult."""
+        result = ExecuteResult(
             success=True,
             stdout="output",
             stderr="",
@@ -42,9 +42,9 @@ class TestSubprocessResult:
         assert result.return_code == 0
         assert result.duration_ms == 100
 
-    def test_create_subprocess_result_failure(self):
-        """Create failed SubprocessResult."""
-        result = SubprocessResult(
+    def test_create_execute_result_failure(self):
+        """Create failed ExecuteResult."""
+        result = ExecuteResult(
             success=False,
             stdout="",
             stderr="error",
@@ -103,19 +103,19 @@ class TestConfigurationError:
 
     def test_raises_when_lillux_missing(self):
         # Mock both shutil.which and Path.is_file to simulate missing lillux
-        with patch("rye.primitives.subprocess.shutil.which", return_value=None), \
-             patch("rye.primitives.subprocess.Path.is_file", return_value=False):
+        with patch("rye.primitives.execute.shutil.which", return_value=None), \
+             patch("rye.primitives.execute.Path.is_file", return_value=False):
             with pytest.raises(ConfigurationError, match="lillux"):
-                SubprocessPrimitive()
+                ExecutePrimitive()
 
 
 @pytest.mark.asyncio
-class TestSubprocessPrimitive:
-    """Test SubprocessPrimitive execution via lillux exec."""
+class TestExecutePrimitive:
+    """Test ExecutePrimitive execution via lillux exec."""
 
     async def test_execute_simple_command(self):
         """Execute simple echo command."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["hello"],
@@ -130,7 +130,7 @@ class TestSubprocessPrimitive:
     async def test_execute_command_with_cwd(self):
         """Execute command in specific directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            primitive = SubprocessPrimitive()
+            primitive = ExecutePrimitive()
             config = {
                 "command": "pwd",
                 "cwd": tmpdir,
@@ -142,7 +142,7 @@ class TestSubprocessPrimitive:
 
     async def test_execute_failed_command(self):
         """Capture failed command (non-zero return code)."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "sh",
             "args": ["-c", "exit 42"],
@@ -154,7 +154,7 @@ class TestSubprocessPrimitive:
 
     async def test_execute_with_input_data(self):
         """Pass input data to command."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "cat",
             "input_data": "test input",
@@ -166,7 +166,7 @@ class TestSubprocessPrimitive:
 
     async def test_env_var_templating_simple(self):
         """Environment variable templating: ${VAR:-default}."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["${MY_VAR:-default_value}"],
@@ -179,7 +179,7 @@ class TestSubprocessPrimitive:
 
     async def test_env_var_templating_uses_default(self):
         """Environment variable templating uses default when var missing."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["${MISSING_VAR:-fallback}"],
@@ -192,7 +192,7 @@ class TestSubprocessPrimitive:
 
     async def test_param_templating(self):
         """Runtime parameter templating: {param_name}."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["parameter is {value}"],
@@ -204,7 +204,7 @@ class TestSubprocessPrimitive:
 
     async def test_missing_param_left_unchanged(self):
         """Missing parameters are left unchanged in output."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["{missing_param}"],
@@ -216,7 +216,7 @@ class TestSubprocessPrimitive:
 
     async def test_both_templating_systems(self):
         """Both env and param templating work together."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["${VAR1:-default1} {param1}"],
@@ -230,7 +230,7 @@ class TestSubprocessPrimitive:
 
     async def test_env_merge_small_count(self):
         """Small env count (<50) merges with os.environ."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "sh",
             "args": ["-c", "echo $USER"],
@@ -242,7 +242,7 @@ class TestSubprocessPrimitive:
 
     async def test_env_merge_large_count(self):
         """Large env count (>=50) uses directly as resolved env."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         large_env = {f"VAR_{i}": f"value_{i}" for i in range(50)}
         large_env["CUSTOM_VAR"] = "custom_value"
 
@@ -257,7 +257,7 @@ class TestSubprocessPrimitive:
 
     async def test_stderr_captured(self):
         """Stderr is captured separately from stdout."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "sh",
             "args": ["-c", "echo stdout_msg && echo stderr_msg >&2"],
@@ -270,7 +270,7 @@ class TestSubprocessPrimitive:
 
     async def test_duration_ms_populated(self):
         """duration_ms is always populated."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["test"],
@@ -282,7 +282,7 @@ class TestSubprocessPrimitive:
 
     async def test_command_with_multiple_args(self):
         """Command with multiple arguments."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "echo",
             "args": ["arg1", "arg2", "arg3"],
@@ -296,7 +296,7 @@ class TestSubprocessPrimitive:
 
     async def test_nonexistent_command_fails(self):
         """Nonexistent command results in failure."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         config = {
             "command": "nonexistent_command_xyz",
         }
@@ -306,7 +306,7 @@ class TestSubprocessPrimitive:
 
     async def test_no_command_specified(self):
         """Missing command returns error."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         result = await primitive.execute({}, {})
 
         assert result.success is False
@@ -314,12 +314,12 @@ class TestSubprocessPrimitive:
 
 
 @pytest.mark.asyncio
-class TestSubprocessLifecycle:
+class TestExecuteLifecycle:
     """Test spawn/kill/status lifecycle methods."""
 
     async def test_spawn_and_kill(self):
         """Spawn a process and kill it."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         spawn_result = await primitive.spawn("sleep", ["60"])
         assert spawn_result.success is True
         assert spawn_result.pid is not None
@@ -336,14 +336,14 @@ class TestSubprocessLifecycle:
 
     async def test_kill_nonexistent_pid(self):
         """Killing a nonexistent PID returns already_dead."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         result = await primitive.kill(999999, grace=0.5)
         assert result.success is True
         assert result.method == "already_dead"
 
     async def test_status_nonexistent_pid(self):
         """Status of nonexistent PID returns not alive."""
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         result = await primitive.status(999999)
         assert result.alive is False
 
@@ -352,7 +352,7 @@ class TestSubprocessLifecycle:
         with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
             log_path = f.name
 
-        primitive = SubprocessPrimitive()
+        primitive = ExecutePrimitive()
         result = await primitive.spawn(
             "sh", ["-c", "echo hello_log"],
             log_path=log_path,

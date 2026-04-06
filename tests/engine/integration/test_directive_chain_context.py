@@ -18,7 +18,7 @@ import pytest
 from conftest import get_bundle_path
 
 # Import _resolve_directive_chain via importlib (same pattern as test_thread_context_injection.py)
-TD_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/thread_directive.py')
+TD_PATH = get_bundle_path("standard", "tools/rye/agent/threads/thread_directive.py")
 _td_spec = importlib.util.spec_from_file_location("thread_directive_test", TD_PATH)
 _td_mod = importlib.util.module_from_spec(_td_spec)
 _td_spec.loader.exec_module(_td_mod)
@@ -26,6 +26,7 @@ _resolve_directive_chain = _td_mod._resolve_directive_chain
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
 
 def _mock_load_and_parser(*parent_dicts):
     """Create mocked resolve_item and ParserRouter that return parent directives in order.
@@ -50,13 +51,16 @@ def _mock_load_and_parser(*parent_dicts):
 
 async def _patch_and_run(coro, mock_resolve, mock_parser):
     """Run an async coroutine with resolve_item, ParserRouter, and get_user_space patched."""
-    with patch("rye.actions._resolve.resolve_item", mock_resolve), \
-         patch("rye.utils.parser_router.ParserRouter", return_value=mock_parser), \
-         patch("rye.utils.resolvers.get_user_space", return_value=Path("/tmp/user")):
+    with (
+        patch("rye.actions._resolve.resolve_item", mock_resolve),
+        patch("rye.utils.parser_router.ParserRouter", return_value=mock_parser),
+        patch("rye.utils.resolvers.get_user_space", return_value=Path("/tmp/user")),
+    ):
         return await coro
 
 
 # ── No extends ────────────────────────────────────────────────────────
+
 
 class TestNoExtends:
     """Chain with no extends attribute."""
@@ -97,6 +101,7 @@ class TestNoExtends:
 
 # ── Single extends ────────────────────────────────────────────────────
 
+
 class TestSingleExtends:
     """Parent → child chain."""
 
@@ -120,7 +125,8 @@ class TestSingleExtends:
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert result["chain"] == ["parent", "child"]
@@ -139,7 +145,8 @@ class TestSingleExtends:
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert result["context"]["before"] == ["parent/rules"]
@@ -149,19 +156,29 @@ class TestSingleExtends:
 
 # ── Three-level chain ─────────────────────────────────────────────────
 
+
 class TestThreeLevelChain:
     """Root → parent → leaf chain."""
 
     async def test_three_level_composes_root_first(self):
         root = {"name": "root", "context": {"system": ["root/identity"]}}
-        parent = {"name": "parent", "extends": "root", "context": {"before": ["parent/rules"]}}
-        leaf = {"name": "leaf", "extends": "parent", "context": {"after": ["leaf/checklist"]}}
+        parent = {
+            "name": "parent",
+            "extends": "root",
+            "context": {"before": ["parent/rules"]},
+        }
+        leaf = {
+            "name": "leaf",
+            "extends": "parent",
+            "context": {"after": ["leaf/checklist"]},
+        }
 
         # Walk order: leaf loads parent first, then parent loads root
         mock_lt, mock_pr = _mock_load_and_parser(parent, root)
         result = await _patch_and_run(
             _resolve_directive_chain("leaf", leaf, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert result["chain"] == ["root", "parent", "leaf"]
@@ -172,13 +189,22 @@ class TestThreeLevelChain:
     async def test_three_level_same_position(self):
         """All three levels add to 'system' — root-first order."""
         root = {"name": "root", "context": {"system": ["root/sys"]}}
-        parent = {"name": "parent", "extends": "root", "context": {"system": ["parent/sys"]}}
-        leaf = {"name": "leaf", "extends": "parent", "context": {"system": ["leaf/sys"]}}
+        parent = {
+            "name": "parent",
+            "extends": "root",
+            "context": {"system": ["parent/sys"]},
+        }
+        leaf = {
+            "name": "leaf",
+            "extends": "parent",
+            "context": {"system": ["leaf/sys"]},
+        }
 
         mock_lt, mock_pr = _mock_load_and_parser(parent, root)
         result = await _patch_and_run(
             _resolve_directive_chain("leaf", leaf, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert result["context"]["system"] == ["root/sys", "parent/sys", "leaf/sys"]
@@ -186,17 +212,23 @@ class TestThreeLevelChain:
 
 # ── Deduplication ─────────────────────────────────────────────────────
 
+
 class TestDeduplication:
     """Same knowledge ID in multiple chain levels appears only once."""
 
     async def test_dedup_same_id_across_positions(self):
         parent = {"name": "parent", "context": {"system": ["shared/id", "parent/only"]}}
-        child = {"name": "child", "extends": "parent", "context": {"system": ["shared/id", "child/only"]}}
+        child = {
+            "name": "child",
+            "extends": "parent",
+            "context": {"system": ["shared/id", "child/only"]},
+        }
 
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         # shared/id from parent (first occurrence) wins, child duplicate dropped
@@ -204,18 +236,24 @@ class TestDeduplication:
 
     async def test_dedup_in_before(self):
         parent = {"name": "parent", "context": {"before": ["shared/rules"]}}
-        child = {"name": "child", "extends": "parent", "context": {"before": ["shared/rules", "child/rules"]}}
+        child = {
+            "name": "child",
+            "extends": "parent",
+            "context": {"before": ["shared/rules", "child/rules"]},
+        }
 
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert result["context"]["before"] == ["shared/rules", "child/rules"]
 
 
 # ── Circular detection ────────────────────────────────────────────────
+
 
 class TestCircularDetection:
     """Circular extends chains are rejected."""
@@ -230,7 +268,8 @@ class TestCircularDetection:
         with pytest.raises(ValueError, match="Circular extends chain"):
             await _patch_and_run(
                 _resolve_directive_chain("a", directive_a, "/tmp/test"),
-                mock_lt, mock_pr,
+                mock_lt,
+                mock_pr,
             )
 
     async def test_self_extends_raises(self):
@@ -241,6 +280,7 @@ class TestCircularDetection:
 
 
 # ── Suppress composition ─────────────────────────────────────────────
+
 
 class TestSuppressComposition:
     """Suppress items collected from all chain levels."""
@@ -255,12 +295,17 @@ class TestSuppressComposition:
 
     async def test_suppress_composed_from_chain(self):
         parent = {"name": "parent", "context": {"suppress": ["system_tool_protocol"]}}
-        child = {"name": "child", "extends": "parent", "context": {"suppress": ["system_identity"]}}
+        child = {
+            "name": "child",
+            "extends": "parent",
+            "context": {"suppress": ["system_identity"]},
+        }
 
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert "system_tool_protocol" in result["context"]["suppress"]
@@ -268,18 +313,24 @@ class TestSuppressComposition:
 
     async def test_suppress_deduplication(self):
         parent = {"name": "parent", "context": {"suppress": ["system_identity"]}}
-        child = {"name": "child", "extends": "parent", "context": {"suppress": ["system_identity"]}}
+        child = {
+            "name": "child",
+            "extends": "parent",
+            "context": {"suppress": ["system_identity"]},
+        }
 
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert result["context"]["suppress"].count("system_identity") == 1
 
 
 # ── Chain metadata ────────────────────────────────────────────────────
+
 
 class TestChainMetadata:
     """chain_directives contains the full parsed directive dicts."""
@@ -291,25 +342,29 @@ class TestChainMetadata:
         mock_lt, mock_pr = _mock_load_and_parser(parent)
         result = await _patch_and_run(
             _resolve_directive_chain("child", child, "/tmp/test"),
-            mock_lt, mock_pr,
+            mock_lt,
+            mock_pr,
         )
 
         assert len(result["chain_directives"]) == 2
         assert result["chain_directives"][0]["name"] == "parent"  # root first
-        assert result["chain_directives"][1]["name"] == "child"   # leaf last
+        assert result["chain_directives"][1]["name"] == "child"  # leaf last
 
     async def test_load_failure_raises(self):
         """Parent directive that fails to load raises ValueError."""
         child = {"name": "child", "extends": "nonexistent"}
 
-        mock_resolve = AsyncMock(return_value={
-            "status": "error",
-            "error": "Directive not found: nonexistent",
-        })
+        mock_resolve = AsyncMock(
+            return_value={
+                "status": "error",
+                "error": "Directive not found: nonexistent",
+            }
+        )
         mock_parser = MagicMock()
 
         with pytest.raises(ValueError, match="Failed to load parent directive"):
             await _patch_and_run(
                 _resolve_directive_chain("child", child, "/tmp/test"),
-                mock_resolve, mock_parser,
+                mock_resolve,
+                mock_parser,
             )

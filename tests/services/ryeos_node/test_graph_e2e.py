@@ -28,6 +28,7 @@ from rye.constants import AI_DIR
 # ---------------------------------------------------------------------------
 
 from conftest import get_bundle_path
+
 _WALKER_DIR = get_bundle_path("core", "tools/rye/core/runtimes/state-graph")
 
 # Load walker once at module level so patch.object targets the same module
@@ -49,7 +50,7 @@ def graph_project(tmp_path, _setup_user_space, monkeypatch):
     """Create a minimal project with .ai/objects for graph execution."""
     project = tmp_path / "project"
     project.mkdir()
-    (project / AI_DIR / "objects").mkdir(parents=True)
+    (project / AI_DIR / "state" / "objects").mkdir(parents=True)
     (project / AI_DIR / "agent" / "graphs").mkdir(parents=True)
     monkeypatch.delenv("RYE_SIGNING_KEY_DIR", raising=False)
     return project
@@ -58,6 +59,7 @@ def graph_project(tmp_path, _setup_user_space, monkeypatch):
 # ---------------------------------------------------------------------------
 # Graph configs (interpolation uses ${...} syntax, not {{ ... }})
 # ---------------------------------------------------------------------------
+
 
 def _simple_graph():
     """Two-node graph: greet → done (return)."""
@@ -138,10 +140,14 @@ class TestPushExecutePullGraph:
             "body": {"message": "hello world"},
         }
 
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch:
             mock_dispatch.return_value = mock_result
             result = await walker.execute(
-                _simple_graph(), {}, str(graph_project),
+                _simple_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result["success"] is True, f"Graph failed: {result.get('error')}"
@@ -149,7 +155,9 @@ class TestPushExecutePullGraph:
 
         # Verify execution_snapshot in CAS via graph ref
         run_id = result["graph_run_id"]
-        ref_path = graph_project / AI_DIR / "objects" / "refs" / "graphs" / f"{run_id}.json"
+        ref_path = (
+            graph_project / AI_DIR / "state" / "objects" / "refs" / "graphs" / f"{run_id}.json"
+        )
         assert ref_path.exists()
 
         snapshot_hash = read_ref(ref_path)
@@ -190,13 +198,17 @@ class TestPushExecutePullGraph:
     @pytest.mark.asyncio
     async def test_graph_output_interpolated(self, graph_project):
         """Return node output is interpolated from state."""
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch:
             mock_dispatch.return_value = {
                 "status": "ok",
                 "body": {"message": "greetings"},
             }
             result = await walker.execute(
-                _simple_graph(), {}, str(graph_project),
+                _simple_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result["success"] is True, f"Graph failed: {result.get('error')}"
@@ -217,10 +229,14 @@ class TestCachedNodeExecution:
         }
 
         # First run — cache miss, stores result
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch:
             mock_dispatch.return_value = mock_result
             result1 = await walker.execute(
-                _cached_graph(), {}, str(graph_project),
+                _cached_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result1["success"] is True, f"Run 1 failed: {result1.get('error')}"
@@ -228,14 +244,19 @@ class TestCachedNodeExecution:
         root = cas_root(graph_project)
 
         # Verify cache was stored
-        cache_dir = graph_project / AI_DIR / "objects" / "cache" / "nodes"
+        cache_dir = graph_project / AI_DIR / "state" / "objects" / "cache" / "nodes"
         assert cache_dir.exists(), "Cache dir not created after first run"
         cache_files = list(cache_dir.iterdir())
         assert len(cache_files) >= 1, "No cache entries after first run"
 
         # Find receipts from first run
         ref1 = read_ref(
-            graph_project / AI_DIR / "objects" / "refs" / "graphs"
+            graph_project
+            / AI_DIR
+            / "state"
+            / "objects"
+            / "refs"
+            / "graphs"
             / f"{result1['graph_run_id']}.json"
         )
         snap1 = cas.get_object(ref1, root)
@@ -266,20 +287,25 @@ class TestCachedNodeExecution:
             graph_hash=graph_hash_val,
             node_name="compute",
             interpolated_action=action,
-            lockfile_hash=None,
             config_snapshot_hash=config_snap_hash,
         )
         cached = cache_lookup(cache_key, graph_project)
-        assert cached is not None, f"cache_lookup returned None for key {cache_key[:16]}"
+        assert cached is not None, (
+            f"cache_lookup returned None for key {cache_key[:16]}"
+        )
 
         # Wait 1s so auto-generated graph_run_id (uses int(time.time())) differs
         _time.sleep(1)
 
         # Second run — same config → cache hit (dispatch NOT called for compute)
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch2:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch2:
             mock_dispatch2.return_value = mock_result
             result2 = await walker.execute(
-                _cached_graph(), {}, str(graph_project),
+                _cached_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result2["success"] is True, f"Run 2 failed: {result2.get('error')}"
@@ -287,8 +313,10 @@ class TestCachedNodeExecution:
         # Infra hooks (after_step emitter) may still call _dispatch_action,
         # so filter to only calls matching the compute node's action item_id.
         compute_calls = [
-            c for c in mock_dispatch2.call_args_list
-            if c.args and isinstance(c.args[0], dict)
+            c
+            for c in mock_dispatch2.call_args_list
+            if c.args
+            and isinstance(c.args[0], dict)
             and c.args[0].get("item_id") == "test/expensive"
         ]
         assert len(compute_calls) == 0, (
@@ -297,7 +325,12 @@ class TestCachedNodeExecution:
 
         # Find receipts from second run
         ref2 = read_ref(
-            graph_project / AI_DIR / "objects" / "refs" / "graphs"
+            graph_project
+            / AI_DIR
+            / "state"
+            / "objects"
+            / "refs"
+            / "graphs"
             / f"{result2['graph_run_id']}.json"
         )
         snap2 = cas.get_object(ref2, root)
@@ -316,20 +349,28 @@ class TestCachedNodeExecution:
             "body": {"value": 42},
         }
 
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch:
             mock_dispatch.return_value = mock_result
             result1 = await walker.execute(
-                _cached_graph(), {}, str(graph_project),
+                _cached_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result1["success"] is True, f"Run 1 failed: {result1.get('error')}"
 
         _time.sleep(1)  # ensure different graph_run_id
 
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch2:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch2:
             mock_dispatch2.return_value = mock_result
             result2 = await walker.execute(
-                _cached_graph(), {}, str(graph_project),
+                _cached_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result2["success"] is True, f"Run 2 failed: {result2.get('error')}"
@@ -345,33 +386,44 @@ class TestCachedNodeExecution:
         }
 
         # First run — populate cache
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch:
             mock_dispatch.return_value = mock_result
             result1 = await walker.execute(
-                _cached_graph(), {}, str(graph_project),
+                _cached_graph(),
+                {},
+                str(graph_project),
             )
         assert result1["success"] is True
 
         # Corrupt all cache files
-        cache_dir = graph_project / AI_DIR / "objects" / "cache" / "nodes"
+        cache_dir = graph_project / AI_DIR / "state" / "objects" / "cache" / "nodes"
         for cache_file in cache_dir.iterdir():
             cache_file.write_text("corrupted json {{{")
 
         import time as _time
+
         _time.sleep(1)
 
         # Second run — corrupted cache → should recompute, not fail
-        with patch.object(walker, "_dispatch_action", new_callable=AsyncMock) as mock_dispatch2:
+        with patch.object(
+            walker, "_dispatch_action", new_callable=AsyncMock
+        ) as mock_dispatch2:
             mock_dispatch2.return_value = mock_result
             result2 = await walker.execute(
-                _cached_graph(), {}, str(graph_project),
+                _cached_graph(),
+                {},
+                str(graph_project),
             )
 
         assert result2["success"] is True, f"Run 2 failed: {result2.get('error')}"
         # Dispatch SHOULD have been called since cache is corrupted
         compute_calls = [
-            c for c in mock_dispatch2.call_args_list
-            if c.args and isinstance(c.args[0], dict)
+            c
+            for c in mock_dispatch2.call_args_list
+            if c.args
+            and isinstance(c.args[0], dict)
             and c.args[0].get("item_id") == "test/expensive"
         ]
         assert len(compute_calls) == 1, "Expected recompute after cache corruption"

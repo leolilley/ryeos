@@ -121,14 +121,8 @@ test_project/
 .ruff_cache
 tests/e2e/.venv
 
-## AI cache (browser snapshots, screenshots, ephemeral data)
-**/.ai/cache/
-
-## AI object store (content-addressed blobs, generated per-execution)
-**/.ai/objects/
-
-## Lockfiles (generated per-execution, not source-controlled)
-**/.ai/lockfiles/
+## AI runtime state (cache, objects, threads, graphs — all ephemeral)
+**/.ai/state/
 
 ## E2E test generated knowledge (ephemeral)
 tests/e2e/.ai/knowledge/

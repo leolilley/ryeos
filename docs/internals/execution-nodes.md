@@ -29,10 +29,10 @@ The key principle: **there is no special infrastructure for specific workload ty
 | `ExecuteTool._dispatch_remote()` | `ryeos/rye/actions/execute.py`   | Routes execution to a named remote via the remote tool                    |
 | `_parse_target()`                | `ryeos/rye/actions/execute.py`   | Parses `"remote:gpu"` → `("remote", "gpu")` — named remote syntax         |
 | `rye/core/remote/remote`         | Core bundle tool                 | CAS sync + HTTP POST to the remote server                                 |
-| `remote_config.py`               | Core bundle                      | Resolves named remotes from `cas/remote.yaml` via 3-tier resolution       |
+| `remote_config.py`               | Core bundle                      | Resolves named remotes from `remotes/remotes.yaml` via 3-tier resolution       |
 | `ryeos-node` server            | `ryeos-node/`         | FastAPI server: `/execute`, `/push`, CAS sync, threads, webhooks, secrets |
 | `modal_app.py`                   | `ryeos-node/`         | Modal deployment: volume-backed CAS, scheduled execution                  |
-| `cas/remote.yaml`                | `.ai/config/cas/`                | Named remotes with URL + key_env, 3-tier resolved                         |
+| `remotes/remotes.yaml`                | `.ai/config/cas/`                | Named remotes with URL + key_env, 3-tier resolved                         |
 | CAS sync protocol                | `rye/cas/sync.py`                | `has/put/get` object exchange                                             |
 | `create_execution_space()`       | `rye/cas/checkout.py`            | Materializes `.ai/` workspace from snapshot on the remote                 |
 | `three_way_merge()`              | `rye/cas/merge.py`               | Merges remote execution results back into project HEAD                    |
@@ -56,7 +56,7 @@ The node ID is derived from the key — not assigned, not arbitrary. `fp:4b987fd
 `remote.yaml` stays minimal — just reachability:
 
 ```yaml
-# .ai/config/cas/remote.yaml
+# .ai/config/remotes/remotes.yaml
 remotes:
   node-1:
     url: https://node-1.internal
@@ -282,7 +282,7 @@ The server at `ryeos-node/ryeos_node/server.py` doesn't assume Modal. Modal-spec
 | -------------------------------------- | ----------------------------------------------------------- |
 | `ExecuteTool._dispatch_remote()`       | Unchanged — routing tools use existing remote dispatch      |
 | `rye/core/remote/remote` tool          | Unchanged — CAS sync + execute, same protocol               |
-| `remote_config.py` + `cas/remote.yaml` | Unchanged — just reachability, capabilities come from nodes |
+| `remote_config.py` + `remotes/remotes.yaml` | Unchanged — just reachability, capabilities come from nodes |
 | `ryeos-node` server                  | Unchanged — same endpoints, deployable on any hardware      |
 | CAS sync protocol (`has/put/get`)      | Unchanged                                                   |
 | `create_execution_space()`             | Unchanged                                                   |

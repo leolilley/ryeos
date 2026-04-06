@@ -81,7 +81,7 @@ These are the authoritative references for the metadata schema of each item type
 | Path                             | Description                                          |
 | -------------------------------- | ---------------------------------------------------- |
 | `bundles/ryeos-core/manifest.yaml` | Bundle manifest for the core standard library bundle |
-| `lockfiles/`                     | Integrity pinning files for signed items             |
+| `state/`                         | Runtime state — threads, graphs, CAS objects, cache  |
 
 ---
 

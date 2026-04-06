@@ -164,7 +164,7 @@ class TestStatusTool:
         assert result["status"] == "completed"
         assert result["alive"] is False
 
-    @patch("rye.primitives.subprocess.SubprocessPrimitive")
+    @patch("rye.primitives.execute.ExecutePrimitive")
     def test_running_run_checks_pid(self, mock_sp_cls, registry_db):
         mock_sp = MagicMock()
         mock_status = AsyncMock()
@@ -206,7 +206,7 @@ class TestCancelTool:
         assert result["success"] is False
         assert "no pid" in result["error"].lower()
 
-    @patch("rye.primitives.subprocess.SubprocessPrimitive")
+    @patch("rye.primitives.execute.ExecutePrimitive")
     def test_successful_cancel(self, mock_sp_cls, registry_db):
         mock_sp = MagicMock()
         mock_kill = AsyncMock()

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:43fec07ad370f79a5c8d8986b5d5dccdd512f63bf39b05661e19516c47548294:_ZfEP3cSQWzclcO286xWTnZCHoO76ZeMdRzjW1g61_kK5cxUzw2c0hNQitTVHqMzaLjCP_2RzyspdAEgVbMFCA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-06T04:15:08Z:69ca8fd6f759aa6a5d27ac317e16b934d4ae90300c7701155fdb398fd1e95ecb:ERJQncf8XIFnH1zGeIEpwQjyS-4npnVcT8FAw4PEcdZQam_tfsAbPFVHypSo2Rkt4XzmmwQ3BzX2xbMMmYMNCA:4b987fd4e40303ac -->
 
 ```yaml
 name: remote-operations
@@ -188,12 +188,12 @@ parameters={"action": "pull", "hashes": ["<runtime_outputs_bundle_hash>"]}
 Then read the bundle JSON locally:
 
 ```
-cat .ai/objects/objects/<ab>/<cd>/<full_hash>.json | python3 -m json.tool
+cat .ai/state/objects/objects/<ab>/<cd>/<full_hash>.json | python3 -m json.tool
 ```
 
 The bundle lists all output files with their blob hashes. Key files:
 
-- **Graph transcript**: `.ai/agent/graphs/<run_id>/transcript.jsonl` — step-by-step events
+- **Graph transcript**: `.ai/state/threads/<run_id>/transcript.jsonl` — step-by-step events
 - **Graph knowledge**: `.ai/knowledge/agent/graphs/<graph_id>/<run_id>.md` — visual status table
 - **Thread knowledge**: `.ai/knowledge/agent/threads/<path>/<thread_id>.md` — for forked directives
 - **Execution snapshot**: referenced by `execution_snapshot_hash` in the bundle
@@ -206,7 +206,7 @@ Pull specific blob hashes from the bundle to read their content:
 parameters={"action": "pull", "hashes": ["<blob_hash_1>", "<blob_hash_2>"]}
 ```
 
-Then read locally from `.ai/objects/blobs/<ab>/<cd>/<hash>`.
+Then read locally from `.ai/state/objects/blobs/<ab>/<cd>/<hash>`.
 
 ### Step 4: Read the graph transcript
 
@@ -220,7 +220,7 @@ For graph tools, the transcript JSONL contains every step with:
 Parse events with:
 
 ```bash
-cat .ai/objects/blobs/<hash> | python3 -c "
+cat .ai/state/objects/blobs/<hash> | python3 -c "
 import sys, json
 for line in sys.stdin:
     print(json.dumps(json.loads(line), indent=2))
@@ -297,7 +297,7 @@ The binding (created via `POST /webhook-bindings`) locks down `item_type`, `item
 
 ## Configuration
 
-Remotes are declared in `.ai/config/cas/remote.yaml`:
+Remotes are declared in `.ai/config/remotes/remotes.yaml`:
 
 ```yaml
 remotes:

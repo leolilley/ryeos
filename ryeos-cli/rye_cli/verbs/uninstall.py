@@ -48,7 +48,7 @@ def _handle_uninstall(args, project_path: str):
         return
 
     files_removed = 0
-    lock_path = bundle_dir / ".bundle-lock.json"
+    lock_path = bundle_dir / "install-receipt.json"
     if lock_path.exists():
         try:
             lock_data = json.loads(lock_path.read_text())

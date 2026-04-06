@@ -1,7 +1,8 @@
-# rye:signed:2026-04-05T03:17:01Z:8d459d5d5992cbd284a72c9cc4fcb8b7d763f30824b4f39d496ad75a2ed31fc5:iB7joPK6tTU5WiL8e1jPM4nme-xUuFb-K0ss7nRK1gxQgkkrv6pYZq--by9D8aajilZgQw7RK0BF5vKX-u1NCA:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:01Z:5ce3cc04314604982ee35ad259b62249da56b4d68f563bcfce2fa3581f753ad7:YKmZ20BrWgv-_gMBLofvbOM49qzUXBGAwN3z2N6Ao3sGIKzrYvjIMLc9fnHhVkoz9brwhvd1hIxgFDBqn2wzAw:4b987fd4e40303ac
+# rye:unsigned
 version: "1.0.0"
 tool_type: runtime
-executor_id: rye/core/primitives/subprocess
+executor_id: rye/core/primitives/execute
 category: rye/core/runtimes/rust
 description: "Rust runtime — executes compiled Rust binaries found on PATH"
 

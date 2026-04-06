@@ -22,19 +22,21 @@ from rye.utils.path_utils import BundleInfo
 
 # ── Module imports via importlib ──────────────────────────────────────
 
-PARSER_PATH = get_bundle_path('core', 'tools/rye/core/parsers/markdown/xml.py')
+PARSER_PATH = get_bundle_path("core", "tools/rye/core/parsers/markdown/xml.py")
 _pspec = importlib.util.spec_from_file_location("markdown_xml", PARSER_PATH)
 _parser_mod = importlib.util.module_from_spec(_pspec)
 _pspec.loader.exec_module(_parser_mod)
 md_parse = _parser_mod.parse
 
-TRANSCRIPT_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/persistence/transcript.py')
+TRANSCRIPT_PATH = get_bundle_path(
+    "standard", "tools/rye/agent/threads/persistence/transcript.py"
+)
 _tspec = importlib.util.spec_from_file_location("transcript", TRANSCRIPT_PATH)
 _transcript_mod = importlib.util.module_from_spec(_tspec)
 _tspec.loader.exec_module(_transcript_mod)
 Transcript = _transcript_mod.Transcript
 
-HARNESS_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/safety_harness.py')
+HARNESS_PATH = get_bundle_path("standard", "tools/rye/agent/threads/safety_harness.py")
 _hspec = importlib.util.spec_from_file_location("safety_harness", HARNESS_PATH)
 _harness_mod = importlib.util.module_from_spec(_hspec)
 _hspec.loader.exec_module(_harness_mod)
@@ -43,11 +45,12 @@ SafetyHarness = _harness_mod.SafetyHarness
 
 # ── XML Parser: <context> tags ────────────────────────────────────────
 
+
 class TestContextXMLParsing:
     """Test <context> metadata parsing in directives."""
 
     def test_context_system_items(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -60,7 +63,7 @@ class TestContextXMLParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         ctx = result.get("context", {})
         assert ctx["system"] == ["rye/agent/core/Identity", "rye/agent/core/Behavior"]
@@ -68,7 +71,7 @@ class TestContextXMLParsing:
         assert ctx["after"] == []
 
     def test_context_all_positions(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -82,7 +85,7 @@ class TestContextXMLParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         ctx = result.get("context", {})
         assert ctx["system"] == ["rye/agent/core/Identity"]
@@ -90,7 +93,7 @@ class TestContextXMLParsing:
         assert ctx["after"] == ["rye/agent/core/Completion"]
 
     def test_no_context_tag(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -99,18 +102,19 @@ class TestContextXMLParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert "context" not in result
 
 
 # ── XML Parser: <acknowledge> tags ────────────────────────────────────
 
+
 class TestAcknowledgeParsing:
     """Test <acknowledge> tag parsing in <permissions>."""
 
     def test_acknowledge_risk(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -123,7 +127,7 @@ class TestAcknowledgeParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         acks = result.get("acknowledged_risks", [])
         assert len(acks) == 1
@@ -131,7 +135,7 @@ class TestAcknowledgeParsing:
         assert "orchestration" in acks[0]["reason"]
 
     def test_acknowledge_elevated(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -144,14 +148,14 @@ class TestAcknowledgeParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         acks = result.get("acknowledged_risks", [])
         assert len(acks) == 1
         assert acks[0]["risk"] == "elevated"
 
     def test_no_acknowledge(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -163,18 +167,19 @@ class TestAcknowledgeParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert "acknowledged_risks" not in result
 
 
 # ── XML Parser: extends attribute ─────────────────────────────────────
 
+
 class TestExtendsAttribute:
     """Test extends attribute parsing."""
 
     def test_extends_parsed(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="child" version="1.0.0" extends="base-directive">
   <metadata>
@@ -183,12 +188,12 @@ class TestExtendsAttribute:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert result["extends"] == "base-directive"
 
     def test_no_extends(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -197,18 +202,19 @@ class TestExtendsAttribute:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert "extends" not in result
 
 
 # ── XML Parser: invalid permission tags ───────────────────────────────
 
+
 class TestInvalidPermissionTags:
     """Test that unknown tags inside <permissions> raise ValueError."""
 
     def test_cap_tag_rejected(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -220,13 +226,13 @@ class TestInvalidPermissionTags:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert "error" in result
         assert "Unknown tag <cap> inside <permissions>" in result["error"]
 
     def test_arbitrary_tag_rejected(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -238,13 +244,13 @@ class TestInvalidPermissionTags:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert "error" in result
         assert "Unknown tag <allow> inside <permissions>" in result["error"]
 
     def test_valid_tags_accepted(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -259,13 +265,14 @@ class TestInvalidPermissionTags:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         assert len(result["permissions"]) == 3
         assert result["acknowledged_risks"][0]["risk"] == "elevated"
 
 
 # ── SafetyHarness: check_permission() ─────────────────────────────────
+
 
 class TestSafetyHarnessPermissions:
     """Test SafetyHarness.check_permission() with the current API."""
@@ -307,7 +314,9 @@ class TestSafetyHarnessPermissions:
 
     def test_internal_always_allowed(self, tmp_path):
         harness = self._make_harness(tmp_path=tmp_path)
-        result = harness.check_permission("execute", "tool", "rye/agent/threads/internal/control")
+        result = harness.check_permission(
+            "execute", "tool", "rye/agent/threads/internal/control"
+        )
         assert result is None
 
     def test_parent_capability_attenuation(self, tmp_path):
@@ -326,34 +335,50 @@ class TestSafetyHarnessPermissions:
 
 # ── SafetyHarness: check_limits() ─────────────────────────────────────
 
+
 class TestSafetyHarnessLimits:
     """Test SafetyHarness.check_limits() with the current API."""
 
     def test_under_limits(self, tmp_path):
         harness = SafetyHarness("t", {"turns": 10, "tokens": 1000}, [], tmp_path)
-        result = harness.check_limits({"turns": 5, "input_tokens": 200, "output_tokens": 100, "spend": 0.01})
+        result = harness.check_limits(
+            {"turns": 5, "input_tokens": 200, "output_tokens": 100, "spend": 0.01}
+        )
         assert result is None
 
     def test_turns_exceeded(self, tmp_path):
         harness = SafetyHarness("t", {"turns": 5}, [], tmp_path)
-        result = harness.check_limits({"turns": 5, "input_tokens": 0, "output_tokens": 0, "spend": 0})
+        result = harness.check_limits(
+            {"turns": 5, "input_tokens": 0, "output_tokens": 0, "spend": 0}
+        )
         assert result is not None
         assert result["limit_code"] == "turns_exceeded"
 
     def test_spend_exceeded(self, tmp_path):
         harness = SafetyHarness("t", {"turns": 100, "spend": 0.5}, [], tmp_path)
-        result = harness.check_limits({"turns": 1, "input_tokens": 0, "output_tokens": 0, "spend": 0.6})
+        result = harness.check_limits(
+            {"turns": 1, "input_tokens": 0, "output_tokens": 0, "spend": 0.6}
+        )
         assert result is not None
         assert result["limit_code"] == "spend_exceeded"
 
     def test_duration_exceeded(self, tmp_path):
         harness = SafetyHarness("t", {"duration_seconds": 60}, [], tmp_path)
-        result = harness.check_limits({"turns": 1, "input_tokens": 0, "output_tokens": 0, "spend": 0, "elapsed_seconds": 70})
+        result = harness.check_limits(
+            {
+                "turns": 1,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "spend": 0,
+                "elapsed_seconds": 70,
+            }
+        )
         assert result is not None
         assert result["limit_code"] == "duration_seconds_exceeded"
 
 
 # ── Capability Risk Classification ────────────────────────────────────
+
 
 class TestCapabilityRisk:
     """Test _assess_capability_risk from thread_directive.py."""
@@ -363,7 +388,16 @@ class TestCapabilityRisk:
         """Import the risk assessment function."""
         td_path = (
             PROJECT_ROOT
-            / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads" / "thread_directive.py"
+            / "ryeos"
+            / "bundles"
+            / "standard"
+            / "ryeos_std"
+            / ".ai"
+            / "tools"
+            / "rye"
+            / "agent"
+            / "threads"
+            / "thread_directive.py"
         )
         spec = importlib.util.spec_from_file_location("thread_directive", td_path)
         mod = importlib.util.module_from_spec(spec)
@@ -409,6 +443,7 @@ class TestCapabilityRisk:
 
 # ── System Message Injection (HttpProvider) ───────────────────────────
 
+
 class TestSystemMessageInjection:
     """Test system prompt injection into API request bodies."""
 
@@ -429,6 +464,7 @@ class TestSystemMessageInjection:
         body = {"contents": [], "tools": []}
         template = {"systemInstruction": {"parts": [{"text": "{system}"}]}}
         system = "You are Rye."
+
         # Simulate body_inject logic
         def apply(tmpl, data):
             if isinstance(tmpl, str) and tmpl == "{system}":
@@ -438,6 +474,7 @@ class TestSystemMessageInjection:
             if isinstance(tmpl, list):
                 return [apply(item, data) for item in tmpl]
             return tmpl
+
         body.update(apply(template, {"system": system}))
         assert body["systemInstruction"]["parts"][0]["text"] == "You are Rye."
 
@@ -453,6 +490,7 @@ class TestSystemMessageInjection:
 
 
 # ── Transcript Rendering ─────────────────────────────────────────────
+
 
 class TestTranscriptRendering:
     """Test rendering of system_prompt and context_injected events."""
@@ -513,10 +551,25 @@ class TestTranscriptRendering:
 # ── Core Knowledge Items ──────────────────────────────────────────────
 
 KNOWLEDGE_DIR = (
-    PROJECT_ROOT / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "knowledge" / "rye" / "agent" / "core"
+    PROJECT_ROOT
+    / "ryeos"
+    / "bundles"
+    / "standard"
+    / "ryeos_std"
+    / ".ai"
+    / "knowledge"
+    / "rye"
+    / "agent"
+    / "core"
 )
 
-EXPECTED_ITEMS = ["Identity", "Behavior", "ToolProtocol", "Environment", "DirectiveInstruction"]
+EXPECTED_ITEMS = [
+    "Identity",
+    "Behavior",
+    "ToolProtocol",
+    "Environment",
+    "DirectiveInstruction",
+]
 
 
 class TestCoreKnowledgeItems:
@@ -566,11 +619,12 @@ class TestCoreKnowledgeItems:
 
 # ── XML Parser: <suppress> in <context> ───────────────────────────────
 
+
 class TestContextSuppressParsing:
     """Test <suppress> tag parsing inside <context> metadata."""
 
     def test_suppress_single(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -582,13 +636,13 @@ class TestContextSuppressParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         ctx = result.get("context", {})
         assert ctx["suppress"] == ["tool-protocol"]
 
     def test_suppress_multiple(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -601,13 +655,13 @@ class TestContextSuppressParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         ctx = result.get("context", {})
         assert ctx["suppress"] == ["tool-protocol", "behavior"]
 
     def test_suppress_with_add(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -621,7 +675,7 @@ class TestContextSuppressParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         ctx = result.get("context", {})
         assert ctx["suppress"] == ["tool-protocol"]
@@ -629,7 +683,7 @@ class TestContextSuppressParsing:
         assert ctx["after"] == ["project/custom-completion"]
 
     def test_no_suppress(self):
-        md = '''# Test
+        md = """# Test
 ```xml
 <directive name="test" version="1.0.0">
   <metadata>
@@ -641,7 +695,7 @@ class TestContextSuppressParsing:
   </metadata>
 </directive>
 ```
-'''
+"""
         result = md_parse(md)
         ctx = result.get("context", {})
         assert ctx["suppress"] == []
@@ -649,55 +703,101 @@ class TestContextSuppressParsing:
 
 # ── _is_suppressed helper ─────────────────────────────────────────────
 
+
 class TestIsSuppressed:
     """Test the _is_suppressed helper in safety_harness."""
 
     def test_suppress_by_hook_id(self):
-        hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/tool-protocol"}}
+        hook = {
+            "id": "system_tool_protocol",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/tool-protocol",
+            },
+        }
         assert _harness_mod._is_suppressed(hook, ["system_tool_protocol"]) is True
 
     def test_suppress_by_full_item_id(self):
-        hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/tool-protocol"}}
-        assert _harness_mod._is_suppressed(hook, ["rye/agent/core/tool-protocol"]) is True
+        hook = {
+            "id": "system_tool_protocol",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/tool-protocol",
+            },
+        }
+        assert (
+            _harness_mod._is_suppressed(hook, ["rye/agent/core/tool-protocol"]) is True
+        )
 
     def test_basename_does_not_match(self):
         """Basename matching is disabled to avoid ambiguous clashes."""
-        hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/tool-protocol"}}
+        hook = {
+            "id": "system_tool_protocol",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/tool-protocol",
+            },
+        }
         assert _harness_mod._is_suppressed(hook, ["tool-protocol"]) is False
 
     def test_no_match(self):
-        hook = {"id": "system_identity", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/identity"}}
+        hook = {
+            "id": "system_identity",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/identity",
+            },
+        }
         assert _harness_mod._is_suppressed(hook, ["tool-protocol"]) is False
 
     def test_empty_suppress_list(self):
-        hook = {"id": "system_identity", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/identity"}}
+        hook = {
+            "id": "system_identity",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/identity",
+            },
+        }
         assert _harness_mod._is_suppressed(hook, []) is False
 
     def test_suppress_identity_by_hook_id(self):
-        hook = {"id": "system_identity", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/identity"}}
+        hook = {
+            "id": "system_identity",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/identity",
+            },
+        }
         assert _harness_mod._is_suppressed(hook, ["system_identity"]) is True
 
     def test_partial_no_match(self):
         """Partial name like 'proto' should NOT match 'tool-protocol'."""
-        hook = {"id": "system_tool_protocol", "event": "build_system_prompt",
-                "action": {"primary": "fetch", "item_type": "knowledge",
-                           "item_id": "rye/agent/core/tool-protocol"}}
+        hook = {
+            "id": "system_tool_protocol",
+            "event": "build_system_prompt",
+            "action": {
+                "primary": "fetch",
+                "item_type": "knowledge",
+                "item_id": "rye/agent/core/tool-protocol",
+            },
+        }
         assert _harness_mod._is_suppressed(hook, ["proto"]) is False
 
 
 # ── SafetyHarness: run_hooks_context with suppress ───────────────────
+
 
 class TestRunHooksContextSuppress:
     """Test that run_hooks_context respects suppress parameter."""
@@ -746,10 +846,15 @@ class TestRunHooksContextSuppress:
         class MockDispatcher:
             async def dispatch(self, action, **kwargs):
                 dispatched.append(action.get("item_id", ""))
-                return {"status": "success", "content": f"content for {action.get('item_id')}"}
+                return {
+                    "status": "success",
+                    "content": f"content for {action.get('item_id')}",
+                }
 
         await harness_with_hooks.run_hooks_context(
-            {}, MockDispatcher(), event="build_system_prompt",
+            {},
+            MockDispatcher(),
+            event="build_system_prompt",
             suppress=["system_tool_protocol"],
         )
         assert "rye/agent/core/identity" in dispatched
@@ -763,10 +868,15 @@ class TestRunHooksContextSuppress:
         class MockDispatcher:
             async def dispatch(self, action, **kwargs):
                 dispatched.append(action.get("item_id", ""))
-                return {"status": "success", "content": f"content for {action.get('item_id')}"}
+                return {
+                    "status": "success",
+                    "content": f"content for {action.get('item_id')}",
+                }
 
         await harness_with_hooks.run_hooks_context(
-            {}, MockDispatcher(), event="build_system_prompt",
+            {},
+            MockDispatcher(),
+            event="build_system_prompt",
         )
         assert "rye/agent/core/identity" in dispatched
         assert "rye/agent/core/tool-protocol" in dispatched
@@ -776,10 +886,21 @@ class TestRunHooksContextSuppress:
 
 CONDITION_EVALUATOR_PATH = (
     PROJECT_ROOT
-    / "ryeos" / "bundles" / "standard" / "ryeos_std" / ".ai" / "tools" / "rye" / "agent" / "threads"
-    / "loaders" / "condition_evaluator.py"
+    / "ryeos"
+    / "bundles"
+    / "standard"
+    / "ryeos_std"
+    / ".ai"
+    / "tools"
+    / "rye"
+    / "agent"
+    / "threads"
+    / "loaders"
+    / "condition_evaluator.py"
 )
-_cespec = importlib.util.spec_from_file_location("condition_evaluator", CONDITION_EVALUATOR_PATH)
+_cespec = importlib.util.spec_from_file_location(
+    "condition_evaluator", CONDITION_EVALUATOR_PATH
+)
 _cond_mod = importlib.util.module_from_spec(_cespec)
 _cespec.loader.exec_module(_cond_mod)
 
@@ -857,7 +978,9 @@ class TestConditionalHookDispatch:
                 },
             },
         ]
-        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+        harness = SafetyHarness(
+            "t", {"turns": 10}, hooks, tmp_path, directive_name="test"
+        )
         dispatched = []
 
         class MockDispatcher:
@@ -866,7 +989,8 @@ class TestConditionalHookDispatch:
                 return {"status": "success", "content": "web identity content"}
 
         await harness.run_hooks_context(
-            {"directive": "rye/web/browser"}, MockDispatcher(),
+            {"directive": "rye/web/browser"},
+            MockDispatcher(),
             event="build_system_prompt",
         )
         assert "project/identities/web-agent" in dispatched
@@ -888,7 +1012,9 @@ class TestConditionalHookDispatch:
                 },
             },
         ]
-        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+        harness = SafetyHarness(
+            "t", {"turns": 10}, hooks, tmp_path, directive_name="test"
+        )
         dispatched = []
 
         class MockDispatcher:
@@ -897,7 +1023,8 @@ class TestConditionalHookDispatch:
                 return {"status": "success", "content": "web identity content"}
 
         await harness.run_hooks_context(
-            {"directive": "rye/core/deploy"}, MockDispatcher(),
+            {"directive": "rye/core/deploy"},
+            MockDispatcher(),
             event="build_system_prompt",
         )
         assert dispatched == []
@@ -950,19 +1077,27 @@ class TestConditionalHookDispatch:
                 },
             },
         ]
-        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+        harness = SafetyHarness(
+            "t", {"turns": 10}, hooks, tmp_path, directive_name="test"
+        )
 
         class MockDispatcher:
             def __init__(self):
                 self.dispatched = []
+
             async def dispatch(self, action, **kwargs):
                 self.dispatched.append(action.get("item_id", ""))
-                return {"status": "success", "content": f"content for {action.get('item_id')}"}
+                return {
+                    "status": "success",
+                    "content": f"content for {action.get('item_id')}",
+                }
 
         # Web directive → only web identity fires
         d1 = MockDispatcher()
         await harness.run_hooks_context(
-            {"directive": "rye/web/browser"}, d1, event="build_system_prompt",
+            {"directive": "rye/web/browser"},
+            d1,
+            event="build_system_prompt",
         )
         assert "project/identities/web-agent" in d1.dispatched
         assert "rye/agent/core/identity" not in d1.dispatched
@@ -971,7 +1106,9 @@ class TestConditionalHookDispatch:
         # Deploy directive → only deploy identity fires
         d2 = MockDispatcher()
         await harness.run_hooks_context(
-            {"directive": "project/deploy/staging"}, d2, event="build_system_prompt",
+            {"directive": "project/deploy/staging"},
+            d2,
+            event="build_system_prompt",
         )
         assert "project/identities/deploy-agent" in d2.dispatched
         assert "rye/agent/core/identity" not in d2.dispatched
@@ -979,7 +1116,9 @@ class TestConditionalHookDispatch:
         # Other directive → only default identity fires
         d3 = MockDispatcher()
         await harness.run_hooks_context(
-            {"directive": "rye/core/init"}, d3, event="build_system_prompt",
+            {"directive": "rye/core/init"},
+            d3,
+            event="build_system_prompt",
         )
         assert "rye/agent/core/identity" in d3.dispatched
         assert "project/identities/web-agent" not in d3.dispatched
@@ -1007,7 +1146,9 @@ class TestContextHookIntegrityAbort:
                 },
             },
         ]
-        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+        harness = SafetyHarness(
+            "t", {"turns": 10}, hooks, tmp_path, directive_name="test"
+        )
 
         class MockDispatcher:
             async def dispatch(self, action, **kwargs):
@@ -1019,7 +1160,8 @@ class TestContextHookIntegrityAbort:
 
         with pytest.raises(RuntimeError):
             await harness.run_hooks_context(
-                {"directive": "test"}, MockDispatcher(),
+                {"directive": "test"},
+                MockDispatcher(),
                 event="build_system_prompt",
             )
 
@@ -1050,7 +1192,9 @@ class TestContextHookIntegrityAbort:
                 },
             },
         ]
-        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+        harness = SafetyHarness(
+            "t", {"turns": 10}, hooks, tmp_path, directive_name="test"
+        )
 
         class MockDispatcher:
             async def dispatch(self, action, **kwargs):
@@ -1060,7 +1204,8 @@ class TestContextHookIntegrityAbort:
 
         # Should not raise — the first hook fails gracefully, the second succeeds
         results = await harness.run_hooks_context(
-            {"directive": "test"}, MockDispatcher(),
+            {"directive": "test"},
+            MockDispatcher(),
             event="build_system_prompt",
         )
         # The good hook's content should appear in the "after" bucket
@@ -1082,7 +1227,9 @@ class TestContextHookIntegrityAbort:
                 },
             },
         ]
-        harness = SafetyHarness("t", {"turns": 10}, hooks, tmp_path, directive_name="test")
+        harness = SafetyHarness(
+            "t", {"turns": 10}, hooks, tmp_path, directive_name="test"
+        )
 
         class MockDispatcher:
             async def dispatch(self, action, **kwargs):
@@ -1094,7 +1241,8 @@ class TestContextHookIntegrityAbort:
 
         with pytest.raises(RuntimeError, match="verified_loader") as exc_info:
             await harness.run_hooks_context(
-                {"directive": "test"}, MockDispatcher(),
+                {"directive": "test"},
+                MockDispatcher(),
                 event="build_system_prompt",
             )
         assert "secure/config" in str(exc_info.value)
@@ -1102,7 +1250,9 @@ class TestContextHookIntegrityAbort:
 
 # ── ConfigLoader merge-by-id for hook overrides ──────────────────────
 
-CONFIG_LOADER_PATH = get_bundle_path('standard', 'tools/rye/agent/threads/loaders/config_loader.py')
+CONFIG_LOADER_PATH = get_bundle_path(
+    "standard", "tools/rye/agent/threads/loaders/config_loader.py"
+)
 _clspec = importlib.util.spec_from_file_location("config_loader", CONFIG_LOADER_PATH)
 _config_mod = importlib.util.module_from_spec(_clspec)
 _clspec.loader.exec_module(_config_mod)
@@ -1120,15 +1270,24 @@ class TestConfigMergeForHookOverrides:
         """Project hook with same ID replaces the system hook."""
         loader = _config_mod.ConfigLoader("test.yaml")
         base = [
-            {"id": "system_identity", "event": "build_system_prompt",
-             "action": {"item_id": "rye/agent/core/identity"}},
-            {"id": "system_behavior", "event": "build_system_prompt",
-             "action": {"item_id": "rye/agent/core/behavior"}},
+            {
+                "id": "system_identity",
+                "event": "build_system_prompt",
+                "action": {"item_id": "rye/agent/core/identity"},
+            },
+            {
+                "id": "system_behavior",
+                "event": "build_system_prompt",
+                "action": {"item_id": "rye/agent/core/behavior"},
+            },
         ]
         override = [
-            {"id": "system_identity", "event": "build_system_prompt",
-             "condition": {"path": "directive", "op": "contains", "value": "web"},
-             "action": {"item_id": "project/identities/web-agent"}},
+            {
+                "id": "system_identity",
+                "event": "build_system_prompt",
+                "condition": {"path": "directive", "op": "contains", "value": "web"},
+                "action": {"item_id": "project/identities/web-agent"},
+            },
         ]
         result = loader._merge_list_by_id(base, override)
         # system_identity should be replaced
@@ -1143,13 +1302,19 @@ class TestConfigMergeForHookOverrides:
         """Project hooks with new IDs are appended."""
         loader = _config_mod.ConfigLoader("test.yaml")
         base = [
-            {"id": "system_identity", "event": "build_system_prompt",
-             "action": {"item_id": "rye/agent/core/identity"}},
+            {
+                "id": "system_identity",
+                "event": "build_system_prompt",
+                "action": {"item_id": "rye/agent/core/identity"},
+            },
         ]
         override = [
-            {"id": "project_deploy_context", "event": "thread_started",
-             "condition": {"path": "directive", "op": "contains", "value": "deploy"},
-             "action": {"item_id": "project/deploy/rules"}},
+            {
+                "id": "project_deploy_context",
+                "event": "thread_started",
+                "condition": {"path": "directive", "op": "contains", "value": "deploy"},
+                "action": {"item_id": "project/deploy/rules"},
+            },
         ]
         result = loader._merge_list_by_id(base, override)
         assert len(result) == 2
@@ -1167,7 +1332,7 @@ class TestConfigMergeForHookOverrides:
         ]
         override = [
             {"id": "b", "order": 99},  # replace
-            {"id": "d", "order": 4},   # new
+            {"id": "d", "order": 4},  # new
         ]
         result = loader._merge_list_by_id(base, override)
         assert [h["id"] for h in result] == ["a", "b", "c", "d"]
@@ -1175,6 +1340,7 @@ class TestConfigMergeForHookOverrides:
 
 
 # ── ConfigLoader three-tier cascade (system → user → project) ────────
+
 
 class TestConfigLoaderThreeTierCascade:
     """Test that ConfigLoader.load() cascades system → user → project."""
@@ -1204,7 +1370,9 @@ class TestConfigLoaderThreeTierCascade:
         user_dir = tmp_path / "user_home" / ".ai"
         monkeypatch.setattr(_config_mod, "get_user_ai_path", lambda: user_dir)
 
-        self._write_yaml(user_dir / "config" / "agent" / "test.yaml", {"custom_key": "from_user"})
+        self._write_yaml(
+            user_dir / "config" / "agent" / "test.yaml", {"custom_key": "from_user"}
+        )
 
         bundle = self._make_bundle(tmp_path, {"base_key": "from_system"})
         monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
@@ -1221,16 +1389,22 @@ class TestConfigLoaderThreeTierCascade:
         user_dir = tmp_path / "user_home" / ".ai"
         monkeypatch.setattr(_config_mod, "get_user_ai_path", lambda: user_dir)
 
-        self._write_yaml(user_dir / "config" / "agent" / "test.yaml", {
-            "value": "user",
-            "user_only": True,
-        })
+        self._write_yaml(
+            user_dir / "config" / "agent" / "test.yaml",
+            {
+                "value": "user",
+                "user_only": True,
+            },
+        )
 
         project_path = tmp_path / "project"
-        self._write_yaml(project_path / ".ai" / "config" / "agent" / "test.yaml", {
-            "value": "project",
-            "project_only": True,
-        })
+        self._write_yaml(
+            project_path / ".ai" / "config" / "agent" / "test.yaml",
+            {
+                "value": "project",
+                "project_only": True,
+            },
+        )
 
         bundle = self._make_bundle(tmp_path, {"value": "system", "system_only": True})
         monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
@@ -1247,14 +1421,20 @@ class TestConfigLoaderThreeTierCascade:
         user_dir = tmp_path / "user_home" / ".ai"
         monkeypatch.setattr(_config_mod, "get_user_ai_path", lambda: user_dir)
 
-        self._write_yaml(user_dir / "config" / "agent" / "test.yaml", {
-            "shared": "user_value",
-        })
+        self._write_yaml(
+            user_dir / "config" / "agent" / "test.yaml",
+            {
+                "shared": "user_value",
+            },
+        )
 
         project_path = tmp_path / "project"
-        self._write_yaml(project_path / ".ai" / "config" / "agent" / "test.yaml", {
-            "shared": "project_value",
-        })
+        self._write_yaml(
+            project_path / ".ai" / "config" / "agent" / "test.yaml",
+            {
+                "shared": "project_value",
+            },
+        )
 
         bundle = self._make_bundle(tmp_path, {"shared": "system_value"})
         monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])
@@ -1270,9 +1450,12 @@ class TestConfigLoaderThreeTierCascade:
         # No user config file created
 
         project_path = tmp_path / "project"
-        self._write_yaml(project_path / ".ai" / "config" / "agent" / "test.yaml", {
-            "project_key": "present",
-        })
+        self._write_yaml(
+            project_path / ".ai" / "config" / "agent" / "test.yaml",
+            {
+                "project_key": "present",
+            },
+        )
 
         bundle = self._make_bundle(tmp_path, {"system_key": "present"})
         monkeypatch.setattr(_config_mod, "get_system_spaces", lambda: [bundle])

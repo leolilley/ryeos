@@ -3,7 +3,7 @@
 Consolidates spawn plumbing used by walker (core bundle) and
 thread_directive (standard bundle) into a single engine-layer helper.
 
-Uses SubprocessPrimitive.spawn() (lillux-proc) for cross-platform
+Uses ExecutePrimitive.spawn() (lillux) for cross-platform
 detached process spawning with session isolation.
 
 ``spawn_thread()`` is the high-level lifecycle helper that handles the
@@ -39,7 +39,7 @@ def generate_thread_id(item_id: str) -> str:
     return f"{item_id}/{bare_name}-{epoch_ms}-{os.getpid()}-{secrets.token_hex(2)}"
 
 # Env var prefixes forwarded to detached child processes.
-# lillux-proc daemonizes with a clean env — only explicitly passed vars survive.
+# lillux daemonizes with a clean env — only explicitly passed vars survive.
 _FORWARD_PREFIXES = (
     "PYTHON", "RYE_", "USER_SPACE", "ZEN_",
     "ANTHROPIC_", "OPENAI_", "GOOGLE_", "CONTEXT7_",
@@ -76,7 +76,7 @@ async def launch_detached(
     env_extra: Optional[Dict[str, str]] = None,
     input_data: Optional[str] = None,
 ) -> Dict:
-    """Spawn a detached child process via lillux-proc.
+    """Spawn a detached child process via lillux.
 
     Args:
         cmd: Command list (e.g. [sys.executable, script, "--flag", ...]).
@@ -89,14 +89,14 @@ async def launch_detached(
         Dict with ``success``, ``pid``, and optional ``error``.
     """
     try:
-        from rye.primitives.subprocess import SubprocessPrimitive
+        from rye.primitives.execute import ExecutePrimitive
 
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "spawn.log"
 
         envs = collect_env(env_extra)
 
-        proc = SubprocessPrimitive()
+        proc = ExecutePrimitive()
         result = await proc.spawn(
             cmd=cmd[0],
             args=cmd[1:],

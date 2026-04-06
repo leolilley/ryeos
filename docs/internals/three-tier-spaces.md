@@ -244,10 +244,10 @@ Each bundle gets a space label like `system:ryeos-core` or `system:my-tools`.
 
 1. Pull the bundle from the registry (`pull_bundle`)
 2. Materialize items into the target space's `.ai/tools/`, `.ai/directives/`, `.ai/knowledge/`, etc.
-3. Write a lockfile at `.ai/bundles/{bundle_id}/.bundle-lock.json`
+3. Write an install receipt at `.ai/bundles/{bundle_id}/install-receipt.json`
 4. Verify bundle signatures via the bundler
 
-### Lockfile Format
+### Install Receipt Format
 
 ```json
 {
@@ -264,7 +264,7 @@ Each bundle gets a space label like `system:ryeos-core` or `system:my-tools`.
 
 ### Uninstallation
 
-`rye uninstall <bundle_id>` reads the lockfile, removes each listed file, cleans up empty parent directories, and removes the bundle metadata directory.
+`rye uninstall <bundle_id>` reads the install receipt, removes each listed file, cleans up empty parent directories, and removes the bundle metadata directory.
 
 ### Key Design Decision
 
@@ -272,7 +272,7 @@ Items are NOT placed inside a nested `.ai/` under `.ai/bundles/`. Instead, they'
 
 - Normal space resolution finds them without any bundle-aware logic
 - No changes to resolvers, executors, or the signing system
-- Bundle metadata (manifest + lockfile) lives at `.ai/bundles/{bundle_id}/`
+- Bundle metadata (manifest + install receipt) lives at `.ai/bundles/{bundle_id}/`
 
 ## Space Compatibility in Executor Chains
 

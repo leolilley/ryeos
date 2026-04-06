@@ -34,7 +34,7 @@ _ce_spec.loader.exec_module(_ce)
 # Fixtures
 # ---------------------------------------------------------------------------
 
-SAMPLE_TOOL = '''\
+SAMPLE_TOOL = """\
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "test/tools"
@@ -54,16 +54,16 @@ CONFIG_SCHEMA = {
     },
     "required": ["command"],
 }
-'''
+"""
 
-SAMPLE_TOOL_NO_SCHEMA = '''\
+SAMPLE_TOOL_NO_SCHEMA = """\
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __tool_description__ = "No schema tool"
 
 def execute(params, project_path):
     return {"success": True}
-'''
+"""
 
 
 @pytest.fixture
@@ -95,12 +95,17 @@ def tool_project(tmp_path):
 # Phase 1: tool_schema_loader
 # ---------------------------------------------------------------------------
 
+
 class TestClassifyCapability:
     def test_execute_tool_cap(self):
         r = _tsl._classify_capability("rye.execute.tool.rye.bash.*")
         assert r == {"action": "execute", "sub_type": "tool", "pattern": "rye/bash/*"}
         r = _tsl._classify_capability("rye.execute.tool.rye.file-system.read")
-        assert r == {"action": "execute", "sub_type": "tool", "pattern": "rye/file-system/read"}
+        assert r == {
+            "action": "execute",
+            "sub_type": "tool",
+            "pattern": "rye/file-system/read",
+        }
 
     def test_fetch_wildcard(self):
         r = _tsl._classify_capability("rye.fetch.*")
@@ -131,7 +136,9 @@ class TestPatternSpecificity:
         assert _tsl._pattern_specificity("rye/file-system/*") < 1000
 
     def test_deeper_wildcard_beats_shallow(self):
-        assert _tsl._pattern_specificity("rye/file-system/*") > _tsl._pattern_specificity("rye/*")
+        assert _tsl._pattern_specificity(
+            "rye/file-system/*"
+        ) > _tsl._pattern_specificity("rye/*")
 
 
 _DEFAULT_PARSERS_MAP = {".py": "python/ast", ".yaml": "yaml/yaml", ".yml": "yaml/yaml"}
@@ -145,7 +152,9 @@ class TestExtractToolMetadata:
         tool_file = tmp_path / "test_tool.py"
         tool_file.write_text(SAMPLE_TOOL)
 
-        meta = _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP)
+        meta = _tsl._extract_tool_metadata(
+            tool_file, self._router(), _DEFAULT_PARSERS_MAP
+        )
         assert meta is not None
         assert meta["description"] == "Run bash commands"
         assert "command" in meta["schema"]["properties"]
@@ -154,12 +163,18 @@ class TestExtractToolMetadata:
     def test_returns_none_without_schema(self, tmp_path):
         tool_file = tmp_path / "no_schema.py"
         tool_file.write_text(SAMPLE_TOOL_NO_SCHEMA)
-        assert _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP) is None
+        assert (
+            _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP)
+            is None
+        )
 
     def test_returns_none_for_syntax_error(self, tmp_path):
         tool_file = tmp_path / "bad.py"
         tool_file.write_text("def broken(:\n")
-        assert _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP) is None
+        assert (
+            _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP)
+            is None
+        )
 
     def test_extracts_yaml_tool(self, tmp_path):
         tool_file = tmp_path / "my_tool.yaml"
@@ -172,7 +187,9 @@ class TestExtractToolMetadata:
             "  - name: verbose\n"
             "    type: boolean\n"
         )
-        meta = _tsl._extract_tool_metadata(tool_file, self._router(), _DEFAULT_PARSERS_MAP)
+        meta = _tsl._extract_tool_metadata(
+            tool_file, self._router(), _DEFAULT_PARSERS_MAP
+        )
         assert meta is not None
         assert meta["description"] == "My YAML tool"
         assert "target" in meta["schema"]["properties"]
@@ -202,35 +219,51 @@ class TestFormatToolSignature:
         assert "count*" not in sig
 
 
-_MOCK_PRIMARY_ACTIONS = [{
-    "name": "rye_execute",
-    "_item_id": "rye/execute",
-    "schema": {"type": "object", "properties": {
-        "item_type": {"type": "string"},
-        "item_id": {"type": "string"},
-        "parameters": {"type": "object"},
-        "dry_run": {"type": "boolean"},
-    }, "required": ["item_type", "item_id"]},
-    "description": "Run a Rye item",
-}, {
-    "name": "rye_fetch",
-    "_item_id": "rye/fetch",
-    "schema": {"type": "object", "properties": {
-        "query": {"type": "string"},
-        "scope": {"type": "string"},
-        "item_type": {"type": "string"},
-        "item_id": {"type": "string"},
-    }, "required": ["query", "scope"]},
-    "description": "Find items by ID or discover by query",
-}, {
-    "name": "rye_sign",
-    "_item_id": "rye/sign",
-    "schema": {"type": "object", "properties": {
-        "item_type": {"type": "string"},
-        "item_id": {"type": "string"},
-    }, "required": ["item_type", "item_id"]},
-    "description": "Validate and sign",
-}]
+_MOCK_PRIMARY_ACTIONS = [
+    {
+        "name": "rye_execute",
+        "_item_id": "rye/execute",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "item_type": {"type": "string"},
+                "item_id": {"type": "string"},
+                "parameters": {"type": "object"},
+                "dry_run": {"type": "boolean"},
+            },
+            "required": ["item_type", "item_id"],
+        },
+        "description": "Run a Rye item",
+    },
+    {
+        "name": "rye_fetch",
+        "_item_id": "rye/fetch",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "scope": {"type": "string"},
+                "item_type": {"type": "string"},
+                "item_id": {"type": "string"},
+            },
+            "required": ["query", "scope"],
+        },
+        "description": "Find items by ID or discover by query",
+    },
+    {
+        "name": "rye_sign",
+        "_item_id": "rye/sign",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "item_type": {"type": "string"},
+                "item_id": {"type": "string"},
+            },
+            "required": ["item_type", "item_id"],
+        },
+        "description": "Validate and sign",
+    },
+]
 
 
 def _tool_names(tool_defs):
@@ -246,12 +279,18 @@ def _tool_ids(tool_defs):
 class TestPreloadToolSchemas:
     def test_preloads_matching_tools(self, tool_project):
         from unittest.mock import patch
+
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
-        with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
                     result = _tsl.preload_tool_schemas(
-                        ["rye.execute.tool.rye.bash.*"], tool_project,
+                        ["rye.execute.tool.rye.bash.*"],
+                        tool_project,
                         primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
@@ -259,14 +298,17 @@ class TestPreloadToolSchemas:
         ids = _tool_ids(result["tool_defs"])
         assert "rye/bash/bash" in ids
         # Tool should have _primary="execute" and flattened name
-        bash_def = [t for t in result["tool_defs"] if t["_item_id"] == "rye/bash/bash"][0]
+        bash_def = [t for t in result["tool_defs"] if t["_item_id"] == "rye/bash/bash"][
+            0
+        ]
         assert bash_def["name"] == "rye_bash_bash"
         assert bash_def["_primary"] == "execute"
 
     def test_non_tool_caps_without_primary_actions(self, tool_project):
         """Without primary_actions arg, fetch/sign caps produce no output."""
         result = _tsl.preload_tool_schemas(
-            ["rye.fetch.*", "rye.fetch.knowledge.*"], tool_project,
+            ["rye.fetch.*", "rye.fetch.knowledge.*"],
+            tool_project,
         )
         assert result["tool_defs"] == []
         assert result["capabilities_summary"] == []
@@ -278,13 +320,22 @@ class TestPreloadToolSchemas:
 
     def test_token_budget_limits_output(self, tool_project):
         from unittest.mock import patch
+
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
-        with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
                     result = _tsl.preload_tool_schemas(
-                        ["rye.execute.tool.rye.bash.*", "rye.execute.tool.rye.file-system.*"],
-                        tool_project, max_tokens=10,
+                        [
+                            "rye.execute.tool.rye.bash.*",
+                            "rye.execute.tool.rye.file-system.*",
+                        ],
+                        tool_project,
+                        max_tokens=10,
                         primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
@@ -293,12 +344,18 @@ class TestPreloadToolSchemas:
 
     def test_exact_tool_reference(self, tool_project):
         from unittest.mock import patch
+
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
-        with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
                     result = _tsl.preload_tool_schemas(
-                        ["rye.execute.tool.rye.file-system.read"], tool_project,
+                        ["rye.execute.tool.rye.file-system.read"],
+                        tool_project,
                         primary_actions=_MOCK_PRIMARY_ACTIONS,
                     )
 
@@ -308,10 +365,15 @@ class TestPreloadToolSchemas:
     def test_deduplicates_across_patterns(self, tool_project):
         """Same tool matched by wildcard and exact cap appears only once."""
         from unittest.mock import patch
+
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
-        with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
                     result = _tsl.preload_tool_schemas(
                         [
                             "rye.execute.tool.rye.bash.bash",
@@ -327,10 +389,15 @@ class TestPreloadToolSchemas:
     def test_primary_actions_registered_with_correct_primary(self, tool_project):
         """Primary actions (fetch, sign) get _primary matching their action."""
         from unittest.mock import patch
+
         mock_paths = [(tool_project / ".ai" / "tools", "project")]
-        with patch.object(_tsl.ToolResolver, "get_search_paths", return_value=mock_paths):
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
             with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
-                with patch.object(_tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
                     result = _tsl.preload_tool_schemas(
                         ["rye.execute.tool.rye.bash.*", "rye.fetch.*"],
                         tool_project,
@@ -347,6 +414,7 @@ class TestPreloadToolSchemas:
 # ---------------------------------------------------------------------------
 # Phase 2: resolve_extends hook conditions
 # ---------------------------------------------------------------------------
+
 
 class TestResolveExtendsConditions:
     def test_has_extends_false_matches(self):
@@ -382,6 +450,7 @@ class TestResolveExtendsConditions:
 # Phase 3: base directives and decomposed protocol
 # ---------------------------------------------------------------------------
 
+
 class TestBaseDirectives:
     def test_base_has_full_permissions_and_protocol(self):
         path = _STD_ROOT / ".ai" / "directives" / "rye" / "agent" / "core" / "base.md"
@@ -394,7 +463,15 @@ class TestBaseDirectives:
         assert "rye/agent/core/Behavior" in content
 
     def test_base_execute_only_is_narrow(self):
-        path = _STD_ROOT / ".ai" / "directives" / "rye" / "agent" / "core" / "base_execute_only.md"
+        path = (
+            _STD_ROOT
+            / ".ai"
+            / "directives"
+            / "rye"
+            / "agent"
+            / "core"
+            / "base_execute_only.md"
+        )
         assert path.exists()
         content = path.read_text()
         assert "<execute>*</execute>" in content
@@ -403,7 +480,15 @@ class TestBaseDirectives:
         assert "rye/agent/core/protocol/search" not in content
 
     def test_base_review_has_read_only_tools(self):
-        path = _STD_ROOT / ".ai" / "directives" / "rye" / "agent" / "core" / "base_review.md"
+        path = (
+            _STD_ROOT
+            / ".ai"
+            / "directives"
+            / "rye"
+            / "agent"
+            / "core"
+            / "base_review.md"
+        )
         assert path.exists()
         content = path.read_text()
         assert "rye.file-system.read" in content
@@ -414,7 +499,9 @@ class TestBaseDirectives:
 
 class TestDecomposedProtocol:
     def test_all_protocol_items_exist(self):
-        proto_dir = _STD_ROOT / ".ai" / "knowledge" / "rye" / "agent" / "core" / "protocol"
+        proto_dir = (
+            _STD_ROOT / ".ai" / "knowledge" / "rye" / "agent" / "core" / "protocol"
+        )
         assert proto_dir.is_dir()
         for name in ("execute", "fetch", "sign"):
             path = proto_dir / f"{name}.md"
@@ -423,13 +510,22 @@ class TestDecomposedProtocol:
             assert f"rye_{name}" in content
 
     def test_original_tool_protocol_still_exists(self):
-        path = _STD_ROOT / ".ai" / "knowledge" / "rye" / "agent" / "core" / "ToolProtocol.md"
+        path = (
+            _STD_ROOT
+            / ".ai"
+            / "knowledge"
+            / "rye"
+            / "agent"
+            / "core"
+            / "ToolProtocol.md"
+        )
         assert path.exists()
 
 
 # ---------------------------------------------------------------------------
 # Phase 4: removed hooks
 # ---------------------------------------------------------------------------
+
 
 class TestHookConditionsPhase4:
     def test_removed_hooks_absent(self):

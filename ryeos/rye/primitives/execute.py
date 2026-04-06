@@ -1,4 +1,4 @@
-"""Subprocess execution primitive.
+"""Execute primitive.
 
 All process operations go through lillux. No POSIX fallbacks.
 """
@@ -17,8 +17,8 @@ from rye.errors import ConfigurationError
 
 
 @dataclass
-class SubprocessResult:
-    """Result of subprocess execution.
+class ExecuteResult:
+    """Result of execute primitive.
 
     Attributes:
         success: True if return code is 0.
@@ -80,7 +80,7 @@ class StatusResult:
     alive: bool
 
 
-class SubprocessPrimitive:
+class ExecutePrimitive:
     """All process operations go through lillux. No POSIX fallbacks."""
 
     def __init__(self):
@@ -105,8 +105,8 @@ class SubprocessPrimitive:
         self,
         config: Dict[str, Any],
         params: Dict[str, Any],
-    ) -> SubprocessResult:
-        """Execute subprocess command via lillux exec run.
+    ) -> ExecuteResult:
+        """Execute command via lillux exec run.
 
         Two-stage templating:
         1. Environment variable expansion: ${VAR:-default}
@@ -127,7 +127,7 @@ class SubprocessPrimitive:
             params: Runtime parameters for templating {param_name}
 
         Returns:
-            SubprocessResult with execution details.
+            ExecuteResult with execution details.
         """
         start_time = time.time()
 
@@ -161,7 +161,7 @@ class SubprocessPrimitive:
 
             # Validate command
             if not command:
-                return SubprocessResult(
+                return ExecuteResult(
                     success=False,
                     stdout="",
                     stderr="No command specified",
@@ -206,7 +206,7 @@ class SubprocessPrimitive:
                     proc.kill()
                     await proc.wait()
                     duration_ms = (time.time() - start_time) * 1000
-                    return SubprocessResult(
+                    return ExecuteResult(
                         success=False,
                         stdout="",
                         stderr=f"lillux wrapper timed out after {wrapper_timeout} seconds",
@@ -218,7 +218,7 @@ class SubprocessPrimitive:
                 if proc.returncode == 0 and stdout_bytes:
                     try:
                         data = json.loads(stdout_bytes.strip())
-                        return SubprocessResult(
+                        return ExecuteResult(
                             success=data.get("success", False),
                             stdout=data.get("stdout", ""),
                             stderr=data.get("stderr", ""),
@@ -230,7 +230,7 @@ class SubprocessPrimitive:
 
                 # lillux itself failed
                 duration_ms = (time.time() - start_time) * 1000
-                return SubprocessResult(
+                return ExecuteResult(
                     success=False,
                     stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
                     stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
@@ -240,7 +240,7 @@ class SubprocessPrimitive:
 
             except FileNotFoundError:
                 duration_ms = (time.time() - start_time) * 1000
-                return SubprocessResult(
+                return ExecuteResult(
                     success=False,
                     stdout="",
                     stderr=f"lillux not found: {self._lillux}",
@@ -250,7 +250,7 @@ class SubprocessPrimitive:
 
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
-            return SubprocessResult(
+            return ExecuteResult(
                 success=False,
                 stdout="",
                 stderr=str(e),

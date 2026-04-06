@@ -17,12 +17,10 @@ The bottom layer. Lillux provides stateless, async-first primitives for interact
 
 | Primitive             | Location                            | Purpose                                                                          |
 | --------------------- | ----------------------------------- | -------------------------------------------------------------------------------- |
-| `SubprocessPrimitive` | `lillux/primitives/subprocess.py`    | Run shell commands with two-stage templating, timeout handling, and stdin piping |
-| `HttpClientPrimitive` | `rye/runtime/http_client.py`         | Make HTTP requests with retry logic, auth headers, and SSE streaming             |
+| `ExecutePrimitive`    | `lillux/primitives/execute.py`       | Run shell commands with two-stage templating, timeout handling, and stdin piping |
 | `signing`             | `lillux/primitives/signing.py`       | Ed25519 key generation, sign, verify — pure crypto, no policy                    |
 | `integrity`           | `lillux/primitives/integrity.py`     | Generic deterministic SHA256 hashing via `compute_integrity(data)`               |
 | `cas`                 | `lillux/primitives/cas.py`           | Content-addressed storage — `store_blob`, `store_object`, sharded by hash        |
-| `lockfile`            | `rye/runtime/lockfile.py`            | Lockfile I/O — load/save JSON lockfiles with explicit paths                      |
 | `EnvResolver`         | `rye/runtime/env_resolver.py`        | Resolve environment variables from `.env` files, venvs, version managers         |
 | `SchemaValidator`     | `rye/schemas/schema_validator.py`    | JSON Schema validation                                                           |
 
@@ -42,7 +40,6 @@ Key components in this layer:
 | ------------------- | ------------------------------------ | ------------------------------------------------------------------------------------- |
 | `PrimitiveExecutor` | `rye/executor/primitive_executor.py` | Chain resolution, validation, caching, and execution routing                          |
 | `ChainValidator`    | `rye/executor/chain_validator.py`    | Space compatibility, I/O matching, version constraint checks                          |
-| `LockfileResolver`  | `rye/executor/lockfile_resolver.py`  | Three-tier lockfile resolution and management                                         |
 | `MetadataManager`   | `rye/utils/metadata_manager.py`      | Signature format handling, content hashing, signing                                   |
 | Resolvers           | `rye/utils/resolvers.py`             | `DirectiveResolver`, `ToolResolver`, `KnowledgeResolver` — three-tier path resolution |
 | `path_utils`        | `rye/utils/path_utils.py`            | Space paths, bundle discovery, category extraction                                    |
@@ -59,13 +56,13 @@ Runtimes are YAML files in `.ai/tools/rye/core/runtimes/` that configure how to 
 
 | Runtime                   | `executor_id`                     | Purpose                                                          |
 | ------------------------- | --------------------------------- | ---------------------------------------------------------------- |
-| `python/script`           | `rye/core/primitives/subprocess`  | Run Python scripts with venv resolution and PYTHONPATH anchoring |
-| `python/function`         | `rye/core/primitives/subprocess`  | Run Python functions via module loader                           |
-| `bash/bash`               | `rye/core/primitives/subprocess`  | Execute shell commands via `/bin/bash -c`                        |
-| `node/node`               | `rye/core/primitives/subprocess`  | Run Node.js scripts with `node_modules` resolution               |
-| `mcp/stdio`               | `rye/core/primitives/subprocess`  | Spawn MCP servers over stdio                                     |
-| `mcp/http`                | `rye/core/primitives/http_client` | Connect to MCP servers over HTTP/SSE                             |
-| `state-graph/runtime`     | `rye/core/primitives/subprocess`  | Walk declarative graph YAML tools, dispatching `rye_execute` for each node  |
+| `python/script`           | `rye/core/primitives/execute`  | Run Python scripts with venv resolution and PYTHONPATH anchoring |
+| `python/function`         | `rye/core/primitives/execute`  | Run Python functions via module loader                           |
+| `bash/bash`               | `rye/core/primitives/execute`  | Execute shell commands via `/bin/bash -c`                        |
+| `node/node`               | `rye/core/primitives/execute`  | Run Node.js scripts with `node_modules` resolution               |
+| `mcp/stdio`               | `rye/core/primitives/execute`  | Spawn MCP servers over stdio                                     |
+| `mcp/http`                | `rye/core/primitives/execute`  | Connect to MCP servers over HTTP/SSE                             |
+| `state-graph/runtime`     | `rye/core/primitives/execute`  | Walk declarative graph YAML tools, dispatching `rye_execute` for each node  |
 
 ### Tools
 
@@ -114,15 +111,11 @@ Integrity Verification
 Chain Validation
   │  Space compatibility, I/O matching, version constraints
   │
-  ▼  LockfileResolver.get_lockfile() / create_lockfile()
-Lockfile Check
-  │  Verify pinned hashes match current files
-  │
   ▼  EnvResolver.resolve() through chain
 Environment Resolution
   │  .env files, venv detection, interpreter paths, static vars
   │
-  ▼  _execute_chain() → SubprocessPrimitive.execute() or HttpClientPrimitive.execute()
+  ▼  _execute_chain() → ExecutePrimitive.execute()
 Lillux Primitive
   │  Two-stage templating: ${ENV_VAR} then {param}
   │
@@ -139,7 +132,7 @@ This means:
 - Adding a new runtime = creating a YAML file (no code changes to Rye)
 - Adding a new tool = creating a Python/JS/shell script with metadata headers
 - Overriding system behavior = placing a file in project space (shadows system space)
-- No hardcoded executor IDs in `PrimitiveExecutor` — only the two Lillux primitive mappings (`subprocess` and `http_client`) are registered in `PRIMITIVE_MAP`
+- No hardcoded executor IDs in `PrimitiveExecutor` — only one Lillux primitive mapping (`execute`) is registered in `PRIMITIVE_MAP`
 
 The only hardcoded knowledge in the system is the mapping from primitive IDs to Lillux classes. Everything above that is resolved from the filesystem at runtime.
 
@@ -149,4 +142,4 @@ Remote execution is a deployment mode — it runs the same executor and graph wa
 
 ## Package and Bundle Distribution
 
-The system is distributed as pip packages organized in a monorepo. `lillux` provides the microkernel (with `lillux-proc` as a hard dependency for process management and `lillux-watch` for file watching). The packages layer additively: `ryeos-engine` provides the engine with no `.ai/` data bundles. `ryeos-core` depends on `ryeos-engine` and adds the core runtimes, primitives, and extractors (`rye/core/*` items). `ryeos` depends on `ryeos-core` and adds the full standard `.ai/` bundle. `ryeos-web` and `ryeos-code` add optional data bundles for web and code tools respectively — installable via `pip install ryeos[web]` or `pip install ryeos[code]`. `ryeos-mcp` adds MCP transport. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.
+The system is distributed as pip packages organized in a monorepo. `lillux` provides the microkernel (with the `lillux` Rust binary as a hard dependency for process management). The packages layer additively: `ryeos-engine` provides the engine with no `.ai/` data bundles. `ryeos-core` depends on `ryeos-engine` and adds the core runtimes, primitives, and extractors (`rye/core/*` items). `ryeos` depends on `ryeos-core` and adds the full standard `.ai/` bundle. `ryeos-web` and `ryeos-code` add optional data bundles for web and code tools respectively — installable via `pip install ryeos[web]` or `pip install ryeos[code]`. `ryeos-mcp` adds MCP transport. See [Packages and Bundles](packages-and-bundles.md) for the full breakdown.

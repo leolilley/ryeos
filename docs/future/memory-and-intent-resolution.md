@@ -31,7 +31,7 @@ Before describing what this proposal adds, here's the infrastructure it builds o
 | -------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Thread continuation        | `coordination.yaml` (`trigger_threshold: 0.9`)                  | At 90% context window, hands off to a new thread with a structured summary                                                                                                                                                                                                                                                       |
 | `thread_summary` directive | `rye/agent/threads/thread_summary.md`                           | Generates summaries with four sections: Completed Work, Pending Work, Key Decisions & Context, Tool Results                                                                                                                                                                                                                      |
-| Transcript persistence     | `.ai/agent/threads/{thread_id}/transcript.jsonl`                      | Full JSONL transcripts stored per thread                                                                                                                                                                                                                                                                                         |
+| Transcript persistence     | `.ai/state/threads/{thread_id}/transcript.jsonl`                      | Full JSONL transcripts stored per thread                                                                                                                                                                                                                                                                                         |
 | Thread registry            | `thread_registry.py` (SQLite)                                   | Tracks `thread_id`, `directive`, `model`, `status`, `parent_id`, `continuation_of`, `continuation_thread_id`, `chain_root_id`, `turns`, `input_tokens`, `output_tokens`, `spend`                                                                                                                                                 |
 | `thread_chain_search`      | `rye/agent/threads/internal/thread_chain_search.py`             | Regex search across JSONL transcripts within a single delegation tree (resolves ancestry via registry)                                                                                                                                                                                                                           |
 | `walker`       | `rye/core/runtimes/walker.py`                       | Follows `continuation_of` links to retrieve results from continued threads                                                                                                                                                                                                                                                       |
@@ -41,7 +41,7 @@ Before describing what this proposal adds, here's the infrastructure it builds o
 | Three MCP tools            | `fetch`, `execute`, `sign`                                      | The entire agent-facing interface                                                                                                                                                                                                                                                                                                |
 | Capability attenuation     | fnmatch patterns (e.g., `rye.execute.tool.rye.bash`)       | Granular permission control                                                                                                                                                                                                                                                                                                      |
 | Three-tier spaces          | project → user → system with shadow-override                    | Resolution precedence for all items                                                                                                                                                                                                                                                                                              |
-| Lillux primitives           | `subprocess`, `http_client`, `signing`, `integrity`, `lockfile` | The full set of OS-level primitives — no embedding primitive exists today                                                                                                                                                                                                                                                        |
+| Lillux primitives           | `execute`, `signing`, `integrity`, `cas`                        | The full set of OS-level primitives — no embedding primitive exists today                                                                                                                                                                                                                                                        |
 
 ---
 
@@ -51,7 +51,7 @@ Before describing what this proposal adds, here's the infrastructure it builds o
 
 Rye already handles context exhaustion gracefully — at 90% of the context window, a thread hands off to a continuation with a summary. `thread_chain_search` already provides regex search across transcripts within a single delegation tree. `walker` follows `continuation_of` links to retrieve results from continued threads.
 
-What none of this does is let any thread recall semantically relevant work from _past, unrelated_ threads — whether its own or another agent's. That history exists in `.ai/agent/threads/*/transcript.jsonl` but is dark once a delegation tree is complete. Agents can't see across thread tree boundaries at all.
+What none of this does is let any thread recall semantically relevant work from _past, unrelated_ threads — whether its own or another agent's. That history exists in `.ai/state/threads/*/transcript.jsonl` but is dark once a delegation tree is complete. Agents can't see across thread tree boundaries at all.
 
 Over time this means agents repeat work that's already been done, lose nuance established in earlier sessions, and can't draw on the collective experience of the entire agent ecosystem even when it's directly applicable.
 
@@ -166,7 +166,7 @@ Both retrieval tools are standard Rye data-driven Python tools — signed, versi
 
 #### New Lillux Primitive Required
 
-Lillux currently has five primitives: `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`. This proposal requires a sixth:
+Lillux currently has primitives: `execute`, `signing`, `integrity`, `cas`. This proposal requires a new one:
 
 - **`embedding`** — a new Lillux primitive for computing embeddings, following the same pattern as `http_client` (stateless, configurable, OS-level capability)
 
@@ -487,7 +487,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 
 | Component                         | What It Requires                                                                                       |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Embedding primitive               | New Lillux primitive (sixth, alongside `subprocess`, `http_client`, `signing`, `integrity`, `lockfile`) |
+| Embedding primitive               | New Lillux primitive (alongside `execute`, `signing`, `integrity`, `cas`) |
 | Shared thread embedding store     | New persistent store under `.ai/tools/rye/memory/thread_store/`                                        |
 | Registry metadata embedding index | New index built at sign time, complements existing BM25 index in `rye_fetch`                           |
 | ryeos-cli parser                  | **Conditional** — if the small model targets CLI strings ([Option A](#output-format--open-question)), the [ryeos-cli](ryeos-cli.md) parser becomes a prerequisite. If it targets structured JSON (Option B), the parser is not in the critical path. |
@@ -518,7 +518,7 @@ This would require a **new hook event type** — `on_token_buffer` does not exis
 | Three MCP tools (`fetch`, `execute`, `sign`)          | Agent-facing interface                              | Same interface, no changes                                     |
 | Capability attenuation (fnmatch patterns)            | Thread memory permissions use the same model        | No new permission concepts                                     |
 | Space resolution (project → user → system)           | Three-tier shadow-override                          | Unchanged                                                      |
-| Ed25519 signing, lockfiles, chain verification       | Lillux `signing`, `integrity`, `lockfile` primitives | Unchanged                                                      |
+| Ed25519 signing, chain verification                  | Lillux `signing`, `integrity` primitives             | Unchanged                                                      |
 | Thread orchestration and budget cascading            | `orchestrator.py`, `coordination.yaml`              | Unchanged                                                      |
 | `thread_chain_search`                                | `rye/agent/threads/internal/thread_chain_search.py` | Unchanged — new `thread_search` extends it, doesn't replace it |
 | `rye_fetch` (BM25 + fuzzy)                           | `ryeos/rye/actions/_fetch.py`                       | Unchanged — RAG index complements it, doesn't replace it       |

@@ -2,7 +2,7 @@
 
 Installed bundles merge their items into the top-level .ai/ space
 (e.g. ~/.ai/tools/, {project}/.ai/tools/). The bundles/ dir under .ai/
-only holds metadata (manifest.yaml, .bundle-lock.json).
+only holds metadata (manifest.yaml, install-receipt.json).
 
 Items from installed bundles are discoverable via the normal project/user
 space resolution — no special bundle scanning needed.
@@ -42,7 +42,7 @@ class TestInstalledBundleResolution:
         bundle_meta = project / AI_DIR / "bundles" / "proj-bundle"
         bundle_meta.mkdir(parents=True)
         (bundle_meta / "manifest.yaml").write_text("bundle_id: proj-bundle\n")
-        (bundle_meta / ".bundle-lock.json").write_text('{"files": []}')
+        (bundle_meta / "install-receipt.json").write_text('{"files": []}')
 
         # User space: items merged from a bundle
         (user / AI_DIR / "tools").mkdir(parents=True)

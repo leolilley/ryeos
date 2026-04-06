@@ -21,12 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from rye.primitives.subprocess import SubprocessPrimitive, SubprocessResult
-from rye.runtime.http_client import HttpClientPrimitive, HttpResult
+from rye.primitives.execute import ExecutePrimitive, ExecuteResult
 from rye.runtime.env_resolver import EnvResolver
 
 from rye.executor.chain_validator import ChainValidator, ChainValidationResult
-from rye.executor.lockfile_resolver import LockfileResolver
 from rye.utils.extensions import get_tool_extensions, get_parsers_map
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.metadata_manager import MetadataManager
@@ -92,8 +90,7 @@ class PrimitiveExecutor:
 
     # Primitive ID to Lillux primitive class mapping (full path IDs)
     PRIMITIVE_MAP = {
-        "rye/core/primitives/subprocess": SubprocessPrimitive,
-        "rye/core/primitives/http_client": HttpClientPrimitive,
+        "rye/core/primitives/execute": ExecutePrimitive,
     }
 
     def __init__(
@@ -127,19 +124,10 @@ class PrimitiveExecutor:
             self.system_spaces = self._get_system_spaces()
         # Use first bundle's root_path as the legacy system_space
         self.system_space = self.system_spaces[0].root_path
-        # Index bundles by ID for lockfile provenance lookups
-        self._bundle_by_id: Dict[str, BundleInfo] = {
-            b.bundle_id: b for b in self.system_spaces
-        }
 
         self.env_resolver = EnvResolver(project_path=self.project_path)
         self.parser_router = ParserRouter(project_path=self.project_path)
         self.chain_validator = ChainValidator()
-        self.lockfile_resolver = LockfileResolver(
-            project_path=self.project_path,
-            user_space=self.user_space,
-            system_space=self.system_space,
-        )
 
         # Primitive instances (lazy loaded)
         self._primitives: Dict[str, Any] = {}
@@ -157,7 +145,6 @@ class PrimitiveExecutor:
         item_id: str,
         parameters: Optional[Dict[str, Any]] = None,
         validate_chain: bool = True,
-        use_lockfile: bool = True,
         trace: bool = False,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> ExecutionResult:
@@ -167,7 +154,6 @@ class PrimitiveExecutor:
             item_id: Tool identifier (e.g., "git", "python_runtime")
             parameters: Runtime parameters for the tool
             validate_chain: Whether to validate chain before execution
-            use_lockfile: Whether to check/create lockfiles
             trace: Whether to collect trace events at each decision point
 
         Returns:
@@ -177,118 +163,10 @@ class PrimitiveExecutor:
 
         start_time = time.time()
         parameters = parameters or {}
-        lockfile_used = False
-        lockfile_created = False
         trace_events: List[Dict[str, Any]] = []
 
         try:
-            # 1. Check for existing lockfile
-            version = None
-            if use_lockfile:
-                # Get version from tool metadata first
-                tool_path = self._resolve_tool_path(item_id, "project")
-                if tool_path:
-                    metadata = self._load_metadata_cached(tool_path[0])
-                    version = metadata.get("version", "0.0.0")
-
-                    lockfile = self.lockfile_resolver.get_lockfile(item_id, version)
-                    if lockfile:
-                        lockfile_path = getattr(lockfile, "_resolved_path", None)
-
-                        # Check provider provenance before integrity.
-                        # If the provider bundle changed (upgrade), the lockfile
-                        # is stale — discard it and re-resolve via the full
-                        # verified path. This is NOT a security bypass: the
-                        # normal _build_chain + verify_item path runs instead.
-                        if self._lockfile_provenance_changed(lockfile):
-                            logger.info(
-                                "Provider changed for %s, discarding stale lockfile",
-                                item_id,
-                            )
-                            self._best_effort_delete_lockfile(lockfile_path)
-                            lockfile = None
-                        else:
-                            logger.debug(f"Using lockfile for {item_id}@{version}")
-                            lockfile_used = True
-                            content = tool_path[0].read_text(encoding="utf-8")
-                            current_integrity = MetadataManager.compute_hash(
-                                ItemType.TOOL,
-                                content,
-                                file_path=tool_path[0],
-                                project_path=self.project_path,
-                            )
-                            if lockfile.root.integrity != current_integrity:
-                                return ExecutionResult(
-                                    success=False,
-                                    error=(
-                                        f"Lockfile integrity mismatch for {item_id}. "
-                                        f"Re-sign the tool and delete the stale lockfile at: "
-                                        f"{lockfile_path}"
-                                    ),
-                                    duration_ms=(time.time() - start_time) * 1000,
-                                )
-
-                            for entry in lockfile.resolved_chain:
-                                entry_id = entry.get("item_id")
-                                entry_space = entry.get("space", "project")
-                                entry_integrity = entry.get("integrity")
-                                if not entry_id or not entry_integrity:
-                                    continue
-
-                                # Check chain entry provenance
-                                entry_provider_id = entry.get("provider_id")
-                                entry_provider_version = entry.get("provider_version")
-                                if entry_provider_id:
-                                    bundle = self._get_bundle_for_space(entry_space)
-                                    if not bundle or bundle.version != entry_provider_version:
-                                        logger.info(
-                                            "Provider changed for chain element %s, "
-                                            "discarding stale lockfile",
-                                            entry_id,
-                                        )
-                                        self._best_effort_delete_lockfile(lockfile_path)
-                                        lockfile = None
-                                        lockfile_used = False
-                                        break
-
-                                resolved = self._resolve_tool_path(entry_id, entry_space)
-                                if not resolved:
-                                    return ExecutionResult(
-                                        success=False,
-                                        error=(
-                                            f"Lockfile chain element not found: {entry_id} "
-                                            f"(space: {entry_space}). Delete the stale lockfile at: "
-                                            f"{lockfile_path}"
-                                        ),
-                                        duration_ms=(time.time() - start_time) * 1000,
-                                    )
-                                entry_content = resolved[0].read_text(encoding="utf-8")
-                                entry_hash = MetadataManager.compute_hash(
-                                    ItemType.TOOL,
-                                    entry_content,
-                                    file_path=resolved[0],
-                                    project_path=self.project_path,
-                                )
-                                if entry_hash != entry_integrity:
-                                    return ExecutionResult(
-                                        success=False,
-                                        error=(
-                                            f"Lockfile integrity mismatch for chain element "
-                                            f"{entry_id}. Re-sign the tool and delete the stale "
-                                            f"lockfile at: {lockfile_path}"
-                                        ),
-                                        duration_ms=(time.time() - start_time) * 1000,
-                                    )
-
-            if trace and lockfile_used:
-                trace_events.append({
-                    "step": "lockfile",
-                    "item_id": item_id,
-                    "version": version,
-                    "status": "used",
-                })
-
-            # 2. Build the executor chain
+            # 1. Build the executor chain
             chain = await self._build_chain(item_id)
 
             if not chain:
@@ -302,15 +180,17 @@ class PrimitiveExecutor:
             if trace and chain:
                 for element in chain:
                     shadowed = self._find_shadowed_paths(element.item_id, element.space)
-                    trace_events.append({
-                        "step": "resolve",
-                        "item_id": element.item_id,
-                        "path": str(element.path),
-                        "space": element.space,
-                        "shadowed": shadowed,
-                    })
+                    trace_events.append(
+                        {
+                            "step": "resolve",
+                            "item_id": element.item_id,
+                            "path": str(element.path),
+                            "space": element.space,
+                            "shadowed": shadowed,
+                        }
+                    )
 
-            # 3. Verify integrity of every chain element
+            # 2. Verify integrity of every chain element
             for element in chain:
                 verify_item(
                     element.path,
@@ -322,18 +202,21 @@ class PrimitiveExecutor:
                 for element in chain:
                     content = element.path.read_text(encoding="utf-8")
                     sig_info = MetadataManager.get_signature_info(
-                        ItemType.TOOL, content,
+                        ItemType.TOOL,
+                        content,
                         file_path=element.path,
                         project_path=self.project_path,
                     )
-                    trace_events.append({
-                        "step": "verify_integrity",
-                        "item_id": element.item_id,
-                        "verified": True,
-                        "key_fp": sig_info["pubkey_fp"] if sig_info else None,
-                    })
+                    trace_events.append(
+                        {
+                            "step": "verify_integrity",
+                            "item_id": element.item_id,
+                            "verified": True,
+                            "key_fp": sig_info["pubkey_fp"] if sig_info else None,
+                        }
+                    )
 
-            # 4. Validate chain if requested
+            # 3. Validate chain if requested
             if validate_chain:
                 validation = self._validate_chain(chain)
                 if not validation.valid:
@@ -344,7 +227,7 @@ class PrimitiveExecutor:
                         duration_ms=(time.time() - start_time) * 1000,
                     )
 
-            # 4.5 Anchor + verify_deps
+            # 3.5 Anchor + verify_deps
             anchor_cfg = None
             for element in chain:
                 if element.anchor_config:
@@ -368,11 +251,13 @@ class PrimitiveExecutor:
             if trace:
                 for element in chain:
                     if element.env_config:
-                        trace_events.append({
-                            "step": "resolve_env",
-                            "contributed_by": element.item_id,
-                            "keys": list(element.env_config.keys()),
-                        })
+                        trace_events.append(
+                            {
+                                "step": "resolve_env",
+                                "contributed_by": element.item_id,
+                                "keys": list(element.env_config.keys()),
+                            }
+                        )
 
             # 5.5 Apply anchor env mutations
             if anchor_active:
@@ -398,7 +283,9 @@ class PrimitiveExecutor:
                 else:
                     # Execution config: merge defaults + per-tool overrides
                     _exec_defaults = _resolved.get("defaults", {})
-                    _tool_overrides = _resolved.get("tools", {}).get(tool_id, {}) if tool_id else {}
+                    _tool_overrides = (
+                        _resolved.get("tools", {}).get(tool_id, {}) if tool_id else {}
+                    )
                     _exec_config = {**_exec_defaults, **_tool_overrides}
                     for _ek, _ev in _exec_config.items():
                         if _ek not in parameters:
@@ -408,41 +295,9 @@ class PrimitiveExecutor:
             # Inject anchor context vars so {runtime_lib}, {anchor_path},
             # {tool_dir}, {tool_parent} are available for subprocess templating
             parameters = {**anchor_ctx, **(parameters or {})}
-            result = await self._execute_chain(chain, parameters, resolved_env, extra_env=extra_env)
-
-            # 7. Create lockfile if execution succeeded and none exists
-            if use_lockfile and result.get("success") and not lockfile_used and version:
-                try:
-                    root_element = chain[0]
-                    root_content = root_element.path.read_text(encoding="utf-8")
-                    integrity = MetadataManager.compute_hash(
-                        ItemType.TOOL,
-                        root_content,
-                        file_path=root_element.path,
-                        project_path=self.project_path,
-                    )
-                    resolved_chain = [self._chain_element_to_dict(e) for e in chain]
-
-                    # Resolve provider info for root element
-                    root_bundle = self._get_bundle_for_space(root_element.space)
-                    provider_id = root_bundle.bundle_id if root_bundle else root_element.space
-                    provider_version = root_bundle.version if root_bundle else version
-
-                    new_lockfile = self.lockfile_resolver.create_lockfile(
-                        tool_id=item_id,
-                        version=version,
-                        integrity=integrity,
-                        provider_id=provider_id,
-                        provider_version=provider_version,
-                        resolved_chain=resolved_chain,
-                    )
-                    self.lockfile_resolver.save_lockfile(
-                        new_lockfile, space=chain[0].space
-                    )
-                    lockfile_created = True
-                    logger.info(f"Created lockfile for {item_id}@{version}")
-                except Exception as e:
-                    logger.warning(f"Failed to create lockfile: {e}")
+            result = await self._execute_chain(
+                chain, parameters, resolved_env, extra_env=extra_env
+            )
 
             duration_ms = (time.time() - start_time) * 1000
 
@@ -454,8 +309,6 @@ class PrimitiveExecutor:
                 chain=[self._chain_element_to_dict(e) for e in chain],
                 metadata={
                     "resolved_env_keys": list(resolved_env.keys()),
-                    "lockfile_used": lockfile_used,
-                    "lockfile_created": lockfile_created,
                 },
                 trace=trace_events if trace else [],
             )
@@ -621,7 +474,9 @@ class PrimitiveExecutor:
 
         return None
 
-    def _find_shadowed_paths(self, item_id: str, found_space: str) -> List[Dict[str, str]]:
+    def _find_shadowed_paths(
+        self, item_id: str, found_space: str
+    ) -> List[Dict[str, str]]:
         """Find items in lower-precedence spaces that are shadowed by the found item."""
         system_entries = [
             (bundle.root_path / AI_DIR / "tools", f"system:{bundle.bundle_id}")
@@ -684,13 +539,19 @@ class PrimitiveExecutor:
                     "Parser %s failed for %s: %s\n"
                     "  Parser expects module-level metadata: "
                     "__version__, __tool_type__, __executor_id__",
-                    parser_name, path, parsed['error'],
+                    parser_name,
+                    path,
+                    parsed["error"],
                 )
                 return metadata
 
             # Normalise parser output to metadata dict
             metadata = self._extract_metadata_from_parsed(parsed)
-            if metadata and not metadata.get("executor_id") and not metadata.get("tool_type"):
+            if (
+                metadata
+                and not metadata.get("executor_id")
+                and not metadata.get("tool_type")
+            ):
                 logger.debug(
                     "Metadata for %s missing executor_id and tool_type. "
                     "Ensure these are defined at module scope.",
@@ -813,30 +674,11 @@ class PrimitiveExecutor:
         """Look up the BundleInfo for a system:bundle_id space string."""
         if not space.startswith("system:"):
             return None
-        return self._bundle_by_id.get(space.split(":", 1)[1])
-
-    def _lockfile_provenance_changed(self, lockfile) -> bool:
-        """Check if the lockfile's root provider no longer matches installed bundles.
-
-        Returns True if the provider bundle version has changed (e.g. pip upgrade),
-        meaning the lockfile is stale and should be discarded for re-resolution.
-        """
-        root = lockfile.root
-        bundle = self._get_bundle_for_space(f"system:{root.provider_id}")
-        if bundle and bundle.version != root.provider_version:
-            return True
-        # Non-system providers (project/user) don't have this staleness problem
-        return False
-
-    @staticmethod
-    def _best_effort_delete_lockfile(lockfile_path) -> None:
-        """Try to delete a stale lockfile. Silently ignore failures (read-only fs)."""
-        if lockfile_path is None:
-            return
-        try:
-            Path(lockfile_path).unlink()
-        except OSError:
-            pass
+        bundle_id = space.split(":", 1)[1]
+        for b in self.system_spaces:
+            if b.bundle_id == bundle_id:
+                return b
+        return None
 
     def _resolve_chain_env(
         self,
@@ -932,7 +774,7 @@ class PrimitiveExecutor:
             result = await primitive.execute(config, enriched_params)
 
             # Convert primitive result to dict
-            if isinstance(result, SubprocessResult):
+            if isinstance(result, ExecuteResult):
                 # Try to parse stdout as JSON (for tool_runner output)
                 error_msg = result.stderr if not result.success else None
                 parsed_data = None
@@ -964,16 +806,6 @@ class PrimitiveExecutor:
                         "return_code": result.return_code,
                     },
                     "error": error_msg,
-                }
-            elif isinstance(result, HttpResult):
-                return {
-                    "success": result.success,
-                    "data": {
-                        "status_code": result.status_code,
-                        "body": result.body,
-                        "headers": result.headers,
-                    },
-                    "error": result.error,
                 }
             else:
                 return {"success": True, "data": result}
@@ -1025,10 +857,13 @@ class PrimitiveExecutor:
         # subprocess config.  Anchor context keys are safe to merge.
         _CONFIG_KEYS = frozenset(("command", "args"))
         passthrough = {k: v for k, v in parameters.items() if k.startswith("__")}
-        config.update({
-            k: v for k, v in parameters.items()
-            if not k.startswith("__") and k not in _CONFIG_KEYS
-        })
+        config.update(
+            {
+                k: v
+                for k, v in parameters.items()
+                if not k.startswith("__") and k not in _CONFIG_KEYS
+            }
+        )
 
         # Apply environment
         config["env"] = resolved_env
@@ -1046,20 +881,30 @@ class PrimitiveExecutor:
 
             # Build params_json from parameters (excluding anchor context
             # keys, runtime routing, and non-serializable metadata)
-            _EXCLUDE_FROM_PARAMS = frozenset((
-                "env",
-                "tool_path", "tool_dir", "tool_parent",
-                "anchor_path", "runtime_lib",
-                "project_path", "user_space", "system_space",
-                "cwd", "timeout", "server", "tool_name",
-                "server_config_path",
-                "fixed_params", "params_key",
-            ))
+            _EXCLUDE_FROM_PARAMS = frozenset(
+                (
+                    "env",
+                    "tool_path",
+                    "tool_dir",
+                    "tool_parent",
+                    "anchor_path",
+                    "runtime_lib",
+                    "project_path",
+                    "user_space",
+                    "system_space",
+                    "cwd",
+                    "timeout",
+                    "server",
+                    "tool_name",
+                    "server_config_path",
+                    "fixed_params",
+                    "params_key",
+                )
+            )
             tool_params = {
                 k: v
                 for k, v in parameters.items()
-                if k not in _EXCLUDE_FROM_PARAMS
-                and not k.startswith("__")
+                if k not in _EXCLUDE_FROM_PARAMS and not k.startswith("__")
             }
 
             # fixed_params: merge static params from tool config with
@@ -1075,12 +920,11 @@ class PrimitiveExecutor:
                     overlap = fixed.keys() & tool_params.keys()
                     if overlap:
                         logger.warning(
-                            "Dropping caller params that collide with "
-                            "fixed_params: %s", sorted(overlap)
+                            "Dropping caller params that collide with fixed_params: %s",
+                            sorted(overlap),
                         )
                         tool_params = {
-                            k: v for k, v in tool_params.items()
-                            if k not in fixed
+                            k: v for k, v in tool_params.items() if k not in fixed
                         }
                     tool_params = {**tool_params, **fixed}
 
@@ -1285,9 +1129,7 @@ class PrimitiveExecutor:
 
             resolved_env[var_name] = _os.pathsep.join(parts)
 
-    def _resolve_tool_config(
-        self, config_resolve: Any
-    ) -> Dict[str, Any]:
+    def _resolve_tool_config(self, config_resolve: Any) -> Dict[str, Any]:
         """Resolve config files from .ai/config/ using 3-tier cascade.
 
         Supports single spec (dict) or multiple specs (list of dicts).
@@ -1321,9 +1163,7 @@ class PrimitiveExecutor:
                 "Config integrity check failed: %s", config_path, exc_info=True
             )
 
-    def _resolve_single_config(
-        self, spec: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def _resolve_single_config(self, spec: Dict[str, Any]) -> Dict[str, Any]:
         """Resolve a single config file using 3-tier cascade."""
         import yaml as _yaml
 
@@ -1385,7 +1225,11 @@ class PrimitiveExecutor:
         for key, value in override.items():
             if key == "extends":
                 continue
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            if (
+                key in result
+                and isinstance(result[key], dict)
+                and isinstance(value, dict)
+            ):
                 result[key] = PrimitiveExecutor._deep_merge_config(result[key], value)
             else:
                 result[key] = value
@@ -1401,9 +1245,7 @@ class PrimitiveExecutor:
 
         return re.sub(r"\{(\w+)\}", replace, template)
 
-    def _template_dict(
-        self, data: Any, ctx: Dict[str, str]
-    ) -> Any:
+    def _template_dict(self, data: Any, ctx: Dict[str, str]) -> Any:
         """Recursively template {var} placeholders in a nested dict/list."""
         if isinstance(data, str):
             return self._template_string(data, ctx)

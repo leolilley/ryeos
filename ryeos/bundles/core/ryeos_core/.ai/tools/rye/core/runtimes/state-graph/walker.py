@@ -1,4 +1,4 @@
-# rye:signed:2026-04-05T03:17:01Z:1d6b2ea45d60fa2adb4e3cc8c93319fc5e12028d3247bcbacb230f03e76e0361:K24RWi4oOhFcF93aY5vGCsT9izPfgSOdlGDmFFp_etYhz2uU53Cpt6IyZmuCUxDEet_kZlV62gk5RYPq4nc1Dw:4b987fd4e40303ac
+# rye:signed:2026-04-06T04:14:01Z:2ea05c7921c1958346dad85b005c03305cb3e337dada8fce62b7a860cf50fddf:P9akrydKDkaOjmjj6Q-uZxft3184xA_G1_P3ZIViEmewjo1S37b4GJRZnLX87Hy83l498Ck4QvaSQA7OaIG7Aw:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -78,14 +78,17 @@ def _find_agent_threads_anchor() -> Optional[Path]:
     Returns None when the standard bundle is not installed (serverless/core-only).
     """
     # Check own bundle first
-    own = _find_tools_root() / "rye" / "agent" / "threads"
+    own = _find_tools_root() / "rye" / "state" / "threads"
     if own.is_dir():
         return own
     # Search across installed system bundles
     try:
         from rye.utils.path_utils import get_system_spaces
+
         for bundle in get_system_spaces():
-            candidate = bundle.root_path / AI_DIR / "tools" / "rye" / "agent" / "threads"
+            candidate = (
+                bundle.root_path / AI_DIR / "tools" / "rye" / "state" / "threads"
+            )
             if candidate.is_dir():
                 return candidate
     except Exception:
@@ -111,23 +114,27 @@ _ANCHOR = _find_agent_threads_anchor()
 # Graph transcript — JSONL event log + signed knowledge markdown
 # ---------------------------------------------------------------------------
 
+
 class GraphTranscript:
     """JSONL event log + signed knowledge markdown for graph execution.
 
     Two outputs, same pattern as thread Transcript:
 
     1. transcript.jsonl — append-only events, ``tail -f`` friendly
-       Path: {project}/.ai/agent/graphs/{graph_run_id}/transcript.jsonl
+       Path: {project}/.ai/state/graphs/{graph_run_id}/transcript.jsonl
 
     2. knowledge markdown — visual node status table + event history,
        re-rendered from JSONL at step boundaries, signed
-       Path: {project}/.ai/knowledge/agent/graphs/{graph_id}/{graph_run_id}.md
+       Path: {project}/.ai/knowledge/state/graphs/{graph_id}/{graph_run_id}.md
 
     No SSE streaming — graphs don't produce tokens.
     """
 
     def __init__(
-        self, project_path: str, graph_id: str, graph_run_id: str,
+        self,
+        project_path: str,
+        graph_id: str,
+        graph_run_id: str,
         nodes_config: Dict,
     ):
         self._project_path = Path(project_path)
@@ -135,9 +142,9 @@ class GraphTranscript:
         self._graph_run_id = graph_run_id
         self._nodes_config = nodes_config
 
-        # JSONL directory (graphs live under agent/graphs/, not agent/threads/)
+        # JSONL directory (graphs live under state/graphs/, not state/threads/)
         self._thread_dir = (
-            self._project_path / AI_DIR / "agent" / "graphs" / graph_run_id
+            self._project_path / AI_DIR / "state" / "graphs" / graph_run_id
         )
         self._thread_dir.mkdir(parents=True, exist_ok=True)
         self._jsonl_path = self._thread_dir / "transcript.jsonl"
@@ -157,7 +164,10 @@ class GraphTranscript:
             f.flush()
 
     def checkpoint(
-        self, step: int, *, state: Optional[Dict] = None,
+        self,
+        step: int,
+        *,
+        state: Optional[Dict] = None,
         current_node: Optional[str] = None,
     ) -> None:
         """Sign transcript JSONL at step boundary via TranscriptSigner.
@@ -167,11 +177,14 @@ class GraphTranscript:
         """
         if state is not None:
             state_hash = self._store_state_snapshot(state)
-            self.write_event("state_checkpoint", {
-                "step": step,
-                "current_node": current_node,
-                "state_hash": state_hash or "",
-            })
+            self.write_event(
+                "state_checkpoint",
+                {
+                    "step": step,
+                    "current_node": current_node,
+                    "state_hash": state_hash or "",
+                },
+            )
         transcript_signer = _try_load_module("persistence/transcript_signer")
         if transcript_signer is None:
             return
@@ -204,8 +217,12 @@ class GraphTranscript:
 
             root = cas_root(self._project_path)
             ref_path = (
-                self._project_path / AI_DIR / "objects" / "refs"
-                / "graphs" / f"{self._graph_run_id}.json"
+                self._project_path
+                / AI_DIR
+                / "objects"
+                / "refs"
+                / "graphs"
+                / f"{self._graph_run_id}.json"
             )
             snapshot_hash = read_ref(ref_path)
             if not snapshot_hash:
@@ -216,7 +233,9 @@ class GraphTranscript:
             return None
 
     def render_knowledge(
-        self, status: str = "running", step_count: int = 0,
+        self,
+        status: str = "running",
+        step_count: int = 0,
         total_elapsed_s: float = 0,
     ) -> Optional[Path]:
         """Render signed knowledge markdown from CAS snapshot + JSONL events.
@@ -285,7 +304,7 @@ class GraphTranscript:
         else:
             duration_str = f"{total_elapsed_s:.1f}s"
 
-        category = f"agent/graphs/{self._graph_id}"
+        category = f"state/graphs/{self._graph_id}"
         parts: List[str] = []
 
         # Frontmatter
@@ -321,20 +340,20 @@ class GraphTranscript:
             if node_name in node_results:
                 nr = node_results[node_name]
                 icon = "✅" if nr["status"] == "completed" else "❌"
-                dur = f'{nr["elapsed_s"]:.1f}s'
+                dur = f"{nr['elapsed_s']:.1f}s"
                 action = nr["action_id"]
                 detail_parts = []
                 if nr.get("thread_id"):
-                    detail_parts.append(f'thread: `{nr["thread_id"]}`')
+                    detail_parts.append(f"thread: `{nr['thread_id']}`")
                 if nr.get("cache_hit"):
                     detail_parts.append("🔁 cached")
                 if nr.get("node_input_hash"):
-                    detail_parts.append(f'in: `{nr["node_input_hash"][:16]}`')
+                    detail_parts.append(f"in: `{nr['node_input_hash'][:16]}`")
                 if nr.get("node_result_hash"):
-                    detail_parts.append(f'out: `{nr["node_result_hash"][:16]}`')
+                    detail_parts.append(f"out: `{nr['node_result_hash'][:16]}`")
                 details = " ".join(detail_parts)
                 parts.append(
-                    f'| {nr["step"]} | {node_name} | {icon}'
+                    f"| {nr['step']} | {node_name} | {icon}"
                     f" | {dur} | {action} | {details} |\n"
                 )
             elif node_name == current_running:
@@ -351,8 +370,10 @@ class GraphTranscript:
 
         # Footer
         labels = {
-            "completed": "✅ Completed", "error": "❌ Error",
-            "cancelled": "⏹ Cancelled", "running": "🔄 Running",
+            "completed": "✅ Completed",
+            "error": "❌ Error",
+            "cancelled": "⏹ Cancelled",
+            "running": "🔄 Running",
             "completed_with_errors": "⚠️ Completed with errors",
         }
         label = labels.get(status, status.title())
@@ -369,9 +390,14 @@ class GraphTranscript:
 
         # Sign and write
         from rye.constants import ItemType
+
         knowledge_dir = (
-            self._project_path / AI_DIR / "knowledge"
-            / "agent" / "graphs" / self._graph_id
+            self._project_path
+            / AI_DIR
+            / "knowledge"
+            / "state"
+            / "graphs"
+            / self._graph_id
         )
         knowledge_dir.mkdir(parents=True, exist_ok=True)
         knowledge_path = knowledge_dir / f"{self._graph_run_id}.md"
@@ -406,13 +432,10 @@ class GraphTranscript:
         p = event.get("payload", {})
 
         if et == "graph_started":
-            ts = datetime.fromtimestamp(
-                event["timestamp"], tz=timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
-            return (
-                f"**Started** {ts} — entry:"
-                f" `{p.get('start_node', '')}`\n\n"
+            ts = datetime.fromtimestamp(event["timestamp"], tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
             )
+            return f"**Started** {ts} — entry: `{p.get('start_node', '')}`\n\n"
 
         if et == "step_started":
             step = p.get("step", 0)
@@ -525,7 +548,10 @@ def _node_thread(node: Dict) -> str:
 
 
 async def _dispatch_action(
-    action: Dict, project_path: str, *, thread: str = "inline",
+    action: Dict,
+    project_path: str,
+    *,
+    thread: str = "inline",
 ) -> Dict:
     """Dispatch a node action through the appropriate primary action.
 
@@ -587,8 +613,15 @@ async def _dispatch_action(
     except Exception as e:
         if os.environ.get("RYE_DEBUG"):
             import traceback
-            logger.error("Dispatch %s %s/%s failed: %s\n%s",
-                         primary, item_type, item_id, e, traceback.format_exc())
+
+            logger.error(
+                "Dispatch %s %s/%s failed: %s\n%s",
+                primary,
+                item_type,
+                item_id,
+                e,
+                traceback.format_exc(),
+            )
         return {"status": "error", "error": str(e)}
 
 
@@ -639,7 +672,9 @@ def _unwrap_result(raw_result: Any) -> Dict:
 
 def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
     """Read a thread's thread.json."""
-    meta_path = Path(project_path) / AI_DIR / "agent" / "threads" / thread_id / "thread.json"
+    meta_path = (
+        Path(project_path) / AI_DIR / "state" / "threads" / thread_id / "thread.json"
+    )
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -649,6 +684,7 @@ def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
 def _update_registry_pid(registry, run_id: str) -> None:
     """Update registry PID to this process (the actual walker child)."""
     import sqlite3
+
     try:
         with sqlite3.connect(registry.db_path) as conn:
             conn.execute(
@@ -661,7 +697,9 @@ def _update_registry_pid(registry, run_id: str) -> None:
 
 
 def _resolve_execution_context(
-    params: Dict, project_path: str, graph_config: Optional[Dict] = None,
+    params: Dict,
+    project_path: str,
+    graph_config: Optional[Dict] = None,
 ) -> Dict:
     """Resolve capabilities and parent context for permission enforcement.
 
@@ -764,9 +802,7 @@ def _check_permission(
 
     return {
         "status": "error",
-        "error": (
-            f"Permission denied: '{required}' not covered by capabilities"
-        ),
+        "error": (f"Permission denied: '{required}' not covered by capabilities"),
     }
 
 
@@ -788,9 +824,7 @@ def _inject_parent_context(params: Dict, exec_ctx: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def _merge_graph_hooks(
-    graph_hooks: List[Dict], project_path: str
-) -> List[Dict]:
+def _merge_graph_hooks(graph_hooks: List[Dict], project_path: str) -> List[Dict]:
     """Merge graph-level hooks with applicable builtins.
 
     Same pattern as thread_directive._merge_hooks().
@@ -815,9 +849,7 @@ def _merge_graph_hooks(
     for h in infra:
         h.setdefault("layer", 3)
 
-    return sorted(
-        graph_hooks + builtin + infra, key=lambda h: h.get("layer", 2)
-    )
+    return sorted(graph_hooks + builtin + infra, key=lambda h: h.get("layer", 2))
 
 
 async def _run_hooks(
@@ -863,9 +895,7 @@ async def _run_hooks(
 # ---------------------------------------------------------------------------
 
 
-def _evaluate_edges(
-    next_spec: Any, state: Dict, result: Dict
-) -> Optional[str]:
+def _evaluate_edges(next_spec: Any, state: Dict, result: Dict) -> Optional[str]:
     """Evaluate edge conditions to determine the next node.
 
     next_spec can be:
@@ -901,6 +931,7 @@ def _find_error_edge(node: Dict) -> Optional[str]:
 def _get_system_version() -> str:
     """Return installed ryeos-core version, or dev fallback."""
     from importlib.metadata import version, PackageNotFoundError
+
     try:
         return version("ryeos-core")
     except PackageNotFoundError:
@@ -916,12 +947,14 @@ def _compute_node_result_hash(result: Dict, project_path: str = "") -> str:
     Falls back to compute-only if CAS is unavailable.
     """
     from rye.cas.objects import NodeResult
+
     node_result = NodeResult(result=result)
 
     if project_path:
         try:
             from rye.primitives import cas
             from rye.cas.store import cas_root
+
             root = cas_root(Path(project_path))
             return cas.store_object(node_result.to_dict(), root)
         except Exception:
@@ -929,6 +962,7 @@ def _compute_node_result_hash(result: Dict, project_path: str = "") -> str:
             return ""
 
     from rye.primitives.integrity import compute_integrity
+
     return compute_integrity(node_result.to_dict())
 
 
@@ -994,30 +1028,45 @@ async def _finalize_graph_run(
     try:
         # 1. Transcript terminal event — derived from status
         if status == "cancelled":
-            transcript.write_event("graph_cancelled", {
-                "steps": step_count,
-                "elapsed_s": elapsed_s,
-            })
+            transcript.write_event(
+                "graph_cancelled",
+                {
+                    "steps": step_count,
+                    "elapsed_s": elapsed_s,
+                },
+            )
         elif status == "error" or error_message:
-            transcript.write_event("graph_error", {
-                "error": error_message or "unknown",
-                "node": current_node,
-                "steps": step_count,
-                "elapsed_s": elapsed_s,
-            })
+            transcript.write_event(
+                "graph_error",
+                {
+                    "error": error_message or "unknown",
+                    "node": current_node,
+                    "steps": step_count,
+                    "elapsed_s": elapsed_s,
+                },
+            )
         else:
-            transcript.write_event("graph_completed", {
-                "status": status,
-                "steps": step_count,
-                "elapsed_s": elapsed_s,
-            })
+            transcript.write_event(
+                "graph_completed",
+                {
+                    "status": status,
+                    "steps": step_count,
+                    "elapsed_s": elapsed_s,
+                },
+            )
 
         # 2. Checkpoint + render (persist before render so ref is visible)
         transcript.checkpoint(step_count, state=state, current_node=current_node)
         await _persist_state(
-            project_path, graph_id, graph_run_id,
-            state, current_node, status, step_count,
-            node_receipts=node_receipts, errors=errors,
+            project_path,
+            graph_id,
+            graph_run_id,
+            state,
+            current_node,
+            status,
+            step_count,
+            node_receipts=node_receipts,
+            errors=errors,
         )
         transcript.render_knowledge(status, step_count, elapsed_s)
 
@@ -1041,7 +1090,9 @@ async def _finalize_graph_run(
     except Exception:
         logger.warning(
             "Failed to finalize graph run %s (status=%s)",
-            graph_run_id, status, exc_info=True,
+            graph_run_id,
+            status,
+            exc_info=True,
         )
 
 
@@ -1087,14 +1138,16 @@ async def _persist_state(
         snapshot_hash = cas.store_object(snapshot.to_dict(), root)
 
         # Update mutable ref
-        refs_dir = proj / AI_DIR / "objects" / "refs" / "graphs"
+        refs_dir = root / "refs" / "graphs"
         refs_dir.mkdir(parents=True, exist_ok=True)
         ref_path = refs_dir / f"{graph_run_id}.json"
         write_ref(ref_path, snapshot_hash)
 
         return snapshot_hash
     except Exception:
-        logger.warning("CAS state persistence failed for %s", graph_run_id, exc_info=True)
+        logger.warning(
+            "CAS state persistence failed for %s", graph_run_id, exc_info=True
+        )
         return None
 
 
@@ -1123,11 +1176,22 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
     elif start not in nodes:
         errors.append(f"start node '{start}' not found in nodes")
 
-    _KNOWN_NODE_KEYS = frozenset({
-        "type", "action", "next", "on_error", "assign",
-        "over", "as", "collect", "parallel", "env_requires",
-        "cache_result", "remote",
-    })
+    _KNOWN_NODE_KEYS = frozenset(
+        {
+            "type",
+            "action",
+            "next",
+            "on_error",
+            "assign",
+            "over",
+            "as",
+            "collect",
+            "parallel",
+            "env_requires",
+            "cache_result",
+            "remote",
+        }
+    )
 
     has_return = False
     for name, node in nodes.items():
@@ -1139,7 +1203,9 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
         unknown = set(node.keys()) - _KNOWN_NODE_KEYS
         if unknown:
             logger.warning(
-                "node '%s' has unknown keys: %s", name, ", ".join(sorted(unknown)),
+                "node '%s' has unknown keys: %s",
+                name,
+                ", ".join(sorted(unknown)),
             )
 
         # Warn on deprecated async placement in foreach nodes
@@ -1159,16 +1225,12 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
         next_spec = node.get("next")
         if isinstance(next_spec, str):
             if next_spec not in nodes:
-                errors.append(
-                    f"node '{name}' references unknown node '{next_spec}'"
-                )
+                errors.append(f"node '{name}' references unknown node '{next_spec}'")
         elif isinstance(next_spec, list):
             for edge in next_spec:
                 to = edge.get("to")
                 if to and to not in nodes:
-                    errors.append(
-                        f"node '{name}' edge references unknown node '{to}'"
-                    )
+                    errors.append(f"node '{name}' edge references unknown node '{to}'")
 
         # Check on_error reference
         on_error = node.get("on_error")
@@ -1186,9 +1248,7 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
 _STATE_REF_RE = re.compile(r"\$\{state\.(\w+)")
 
 
-def _analyze_graph(
-    cfg: Dict, graph_config: Optional[Dict] = None
-) -> tuple:
+def _analyze_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> tuple:
     """Static analysis of graph structure. Returns (errors, warnings).
 
     Extends _validate_graph with reachability analysis and state flow checks.
@@ -1365,18 +1425,17 @@ def _error_to_context(result: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def _follow_continuation_chain(
-    continuation_id: str, project_path: str
-) -> Dict:
+def _follow_continuation_chain(continuation_id: str, project_path: str) -> Dict:
     """Follow a continuation chain to the terminal thread's persisted result."""
     orchestrator = _try_load_module("orchestrator")
     thread_registry = _try_load_module("persistence/thread_registry")
     if orchestrator is None or thread_registry is None:
-        return {"success": False, "error": "Agent bundle required for continuation chain resolution"}
+        return {
+            "success": False,
+            "error": "Agent bundle required for continuation chain resolution",
+        }
 
-    terminal_id = orchestrator.resolve_thread_chain(
-        continuation_id, Path(project_path)
-    )
+    terminal_id = orchestrator.resolve_thread_chain(continuation_id, Path(project_path))
     registry = thread_registry.get_registry(Path(project_path))
     terminal_thread = registry.get_thread(terminal_id)
 
@@ -1406,7 +1465,7 @@ def _load_resume_state(
 ) -> Optional[Dict]:
     """Load a persisted graph state for resume via CAS execution_snapshot ref.
 
-    Reads the mutable ref at .ai/objects/refs/graphs/{run_id}.json,
+    Reads the mutable ref at .ai/state/objects/refs/graphs/{run_id}.json,
     loads the execution_snapshot, then loads the state_snapshot by hash.
     Verifies transcript integrity before returning.
 
@@ -1437,7 +1496,7 @@ def _load_resume_state(
         return None
 
     # Verify transcript integrity
-    jsonl_path = proj / AI_DIR / "agent" / "graphs" / graph_run_id / "transcript.jsonl"
+    jsonl_path = proj / AI_DIR / "state" / "graphs" / graph_run_id / "transcript.jsonl"
     if jsonl_path.exists():
         transcript_signer = _try_load_module("persistence/transcript_signer")
         if transcript_signer is not None:
@@ -1446,7 +1505,8 @@ def _load_resume_state(
             if not verify_result.get("valid", False):
                 logger.warning(
                     "Transcript integrity failed for %s: %s",
-                    graph_run_id, verify_result.get("error", "unknown"),
+                    graph_run_id,
+                    verify_result.get("error", "unknown"),
                 )
                 return None
 
@@ -1479,7 +1539,9 @@ def _load_resume_state(
 
 
 async def execute(
-    graph_config: Dict, params: Dict, project_path: str,
+    graph_config: Dict,
+    params: Dict,
+    project_path: str,
     graph_run_id: Optional[str] = None,
     pre_registered: bool = False,
 ) -> Dict:
@@ -1499,7 +1561,9 @@ async def execute(
         for parent in fp.parents:
             if parent.name == "tools" and parent.parent.name == ".ai":
                 try:
-                    graph_config["_item_id"] = str(fp.relative_to(parent).with_suffix(""))
+                    graph_config["_item_id"] = str(
+                        fp.relative_to(parent).with_suffix("")
+                    )
                 except ValueError:
                     pass
                 break
@@ -1544,11 +1608,18 @@ async def execute(
 
     # Shared finalize kwargs for early failures (no state yet)
     _early_finalize = dict(
-        project_path=project_path, graph_id=graph_id,
-        graph_run_id=graph_run_id, transcript=graph_transcript,
-        current_node=cfg.get("start"), status="error",
-        step_count=0, node_receipts=[], registry=None,
-        hooks=hooks, elapsed_s=0, hook_event=None,
+        project_path=project_path,
+        graph_id=graph_id,
+        graph_run_id=graph_run_id,
+        transcript=graph_transcript,
+        current_node=cfg.get("start"),
+        status="error",
+        step_count=0,
+        node_receipts=[],
+        registry=None,
+        hooks=hooks,
+        elapsed_s=0,
+        hook_event=None,
     )
 
     # Validate graph
@@ -1558,7 +1629,13 @@ async def execute(
         await _finalize_graph_run(
             **_early_finalize,
             state={"inputs": dict(params)},
-            errors=[{"code": "graph_validation_failed", "message": error_msg, "phase": "startup"}],
+            errors=[
+                {
+                    "code": "graph_validation_failed",
+                    "message": error_msg,
+                    "phase": "startup",
+                }
+            ],
             error_message=error_msg,
         )
         return {"success": False, "error": error_msg}
@@ -1570,7 +1647,13 @@ async def execute(
         await _finalize_graph_run(
             **_early_finalize,
             state={"inputs": dict(params)},
-            errors=[{"code": "missing_environment_variables", "message": error_msg, "phase": "startup"}],
+            errors=[
+                {
+                    "code": "missing_environment_variables",
+                    "message": error_msg,
+                    "phase": "startup",
+                }
+            ],
             error_message=error_msg,
         )
         return {"success": False, "error": error_msg}
@@ -1581,7 +1664,13 @@ async def execute(
         await _finalize_graph_run(
             **_early_finalize,
             state={"inputs": dict(params)},
-            errors=[{"code": "target_node_not_found", "message": error_msg, "phase": "startup"}],
+            errors=[
+                {
+                    "code": "target_node_not_found",
+                    "message": error_msg,
+                    "phase": "startup",
+                }
+            ],
             error_message=error_msg,
         )
         return {"success": False, "error": error_msg}
@@ -1596,7 +1685,13 @@ async def execute(
             await _finalize_graph_run(
                 **_early_finalize,
                 state={"inputs": dict(params)},
-                errors=[{"code": "resume_state_not_found", "message": error_msg, "phase": "startup"}],
+                errors=[
+                    {
+                        "code": "resume_state_not_found",
+                        "message": error_msg,
+                        "phase": "startup",
+                    }
+                ],
                 error_message=error_msg,
             )
             return {"success": False, "error": error_msg}
@@ -1611,7 +1706,13 @@ async def execute(
             await _finalize_graph_run(
                 **_early_finalize,
                 state=state,
-                errors=[{"code": "resume_no_current_node", "message": error_msg, "phase": "startup"}],
+                errors=[
+                    {
+                        "code": "resume_no_current_node",
+                        "message": error_msg,
+                        "phase": "startup",
+                    }
+                ],
                 error_message=error_msg,
             )
             return {"success": False, "error": error_msg}
@@ -1621,8 +1722,13 @@ async def execute(
             _update_registry_pid(registry, graph_run_id)
             registry.update_status(graph_run_id, "running")
         await _persist_state(
-            project_path, graph_id, graph_run_id,
-            state, current, "running", step_count,
+            project_path,
+            graph_id,
+            graph_run_id,
+            state,
+            current,
+            "running",
+            step_count,
             node_receipts=node_receipt_hashes,
         )
     else:
@@ -1644,7 +1750,13 @@ async def execute(
             await _finalize_graph_run(
                 **_early_finalize,
                 state=state,
-                errors=[{"code": "input_validation_failed", "message": error_msg, "phase": "startup"}],
+                errors=[
+                    {
+                        "code": "input_validation_failed",
+                        "message": error_msg,
+                        "phase": "startup",
+                    }
+                ],
                 error_message=error_msg,
             )
             return {"success": False, "error": error_msg}
@@ -1662,8 +1774,13 @@ async def execute(
                 # so process tools can find/kill the right PID
                 _update_registry_pid(registry, graph_run_id)
         await _persist_state(
-            project_path, graph_id, graph_run_id,
-            state, current, "running", step_count,
+            project_path,
+            graph_id,
+            graph_run_id,
+            state,
+            current,
+            "running",
+            step_count,
             node_receipts=node_receipt_hashes,
         )
 
@@ -1683,13 +1800,19 @@ async def execute(
         if not graph_run_id or not graph_run_id.endswith("-step"):
             graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}-step"
             # Re-create transcript for the step-scoped run_id
-            graph_transcript = GraphTranscript(project_path, graph_id, graph_run_id, nodes)
+            graph_transcript = GraphTranscript(
+                project_path, graph_id, graph_run_id, nodes
+            )
 
     if not is_resume:
-        graph_transcript.write_event("graph_started", {
-            "graph_id": graph_id, "graph_run_id": graph_run_id,
-            "start_node": current or "",
-        })
+        graph_transcript.write_event(
+            "graph_started",
+            {
+                "graph_id": graph_id,
+                "graph_run_id": graph_run_id,
+                "start_node": current or "",
+            },
+        )
         graph_transcript.render_knowledge("running", step_count, 0)
 
     while current and step_count < max_steps:
@@ -1697,14 +1820,28 @@ async def execute(
         if node is None:
             error_msg = f"Node '{current}' not found in graph"
             await _finalize_graph_run(
-                project_path=project_path, graph_id=graph_id,
-                graph_run_id=graph_run_id, transcript=graph_transcript,
-                state=state, current_node=current, status="error",
-                step_count=step_count, node_receipts=node_receipt_hashes,
-                errors=[{"code": "node_not_found", "message": error_msg, "node": current, "phase": "execution"}],
-                registry=registry, hooks=hooks,
+                project_path=project_path,
+                graph_id=graph_id,
+                graph_run_id=graph_run_id,
+                transcript=graph_transcript,
+                state=state,
+                current_node=current,
+                status="error",
+                step_count=step_count,
+                node_receipts=node_receipt_hashes,
+                errors=[
+                    {
+                        "code": "node_not_found",
+                        "message": error_msg,
+                        "node": current,
+                        "phase": "execution",
+                    }
+                ],
+                registry=registry,
+                hooks=hooks,
                 elapsed_s=time.monotonic() - graph_start_time,
-                error_message=error_msg, hook_event=None,
+                error_message=error_msg,
+                hook_event=None,
             )
             return {"success": False, "error": error_msg, "state": state}
 
@@ -1715,28 +1852,70 @@ async def execute(
         if node.get("type") == "return":
             elapsed = time.monotonic() - graph_start_time
             final_status = "completed_with_errors" if suppressed_errors else "completed"
-            graph_transcript.write_event("step_started", {
-                "step": step_count, "node": executed_node, "node_type": "return",
-            })
-            graph_transcript.write_event("step_completed", {
-                "step": step_count, "node": executed_node, "status": "completed",
-                "elapsed_s": 0, "action_id": "", "thread_id": "",
-            })
-            _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=elapsed, status="return")
+            graph_transcript.write_event(
+                "step_started",
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "node_type": "return",
+                },
+            )
+            graph_transcript.write_event(
+                "step_completed",
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "status": "completed",
+                    "elapsed_s": 0,
+                    "action_id": "",
+                    "thread_id": "",
+                },
+            )
+            _log_progress(
+                graph_id,
+                step_count,
+                len(nodes),
+                executed_node,
+                elapsed_s=elapsed,
+                status="return",
+            )
             await _finalize_graph_run(
-                project_path=project_path, graph_id=graph_id,
-                graph_run_id=graph_run_id, transcript=graph_transcript,
-                state=state, current_node=current, status=final_status,
-                step_count=step_count, node_receipts=node_receipt_hashes,
-                errors=suppressed_errors, registry=registry, hooks=hooks,
+                project_path=project_path,
+                graph_id=graph_id,
+                graph_run_id=graph_run_id,
+                transcript=graph_transcript,
+                state=state,
+                current_node=current,
+                status=final_status,
+                step_count=step_count,
+                node_receipts=node_receipt_hashes,
+                errors=suppressed_errors,
+                registry=registry,
+                hooks=hooks,
                 elapsed_s=elapsed,
             )
-            _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="ok", detail=f"{step_count} steps")
+            _log_progress(
+                graph_id,
+                step_count,
+                len(nodes),
+                "done",
+                elapsed_s=elapsed,
+                status="ok",
+                detail=f"{step_count} steps",
+            )
             # Return interpolated output from the return node (slim),
             # full state is already persisted as a knowledge artifact.
             output_template = node.get("output", {})
-            interp_ctx: Dict[str, Any] = {"state": state, "inputs": params, **_builtins()}
-            output = interpolation.interpolate(output_template, interp_ctx) if output_template else {}
+            interp_ctx: Dict[str, Any] = {
+                "state": state,
+                "inputs": params,
+                **_builtins(),
+            }
+            output = (
+                interpolation.interpolate(output_template, interp_ctx)
+                if output_template
+                else {}
+            )
             result_dict = {
                 "success": True,
                 "status": final_status,
@@ -1753,25 +1932,50 @@ async def execute(
 
         # Foreach node — iterate
         if node.get("type") == "foreach":
-            graph_transcript.write_event("step_started", {
-                "step": step_count, "node": executed_node, "node_type": "foreach",
-            })
+            graph_transcript.write_event(
+                "step_started",
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "node_type": "foreach",
+                },
+            )
             foreach_start = time.monotonic()
             current, state = await _handle_foreach(
                 node, state, params, exec_ctx, project_path
             )
-            graph_transcript.write_event("foreach_completed", {
-                "step": step_count, "node": executed_node, "next_node": current,
-            })
+            graph_transcript.write_event(
+                "foreach_completed",
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "next_node": current,
+                },
+            )
             foreach_elapsed = time.monotonic() - foreach_start
-            _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=foreach_elapsed, status="ok", detail="foreach")
+            _log_progress(
+                graph_id,
+                step_count,
+                len(nodes),
+                executed_node,
+                elapsed_s=foreach_elapsed,
+                status="ok",
+                detail="foreach",
+            )
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge(
-                "running", step_count, time.monotonic() - graph_start_time,
+                "running",
+                step_count,
+                time.monotonic() - graph_start_time,
             )
             await _persist_state(
-                project_path, graph_id, graph_run_id,
-                state, current, "running", step_count,
+                project_path,
+                graph_id,
+                graph_run_id,
+                state,
+                current,
+                "running",
+                step_count,
                 node_receipts=node_receipt_hashes,
             )
             if target_node:
@@ -1789,35 +1993,59 @@ async def execute(
 
         # Gate node — explicit routing/assign, no action execution
         if node.get("type") == "gate":
-            graph_transcript.write_event("step_started", {
-                "step": step_count, "node": executed_node, "node_type": "gate",
-            })
+            graph_transcript.write_event(
+                "step_started",
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "node_type": "gate",
+                },
+            )
             if "assign" in node:
                 for key, expr in node["assign"].items():
                     resolved = interpolation.interpolate(expr, interp_ctx)
                     if resolved is None and expr:
                         logger.warning(
                             "assign '%s' resolved to None for expr '%s'",
-                            key, expr,
+                            key,
+                            expr,
                         )
                     state[key] = resolved
             next_spec = node.get("next")
             current = _evaluate_edges(next_spec, state, {})
-            graph_transcript.write_event("step_completed", {
-                "step": step_count, "node": executed_node,
-                "action_id": "",
-                "status": "ok",
-                "elapsed_s": 0,
-                "next_node": current,
-            })
-            _log_progress(graph_id, step_count, len(nodes), executed_node, status="ok", detail="gate")
+            graph_transcript.write_event(
+                "step_completed",
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "action_id": "",
+                    "status": "ok",
+                    "elapsed_s": 0,
+                    "next_node": current,
+                },
+            )
+            _log_progress(
+                graph_id,
+                step_count,
+                len(nodes),
+                executed_node,
+                status="ok",
+                detail="gate",
+            )
             graph_transcript.checkpoint(step_count, state=state, current_node=current)
             graph_transcript.render_knowledge(
-                "running", step_count, time.monotonic() - graph_start_time,
+                "running",
+                step_count,
+                time.monotonic() - graph_start_time,
             )
             await _persist_state(
-                project_path, graph_id, graph_run_id,
-                state, current, "running", step_count,
+                project_path,
+                graph_id,
+                graph_run_id,
+                state,
+                current,
+                "running",
+                step_count,
                 node_receipts=node_receipt_hashes,
             )
             if target_node:
@@ -1850,11 +2078,18 @@ async def execute(
             )
 
         action_id = action.get("item_id", "")
-        graph_transcript.write_event("step_started", {
-            "step": step_count, "node": executed_node, "action_id": action_id,
-        })
+        graph_transcript.write_event(
+            "step_started",
+            {
+                "step": step_count,
+                "node": executed_node,
+                "action_id": action_id,
+            },
+        )
         graph_transcript.render_knowledge(
-            "running", step_count, time.monotonic() - graph_start_time,
+            "running",
+            step_count,
+            time.monotonic() - graph_start_time,
         )
         node_start = time.monotonic()
         state_keys_before = set(state.keys())
@@ -1880,18 +2115,17 @@ async def execute(
                     from rye.cas.config_snapshot import compute_agent_config_snapshot
 
                     graph_hash_val = hashlib.sha256(
-                        json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str).encode()
+                        json.dumps(
+                            cfg, sort_keys=True, separators=(",", ":"), default=str
+                        ).encode()
                     ).hexdigest()
 
                     config_snap_hash, _ = compute_agent_config_snapshot(project_path)
 
-                    # lockfile_hash=None: lockfiles are tool-level, not
-                    # graph-node-level — graph nodes don't have their own lockfiles.
                     node_cache_key = compute_cache_key(
                         graph_hash=graph_hash_val,
                         node_name=executed_node,
                         interpolated_action=action,
-                        lockfile_hash=None,
                         config_snapshot_hash=config_snap_hash,
                     )
 
@@ -1900,35 +2134,62 @@ async def execute(
                         result = cached["result"]
                         node_result_hash = cached["node_result_hash"]
                         cache_hit = True
-                        logger.debug("Cache HIT for node %s (key=%s)", executed_node, node_cache_key[:16])
+                        logger.debug(
+                            "Cache HIT for node %s (key=%s)",
+                            executed_node,
+                            node_cache_key[:16],
+                        )
                 except Exception as exc:
-                    logger.warning("Cache check failed for node %s: %s", executed_node, exc, exc_info=True)
+                    logger.warning(
+                        "Cache check failed for node %s: %s",
+                        executed_node,
+                        exc,
+                        exc_info=True,
+                    )
 
             if not cache_hit:
                 raw_result = await _dispatch_action(
-                    action, project_path, thread=_node_thread(node),
+                    action,
+                    project_path,
+                    thread=_node_thread(node),
                 )
                 result = _unwrap_result(raw_result)
 
                 # Store in cache on successful execution
-                if node.get("cache_result", False) and node_cache_key and result.get("status") != "error":
+                if (
+                    node.get("cache_result", False)
+                    and node_cache_key
+                    and result.get("status") != "error"
+                ):
                     try:
                         from rye.cas.node_cache import cache_store
+
                         stored_hash = cache_store(
-                            node_cache_key, result, Path(project_path),
-                            executed_node, int((time.monotonic() - node_start) * 1000),
+                            node_cache_key,
+                            result,
+                            Path(project_path),
+                            executed_node,
+                            int((time.monotonic() - node_start) * 1000),
                         )
                         if stored_hash:
                             node_result_hash = stored_hash
                     except Exception:
-                        logger.debug("Cache store failed for node %s", executed_node, exc_info=True)
+                        logger.debug(
+                            "Cache store failed for node %s",
+                            executed_node,
+                            exc_info=True,
+                        )
 
         # Compute node_result_hash if not already set (non-cached or cache-off)
         if not node_result_hash and result:
             try:
                 node_result_hash = _compute_node_result_hash(result, project_path)
             except Exception:
-                logger.warning("Failed to compute node_result_hash for %s", executed_node, exc_info=True)
+                logger.warning(
+                    "Failed to compute node_result_hash for %s",
+                    executed_node,
+                    exc_info=True,
+                )
 
         # Handle continuation chains for LLM nodes
         if (
@@ -1955,9 +2216,7 @@ async def execute(
                 "state": state,
                 "step_count": step_count,
             }
-            hook_action = await _run_hooks(
-                "error", error_ctx, hooks, project_path
-            )
+            hook_action = await _run_hooks("error", error_ctx, hooks, project_path)
             if hook_action and hook_action.get("action") == "retry":
                 max_retries = hook_action.get("max_retries", 3)
                 retries = state.get("_retries", {}).get(executed_node, 0)
@@ -1974,8 +2233,13 @@ async def execute(
             if error_edge:
                 current = error_edge
                 await _persist_state(
-                    project_path, graph_id, graph_run_id,
-                    state, current, "running", step_count,
+                    project_path,
+                    graph_id,
+                    graph_run_id,
+                    state,
+                    current,
+                    "running",
+                    step_count,
                     node_receipts=node_receipt_hashes,
                 )
                 continue
@@ -1983,16 +2247,38 @@ async def execute(
                 node_elapsed = time.monotonic() - node_start
                 error_msg = result.get("error", "unknown")
                 await _finalize_graph_run(
-                    project_path=project_path, graph_id=graph_id,
-                    graph_run_id=graph_run_id, transcript=graph_transcript,
-                    state=state, current_node=current, status="error",
-                    step_count=step_count, node_receipts=node_receipt_hashes,
-                    errors=[{"code": "node_error", "message": error_msg, "node": executed_node, "phase": "execution"}],
-                    registry=registry, hooks=hooks,
+                    project_path=project_path,
+                    graph_id=graph_id,
+                    graph_run_id=graph_run_id,
+                    transcript=graph_transcript,
+                    state=state,
+                    current_node=current,
+                    status="error",
+                    step_count=step_count,
+                    node_receipts=node_receipt_hashes,
+                    errors=[
+                        {
+                            "code": "node_error",
+                            "message": error_msg,
+                            "node": executed_node,
+                            "phase": "execution",
+                        }
+                    ],
+                    registry=registry,
+                    hooks=hooks,
                     elapsed_s=time.monotonic() - graph_start_time,
-                    error_message=error_msg, hook_event=None,
+                    error_message=error_msg,
+                    hook_event=None,
                 )
-                _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error", detail=str(error_msg)[:80])
+                _log_progress(
+                    graph_id,
+                    step_count,
+                    len(nodes),
+                    executed_node,
+                    elapsed_s=node_elapsed,
+                    status="error",
+                    detail=str(error_msg)[:80],
+                )
                 return {
                     "success": False,
                     "error": error_msg,
@@ -2000,11 +2286,13 @@ async def execute(
                     "state": state,
                 }
             # error_mode == "continue" — track suppressed error, skip assign
-            suppressed_errors.append({
-                "step": step_count,
-                "node": executed_node,
-                "error": str(result.get("error", "unknown")),
-            })
+            suppressed_errors.append(
+                {
+                    "step": step_count,
+                    "node": executed_node,
+                    "error": str(result.get("error", "unknown")),
+                }
+            )
 
         # Assign result values to state (skipped on error in "continue" mode)
         if result.get("status") != "error":
@@ -2015,7 +2303,8 @@ async def execute(
                     if resolved is None and expr:
                         logger.warning(
                             "assign '%s' resolved to None for expr '%s'",
-                            key, expr,
+                            key,
+                            expr,
                         )
                     state[key] = resolved
 
@@ -2027,7 +2316,9 @@ async def execute(
         node_elapsed_ms = int(node_elapsed * 1000)
 
         # M2: Store NodeReceipt for audit trail
-        node_error = str(result.get("error", "")) if result.get("status") == "error" else None
+        node_error = (
+            str(result.get("error", "")) if result.get("status") == "error" else None
+        )
         receipt_hash = _store_node_receipt(
             project_path,
             node_input_hash=node_cache_key or "",
@@ -2040,30 +2331,49 @@ async def execute(
             node_receipt_hashes.append(receipt_hash)
 
         # m6: Full hashes in step_completed events
-        graph_transcript.write_event("step_completed", {
-            "step": step_count, "node": executed_node,
-            "action_id": action_id,
-            "status": result.get("status", "ok"),
-            "elapsed_s": node_elapsed,
-            "next_node": current,
-            "thread_id": result.get("thread_id", ""),
-            "error": result.get("error", ""),
-            "cache_hit": cache_hit,
-            "node_input_hash": node_cache_key or "",
-            "node_result_hash": node_result_hash,
-        })
+        graph_transcript.write_event(
+            "step_completed",
+            {
+                "step": step_count,
+                "node": executed_node,
+                "action_id": action_id,
+                "status": result.get("status", "ok"),
+                "elapsed_s": node_elapsed,
+                "next_node": current,
+                "thread_id": result.get("thread_id", ""),
+                "error": result.get("error", ""),
+                "cache_hit": cache_hit,
+                "node_input_hash": node_cache_key or "",
+                "node_result_hash": node_result_hash,
+            },
+        )
         added_keys = set(state.keys()) - state_keys_before
-        _log_progress(graph_id, step_count, len(nodes), executed_node, elapsed_s=node_elapsed, status="error" if result.get("status") == "error" else "ok", detail=f"+{', '.join(sorted(added_keys))}" if added_keys else "")
+        _log_progress(
+            graph_id,
+            step_count,
+            len(nodes),
+            executed_node,
+            elapsed_s=node_elapsed,
+            status="error" if result.get("status") == "error" else "ok",
+            detail=f"+{', '.join(sorted(added_keys))}" if added_keys else "",
+        )
         graph_transcript.checkpoint(step_count, state=state, current_node=current)
 
         # Persist state before rendering so render_knowledge sees latest snapshot
         await _persist_state(
-            project_path, graph_id, graph_run_id,
-            state, current, "running", step_count,
+            project_path,
+            graph_id,
+            graph_run_id,
+            state,
+            current,
+            "running",
+            step_count,
             node_receipts=node_receipt_hashes,
         )
         graph_transcript.render_knowledge(
-            "running", step_count, time.monotonic() - graph_start_time,
+            "running",
+            step_count,
+            time.monotonic() - graph_start_time,
         )
 
         # Fire after_step hooks
@@ -2093,12 +2403,24 @@ async def execute(
         # SIGTERM-based cancellation
         if _shutdown_requested:
             await _finalize_graph_run(
-                project_path=project_path, graph_id=graph_id,
-                graph_run_id=graph_run_id, transcript=graph_transcript,
-                state=state, current_node=current, status="cancelled",
-                step_count=step_count, node_receipts=node_receipt_hashes,
-                errors=[{"code": "cancelled", "message": f"Signal {_shutdown_requested}", "phase": "execution"}],
-                registry=registry, hooks=hooks,
+                project_path=project_path,
+                graph_id=graph_id,
+                graph_run_id=graph_run_id,
+                transcript=graph_transcript,
+                state=state,
+                current_node=current,
+                status="cancelled",
+                step_count=step_count,
+                node_receipts=node_receipt_hashes,
+                errors=[
+                    {
+                        "code": "cancelled",
+                        "message": f"Signal {_shutdown_requested}",
+                        "phase": "execution",
+                    }
+                ],
+                registry=registry,
+                hooks=hooks,
                 elapsed_s=time.monotonic() - graph_start_time,
                 hook_event=None,
             )
@@ -2120,15 +2442,33 @@ async def execute(
     }
     await _run_hooks("limit", limit_ctx, hooks, project_path)
     await _finalize_graph_run(
-        project_path=project_path, graph_id=graph_id,
-        graph_run_id=graph_run_id, transcript=graph_transcript,
-        state=state, current_node=current, status="error",
-        step_count=step_count, node_receipts=node_receipt_hashes,
-        errors=[{"code": "max_steps_exceeded", "message": error_msg, "phase": "execution"}],
-        registry=registry, hooks=hooks,
-        elapsed_s=elapsed, error_message=error_msg, hook_event=None,
+        project_path=project_path,
+        graph_id=graph_id,
+        graph_run_id=graph_run_id,
+        transcript=graph_transcript,
+        state=state,
+        current_node=current,
+        status="error",
+        step_count=step_count,
+        node_receipts=node_receipt_hashes,
+        errors=[
+            {"code": "max_steps_exceeded", "message": error_msg, "phase": "execution"}
+        ],
+        registry=registry,
+        hooks=hooks,
+        elapsed_s=elapsed,
+        error_message=error_msg,
+        hook_event=None,
     )
-    _log_progress(graph_id, step_count, len(nodes), "done", elapsed_s=elapsed, status="error", detail=f"max_steps_exceeded ({max_steps})")
+    _log_progress(
+        graph_id,
+        step_count,
+        len(nodes),
+        "done",
+        elapsed_s=elapsed,
+        status="error",
+        detail=f"max_steps_exceeded ({max_steps})",
+    )
     return {
         "success": False,
         "error": error_msg,
@@ -2250,6 +2590,7 @@ def _foreach_cache_context(node: Dict, project_path: str) -> Optional[tuple]:
         return None
     try:
         from rye.cas.config_snapshot import compute_agent_config_snapshot
+
         config_snap_hash, _ = compute_agent_config_snapshot(project_path)
         return ("foreach", config_snap_hash)
     except Exception:
@@ -2286,11 +2627,11 @@ async def _foreach_dispatch_one(
         graph_hash_val, config_snap_hash = cache_ctx
         try:
             from rye.cas.node_cache import compute_cache_key, cache_lookup, cache_store
+
             node_cache_key = compute_cache_key(
                 graph_hash=graph_hash_val,
                 node_name=node_name,
                 interpolated_action=action,
-                lockfile_hash=None,
                 config_snapshot_hash=config_snap_hash,
             )
             cached = cache_lookup(node_cache_key, Path(project_path))
@@ -2304,23 +2645,34 @@ async def _foreach_dispatch_one(
                 result = _unwrap_result(raw_result)
                 if result.get("status") != "error":
                     stored = cache_store(
-                        node_cache_key, result, Path(project_path),
-                        node_name, int((time.monotonic() - iter_start) * 1000),
+                        node_cache_key,
+                        result,
+                        Path(project_path),
+                        node_name,
+                        int((time.monotonic() - iter_start) * 1000),
                     )
                     if stored:
                         node_result_hash = stored
         except Exception:
-            raw_result = await _dispatch_action(action, project_path, thread=_node_thread(node))
+            raw_result = await _dispatch_action(
+                action, project_path, thread=_node_thread(node)
+            )
             result = _unwrap_result(raw_result)
     else:
-        raw_result = await _dispatch_action(action, project_path, thread=_node_thread(node))
+        raw_result = await _dispatch_action(
+            action, project_path, thread=_node_thread(node)
+        )
         result = _unwrap_result(raw_result)
 
     if not node_result_hash and result:
         try:
             node_result_hash = _compute_node_result_hash(result, project_path)
         except Exception:
-            logger.warning("Failed to compute node_result_hash for foreach %s", node_name, exc_info=True)
+            logger.warning(
+                "Failed to compute node_result_hash for foreach %s",
+                node_name,
+                exc_info=True,
+            )
 
     elapsed_ms = int((time.monotonic() - iter_start) * 1000)
     receipt_hash = _store_node_receipt(
@@ -2352,7 +2704,10 @@ async def _foreach_sequential(
     for item in items:
         state[as_var] = item
         interp_ctx: Dict[str, Any] = {
-            "state": state, "inputs": inputs, as_var: item, **_builtins(),
+            "state": state,
+            "inputs": inputs,
+            as_var: item,
+            **_builtins(),
         }
 
         action = interpolation.interpolate_action(node["action"], interp_ctx)
@@ -2364,8 +2719,12 @@ async def _foreach_sequential(
             )
 
         value, _receipt = await _foreach_dispatch_one(
-            node, action, exec_ctx, project_path,
-            f"foreach_{as_var}", cache_ctx,
+            node,
+            action,
+            exec_ctx,
+            project_path,
+            f"foreach_{as_var}",
+            cache_ctx,
         )
         collected.append(value)
 
@@ -2399,8 +2758,12 @@ async def _foreach_parallel(
             )
 
         value, _receipt = await _foreach_dispatch_one(
-            node, action, exec_ctx, project_path,
-            f"foreach_{as_var}", cache_ctx,
+            node,
+            action,
+            exec_ctx,
+            project_path,
+            f"foreach_{as_var}",
+            cache_ctx,
         )
         return value
 
@@ -2412,9 +2775,7 @@ async def _foreach_parallel(
 # ---------------------------------------------------------------------------
 
 
-def run_sync(
-    graph_config: Dict, params: Dict, project_path: str
-) -> Dict:
+def run_sync(graph_config: Dict, params: Dict, project_path: str) -> Dict:
     """Synchronous entry point for graph execution.
 
     Supports ``async`` parameter: when True, spawns a child process
@@ -2433,7 +2794,9 @@ def run_sync(
 
         # Pre-generate graph_run_id so parent can return it
         cfg = graph_config.get("config", {})
-        graph_id = graph_config.get("_item_id") or graph_config.get("category", "unknown")
+        graph_id = graph_config.get("_item_id") or graph_config.get(
+            "category", "unknown"
+        )
         graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
 
         # Register before subprocess so child process sees it
@@ -2448,24 +2811,30 @@ def run_sync(
         cmd = [
             sys.executable,
             str(walker_path),
-            "--graph-path", graph_config.get("_file_path", ""),
-            "--project-path", project_path,
-            "--graph-run-id", graph_run_id,
+            "--graph-path",
+            graph_config.get("_file_path", ""),
+            "--project-path",
+            project_path,
+            "--graph-run-id",
+            graph_run_id,
             "--pre-registered",
         ]
 
         # Shared engine-layer detached spawn with lifecycle management
         from rye.utils.detached import spawn_thread
-        log_dir = Path(project_path) / AI_DIR / "agent" / "graphs" / graph_run_id
-        spawn_result = asyncio.run(spawn_thread(
-            registry=registry,
-            thread_id=graph_run_id,
-            directive=graph_id,
-            cmd=cmd,
-            log_dir=log_dir,
-            input_data=params_json,
-            parent_id=parent_thread_id,
-        ))
+
+        log_dir = Path(project_path) / AI_DIR / "state" / "graphs" / graph_run_id
+        spawn_result = asyncio.run(
+            spawn_thread(
+                registry=registry,
+                thread_id=graph_run_id,
+                directive=graph_id,
+                cmd=cmd,
+                log_dir=log_dir,
+                input_data=params_json,
+                parent_id=parent_thread_id,
+            )
+        )
 
         if not spawn_result.get("success"):
             return {
@@ -2515,13 +2884,15 @@ if __name__ == "__main__":
     # call execute() directly (child process behavior)
     try:
         if args.graph_run_id and args.pre_registered:
-            result = asyncio.run(execute(
-                graph_config,
-                params,
-                args.project_path,
-                graph_run_id=args.graph_run_id,
-                pre_registered=True,
-            ))
+            result = asyncio.run(
+                execute(
+                    graph_config,
+                    params,
+                    args.project_path,
+                    graph_run_id=args.graph_run_id,
+                    pre_registered=True,
+                )
+            )
         else:
             # Normal entry (possibly with async=True for fork/subprocess)
             result = run_sync(graph_config, params, args.project_path)
