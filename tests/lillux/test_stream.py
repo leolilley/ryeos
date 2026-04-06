@@ -68,8 +68,8 @@ class TestStreamBasicOutput:
     def test_binary_passthrough(self):
         """Binary data passes through without corruption."""
         r = subprocess.run(
-            [LILLUX, "exec", "stream", "--cmd", "sh", "--arg", "-c",
-             "--arg", r"printf '\x00\x01\x02\xff'"],
+            [LILLUX, "exec", "stream", "--cmd", "python3", "--arg", "-c",
+             "--arg", "import sys; sys.stdout.buffer.write(b'\\x00\\x01\\x02\\xff')"],
             capture_output=True,
         )
         assert r.returncode == 0
