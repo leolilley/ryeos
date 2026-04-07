@@ -1,3 +1,5 @@
 """RYE MCP Server - MCP transport layer for RYE OS."""
 
-__version__ = "0.1.4"
+from importlib.metadata import version
+
+__version__ = version("ryeos-mcp")
