@@ -99,6 +99,7 @@ from rye.cas.gc_incremental import load_gc_state
 from rye.cas.gc_lock import read_lock as read_gc_lock
 from rye.constants import AI_DIR
 from rye.actions.execute import ExecuteTool
+from rye.utils.execution_context import ExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,9 @@ class _ExecutionCounter:
 
 _exec_counter = _ExecutionCounter()
 
-app = FastAPI(title="ryeos-node", version="0.1.0")
+from ryeos_node import __version__ as _node_version
+
+app = FastAPI(title="ryeos-node", version=_node_version)
 
 # m3: Gzip compression for responses
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -1294,16 +1297,15 @@ async def _execute_from_head(
             )
 
             # Build per-execution env (never mutate process-global os.environ)
+            # These are for subprocesses; in-process code uses ExecutionContext.
+            resolved_user_space: Path = user_space if user_space else exec_space / ".empty_user_space"
+            if not user_space:
+                resolved_user_space.mkdir(exist_ok=True)
+
             exec_env: dict[str, str] = {
                 "RYE_SIGNING_KEY_DIR": settings.signing_key_dir,
+                "USER_SPACE": str(resolved_user_space),
             }
-
-            if user_space:
-                exec_env["USER_SPACE"] = str(user_space)
-            else:
-                empty_user = exec_space / ".empty_user_space"
-                empty_user.mkdir(exist_ok=True)
-                exec_env["USER_SPACE"] = str(empty_user)
 
             # Resolve vault secrets into per-execution env
             if vault_keys:
@@ -1326,9 +1328,18 @@ async def _execute_from_head(
                 )
                 exec_env.update(decrypted)
 
+            # Explicit execution context — no env-var fallbacks
+            from rye.utils.path_utils import get_system_spaces
+
+            exec_ctx = ExecutionContext(
+                project_path=exec_space,
+                user_space=resolved_user_space,
+                signing_key_dir=Path(settings.signing_key_dir),
+                system_spaces=tuple(get_system_spaces()),
+            )
+
             tool = ExecuteTool(
-                user_space=str(user_space) if user_space else None,
-                project_path=str(exec_space),
+                ctx=exec_ctx,
                 extra_env=exec_env,
             )
 

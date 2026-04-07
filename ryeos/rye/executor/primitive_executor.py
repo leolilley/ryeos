@@ -26,6 +26,7 @@ from rye.runtime.env_resolver import EnvResolver
 
 from rye.executor.chain_validator import ChainValidator, ChainValidationResult
 from rye.utils.extensions import get_tool_extensions, get_parsers_map
+from rye.utils.execution_context import ExecutionContext
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.metadata_manager import MetadataManager
 from rye.utils.path_utils import BundleInfo
@@ -95,33 +96,17 @@ class PrimitiveExecutor:
 
     def __init__(
         self,
-        project_path: Optional[Path] = None,
-        user_space: Optional[Path] = None,
-        system_space: Optional[Path] = None,
+        ctx: ExecutionContext,
     ):
-        """Initialize executor with space paths.
+        """Initialize executor with an explicit execution context.
 
         Args:
-            project_path: Project root for .ai/ resolution
-            user_space: User space base path (~ or $USER_SPACE)
-            system_space: System space base path (site-packages/rye/)
+            ctx: Immutable execution context with all resolved paths.
         """
-        self.project_path = Path(project_path) if project_path else Path.cwd()
-        self.user_space = Path(user_space) if user_space else self._get_user_space()
-        if system_space:
-            from rye.utils.path_utils import BundleInfo
-
-            self.system_spaces: List[BundleInfo] = [
-                BundleInfo(
-                    bundle_id="ryeos",
-                    version="0.0.0",
-                    root_path=Path(system_space),
-                    manifest_path=None,
-                    source="legacy",
-                )
-            ]
-        else:
-            self.system_spaces = self._get_system_spaces()
+        self.ctx = ctx
+        self.project_path = ctx.project_path
+        self.user_space = ctx.user_space
+        self.system_spaces: List[BundleInfo] = list(ctx.system_spaces)
         # Use first bundle's root_path as the legacy system_space
         self.system_space = self.system_spaces[0].root_path
 
@@ -195,7 +180,7 @@ class PrimitiveExecutor:
                 verify_item(
                     element.path,
                     ItemType.TOOL,
-                    project_path=self.project_path,
+                    ctx=self.ctx,
                 )
 
             if trace:
@@ -1155,7 +1140,7 @@ class PrimitiveExecutor:
     def _verify_config_file(self, config_path: Path) -> None:
         """Verify config file integrity: warn-if-unsigned, reject-if-tampered."""
         try:
-            verify_item(config_path, "config", allow_unsigned=True)
+            verify_item(config_path, "config", ctx=self.ctx, allow_unsigned=True)
         except IntegrityError:
             raise
         except Exception:
@@ -1325,7 +1310,7 @@ class PrimitiveExecutor:
                         f"Symlink escape: {filepath} resolves to {real}"
                     )
 
-                verify_item(filepath, ItemType.TOOL, project_path=self.project_path)
+                verify_item(filepath, ItemType.TOOL, ctx=self.ctx)
 
     def _get_user_space(self) -> Path:
         """Get user space path."""

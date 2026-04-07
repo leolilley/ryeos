@@ -104,9 +104,10 @@ jobs:
           # Trust the CI key in user space
           python -c "
           import os
+          from rye.utils.execution_context import ExecutionContext
           from rye.utils.trust_store import TrustStore
           pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
-          store = TrustStore()
+          store = TrustStore(ExecutionContext.from_env())
           store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
           "
 
@@ -204,9 +205,10 @@ jobs:
           echo "$RYE_SIGNING_PUBKEY" > ~/.ai/config/keys/signing/public_key.pem
           python -c "
           import os
+          from rye.utils.execution_context import ExecutionContext
           from rye.utils.trust_store import TrustStore
           pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
-          store = TrustStore()
+          store = TrustStore(ExecutionContext.from_env())
           store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
           "
 
@@ -311,9 +313,10 @@ jobs:
           echo "$RYE_SIGNING_PUBKEY" > ~/.ai/config/keys/signing/public_key.pem
           python -c "
           import os
+          from rye.utils.execution_context import ExecutionContext
           from rye.utils.trust_store import TrustStore
           pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
-          store = TrustStore()
+          store = TrustStore(ExecutionContext.from_env())
           store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
           "
 

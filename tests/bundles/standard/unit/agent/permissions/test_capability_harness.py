@@ -227,6 +227,7 @@ default:
 async def signed_project(temp_project, _setup_user_space):
     """Sign all directives in the temp project."""
     import os
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.trust_store import TrustStore
     from rye.utils.metadata_manager import MetadataManager
     from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
@@ -238,7 +239,8 @@ async def signed_project(temp_project, _setup_user_space):
     _, public_pem_signing = load_keypair(signing_key_dir)
 
     # Trust the signing key in this project
-    store = TrustStore(project_path=temp_project)
+    ctx = ExecutionContext.from_env(project_path=temp_project)
+    store = TrustStore(ctx)
     store.add_key(public_pem_signing, owner="local", space="project", version="1.0.0")
 
     # Sign all directives

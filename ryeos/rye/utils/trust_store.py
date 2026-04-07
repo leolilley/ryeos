@@ -27,7 +27,6 @@ from typing import FrozenSet, List, Optional
 from rye.primitives.signing import compute_key_fingerprint
 from rye.constants import AI_DIR
 from rye.utils.metadata_manager import ToolMetadataStrategy, compute_content_hash
-from rye.utils.path_utils import get_signing_key_dir, get_user_space
 
 # TOML uses # comments — same format as tools with # prefix
 _key_strategy = ToolMetadataStrategy()
@@ -96,15 +95,17 @@ class TrustStore:
     """Manages trusted Ed25519 public keys with 3-tier resolution.
 
     Resolution order: project > user > system .ai/config/keys/trusted/{fp}.toml
+
+    Requires an ``ExecutionContext`` — no env-var fallbacks.  CLI callers
+    should use ``ExecutionContext.from_env()`` to construct one.
     """
 
-    def __init__(
-        self,
-        *,
-        project_path: Optional[Path] = None,
-    ):
-        self.project_path = project_path
-        self._user_trust_dir = get_user_space() / AI_DIR / TRUSTED_KEYS_DIR
+    def __init__(self, ctx: "ExecutionContext"):
+        from rye.utils.execution_context import ExecutionContext  # noqa: F811
+
+        self.ctx: ExecutionContext = ctx
+        self.project_path = ctx.project_path
+        self._user_trust_dir = ctx.user_space / AI_DIR / TRUSTED_KEYS_DIR
 
     def _search_dirs(self) -> List[tuple[str, Path]]:
         """Build ordered list of (source_label, directory) to search."""
@@ -112,8 +113,7 @@ class TrustStore:
         if self.project_path:
             dirs.append(("project", self.project_path / AI_DIR / TRUSTED_KEYS_DIR))
         dirs.append(("user", self._user_trust_dir))
-        from rye.utils.path_utils import get_system_spaces
-        for bundle in get_system_spaces():
+        for bundle in self.ctx.system_spaces:
             dirs.append(
                 (f"system:{bundle.bundle_id}", bundle.root_path / AI_DIR / TRUSTED_KEYS_DIR)
             )
@@ -123,8 +123,7 @@ class TrustStore:
     # Integrity: sign on write, verify on load
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _sign_key_content(content: str, file_path: Path | None = None) -> str:
+    def _sign_key_content(self, content: str, file_path: Path | None = None) -> str:
         """Sign trusted key TOML content by prepending a signature comment.
 
         Uses MetadataManager.sign_content for consistent signing across all
@@ -135,6 +134,7 @@ class TrustStore:
 
         return MetadataManager.sign_content(
             "config", content, file_path=file_path,
+            signing_key_dir=self.ctx.signing_key_dir,
         )
 
     def _verify_key_integrity(

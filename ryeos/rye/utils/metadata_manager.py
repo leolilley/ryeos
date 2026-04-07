@@ -317,6 +317,7 @@ class MetadataManager:
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
+        signing_key_dir: Optional[Path] = None,
     ) -> str:
         """Create Ed25519 signature for content.
 
@@ -337,7 +338,7 @@ class MetadataManager:
             compute_key_fingerprint,
         )
 
-        key_dir = get_signing_key_dir()
+        key_dir = signing_key_dir if signing_key_dir is not None else get_signing_key_dir()
         try:
             private_pem, public_pem = load_keypair(key_dir)
         except FileNotFoundError:
@@ -359,6 +360,7 @@ class MetadataManager:
         content_hash: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
+        signing_key_dir: Optional[Path] = None,
     ) -> str:
         """Create Ed25519 signature using a precomputed integrity hash."""
         strategy = cls.get_strategy(
@@ -372,7 +374,7 @@ class MetadataManager:
             sign_hash,
             compute_key_fingerprint,
         )
-        key_dir = get_signing_key_dir()
+        key_dir = signing_key_dir if signing_key_dir is not None else get_signing_key_dir()
         try:
             private_pem, public_pem = load_keypair(key_dir)
         except FileNotFoundError:
@@ -394,13 +396,15 @@ class MetadataManager:
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
+        signing_key_dir: Optional[Path] = None,
     ) -> str:
         """Add Ed25519 signature to content."""
         strategy = cls.get_strategy(
             item_type, file_path=file_path, project_path=project_path
         )
         signature = cls.create_signature(
-            item_type, file_content, file_path=file_path, project_path=project_path
+            item_type, file_content, file_path=file_path, project_path=project_path,
+            signing_key_dir=signing_key_dir,
         )
         return strategy.insert_signature(file_content, signature)
 
@@ -412,13 +416,15 @@ class MetadataManager:
         content_hash: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
+        signing_key_dir: Optional[Path] = None,
     ) -> str:
         """Add Ed25519 signature to content using a precomputed integrity hash."""
         strategy = cls.get_strategy(
             item_type, file_path=file_path, project_path=project_path
         )
         signature = cls.create_signature_from_hash(
-            item_type, content_hash, file_path=file_path, project_path=project_path
+            item_type, content_hash, file_path=file_path, project_path=project_path,
+            signing_key_dir=signing_key_dir,
         )
         return strategy.insert_signature(file_content, signature)
 

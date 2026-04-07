@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rye.constants import ItemType, AI_DIR
+from rye.utils.execution_context import ExecutionContext
 from rye.utils.path_utils import get_project_type_path, get_system_spaces
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.integrity import verify_item, IntegrityError
@@ -65,7 +66,9 @@ async def resolve_item(user_space: str, **kwargs) -> Dict[str, Any]:
 
         verify_item(
             source_path, item_type,
-            project_path=Path(project_path) if project_path else None,
+            ctx=ExecutionContext.from_env(
+                project_path=Path(project_path) if project_path else None,
+            ),
         )
 
         content = source_path.read_text(encoding="utf-8")

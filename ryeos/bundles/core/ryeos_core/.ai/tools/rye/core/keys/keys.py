@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:c28f71c1d0d8ae02eeaaa45c06f690fa7d19c363d0f86804fe2d0038f61db059:D0etgJbfSTn0JABWyBwjmPf2Wrd_Kmq4EArHf9gX1xKzc0_Mn7yqtL6vvBk5NTegC-ACiva8b2t3rmNNVWqpDg:4b987fd4e40303ac
+# rye:signed:2026-04-07T03:17:14Z:fd73f3cf1b2d2e4bbfb8ba921796d51b5be98deed7e3c5d1c78f919a60547fc2:M1bcgXja-Y1iwy4kWgXAhakQ97uWQUJrTtFH8G4pVl6T9nn6_LBCvx7ys4k2WSvGxyPl8uW79txBlJxT5HClDQ:4b987fd4e40303ac
 """Key management tool — generate, inspect, and trust Ed25519 signing keys.
 
 The user's signing identity. Handles keypair generation, fingerprint display,
@@ -195,8 +195,9 @@ def _import(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     # Auto-trust in user space
     if auto_trust:
         from rye.utils.trust_store import TrustStore
+        from rye.utils.execution_context import ExecutionContext
 
-        store = TrustStore(project_path=Path(project_path))
+        store = TrustStore(ExecutionContext.from_env(project_path=Path(project_path)))
         existing = store.get_key(fingerprint)
         if existing:
             result["trusted"] = True
@@ -228,8 +229,9 @@ def _info(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 
     # Check trust status across spaces
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
 
-    store = TrustStore(project_path=Path(project_path))
+    store = TrustStore(ExecutionContext.from_env(project_path=Path(project_path)))
     key_info = store.get_key(fingerprint)
 
     return {
@@ -247,6 +249,7 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     from rye.primitives.signing import ensure_keypair, compute_key_fingerprint
     from rye.utils.path_utils import get_signing_key_dir
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
 
     key_dir = get_signing_key_dir()
 
@@ -263,7 +266,7 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     owner = params.get("owner", "local")
     version = params.get("version", "1.0.0")
 
-    store = TrustStore(project_path=Path(project_path))
+    store = TrustStore(ExecutionContext.from_env(project_path=Path(project_path)))
 
     # Check if already trusted in this space
     existing = store.get_key(fingerprint)
@@ -300,8 +303,9 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 def _list(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """List all trusted keys across all spaces."""
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
 
-    store = TrustStore(project_path=Path(project_path))
+    store = TrustStore(ExecutionContext.from_env(project_path=Path(project_path)))
     keys = store.list_keys()
 
     return {
@@ -322,12 +326,13 @@ def _list(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
 def _remove(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
     """Remove a key from the user trust store."""
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
 
     fingerprint = params.get("fingerprint")
     if not fingerprint:
         return {"success": False, "error": "fingerprint is required for remove."}
 
-    store = TrustStore(project_path=Path(project_path))
+    store = TrustStore(ExecutionContext.from_env(project_path=Path(project_path)))
     removed = store.remove_key(fingerprint)
 
     return {

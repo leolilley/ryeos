@@ -9,6 +9,7 @@ import pytest
 
 from rye.utils.metadata_manager import MetadataManager, ToolMetadataStrategy
 from rye.utils.integrity import verify_item, IntegrityError
+from rye.utils.execution_context import ExecutionContext
 
 
 class TestConfigMetadataStrategy:
@@ -47,7 +48,7 @@ class TestVerifyItemAllowUnsigned:
 
             result = verify_item(
                 config_file, "config",
-                project_path=Path(tmpdir),
+                ctx=ExecutionContext.from_env(project_path=Path(tmpdir)),
                 allow_unsigned=True,
             )
             assert result == "unsigned"
@@ -59,7 +60,7 @@ class TestVerifyItemAllowUnsigned:
             config_file.write_text("key: value\n")
 
             with pytest.raises(IntegrityError):
-                verify_item(config_file, "config", project_path=Path(tmpdir))
+                verify_item(config_file, "config", ctx=ExecutionContext.from_env(project_path=Path(tmpdir)))
 
     def test_tampered_config_rejected_even_with_allow_unsigned(self, _setup_user_space):
         """Tampered signed config is always rejected."""
@@ -81,7 +82,7 @@ class TestVerifyItemAllowUnsigned:
             with pytest.raises(IntegrityError, match="modified since signing"):
                 verify_item(
                     config_file, "config",
-                    project_path=Path(tmpdir),
+                    ctx=ExecutionContext.from_env(project_path=Path(tmpdir)),
                     allow_unsigned=True,
                 )
 
@@ -93,4 +94,4 @@ class TestVerifyItemAllowUnsigned:
             tool_file.write_text("pass\n")
 
             with pytest.raises(IntegrityError):
-                verify_item(tool_file, "tool", project_path=Path(tmpdir))
+                verify_item(tool_file, "tool", ctx=ExecutionContext.from_env(project_path=Path(tmpdir)))

@@ -14,6 +14,7 @@ def temp_project(_setup_user_space):
     """Create temporary project with test items."""
     import os
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.metadata_manager import MetadataManager
     from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
     
@@ -57,7 +58,7 @@ def temp_project(_setup_user_space):
         _, public_pem_signing = load_keypair(signing_key_dir)
         
         # Trust the signing key in this project
-        store = TrustStore(project_path=project_root)
+        store = TrustStore(ExecutionContext.from_env(project_path=project_root))
         store.add_key(public_pem_signing, owner="local", space="project", version="1.0.0")
 
         # Sign items

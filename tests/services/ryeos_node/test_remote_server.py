@@ -965,7 +965,8 @@ class TestTrustStore:
         save_keypair(private_pem, public_pem, signing_dir)
 
         from rye.utils.trust_store import TrustStore
-        ts = TrustStore(project_path=tmp_path / "project")
+        from rye.utils.execution_context import ExecutionContext
+        ts = TrustStore(ExecutionContext.from_env(project_path=tmp_path / "project"))
         # Trust the signing key so signed trust entries pass integrity
         ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
         return ts
@@ -1052,7 +1053,8 @@ class TestRemoteKeyVerification:
         save_keypair(private_pem, public_pem, signing_dir)
 
         from rye.utils.trust_store import TrustStore
-        ts = TrustStore(project_path=tmp_path / "project")
+        from rye.utils.execution_context import ExecutionContext
+        ts = TrustStore(ExecutionContext.from_env(project_path=tmp_path / "project"))
         ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
         return ts
 

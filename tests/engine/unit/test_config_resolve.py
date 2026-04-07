@@ -20,6 +20,7 @@ from conftest import PROJECT_ROOT
 
 from rye.constants import AI_DIR
 from rye.executor.primitive_executor import PrimitiveExecutor, ChainElement
+from rye.utils.execution_context import ExecutionContext
 from rye.utils.path_utils import BundleInfo
 
 
@@ -51,11 +52,15 @@ def _make_executor(
         sys_root.mkdir(exist_ok=True)
         system_bundles = [sys_root]
 
-    executor = PrimitiveExecutor(
+    executor = PrimitiveExecutor(ctx=ExecutionContext(
         project_path=project,
         user_space=user_space,
-        system_space=system_bundles[0],
-    )
+        signing_key_dir=tmp_path / "keys",
+        system_spaces=tuple(
+            BundleInfo(bundle_id=f"bundle-{i}", version="1.0.0", root_path=p, manifest_path=None, source="test")
+            for i, p in enumerate(system_bundles)
+        ),
+    ))
     # Inject multiple bundles if provided
     if len(system_bundles) > 1:
         executor.system_spaces = [

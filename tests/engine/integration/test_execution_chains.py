@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "rye"))
 
 from rye.executor.primitive_executor import PrimitiveExecutor, MAX_CHAIN_DEPTH
 from rye.executor.chain_validator import ChainValidator
+from rye.utils.execution_context import ExecutionContext
 
 
 class TestChainBuilding:
@@ -23,7 +24,7 @@ class TestChainBuilding:
 
     def test_max_chain_depth_enforcement(self):
         """Test that chains deeper than MAX_CHAIN_DEPTH raise error."""
-        executor = PrimitiveExecutor()
+        executor = PrimitiveExecutor(ctx=ExecutionContext.from_env())
         
         # Simulate chain building with depth check
         chain = []
@@ -96,7 +97,7 @@ class TestEnvironmentResolution:
 
     def test_env_config_substitution(self):
         """Test environment variable substitution in config."""
-        executor = PrimitiveExecutor()
+        executor = PrimitiveExecutor(ctx=ExecutionContext.from_env())
         
         config = {
             "command": "echo ${MESSAGE}",
@@ -114,7 +115,7 @@ class TestEnvironmentResolution:
 
     def test_env_config_with_defaults(self):
         """Test default values in environment substitution."""
-        executor = PrimitiveExecutor()
+        executor = PrimitiveExecutor(ctx=ExecutionContext.from_env())
         
         config = {"value": "${MISSING:-default_value}"}
         env = {}
@@ -125,7 +126,7 @@ class TestEnvironmentResolution:
 
     def test_nested_template_substitution(self):
         """Test nested template substitution."""
-        executor = PrimitiveExecutor()
+        executor = PrimitiveExecutor(ctx=ExecutionContext.from_env())
         
         config = {
             "user": "${USER}",
@@ -183,7 +184,7 @@ class TestCacheInvalidation:
         """Test that cache is invalidated when file changes."""
         import tempfile
         
-        executor = PrimitiveExecutor()
+        executor = PrimitiveExecutor(ctx=ExecutionContext.from_env())
         
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write('__version__ = "1.0.0"')
@@ -206,7 +207,7 @@ class TestCacheInvalidation:
 
     def test_clear_cache_method(self):
         """Test clearing all caches."""
-        executor = PrimitiveExecutor()
+        executor = PrimitiveExecutor(ctx=ExecutionContext.from_env())
         
         # Should not raise
         executor.clear_caches()

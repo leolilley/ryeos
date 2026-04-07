@@ -31,6 +31,7 @@ from rye.utils.path_utils import (
     get_system_spaces,
     get_extractor_search_paths,
 )
+from rye.utils.execution_context import ExecutionContext
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.parser_router import ParserRouter
 from rye.utils.registry_providers import get_registry_providers
@@ -705,7 +706,9 @@ class MetadataExtractor:
                 metadata.update(self._extract_knowledge_meta(content))
 
         try:
-            integrity_hash = verify_item(file_path, item_type)
+            integrity_hash = verify_item(
+                file_path, item_type, ctx=ExecutionContext.from_env(),
+            )
             metadata["signed"] = True
             metadata["integrity"] = integrity_hash
         except IntegrityError:

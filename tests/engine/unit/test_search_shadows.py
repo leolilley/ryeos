@@ -48,7 +48,8 @@ def multi_space_project(_setup_user_space):
         _, public_pem = load_keypair(signing_key_dir)
 
         from rye.utils.trust_store import TrustStore
-        store = TrustStore(project_path=project_root)
+        from rye.utils.execution_context import ExecutionContext
+        store = TrustStore(ExecutionContext.from_env(project_path=project_root))
         store.add_key(public_pem, owner="local", space="project", version="1.0.0")
 
         for f in directives_dir.glob("*.md"):

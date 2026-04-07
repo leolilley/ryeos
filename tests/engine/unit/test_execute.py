@@ -27,6 +27,7 @@ def temp_project(_setup_user_space):
     """Create temporary project with test items."""
     import os
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
     
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)
@@ -77,7 +78,7 @@ def main():
         signing_fp = compute_key_fingerprint(public_pem_signing)
         
         # Trust the signing key in this project so verification passes
-        store = TrustStore(project_path=project_root)
+        store = TrustStore(ExecutionContext.from_env(project_path=project_root))
         store.add_key(public_pem_signing, owner="local", space="project", version="1.0.0")
 
         for directive_file in (ai_dir / "directives").glob("*.md"):

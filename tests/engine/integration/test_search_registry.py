@@ -14,6 +14,7 @@ def temp_project(_setup_user_space):
     """Create minimal project for search tests."""
     import os
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.metadata_manager import MetadataManager
     from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
 
@@ -37,7 +38,7 @@ def temp_project(_setup_user_space):
         from rye.primitives.signing import load_keypair
         _, public_pem = load_keypair(signing_key_dir)
 
-        store = TrustStore(project_path=project_root)
+        store = TrustStore(ExecutionContext.from_env(project_path=project_root))
         store.add_key(public_pem, owner="local", space="project", version="1.0.0")
 
         for f in (ai_dir / "directives").glob("*.md"):

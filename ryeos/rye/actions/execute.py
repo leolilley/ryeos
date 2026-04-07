@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from rye.constants import AI_DIR, ItemType, STATE_DIR, STATE_THREADS
 from rye.executor import ExecutionResult, PrimitiveExecutor
+from rye.utils.execution_context import ExecutionContext
 from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.parser_router import ParserRouter
 from rye.utils.processor_router import ProcessorRouter
@@ -79,6 +80,7 @@ class ExecuteTool:
         user_space: Optional[str] = None,
         project_path: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        ctx: Optional[ExecutionContext] = None,
     ):
         """Initialize execute tool.
 
@@ -87,9 +89,18 @@ class ExecuteTool:
             project_path: Project root path for .ai/ resolution
             extra_env: Extra environment variables to pass to subprocess
                 execution without mutating os.environ.
+            ctx: Explicit execution context. If provided, user_space and
+                project_path are ignored in favour of ctx values.
         """
-        self.user_space = user_space or str(get_user_space())
-        self.project_path = project_path
+        if ctx is not None:
+            self._base_ctx = ctx
+            self.user_space = str(ctx.user_space)
+            self.project_path = str(ctx.project_path)
+        else:
+            self._base_ctx: Optional[ExecutionContext] = None
+            self.user_space = user_space or str(get_user_space())
+            self.project_path = project_path
+
         self.parser_router = ParserRouter()
         self.processor_router = ProcessorRouter()
         self.extra_env = extra_env or {}
@@ -530,9 +541,9 @@ class ExecuteTool:
             if not file_path:
                 return {"status": "error", "error": f"Directive not found: {item_id}"}
 
-            proj_path = Path(project_path) if project_path else None
+            ctx = self._build_ctx(project_path)
             try:
-                verify_item(file_path, ItemType.DIRECTIVE, project_path=proj_path)
+                verify_item(file_path, ItemType.DIRECTIVE, ctx=ctx)
             except IntegrityError as exc:
                 return {"status": "error", "error": str(exc), "item_id": item_id}
 
@@ -545,7 +556,7 @@ class ExecuteTool:
                     "item_id": item_id,
                 }
 
-            processor_router = ProcessorRouter(proj_path)
+            processor_router = ProcessorRouter(ctx.project_path)
             validation = processor_router.run("inputs/validate", parsed, parameters)
             if validation.get("status") == "error":
                 validation["item_id"] = item_id
@@ -645,9 +656,9 @@ class ExecuteTool:
             return {"status": "error", "error": f"Directive not found: {item_id}"}
 
         # 2. Integrity check
-        proj_path = Path(project_path) if project_path else None
+        ctx = self._build_ctx(project_path)
         try:
-            verify_item(file_path, ItemType.DIRECTIVE, project_path=proj_path)
+            verify_item(file_path, ItemType.DIRECTIVE, ctx=ctx)
         except IntegrityError as exc:
             return {"status": "error", "error": str(exc), "item_id": item_id}
 
@@ -658,7 +669,7 @@ class ExecuteTool:
             return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
 
         # 4. Validate inputs (data-driven processor)
-        processor_router = ProcessorRouter(proj_path)
+        processor_router = ProcessorRouter(ctx.project_path)
         validation = processor_router.run("inputs/validate", parsed, parameters)
         if validation.get("status") == "error":
             validation["item_id"] = item_id
@@ -941,6 +952,19 @@ class ExecuteTool:
             pass
         return None
 
+    def _build_ctx(self, project_path: str) -> ExecutionContext:
+        """Build an ExecutionContext for the given project path."""
+        proj_path = Path(project_path) if project_path else Path.cwd()
+        if self._base_ctx is not None:
+            # Re-derive from the explicit base, only overriding project_path
+            return ExecutionContext(
+                project_path=proj_path,
+                user_space=self._base_ctx.user_space,
+                signing_key_dir=self._base_ctx.signing_key_dir,
+                system_spaces=self._base_ctx.system_spaces,
+            )
+        return ExecutionContext.from_env(project_path=proj_path)
+
     def _get_executor(self, project_path: str) -> PrimitiveExecutor:
         """Get or create PrimitiveExecutor for project.
 
@@ -950,10 +974,8 @@ class ExecuteTool:
 
         # Check if we need a new executor
         if self._executor is None or self._executor.project_path != proj_path:
-            self._executor = PrimitiveExecutor(
-                project_path=proj_path,
-                user_space=Path(self.user_space),
-            )
+            ctx = self._build_ctx(project_path)
+            self._executor = PrimitiveExecutor(ctx=ctx)
 
         return self._executor
 
@@ -966,7 +988,7 @@ class ExecuteTool:
         verify_item(
             file_path,
             ItemType.KNOWLEDGE,
-            project_path=Path(project_path) if project_path else None,
+            ctx=self._build_ctx(project_path),
         )
 
         content = file_path.read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:25Z:6c7c50442b899dc09c644b4d1308ebdf0cad7a1850e12ce667a9f31604ea63e9:OLKnrbinxoUEMqQjNAdfWXJKTLJZJf5g5F_dvbobzeKu6zUIFXNe_krcBYdYKx2HRJcyPNseQd4gPj2OCe3wAQ:4b987fd4e40303ac
+# rye:signed:2026-04-07T03:17:14Z:ad03394953302fbca661fb8823dbb90f1b4ad22dffc12526eb943b6d9b86fc37:C_EeZlLHOVgLWokA3Il5KaghClkawtm2DsGQxe8SC1kcwAJNmeX7bMD3BbrzK32pbmfLMtPy8IoVBCfFKu2AAg:4b987fd4e40303ac
 """Checkpoint signing for transcript integrity and JSON signing utilities.
 
 Signs transcript.jsonl at turn boundaries by appending checkpoint events
@@ -36,9 +36,10 @@ def _get_keypair():
 
 def _ensure_self_trusted(public_pem: bytes, fingerprint: str) -> None:
     """Auto-trust own public key if not already trusted."""
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.trust_store import TrustStore
 
-    trust_store = TrustStore()
+    trust_store = TrustStore(ExecutionContext.from_env())
     if not trust_store.is_trusted(fingerprint):
         trust_store.add_key(public_pem, owner="self", version="1.0.0")
 
@@ -132,9 +133,10 @@ class TranscriptSigner:
             return {"valid": True, "checkpoints": 0, "unsigned": True}
 
         from rye.primitives.signing import verify_signature
+        from rye.utils.execution_context import ExecutionContext
         from rye.utils.trust_store import TrustStore
 
-        trust_store = TrustStore()
+        trust_store = TrustStore(ExecutionContext.from_env())
 
         for cp in checkpoints:
             byte_offset = cp["byte_offset"]
@@ -249,6 +251,7 @@ def verify_json(data: dict) -> bool:
         return False
 
     from rye.primitives.signing import verify_signature
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.trust_store import TrustStore
 
     content = {k: v for k, v in data.items() if k != "_signature"}
@@ -258,7 +261,7 @@ def verify_json(data: dict) -> bool:
     if actual_hash != parsed["hash"]:
         return False
 
-    trust_store = TrustStore()
+    trust_store = TrustStore(ExecutionContext.from_env())
     key_info = trust_store.get_key(parsed["pubkey_fp"])
     if key_info is None:
         return False

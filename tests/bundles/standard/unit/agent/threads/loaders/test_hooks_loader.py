@@ -153,7 +153,8 @@ class TestMergeHooks:
         save_keypair(priv, pub, signing_dir)
 
         from rye.utils.trust_store import TrustStore
-        store = TrustStore()
+        from rye.utils.execution_context import ExecutionContext
+        store = TrustStore(ExecutionContext.from_env())
         # Trust the ephemeral key first (self-signed), then the env signer
         store.add_key(pub, owner="test-ephemeral", space="user", version="1.0.0")
         if real_signing_pubkey:

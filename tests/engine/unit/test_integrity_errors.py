@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from rye.utils.integrity import verify_item, IntegrityError, _infer_item_id
+from rye.utils.execution_context import ExecutionContext
 from rye.constants import ItemType
 from rye.actions.execute import ExecuteTool
 from rye.actions._resolve import resolve_item
@@ -50,7 +51,7 @@ class TestIntegrityErrorMessages:
             tool_file.write_text('__version__ = "1.0.0"\n')
 
             with pytest.raises(IntegrityError, match=r"rye sign tool my/tool"):
-                verify_item(tool_file, ItemType.TOOL, project_path=project)
+                verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
     def test_unsigned_error_includes_item_type(self, _setup_user_space):
         """Error should mention the item type."""
@@ -62,7 +63,7 @@ class TestIntegrityErrorMessages:
             tool_file.write_text("pass\n")
 
             with pytest.raises(IntegrityError, match=r"Item type: tool"):
-                verify_item(tool_file, ItemType.TOOL, project_path=project)
+                verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
     def test_unsigned_error_mentions_expected_header(self, _setup_user_space):
         """Error should mention the expected signature header."""
@@ -74,7 +75,7 @@ class TestIntegrityErrorMessages:
             tool_file.write_text("pass\n")
 
             with pytest.raises(IntegrityError, match=r"rye:signed:"):
-                verify_item(tool_file, ItemType.TOOL, project_path=project)
+                verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
     def test_hash_mismatch_error_includes_fix(self, _setup_user_space):
         """Content-modified errors should suggest re-signing."""
@@ -98,7 +99,7 @@ class TestIntegrityErrorMessages:
             tool_file.write_text("\n".join(lines))
 
             with pytest.raises(IntegrityError, match=r"Re-sign after editing"):
-                verify_item(tool_file, ItemType.TOOL, project_path=project)
+                verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
 
 class TestDevMode:
@@ -114,7 +115,7 @@ class TestDevMode:
             tool_file.write_text("pass\n")
 
             with patch.dict(os.environ, {"RYE_DEV_MODE": "1"}):
-                result = verify_item(tool_file, ItemType.TOOL, project_path=project)
+                result = verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
                 assert result == "unverified"
 
     def test_dev_mode_off_raises(self, _setup_user_space):
@@ -129,7 +130,7 @@ class TestDevMode:
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("RYE_DEV_MODE", None)
                 with pytest.raises(IntegrityError):
-                    verify_item(tool_file, ItemType.TOOL, project_path=project)
+                    verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
     def test_dev_mode_value_must_be_1(self, _setup_user_space):
         """Only '1' activates dev mode, not 'true' or other values."""
@@ -142,7 +143,7 @@ class TestDevMode:
 
             with patch.dict(os.environ, {"RYE_DEV_MODE": "true"}):
                 with pytest.raises(IntegrityError):
-                    verify_item(tool_file, ItemType.TOOL, project_path=project)
+                    verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
 
 class TestExecuteToolIntegrityErrorType:

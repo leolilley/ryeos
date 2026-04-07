@@ -7,10 +7,13 @@ Replaces the dead-code IntegrityVerifier with MetadataManager-based verification
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from rye.constants import ItemType
 from rye.utils.metadata_manager import MetadataManager
+
+if TYPE_CHECKING:
+    from rye.utils.execution_context import ExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ def verify_item(
     file_path: Path,
     item_type: str,
     *,
-    project_path: Optional[Path] = None,
+    ctx: "ExecutionContext",
     allow_unsigned: bool = False,
 ) -> str:
     """Verify signature matches content. Returns verified hash.
@@ -51,11 +54,13 @@ def verify_item(
     Args:
         file_path: Path to the item file
         item_type: One of ItemType.DIRECTIVE, ItemType.TOOL, ItemType.KNOWLEDGE
-        project_path: Optional project path for tool signature format resolution
+        ctx: Execution context with project_path, user_space, etc.
+        allow_unsigned: If True, unsigned items return "unsigned" instead of raising.
 
     Returns:
         Verified content hash (SHA256 hex digest), or "unverified" in dev mode.
     """
+    project_path = ctx.project_path
     try:
         content = file_path.read_text(encoding="utf-8")
 
@@ -94,7 +99,7 @@ def verify_item(
         from rye.primitives.signing import verify_signature
         from rye.utils.trust_store import TrustStore
 
-        trust_store = TrustStore(project_path=project_path)
+        trust_store = TrustStore(ctx)
         key_info = trust_store.get_key(pubkey_fp)
 
         if key_info is None:

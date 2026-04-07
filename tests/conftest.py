@@ -78,6 +78,7 @@ from rye.primitives.signing import (
     save_keypair,
     compute_key_fingerprint,
 )
+from rye.utils.path_utils import get_system_spaces
 
 
 def get_env_signing_pubkey() -> bytes | None:
@@ -122,8 +123,16 @@ def _setup_user_space(tmp_path, monkeypatch):
     save_keypair(private_pem_general, public_pem_general, key_dir)
 
     # Add both public keys to user space trust store
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.trust_store import TrustStore
-    store = TrustStore(project_path=user_space)
+
+    ctx = ExecutionContext(
+        project_path=user_space,
+        user_space=user_space,
+        signing_key_dir=signing_key_dir,
+        system_spaces=tuple(get_system_spaces()),
+    )
+    store = TrustStore(ctx)
     store.add_key(public_pem, owner="local", space="user", version="1.0.0")
     store.add_key(public_pem_general, owner="local", space="user", version="1.0.0")
 

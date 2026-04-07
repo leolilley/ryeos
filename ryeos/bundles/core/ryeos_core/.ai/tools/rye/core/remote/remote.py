@@ -1,4 +1,4 @@
-# rye:signed:2026-04-07T01:49:39Z:06d4d4cc81d62783e33523d270b89bfac0b92530bb4ccfc85fcb3027604a250d:UqwrjaC7yOFtQPYwLRod-LO91_NqKbpS1i21zg32seW8Xlxb2IDKZnrLNqSRS5yIdC3GtaPwmTwJhqJOEC2UCw:4b987fd4e40303ac
+# rye:signed:2026-04-07T03:17:14Z:c8c14a111ab1d95210a2b0e8c3be39ad2c0f219f2e23921b945fc5d798ce0771:-mP5K8PA6xzDylC6PdG_NFGjoO4-AaFmWp-4FGkGnr2AMgmhc4_LOaonTDRIM04Doy_nTsinhoJaGF-ClQxNAg:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -662,9 +662,10 @@ async def _fetch_verified_identity(
     # TOFU key pinning
     from rye.primitives.signing import compute_key_fingerprint
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
 
     remote_fp = compute_key_fingerprint(remote_pem)
-    trust_store = TrustStore()
+    trust_store = TrustStore(ExecutionContext.from_env())
     from urllib.parse import urlparse
 
     host = urlparse(client.base_url).netloc

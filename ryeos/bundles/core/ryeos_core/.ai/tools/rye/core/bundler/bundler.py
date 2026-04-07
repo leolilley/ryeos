@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:11fef8084a985265d5ae6efae6a0f373f0630047ff0dde0c1bc29f8d3d893d72:qIawpy0deQVPU6UY0NRC0n8mpCKtF7tnFw0eGOeF5Ad3Ik2gyARWxgIB__b7wYF9NgaMUUI-13FW54MlTB9QBg:4b987fd4e40303ac
+# rye:signed:2026-04-07T03:17:14Z:a98c8cbdafc052f81bd431648fe231ebe39cd0ddfef4a719c3f3e08e2599919e:KQKaA6Mh033mGg0rWlPcux6aoFQocpTcLSn9VvOL4lclOAYnezyF_mDWj6VQGHqWktMG62X-7UIiVUiQkFowAQ:4b987fd4e40303ac
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -118,6 +118,7 @@ def validate_bundle_manifest(
             - error: str - error message if validation failed
     """
     from rye.utils.integrity import verify_item, IntegrityError
+    from rye.utils.execution_context import ExecutionContext
     from rye.constants import ItemType
 
     if not manifest_path.exists():
@@ -140,7 +141,7 @@ def validate_bundle_manifest(
 
     # 1. Verify manifest's own signature
     try:
-        verify_item(manifest_path, ItemType.TOOL, project_path=project_path)
+        verify_item(manifest_path, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project_path))
         result["manifest_valid"] = True
     except IntegrityError as e:
         result["error"] = f"Manifest signature invalid: {e}"
@@ -195,7 +196,7 @@ def validate_bundle_manifest(
             item_type = _classify_file(rel_path)
             if item_type in ("directive", "tool", "knowledge"):
                 try:
-                    verify_item(file_path, item_type, project_path=base_path)
+                    verify_item(file_path, item_type, ctx=ExecutionContext.from_env(project_path=base_path))
                 except IntegrityError:
                     result["files_tampered"].append(rel_path)
                     continue
@@ -337,6 +338,7 @@ def _sign_manifest(content: str) -> str:
         compute_key_fingerprint,
     )
     from rye.utils.trust_store import TrustStore
+    from rye.utils.execution_context import ExecutionContext
     from rye.utils.path_utils import get_signing_key_dir
 
     content_hash = compute_content_hash(content)
@@ -348,7 +350,7 @@ def _sign_manifest(content: str) -> str:
     ed25519_sig = sign_hash(content_hash, private_pem)
     pubkey_fp = compute_key_fingerprint(public_pem)
 
-    trust_store = TrustStore()
+    trust_store = TrustStore(ExecutionContext.from_env())
     if not trust_store.is_trusted(pubkey_fp):
         trust_store.add_key(public_pem, owner="local", version=__version__)
 
@@ -551,12 +553,13 @@ async def _verify(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
 
     # 1. Verify manifest's own inline signature
     from rye.utils.integrity import verify_item, IntegrityError
+    from rye.utils.execution_context import ExecutionContext
     from rye.constants import ItemType
 
     manifest_valid = True
     manifest_error = None
     try:
-        verify_item(manifest_path, ItemType.TOOL, project_path=project_path)
+        verify_item(manifest_path, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project_path))
     except IntegrityError as e:
         manifest_valid = False
         manifest_error = str(e)
@@ -599,7 +602,7 @@ async def _verify(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
                     verify_item(
                         file_path,
                         item_type,
-                        project_path=project_path,
+                        ctx=ExecutionContext.from_env(project_path=project_path),
                     )
                 except IntegrityError:
                     files_tampered.append(rel_path)

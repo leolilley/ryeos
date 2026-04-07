@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from rye.executor.primitive_executor import PrimitiveExecutor, ExecutionResult
+from rye.utils.execution_context import ExecutionContext
+from rye.utils.path_utils import BundleInfo
 
 
 class TestExecutionResultTrace:
@@ -36,11 +38,12 @@ class TestFindShadowedPaths:
             tools_dir.mkdir(parents=True)
             (tools_dir / "tool.py").write_text("pass\n")
 
-            executor = PrimitiveExecutor(
+            executor = PrimitiveExecutor(ctx=ExecutionContext(
                 project_path=project,
                 user_space=project / "user",  # doesn't exist
-                system_space=project / "system",  # doesn't exist
-            )
+                signing_key_dir=project / "keys",
+                system_spaces=(BundleInfo(bundle_id="test", version="0.0.0", root_path=project / "system", manifest_path=None, source="test"),),
+            ))
             shadowed = executor._find_shadowed_paths("my/tool", "project")
             assert shadowed == []
 
@@ -59,11 +62,12 @@ class TestFindShadowedPaths:
             system_tools.mkdir(parents=True)
             (system_tools / "tool.py").write_text("# system\n")
 
-            executor = PrimitiveExecutor(
+            executor = PrimitiveExecutor(ctx=ExecutionContext(
                 project_path=root / "project",
                 user_space=root / "user",
-                system_space=root / "system",
-            )
+                signing_key_dir=root / "keys",
+                system_spaces=(BundleInfo(bundle_id="test", version="0.0.0", root_path=root / "system", manifest_path=None, source="test"),),
+            ))
             shadowed = executor._find_shadowed_paths("my/tool", "project")
             assert len(shadowed) == 1
             assert "system" in shadowed[0]["space"]
@@ -77,11 +81,12 @@ class TestFindShadowedPaths:
             system_tools.mkdir(parents=True)
             (system_tools / "tool.py").write_text("# system\n")
 
-            executor = PrimitiveExecutor(
+            executor = PrimitiveExecutor(ctx=ExecutionContext(
                 project_path=root / "project",
                 user_space=root / "user",
-                system_space=root / "system",
-            )
+                signing_key_dir=root / "keys",
+                system_spaces=(BundleInfo(bundle_id="ryeos", version="0.0.0", root_path=root / "system", manifest_path=None, source="test"),),
+            ))
             # system:ryeos matches the bundle ID format
             shadowed = executor._find_shadowed_paths("my/tool", "system:ryeos")
             assert shadowed == []

@@ -21,19 +21,27 @@ def _bootstrap_trust_store(pub_pem: bytes, fp: str, label: str, signing_dir: Pat
 
     This ensures the execution engine (TrustStore) trusts tools
     signed by this key, not just the API auth layer.
+
+    Uses an explicit ExecutionContext — no env-var fallbacks.
+    ``signing_dir`` points to the node's keypair (e.g. /cas/signing/).
     """
+    from rye.utils.execution_context import ExecutionContext
+    from rye.utils.path_utils import get_system_spaces
     from rye.utils.trust_store import TrustStore
 
-    try:
-        trust_store = TrustStore()
-        trust_store.add_key(
-            public_key_pem=pub_pem,
-            owner=label,
-            version="1.0.0",
-        )
-        logger.info("Bootstrapped trust store key: fp:%s (owner=%s)", fp, label)
-    except Exception:
-        logger.warning("Failed to bootstrap trust store for fp:%s", fp, exc_info=True)
+    ctx = ExecutionContext(
+        project_path=Path.home(),
+        user_space=Path.home(),
+        signing_key_dir=signing_dir,
+        system_spaces=tuple(get_system_spaces()),
+    )
+    trust_store = TrustStore(ctx)
+    trust_store.add_key(
+        public_key_pem=pub_pem,
+        owner=label,
+        version="1.0.0",
+    )
+    logger.info("Bootstrapped trust store key: fp:%s (owner=%s)", fp, label)
 
 
 def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> None:
