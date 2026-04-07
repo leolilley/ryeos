@@ -1,4 +1,4 @@
-# rye:signed:2026-04-01T06:45:27Z:d2126205fc3cd4a7333b24adae8db11d40d22459df77d5cc7e35697a4f611314:VFCRBpV0onhwyAPHl3G2dgvEvQUMCKiBU9Z0l4GohKrNFuc7XRc4rH_3yaZnK_agBvPOtyL3vc8s3bqmeKuxBw:4b987fd4e40303ac
+# rye:signed:2026-04-07T01:22:48Z:f4010df9e535c5210162e75dff191fdef67f76df814acb626aec78f9e712a6aa:joRYjXxM45oRsaJOlMotkfZCPDSMuDPRKlrWFJiRv4X88SQgdZmlN2joHIqPu95eIzO_Vnrjj65KLA7xnly_Cg:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -208,6 +208,14 @@ class RemoteHttpClient:
                 "body": body,
                 "error": None,
             }
+        except json.JSONDecodeError:
+            status = resp.status_code if resp is not None else 0
+            return {
+                "success": False,
+                "status_code": status,
+                "body": resp.text if resp is not None else None,
+                "error": f"Server returned non-JSON response (HTTP {status})",
+            }
         except Exception as exc:
             return {
                 "success": False,
@@ -235,6 +243,14 @@ class RemoteHttpClient:
                 "body": resp_body,
                 "error": None,
             }
+        except json.JSONDecodeError:
+            status = resp.status_code if resp is not None else 0
+            return {
+                "success": False,
+                "status_code": status,
+                "body": resp.text if resp is not None else None,
+                "error": f"Server returned non-JSON response (HTTP {status})",
+            }
         except Exception as exc:
             return {
                 "success": False,
@@ -257,6 +273,14 @@ class RemoteHttpClient:
                 "status_code": resp.status_code,
                 "body": body,
                 "error": None,
+            }
+        except json.JSONDecodeError:
+            status = resp.status_code if resp is not None else 0
+            return {
+                "success": False,
+                "status_code": status,
+                "body": resp.text if resp is not None else None,
+                "error": f"Server returned non-JSON response (HTTP {status})",
             }
         except Exception as exc:
             return {

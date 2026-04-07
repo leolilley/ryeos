@@ -47,6 +47,16 @@ def _mock_response(status_code=200, body=None):
     return resp
 
 
+def _mock_non_json_response(status_code=502, text="<html>Bad Gateway</html>"):
+    """Build a mock httpx.Response that returns non-JSON content."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.content = text.encode()
+    resp.text = text
+    resp.json.side_effect = json.JSONDecodeError("Expecting value", text, 0)
+    return resp
+
+
 # ── RemoteHttpClient tests ───────────────────────────────────────────────
 
 
@@ -104,6 +114,48 @@ class TestRemoteHttpClient:
         assert result["status_code"] == 200
         assert result["body"] == {"id": "exec-123"}
         assert result["error"] is None
+
+    async def test_get_non_json_response(self):
+        client = RemoteHttpClient("https://node.example.com")
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.get.return_value = _mock_non_json_response(502, "<html>Bad Gateway</html>")
+        client._http = mock_http
+
+        with patch.object(client, "_sign_headers", return_value={}):
+            result = await client.get("/api/v1/status")
+
+        assert result["success"] is False
+        assert result["status_code"] == 502
+        assert "non-JSON" in result["error"]
+        assert "502" in result["error"]
+        assert result["body"] == "<html>Bad Gateway</html>"
+
+    async def test_post_non_json_response(self):
+        client = RemoteHttpClient("https://node.example.com")
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.post.return_value = _mock_non_json_response(503, "Service Unavailable")
+        client._http = mock_http
+
+        with patch.object(client, "_sign_headers", return_value={}):
+            result = await client.post("/objects/put", {"entries": []})
+
+        assert result["success"] is False
+        assert result["status_code"] == 503
+        assert "non-JSON" in result["error"]
+        assert result["body"] == "Service Unavailable"
+
+    async def test_delete_non_json_response(self):
+        client = RemoteHttpClient("https://node.example.com")
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.delete.return_value = _mock_non_json_response(500, "Internal Server Error")
+        client._http = mock_http
+
+        with patch.object(client, "_sign_headers", return_value={}):
+            result = await client.delete("/api/v1/resource")
+
+        assert result["success"] is False
+        assert result["status_code"] == 500
+        assert "non-JSON" in result["error"]
 
 
 # ── _SimpleClient tests ──────────────────────────────────────────────────
