@@ -338,7 +338,8 @@ jobs:
               rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
             done
           fi
-          rye remote bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }} --version "${GITHUB_REF_NAME#v}"
+          BUNDLE_VERSION=$(python -c "import tomllib; print(tomllib.load(open('${{ matrix.path }}/pyproject.toml','rb'))['project']['version'])")
+          rye remote bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }} --version "$BUNDLE_VERSION"
 
       - name: Configure registry remote
         if: steps.check.outputs.skip == 'false'
@@ -346,7 +347,7 @@ jobs:
           RYE_REGISTRY_URL: ${{ secrets.RYE_REGISTRY_URL }}
         run: |
           mkdir -p ~/.ai/config/remotes
-          printf 'remotes:\n  registry:\n    url: %s\n    roles: [registry]\n' "$RYE_REGISTRY_URL" > ~/.ai/config/remotes/remotes.yaml
+          printf 'defaults:\n  timeout: 300\nremotes:\n  registry:\n    url: %s\n    roles: [registry]\n' "$RYE_REGISTRY_URL" > ~/.ai/config/remotes/remotes.yaml
 
       - name: Push bundle to registry
         if: steps.check.outputs.skip == 'false'
