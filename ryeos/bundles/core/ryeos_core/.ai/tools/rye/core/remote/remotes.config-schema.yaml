@@ -12,6 +12,13 @@ schema:
   properties:
     project_name:
       type: string
+    defaults:
+      type: object
+      properties:
+        timeout:
+          type: integer
+          description: "Request timeout in seconds, applied to all remotes"
+      required: [timeout]
     remotes:
       type: object
       additionalProperties:
@@ -21,7 +28,11 @@ schema:
             type: string
           key_env:
             type: string
+          timeout:
+            type: integer
+            description: "Per-remote timeout override in seconds"
           roles:
             type: array
             items:
               type: string
+  required: [defaults]

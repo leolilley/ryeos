@@ -29,6 +29,7 @@ class RemoteConfig:
 
     name: str
     url: str
+    timeout: int
     node_id: str = ""  # fp:<fingerprint> of the remote node (audience for request signing)
 
 
@@ -74,7 +75,14 @@ def resolve_remote(
             f"Remote '{name}' has no url configured in remotes/remotes.yaml"
         )
     node_id = entry.get("node_id", "")
-    return RemoteConfig(name=name, url=url, node_id=node_id)
+    defaults = config.get("defaults", {})
+    timeout = entry.get("timeout", defaults.get("timeout"))
+    if timeout is None:
+        raise ValueError(
+            f"Remote '{name}' has no timeout configured and no defaults.timeout "
+            f"in remotes/remotes.yaml"
+        )
+    return RemoteConfig(name=name, url=url, timeout=timeout, node_id=node_id)
 
 
 def get_project_path(project_path: Optional[Path] = None) -> str:

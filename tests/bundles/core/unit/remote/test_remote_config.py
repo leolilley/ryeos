@@ -34,16 +34,18 @@ class TestResolveRemote:
 
     def test_named_remote_from_config(self):
         config = {
+            "defaults": {"timeout": 300},
             "remotes": {
                 "gpu": {"url": "https://gpu.example.com", "node_id": "fp:abc123"},
             },
         }
         with _patch_config(config):
             rc = resolve_remote("gpu")
-        assert rc == RemoteConfig(name="gpu", url="https://gpu.example.com", node_id="fp:abc123")
+        assert rc == RemoteConfig(name="gpu", url="https://gpu.example.com", timeout=300, node_id="fp:abc123")
 
     def test_default_remote_from_config(self):
         config = {
+            "defaults": {"timeout": 300},
             "remotes": {
                 "default": {"url": "https://default.example.com", "node_id": "fp:def456"},
             },
@@ -70,10 +72,25 @@ class TestResolveRemote:
 
     def test_missing_node_id_returns_empty(self):
         """node_id is optional — empty string if not configured."""
-        config = {"remotes": {"gpu": {"url": "https://gpu.example.com"}}}
+        config = {"defaults": {"timeout": 300}, "remotes": {"gpu": {"url": "https://gpu.example.com"}}}
         with _patch_config(config):
             rc = resolve_remote("gpu")
         assert rc.node_id == ""
+
+    def test_per_remote_timeout_overrides_default(self):
+        config = {
+            "defaults": {"timeout": 300},
+            "remotes": {"gpu": {"url": "https://gpu.example.com", "timeout": 600}},
+        }
+        with _patch_config(config):
+            rc = resolve_remote("gpu")
+        assert rc.timeout == 600
+
+    def test_missing_timeout_raises(self):
+        config = {"remotes": {"gpu": {"url": "https://gpu.example.com"}}}
+        with _patch_config(config):
+            with pytest.raises(ValueError, match="no timeout configured"):
+                resolve_remote("gpu")
 
     def test_malformed_entry_not_dict(self):
         config = {"remotes": {"gpu": "https://example.com"}}
@@ -152,7 +169,7 @@ class TestRemoteToolIntegration:
 
     def test_get_client_uses_resolve_remote(self):
         """_get_client() calls resolve_remote() and creates RemoteHttpClient."""
-        config = {"remotes": {"gpu": {"url": "https://gpu.example.com", "node_id": "fp:test123"}}}
+        config = {"defaults": {"timeout": 300}, "remotes": {"gpu": {"url": "https://gpu.example.com", "node_id": "fp:test123"}}}
         with _patch_config(config):
             import importlib
             import remote as remote_mod
@@ -161,6 +178,7 @@ class TestRemoteToolIntegration:
             client = remote_mod._get_client("gpu", None)
             assert client.base_url == "https://gpu.example.com"
             assert client.node_id == "fp:test123"
+            assert client.timeout == 300
 
 
 class TestParseEnvFile:

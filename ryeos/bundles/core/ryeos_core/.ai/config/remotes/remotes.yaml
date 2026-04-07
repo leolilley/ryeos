@@ -6,6 +6,9 @@
 category: "cas"
 version: "1.0.0"
 
+defaults:
+  timeout: 300  # request timeout in seconds, applied to all remotes
+
 # project_name: my-project   # stable identifier for push refs + webhooks
 #                             # Falls back to directory basename if unset.
 

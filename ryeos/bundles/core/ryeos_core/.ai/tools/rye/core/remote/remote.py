@@ -143,9 +143,10 @@ CONFIG_SCHEMA = {
 class RemoteHttpClient:
     """HTTP client for ryeos-node API calls."""
 
-    def __init__(self, base_url: str, node_id: str = ""):
+    def __init__(self, base_url: str, node_id: str = "", timeout: int = 300):
         self.base_url = base_url.rstrip("/")
         self.node_id = node_id
+        self.timeout = timeout
         self._http = None
 
     async def _get_http(self):
@@ -199,7 +200,7 @@ class RemoteHttpClient:
         headers.update(self._sign_headers("GET", path))
         try:
             resp = await client.get(
-                f"{self.base_url}{path}", headers=headers, timeout=30
+                f"{self.base_url}{path}", headers=headers, timeout=self.timeout
             )
             body = resp.json() if resp.content else {}
             return {
@@ -224,7 +225,7 @@ class RemoteHttpClient:
                 "error": str(exc),
             }
 
-    async def post(self, path: str, body: Dict, timeout: int = 60) -> Dict:
+    async def post(self, path: str, body: Dict, timeout: int = None) -> Dict:
         client = await self._get_http()
         body_bytes = json.dumps(body).encode() if body else None
         headers = {"Content-Type": "application/json"}
@@ -234,7 +235,7 @@ class RemoteHttpClient:
                 f"{self.base_url}{path}",
                 content=body_bytes,
                 headers=headers,
-                timeout=timeout,
+                timeout=timeout or self.timeout,
             )
             resp_body = resp.json() if resp.content else {}
             return {
@@ -265,7 +266,7 @@ class RemoteHttpClient:
         headers.update(self._sign_headers("DELETE", path))
         try:
             resp = await client.delete(
-                f"{self.base_url}{path}", headers=headers, timeout=30
+                f"{self.base_url}{path}", headers=headers, timeout=self.timeout
             )
             body = resp.json() if resp.content else {}
             return {
@@ -296,7 +297,7 @@ def _get_client(remote_name=None, project_path=None) -> RemoteHttpClient:
     from remote_config import resolve_remote
 
     config = resolve_remote(remote_name, project_path)
-    return RemoteHttpClient(config.url, config.node_id)
+    return RemoteHttpClient(config.url, config.node_id, timeout=config.timeout)
 
 
 # ---------------------------------------------------------------------------
