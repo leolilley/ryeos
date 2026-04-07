@@ -77,8 +77,9 @@ def _find_agent_threads_anchor() -> Optional[Path]:
     The walker lives in core but rye/agent/threads is in the standard bundle.
     Returns None when the standard bundle is not installed (serverless/core-only).
     """
+    _AGENT_THREADS_REL = Path("rye") / "agent" / "threads"
     # Check own bundle first
-    own = _find_tools_root() / "rye" / "state" / "threads"
+    own = _find_tools_root() / _AGENT_THREADS_REL
     if own.is_dir():
         return own
     # Search across installed system bundles
@@ -87,7 +88,7 @@ def _find_agent_threads_anchor() -> Optional[Path]:
 
         for bundle in get_system_spaces():
             candidate = (
-                bundle.root_path / AI_DIR / "tools" / "rye" / "state" / "threads"
+                bundle.root_path / AI_DIR / ItemType.TYPE_DIRS[ItemType.TOOL] / _AGENT_THREADS_REL
             )
             if candidate.is_dir():
                 return candidate
@@ -1187,6 +1188,7 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
             "as",
             "collect",
             "parallel",
+            "max_concurrency",
             "env_requires",
             "cache_result",
             "remote",
@@ -1551,8 +1553,18 @@ async def execute(
 
     cfg = graph_config.get("config", {})
     nodes = cfg.get("nodes", {})
-    max_steps = cfg.get("max_steps", 100)
     error_mode = cfg.get("on_error", "fail")
+
+    # Graph-level config overrides execution config defaults (from execution.yaml).
+    # These MUST be present in the resolved execution config — fail if missing.
+    _exec_max_steps = params.pop("max_steps", None)
+    _exec_max_concurrency = params.pop("max_concurrency", None)
+    max_steps = cfg.get("max_steps", _exec_max_steps)
+    max_concurrency = cfg.get("max_concurrency", _exec_max_concurrency)
+    if max_steps is None:
+        return {"success": False, "error": "max_steps not configured — check execution.yaml defaults"}
+    if max_concurrency is None:
+        return {"success": False, "error": "max_concurrency not configured — check execution.yaml defaults"}
 
     # Derive IDs — resolve _item_id from _file_path if not set
     if not graph_config.get("_item_id") and graph_config.get("_file_path"):
@@ -1942,7 +1954,7 @@ async def execute(
             )
             foreach_start = time.monotonic()
             current, state = await _handle_foreach(
-                node, state, params, exec_ctx, project_path
+                node, state, params, exec_ctx, project_path, max_concurrency
             )
             graph_transcript.write_event(
                 "foreach_completed",
@@ -2541,12 +2553,13 @@ async def _handle_foreach(
     inputs: Dict,
     exec_ctx: Dict,
     project_path: str,
+    max_concurrency: int,
 ) -> tuple:
     """Handle a foreach node — iterate over a list, execute action per item.
 
     Parallel mode: when the node has ``parallel: true``, all iterations are
-    dispatched concurrently via asyncio.gather.  Sequential mode (default):
-    each iteration completes before the next starts.
+    dispatched concurrently via asyncio.gather (bounded by max_concurrency).
+    Sequential mode (default): each iteration completes before the next starts.
 
     Returns (next_node, updated_state).
     """
@@ -2563,8 +2576,10 @@ async def _handle_foreach(
     is_parallel = node.get("parallel", False) is True
 
     if is_parallel:
+        # Node-level max_concurrency overrides graph-level default
+        node_concurrency = node.get("max_concurrency", max_concurrency)
         collected = await _foreach_parallel(
-            node, items, as_var, inputs, exec_ctx, project_path
+            node, items, as_var, inputs, exec_ctx, project_path, node_concurrency
         )
     else:
         collected = await _foreach_sequential(
@@ -2738,34 +2753,37 @@ async def _foreach_parallel(
     inputs: Dict,
     exec_ctx: Dict,
     project_path: str,
+    max_concurrency: int,
 ) -> List:
-    """Dispatch all foreach items concurrently via asyncio.gather."""
+    """Dispatch foreach items concurrently, bounded by max_concurrency."""
     cache_ctx = _foreach_cache_context(node, project_path)
+    semaphore = asyncio.Semaphore(max_concurrency)
 
     async def _run_one(item: Any) -> Any:
-        interp_ctx: Dict[str, Any] = {
-            "state": {"inputs": inputs, as_var: item},
-            "inputs": inputs,
-            as_var: item,
-            **_builtins(),
-        }
-        action = interpolation.interpolate_action(node["action"], interp_ctx)
-        action["params"] = _strip_none(action.get("params", {}))
+        async with semaphore:
+            interp_ctx: Dict[str, Any] = {
+                "state": {"inputs": inputs, as_var: item},
+                "inputs": inputs,
+                as_var: item,
+                **_builtins(),
+            }
+            action = interpolation.interpolate_action(node["action"], interp_ctx)
+            action["params"] = _strip_none(action.get("params", {}))
 
-        if action.get("item_id") == "rye/agent/threads/thread_directive":
-            action["params"] = _inject_parent_context(
-                action.get("params", {}), exec_ctx
+            if action.get("item_id") == "rye/agent/threads/thread_directive":
+                action["params"] = _inject_parent_context(
+                    action.get("params", {}), exec_ctx
+                )
+
+            value, _receipt = await _foreach_dispatch_one(
+                node,
+                action,
+                exec_ctx,
+                project_path,
+                f"foreach_{as_var}",
+                cache_ctx,
             )
-
-        value, _receipt = await _foreach_dispatch_one(
-            node,
-            action,
-            exec_ctx,
-            project_path,
-            f"foreach_{as_var}",
-            cache_ctx,
-        )
-        return value
+            return value
 
     return list(await asyncio.gather(*[_run_one(item) for item in items]))
 

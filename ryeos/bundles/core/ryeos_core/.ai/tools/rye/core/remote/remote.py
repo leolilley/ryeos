@@ -1,4 +1,4 @@
-# rye:signed:2026-04-07T01:22:48Z:f4010df9e535c5210162e75dff191fdef67f76df814acb626aec78f9e712a6aa:joRYjXxM45oRsaJOlMotkfZCPDSMuDPRKlrWFJiRv4X88SQgdZmlN2joHIqPu95eIzO_Vnrjj65KLA7xnly_Cg:4b987fd4e40303ac
+# rye:signed:2026-04-07T01:49:39Z:06d4d4cc81d62783e33523d270b89bfac0b92530bb4ccfc85fcb3027604a250d:UqwrjaC7yOFtQPYwLRod-LO91_NqKbpS1i21zg32seW8Xlxb2IDKZnrLNqSRS5yIdC3GtaPwmTwJhqJOEC2UCw:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -524,8 +524,9 @@ async def _push(project_path: Path, params: Dict) -> Dict:
         else "Remote is up to date",
     }
     if not ref_published:
+        ref_err = push_resp.get("error") or push_body or f"HTTP {push_resp.get('status_code')}"
         result["ref_warning"] = (
-            f"Objects uploaded but project ref not published: {push_resp.get('error')}"
+            f"Objects uploaded but project ref not published: {ref_err}"
         )
     return result
 
@@ -927,7 +928,8 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     exec_resp = await client.post("/execute", exec_body, timeout=300)
 
     if not exec_resp["success"]:
-        return {"error": f"Remote execution failed: {exec_resp['error']}"}
+        err = exec_resp.get("error") or exec_resp.get("body") or f"HTTP {exec_resp.get('status_code')}"
+        return {"error": f"Remote execution failed: {err}", "success": False}
 
     exec_body = exec_resp["body"]
     if isinstance(exec_body, str):

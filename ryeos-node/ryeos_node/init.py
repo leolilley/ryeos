@@ -16,6 +16,26 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _bootstrap_trust_store(pub_pem: bytes, fp: str, label: str, signing_dir: Path) -> None:
+    """Add a public key to the node's user-level trust store.
+
+    This ensures the execution engine (TrustStore) trusts tools
+    signed by this key, not just the API auth layer.
+    """
+    from rye.utils.trust_store import TrustStore
+
+    try:
+        trust_store = TrustStore()
+        trust_store.add_key(
+            public_key_pem=pub_pem,
+            owner=label,
+            version="1.0.0",
+        )
+        logger.info("Bootstrapped trust store key: fp:%s (owner=%s)", fp, label)
+    except Exception:
+        logger.warning("Failed to bootstrap trust store for fp:%s", fp, exc_info=True)
+
+
 def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> None:
     """Create first authorized key from BOOTSTRAP_PUBLIC_KEY env var.
 
@@ -69,6 +89,10 @@ def _bootstrap_authorized_key(authorized_keys_dir: Path, signing_dir: Path) -> N
     key_file = authorized_keys_dir / f"{fp}.toml"
     key_file.write_text(signed_content, encoding="utf-8")
     logger.info("Bootstrapped authorized key: fp:%s (label=%s)", fp, label)
+
+    # Also register in the CAS trust store so the execution engine
+    # trusts tools signed by this key (authorized_keys is API-only).
+    _bootstrap_trust_store(pub_pem, fp, label, signing_dir)
 
 
 def ensure_node_space(cas_base_path: str) -> str:

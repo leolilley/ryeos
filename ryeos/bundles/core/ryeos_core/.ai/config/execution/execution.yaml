@@ -1,4 +1,4 @@
-# rye:signed:2026-04-05T03:14:25Z:1e744ffc1329e3229b8893d997daa2d1a2b51b5169ece03519330722ea2c6dc0:tEeqjHHfpLKfKG54AXrs3yfAbeWmGB4PSYzlG1SmShDjrHIAAtctnsSk4Lse3ZqyS_3Aq5fztSn2Ma0sWwMnDg:4b987fd4e40303ac
+# rye:signed:2026-04-07T00:46:22Z:fa08a2c7b4e58bb0523c4708d50fbd99614d0ad75d718dce99916642913f6a6b:GnOpNI2Nj_FtTTOLh18rg74WWjsaF1R5xHdKJYhLUkz8XYkZHo4CHmCzTh3G4w5t_j88gIc0I21H9spCwC8oCw:4b987fd4e40303ac
 # Execution config — system defaults
 # Override per-user: ~/.ai/config/execution/execution.yaml
 # Override per-project: .ai/config/execution/execution.yaml
@@ -9,6 +9,8 @@ schema_version: "1.0.0"
 # Defaults applied to all tool executions
 defaults:
   timeout: 300
+  max_steps: 100
+  max_concurrency: 10
 
 # Per-tool overrides (key = tool item_id)
 # tools:

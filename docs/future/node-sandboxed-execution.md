@@ -32,10 +32,10 @@ When the node cryptographically attests to its environment, execution becomes bo
 
 ## The Stack
 
-| Layer      | Concern                 | What it does                                                                      |
-| ---------- | ----------------------- | --------------------------------------------------------------------------------- |
-| **Key**    | Identity                | Who authorized this                                                               |
-| **Node**   | Environment attestation | Declares what hardware, what capabilities, what isolation is available             |
+| Layer      | Concern                 | What it does                                                                              |
+| ---------- | ----------------------- | ----------------------------------------------------------------------------------------- |
+| **Key**    | Identity                | Who authorized this                                                                       |
+| **Node**   | Environment attestation | Declares what hardware, what capabilities, what isolation is available                    |
 | **Lillux** | Enforcement             | Applies constraints at execution time. Will not spawn unless sandbox requirements are met |
 
 The node declares. Lillux enforces. The node says "I have these capabilities and these restrictions." Lillux says "I will not spawn this process unless these constraints are applied." Declaration above, enforcement below.
@@ -72,3 +72,244 @@ This attestation is signed by the node's key (from `~/.ai/node/identity/`) and p
 ## What Changes in Lillux
 
 Lillux gains sandbox enforcement as part of Execute. `lillux exec` learns to accept and apply constraint parameters: cgroups, namespaces, seccomp profiles, network restrictions. The four concerns stay the same (Execute, Memory, Identity, Time), but Execute grows to include "execute within these constraints." The constraints are passed down from the node layer, but the Rust binary is what applies them.
+
+---
+
+## Updated Architecture: Sandbox Engines as Data-Driven Providers
+
+After further analysis, the approach shifts from implementing sandboxing primitives directly in Lillux to integrating with existing sandbox solutions as **registered capabilities**. This aligns with RYE's data-driven philosophy and follows the same pattern as model providers, runtimes, and other external systems.
+
+### The Integration Model
+
+Instead of Lillux learning cgroups, namespaces, and seccomp directly, it delegates to **sandbox engines** — existing, battle-tested solutions like nsjail, Firecracker, bubblewrap, or Docker. The sandbox becomes a runtime descriptor, configured via YAML and invoked through a standard interface.
+
+```yaml
+# .ai/config/sandbox/nsjail.yaml
+engine: nsjail
+binary: /usr/bin/nsjail
+profiles:
+  strict:
+    config: /etc/ryeos/nsjail/strict.cfg
+    capabilities: [cgroups_v2, seccomp, user_namespaces]
+  gpu-isolated:
+    config: /etc/ryeos/nsjail/gpu.cfg
+    capabilities: [cgroups_v2, seccomp, user_namespaces, gpu_passthrough]
+invocation:
+  args: ["--config", "{profile_config}", "--", "{cmd}"]
+  cwd: "{cwd}"
+  env_passthrough: ["RYE_*", "HOME", "PATH"]
+```
+
+```yaml
+# .ai/config/sandbox/bubblewrap.yaml
+engine: bubblewrap
+binary: /usr/bin/bwrap
+profiles:
+  strict:
+    args: ["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/"]
+    capabilities: [user_namespaces]
+```
+
+### Node Attestation with Sandbox Engines
+
+The node's attestation document declares which sandbox engines are available and with what profiles:
+
+```json
+{
+  "kind": "attestation/v1",
+  "node_id": "fp:a3f8c921e7b04d12",
+  "environment": {
+    "platform": "linux",
+    "architecture": "x86_64"
+  },
+  "isolation": {
+    "engines": [
+      {
+        "name": "nsjail",
+        "version": "3.4",
+        "profiles": ["strict", "gpu-isolated", "network-restricted"],
+        "capabilities": ["cgroups_v2", "seccomp", "user_namespaces"]
+      },
+      {
+        "name": "bubblewrap",
+        "version": "0.8.0",
+        "profiles": ["strict"],
+        "capabilities": ["user_namespaces"]
+      }
+    ]
+  }
+}
+```
+
+### Directive Sandbox Requirements
+
+Directives declare sandbox requirements using the same engine/profile model:
+
+```yaml
+metadata:
+  sandbox:
+    engine: "nsjail"
+    profile: "strict"
+    requires:
+      capabilities: ["cgroups_v2", "seccomp"]
+```
+
+### Lillux Integration
+
+Lillux gains a `--sandbox` flag that accepts engine configuration:
+
+```rust
+#[derive(Subcommand)]
+pub enum ExecAction {
+    Run {
+        // ... existing fields
+        #[arg(long)]
+        sandbox: Option<String>,  // JSON: {"engine": "nsjail", "profile": "strict"}
+    }
+}
+```
+
+When `--sandbox` is provided, Lillux:
+
+1. Loads the engine configuration from `.ai/config/sandbox/{engine}.yaml`
+2. Resolves the profile and constructs the invocation
+3. Executes the sandbox engine instead of the raw command
+4. The sandbox engine handles all isolation primitives
+
+This keeps Lillux focused on its core primitives while delegating complex kernel-level sandboxing to specialized tools.
+
+### Cross-Platform Considerations
+
+Different platforms support different sandbox engines:
+
+| Platform    | Available Engines                       | Notes                     |
+| ----------- | --------------------------------------- | ------------------------- |
+| **Linux**   | nsjail, bubblewrap, Firecracker, Docker | Full ecosystem            |
+| **FreeBSD** | jails, bhyve                            | Native OS-level isolation |
+| **OpenBSD** | pledge/unveil integration               | Syscall-level sandboxing  |
+| **macOS**   | sandbox-exec, Docker                    | Limited native options    |
+| **Windows** | Docker, Windows Sandbox                 | Container-based           |
+
+The attestation honestly declares what's available. A macOS node might only offer `{"engines": [{"name": "docker", "profiles": ["basic"]}]}` while a Linux node offers the full range.
+
+### BSD and Enhanced Security Model
+
+FreeBSD and OpenBSD provide unique advantages for RYE's security model:
+
+#### FreeBSD with Jails
+
+- **Native OS-level isolation**: Jails provide clean process and filesystem isolation without complex userspace configuration
+- **ZFS integration**: Content-addressed storage gets deduplication, snapshotting, and send/receive for free
+- **Coherent base system**: Single-team development of kernel + userland reduces attack surface
+- **GPU passthrough**: PCIe device passthrough to jails enables clean GPU isolation
+
+#### OpenBSD with pledge/unveil
+
+- **Syscall-level capability enforcement**: pledge() restricts available syscalls, unveil() restricts filesystem access
+- **Auditable security**: Every component is designed for human auditability
+- **Minimal attack surface**: Features removed if they increase complexity
+- **Natural alignment**: OpenBSD's capability model mirrors RYE's declared permissions
+
+### tinygrad and Hardware Independence
+
+tinygrad's architecture enables GPU inference on BSD platforms through multiple paths:
+
+#### Hardware Command Queue (HCQ) Model
+
+tinygrad's HCQ bypasses vendor runtimes (CUDA, ROCm, HIP) and talks directly to hardware via command queues. This eliminates dependencies on proprietary runtime stacks.
+
+#### AMD RDNA3/RDNA4 Support
+
+The AM driver is a complete userspace GPU driver for AMD RDNA3/RDNA4:
+
+- No kernel driver required for compute workloads
+- Direct PCIe device access
+- Memory management and compute queue binding in Python
+- Works with FreeBSD jails via PCIe passthrough
+
+#### Nvidia Open Source Path
+
+With Nvidia's open-source kernel modules (mandatory for Blackwell, available for older generations):
+
+- FreeBSD developers are porting nvidia-drm-kmod via linuxkpi
+- tinygrad's NV backend can bypass CUDA runtime
+- Direct PCI interface eliminates proprietary userspace dependencies
+
+### The Complete Stack on BSD
+
+For a RYE node on FreeBSD with GPU inference:
+
+```
+FreeBSD kernel
+├── Jail isolation (OS-level)
+├── PCIe device passthrough
+├── ryeosd process
+    ├── Lillux execution boundary
+    ├── tinygrad AM driver (userspace)
+    └── GPU hardware (RDNA3/RDNA4)
+```
+
+Every layer is auditable. The signing boundary, jail boundary, and hardware boundary coincide. There's no opaque kernel blob in the execution path.
+
+### Use Cases for BSD Deployment
+
+#### Regulated Data Handling
+
+Legal, medical, or financial firms processing privileged documents need fully auditable execution paths. BSD + RYE provides cryptographic proof of capability boundaries.
+
+#### Government/Defense Contracts
+
+Supply chain integrity requirements demand auditable software stacks. A RYE node on FreeBSD with signed task chains satisfies these requirements.
+
+#### Multi-tenant Inference
+
+Shared hardware serving multiple clients requires cryptographic isolation guarantees. Jail isolation + signed execution boundaries make this enforceable rather than policy-based.
+
+#### High-value Autonomous Agents
+
+Agents with real-world consequences (trading, infrastructure, communications) need audit trails with cryptographic integrity. The signed directive chain becomes legally admissible evidence.
+
+### Implementation Phases
+
+#### Phase 1: Attestation Foundation (Cross-platform)
+
+- Environment probing (hardware, OS, available isolation)
+- Signed attestation documents
+- `/attestation` endpoint
+- Constraint matching before dispatch
+
+#### Phase 2: Sandbox Engine Integration (Linux-first)
+
+- YAML-based engine configuration
+- `--sandbox` flag in Lillux
+- nsjail and bubblewrap integration
+- Directive sandbox requirements
+
+#### Phase 3: BSD Native Support
+
+- FreeBSD jail integration
+- OpenBSD pledge/unveil integration
+  opencode -s ses_29e142adfffeLujQ6ifQISICCG
+  ple
+- tinygrad AM driver on FreeBSD
+- PCIe passthrough for GPU isolation
+
+#### Phase 4: Hardware Attestation (Future)
+
+- TPM-backed attestation
+- SEV-SNP encrypted execution
+- Hardware-verified isolation claims
+
+### What This Achieves
+
+**Data-driven consistency**: Sandbox engines follow the same YAML configuration pattern as model providers and runtimes. Adding support for a new sandbox = dropping a config file.
+
+**Battle-tested security**: Instead of implementing sandboxing primitives, RYE leverages decades of hardening in nsjail, jails, and pledge/unveil.
+
+**Cross-platform honesty**: Each platform's attestation honestly declares available isolation. No false security claims.
+
+**Verifiable architecture**: On BSD, every layer from directive to hardware is auditable. The security model has no footnotes.
+
+**Practical deployment**: Linux nodes handle throughput-sensitive workloads, BSD nodes handle trust-sensitive workloads. The architecture supports both.
+
+The result is a sandboxing model that's more principled than custom implementation, more honest than container-based solutions, and more verifiable than proprietary stacks — while remaining practical for production deployment.

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-01T05:25:51Z:d9f51d386deda66215ef9730c73a390b12a181b1215cc04a6660d58504bdae33:caOzPZBq-0pwBAFYnu91qko7oiOP0FJLKIHk8zakQz8BLqB9byo7Bkbu5UQbgL6NZEYa-p4GR3XmuOyQ5G0dBA:4b987fd4e40303ac
+# rye:signed:2026-04-07T01:22:48Z:8ec7a84a77fa82d659fc5f1b1d7e3ff096244d8fddb476abaeed6f303b9299e5:uWkXPatyWA1NzGAnd-r_AyzqIE71Qz4QdftLMGD5hs2lMqONtm49zGRrb-rJbqEATZfbQCHY3E2Jpg9HygXNDA:4b987fd4e40303ac
 """Named remote resolution for multi-remote execution.
 
 Resolves remote connection details (URL + API key) via 3-tier config

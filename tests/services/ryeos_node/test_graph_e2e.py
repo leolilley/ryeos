@@ -68,6 +68,8 @@ def _simple_graph():
         "permissions": ["rye.execute.tool.*"],
         "config": {
             "start": "greet",
+            "max_steps": 100,
+            "max_concurrency": 10,
             "nodes": {
                 "greet": {
                     "action": {
@@ -99,6 +101,8 @@ def _cached_graph():
         "permissions": ["rye.execute.tool.*"],
         "config": {
             "start": "compute",
+            "max_steps": 100,
+            "max_concurrency": 10,
             "nodes": {
                 "compute": {
                     "cache_result": True,
