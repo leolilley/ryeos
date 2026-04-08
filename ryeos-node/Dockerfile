@@ -2,12 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    "ryeos>=0.1.20" \
-    "fastapi>=0.109.0" \
-    "uvicorn[standard]>=0.27.0" \
-    "pydantic-settings>=2.1.0" \
-    "pyyaml>=6.0"
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ryeos_node/ /app/ryeos_node/
 

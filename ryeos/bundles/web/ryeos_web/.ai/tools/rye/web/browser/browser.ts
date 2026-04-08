@@ -1,4 +1,4 @@
-// rye:signed:2026-04-05T01:04:24Z:10f1bddb3a09b9a39ec0f43f1bf0d5ef15c32b3477e61b7c3332b4194434b827:RQOfpballj7viEDcet-RSOMlGYRP6xlIlg6f_BKNOCrUo-9JhIJ0Fqxmvcu2-nGOwkM5wBTdx_eEWkM_8Y2mDw:4b987fd4e40303ac
+// rye:signed:2026-04-08T02:44:04Z:8921dff44f4d37bb08333c9b75d64b24e3d33a0f7de769bb004aa90041315db5:5BDnqh1ClhQ5wBs8oLsMZ7Zi26NA0hgk_Mnyk22aTZS9e_AZE7_hh1uvbDFDsQPpeIkOY9Z2pbckPr8GYDuUDg:4b987fd4e40303ac
 // rye:unsigned
 import { parseArgs } from "node:util";
 import { execSync } from "node:child_process";
