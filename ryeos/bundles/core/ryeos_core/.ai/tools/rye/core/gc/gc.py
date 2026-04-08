@@ -101,8 +101,16 @@ async def execute(params: dict, project_path: str) -> dict:
 
 
 def _status(cas_root: Path) -> Dict[str, Any]:
-    obj_count = sum(1 for _ in (cas_root / "objects").rglob("*.json")) if (cas_root / "objects").is_dir() else 0
-    blob_count = sum(1 for f in (cas_root / "blobs").rglob("*") if f.is_file()) if (cas_root / "blobs").is_dir() else 0
+    obj_count = (
+        sum(1 for _ in (cas_root / "objects").rglob("*.json"))
+        if (cas_root / "objects").is_dir()
+        else 0
+    )
+    blob_count = (
+        sum(1 for f in (cas_root / "blobs").rglob("*") if f.is_file())
+        if (cas_root / "blobs").is_dir()
+        else 0
+    )
     total_bytes = _measure_usage(cas_root)
 
     ref_count = 0
@@ -122,16 +130,38 @@ def _status(cas_root: Path) -> Dict[str, Any]:
 
 def _run(params: Dict, project: Path, cas_root: Path) -> Dict[str, Any]:
     from rye.cas.gc import mark_reachable, sweep
+    from rye.cas.gc_lock import acquire, release
 
     dry_run = params.get("action") == "dry-run"
     grace = 300 if params.get("aggressive") else 3600
+    node_id = "local-gc-tool"
 
-    reachable = mark_reachable(project, cas_root)
+    lock = acquire(project, node_id)
+    if lock is None:
+        return {
+            "success": False,
+            "error": "GC lock held by another process",
+        }
 
-    obj_count = sum(1 for _ in (cas_root / "objects").rglob("*.json")) if (cas_root / "objects").is_dir() else 0
-    blob_count = sum(1 for f in (cas_root / "blobs").rglob("*") if f.is_file()) if (cas_root / "blobs").is_dir() else 0
+    try:
+        reachable = mark_reachable(project, cas_root)
 
-    sweep_result = sweep(project, cas_root, reachable, grace_seconds=grace, dry_run=dry_run)
+        obj_count = (
+            sum(1 for _ in (cas_root / "objects").rglob("*.json"))
+            if (cas_root / "objects").is_dir()
+            else 0
+        )
+        blob_count = (
+            sum(1 for f in (cas_root / "blobs").rglob("*") if f.is_file())
+            if (cas_root / "blobs").is_dir()
+            else 0
+        )
+
+        sweep_result = sweep(
+            project, cas_root, reachable, grace_seconds=grace, dry_run=dry_run
+        )
+    finally:
+        release(project, node_id)
 
     return {
         "success": True,

@@ -20,7 +20,9 @@ def _load_node_yaml(node_config_dir: str, cas_base_path: str) -> Dict[str, Any]:
     Returns empty dict if file doesn't exist or fails to parse.
     """
     ai_dir = os.environ.get("AI_DIR", ".ai")
-    config_root = Path(node_config_dir) if node_config_dir else Path(cas_base_path) / "config"
+    config_root = (
+        Path(node_config_dir) if node_config_dir else Path(cas_base_path) / "config"
+    )
     node_yaml_path = config_root / ai_dir / "config" / "node" / "node.yaml"
 
     if not node_yaml_path.is_file():
@@ -34,7 +36,9 @@ def _load_node_yaml(node_config_dir: str, cas_base_path: str) -> Dict[str, Any]:
             text = "".join(lines[1:])
         data = yaml.safe_load(text)
     except Exception:
-        logger.warning("Failed to load node.yaml from %s", node_yaml_path, exc_info=True)
+        logger.warning(
+            "Failed to load node.yaml from %s", node_yaml_path, exc_info=True
+        )
         return {}
 
     if not isinstance(data, dict):
@@ -75,6 +79,8 @@ def _load_node_yaml(node_config_dir: str, cas_base_path: str) -> Dict[str, Any]:
             "auto_gc_enabled": "gc_auto_enabled",
             "auto_gc_cooldown_seconds": "gc_auto_cooldown",
             "grace_window_seconds": "gc_grace_window",
+            "schedule_interval_seconds": "gc_schedule_interval",
+            "log_max_entries": "gc_log_max_entries",
         }
         for yaml_key, settings_key in _gc_map.items():
             if yaml_key in gc:
@@ -121,6 +127,8 @@ class Settings(BaseSettings):
     gc_auto_enabled: bool = True
     gc_auto_cooldown: int = 600  # seconds between auto-GC runs
     gc_grace_window: int = 3600  # sweep grace period seconds
+    gc_schedule_interval: int = 21600  # periodic GC interval in seconds (default 6h)
+    gc_log_max_entries: int = 500  # max entries before gc.jsonl rotation
 
     @model_validator(mode="before")
     @classmethod

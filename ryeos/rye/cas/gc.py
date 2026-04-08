@@ -497,12 +497,7 @@ def compact_project_history(
 
     for snap in reversed(retained_chain):  # oldest → newest
         snap_hash = snap["_hash"]
-
-        if snap_hash in pinned_hashes:
-            # Pinned: preserve original object hash — do NOT rewrite
-            old_to_new[snap_hash] = snap_hash
-            prev_hash = snap_hash
-            continue
+        is_pinned = snap_hash in pinned_hashes
 
         new_snap = {k: v for k, v in snap.items() if k != "_hash"}
         new_snap["parent_hashes"] = [prev_hash] if prev_hash else []
@@ -512,8 +507,31 @@ def compact_project_history(
             "original_hash": snap_hash,
             "original_parent_hashes": snap.get("parent_hashes", []),
         }
+        if is_pinned:
+            new_snap["metadata"]["was_pinned"] = True
+
         new_hash = cas.store_object(new_snap, cas_root)
         old_to_new[snap_hash] = new_hash
+
+        if is_pinned:
+            try:
+                pin_dirs = list(
+                    (user_root / "refs" / "pins" / project_ref_dir.name).iterdir()
+                )
+                for pin_dir in pin_dirs:
+                    pin_head = pin_dir / "head"
+                    if pin_head.is_file():
+                        try:
+                            if (
+                                pin_head.read_text(encoding="utf-8").strip()
+                                == snap_hash
+                            ):
+                                write_ref_atomic(pin_head, new_hash)
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+
         prev_hash = new_hash
 
     # prev_hash is now the rewritten HEAD (last written = newest)
@@ -758,6 +776,28 @@ def mark_reachable(user_root: Path, cas_root: Path) -> Set[str]:
     return reachable
 
 
+def _walk_shards(root: Path):
+    """Yield (path, is_dir) for immediate children using scandir (avoids rglob)."""
+    try:
+        for entry in os.scandir(root):
+            try:
+                yield Path(entry.path), entry.is_dir()
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
+def _walk_shard_files(root: Path):
+    """Yield file paths under a shard directory tree using os.walk."""
+    try:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                yield Path(dirpath, name)
+    except OSError:
+        return
+
+
 def sweep(
     user_root: Path,
     cas_root: Path,
@@ -770,7 +810,6 @@ def sweep(
 
     Epoch-aware: never deletes objects newer than the oldest active epoch.
     """
-    # Active executions are safe with epoch protection — log for observability
     running_dir = user_root / "running"
     if running_dir.is_dir():
         try:
@@ -783,10 +822,12 @@ def sweep(
 
     gc_start = time.time()
 
-    # Epoch-aware time bound
+    cleanup_stale_epochs(user_root)
     oldest_epoch = oldest_epoch_time(user_root)
+    epoch_max_age = 1800
     if oldest_epoch is not None:
-        grace_cutoff = min(gc_start - grace_seconds, oldest_epoch)
+        effective_epoch = max(oldest_epoch, gc_start - epoch_max_age)
+        grace_cutoff = min(gc_start - grace_seconds, effective_epoch)
     else:
         grace_cutoff = gc_start - grace_seconds
 
@@ -794,49 +835,57 @@ def sweep(
     deleted_blobs = 0
     freed_bytes = 0
 
-    # Sweep objects
+    # Sweep objects — walk shard dirs then files within
     objects_dir = cas_root / "objects"
     if objects_dir.is_dir():
-        for obj_path in objects_dir.rglob("*.json"):
-            obj_hash = obj_path.stem
-            if obj_hash in reachable:
+        for shard_path, is_dir in _walk_shards(objects_dir):
+            if not is_dir:
                 continue
-            try:
-                st = obj_path.stat()
-            except OSError:
-                continue
-            if st.st_mtime >= grace_cutoff:
-                continue
-            if not dry_run:
+            for obj_path in _walk_shard_files(shard_path):
+                if not obj_path.suffix == ".json":
+                    continue
+                obj_hash = obj_path.stem
+                if obj_hash in reachable:
+                    continue
                 try:
-                    obj_path.unlink()
+                    st = obj_path.stat()
                 except OSError:
                     continue
-            freed_bytes += st.st_size
-            deleted_objects += 1
+                if st.st_mtime >= grace_cutoff:
+                    continue
+                if not dry_run:
+                    try:
+                        obj_path.unlink()
+                    except OSError:
+                        continue
+                freed_bytes += st.st_size
+                deleted_objects += 1
 
-    # Sweep blobs
+    # Sweep blobs — walk shard dirs then files within
     blobs_dir = cas_root / "blobs"
     if blobs_dir.is_dir():
-        for blob_path in blobs_dir.rglob("*"):
-            if not blob_path.is_file():
+        for shard_path, is_dir in _walk_shards(blobs_dir):
+            if not is_dir:
                 continue
-            blob_hash = blob_path.name
-            if blob_hash in reachable:
-                continue
-            try:
-                st = blob_path.stat()
-            except OSError:
-                continue
-            if st.st_mtime >= grace_cutoff:
-                continue
-            if not dry_run:
+            for blob_path in _walk_shard_files(shard_path):
+                if not blob_path.is_file():
+                    continue
+                blob_hash = blob_path.name
+                if blob_hash in reachable:
+                    continue
                 try:
-                    blob_path.unlink()
+                    st = blob_path.stat()
                 except OSError:
                     continue
-            freed_bytes += st.st_size
-            deleted_blobs += 1
+                if st.st_mtime >= grace_cutoff:
+                    continue
+                if not dry_run:
+                    try:
+                        blob_path.unlink()
+                    except OSError:
+                        continue
+                freed_bytes += st.st_size
+                deleted_blobs += 1
 
     # Clean empty shard directories
     if not dry_run:
@@ -864,6 +913,7 @@ def emit_gc_event(
     sweep_result: SweepResult,
     total_freed: int,
     duration_ms: int,
+    max_log_entries: int = 500,
 ) -> None:
     """Write a structured GC event to the log file and stdout."""
     event: Dict[str, Any] = {
@@ -903,7 +953,22 @@ def emit_gc_event(
     gc_log = user_root / "logs" / "gc.jsonl"
     try:
         gc_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(gc_log, "a", encoding="utf-8") as f:
+
+        existing_lines: list[str] = []
+        if gc_log.is_file():
+            try:
+                raw = gc_log.read_text(encoding="utf-8")
+                all_lines = raw.strip().split("\n")
+                if len(all_lines) > max_log_entries:
+                    existing_lines = all_lines[-(max_log_entries // 2) :]
+                else:
+                    existing_lines = all_lines
+            except OSError:
+                pass
+
+        with open(gc_log, "w", encoding="utf-8") as f:
+            for line in existing_lines:
+                f.write(line + "\n")
             f.write(json.dumps(event) + "\n")
     except OSError:
         logger.warning("Failed to write GC event to %s", gc_log, exc_info=True)

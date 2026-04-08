@@ -72,15 +72,28 @@ from ryeos_node.server import (
     _validate_manifest_graph,
     MAX_FOLD_BACK_RETRIES,
 )
-from ryeos_node.refs import resolve_project_ref, advance_project_ref, resolve_user_space_ref, init_project_ref
-from ryeos_node.executions import register_execution, complete_execution, get_execution, store_conflict_record
+from ryeos_node.refs import (
+    resolve_project_ref,
+    advance_project_ref,
+    resolve_user_space_ref,
+    init_project_ref,
+)
+from ryeos_node.executions import (
+    register_execution,
+    complete_execution,
+    get_execution,
+    store_conflict_record,
+)
 
 # Load ArtifactStore from bundle via importlib (path has .ai/ dir)
 from conftest import PROJECT_ROOT, get_bundle_path
+
 _ARTIFACT_STORE_PATH = get_bundle_path(
     "standard", "tools/rye/agent/threads/persistence/artifact_store.py"
 )
-_as_spec = importlib.util.spec_from_file_location("artifact_store", _ARTIFACT_STORE_PATH)
+_as_spec = importlib.util.spec_from_file_location(
+    "artifact_store", _ARTIFACT_STORE_PATH
+)
 _as_mod = importlib.util.module_from_spec(_as_spec)
 _as_spec.loader.exec_module(_as_mod)
 ArtifactStore = _as_mod.ArtifactStore
@@ -131,6 +144,7 @@ def cas_env(tmp_path):
         """
         import json as _json
         from fastapi import HTTPException as _HTTPException
+
         raw = await request.body()
         body = _json.loads(raw)
         item_type = body.get("item_type")
@@ -142,7 +156,9 @@ def cas_env(tmp_path):
         if not item_type or not item_id:
             raise _HTTPException(400, "item_type and item_id are required")
         if item_type not in ("tool", "directive"):
-            raise _HTTPException(400, f"item_type must be 'tool' or 'directive', got {item_type!r}")
+            raise _HTTPException(
+                400, f"item_type must be 'tool' or 'directive', got {item_type!r}"
+            )
         if not project_path:
             raise _HTTPException(400, "project_path is required")
         if not isinstance(parameters, dict):
@@ -150,9 +166,13 @@ def cas_env(tmp_path):
         if not thread:
             thread = "fork" if item_type == "directive" else "inline"
         if item_type == "directive" and thread != "fork":
-            raise _HTTPException(400, f"Directives must use thread=fork on remote, got thread={thread!r}")
+            raise _HTTPException(
+                400, f"Directives must use thread=fork on remote, got thread={thread!r}"
+            )
         if item_type == "tool" and thread != "inline":
-            raise _HTTPException(400, f"Tools must use thread=inline on remote, got thread={thread!r}")
+            raise _HTTPException(
+                400, f"Tools must use thread=inline on remote, got thread={thread!r}"
+            )
 
         return ResolvedExecution(
             principal=TEST_PRINCIPAL,
@@ -163,11 +183,13 @@ def cas_env(tmp_path):
             thread=thread,
             secret_envelope=body.get("secret_envelope"),
         )
+
     app.dependency_overrides[resolve_execution] = _mock_resolve_execution
 
     # Populate lru_cache so middleware (which calls get_settings() directly) uses ours
     get_settings.cache_clear()
     import unittest.mock
+
     with unittest.mock.patch("ryeos_node.config.Settings", return_value=settings):
         get_settings()  # populates the cache with our settings
 
@@ -245,8 +267,11 @@ class TestHealth:
         c, _, _ = cas_env
         r = c.get("/health")
         from ryeos_node import __version__ as node_version
-        assert r.json()["version"] == node_version
-        assert r.json()["engine_version"] == get_system_version()
+
+        body = r.json()
+        assert body["version"] == node_version
+        assert body["engine_version"] == get_system_version()
+        assert "ryeos_version" in body
 
 
 class TestPublicKey:
@@ -290,9 +315,18 @@ class TestObjectsPut:
         c, root, _ = cas_env
         data = b"blob content"
         h = hashlib.sha256(data).hexdigest()
-        r = c.post("/objects/put", json={"entries": [
-            {"hash": h, "kind": "blob", "data": base64.b64encode(data).decode()},
-        ]})
+        r = c.post(
+            "/objects/put",
+            json={
+                "entries": [
+                    {
+                        "hash": h,
+                        "kind": "blob",
+                        "data": base64.b64encode(data).decode(),
+                    },
+                ]
+            },
+        )
         assert r.status_code == 200
         assert h in r.json()["stored"]
         assert cas.get_blob(h, root) == data
@@ -302,27 +336,54 @@ class TestObjectsPut:
         obj = {"kind": "test", "value": 42}
         raw = canonical_json(obj).encode("utf-8")
         h = compute_integrity(obj)
-        r = c.post("/objects/put", json={"entries": [
-            {"hash": h, "kind": "object", "data": base64.b64encode(raw).decode()},
-        ]})
+        r = c.post(
+            "/objects/put",
+            json={
+                "entries": [
+                    {
+                        "hash": h,
+                        "kind": "object",
+                        "data": base64.b64encode(raw).decode(),
+                    },
+                ]
+            },
+        )
         assert r.status_code == 200
         assert h in r.json()["stored"]
         assert cas.get_object(h, root) == obj
 
     def test_rejects_wrong_blob_hash(self, cas_env):
         c, _, _ = cas_env
-        r = c.post("/objects/put", json={"entries": [
-            {"hash": "f" * 64, "kind": "blob", "data": base64.b64encode(b"x").decode()},
-        ]})
+        r = c.post(
+            "/objects/put",
+            json={
+                "entries": [
+                    {
+                        "hash": "f" * 64,
+                        "kind": "blob",
+                        "data": base64.b64encode(b"x").decode(),
+                    },
+                ]
+            },
+        )
         assert r.status_code == 400
 
     def test_rejects_wrong_object_hash(self, cas_env):
         c, _, _ = cas_env
         obj = {"kind": "test", "tampered": True}
         raw = canonical_json(obj).encode("utf-8")
-        r = c.post("/objects/put", json={"entries": [
-            {"hash": "a" * 64, "kind": "object", "data": base64.b64encode(raw).decode()},
-        ]})
+        r = c.post(
+            "/objects/put",
+            json={
+                "entries": [
+                    {
+                        "hash": "a" * 64,
+                        "kind": "object",
+                        "data": base64.b64encode(raw).decode(),
+                    },
+                ]
+            },
+        )
         assert r.status_code == 400
 
 
@@ -364,9 +425,18 @@ class TestPutGetRoundtrip:
         # Put
         data = b"roundtrip data"
         h = hashlib.sha256(data).hexdigest()
-        c.post("/objects/put", json={"entries": [
-            {"hash": h, "kind": "blob", "data": base64.b64encode(data).decode()},
-        ]})
+        c.post(
+            "/objects/put",
+            json={
+                "entries": [
+                    {
+                        "hash": h,
+                        "kind": "blob",
+                        "data": base64.b64encode(data).decode(),
+                    },
+                ]
+            },
+        )
         # Get
         r = c.post("/objects/get", json={"hashes": [h]})
         assert r.status_code == 200
@@ -384,16 +454,27 @@ class TestExecute:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
         assert r.status_code == 200
         body = r.json()
         assert "execution_snapshot_hash" in body
@@ -404,16 +485,27 @@ class TestExecute:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
         body = r.json()
         assert body["system_version"] == get_system_version()
 
@@ -421,35 +513,52 @@ class TestExecute:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
         body = r.json()
         assert "new_object_hashes" in body
         assert isinstance(body["new_object_hashes"], list)
 
     def test_missing_project(self, cas_env):
         c, _, _ = cas_env
-        r = c.post("/execute", json={
-            "item_type": "tool",
-            "item_id": "x",
-            "parameters": {},
-        })
+        r = c.post(
+            "/execute",
+            json={
+                "item_type": "tool",
+                "item_id": "x",
+                "parameters": {},
+            },
+        )
         assert r.status_code == 400
 
     def test_missing_item_type(self, cas_env):
         c, _, _ = cas_env
-        r = c.post("/execute", json={
-            "project_path": "test-project",
-            "item_id": "x",
-        })
+        r = c.post(
+            "/execute",
+            json={
+                "project_path": "test-project",
+                "item_id": "x",
+            },
+        )
         assert r.status_code == 400
 
 
@@ -465,13 +574,16 @@ class TestExecuteThreadValidation:
         """Directive + thread=inline → 400 (directives must fork on remote)."""
         c, root, tmp_path = cas_env
 
-        r = c.post("/execute", json={
-            "project_path": "test-project",
-            "item_type": "directive",
-            "item_id": "test_dir",
-            "parameters": {},
-            "thread": "inline",
-        })
+        r = c.post(
+            "/execute",
+            json={
+                "project_path": "test-project",
+                "item_type": "directive",
+                "item_id": "test_dir",
+                "parameters": {},
+                "thread": "inline",
+            },
+        )
         assert r.status_code == 400
         assert "fork" in r.json()["detail"].lower()
 
@@ -479,13 +591,16 @@ class TestExecuteThreadValidation:
         """Tool + thread=fork → 400 (tools must run inline on remote)."""
         c, root, tmp_path = cas_env
 
-        r = c.post("/execute", json={
-            "project_path": "test-project",
-            "item_type": "tool",
-            "item_id": "x",
-            "parameters": {},
-            "thread": "fork",
-        })
+        r = c.post(
+            "/execute",
+            json={
+                "project_path": "test-project",
+                "item_type": "tool",
+                "item_id": "x",
+                "parameters": {},
+                "thread": "fork",
+            },
+        )
         assert r.status_code == 400
         assert "inline" in r.json()["detail"].lower()
 
@@ -494,17 +609,28 @@ class TestExecuteThreadValidation:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-                "thread": "inline",
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                    "thread": "inline",
+                },
+            )
         assert r.status_code == 200
 
     def test_thread_auto_derived_for_tool(self, cas_env):
@@ -512,16 +638,27 @@ class TestExecuteThreadValidation:
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
         assert r.status_code == 200
 
 
@@ -571,6 +708,7 @@ class TestPathTraversal:
 
         with pytest.raises(ValueError, match="escapes target root"):
             from rye.cas.materializer import _materialize_manifest
+
             _materialize_manifest(manifest_hash, target_dir, root)
 
     def test_manifest_absolute_path_rejected(self, tmp_path):
@@ -595,6 +733,7 @@ class TestPathTraversal:
 
         with pytest.raises(ValueError, match="Absolute path"):
             from rye.cas.materializer import _materialize_manifest
+
             _materialize_manifest(manifest_hash, target_dir, root)
 
     def test_manifest_items_path_traversal_rejected(self, tmp_path):
@@ -627,6 +766,7 @@ class TestPathTraversal:
 
         with pytest.raises(ValueError, match="escapes target root"):
             from rye.cas.materializer import _materialize_manifest
+
             _materialize_manifest(manifest_hash, target_dir, root)
 
 
@@ -674,9 +814,18 @@ class TestRequestLimits:
             with TestClient(app) as c:
                 data = b"new blob"
                 h = hashlib.sha256(data).hexdigest()
-                r = c.post("/objects/put", json={"entries": [
-                    {"hash": h, "kind": "blob", "data": base64.b64encode(data).decode()},
-                ]})
+                r = c.post(
+                    "/objects/put",
+                    json={
+                        "entries": [
+                            {
+                                "hash": h,
+                                "kind": "blob",
+                                "data": base64.b64encode(data).decode(),
+                            },
+                        ]
+                    },
+                )
                 assert r.status_code == 507
         finally:
             self._clear_overrides()
@@ -734,15 +883,20 @@ class TestRequestLimits:
         )
 
         from fastapi import HTTPException
+        import asyncio
+
         with pytest.raises(HTTPException) as exc_info:
-            _check_user_quota(user, small_settings)
+            asyncio.run(_check_user_quota(user, small_settings))
         assert exc_info.value.status_code == 507
 
     @staticmethod
     def _apply_overrides(settings):
         import unittest.mock
+
         app.dependency_overrides[get_current_principal] = lambda: Principal(
-            fingerprint="test-user", scopes=["*"], owner="tester",
+            fingerprint="test-user",
+            scopes=["*"],
+            owner="tester",
         )
         app.dependency_overrides[get_settings] = lambda: settings
         get_settings.cache_clear()
@@ -785,7 +939,13 @@ class TestSyncProtocol:
     def test_import_objects_errors_raise(self, tmp_path):
         root = tmp_path / "cas"
         root.mkdir()
-        bad_entries = [{"hash": "f" * 64, "kind": "blob", "data": base64.b64encode(b"bad").decode()}]
+        bad_entries = [
+            {
+                "hash": "f" * 64,
+                "kind": "blob",
+                "data": base64.b64encode(b"bad").decode(),
+            }
+        ]
         with pytest.raises(ValueError, match="CAS import failed"):
             import_objects(bad_entries, root)
 
@@ -931,8 +1091,13 @@ class TestArtifactStore:
 
         # Write a ref pointing to a non-existent object
         ref_path = (
-            project_path / AI_DIR / "state" / "objects" / "refs"
-            / "artifacts" / "thread-corrupt.json"
+            project_path
+            / AI_DIR
+            / "state"
+            / "objects"
+            / "refs"
+            / "artifacts"
+            / "thread-corrupt.json"
         )
         write_ref(ref_path, "0" * 64)
 
@@ -958,6 +1123,7 @@ class TestTrustStore:
         monkeypatch.delenv("RYE_SIGNING_KEY_DIR", raising=False)
 
         from rye.utils.signature_formats import clear_signature_formats_cache
+
         clear_signature_formats_cache()
 
         signing_dir = user_space / AI_DIR / "config" / "keys" / "signing"
@@ -966,6 +1132,7 @@ class TestTrustStore:
 
         from rye.utils.trust_store import TrustStore
         from rye.utils.execution_context import ExecutionContext
+
         ts = TrustStore(ExecutionContext.from_env(project_path=tmp_path / "project"))
         # Trust the signing key so signed trust entries pass integrity
         ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
@@ -1022,7 +1189,9 @@ class TestTrustStore:
         trust_dir = tmp_path / "user" / AI_DIR / "config" / "keys" / "trusted"
         key_file1 = trust_dir / f"{fp1}.toml"
         content = key_file1.read_text()
-        key_file1.write_text(content.replace(f'fingerprint = "{fp1}"', 'fingerprint = "tampered"'))
+        key_file1.write_text(
+            content.replace(f'fingerprint = "{fp1}"', 'fingerprint = "tampered"')
+        )
 
         # _find_key_fp_by_owner should skip the tampered one and return the valid one
         result = ts.get_remote_key()
@@ -1046,6 +1215,7 @@ class TestRemoteKeyVerification:
         monkeypatch.delenv("RYE_SIGNING_KEY_DIR", raising=False)
 
         from rye.utils.signature_formats import clear_signature_formats_cache
+
         clear_signature_formats_cache()
 
         signing_dir = user_space / AI_DIR / "config" / "keys" / "signing"
@@ -1054,6 +1224,7 @@ class TestRemoteKeyVerification:
 
         from rye.utils.trust_store import TrustStore
         from rye.utils.execution_context import ExecutionContext
+
         ts = TrustStore(ExecutionContext.from_env(project_path=tmp_path / "project"))
         ts.add_key(public_pem, owner="local", space="user", version="1.0.0")
         return ts
@@ -1068,9 +1239,11 @@ class TestRemoteKeyVerification:
             sign_hash as _sign,
             ensure_full_keypair as _efk,
         )
+
         fp = _fp(pub_pem)
         # Generate box keys (just for the identity doc shape)
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
         box_priv = X25519PrivateKey.generate()
         box_pub_raw = box_priv.public_key().public_bytes_raw()
         box_pub_b64url = _b64.urlsafe_b64encode(box_pub_raw).decode()
@@ -1084,7 +1257,8 @@ class TestRemoteKeyVerification:
         }
         payload = json.dumps(
             {k: v for k, v in doc.items() if k != "_signature"},
-            sort_keys=True, separators=(",", ":"),
+            sort_keys=True,
+            separators=(",", ":"),
         )
         content_hash = _hl.sha256(payload.encode()).hexdigest()
         sig_b64 = _sign(content_hash, priv_pem)
@@ -1147,7 +1321,9 @@ class TestRemoteKeyVerification:
                 }
 
         _remote_path = get_bundle_path("core", "tools/rye/core/remote/remote.py")
-        _r_spec = importlib.util.spec_from_file_location("remote_tool_fetch", _remote_path)
+        _r_spec = importlib.util.spec_from_file_location(
+            "remote_tool_fetch", _remote_path
+        )
         _r_mod = importlib.util.module_from_spec(_r_spec)
         _r_spec.loader.exec_module(_r_mod)
 
@@ -1206,6 +1382,7 @@ class TestCopyCasObjects:
 
         # Overwrite the blob file with different content (simulating corruption)
         from rye.primitives.cas import _shard_path
+
         blob_path = _shard_path(src, "blobs", h)
         blob_path.write_bytes(b"tampered content")
 
@@ -1332,7 +1509,10 @@ class TestIngestRuntimeOutputs:
         project, dst_root = self._setup_project(tmp_path)
 
         bundle_hash, new_hashes = _ingest_runtime_outputs(
-            project, dst_root, "thread-1", "snap-hash",
+            project,
+            dst_root,
+            "thread-1",
+            "snap-hash",
         )
 
         assert bundle_hash
@@ -1359,7 +1539,10 @@ class TestIngestRuntimeOutputs:
         project, dst_root = self._setup_project(tmp_path)
 
         bundle_hash, new_hashes = _ingest_runtime_outputs(
-            project, dst_root, "thread-1", "snap-hash",
+            project,
+            dst_root,
+            "thread-1",
+            "snap-hash",
         )
 
         # Bundle object hash is included
@@ -1381,7 +1564,10 @@ class TestIngestRuntimeOutputs:
         (state_dir / "link.jsonl").symlink_to(target)
 
         bundle_hash, new_hashes = _ingest_runtime_outputs(
-            project, dst_root, "thread-1", "snap-hash",
+            project,
+            dst_root,
+            "thread-1",
+            "snap-hash",
         )
 
         # Symlink should NOT be in the bundle
@@ -1395,7 +1581,10 @@ class TestIngestRuntimeOutputs:
         (project / AI_DIR / "state" / "objects").mkdir(parents=True)
 
         bundle_hash, new_hashes = _ingest_runtime_outputs(
-            project, tmp_path / "cas", "thread-1", "snap-hash",
+            project,
+            tmp_path / "cas",
+            "thread-1",
+            "snap-hash",
         )
 
         assert bundle_hash == ""
@@ -1453,11 +1642,14 @@ class TestMaterializeRuntimeOutputs:
         project = tmp_path / "project"
         project.mkdir()
 
-        bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/state/graphs/run-1/transcript.jsonl": '{"event": "started"}\n',
-            ".ai/state/threads/t-1/thread.json": '{"status": "completed"}\n',
-            ".ai/knowledge/state/graphs/test/run-1.md": "# Report\n",
-        })
+        bundle_hash = self._create_bundle_in_cas(
+            project,
+            {
+                ".ai/state/graphs/run-1/transcript.jsonl": '{"event": "started"}\n',
+                ".ai/state/threads/t-1/thread.json": '{"status": "completed"}\n',
+                ".ai/knowledge/state/graphs/test/run-1.md": "# Report\n",
+            },
+        )
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 3
@@ -1467,29 +1659,39 @@ class TestMaterializeRuntimeOutputs:
         assert (project / ".ai/knowledge/state/graphs/test/run-1.md").exists()
 
         # Content should match
-        assert (project / ".ai/state/graphs/run-1/transcript.jsonl").read_text() == '{"event": "started"}\n'
+        assert (
+            project / ".ai/state/graphs/run-1/transcript.jsonl"
+        ).read_text() == '{"event": "started"}\n'
 
     def test_refs_materialized(self, tmp_path):
         project = tmp_path / "project"
         project.mkdir()
 
-        bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/state/objects/refs/graphs/run-1.json": '{"hash": "abc"}',
-        })
+        bundle_hash = self._create_bundle_in_cas(
+            project,
+            {
+                ".ai/state/objects/refs/graphs/run-1.json": '{"hash": "abc"}',
+            },
+        )
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 1
-        assert (project / ".ai/state/objects/refs/graphs/run-1.json").read_text() == '{"hash": "abc"}'
+        assert (
+            project / ".ai/state/objects/refs/graphs/run-1.json"
+        ).read_text() == '{"hash": "abc"}'
 
     def test_rejects_paths_outside_allowlist(self, tmp_path):
         project = tmp_path / "project"
         project.mkdir()
 
-        bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/state/graphs/run-1/transcript.jsonl": "ok",
-            ".ai/tools/evil.py": "import os; os.system('rm -rf /')",
-            "src/main.py": "print('injected')",
-        })
+        bundle_hash = self._create_bundle_in_cas(
+            project,
+            {
+                ".ai/state/graphs/run-1/transcript.jsonl": "ok",
+                ".ai/tools/evil.py": "import os; os.system('rm -rf /')",
+                "src/main.py": "print('injected')",
+            },
+        )
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 1  # only the state file
@@ -1500,9 +1702,12 @@ class TestMaterializeRuntimeOutputs:
         project = tmp_path / "project"
         project.mkdir()
 
-        bundle_hash = self._create_bundle_in_cas(project, {
-            ".ai/state/../../etc/passwd": "root:x:0:0",
-        })
+        bundle_hash = self._create_bundle_in_cas(
+            project,
+            {
+                ".ai/state/../../etc/passwd": "root:x:0:0",
+            },
+        )
 
         count = _materialize_runtime_outputs(bundle_hash, project)
         assert count == 0
@@ -1538,7 +1743,9 @@ class TestMaterializeRuntimeOutputs:
 # ============================================================================
 
 
-def _create_snapshot_chain(root, items=None, files=None, parent_hashes=None, source="push"):
+def _create_snapshot_chain(
+    root, items=None, files=None, parent_hashes=None, source="push"
+):
     """Create a ProjectSnapshot backed by a real manifest in CAS.
 
     Returns (snapshot_hash, manifest_hash).
@@ -1623,7 +1830,9 @@ class TestTryAdvanceHead:
 
         init_project_ref(str(cas_base), user.fingerprint, "my-project", "old_hash")
 
-        result = _try_advance_head(settings, user, "my-project", "new_hash", "wrong_hash")
+        result = _try_advance_head(
+            settings, user, "my-project", "new_hash", "wrong_hash"
+        )
         assert result is False
 
 
@@ -1649,7 +1858,9 @@ class TestFoldBack:
         settings, user, root, cache = self._make_env(tmp_path)
 
         base_hash, _ = _create_snapshot_chain(root)
-        exec_hash, _ = _create_snapshot_chain(root, parent_hashes=[base_hash], source="execution")
+        exec_hash, _ = _create_snapshot_chain(
+            root, parent_hashes=[base_hash], source="execution"
+        )
 
         from unittest.mock import patch
 
@@ -1658,12 +1869,20 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=True), \
-             patch("ryeos_node.server._update_snapshot_cache"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=True),
+            patch("ryeos_node.server._update_snapshot_cache"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "fast-forward"
@@ -1681,15 +1900,18 @@ class TestFoldBack:
         # HEAD moved: added file_b.txt (ours)
         blob_b = cas.store_blob(b"content b", root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"file_a.txt": blob_a, "file_b.txt": blob_b},
+            root,
+            files={"file_a.txt": blob_a, "file_b.txt": blob_b},
             parent_hashes=[base_hash],
         )
 
         # Execution: added file_c.txt (theirs)
         blob_c = cas.store_blob(b"content c", root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"file_a.txt": blob_a, "file_c.txt": blob_c},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"file_a.txt": blob_a, "file_c.txt": blob_c},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1699,12 +1921,20 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=True), \
-             patch("ryeos_node.server._update_snapshot_cache"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=True),
+            patch("ryeos_node.server._update_snapshot_cache"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "merge"
@@ -1732,14 +1962,17 @@ class TestFoldBack:
 
         blob_ours = cas.store_blob(b"ours content", root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"shared.txt": blob_ours},
+            root,
+            files={"shared.txt": blob_ours},
             parent_hashes=[base_hash],
         )
 
         blob_theirs = cas.store_blob(b"theirs content", root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"shared.txt": blob_theirs},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"shared.txt": blob_theirs},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1749,11 +1982,19 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.store_conflict_record"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.store_conflict_record"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "conflict"
@@ -1771,14 +2012,18 @@ class TestFoldBack:
 
         # HEAD: delete target.txt
         head_hash, _ = _create_snapshot_chain(
-            root, files={}, parent_hashes=[base_hash],
+            root,
+            files={},
+            parent_hashes=[base_hash],
         )
 
         # Execution: modify target.txt
         blob_mod = cas.store_blob(b"modified", root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"target.txt": blob_mod},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"target.txt": blob_mod},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1788,16 +2033,27 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.store_conflict_record"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.store_conflict_record"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "conflict"
         assert "target.txt" in result["conflicts"]
-        assert result["conflicts"]["target.txt"]["type"] in ("delete/modify", "modify/delete")
+        assert result["conflicts"]["target.txt"]["type"] in (
+            "delete/modify",
+            "modify/delete",
+        )
 
     @pytest.mark.asyncio
     async def test_add_add_conflict(self, tmp_path):
@@ -1808,14 +2064,17 @@ class TestFoldBack:
 
         blob_ours = cas.store_blob(b"ours version", root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"new_file.txt": blob_ours},
+            root,
+            files={"new_file.txt": blob_ours},
             parent_hashes=[base_hash],
         )
 
         blob_theirs = cas.store_blob(b"theirs version", root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"new_file.txt": blob_theirs},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"new_file.txt": blob_theirs},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1825,11 +2084,19 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.store_conflict_record"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.store_conflict_record"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "conflict"
@@ -1849,15 +2116,19 @@ class TestFoldBack:
         ours_text = "LINE1_MODIFIED\nline2\nline3\nline4\n"
         blob_ours = cas.store_blob(ours_text.encode(), root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"doc.txt": blob_ours}, parent_hashes=[base_hash],
+            root,
+            files={"doc.txt": blob_ours},
+            parent_hashes=[base_hash],
         )
 
         # Execution modifies line4
         theirs_text = "line1\nline2\nline3\nLINE4_MODIFIED\n"
         blob_theirs = cas.store_blob(theirs_text.encode(), root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"doc.txt": blob_theirs},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"doc.txt": blob_theirs},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1867,12 +2138,20 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=True), \
-             patch("ryeos_node.server._update_snapshot_cache"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=True),
+            patch("ryeos_node.server._update_snapshot_cache"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "merge"
@@ -1896,14 +2175,18 @@ class TestFoldBack:
         ours_text = "OURS_LINE1\nline2\nline3\n"
         blob_ours = cas.store_blob(ours_text.encode(), root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"doc.txt": blob_ours}, parent_hashes=[base_hash],
+            root,
+            files={"doc.txt": blob_ours},
+            parent_hashes=[base_hash],
         )
 
         theirs_text = "THEIRS_LINE1\nline2\nline3\n"
         blob_theirs = cas.store_blob(theirs_text.encode(), root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"doc.txt": blob_theirs},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"doc.txt": blob_theirs},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1913,11 +2196,19 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.store_conflict_record"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.store_conflict_record"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "conflict"
@@ -1934,13 +2225,17 @@ class TestFoldBack:
 
         blob_ours = cas.store_blob(b"\x00\x01\xff\x03", root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"data.bin": blob_ours}, parent_hashes=[base_hash],
+            root,
+            files={"data.bin": blob_ours},
+            parent_hashes=[base_hash],
         )
 
         blob_theirs = cas.store_blob(b"\x00\x01\x02\xfe", root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"data.bin": blob_theirs},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"data.bin": blob_theirs},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1950,11 +2245,19 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.store_conflict_record"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.store_conflict_record"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "conflict"
@@ -1973,14 +2276,18 @@ class TestFoldBack:
         ours_data = b"B" * (1_100_000)
         blob_ours = cas.store_blob(ours_data, root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"big.txt": blob_ours}, parent_hashes=[base_hash],
+            root,
+            files={"big.txt": blob_ours},
+            parent_hashes=[base_hash],
         )
 
         theirs_data = b"C" * (1_100_000)
         blob_theirs = cas.store_blob(theirs_data, root)
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"big.txt": blob_theirs},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"big.txt": blob_theirs},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -1990,11 +2297,19 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.store_conflict_record"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.store_conflict_record"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "conflict"
@@ -2005,7 +2320,9 @@ class TestFoldBack:
         settings, user, root, cache = self._make_env(tmp_path)
 
         base_hash, _ = _create_snapshot_chain(root)
-        exec_hash, _ = _create_snapshot_chain(root, parent_hashes=[base_hash], source="execution")
+        exec_hash, _ = _create_snapshot_chain(
+            root, parent_hashes=[base_hash], source="execution"
+        )
 
         from unittest.mock import patch
 
@@ -2015,12 +2332,20 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=False), \
-             patch("asyncio.sleep", return_value=None):  # skip actual delays
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=False),
+            patch("asyncio.sleep", return_value=None),
+        ):  # skip actual delays
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "retry_exhausted"
@@ -2036,11 +2361,15 @@ class TestFoldBack:
 
         blob_same = cas.store_blob(b"same change", root)
         head_hash, _ = _create_snapshot_chain(
-            root, files={"shared.txt": blob_same}, parent_hashes=[base_hash],
+            root,
+            files={"shared.txt": blob_same},
+            parent_hashes=[base_hash],
         )
         exec_hash, _ = _create_snapshot_chain(
-            root, files={"shared.txt": blob_same},
-            parent_hashes=[base_hash], source="execution",
+            root,
+            files={"shared.txt": blob_same},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -2050,12 +2379,20 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=True), \
-             patch("ryeos_node.server._update_snapshot_cache"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=True),
+            patch("ryeos_node.server._update_snapshot_cache"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "merge"
@@ -2073,10 +2410,15 @@ class TestFoldBack:
 
         # Both sides remove gone.txt
         head_hash, _ = _create_snapshot_chain(
-            root, files={}, parent_hashes=[base_hash],
+            root,
+            files={},
+            parent_hashes=[base_hash],
         )
         exec_hash, _ = _create_snapshot_chain(
-            root, files={}, parent_hashes=[base_hash], source="execution",
+            root,
+            files={},
+            parent_hashes=[base_hash],
+            source="execution",
         )
 
         from unittest.mock import patch
@@ -2086,12 +2428,20 @@ class TestFoldBack:
             "project_path": "test-project",
         }
 
-        with patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=True), \
-             patch("ryeos_node.server._update_snapshot_cache"):
+        with (
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=True),
+            patch("ryeos_node.server._update_snapshot_cache"),
+        ):
             result = await _fold_back(
-                user, settings, "test-project",
-                base_hash, exec_hash, root, cache, "thread-1",
+                user,
+                settings,
+                "test-project",
+                base_hash,
+                exec_hash,
+                root,
+                cache,
+                "thread-1",
             )
 
         assert result["merge_type"] == "merge"
@@ -2109,16 +2459,27 @@ class TestExecuteFromHead:
 
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
 
         assert r.status_code == 200
         body = r.json()
@@ -2131,9 +2492,13 @@ class TestExecuteFromHead:
 
         from unittest.mock import patch
 
-        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(tmp_path, root)
+        ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
+            tmp_path, root
+        )
 
-        async def mock_handle(self, item_type, item_id, project_path, parameters, thread):
+        async def mock_handle(
+            self, item_type, item_id, project_path, parameters, thread
+        ):
             new_file = Path(project_path) / AI_DIR / "knowledge" / "new_knowledge.md"
             new_file.parent.mkdir(parents=True, exist_ok=True)
             new_file.write_text("# New Knowledge\n")
@@ -2142,21 +2507,31 @@ class TestExecuteFromHead:
         # Also need to patch fold-back's resolve + advance for the HEAD advance
         mock_fold_ref = {"snapshot_hash": snapshot_hash, "project_path": "test-project"}
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_node.server.resolve_project_ref", return_value=mock_fold_ref), \
-             patch("ryeos_node.server.advance_project_ref", return_value=True), \
-             patch("ryeos_node.server._update_snapshot_cache"), \
-             patch.object(
-                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
-                 "handle", mock_handle,
-             ):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+            patch("ryeos_node.server.resolve_project_ref", return_value=mock_fold_ref),
+            patch("ryeos_node.server.advance_project_ref", return_value=True),
+            patch("ryeos_node.server._update_snapshot_cache"),
+            patch.object(
+                __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                "handle",
+                mock_handle,
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
 
         assert r.status_code == 200
         body = r.json()
@@ -2179,14 +2554,23 @@ class TestExecuteFromHead:
             "pushed_at": "2026-01-01T00:00:00+00:00",
         }
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref):
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-            })
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+        ):
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "x",
+                    "parameters": {},
+                },
+            )
 
         assert r.status_code == 400
         assert "snapshot" in r.json()["detail"].lower()
@@ -2253,6 +2637,7 @@ class TestConcurrentExecution:
 
         # Pre-cache the snapshot so create_execution_space works
         from rye.cas.checkout import ensure_snapshot_cached
+
         ensure_snapshot_cached(base_snapshot_hash, root, cache)
 
         # --- Mutable state to simulate HEAD advancement ---
@@ -2269,7 +2654,9 @@ class TestConcurrentExecution:
         def mock_resolve_project_ref(cas_base, user_fp, project_path):
             return dict(head_state)
 
-        def mock_advance_project_ref(cas_base, user_fp, project_path, new_hash, expected_hash):
+        def mock_advance_project_ref(
+            cas_base, user_fp, project_path, new_hash, expected_hash
+        ):
             """Simulate optimistic CAS — succeed only if hash matches."""
             if head_state["snapshot_hash"] != expected_hash:
                 return False
@@ -2287,7 +2674,9 @@ class TestConcurrentExecution:
 
         exec_call_count = 0
 
-        async def mock_handle(self_tool, item_type, item_id, project_path, parameters, thread):
+        async def mock_handle(
+            self_tool, item_type, item_id, project_path, parameters, thread
+        ):
             """Mock ExecuteTool.handle: write a unique knowledge file per call."""
             nonlocal exec_call_count
             exec_call_count += 1
@@ -2297,9 +2686,13 @@ class TestConcurrentExecution:
             knowledge_dir.mkdir(parents=True, exist_ok=True)
 
             if call_num == 1:
-                (knowledge_dir / "exec_a.md").write_text("# Knowledge from execution A\n")
+                (knowledge_dir / "exec_a.md").write_text(
+                    "# Knowledge from execution A\n"
+                )
             else:
-                (knowledge_dir / "exec_b.md").write_text("# Knowledge from execution B\n")
+                (knowledge_dir / "exec_b.md").write_text(
+                    "# Knowledge from execution B\n"
+                )
 
             # Wait for both executions to finish modifying before either proceeds
             await barrier.wait()
@@ -2307,28 +2700,50 @@ class TestConcurrentExecution:
 
         from ryeos_node.server import _execute_from_head
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_node.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_node.server.advance_project_ref", side_effect=mock_advance_project_ref), \
-             patch("ryeos_node.server.register_execution"), \
-             patch("ryeos_node.server.complete_execution"), \
-             patch("ryeos_node.server._update_snapshot_cache"), \
-             patch("ryeos_node.server._check_user_quota"), \
-             patch.object(
-                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
-                 "handle", mock_handle,
-             ):
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404",
+                side_effect=mock_resolve_project_ref_or_404,
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_project_ref",
+                side_effect=mock_resolve_project_ref,
+            ),
+            patch(
+                "ryeos_node.server.advance_project_ref",
+                side_effect=mock_advance_project_ref,
+            ),
+            patch("ryeos_node.server.register_execution"),
+            patch("ryeos_node.server.complete_execution"),
+            patch("ryeos_node.server._update_snapshot_cache"),
+            patch("ryeos_node.server._check_user_quota"),
+            patch.object(
+                __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                "handle",
+                mock_handle,
+            ),
+        ):
             result_a, result_b = await asyncio.gather(
                 _execute_from_head(
-                    user, settings, "test-project",
-                    item_type="tool", item_id="x",
-                    parameters={}, thread="inline",
+                    user,
+                    settings,
+                    "test-project",
+                    item_type="tool",
+                    item_id="x",
+                    parameters={},
+                    thread="inline",
                 ),
                 _execute_from_head(
-                    user, settings, "test-project",
-                    item_type="tool", item_id="y",
-                    parameters={}, thread="inline",
+                    user,
+                    settings,
+                    "test-project",
+                    item_type="tool",
+                    item_id="y",
+                    parameters={},
+                    thread="inline",
                 ),
             )
 
@@ -2368,12 +2783,16 @@ class TestConcurrentExecution:
         assert f"{AI_DIR}/knowledge/exec_b.md" in item_paths
 
         # Verify exec_a and exec_b content blobs exist and have correct content
-        exec_a_item = cas.get_object(final_manifest["items"][f"{AI_DIR}/knowledge/exec_a.md"], root)
+        exec_a_item = cas.get_object(
+            final_manifest["items"][f"{AI_DIR}/knowledge/exec_a.md"], root
+        )
         assert exec_a_item is not None
         exec_a_content = cas.get_blob(exec_a_item["content_blob_hash"], root)
         assert exec_a_content == b"# Knowledge from execution A\n"
 
-        exec_b_item = cas.get_object(final_manifest["items"][f"{AI_DIR}/knowledge/exec_b.md"], root)
+        exec_b_item = cas.get_object(
+            final_manifest["items"][f"{AI_DIR}/knowledge/exec_b.md"], root
+        )
         assert exec_b_item is not None
         exec_b_content = cas.get_blob(exec_b_item["content_blob_hash"], root)
         assert exec_b_content == b"# Knowledge from execution B\n"
@@ -2427,7 +2846,9 @@ class TestConcurrentExecution:
         def mock_resolve_project_ref(cas_base, user_fp, project_path):
             return dict(head_state)
 
-        def mock_advance_project_ref(cas_base, user_fp, project_path, new_hash, expected_hash):
+        def mock_advance_project_ref(
+            cas_base, user_fp, project_path, new_hash, expected_hash
+        ):
             if head_state["snapshot_hash"] != expected_hash:
                 return False
             head_state["snapshot_hash"] = new_hash
@@ -2441,7 +2862,9 @@ class TestConcurrentExecution:
         barrier = asyncio.Barrier(2)
         exec_call_count = 0
 
-        async def mock_handle(self_tool, item_type, item_id, project_path, parameters, thread):
+        async def mock_handle(
+            self_tool, item_type, item_id, project_path, parameters, thread
+        ):
             nonlocal exec_call_count
             exec_call_count += 1
             call_num = exec_call_count
@@ -2458,29 +2881,51 @@ class TestConcurrentExecution:
 
         from ryeos_node.server import _execute_from_head
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_node.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_node.server.advance_project_ref", side_effect=mock_advance_project_ref), \
-             patch("ryeos_node.server.register_execution"), \
-             patch("ryeos_node.server.complete_execution"), \
-             patch("ryeos_node.server._update_snapshot_cache"), \
-             patch("ryeos_node.server._check_user_quota"), \
-             patch("ryeos_node.server.store_conflict_record"), \
-             patch.object(
-                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
-                 "handle", mock_handle,
-             ):
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404",
+                side_effect=mock_resolve_project_ref_or_404,
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_project_ref",
+                side_effect=mock_resolve_project_ref,
+            ),
+            patch(
+                "ryeos_node.server.advance_project_ref",
+                side_effect=mock_advance_project_ref,
+            ),
+            patch("ryeos_node.server.register_execution"),
+            patch("ryeos_node.server.complete_execution"),
+            patch("ryeos_node.server._update_snapshot_cache"),
+            patch("ryeos_node.server._check_user_quota"),
+            patch("ryeos_node.server.store_conflict_record"),
+            patch.object(
+                __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                "handle",
+                mock_handle,
+            ),
+        ):
             result_a, result_b = await asyncio.gather(
                 _execute_from_head(
-                    user, settings, "test-project",
-                    item_type="tool", item_id="x",
-                    parameters={}, thread="inline",
+                    user,
+                    settings,
+                    "test-project",
+                    item_type="tool",
+                    item_id="x",
+                    parameters={},
+                    thread="inline",
                 ),
                 _execute_from_head(
-                    user, settings, "test-project",
-                    item_type="tool", item_id="y",
-                    parameters={}, thread="inline",
+                    user,
+                    settings,
+                    "test-project",
+                    item_type="tool",
+                    item_id="y",
+                    parameters={},
+                    thread="inline",
                 ),
             )
 
@@ -2568,7 +3013,9 @@ class TestConcurrentExecution:
         def mock_resolve_project_ref(cas_base, user_fp, project_path):
             return dict(head_state)
 
-        def mock_advance_project_ref(cas_base, user_fp, project_path, new_hash, expected_hash):
+        def mock_advance_project_ref(
+            cas_base, user_fp, project_path, new_hash, expected_hash
+        ):
             if head_state["snapshot_hash"] != expected_hash:
                 return False
             head_state["snapshot_hash"] = new_hash
@@ -2582,7 +3029,9 @@ class TestConcurrentExecution:
         barrier = asyncio.Barrier(2)
         exec_call_count = 0
 
-        async def mock_handle(self_tool, item_type, item_id, project_path, parameters, thread):
+        async def mock_handle(
+            self_tool, item_type, item_id, project_path, parameters, thread
+        ):
             nonlocal exec_call_count
             exec_call_count += 1
             call_num = exec_call_count
@@ -2598,28 +3047,50 @@ class TestConcurrentExecution:
 
         from ryeos_node.server import _execute_from_head
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=mock_resolve_project_ref_or_404), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_node.server.resolve_project_ref", side_effect=mock_resolve_project_ref), \
-             patch("ryeos_node.server.advance_project_ref", side_effect=mock_advance_project_ref), \
-             patch("ryeos_node.server.register_execution"), \
-             patch("ryeos_node.server.complete_execution"), \
-             patch("ryeos_node.server._update_snapshot_cache"), \
-             patch("ryeos_node.server._check_user_quota"), \
-             patch.object(
-                 __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
-                 "handle", mock_handle,
-             ):
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404",
+                side_effect=mock_resolve_project_ref_or_404,
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_project_ref",
+                side_effect=mock_resolve_project_ref,
+            ),
+            patch(
+                "ryeos_node.server.advance_project_ref",
+                side_effect=mock_advance_project_ref,
+            ),
+            patch("ryeos_node.server.register_execution"),
+            patch("ryeos_node.server.complete_execution"),
+            patch("ryeos_node.server._update_snapshot_cache"),
+            patch("ryeos_node.server._check_user_quota"),
+            patch.object(
+                __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+                "handle",
+                mock_handle,
+            ),
+        ):
             result_a, result_b = await asyncio.gather(
                 _execute_from_head(
-                    user, settings, "test-project",
-                    item_type="tool", item_id="x",
-                    parameters={}, thread="inline",
+                    user,
+                    settings,
+                    "test-project",
+                    item_type="tool",
+                    item_id="x",
+                    parameters={},
+                    thread="inline",
                 ),
                 _execute_from_head(
-                    user, settings, "test-project",
-                    item_type="tool", item_id="y",
-                    parameters={}, thread="inline",
+                    user,
+                    settings,
+                    "test-project",
+                    item_type="tool",
+                    item_id="y",
+                    parameters={},
+                    thread="inline",
                 ),
             )
 
@@ -2662,7 +3133,8 @@ class TestStoreConflictRecord:
         exec_dir.mkdir(parents=True)
 
         store_conflict_record(
-            str(cas_base), user_fp,
+            str(cas_base),
+            user_fp,
             thread_id="thread-1",
             conflicts={"file.txt": {"type": "content"}},
             unmerged_snapshot="snap123",
@@ -2671,6 +3143,7 @@ class TestStoreConflictRecord:
         record_file = exec_dir / "thread-1"
         assert record_file.exists()
         import json
+
         record = json.loads(record_file.read_text())
         assert record["merge_conflicts"] == {"file.txt": {"type": "content"}}
         assert record["unmerged_snapshot_hash"] == "snap123"
@@ -2679,7 +3152,8 @@ class TestStoreConflictRecord:
         cas_base = tmp_path / "cas"
         # Don't create dirs — should trigger an error path but not raise
         store_conflict_record(
-            str(cas_base), "test-user",
+            str(cas_base),
+            "test-user",
             thread_id="thread-1",
             conflicts={},
             unmerged_snapshot="snap123",
@@ -2703,8 +3177,12 @@ class TestUpdateSnapshotCache:
         snapshot_hash, _ = _create_snapshot_chain(root)
 
         _update_snapshot_cache(
-            settings, user, "project",
-            snapshot_hash, root, cache,
+            settings,
+            user,
+            "project",
+            snapshot_hash,
+            root,
+            cache,
         )
 
         cached = cache / "snapshots" / snapshot_hash
@@ -2724,8 +3202,12 @@ class TestUpdateSnapshotCache:
 
         # Non-existent snapshot → ensure_snapshot_cached will raise
         _update_snapshot_cache(
-            settings, user, "project",
-            "0" * 64, root, cache,
+            settings,
+            user,
+            "project",
+            "0" * 64,
+            root,
+            cache,
         )
         # Should not raise — logs warning instead
 
@@ -2748,22 +3230,26 @@ class TestSettingsCacheExecRoots:
 class TestVerifyTimestamp:
     def test_valid_timestamp(self):
         from ryeos_node.auth import verify_timestamp
+
         verify_timestamp(str(int(time.time())))  # should not raise
 
     def test_empty_timestamp(self):
         from ryeos_node.auth import verify_timestamp
+
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp("")
         assert exc_info.value.status_code == 401
 
     def test_non_numeric_timestamp(self):
         from ryeos_node.auth import verify_timestamp
+
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp("not-a-number")
         assert exc_info.value.status_code == 401
 
     def test_stale_timestamp(self):
         from ryeos_node.auth import verify_timestamp
+
         stale = str(int(time.time()) - 600)
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp(stale)
@@ -2771,6 +3257,7 @@ class TestVerifyTimestamp:
 
     def test_future_timestamp(self):
         from ryeos_node.auth import verify_timestamp
+
         future = str(int(time.time()) + 60)
         with pytest.raises(HTTPException) as exc_info:
             verify_timestamp(future)
@@ -2780,12 +3267,14 @@ class TestVerifyTimestamp:
 class TestVerifyHmac:
     def _sign(self, timestamp, body, secret):
         import hmac as _hmac
+
         signed = timestamp.encode() + b"." + body
         sig = _hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
         return f"sha256={sig}"
 
     def test_valid_hmac(self):
         from ryeos_node.auth import verify_hmac
+
         ts = str(int(time.time()))
         body = b'{"hook_id": "wh_test"}'
         secret = "whsec_test123"
@@ -2794,6 +3283,7 @@ class TestVerifyHmac:
 
     def test_wrong_secret(self):
         from ryeos_node.auth import verify_hmac
+
         ts = str(int(time.time()))
         body = b'{"hook_id": "wh_test"}'
         sig = self._sign(ts, body, "correct_secret")
@@ -2803,6 +3293,7 @@ class TestVerifyHmac:
 
     def test_tampered_body(self):
         from ryeos_node.auth import verify_hmac
+
         ts = str(int(time.time()))
         secret = "whsec_test123"
         sig = self._sign(ts, b'{"hook_id": "wh_test"}', secret)
@@ -2812,18 +3303,21 @@ class TestVerifyHmac:
 
     def test_missing_signature(self):
         from ryeos_node.auth import verify_hmac
+
         with pytest.raises(HTTPException) as exc_info:
             verify_hmac("123", b"body", "secret", "")
         assert exc_info.value.status_code == 401
 
     def test_wrong_prefix(self):
         from ryeos_node.auth import verify_hmac
+
         with pytest.raises(HTTPException) as exc_info:
             verify_hmac("123", b"body", "secret", "md5=abcd")
         assert exc_info.value.status_code == 401
 
     def test_wrong_length(self):
         from ryeos_node.auth import verify_hmac
+
         with pytest.raises(HTTPException) as exc_info:
             verify_hmac("123", b"body", "secret", "sha256=tooshort")
         assert exc_info.value.status_code == 401
@@ -2837,6 +3331,7 @@ class TestVerifyHmac:
 class TestLookupBinding:
     def test_active_binding(self):
         from unittest.mock import patch
+
         settings = _make_settings("/cas", "/signing")
         binding = {
             "hook_id": "wh_test",
@@ -2855,6 +3350,7 @@ class TestLookupBinding:
 
     def test_missing_binding(self):
         from unittest.mock import patch
+
         settings = _make_settings("/cas", "/signing")
 
         with patch("ryeos_node.server.resolve_binding", return_value=None):
@@ -2865,6 +3361,7 @@ class TestLookupBinding:
 
     def test_revoked_binding(self):
         from unittest.mock import patch
+
         settings = _make_settings("/cas", "/signing")
 
         # resolve_binding returns None for revoked bindings
@@ -2908,12 +3405,15 @@ class TestWebhookBindings:
         }
 
         with patch("ryeos_node.server.create_binding", return_value=mock_result):
-            r = c.post("/webhook-bindings", json={
-                "item_type": "directive",
-                "item_id": "email/handle_inbound",
-                "project_path": "campaign-kiwi",
-                "description": "Inbound email processing",
-            })
+            r = c.post(
+                "/webhook-bindings",
+                json={
+                    "item_type": "directive",
+                    "item_id": "email/handle_inbound",
+                    "project_path": "campaign-kiwi",
+                    "description": "Inbound email processing",
+                },
+            )
         assert r.status_code == 200
         body = r.json()
         assert body["hook_id"].startswith("wh_")
@@ -2924,11 +3424,14 @@ class TestWebhookBindings:
 
     def test_create_binding_invalid_item_type(self, cas_env):
         c, root, tmp_path = cas_env
-        r = c.post("/webhook-bindings", json={
-            "item_type": "knowledge",
-            "item_id": "x",
-            "project_path": "test",
-        })
+        r = c.post(
+            "/webhook-bindings",
+            json={
+                "item_type": "knowledge",
+                "item_id": "x",
+                "project_path": "test",
+            },
+        )
         assert r.status_code == 400
 
     def test_list_bindings(self, cas_env):
@@ -2936,8 +3439,15 @@ class TestWebhookBindings:
         from unittest.mock import patch
 
         bindings = [
-            {"hook_id": "wh_abc", "item_type": "directive", "item_id": "email/send",
-             "project_path": "proj", "description": "test", "created_at": "2026-01-01", "revoked_at": None},
+            {
+                "hook_id": "wh_abc",
+                "item_type": "directive",
+                "item_id": "email/send",
+                "project_path": "proj",
+                "description": "test",
+                "created_at": "2026-01-01",
+                "revoked_at": None,
+            },
         ]
 
         with patch("ryeos_node.server.list_bindings", return_value=bindings):
@@ -3004,7 +3514,10 @@ class TestValidateManifestGraph:
         root.mkdir()
         manifest_hash, _, _, _ = self._make_valid_manifest(root)
         result = _validate_manifest_graph(
-            manifest_hash, root, expected_space="project", label="test",
+            manifest_hash,
+            root,
+            expected_space="project",
+            label="test",
         )
         assert result["kind"] == "source_manifest"
         assert result["space"] == "project"
@@ -3014,7 +3527,10 @@ class TestValidateManifestGraph:
         root.mkdir()
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                "deadbeef" * 8, root, expected_space="project", label="test",
+                "deadbeef" * 8,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "not found in CAS" in exc_info.value.detail
@@ -3027,7 +3543,10 @@ class TestValidateManifestGraph:
         obj_hash = cas.store_object(obj, root)
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                obj_hash, root, expected_space="project", label="test",
+                obj_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "expected 'source_manifest'" in exc_info.value.detail
@@ -3035,11 +3554,20 @@ class TestValidateManifestGraph:
     def test_wrong_schema_version(self, tmp_path):
         root = tmp_path / "cas"
         root.mkdir()
-        obj = {"kind": "source_manifest", "schema": 999, "space": "project", "items": {}, "files": {}}
+        obj = {
+            "kind": "source_manifest",
+            "schema": 999,
+            "space": "project",
+            "items": {},
+            "files": {},
+        }
         obj_hash = cas.store_object(obj, root)
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                obj_hash, root, expected_space="project", label="test",
+                obj_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "unsupported schema version" in exc_info.value.detail
@@ -3050,7 +3578,10 @@ class TestValidateManifestGraph:
         manifest_hash, _, _, _ = self._make_valid_manifest(root, space="user")
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                manifest_hash, root, expected_space="project", label="test",
+                manifest_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "expected 'project'" in exc_info.value.detail
@@ -3066,7 +3597,10 @@ class TestValidateManifestGraph:
         manifest_hash = cas.store_object(manifest.to_dict(), root)
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                manifest_hash, root, expected_space="project", label="test",
+                manifest_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "missing object" in exc_info.value.detail
@@ -3085,7 +3619,10 @@ class TestValidateManifestGraph:
         manifest_hash = cas.store_object(manifest.to_dict(), root)
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                manifest_hash, root, expected_space="project", label="test",
+                manifest_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "expected 'item_source'" in exc_info.value.detail
@@ -3109,7 +3646,10 @@ class TestValidateManifestGraph:
         manifest_hash = cas.store_object(manifest.to_dict(), root)
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                manifest_hash, root, expected_space="project", label="test",
+                manifest_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "missing blob" in exc_info.value.detail
@@ -3125,7 +3665,10 @@ class TestValidateManifestGraph:
         manifest_hash = cas.store_object(manifest.to_dict(), root)
         with pytest.raises(HTTPException) as exc_info:
             _validate_manifest_graph(
-                manifest_hash, root, expected_space="project", label="test",
+                manifest_hash,
+                root,
+                expected_space="project",
+                label="test",
             )
         assert exc_info.value.status_code == 400
         assert "missing blob" in exc_info.value.detail
@@ -3135,7 +3678,10 @@ class TestValidateManifestGraph:
         root.mkdir()
         manifest_hash, _, _, _ = self._make_valid_manifest(root, space="user")
         result = _validate_manifest_graph(
-            manifest_hash, root, expected_space="user", label="user_manifest",
+            manifest_hash,
+            root,
+            expected_space="user",
+            label="user_manifest",
         )
         assert result["space"] == "user"
 
@@ -3145,7 +3691,10 @@ class TestValidateManifestGraph:
         manifest = SourceManifest(space="project", items={}, files={})
         manifest_hash = cas.store_object(manifest.to_dict(), root)
         result = _validate_manifest_graph(
-            manifest_hash, root, expected_space="project", label="test",
+            manifest_hash,
+            root,
+            expected_space="project",
+            label="test",
         )
         assert result["items"] == {}
         assert result["files"] == {}
@@ -3173,7 +3722,10 @@ class TestValidateManifestGraph:
         )
         manifest_hash = cas.store_object(manifest.to_dict(), root)
         result = _validate_manifest_graph(
-            manifest_hash, root, expected_space="project", label="test",
+            manifest_hash,
+            root,
+            expected_space="project",
+            label="test",
         )
         assert len(result["items"]) == 2
 
@@ -3190,19 +3742,25 @@ class TestGetHistory:
         root.mkdir()
 
         s0 = ProjectSnapshot(
-            project_manifest_hash="m0", source="push", timestamp="t0",
+            project_manifest_hash="m0",
+            source="push",
+            timestamp="t0",
         )
         h0 = cas.store_object(s0.to_dict(), root)
 
         s1 = ProjectSnapshot(
-            project_manifest_hash="m1", parent_hashes=[h0],
-            source="push", timestamp="t1",
+            project_manifest_hash="m1",
+            parent_hashes=[h0],
+            source="push",
+            timestamp="t1",
         )
         h1 = cas.store_object(s1.to_dict(), root)
 
         s2 = ProjectSnapshot(
-            project_manifest_hash="m2", parent_hashes=[h1],
-            source="execution", timestamp="t2",
+            project_manifest_hash="m2",
+            parent_hashes=[h1],
+            source="execution",
+            timestamp="t2",
         )
         h2 = cas.store_object(s2.to_dict(), root)
 
@@ -3220,25 +3778,33 @@ class TestGetHistory:
         root.mkdir()
 
         s_base = ProjectSnapshot(
-            project_manifest_hash="base", source="push", timestamp="t0",
+            project_manifest_hash="base",
+            source="push",
+            timestamp="t0",
         )
         h_base = cas.store_object(s_base.to_dict(), root)
 
         s_branch = ProjectSnapshot(
-            project_manifest_hash="branch", parent_hashes=[h_base],
-            source="execution", timestamp="t1",
+            project_manifest_hash="branch",
+            parent_hashes=[h_base],
+            source="execution",
+            timestamp="t1",
         )
         h_branch = cas.store_object(s_branch.to_dict(), root)
 
         s_main = ProjectSnapshot(
-            project_manifest_hash="main", parent_hashes=[h_base],
-            source="push", timestamp="t2",
+            project_manifest_hash="main",
+            parent_hashes=[h_base],
+            source="push",
+            timestamp="t2",
         )
         h_main = cas.store_object(s_main.to_dict(), root)
 
         s_merge = ProjectSnapshot(
-            project_manifest_hash="merged", parent_hashes=[h_main, h_branch],
-            source="merge", timestamp="t3",
+            project_manifest_hash="merged",
+            parent_hashes=[h_main, h_branch],
+            source="merge",
+            timestamp="t3",
         )
         h_merge = cas.store_object(s_merge.to_dict(), root)
 
@@ -3254,7 +3820,8 @@ class TestGetHistory:
         s1 = ProjectSnapshot(
             project_manifest_hash="m1",
             parent_hashes=["nonexistent_hash"],
-            source="push", timestamp="t1",
+            source="push",
+            timestamp="t1",
         )
         h1 = cas.store_object(s1.to_dict(), root)
 
@@ -3272,7 +3839,8 @@ class TestGetHistory:
             s = ProjectSnapshot(
                 project_manifest_hash=f"m{i}",
                 parent_hashes=[prev] if prev else [],
-                source="push", timestamp=f"t{i}",
+                source="push",
+                timestamp=f"t{i}",
             )
             prev = cas.store_object(s.to_dict(), root)
 
@@ -3300,12 +3868,16 @@ class TestHistoryEndpoint:
 
         # Build a 2-snapshot chain in CAS
         s0 = ProjectSnapshot(
-            project_manifest_hash="m0", source="push", timestamp="t0",
+            project_manifest_hash="m0",
+            source="push",
+            timestamp="t0",
         )
         h0 = cas.store_object(s0.to_dict(), user_cas)
         s1 = ProjectSnapshot(
-            project_manifest_hash="m1", parent_hashes=[h0],
-            source="push", timestamp="t1",
+            project_manifest_hash="m1",
+            parent_hashes=[h0],
+            source="push",
+            timestamp="t1",
         )
         h1 = cas.store_object(s1.to_dict(), user_cas)
 
@@ -3314,7 +3886,9 @@ class TestHistoryEndpoint:
             "project_path": "my-project",
         }
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref):
+        with patch(
+            "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+        ):
             r = c.get("/history", params={"project_path": "my-project"})
 
         assert r.status_code == 200
@@ -3334,7 +3908,9 @@ class TestHistoryEndpoint:
         def raise_404(*args, **kwargs):
             raise HTTPException(404, "No project ref found")
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", side_effect=raise_404):
+        with patch(
+            "ryeos_node.server._resolve_project_ref_or_404", side_effect=raise_404
+        ):
             r = c.get("/history", params={"project_path": "nonexistent"})
 
         assert r.status_code == 404
@@ -3350,7 +3926,8 @@ class TestHistoryEndpoint:
             s = ProjectSnapshot(
                 project_manifest_hash=f"m{i}",
                 parent_hashes=[prev] if prev else [],
-                source="push", timestamp=f"t{i}",
+                source="push",
+                timestamp=f"t{i}",
             )
             prev = cas.store_object(s.to_dict(), user_cas)
 
@@ -3359,7 +3936,9 @@ class TestHistoryEndpoint:
             "project_path": "proj",
         }
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref):
+        with patch(
+            "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+        ):
             r = c.get("/history", params={"project_path": "proj", "limit": 2})
 
         assert r.status_code == 200
@@ -3452,6 +4031,7 @@ class TestSealedEnvelope:
 
         box_key, box_pub = _generate_box_keypair()
         from rye.primitives.signing import compute_box_fingerprint
+
         fp = compute_box_fingerprint(box_pub)
 
         identity_doc = {
@@ -3462,7 +4042,9 @@ class TestSealedEnvelope:
         }
 
         envelope_mod = self._load_envelope_module()
-        sealed = envelope_mod.seal_secrets_for_identity({"MY_SECRET": "abc"}, identity_doc)
+        sealed = envelope_mod.seal_secrets_for_identity(
+            {"MY_SECRET": "abc"}, identity_doc
+        )
 
         decrypted = envelope_mod.open_envelope(sealed, box_key)
         assert decrypted == {"MY_SECRET": "abc"}
@@ -3551,26 +4133,42 @@ class TestExecuteWithEnvelope:
         """secret_envelope from request body appears in ResolvedExecution."""
         c, user_cas, tmp_path = cas_env
         ph, uh, snapshot_hash, mock_ref, mock_user_ref = _build_manifests_with_snapshot(
-            tmp_path, user_cas,
+            tmp_path,
+            user_cas,
         )
 
         from unittest.mock import patch
 
-        envelope = {"version": 1, "recipient": "fp:test", "enc": "abc", "ciphertext": "xyz"}
+        envelope = {
+            "version": 1,
+            "recipient": "fp:test",
+            "enc": "abc",
+            "ciphertext": "xyz",
+        }
 
-        with patch("ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref), \
-             patch("ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref), \
-             patch("ryeos_node.server._execute_from_head") as mock_exec:
+        with (
+            patch(
+                "ryeos_node.server._resolve_project_ref_or_404", return_value=mock_ref
+            ),
+            patch(
+                "ryeos_node.server.resolve_user_space_ref", return_value=mock_user_ref
+            ),
+            patch("ryeos_node.server._execute_from_head") as mock_exec,
+        ):
             mock_exec.return_value = {"status": "ok"}
-            r = c.post("/execute", json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "test/tool",
-                "parameters": {},
-                "secret_envelope": envelope,
-            })
+            r = c.post(
+                "/execute",
+                json={
+                    "project_path": "test-project",
+                    "item_type": "tool",
+                    "item_id": "test/tool",
+                    "parameters": {},
+                    "secret_envelope": envelope,
+                },
+            )
 
         assert mock_exec.called
         call_kwargs = mock_exec.call_args
-        assert call_kwargs.kwargs.get("secret_envelope") == envelope \
-            or (len(call_kwargs.args) > 7 and call_kwargs.args[7] == envelope)
+        assert call_kwargs.kwargs.get("secret_envelope") == envelope or (
+            len(call_kwargs.args) > 7 and call_kwargs.args[7] == envelope
+        )

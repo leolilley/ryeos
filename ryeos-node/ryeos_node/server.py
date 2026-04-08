@@ -8,6 +8,8 @@ Endpoints: /health, /public-key, /objects/has, /objects/put, /objects/get,
            /webhook-bindings (POST, GET), /webhook-bindings/{hook_id} (DELETE)
 """
 
+from contextlib import asynccontextmanager
+
 import asyncio
 import datetime
 import hashlib
@@ -131,7 +133,76 @@ _exec_counter = _ExecutionCounter()
 
 from ryeos_node import __version__ as _node_version
 
-app = FastAPI(title="ryeos-node", version=_node_version)
+_gc_scheduler_task: Optional[asyncio.Task] = None
+
+
+async def _periodic_gc_loop() -> None:
+    """Run GC for all active users on a schedule."""
+    settings = get_settings()
+    interval = settings.gc_schedule_interval
+    cas_base = Path(settings.cas_base_path)
+    node_id = settings.rye_remote_name
+
+    logger.info("Periodic GC scheduler started (interval=%ds)", interval)
+
+    while True:
+        await asyncio.sleep(interval)
+        logger.debug("Periodic GC tick")
+        try:
+            if not cas_base.is_dir():
+                continue
+            for user_dir in cas_base.iterdir():
+                if not user_dir.is_dir() or user_dir.name.startswith("."):
+                    continue
+                try:
+                    policy = RetentionPolicy(
+                        manual_pushes=settings.gc_max_manual_pushes,
+                        daily_checkpoints=settings.gc_retention_days,
+                        max_success_executions=settings.gc_max_executions,
+                        max_failure_executions=settings.gc_max_executions,
+                    )
+                    ai_dir = os.environ.get("AI_DIR", ".ai")
+                    user_root = user_dir
+                    cas_root = user_dir / ai_dir / "state" / "objects"
+                    if not cas_root.is_dir():
+                        continue
+                    result = await asyncio.to_thread(
+                        run_gc,
+                        user_root,
+                        cas_root,
+                        node_id=node_id,
+                        policy=policy,
+                    )
+                    logger.info(
+                        "Periodic GC for %s: freed %s in %dms",
+                        user_dir.name,
+                        _human_bytes(result.total_freed_bytes),
+                        result.duration_ms,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Periodic GC failed for %s", user_dir.name, exc_info=True
+                    )
+        except Exception:
+            logger.warning("Periodic GC tick failed", exc_info=True)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _gc_scheduler_task
+    settings = get_settings()
+    if settings.gc_auto_enabled and settings.gc_schedule_interval > 0:
+        _gc_scheduler_task = asyncio.create_task(_periodic_gc_loop())
+    yield
+    if _gc_scheduler_task:
+        _gc_scheduler_task.cancel()
+        try:
+            await _gc_scheduler_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="ryeos-node", version=_node_version, lifespan=_lifespan)
 
 # m3: Gzip compression for responses
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -255,7 +326,7 @@ def _get_last_gc_time(user_root: Path) -> float | None:
     return None
 
 
-def _check_user_quota(principal: Principal, settings: Settings) -> None:
+async def _check_user_quota(principal: Principal, settings: Settings) -> None:
     """Check quota and auto-GC if over limit. Raise 507 only if GC can't reclaim enough."""
     user_root = settings.user_root(principal.fingerprint)
     if not user_root.exists():
@@ -298,7 +369,8 @@ def _check_user_quota(principal: Principal, settings: Settings) -> None:
 
     # Full GC with aggressive retention
     try:
-        run_gc(
+        await asyncio.to_thread(
+            run_gc,
             user_root,
             cas_root,
             node_id=f"{settings.rye_remote_name}-auto-{os.getpid()}",
@@ -640,10 +712,19 @@ def _find_execution_snapshot_hash(project_path: Path) -> Optional[str]:
 async def health():
     from ryeos_node import __version__ as node_version
 
+    ryeos_version = "unknown"
+    try:
+        from importlib.metadata import version
+
+        ryeos_version = version("ryeos")
+    except Exception:
+        pass
+
     return {
         "status": "ok",
         "version": node_version,
         "engine_version": get_system_version(),
+        "ryeos_version": ryeos_version,
     }
 
 
@@ -786,7 +867,7 @@ async def objects_put(
     principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
-    _check_user_quota(principal, settings)
+    await _check_user_quota(principal, settings)
     root = _principal_cas_root(principal, settings)
     result = handle_put_objects(req.entries, root)
     if result.get("errors"):
@@ -1298,7 +1379,9 @@ async def _execute_from_head(
 
             # Build per-execution env (never mutate process-global os.environ)
             # These are for subprocesses; in-process code uses ExecutionContext.
-            resolved_user_space: Path = user_space if user_space else exec_space / ".empty_user_space"
+            resolved_user_space: Path = (
+                user_space if user_space else exec_space / ".empty_user_space"
+            )
             if not user_space:
                 resolved_user_space.mkdir(exist_ok=True)
 
@@ -1454,7 +1537,7 @@ async def _execute_from_head(
                 user_manifest_hash=user_manifest_hash,
             )
 
-            _check_user_quota(principal, settings)
+            await _check_user_quota(principal, settings)
 
             exec_status = result.get("status", "unknown")
             complete_execution(
@@ -1891,7 +1974,8 @@ async def gc_endpoint(
         max_failure_executions=settings.gc_max_executions,
     )
 
-    result = run_gc(
+    result = await asyncio.to_thread(
+        run_gc,
         user_root,
         cas_root,
         node_id=settings.rye_remote_name,
