@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:25Z:14583d18817459c7fc21cfbb055c21211bbf5a969ab85c4d694e5eb957c70132:6L0odeGXtcbmFMUrunGKbjWi209AvdnHxcDXU08I2UTpW9DsTrapT831NpZhD8yopHHTqlc3pilLa_AEzGRBDA:4b987fd4e40303ac
+# rye:signed:2026-04-08T05:43:17Z:b837299c3bc7a33ceaa7d20bd133811302b31e00c3e7b8dd31d7af93a138e24d:fa-tbAex0wjYdQbjyY_8IXFpmJ6VX9449ClZvxWgmOVo6J3oafhFzE2931LuJWnXLZ0MBL2Mr9onUjue8V09BA:4b987fd4e40303ac
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -32,17 +32,17 @@ class ConfigLoader:
         for bundle in get_system_spaces():
             system_path = bundle.root_path / AI_DIR / "config" / "agent" / self.config_name
             if system_path.exists():
-                bundle_config = self._load_yaml(system_path)
+                bundle_config = self._load_yaml(system_path, project_path)
                 config = self._merge(config, bundle_config)
 
         user_config_path = get_user_ai_path() / "config" / "agent" / self.config_name
         if user_config_path.exists():
-            user_config = self._load_yaml(user_config_path)
+            user_config = self._load_yaml(user_config_path, project_path)
             config = self._merge(config, user_config)
 
         project_config_path = project_path / AI_DIR / "config" / "agent" / self.config_name
         if project_config_path.exists():
-            project_config = self._load_yaml(project_config_path)
+            project_config = self._load_yaml(project_config_path, project_path)
             config = self._merge(config, project_config)
 
         # Validate merged config against schema
@@ -51,16 +51,18 @@ class ConfigLoader:
         self._cache[cache_key] = config
         return config
 
-    def _load_yaml(self, path: Path) -> Dict[str, Any]:
-        self._verify_config(path)
+    def _load_yaml(self, path: Path, project_path: Path) -> Dict[str, Any]:
+        self._verify_config(path, project_path)
         with open(path) as f:
             return yaml.safe_load(f) or {}
 
-    def _verify_config(self, path: Path) -> None:
+    def _verify_config(self, path: Path, project_path: Path) -> None:
         """Verify config integrity: warn-if-unsigned, reject-if-tampered."""
         from rye.utils.integrity import verify_item, IntegrityError
+        from rye.utils.execution_context import ExecutionContext
         try:
-            verify_item(path, "config", allow_unsigned=True)
+            ctx = ExecutionContext.from_env(project_path=project_path)
+            verify_item(path, "config", ctx=ctx, allow_unsigned=True)
         except IntegrityError:
             raise
         except Exception:
