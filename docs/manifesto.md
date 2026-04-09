@@ -114,13 +114,13 @@ This is what enables always-on webhook agents. External services trigger executi
 
 Every agent framework today puts the model at the centre. Memory, tools, files orbit around it. Everything exists to serve the model. The state persists. But ownership doesn't. There's no cryptographic chain between the work and the person who produced it. Move machines, switch tools, and you have files with no provenance, no verified identity, no way to prove they're yours or that they haven't been altered. Continuity without ownership. A session pretending to be an entity.
 
-RYE inverts this. The substrate is inert. Nodes sit idle. Objects sit hashed. Nothing executes until a key shows up. The agent is the signing key.
+RYE inverts this. The substrate is inert. Nodes sit idle. Objects sit hashed. Nothing executes until a key shows up.
 
-The cryptographically unique key that signs every item into existence. It is what authenticates to nodes. It is what makes every action, every thread, every tool call attributable to a single identity. When your TUI connects to ryeosd, it signs the request with your cryptographically unique key. When you push to a remote node, your key authenticates. When a webhook fires, it traces back to the fingerprint of the key that created the binding. Everything that passes through your key gets cryptographically bound to it. The workspace, the directives, the execution history, all of it is data that flows through the key and becomes provably yours. The substrate comes alive because a key activates it.
+In RYE, the agent is the signing key.
 
-An Ed25519 keypair is mathematically unique. Not an account a platform assigned you. Not a username you configured. The key is unique to you because the mathematics guarantee it. That's why it works as identity. Not identity by convention. Identity by proof.
+The cryptographically unique key that signs every item into existence. It authenticates to nodes. It makes every action, every thread, every tool call attributable to a single identity. The workspace, the directives, the execution history, all of it flows through the key and becomes provably yours. The substrate comes alive because a key activates it. Which means the agent can open multiple threads, fan out across nodes, run tasks in parallel, and every one of them traces back to the same fingerprint. There is no planner agent and builder agent and orchestrator agent negotiating with each other. No subagents. No trust asserted between roles. One key, one agent, operating across multiple execution contexts simultaneously. The model coordinating in thread A and the model executing in thread B are different inference calls. The agent is the same. Because the agent was never the model.
 
-Swap Claude for GPT for Gemini for whatever comes next. The model is just the current best available reasoning engine passing through. The agent remains. Because the agent was never the model. It's the unique identity the cryptographic key gives you. Which means your agent is irreducibly yours in a way no hosted platform can replicate. Not a product you're using. Not an instance of something running on someone else's infrastructure with your settings applied. Something that could only have come from your key.
+An Ed25519 keypair is mathematically unique. Not an account a platform assigned you. Not a username you configured. Its uniqueness is guaranteed by the mathematics. Not identity by convention. Identity by proof. Swap Claude for GPT for Gemini for whatever comes next. The agent remains. Something that could only have come from your key.
 
 Now imagine that at scale. Millions of signing keys activating a shared substrate. A global mesh of nodes running the same daemon. Public registries of reproducible work anyone can pull and trust. Every agent a genuinely distinct entity, not a million instances of the same product with different configurations. Persistent, portable, and provably yours.
 
@@ -128,15 +128,15 @@ The intelligence is borrowed. The identity is yours.
 
 ---
 
-**The future — from execution system to operating system**
+**The future**
 
-Everything described so far is an execution system. Two things turn it into an operating system.
+RYE is already an operating system. Lillux is the microkernel, process isolation and nothing more. The engine is the kernel, resolution, trust, chain building. ryeosd is the OS layer, threads, events, scheduling, networking. Canonical refs are the syscall interface, the stable contract between your agent and the system. The instruction set is open-ended. Add a new kind of computation without touching the kernel. Every instruction carries its own trust proof. That is not analogy. That is the architecture.
+
+Two things extend where this OS can run.
 
 Encrypted execution. Today the substrate runs on nodes you control. When execution itself is encrypted, when your data remains sealed through computation on hardware you don't control, the substrate extends to any node anywhere. You stop needing to trust the hardware.
 
 Sovereign inference. Today RYE calls external LLM providers. You rent intelligence. When the model runs on your own hardware, `llm/complete` becomes just another tool that resolves through the same chain as everything else. The model is a device driver. `execute` is the syscall. At cluster scale, routing between GPU nodes is a tool, provisioning a new node is a directive, and the agent doing the work and the agent managing the cluster are the same agent. There's no control plane. Runbooks become executable. The agent is the operator, the workload, and the client.
-
-An OS abstracts hardware. RYE does the same thing, but the hardware is compute clusters, models, and tools. You call `execute`. Everything else is invisible. The model is a swappable driver. The cluster is the kernel. The key is the identity running through all of it.
 
 ---
 

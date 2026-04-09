@@ -8,8 +8,6 @@ rye/rye/.ai/tools/rye/primary/ (in-thread primary actions).
 # Shared field descriptions (used across multiple tools)
 # ---------------------------------------------------------------------------
 
-ITEM_TYPE_DESC = 'What to operate on: "directive", "tool", or "knowledge".'
-
 PROJECT_PATH_DESC = "Absolute path to the project root containing .ai/."
 
 ITEM_ID_DESC = (
