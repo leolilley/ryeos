@@ -59,7 +59,7 @@ Multi-thread orchestration — wait, cancel, status, resume, handoff.
 
   <step name="execute_operation">
     Call the orchestrator tool with the operation and relevant parameters:
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator", parameters={"operation": "{input:operation}", "thread_ids": {input:thread_ids}, "thread_id": "{input:thread_id}", "timeout": {input:timeout}, "query": "{input:query}", "message": "{input:message}", "tail_lines": {input:tail_lines}})`
+    `rye_execute(item_id="rye/agent/threads/orchestrator", parameters={"operation": "{input:operation}", "thread_ids": {input:thread_ids}, "thread_id": "{input:thread_id}", "timeout": {input:timeout}, "query": "{input:query}", "message": "{input:message}", "tail_lines": {input:tail_lines}})`
     Only pass parameters that are relevant to the chosen operation.
   </step>
 

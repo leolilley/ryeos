@@ -42,7 +42,6 @@ def create_binding(
     cas_base: str,
     user_fp: str,
     remote_name: str,
-    item_type: str,
     item_id: str,
     project_path: str,
     description: str | None = None,
@@ -57,7 +56,6 @@ def create_binding(
         "hook_id": hook_id,
         "user_id": user_fp,
         "remote_name": remote_name,
-        "item_type": item_type,
         "item_id": item_id,
         "project_path": project_path,
         "description": description,
@@ -78,12 +76,11 @@ def create_binding(
     secret_path.write_text(hmac_secret)
     secret_path.chmod(0o600)
 
-    logger.info("Created webhook binding %s for %s/%s", hook_id, item_type, item_id)
+    logger.info("Created webhook binding %s for %s", hook_id, item_id)
 
     return {
         "hook_id": hook_id,
         "hmac_secret": hmac_secret,
-        "item_type": item_type,
         "item_id": item_id,
         "project_path": project_path,
         "has_secret_envelope": secret_envelope is not None,
@@ -98,7 +95,6 @@ def list_bindings(cas_base: str, user_fp: str, remote_name: str) -> list[dict]:
         if binding["user_id"] == user_fp and binding["remote_name"] == remote_name:
             results.append({
                 "hook_id": binding["hook_id"],
-                "item_type": binding["item_type"],
                 "item_id": binding["item_id"],
                 "project_path": binding["project_path"],
                 "description": binding["description"],

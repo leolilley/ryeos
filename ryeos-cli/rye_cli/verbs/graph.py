@@ -50,8 +50,7 @@ def _execute_graph(graph_id: str, params: dict, project_path: str):
 
     tool = ExecuteTool(str(get_user_space()))
     result = run_async(tool.handle(
-        item_type="tool",
-        item_id=graph_id,
+        item_id=f"tool:{graph_id}",
         project_path=project_path,
         parameters=params,
     ))

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-07T02:45:54Z:9353df6f5e63fc9679b82e55a52f36f90bda6dff57b125c5eb9a6a0308603495:45QmAw5wYvV81V5UpyKKRJCGPK-BlP_3ynwfcMjeqLx8uZTKdMwxp-5r6n3v2CtuzETUBt0BIgkYU7WbFnMjCg:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:b6414cf76215d4db33675d7834bb998b3b15ace377506ad1fc8af2d7357706f1:HjfElr3EK_k4eyEawaFX76fhuKpFqR-EEoI2fmOG3yinpxB8dtaVc9jGvKWyVYZED8zcRgzVTVgSwM2Hfp21AQ:4b987fd4e40303ac
 """
 Reference routing tool — capability-based dispatch to cluster nodes.
 
@@ -40,12 +40,11 @@ CONFIG_SCHEMA = {
     "properties": {
         "action": {"type": "string", "enum": ACTIONS},
         "capability": {"type": "string", "description": "Capability pattern to match (fnmatch)"},
-        "item_type": {"type": "string", "description": "tool or directive"},
-        "item_id": {"type": "string", "description": "Item to execute"},
+        "item_id": {"type": "string", "description": "Canonical ref to execute (e.g. 'tool:my/tool')"},
         "parameters": {"type": "object", "description": "Execution parameters"},
         "thread": {"type": "string", "description": "Execution thread mode"},
     },
-    "required": ["action", "capability", "item_type", "item_id"],
+    "required": ["action", "capability", "item_id"],
 }
 
 
@@ -92,17 +91,22 @@ class _SimpleClient:
 
 async def _route(params: Dict, project_path: str) -> Dict:
     """Route execution to the best available node."""
+    from rye.constants import ItemType
+
     capability = params.get("capability")
-    item_type = params.get("item_type")
     item_id = params.get("item_id")
     exec_params = params.get("parameters", {})
     thread = params.get("thread")
 
-    if not capability or not item_type or not item_id:
-        return {"error": "Required: capability, item_type, item_id"}
+    if not capability or not item_id:
+        return {"error": "Required: capability, item_id (canonical ref)"}
+
+    kind, bare_id = ItemType.parse_canonical_ref(item_id)
+    if not kind:
+        return {"error": f"item_id must be a canonical ref (e.g. 'tool:my/tool'), got: {item_id!r}"}
 
     if not thread:
-        thread = "fork" if item_type == "directive" else "inline"
+        thread = "fork" if kind == ItemType.DIRECTIVE else "inline"
 
     # Load routing policy
     topology = _load_topology(project_path)
@@ -185,7 +189,6 @@ async def _route(params: Dict, project_path: str) -> Dict:
         {
             "action": "execute",
             "remote": selected_name,
-            "item_type": item_type,
             "item_id": item_id,
             "parameters": exec_params,
             "thread": thread,

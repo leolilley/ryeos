@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:62d60ba3d103451a68e5ab4fe4e16b1ad929eca6f1b080ef0eada810a1dc8a5f:i94vsMqlDd5RwzZFQ1sSXKoogNwyZCEegZC_gbgT8TGvfspeFVY9uT5I55OeiQ2ZRcvyMZgLcAm3ENLxDc7KBw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:12Z:62d60ba3d103451a68e5ab4fe4e16b1ad929eca6f1b080ef0eada810a1dc8a5f:i94vsMqlDd5RwzZFQ1sSXKoogNwyZCEegZC_gbgT8TGvfspeFVY9uT5I55OeiQ2ZRcvyMZgLcAm3ENLxDc7KBw:4b987fd4e40303ac -->
 
 # Create Directive
 
@@ -69,7 +69,7 @@ Create a new directive file with proper metadata, validate, and sign it.
 
     Use {input:process_steps} if provided to inform the step content.
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
 
   </step>
 

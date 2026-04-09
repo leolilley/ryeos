@@ -50,7 +50,7 @@ Execute a directive, tool, or knowledge item by id with optional parameters.
 
   <step name="call_execute">
     Execute the item:
-    `rye_execute(item_type="{input:item_type}", item_id="{input:item_id}", parameters={input:parameters}, dry_run={input:dry_run})`
+    `rye_execute(item_id="{input:item_id}", parameters={input:parameters}, dry_run={input:dry_run})`
   </step>
 
   <step name="return_result">

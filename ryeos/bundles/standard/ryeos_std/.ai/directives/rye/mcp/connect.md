@@ -44,7 +44,7 @@ Execute a tool call on an MCP server via HTTP or stdio transport.
 
   <step name="execute_tool_call">
     Call the MCP connect tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/mcp/connect", parameters={"server_config": "{input:server_config}", "transport": "{input:transport}", "url": "{input:url}", "headers": "{input:headers}", "command": "{input:command}", "args": "{input:args}", "tool": "{input:tool}", "params": "{input:params}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/mcp/connect", parameters={"server_config": "{input:server_config}", "transport": "{input:transport}", "url": "{input:url}", "headers": "{input:headers}", "command": "{input:command}", "args": "{input:args}", "tool": "{input:tool}", "params": "{input:params}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_result">

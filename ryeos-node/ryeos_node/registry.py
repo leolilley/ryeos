@@ -119,14 +119,14 @@ def verify_namespace_owner(cas_base: str, namespace: str, publisher_fp: str) -> 
 
 def publish_item(
     cas_base: str,
-    item_type: str,
+    kind: str,
     item_id: str,
     version: str,
     manifest_hash: str,
     publisher_fp: str,
 ) -> dict:
-    if item_type not in VALID_ITEM_TYPES:
-        return {"ok": False, "error": f"Invalid item_type: {item_type}"}
+    if kind not in VALID_ITEM_TYPES:
+        return {"ok": False, "error": f"Invalid kind: {kind}"}
     if not item_id or not version or not manifest_hash or not publisher_fp:
         return {"ok": False, "error": "Missing required field"}
 
@@ -139,14 +139,14 @@ def publish_item(
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             index = load_index(cas_base)
-            type_entries = index["entries"].setdefault(item_type, {})
+            type_entries = index["entries"].setdefault(kind, {})
 
             if item_id in type_entries:
                 entry = type_entries[item_id]
                 if version in entry["versions"]:
                     existing = entry["versions"][version]
                     if existing["manifest_hash"] == manifest_hash:
-                        logger.info("Idempotent skip: %s/%s@%s", item_type, item_id, version)
+                        logger.info("Idempotent skip: %s/%s@%s", kind, item_id, version)
                         head = read_ref(_index_head_path(cas_base))
                         return {"ok": True, "head": head, "skipped": True}
                     return {
@@ -174,7 +174,7 @@ def publish_item(
             new_head = cas.store_object(index, _cas_root(cas_base))
             write_ref_atomic(_index_head_path(cas_base), new_head)
 
-            logger.info("Published %s/%s@%s -> %s", item_type, item_id, version, new_head)
+            logger.info("Published %s/%s@%s -> %s", kind, item_id, version, new_head)
             return {"ok": True, "head": new_head}
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -187,14 +187,14 @@ def publish_item(
 def search_items(
     cas_base: str,
     query: str | None = None,
-    item_type: str | None = None,
+    kind: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
     index = load_index(cas_base)
     results: list[dict] = []
 
-    types_to_search = [item_type] if item_type and item_type in VALID_ITEM_TYPES else list(VALID_ITEM_TYPES)
+    types_to_search = [kind] if kind and kind in VALID_ITEM_TYPES else list(VALID_ITEM_TYPES)
 
     for t in types_to_search:
         for iid, entry in index["entries"].get(t, {}).items():
@@ -203,7 +203,7 @@ def search_items(
             if query and query.lower() not in iid.lower():
                 continue
             results.append({
-                "item_type": t,
+                "kind": t,
                 "item_id": iid,
                 "namespace": entry.get("namespace"),
                 "latest_version": entry.get("latest_version"),
@@ -215,15 +215,15 @@ def search_items(
     return results
 
 
-def get_item(cas_base: str, item_type: str, item_id: str) -> dict | None:
+def get_item(cas_base: str, kind: str, item_id: str) -> dict | None:
     index = load_index(cas_base)
-    return index["entries"].get(item_type, {}).get(item_id)
+    return index["entries"].get(kind, {}).get(item_id)
 
 
 def get_version(
-    cas_base: str, item_type: str, item_id: str, version: str
+    cas_base: str, kind: str, item_id: str, version: str
 ) -> dict | None:
-    item = get_item(cas_base, item_type, item_id)
+    item = get_item(cas_base, kind, item_id)
     if item is None:
         return None
     return item.get("versions", {}).get(version)

@@ -185,14 +185,14 @@ class TestSpawnThread:
             result = await spawn_thread(
                 registry=reg,
                 thread_id="tid-001",
-                directive="tool/my-tool",
+                item_id="tool:my-tool",
                 cmd=["python", "-c", "pass"],
                 log_dir=tmp_path / "threads" / "tid-001",
             )
 
         assert result["success"] is True
         assert result["pid"] == 42
-        reg.register.assert_called_once_with("tid-001", "tool/my-tool", None)
+        reg.register.assert_called_once_with("tid-001", "tool:my-tool", None)
         reg.update_status.assert_called_once_with("tid-001", "running")
         reg.update_pid.assert_called_once_with("tid-001", 42)
 
@@ -206,14 +206,14 @@ class TestSpawnThread:
             result = await spawn_thread(
                 registry=reg,
                 thread_id="tid-002",
-                directive="tool/broken",
+                item_id="tool:broken",
                 cmd=["nonexistent"],
                 log_dir=tmp_path / "threads" / "tid-002",
             )
 
         assert result["success"] is False
         assert result["error"] == "proc died"
-        reg.register.assert_called_once_with("tid-002", "tool/broken", None)
+        reg.register.assert_called_once_with("tid-002", "tool:broken", None)
         # update_status called twice: "running" then "error"
         assert reg.update_status.call_count == 2
         reg.update_status.assert_any_call("tid-002", "running")
@@ -230,13 +230,13 @@ class TestSpawnThread:
             await spawn_thread(
                 registry=reg,
                 thread_id="child-001",
-                directive="tool/x",
+                item_id="tool:x",
                 cmd=["python", "-c", "pass"],
                 log_dir=tmp_path / "logs",
                 parent_id="parent-001",
             )
 
-        reg.register.assert_called_once_with("child-001", "tool/x", "parent-001")
+        reg.register.assert_called_once_with("child-001", "tool:x", "parent-001")
 
     @pytest.mark.asyncio
     async def test_input_data_forwarded(self, tmp_path):
@@ -249,7 +249,7 @@ class TestSpawnThread:
             await spawn_thread(
                 registry=reg,
                 thread_id="tid-003",
-                directive="tool/y",
+                item_id="tool:y",
                 cmd=["python", "script.py"],
                 log_dir=tmp_path / "logs",
                 input_data='{"payload": true}',
@@ -269,7 +269,7 @@ class TestSpawnThread:
             await spawn_thread(
                 registry=reg,
                 thread_id="tid-004",
-                directive="tool/z",
+                item_id="tool:z",
                 cmd=["echo"],
                 log_dir=log_dir,
             )
@@ -287,7 +287,7 @@ class TestSpawnThread:
             result = await spawn_thread(
                 registry=reg,
                 thread_id="tid-005",
-                directive="tool/w",
+                item_id="tool:w",
                 cmd=["python", "-c", "pass"],
                 log_dir=tmp_path / "logs",
             )

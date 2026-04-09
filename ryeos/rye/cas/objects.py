@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 # --- Core refs ---
 
 
 @dataclass(frozen=True)
-class ItemRef:
+class IngestResult:
     """Return type from ingest_item — references into CAS."""
 
     blob_hash: str
@@ -40,8 +40,7 @@ class ItemSource:
 
     kind: str = field(default="item_source", init=False)
     schema: int = field(default=SCHEMA_VERSION, init=False)
-    item_type: str = ""
-    item_id: str = ""
+    item_ref: str = ""
     content_blob_hash: str = ""
     integrity: str = ""
     signature_info: Optional[Dict[str, str]] = None
@@ -50,8 +49,7 @@ class ItemSource:
         return {
             "schema": self.schema,
             "kind": self.kind,
-            "item_type": self.item_type,
-            "item_id": self.item_id,
+            "item_ref": self.item_ref,
             "content_blob_hash": self.content_blob_hash,
             "integrity": self.integrity,
             "signature_info": self.signature_info,

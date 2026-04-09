@@ -1,5 +1,5 @@
-# rye:signed:2026-04-06T04:14:24Z:85954594df86ab49f6a646ded2f907cc407c448fc5cef7fd7cd38dd21490d3d0:nsydNH3sLif2udJbCXiI3d86Yif00K98CVc-YWZ_ijd0V3tcHHu1cWr_l4W6wzQWk8DchsDoGcNvXlKbGov_Aw:4b987fd4e40303ac
-"""Execute a directive, tool, or knowledge item via rye."""
+# rye:signed:2026-04-09T00:05:55Z:4a27a5dda5c19f40679a6e3008fcea44239aaca622006d96e19547e539676ade:zhJ47DwBsXrprAoi02jWBx1g1DybSt9r-U2FpJ1J9q7amsYdNo-5XXOd52gvKEp_PaqcC8lmILxkce2qsmr0CA:4b987fd4e40303ac
+"""Execute a tool or directive via rye."""
 
 import argparse
 import json
@@ -12,23 +12,17 @@ from rye.primary_action_descriptions import (
     EXECUTE_TARGET_DESC,
     EXECUTE_THREAD_DESC,
     ITEM_ID_DESC,
-    ITEM_TYPE_DESC,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye"
-__tool_description__ = "Run a Rye item (directive, tool, or knowledge)"
+__tool_description__ = "Run a Rye item (tool or directive). Knowledge is not executable — use rye fetch."
 
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "item_type": {
-            "type": "string",
-            "enum": ["directive", "tool", "knowledge"],
-            "description": ITEM_TYPE_DESC,
-        },
         "item_id": {
             "type": "string",
             "description": ITEM_ID_DESC,
@@ -60,7 +54,7 @@ CONFIG_SCHEMA = {
             "default": False,
         },
     },
-    "required": ["item_type", "item_id"],
+    "required": ["item_id"],
 }
 
 
@@ -77,7 +71,6 @@ def execute(params: dict, project_path: str) -> dict:
 
         tool = ExecuteTool(project_path=project_path)
         result = asyncio.run(tool.handle(
-            item_type=params["item_type"],
             item_id=params["item_id"],
             project_path=project_path,
             parameters=raw_params,

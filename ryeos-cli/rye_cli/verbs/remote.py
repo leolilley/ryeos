@@ -94,8 +94,7 @@ def _remote_execute(project_path: str, params: dict) -> dict:
 
     tool = ExecuteTool(str(get_user_space()))
     return run_async(tool.handle(
-        item_type="tool",
-        item_id="rye/core/remote/remote",
+        item_id="tool:rye/core/remote/remote",
         project_path=project_path,
         parameters=params,
     ))
@@ -107,8 +106,7 @@ def _bundler_execute(project_path: str, params: dict) -> dict:
 
     tool = ExecuteTool(str(get_user_space()))
     return run_async(tool.handle(
-        item_type="tool",
-        item_id="rye/core/bundler/bundler",
+        item_id="tool:rye/core/bundler/bundler",
         project_path=project_path,
         parameters=params,
     ))

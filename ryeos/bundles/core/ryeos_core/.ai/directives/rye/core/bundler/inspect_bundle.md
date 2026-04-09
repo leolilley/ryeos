@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:a5d7f943069b72d80a170628568ebe9d6bdb980a170096ce0a8360169c80c29f:dvBrZfg34uAYMLoU0ghH23NfkTKs565ZeaLhLY8QzhaQQBbYHY-yQ02m3luVBAWC1_nmAaEvHWJl4qvufE6cAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:a5d7f943069b72d80a170628568ebe9d6bdb980a170096ce0a8360169c80c29f:dvBrZfg34uAYMLoU0ghH23NfkTKs565ZeaLhLY8QzhaQQBbYHY-yQ02m3luVBAWC1_nmAaEvHWJl4qvufE6cAw:4b987fd4e40303ac -->
 # Inspect Bundle
 
 Inspect the contents and metadata of a bundle.
@@ -37,7 +37,7 @@ Inspect the contents and metadata of a bundle.
 
   <step name="call_bundler_inspect">
     Call the bundler tool with action=inspect.
-    `rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "inspect", "bundle_id": "{input:bundle_id}"})`
+    `rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "inspect", "bundle_id": "{input:bundle_id}"})`
   </step>
 
   <step name="return_result">

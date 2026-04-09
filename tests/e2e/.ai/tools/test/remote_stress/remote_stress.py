@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T08:07:48Z:edd79b16d12bcf0e6d31df19f2f8f44c3af161a8608e19f69208138b9c6767a4:9tUE3rfkoq4sI9x7oJWtjhRetho488CA69IeIs1u-yZ4sK1bcpUhaBEWvkOg_zYlNuUzVdsIOBKhi5Ra9RWoDQ==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:edd79b16d12bcf0e6d31df19f2f8f44c3af161a8608e19f69208138b9c6767a4:9tUE3rfkoq4sI9x7oJWtjhRetho488CA69IeIs1u-yZ4sK1bcpUhaBEWvkOg_zYlNuUzVdsIOBKhi5Ra9RWoDQ:4b987fd4e40303ac
 """Stress test tool for remote execution.
 
 Exercises multiple capabilities: CPU work, stdlib imports, nested data

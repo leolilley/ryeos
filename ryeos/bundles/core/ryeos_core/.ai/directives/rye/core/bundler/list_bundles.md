@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:707be2130959ea4ed1c101a8c8b7abaf1a7b9460521ba88bd51d2dc2df207ba5:QzvR-w9KjKC41Vu_fDJM_vLW7qXF0yHo3KFjyja3-q9nQN-nMMLgVlQ-_SN-mTdyWd1DmLtQSecFwH_Fgf3YDg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:707be2130959ea4ed1c101a8c8b7abaf1a7b9460521ba88bd51d2dc2df207ba5:QzvR-w9KjKC41Vu_fDJM_vLW7qXF0yHo3KFjyja3-q9nQN-nMMLgVlQ-_SN-mTdyWd1DmLtQSecFwH_Fgf3YDg:4b987fd4e40303ac -->
 # List Bundles
 
 List all available bundles.
@@ -29,7 +29,7 @@ List all available bundles.
 <process>
   <step name="call_bundler_list">
     Call the bundler tool with action=list.
-    `rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "list"})`
+    `rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "list"})`
   </step>
 
   <step name="return_result">

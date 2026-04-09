@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:470b40123d1214bb41a9d3ea5bb490fdb1f56ea80aa06ca9fc735a7af992e852:jubpyc8in5xg1D0A3spOxnwrVaZHGfHf6xf7Mb74oVKLmM3GlpRQ0dOs8Zxr-C_NNW-iZca_B3VKrD98OMNDAQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:470b40123d1214bb41a9d3ea5bb490fdb1f56ea80aa06ca9fc735a7af992e852:jubpyc8in5xg1D0A3spOxnwrVaZHGfHf6xf7Mb74oVKLmM3GlpRQ0dOs8Zxr-C_NNW-iZca_B3VKrD98OMNDAQ:4b987fd4e40303ac -->
 ```yaml
 name: fetch-semantics
 title: "rye_fetch — MCP Tool Semantics"

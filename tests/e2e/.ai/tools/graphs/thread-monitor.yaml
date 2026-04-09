@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:14:30Z:d18495efd7f43d2357d34cfb3fa13c44e6f3a8e6cbeabc06c5b686845bb99f1b:MS1QRN2hYoMVwlgzMakoZonplvGcjy-FpD7dFlX9k2U8duNQJg2-B4PS539PrShvYfWbo-6X19C30BKgHV4dDg==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:dc5a156e96c8be6e4c6e95b8cf1ab20d0bf743b528cd2f0078702b8120b60358:2mpfvO1515ZXvhMUShx9u6hVFAFrNMJRydyoBWRXyUa0iTUTszNKFUl9L0zy0PTqiGiuI8nJxGQpTACDloi4Dw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -26,8 +26,7 @@ config:
     setup:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir} && echo 'monitor setup complete'"
       next: spawn_task
@@ -35,8 +34,7 @@ config:
     spawn_task:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/analyze_code
           async: true
@@ -75,8 +73,7 @@ config:
     log_spawn:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo '[spawn] Thread ${state.spawned_thread_id} launched at $(date -Iseconds)' > ${inputs.output_dir}/monitor.log"
       next: check_status
@@ -84,8 +81,7 @@ config:
     check_status:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "sleep 2 && echo 'status_check_done'"
       next: read_thread_result
@@ -94,8 +90,7 @@ config:
       cache: true
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo '[check] Checking thread result at $(date -Iseconds)' >> ${inputs.output_dir}/monitor.log && cat ${inputs.output_dir}/async_analysis.json 2>/dev/null && echo '[done] Analysis file found' >> ${inputs.output_dir}/monitor.log || echo '[wait] Analysis not ready yet' >> ${inputs.output_dir}/monitor.log"
       assign:
@@ -105,8 +100,7 @@ config:
     write_final_report:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo '' >> ${inputs.output_dir}/monitor.log && echo '[report] Final status at $(date -Iseconds)' >> ${inputs.output_dir}/monitor.log && echo '# Thread Monitor Report' > ${inputs.output_dir}/report.md && echo '' >> ${inputs.output_dir}/report.md && echo '## Spawned Thread' >> ${inputs.output_dir}/report.md && echo 'Thread ID: ${state.spawned_thread_id}' >> ${inputs.output_dir}/report.md && echo '' >> ${inputs.output_dir}/report.md && echo '## Monitor Log' >> ${inputs.output_dir}/report.md && cat ${inputs.output_dir}/monitor.log >> ${inputs.output_dir}/report.md && echo '' >> ${inputs.output_dir}/report.md && echo '## Thread Output' >> ${inputs.output_dir}/report.md && echo '${state.thread_output}' >> ${inputs.output_dir}/report.md && cat ${inputs.output_dir}/report.md"
       assign:

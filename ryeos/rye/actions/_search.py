@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from rye.constants import AI_DIR, ItemType
 from rye.utils.path_utils import (
     get_user_space,
-    get_project_type_path,
-    get_user_type_path,
+    get_project_kind_path,
+    get_user_kind_path,
     get_system_spaces,
     get_extractor_search_paths,
 )
@@ -62,7 +62,7 @@ def _load_extractor_data(
 
     Returns:
         Tuple of (search_fields_by_type, extraction_rules_by_type, parser_by_type)
-        keyed by item_type name derived from filename (e.g. "directive").
+        keyed by kind name derived from filename (e.g. "directive").
     """
     search_fields: Dict[str, Dict[str, float]] = {}
     extraction_rules: Dict[str, Dict[str, Any]] = {}
@@ -77,8 +77,8 @@ def _load_extractor_data(
             if file_path.name.startswith("_"):
                 continue
 
-            item_type_name = file_path.stem.replace("_extractor", "")
-            if item_type_name in search_fields:
+            kind_name = file_path.stem.replace("_extractor", "")
+            if kind_name in search_fields:
                 continue
 
             try:
@@ -88,11 +88,11 @@ def _load_extractor_data(
                     if not data:
                         continue
                     if "search_fields" in data:
-                        search_fields[item_type_name] = data["search_fields"]
+                        search_fields[kind_name] = data["search_fields"]
                     if "extraction_rules" in data:
-                        extraction_rules[item_type_name] = data["extraction_rules"]
+                        extraction_rules[kind_name] = data["extraction_rules"]
                     if "parser" in data:
-                        parser_names[item_type_name] = data["parser"]
+                        parser_names[kind_name] = data["parser"]
                 else:
                     content = file_path.read_text()
                     tree = ast.parse(content)
@@ -107,17 +107,17 @@ def _load_extractor_data(
                         if target.id == "SEARCH_FIELDS" and isinstance(
                             node.value, ast.Dict
                         ):
-                            search_fields[item_type_name] = ast.literal_eval(node.value)
+                            search_fields[kind_name] = ast.literal_eval(node.value)
 
                         elif target.id == "EXTRACTION_RULES" and isinstance(
                             node.value, ast.Dict
                         ):
-                            extraction_rules[item_type_name] = ast.literal_eval(node.value)
+                            extraction_rules[kind_name] = ast.literal_eval(node.value)
 
                         elif target.id == "PARSER" and isinstance(
                             node.value, ast.Constant
                         ):
-                            parser_names[item_type_name] = node.value.value
+                            parser_names[kind_name] = node.value.value
 
             except Exception as e:
                 logger.warning(
@@ -128,33 +128,33 @@ def _load_extractor_data(
 
 
 def get_search_fields(
-    item_type: str, project_path: Optional[Path] = None
+    kind: str, project_path: Optional[Path] = None
 ) -> Dict[str, float]:
     """Get search field weights for an item type from extractors."""
     global _search_fields_cache
     if _search_fields_cache is None:
         _search_fields_cache, _, _ = _load_extractor_data(project_path)
-    return _search_fields_cache.get(item_type, DEFAULT_FIELD_WEIGHTS)
+    return _search_fields_cache.get(kind, DEFAULT_FIELD_WEIGHTS)
 
 
 def get_extraction_rules(
-    item_type: str, project_path: Optional[Path] = None
+    kind: str, project_path: Optional[Path] = None
 ) -> Dict[str, Any]:
     """Get extraction rules for an item type from extractors."""
     global _extraction_rules_cache
     if _extraction_rules_cache is None:
         _, _extraction_rules_cache, _ = _load_extractor_data(project_path)
-    return _extraction_rules_cache.get(item_type, {})
+    return _extraction_rules_cache.get(kind, {})
 
 
 def get_parser_name(
-    item_type: str, project_path: Optional[Path] = None
+    kind: str, project_path: Optional[Path] = None
 ) -> Optional[str]:
     """Get parser name for an item type from extractors."""
     global _parser_names_cache
     if _parser_names_cache is None:
         _, _, _parser_names_cache = _load_extractor_data(project_path)
-    return _parser_names_cache.get(item_type)
+    return _parser_names_cache.get(kind)
 
 
 def clear_search_cache():
@@ -188,33 +188,33 @@ def parse_search_scope(scope: str) -> Dict[str, Any]:
     Accepts capability format: rye.fetch.directive.rye.core.*
     Or shorthand: directive (all directives), tool.rye.core.* (tools in rye/core)
 
-    Returns dict with keys: item_type, namespace_filter
-    - item_type: directive | tool | knowledge
+    Returns dict with keys: kind, namespace_filter
+    - kind: directive | tool | knowledge
     - namespace_filter: prefix to match item IDs against (e.g., "rye/core/")
       or None for no filtering
     """
     if not scope:
-        return {"item_type": "", "namespace_filter": None}
+        return {"kind": "", "namespace_filter": None}
 
     # Full capability format: rye.fetch.directive.rye.core.*
     if scope.startswith("rye."):
         parts = scope[4:].split(".", 2)  # After "rye."
         if len(parts) < 2:
-            return {"item_type": "", "namespace_filter": None}
+            return {"kind": "", "namespace_filter": None}
 
-        # parts[0] = primary (fetch), parts[1] = item_type
+        # parts[0] = primary (fetch), parts[1] = kind
         primary = parts[0]
         if primary not in ("fetch", "*"):
-            return {"item_type": "", "namespace_filter": None}
-        item_type = parts[1]
-        if item_type == "*":
-            return {"item_type": "", "namespace_filter": None}
+            return {"kind": "", "namespace_filter": None}
+        kind = parts[1]
+        if kind == "*":
+            return {"kind": "", "namespace_filter": None}
 
-        if item_type not in ("directive", "tool", "knowledge"):
-            return {"item_type": "", "namespace_filter": None}
+        if kind not in ("directive", "tool", "knowledge"):
+            return {"kind": "", "namespace_filter": None}
 
         if len(parts) < 3 or parts[2] == "*":
-            return {"item_type": item_type, "namespace_filter": None}
+            return {"kind": kind, "namespace_filter": None}
 
         # Convert specifics dots back to slashes for namespace filter
         specifics = parts[2]
@@ -227,16 +227,16 @@ def parse_search_scope(scope: str) -> Dict[str, Any]:
         if ns_filter and not ns_filter.endswith("/"):
             ns_filter += "/"
 
-        return {"item_type": item_type, "namespace_filter": ns_filter}
+        return {"kind": kind, "namespace_filter": ns_filter}
 
-    # Shorthand: just item_type, or item_type.namespace
+    # Shorthand: just kind, or kind.namespace
     parts = scope.split(".", 1)
-    item_type = parts[0]
-    if item_type not in ("directive", "tool", "knowledge"):
-        return {"item_type": "", "namespace_filter": None}
+    kind = parts[0]
+    if kind not in ("directive", "tool", "knowledge"):
+        return {"kind": "", "namespace_filter": None}
 
     if len(parts) < 2 or parts[1] == "*":
-        return {"item_type": item_type, "namespace_filter": None}
+        return {"kind": kind, "namespace_filter": None}
 
     specifics = parts[1]
     if specifics.endswith(".*"):
@@ -248,7 +248,7 @@ def parse_search_scope(scope: str) -> Dict[str, Any]:
     if ns_filter and not ns_filter.endswith("/"):
         ns_filter += "/"
 
-    return {"item_type": item_type, "namespace_filter": ns_filter}
+    return {"kind": kind, "namespace_filter": ns_filter}
 
 
 # ---------------------------------------------------------------------------
@@ -651,13 +651,13 @@ class MetadataExtractor:
         self._parser_router = ParserRouter(project_path)
 
     def extract(
-        self, file_path: Path, item_type: str, search_dir: Path,
+        self, file_path: Path, kind: str, search_dir: Path,
         source_label: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Extract metadata from a single file.
 
         Uses the data-driven EXTRACTION_RULES and PARSER from the extractor
-        for the given item_type. Falls back to regex-based extraction if the
+        for the given kind. Falls back to regex-based extraction if the
         parser is unavailable.
         """
         try:
@@ -684,8 +684,8 @@ class MetadataExtractor:
             "metadata": {},
         }
 
-        rules = get_extraction_rules(item_type, self.project_path)
-        parser_name = get_parser_name(item_type, self.project_path)
+        rules = get_extraction_rules(kind, self.project_path)
+        parser_name = get_parser_name(kind, self.project_path)
 
         parsed: Optional[Dict[str, Any]] = None
         if parser_name:
@@ -698,16 +698,16 @@ class MetadataExtractor:
                 self._apply_extraction_rules(parsed, rules, file_path)
             )
         else:
-            if item_type == ItemType.DIRECTIVE:
+            if kind == ItemType.DIRECTIVE:
                 metadata.update(self._extract_directive_meta(content))
-            elif item_type == ItemType.TOOL:
+            elif kind == ItemType.TOOL:
                 metadata.update(self._extract_tool_meta(content))
-            elif item_type == ItemType.KNOWLEDGE:
+            elif kind == ItemType.KNOWLEDGE:
                 metadata.update(self._extract_knowledge_meta(content))
 
         try:
             integrity_hash = verify_item(
-                file_path, item_type, ctx=ExecutionContext.from_env(),
+                file_path, kind, ctx=ExecutionContext.from_env(),
             )
             metadata["signed"] = True
             metadata["integrity"] = integrity_hash
@@ -756,10 +756,14 @@ class MetadataExtractor:
 
             if rule_type == "filename":
                 value = file_path.stem
+            elif rule_type == "constant":
+                value = rule.get("value")
             elif rule_type == "path":
                 key = rule.get("key", field_name)
                 value = parsed.get(key)
 
+            if value is None:
+                value = rule.get("default")
             if value is None:
                 continue
 
@@ -901,7 +905,7 @@ class SearchEngine:
         scope = kwargs.get("scope", "")
         parsed_scope = parse_search_scope(scope)
 
-        item_type = parsed_scope["item_type"] or kwargs.get("item_type", "")
+        kind = parsed_scope["kind"]
         namespace_filter = parsed_scope["namespace_filter"]
         opts = SearchOptions(
             query=kwargs.get("query", ""),
@@ -917,8 +921,8 @@ class SearchEngine:
             proximity=kwargs.get("proximity") or {},
         )
 
-        if not item_type:
-            return {"error": "scope must specify an item_type (e.g., rye.fetch.directive.*)"}
+        if not kind:
+            return {"error": "scope must specify a kind (e.g., rye.fetch.directive.*)"}
 
         logger.debug(
             f"Search: scope={opts.scope}, source={opts.source}, query={opts.query}"
@@ -926,9 +930,9 @@ class SearchEngine:
 
         try:
             query_ast = QueryParser(opts.query).parse()
-            search_paths = self._resolve_search_paths(opts, item_type)
+            search_paths = self._resolve_search_paths(opts, kind)
             field_weights = get_search_fields(
-                item_type, Path(opts.project_path) if opts.project_path else None
+                kind, Path(opts.project_path) if opts.project_path else None
             )
 
             extractor = MetadataExtractor(
@@ -938,7 +942,7 @@ class SearchEngine:
             results = []
             if opts.source != "registry":
                 results = self._search_items(
-                    search_paths, opts, item_type, namespace_filter,
+                    search_paths, opts, kind, namespace_filter,
                     query_ast, field_weights, extractor
                 )
 
@@ -948,7 +952,7 @@ class SearchEngine:
                     try:
                         remote_results = await provider.search(
                             query=opts.query,
-                            item_type=item_type,
+                            kind=kind,
                             limit=opts.limit,
                         )
                         results.extend(remote_results)
@@ -982,7 +986,7 @@ class SearchEngine:
     # ------------------------------------------------------------------
 
     def _resolve_search_paths(
-        self, opts: SearchOptions, item_type: str
+        self, opts: SearchOptions, kind: str
     ) -> List[Tuple[Path, str]]:
         """Resolve (search_dir, source_label) pairs for the given item type.
 
@@ -999,18 +1003,18 @@ class SearchEngine:
         paths: List[Tuple[Path, str]] = []
 
         if opts.source in ("project", "local", "all") and project_path:
-            d = get_project_type_path(project_path, item_type)
+            d = get_project_kind_path(project_path, kind)
             if d.exists():
                 paths.append((d, "project"))
 
         if opts.source in ("user", "local", "all"):
-            d = get_user_type_path(item_type)
+            d = get_user_kind_path(kind)
             if d.exists():
                 paths.append((d, "user"))
 
         if opts.source in ("system", "local", "all"):
             for bundle in get_system_spaces():
-                type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+                type_folder = ItemType.KIND_DIRS.get(kind, kind)
                 type_root = bundle.root_path / AI_DIR / type_folder
                 if not type_root.exists():
                     continue
@@ -1026,7 +1030,7 @@ class SearchEngine:
         self,
         search_paths: List[Tuple[Path, str]],
         opts: SearchOptions,
-        item_type: str,
+        kind: str,
         namespace_filter: Optional[str],
         query_ast: QueryNode,
         field_weights: Dict[str, float],
@@ -1044,7 +1048,7 @@ class SearchEngine:
                 if not file_path.is_file() or file_path.name.startswith("_"):
                     continue
 
-                item = extractor.extract(file_path, item_type, search_dir, source_label=source_label)
+                item = extractor.extract(file_path, kind, search_dir, source_label=source_label)
                 if not item:
                     continue
 
@@ -1073,7 +1077,7 @@ class SearchEngine:
                     item, opts, field_weights, fuzzy_distance
                 )
                 item["score"] = round(score, 4)
-                item["type"] = item_type
+                item["type"] = kind
                 results.append(item)
 
         return results

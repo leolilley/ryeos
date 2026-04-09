@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:23201bac4e977aefd1ff72f7db6c45e678b5edc2a21b6092488d4ac137e20445:nJg5LLALlyZuFXNol2jc7PocHDpx3hPGNMM6vW3VKTfMFLzbvuoAAL0zt-hG1MXuEYqaXaoj4W9XqXRzArw2Ag:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:9bef61ee16b07d3a5b5a5144c340db8d0ced85f470770d687260f9c74ab33e6a:mfpua33LWjiHTo9zDB6MoyZVLVyyTZZw6s1t7ko8zGpVIi1x2ope_14TAKmmwbBJvojHmMzOONPxrzOkOb5wAQ:4b987fd4e40303ac -->
 ```yaml
 name: orchestrator-patterns
 title: Orchestrator Patterns
@@ -164,18 +164,18 @@ Spawn N children async, wait, collect:
 ```python
 # Spawn phase
 for niche in niches:
-    rye_execute(item_type="directive", item_id="domain/discover",
+    rye_execute(item_id="domain/discover",
         parameters={"niche": niche},
         async=True,
         limit_overrides={"turns": 10, "spend": 0.10})
 # → collect thread_ids
 
 # Wait phase
-rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+rye_execute(item_id="rye/agent/threads/orchestrator",
     parameters={"operation": "wait_threads", "thread_ids": [...], "timeout": 300})
 
 # Collect phase
-rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+rye_execute(item_id="rye/agent/threads/orchestrator",
     parameters={"operation": "aggregate_results", "thread_ids": [...]})
 ```
 
@@ -186,7 +186,7 @@ Orchestrators pass dependency thread IDs as `inputs` when spawning child directi
 **Example:** Orchestrator completes Wave 0 (scaffold), gets `thread_id` back, then spawns Wave 1:
 
 ```python
-rye_execute(item_type="directive", item_id="project/implement_feature",
+rye_execute(item_id="project/implement_feature",
     parameters={"scaffold_thread_id": "scaffold_project/scaffold_project-1740200000"})
 ```
 
@@ -255,12 +255,12 @@ Some phases must run in order (qualification before outreach):
 
 ```python
 # Phase 1: qualify (synchronous — blocks until done)
-qualify_result = rye_execute(item_type="directive", item_id="domain/qualify",
+qualify_result = rye_execute(item_id="domain/qualify",
     parameters={"leads_file": "..."},
     limit_overrides={"turns": 20, "spend": 1.00})
 
 # Phase 2: outreach (only after qualification completes)
-outreach_result = rye_execute(item_type="directive", item_id="domain/outreach",
+outreach_result = rye_execute(item_id="domain/outreach",
     parameters={"qualified_file": qualify_result["output_file"]},
     limit_overrides={"turns": 15, "spend": 0.80})
 ```

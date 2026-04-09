@@ -59,7 +59,7 @@ Configure an LLM provider (Anthropic or OpenAI) by writing/updating the provider
     - The default model set to {input:default_model} if provided, otherwise keep the system default
     - All other settings preserved from the system default
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "~/.ai/tools/rye/agent/providers/{input:provider}.yaml", "content": "<generated YAML config>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": "~/.ai/tools/rye/agent/providers/{input:provider}.yaml", "content": "<generated YAML config>", "create_dirs": true})`
 
   </step>
 

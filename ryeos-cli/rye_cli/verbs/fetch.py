@@ -1,15 +1,16 @@
-"""rye fetch [type] <id> | rye fetch --query <q> --scope <s>"""
+"""rye fetch <item_id> | rye fetch --query <q> --scope <s>
+
+item_id supports canonical refs (e.g. 'tool:rye/bash/bash', 'knowledge:my/entry').
+Bare IDs auto-detect across directive/tool/knowledge.
+"""
 
 from rye_cli.output import run_async, print_result
 
 
 def register(subparsers):
     p = subparsers.add_parser("fetch", help="Resolve items by ID or discover by query")
-    p.add_argument("item_type", nargs="?", default=None,
-                   choices=["directive", "tool", "knowledge"],
-                   help="Item type (optional in ID mode — auto-detects)")
     p.add_argument("item_id", nargs="?", default=None,
-                   help="Item ID (slash-separated path)")
+                   help="Item ID or canonical ref (tool:id, directive:id, knowledge:id)")
     p.add_argument("--query", help="Search query (triggers query mode)")
     p.add_argument("--scope", help="Item type scope for query mode (e.g., tool, directive, tool.rye.core.*)")
     p.add_argument("--source", choices=["project", "user", "system", "local", "registry", "all"],
@@ -35,16 +36,9 @@ def handle(args, project_path: str):
         if args.source:
             kwargs["source"] = args.source
         kwargs["limit"] = args.limit
-    elif args.item_id or args.item_type:
-        # ID mode — handle positional args
-        if args.item_id:
-            kwargs["item_id"] = args.item_id
-        elif args.item_type and not args.item_id:
-            # Single positional arg = item_id (auto-detect type)
-            kwargs["item_id"] = args.item_type
-            args.item_type = None
-        if args.item_type:
-            kwargs["item_type"] = args.item_type
+    elif args.item_id:
+        # ID mode
+        kwargs["item_id"] = args.item_id
         if args.source:
             kwargs["source"] = args.source
         if args.destination:

@@ -40,7 +40,7 @@ Find files matching a glob pattern.
 
   <step name="call_glob">
     Find matching files:
-    `rye_execute(item_type="tool", item_id="rye/file-system/glob", parameters={"pattern": "{input:pattern}", "path": "{input:path}"})`
+    `rye_execute(item_id="rye/file-system/glob", parameters={"pattern": "{input:pattern}", "path": "{input:path}"})`
   </step>
 
   <step name="return_result">

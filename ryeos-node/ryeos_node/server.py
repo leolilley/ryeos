@@ -264,8 +264,7 @@ class PushUserSpaceRequest(BaseModel):
 
 
 class CreateWebhookBindingRequest(BaseModel):
-    item_type: str
-    item_id: str
+    item_id: str  # canonical ref, e.g. "directive:email/handle_inbound"
     project_path: str
     description: Optional[str] = None
     secret_envelope: Optional[dict] = None
@@ -279,7 +278,7 @@ class AuthorizeKeyRequest(BaseModel):
 
 
 class PublishRequest(BaseModel):
-    item_type: str
+    kind: str
     item_id: str
     version: str
     manifest_hash: str
@@ -1182,7 +1181,6 @@ async def resolve_execution(
             )
 
         principal = _resolve_principal_from_binding(binding)
-        thread = "fork" if binding["item_type"] == "directive" else "inline"
 
         parameters = body.get("parameters", {})
         if not isinstance(parameters, dict):
@@ -1192,33 +1190,32 @@ async def resolve_execution(
 
         return ResolvedExecution(
             principal=principal,
-            item_type=binding["item_type"],
             item_id=binding["item_id"],
             project_path=binding["project_path"],
             parameters=parameters,
-            thread=thread,
+            thread=body.get("thread"),
             secret_envelope=binding.get("secret_envelope"),
             vault_keys=binding.get("vault_keys") or None,
         )
 
     # Signed-request path — caller controls everything
     principal = _verify_signed_request(request, raw_body, settings)
-    item_type = body.get("item_type")
-    item_id = body.get("item_id")
+
+    from rye.constants import ItemType
+
+    raw_item_id = body.get("item_id", "")
+    kind, bare_id = ItemType.parse_canonical_ref(raw_item_id)
+
+    if not kind or not bare_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "item_id with canonical ref (e.g. tool:my/tool) is required",
+        )
+
     project_path = body.get("project_path")
     parameters = body.get("parameters", {})
     thread = body.get("thread")
 
-    if not item_type or not item_id:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "item_type and item_id are required",
-        )
-    if item_type not in ("tool", "directive"):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"item_type must be 'tool' or 'directive', got {item_type!r}",
-        )
     if not project_path:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -1228,20 +1225,6 @@ async def resolve_execution(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "parameters must be an object",
-        )
-
-    if not thread:
-        thread = "fork" if item_type == "directive" else "inline"
-
-    if item_type == "directive" and thread != "fork":
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Directives must use thread=fork on remote, got thread={thread!r}",
-        )
-    if item_type == "tool" and thread != "inline":
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Tools must use thread=inline on remote, got thread={thread!r}",
         )
 
     vault_keys = body.get("vault_keys")
@@ -1256,8 +1239,7 @@ async def resolve_execution(
 
     return ResolvedExecution(
         principal=principal,
-        item_type=item_type,
-        item_id=item_id,
+        item_id=raw_item_id,
         project_path=project_path,
         parameters=parameters,
         thread=thread,
@@ -1275,7 +1257,6 @@ async def execute(
         principal=resolved.principal,
         settings=settings,
         project_path=resolved.project_path,
-        item_type=resolved.item_type,
         item_id=resolved.item_id,
         parameters=resolved.parameters,
         thread=resolved.thread,
@@ -1294,10 +1275,9 @@ async def _execute_from_head(
     principal: Principal,
     settings: Settings,
     project_path: str,
-    item_type: str,
     item_id: str,
     parameters: Dict[str, Any],
-    thread: str,
+    thread: str | None,
     secret_envelope: dict | None = None,
     vault_keys: list[str] | None = None,
 ):
@@ -1339,7 +1319,6 @@ async def _execute_from_head(
         settings.cas_base_path,
         principal.fingerprint,
         thread_id,
-        item_type=item_type,
         item_id=item_id,
         project_manifest_hash=base_manifest_hash or "",
         user_manifest_hash=user_manifest_hash,
@@ -1427,7 +1406,6 @@ async def _execute_from_head(
             )
 
             result = await tool.handle(
-                item_type=item_type,
                 item_id=item_id,
                 project_path=str(exec_space),
                 parameters=parameters,
@@ -1452,7 +1430,7 @@ async def _execute_from_head(
                 )
                 es = ExecutionSnapshot(
                     graph_run_id=thread_id,
-                    graph_id=f"{item_type}/{item_id}",
+                    graph_id=item_id,
                     project_manifest_hash=base_manifest_hash or "",
                     user_manifest_hash=user_manifest_hash,
                     system_version=get_system_version(),
@@ -1517,7 +1495,7 @@ async def _execute_from_head(
                 user_manifest_hash=user_manifest_hash,
                 parent_hashes=[base_snapshot_hash],
                 source="execution",
-                source_detail=f"{item_type}/{item_id}",
+                source_detail=item_id,
                 timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 metadata={"thread_id": thread_id},
             )
@@ -1581,9 +1559,8 @@ async def _execute_from_head(
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
         except Exception as e:
             logger.error(
-                "Execution failed for thread %s (%s/%s): %s",
+                "Execution failed for thread %s (%s): %s",
                 thread_id,
-                item_type,
                 item_id,
                 e,
                 exc_info=True,
@@ -1601,7 +1578,6 @@ async def _execute_from_head(
                 detail={
                     "error": str(e),
                     "thread_id": thread_id,
-                    "item_type": item_type,
                     "item_id": item_id,
                     "phase": "execution",
                 },
@@ -2054,17 +2030,19 @@ async def create_webhook_binding(
     settings: Settings = Depends(get_settings),
 ):
     """Create a webhook binding. Returns hook_id and hmac_secret (shown once)."""
-    if req.item_type not in ("tool", "directive"):
+    from rye.constants import ItemType
+
+    kind, bare_id = ItemType.parse_canonical_ref(req.item_id)
+    if not kind or not bare_id:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"item_type must be 'tool' or 'directive', got {req.item_type!r}",
+            "item_id must be a canonical ref (e.g. directive:email/handle_inbound)",
         )
 
     return create_binding(
         settings.cas_base_path,
         principal.fingerprint,
         settings.rye_remote_name,
-        req.item_type,
         req.item_id,
         req.project_path,
         req.description,
@@ -2123,7 +2101,7 @@ async def registry_publish(
     require_publish_namespace(principal, namespace)
     result = publish_item(
         settings.cas_base_path,
-        body.item_type,
+        body.kind,
         body.item_id,
         body.version,
         body.manifest_hash,
@@ -2139,7 +2117,7 @@ async def registry_publish(
 @app.get("/registry/search")
 async def registry_search(
     query: str | None = None,
-    item_type: str | None = None,
+    kind: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
     principal: Principal = Depends(get_current_principal),
@@ -2147,13 +2125,13 @@ async def registry_search(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    results = search_items(settings.cas_base_path, query, item_type, namespace, limit)
+    results = search_items(settings.cas_base_path, query, kind, namespace, limit)
     return {"results": results, "total": len(results)}
 
 
-@app.get("/registry/items/{item_type}/{item_id:path}/versions/{version}")
+@app.get("/registry/items/{kind}/{item_id:path}/versions/{version}")
 async def registry_get_version(
-    item_type: str,
+    kind: str,
     item_id: str,
     version: str,
     principal: Principal = Depends(get_current_principal),
@@ -2161,28 +2139,28 @@ async def registry_get_version(
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    ver = get_version(settings.cas_base_path, item_type, item_id, version)
+    ver = get_version(settings.cas_base_path, kind, item_id, version)
     if ver is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            f"Version not found: {item_type}/{item_id}@{version}",
+            f"Version not found: {kind}/{item_id}@{version}",
         )
     return ver
 
 
-@app.get("/registry/items/{item_type}/{item_id:path}")
+@app.get("/registry/items/{kind}/{item_id:path}")
 async def registry_get_item(
-    item_type: str,
+    kind: str,
     item_id: str,
     principal: Principal = Depends(get_current_principal),
     settings: Settings = Depends(get_settings),
 ):
     if not settings.registry_enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registry not enabled")
-    item = get_item(settings.cas_base_path, item_type, item_id)
+    item = get_item(settings.cas_base_path, kind, item_id)
     if item is None:
         raise HTTPException(
-            status.HTTP_404_NOT_FOUND, f"Item not found: {item_type}/{item_id}"
+            status.HTTP_404_NOT_FOUND, f"Item not found: {kind}/{item_id}"
         )
     return item
 

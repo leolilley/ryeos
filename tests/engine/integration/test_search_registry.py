@@ -98,7 +98,7 @@ class TestRegistrySearchSpace:
 
         assert "error" not in result
         provider.search.assert_called_once_with(
-            query="bootstrap", item_type="directive", limit=10
+            query="bootstrap", kind="directive", limit=10
         )
         # Should only have registry results, not local
         assert all(r["source"] == "registry" for r in result["results"])

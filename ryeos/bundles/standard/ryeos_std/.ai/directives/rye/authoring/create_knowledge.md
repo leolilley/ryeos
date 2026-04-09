@@ -72,7 +72,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
 
     {input:content}
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/knowledge/{input:category}/{input:name}.md", "content": "<generated knowledge entry>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/knowledge/{input:category}/{input:name}.md", "content": "<generated knowledge entry>", "create_dirs": true})`
   </step>
 
   <step name="sign_entry">

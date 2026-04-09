@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:19:02Z:4fae68cc242bce6c597db239d569c0455d31e74dfe4dd713d1c0f84896f93e3b:F741VNwYr5mwwUTTokBsSgPbSSpfXbKgacjkcW28RLKISN2VRrIUOZ1fObbSb3juk-QFltl32p_sXKh_0h-YCQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:4fae68cc242bce6c597db239d569c0455d31e74dfe4dd713d1c0f84896f93e3b:F741VNwYr5mwwUTTokBsSgPbSSpfXbKgacjkcW28RLKISN2VRrIUOZ1fObbSb3juk-QFltl32p_sXKh_0h-YCQ:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Quality Review
 
@@ -46,16 +46,16 @@ Review code changes for quality issues — runs gates then uses LLM analysis aga
 <process>
   <step name="run_quality_gates">
     Run the project's quality gates for deterministic pass/fail signals.
-    `rye_execute(item_type="tool", item_id="rye/code/quality/gate", parameters={})`
+    `rye_execute(item_id="rye/code/quality/gate", parameters={})`
     Record the gate results. If any required gate fails, this is strong evidence toward rejection.
   </step>
 
   <step name="get_diff">
     Get the diff of changed files. If {input:changed_files} is provided, diff those files specifically.
     Otherwise, diff against {input:base_ref} (defaulting to HEAD~1).
-    `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "diff", "args": ["{input:base_ref}"]})`
+    `rye_execute(item_id="rye/code/git/git", parameters={"action": "diff", "args": ["{input:base_ref}"]})`
     If {input:changed_files} is provided:
-    `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "diff", "args": ["{input:base_ref}", "--"] })`
+    `rye_execute(item_id="rye/code/git/git", parameters={"action": "diff", "args": ["{input:base_ref}", "--"] })`
     with the changed files appended to args.
   </step>
 

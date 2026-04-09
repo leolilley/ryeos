@@ -50,7 +50,7 @@ Output ONLY the text inside the render block above. No step labels, no headers, 
     <instruction>
 Search for provider configuration knowledge:
 <tool_call>rye_fetch(scope="knowledge", query="provider configuration")</tool_call>
-<tool_call>rye_execute(item_type="knowledge", item_id="rye/agent/provider-configuration")</tool_call>
+<tool_call>rye_fetch(item_id="rye/agent/provider-configuration")</tool_call>
 </instruction>
     <render>
 Providers are configured as YAML files in `.ai/tools/rye/agent/providers/`. Rye ships with `anthropic.yaml` and `openai.yaml`. Your API key goes in `~/.ai/.env`:
@@ -98,7 +98,7 @@ Spawn a thread with `thread_directive`:
 </render>
     <instruction>
 Output the render block, then show the tool call example:
-<tool_call>rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "my-directive", "parameters": {"key": "value"}})</tool_call>
+<tool_call>rye_execute(item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "my-directive", "parameters": {"key": "value"}})</tool_call>
 Then output the following render block and continue.
 </instruction>
     <render>
@@ -179,7 +179,7 @@ The real power: spawning threads from threads.
 An orchestrator directive spawns multiple child threads, waits for them, collects results:
 
 ```
-rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+rye_execute(item_id="rye/agent/threads/orchestrator",
   parameters={
     "threads": [
       {"directive_id": "task-a", "parameters": {"input": "..."}},

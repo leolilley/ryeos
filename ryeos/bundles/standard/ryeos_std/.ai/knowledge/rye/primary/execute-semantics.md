@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:852de1e777b6d0f99a81a1e80516a86d16c0152265ef759dc54c7b6610e2f1b5:5fCOMkQPkJ0fkSAPnQ3p8EgJKs8whsDa97rybzO7dEnSQa459Sx7TeVz3sNjJHStKN6sqGvAEYnVfxLFzG1CCg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:fee9a1e4ad611bbdf3e123f4a191bf5d5d697de1abc1715437e736483c99b792:W9r3839MBMEHyCvR61Nfu0JuRWM-C9MDXCmglNE6VGt5OdQk0IvF3UMO058lgPL6PuN6iJbHsfmdfo1dKVRUAQ:4b987fd4e40303ac -->
 ```yaml
 name: execute-semantics
 title: "rye_execute — MCP Tool Semantics"
@@ -19,13 +19,12 @@ references:
 
 # rye_execute — MCP Tool Semantics
 
-Execute directives, tools, or knowledge items. Routes execution by `item_type`.
+Execute tools and directives. Knowledge is not executable — use rye fetch.
 
 ## Parameters
 
 | Parameter      | Type   | Required | Default | Description                                                              |
 | -------------- | ------ | -------- | ------- | ------------------------------------------------------------------------ |
-| `item_type`    | string | yes      | —       | `"directive"`, `"tool"`, or `"knowledge"`                                |
 | `item_id`      | string | yes      | —       | Relative path from `.ai/<type>/` without extension                       |
 | `project_path` | string | yes      | —       | Absolute path to the project root                                        |
 | `parameters`   | dict   | no       | `{}`    | Parameters to pass to the item                                           |
@@ -40,13 +39,13 @@ Execute directives, tools, or knowledge items. Routes execution by `item_type`.
 Items are resolved across three spaces in priority order:
 
 ```
-project:  <project_path>/.ai/{item_type}/<item_id>.<ext>
-user:     <USER_SPACE>/.ai/{item_type}/<item_id>.<ext>
-system:   <rye-package>/.ai/{item_type}/<item_id>.<ext>
+project:  <project_path>/.ai/{directives|tools}/<item_id>.<ext>
+user:     <USER_SPACE>/.ai/{directives|tools}/<item_id>.<ext>
+system:   <rye-package>/.ai/{directives|tools}/<item_id>.<ext>
 ```
 
 Extensions tried automatically:
-- **Directives / Knowledge:** `.md`
+- **Directives:** `.md`
 - **Tools:** `.py`, `.yaml`, `.yml`, `.js`, `.sh`, and others via extractors
 
 ## Integrity Verification
@@ -172,23 +171,6 @@ Executes through PrimitiveExecutor with recursive chain resolution:
 }
 ```
 
-### Knowledge
-
-Parses markdown with YAML frontmatter and returns content as agent context.
-
-**Response:**
-
-```json
-{
-  "status": "success",
-  "type": "knowledge",
-  "item_id": "rye/core/directive-metadata-reference",
-  "data": { "...parsed frontmatter + content..." },
-  "your_directions": "Use this knowledge to inform your decisions.",
-  "metadata": { "duration_ms": 3 }
-}
-```
-
 ## `<returns>` Injection
 
 When a directive is executed, the infrastructure transforms the directive's `<outputs>` into a `<returns>` block appended to the rendered prompt. The LLM never sees raw `<outputs>` XML — it sees the deterministically generated `<returns>` section after the process steps, specifying what structured output keys to produce.
@@ -228,14 +210,12 @@ Tool chain failures include partial chain and metadata:
 | ----------- | --------------------------------------------------------- |
 | `directive` | Parse + validate inputs → `"validation_passed"`           |
 | `tool`      | Build + validate chain → `"validation_passed"` with chain |
-| `knowledge` | N/A (knowledge execute is always read-only)               |
 
 ## Usage Examples
 
 ```python
 # Directive with inputs (default: returns content in-thread)
 rye_execute(
-    item_type="directive",
     item_id="rye/core/create_directive",
     project_path="/home/user/my-project",
     parameters={"name": "deploy_app", "category": "workflows"}
@@ -243,7 +223,6 @@ rye_execute(
 
 # Directive in a managed thread
 rye_execute(
-    item_type="directive",
     item_id="my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
@@ -252,7 +231,6 @@ rye_execute(
 
 # Async directive in a managed thread
 rye_execute(
-    item_type="directive",
     item_id="my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
@@ -263,7 +241,6 @@ rye_execute(
 
 # Tool execution
 rye_execute(
-    item_type="tool",
     item_id="rye/file-system/write",
     project_path="/home/user/my-project",
     parameters={"path": "output.txt", "content": "hello world"}
@@ -271,16 +248,14 @@ rye_execute(
 
 # Dry-run tool chain validation
 rye_execute(
-    item_type="tool",
     item_id="rye/bash/bash",
     project_path="/home/user/my-project",
     parameters={"command": "echo test"},
     dry_run=True
 )
 
-# Knowledge entry
-rye_execute(
-    item_type="knowledge",
+# Knowledge entry (use rye_fetch, not rye_execute)
+rye_fetch(
     item_id="rye/core/directive-metadata-reference",
     project_path="/home/user/my-project"
 )

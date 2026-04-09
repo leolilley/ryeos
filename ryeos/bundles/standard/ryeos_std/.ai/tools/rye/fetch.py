@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:24Z:e8742bb9c670a715f7864c09f3f6a488b50c1010a9b5e9e7522e3e31bb966e52:5JgjLMua-rmYk7ziwU4X43YmARkJVSvRtDLz95YSH5ifkOQ-fjnseIE4Nh3FXjfTKXCxl1QYv5ukBtV6hWH7Dg:4b987fd4e40303ac
+# rye:signed:2026-04-09T01:05:57Z:dde97f9db693d10103b0f7c46f62106de857e865928f492dd7cadcf5cec25e20:URJWmZK2_H3OIp0dUxuAhZE8n1mDqDlcWM169_ugLAHTYr38g5Z4_OFZ8QiRZxy5pBihCduMf9QvCqW_ZQLqDg:4b987fd4e40303ac
 """Resolve items by ID or discover by query."""
 
 import argparse
@@ -13,10 +13,9 @@ from rye.primary_action_descriptions import (
     FETCH_SCOPE_DESC,
     FETCH_SOURCE_DESC,
     ITEM_ID_DESC,
-    ITEM_TYPE_DESC,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye"
@@ -25,11 +24,6 @@ __tool_description__ = "Resolve items by ID or discover by query"
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "item_type": {
-            "type": "string",
-            "enum": ["directive", "tool", "knowledge"],
-            "description": ITEM_TYPE_DESC,
-        },
         "item_id": {
             "type": "string",
             "description": ITEM_ID_DESC,
@@ -72,7 +66,7 @@ def execute(params: dict, project_path: str) -> dict:
 
         tool = FetchTool()
         kwargs = {"project_path": project_path}
-        for key in ("item_type", "item_id", "query", "scope", "source", "destination", "version", "limit"):
+        for key in ("item_id", "query", "scope", "source", "destination", "version", "limit"):
             if key in params and params[key] is not None:
                 kwargs[key] = params[key]
         result = asyncio.run(tool.handle(**kwargs))

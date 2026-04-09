@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:4622fdca95d2707dfe9fba13ccb6cf7537b3ca9c6f34651980d0f6b1ffa1e19d:rYX2Rgzj7XkUYftV-ncAhSPY41sdWDj0fvToTUW06tcqa183iNLV75O905zHl-vaLFlR84r-m1U75lUCMgj8Dg:4b987fd4e40303ac
+# rye:signed:2026-04-09T03:35:39Z:98dc15495d58ba3fa63489ea2051ef58f3f9560c025baa379a1da92ff1f7a49a:WUvikxF_4RJg3aoDKfkmbSofL1eIgKUJLcD-9OIqNIW_iu1d_zSRKc-RS_5LWwYC3zzR7vWel20aOBAxPzIjAg:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -39,6 +39,9 @@ extraction_rules:
   body:
     type: path
     key: body
+  executor_id:
+    type: constant
+    value: "rye/core/executors/knowledge/knowledge"
 
 search_fields:
   title: 3.0

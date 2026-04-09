@@ -10,8 +10,7 @@ from typing import Any, Dict
 
 def execute(params: Dict, project_path: str) -> Dict:
     """Track and report LLM costs."""
-    ctx = params.get("_thread_context", {})
-    cost = ctx.get("cost", {})
+    cost = params.get("cost", {})
 
     operation = params.get("operation", "report")
 

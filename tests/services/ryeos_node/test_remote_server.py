@@ -144,39 +144,30 @@ def cas_env(tmp_path):
         """
         import json as _json
         from fastapi import HTTPException as _HTTPException
+        from rye.constants import ItemType
 
         raw = await request.body()
         body = _json.loads(raw)
-        item_type = body.get("item_type")
         item_id = body.get("item_id")
         project_path = body.get("project_path")
         parameters = body.get("parameters", {})
         thread = body.get("thread")
 
-        if not item_type or not item_id:
-            raise _HTTPException(400, "item_type and item_id are required")
-        if item_type not in ("tool", "directive"):
+        if not item_id:
+            raise _HTTPException(400, "item_id is required")
+
+        kind, bare_id = ItemType.parse_canonical_ref(item_id)
+        if not kind or not bare_id:
             raise _HTTPException(
-                400, f"item_type must be 'tool' or 'directive', got {item_type!r}"
+                400, "item_id must be a canonical ref (e.g. tool:my/tool)"
             )
         if not project_path:
             raise _HTTPException(400, "project_path is required")
         if not isinstance(parameters, dict):
             raise _HTTPException(400, "parameters must be an object")
-        if not thread:
-            thread = "fork" if item_type == "directive" else "inline"
-        if item_type == "directive" and thread != "fork":
-            raise _HTTPException(
-                400, f"Directives must use thread=fork on remote, got thread={thread!r}"
-            )
-        if item_type == "tool" and thread != "inline":
-            raise _HTTPException(
-                400, f"Tools must use thread=inline on remote, got thread={thread!r}"
-            )
 
         return ResolvedExecution(
             principal=TEST_PRINCIPAL,
-            item_type=item_type,
             item_id=item_id,
             project_path=project_path,
             parameters=parameters,
@@ -470,8 +461,7 @@ class TestExecute:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -501,8 +491,7 @@ class TestExecute:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -529,8 +518,7 @@ class TestExecute:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -543,14 +531,14 @@ class TestExecute:
         r = c.post(
             "/execute",
             json={
-                "item_type": "tool",
-                "item_id": "x",
+                "item_id": "tool:x",
                 "parameters": {},
             },
         )
         assert r.status_code == 400
 
-    def test_missing_item_type(self, cas_env):
+    def test_missing_canonical_ref(self, cas_env):
+        """item_id without canonical ref prefix → 400."""
         c, _, _ = cas_env
         r = c.post(
             "/execute",
@@ -568,44 +556,10 @@ class TestExecute:
 
 
 class TestExecuteThreadValidation:
-    """Server-side thread enforcement on /execute endpoint."""
+    """Thread is passed through to the engine — server does no kind-specific validation."""
 
-    def test_directive_inline_rejected(self, cas_env):
-        """Directive + thread=inline → 400 (directives must fork on remote)."""
-        c, root, tmp_path = cas_env
-
-        r = c.post(
-            "/execute",
-            json={
-                "project_path": "test-project",
-                "item_type": "directive",
-                "item_id": "test_dir",
-                "parameters": {},
-                "thread": "inline",
-            },
-        )
-        assert r.status_code == 400
-        assert "fork" in r.json()["detail"].lower()
-
-    def test_tool_fork_rejected(self, cas_env):
-        """Tool + thread=fork → 400 (tools must run inline on remote)."""
-        c, root, tmp_path = cas_env
-
-        r = c.post(
-            "/execute",
-            json={
-                "project_path": "test-project",
-                "item_type": "tool",
-                "item_id": "x",
-                "parameters": {},
-                "thread": "fork",
-            },
-        )
-        assert r.status_code == 400
-        assert "inline" in r.json()["detail"].lower()
-
-    def test_tool_inline_accepted(self, cas_env):
-        """Tool + thread=inline → accepted (not rejected by thread validation)."""
+    def test_thread_passed_through(self, cas_env):
+        """Any thread value is accepted by the server (engine validates)."""
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
@@ -625,16 +579,15 @@ class TestExecuteThreadValidation:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                     "thread": "inline",
                 },
             )
         assert r.status_code == 200
 
-    def test_thread_auto_derived_for_tool(self, cas_env):
-        """Omitting thread field for tool → auto-derives 'inline'."""
+    def test_thread_omitted_accepted(self, cas_env):
+        """Omitting thread field → accepted (engine decides default)."""
         c, root, tmp_path = cas_env
         from unittest.mock import patch
 
@@ -654,8 +607,7 @@ class TestExecuteThreadValidation:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -745,8 +697,7 @@ class TestPathTraversal:
         blob_hash = cas.store_blob(content, root)
         item_source = {
             "kind": "item_source",
-            "item_type": "tool",
-            "item_id": "evil",
+            "item_ref": "tool:evil",
             "content_blob_hash": blob_hash,
             "integrity": hashlib.sha256(content).hexdigest(),
         }
@@ -966,8 +917,7 @@ class TestMaterializer:
         blob_hash = cas.store_blob(content, root)
 
         item_source = ItemSource(
-            item_type="tool",
-            item_id="hello",
+            item_ref="tool:hello",
             content_blob_hash=blob_hash,
             integrity=hashlib.sha256(content).hexdigest(),
         )
@@ -1599,7 +1549,7 @@ class TestIngestRuntimeOutputs:
         )
         d = bundle.to_dict()
         assert d["kind"] == "runtime_outputs_bundle"
-        assert d["schema"] == 1
+        assert d["schema"] == 2
         assert d["remote_thread_id"] == "t-1"
         assert d["execution_snapshot_hash"] == "snap-1"
         assert d["files"] == {".ai/state/test.jsonl": "abc123"}
@@ -2475,8 +2425,7 @@ class TestExecuteFromHead:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -2497,7 +2446,7 @@ class TestExecuteFromHead:
         )
 
         async def mock_handle(
-            self, item_type, item_id, project_path, parameters, thread
+            self, item_id, project_path, parameters, thread
         ):
             new_file = Path(project_path) / AI_DIR / "knowledge" / "new_knowledge.md"
             new_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2527,8 +2476,7 @@ class TestExecuteFromHead:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -2566,8 +2514,7 @@ class TestExecuteFromHead:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "x",
+                    "item_id": "tool:x",
                     "parameters": {},
                 },
             )
@@ -2611,8 +2558,7 @@ class TestConcurrentExecution:
         # --- Set up base project with one file ---
         blob_base = cas.store_blob(b"base content\n", root)
         base_item = ItemSource(
-            item_type="knowledge",
-            item_id="base_doc",
+            item_ref="knowledge:base_doc",
             content_blob_hash=blob_base,
             integrity=f"sha256:{hashlib.sha256(b'base content\n').hexdigest()}",
         )
@@ -2675,7 +2621,7 @@ class TestConcurrentExecution:
         exec_call_count = 0
 
         async def mock_handle(
-            self_tool, item_type, item_id, project_path, parameters, thread
+            self_tool, item_id, project_path, parameters, thread
         ):
             """Mock ExecuteTool.handle: write a unique knowledge file per call."""
             nonlocal exec_call_count
@@ -2731,8 +2677,7 @@ class TestConcurrentExecution:
                     user,
                     settings,
                     "test-project",
-                    item_type="tool",
-                    item_id="x",
+                    item_id="tool:x",
                     parameters={},
                     thread="inline",
                 ),
@@ -2740,8 +2685,7 @@ class TestConcurrentExecution:
                     user,
                     settings,
                     "test-project",
-                    item_type="tool",
-                    item_id="y",
+                    item_id="tool:y",
                     parameters={},
                     thread="inline",
                 ),
@@ -2810,8 +2754,7 @@ class TestConcurrentExecution:
         base_content = b"# Shared Knowledge\noriginal content\n"
         blob_base = cas.store_blob(base_content, root)
         base_item = ItemSource(
-            item_type="knowledge",
-            item_id="shared",
+            item_ref="knowledge:shared",
             content_blob_hash=blob_base,
             integrity=f"sha256:{hashlib.sha256(base_content).hexdigest()}",
         )
@@ -2863,7 +2806,7 @@ class TestConcurrentExecution:
         exec_call_count = 0
 
         async def mock_handle(
-            self_tool, item_type, item_id, project_path, parameters, thread
+            self_tool, item_id, project_path, parameters, thread
         ):
             nonlocal exec_call_count
             exec_call_count += 1
@@ -2913,8 +2856,7 @@ class TestConcurrentExecution:
                     user,
                     settings,
                     "test-project",
-                    item_type="tool",
-                    item_id="x",
+                    item_id="tool:x",
                     parameters={},
                     thread="inline",
                 ),
@@ -2922,8 +2864,7 @@ class TestConcurrentExecution:
                     user,
                     settings,
                     "test-project",
-                    item_type="tool",
-                    item_id="y",
+                    item_id="tool:y",
                     parameters={},
                     thread="inline",
                 ),
@@ -2962,8 +2903,7 @@ class TestConcurrentExecution:
         sync_yaml = "sync:\n  include:\n    - '*.txt'\n"
         sync_blob = cas.store_blob(sync_yaml.encode(), root)
         sync_item = ItemSource(
-            item_type="config",
-            item_id="cas/remote",
+            item_ref="config:cas/remote",
             content_blob_hash=sync_blob,
             integrity=f"sha256:{hashlib.sha256(sync_yaml.encode()).hexdigest()}",
         )
@@ -2972,8 +2912,7 @@ class TestConcurrentExecution:
         base_content = b"# Base\n"
         base_blob = cas.store_blob(base_content, root)
         base_item = ItemSource(
-            item_type="knowledge",
-            item_id="base",
+            item_ref="knowledge:base",
             content_blob_hash=base_blob,
             integrity=f"sha256:{hashlib.sha256(base_content).hexdigest()}",
         )
@@ -3030,7 +2969,7 @@ class TestConcurrentExecution:
         exec_call_count = 0
 
         async def mock_handle(
-            self_tool, item_type, item_id, project_path, parameters, thread
+            self_tool, item_id, project_path, parameters, thread
         ):
             nonlocal exec_call_count
             exec_call_count += 1
@@ -3078,8 +3017,7 @@ class TestConcurrentExecution:
                     user,
                     settings,
                     "test-project",
-                    item_type="tool",
-                    item_id="x",
+                    item_id="tool:x",
                     parameters={},
                     thread="inline",
                 ),
@@ -3087,8 +3025,7 @@ class TestConcurrentExecution:
                     user,
                     settings,
                     "test-project",
-                    item_type="tool",
-                    item_id="y",
+                    item_id="tool:y",
                     parameters={},
                     thread="inline",
                 ),
@@ -3337,8 +3274,7 @@ class TestLookupBinding:
             "hook_id": "wh_test",
             "user_id": "user-1",
             "remote_name": "default",
-            "item_type": "directive",
-            "item_id": "email/handle_inbound",
+            "item_id": "directive:email/handle_inbound",
             "project_path": "test-project",
             "hmac_secret": "whsec_secret",
             "revoked_at": None,
@@ -3346,7 +3282,7 @@ class TestLookupBinding:
 
         with patch("ryeos_node.server.resolve_binding", return_value=binding):
             result = _lookup_binding("wh_test", settings)
-        assert result["item_id"] == "email/handle_inbound"
+        assert result["item_id"] == "directive:email/handle_inbound"
 
     def test_missing_binding(self):
         from unittest.mock import patch
@@ -3399,8 +3335,7 @@ class TestWebhookBindings:
         mock_result = {
             "hook_id": "wh_" + "a" * 32,
             "hmac_secret": "whsec_" + "b" * 64,
-            "item_type": "directive",
-            "item_id": "email/handle_inbound",
+            "item_id": "directive:email/handle_inbound",
             "project_path": "campaign-kiwi",
         }
 
@@ -3408,8 +3343,7 @@ class TestWebhookBindings:
             r = c.post(
                 "/webhook-bindings",
                 json={
-                    "item_type": "directive",
-                    "item_id": "email/handle_inbound",
+                    "item_id": "directive:email/handle_inbound",
                     "project_path": "campaign-kiwi",
                     "description": "Inbound email processing",
                 },
@@ -3418,16 +3352,15 @@ class TestWebhookBindings:
         body = r.json()
         assert body["hook_id"].startswith("wh_")
         assert body["hmac_secret"].startswith("whsec_")
-        assert body["item_type"] == "directive"
-        assert body["item_id"] == "email/handle_inbound"
+        assert body["item_id"] == "directive:email/handle_inbound"
         assert body["project_path"] == "campaign-kiwi"
 
-    def test_create_binding_invalid_item_type(self, cas_env):
+    def test_create_binding_invalid_item_id(self, cas_env):
+        """item_id without canonical ref prefix → 400."""
         c, root, tmp_path = cas_env
         r = c.post(
             "/webhook-bindings",
             json={
-                "item_type": "knowledge",
                 "item_id": "x",
                 "project_path": "test",
             },
@@ -3441,8 +3374,7 @@ class TestWebhookBindings:
         bindings = [
             {
                 "hook_id": "wh_abc",
-                "item_type": "directive",
-                "item_id": "email/send",
+                "item_id": "directive:email/send",
                 "project_path": "proj",
                 "description": "test",
                 "created_at": "2026-01-01",
@@ -3489,8 +3421,7 @@ class TestValidateManifestGraph:
 
         # Store an item_source object pointing to the blob
         item_source = ItemSource(
-            item_type="tool",
-            item_id="test/tool",
+            item_ref="tool:test/tool",
             content_blob_hash=blob_hash,
             integrity=f"sha256:{hashlib.sha256(content).hexdigest()}",
         )
@@ -3632,8 +3563,7 @@ class TestValidateManifestGraph:
         root.mkdir()
         # item_source pointing to a blob that doesn't exist
         item_source = ItemSource(
-            item_type="tool",
-            item_id="test/tool",
+            item_ref="tool:test/tool",
             content_blob_hash="deadbeef" * 8,
             integrity="sha256:fake",
         )
@@ -3706,8 +3636,7 @@ class TestValidateManifestGraph:
         content = b"shared content"
         blob_hash = cas.store_blob(content, root)
         item_source = ItemSource(
-            item_type="tool",
-            item_id="shared",
+            item_ref="tool:shared",
             content_blob_hash=blob_hash,
             integrity=f"sha256:{hashlib.sha256(content).hexdigest()}",
         )
@@ -4160,8 +4089,7 @@ class TestExecuteWithEnvelope:
                 "/execute",
                 json={
                     "project_path": "test-project",
-                    "item_type": "tool",
-                    "item_id": "test/tool",
+                    "item_id": "tool:test/tool",
                     "parameters": {},
                     "secret_envelope": envelope,
                 },

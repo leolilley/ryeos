@@ -40,7 +40,7 @@ Discover available tools on an MCP server.
 
   <step name="discover_tools">
     Call the MCP discover tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/mcp/discover", parameters={"transport": "{input:transport}", "url": "{input:url}", "headers": "{input:headers}", "command": "{input:command}", "args": "{input:args}", "env": "{input:env}"})`
+    `rye_execute(item_id="rye/mcp/discover", parameters={"transport": "{input:transport}", "url": "{input:url}", "headers": "{input:headers}", "command": "{input:command}", "args": "{input:args}", "env": "{input:env}"})`
   </step>
 
   <step name="return_tools">

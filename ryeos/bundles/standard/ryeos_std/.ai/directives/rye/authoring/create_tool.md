@@ -76,7 +76,7 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
 
     Include {input:parameters} definitions in the generated code if provided.
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/tools/{input:category}/{input:tool_name}.{ext}", "content": "<generated tool code>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/tools/{input:category}/{input:tool_name}.{ext}", "content": "<generated tool code>", "create_dirs": true})`
   </step>
 
   <step name="sign_tool">

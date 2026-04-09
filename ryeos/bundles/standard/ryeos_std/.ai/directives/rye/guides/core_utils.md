@@ -38,11 +38,11 @@ Under every directive you run and every tool you call, there's infrastructure. S
 
   <step name="system_tool">
     <instruction>Execute the system tool to show paths, then runtime info.</instruction>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/system/system", parameters={"item": "paths"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/system/system", parameters={"item": "paths"})</tool_call>
     <render>
 Explain the output — project_path, user_space, system_spaces. This is the same tool the init directive used to find your user space.
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/system/system", parameters={"item": "runtime"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/system/system", parameters={"item": "runtime"})</tool_call>
     <render>
 Platform, Python version, working directory. Useful for debugging.
 </render>
@@ -50,7 +50,7 @@ Platform, Python version, working directory. Useful for debugging.
 
   <step name="telemetry_tool">
     <instruction>Execute telemetry to show logs.</instruction>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/telemetry/telemetry", parameters={"item": "logs", "limit": 10})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/telemetry/telemetry", parameters={"item": "logs", "limit": 10})</tool_call>
     <render>
 Every MCP call, every tool execution, every error — logged. Set `RYE_LOG_LEVEL=DEBUG` for verbose output. Use `{"item": "errors"}` to see just errors, `{"item": "stats"}` for execution statistics.
 </render>
@@ -58,11 +58,11 @@ Every MCP call, every tool execution, every error — logged. Set `RYE_LOG_LEVEL
 
   <step name="bundler_tool">
     <instruction>List installed bundles.</instruction>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "list"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "list"})</tool_call>
     <render>
 Bundles are packages of directives, tools, and knowledge with signed manifests. The rye-os bundle is what you've been using.
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "inspect", "bundle_id": "rye-os"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "inspect", "bundle_id": "rye-os"})</tool_call>
     <render>
 This shows every file in the bundle with its SHA256 hash. Both the manifest and each file have signatures — dual protection. You can create your own bundles to package and distribute your tools.
 </render>

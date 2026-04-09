@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:9e8f188e4169e6b71031788b2991476a988a6d69255ee195394d02807e4b8b83:gec07NSx67sMMvh9XL2TqQf_2WLfbiTBxxHTaQ6RLklphPxV73ak4TQOdBNZ_7LzRnj3zCvxRim1GaV7fdj_BA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:9e8f188e4169e6b71031788b2991476a988a6d69255ee195394d02807e4b8b83:gec07NSx67sMMvh9XL2TqQf_2WLfbiTBxxHTaQ6RLklphPxV73ak4TQOdBNZ_7LzRnj3zCvxRim1GaV7fdj_BA:4b987fd4e40303ac -->
 # Daily Digest
 
 Generate a summary of email activity and send it.
@@ -51,7 +51,7 @@ Generate a summary of email activity and send it.
   </step>
 
   <step name="send_digest">
-    `rye_execute(item_type="directive", item_id="rye/email/send", parameters={"to": "leo.lml.lilley@gmail.com", "subject": "[Agent Digest] <date> — <headline_stat>", "body": "<digest_body>", "send_type": "primary", "from_inbox": "leo@agentkiwi.nz"})`
+    `rye_execute(item_id="rye/email/send", parameters={"to": "leo.lml.lilley@gmail.com", "subject": "[Agent Digest] <date> — <headline_stat>", "body": "<digest_body>", "send_type": "primary", "from_inbox": "leo@agentkiwi.nz"})`
   </step>
 
   <step name="return_result">

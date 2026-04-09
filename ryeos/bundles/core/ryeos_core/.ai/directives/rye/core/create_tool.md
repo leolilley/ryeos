@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:4d57c8723fda7ccbbd47e24e4fedd46dd6e42ba0f606415fe3d1a53322577899:eOffCe27ZBTOkDGOxE7Gxcd76Go4svlFmibhNuM2T_-ba3jdf91B8KgCZTi7S3nsB7d9OiM3Ur2ynS9Pss6IDg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:12Z:4d57c8723fda7ccbbd47e24e4fedd46dd6e42ba0f606415fe3d1a53322577899:eOffCe27ZBTOkDGOxE7Gxcd76Go4svlFmibhNuM2T_-ba3jdf91B8KgCZTi7S3nsB7d9OiM3Ur2ynS9Pss6IDg:4b987fd4e40303ac -->
 # Create Tool
 
 Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign it.
@@ -76,7 +76,7 @@ Create a new tool (Python, YAML, etc.) with proper metadata, validate, and sign 
 
     Include {input:parameters} definitions in the generated code if provided.
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/tools/{input:category}/{input:tool_name}.{ext}", "content": "<generated tool code>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/tools/{input:category}/{input:tool_name}.{ext}", "content": "<generated tool code>", "create_dirs": true})`
   </step>
 
   <step name="sign_tool">

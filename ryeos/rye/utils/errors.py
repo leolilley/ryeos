@@ -73,12 +73,16 @@ class ErrorResponse:
         }
 
     @classmethod
-    def not_found(cls, item_type: str, item_id: str) -> "ErrorResponse":
+    def not_found(cls, item_ref: str) -> "ErrorResponse":
         """Create 'not found' error."""
+        kind, bare_id = None, item_ref
+        if ":" in item_ref:
+            kind, bare_id = item_ref.split(":", 1)
+        kind_label = kind or "item"
         return cls(
             code=ErrorCode.TOOL_NOT_FOUND,
-            message=f"{item_type} not found: {item_id}",
-            suggestion=f"Check the item_id and ensure it exists in .ai/{item_type}s/",
+            message=f"{kind_label} not found: {bare_id}",
+            suggestion=f"Check the item_ref and ensure it exists in .ai/{kind_label}s/",
         )
 
     @classmethod

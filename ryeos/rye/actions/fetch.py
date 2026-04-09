@@ -8,6 +8,7 @@ Unifies search and resolution into a single primitive with two modes:
 import logging
 from typing import Any, Dict, Optional, Set
 
+from rye.constants import ItemType
 from rye.utils.path_utils import get_user_space
 from rye.actions._resolve import resolve_item
 from rye.actions._search import search_items
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class FetchTool:
     """Resolve items by ID or discover by query."""
 
-    _ID_PARAMS = {"item_id", "item_type", "source", "destination", "version", "project_path"}
+    _ID_PARAMS = {"item_id", "item_ref", "source", "destination", "version", "project_path"}
     _QUERY_PARAMS = {"query", "scope", "source", "limit", "project_path"}
 
     def __init__(self, user_space: Optional[str] = None):
@@ -46,43 +47,20 @@ class FetchTool:
 
     async def _resolve_by_id(self, **kwargs) -> Dict[str, Any]:
         """ID mode — find item, return content, optionally copy."""
-        item_type = kwargs.get("item_type")
-        source = kwargs.get("source")
+        item_id = kwargs.get("item_id", "")
 
-        # Registry requires explicit item_type
-        if source == "registry" and not item_type:
-            return {"status": "error", "error": "item_type required for registry fetch"}
+        try:
+            ItemType.require_canonical_ref(item_id)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
 
-        if item_type:
-            result = await resolve_item(self.user_space, **kwargs)
-            if result.get("status") == "success":
-                result["mode"] = "id"
-            return result
+        kwargs = {**kwargs, "item_ref": item_id}
+        kwargs.pop("item_id", None)
 
-        # Auto-detect: try all types, collect matches
-        matches = []
-        for try_type in ("directive", "tool", "knowledge"):
-            result = await resolve_item(self.user_space, item_type=try_type, **kwargs)
-            if result.get("status") == "success":
-                matches.append((try_type, result))
-            elif result.get("error_type") == "integrity":
-                return result
-
-        if len(matches) == 0:
-            return {"status": "error", "error": f"Item not found: {kwargs['item_id']}"}
-        if len(matches) == 1:
-            result = matches[0][1]
-            result["item_type"] = matches[0][0]
+        result = await resolve_item(self.user_space, **kwargs)
+        if result.get("status") == "success":
             result["mode"] = "id"
-            return result
-        return {
-            "status": "error",
-            "error": (
-                f"Ambiguous item_id '{kwargs['item_id']}' — exists as: "
-                f"{', '.join(t for t, _ in matches)}. "
-                "Provide item_type to disambiguate."
-            ),
-        }
+        return result
 
     async def _resolve_by_query(self, **kwargs) -> Dict[str, Any]:
         """Query mode — search across spaces."""

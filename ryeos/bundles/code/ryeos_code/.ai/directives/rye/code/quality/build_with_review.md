@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:19:02Z:cc1e9410426bcfbd01f35308906135e5002010311f9da8df704b01422054072e:J2hxQKiPKEkMGlCc_G0c4eRYxvvtHB7Zi4BCtAAeUyXpFX-jF6MAOVtwlol6V6C9Ewp9o6k1NYXHvWgRx4y-Dw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:cc1e9410426bcfbd01f35308906135e5002010311f9da8df704b01422054072e:J2hxQKiPKEkMGlCc_G0c4eRYxvvtHB7Zi4BCtAAeUyXpFX-jF6MAOVtwlol6V6C9Ewp9o6k1NYXHvWgRx4y-Dw:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Build With Review
 
@@ -62,14 +62,14 @@ Orchestrator pattern — runs a build directive, then reviews the output. Retrie
        so the build agent understands what to avoid.
 
     3. Spawn the build directive as a thread:
-       `rye_execute(item_type="directive", item_id="{input:directive_id}", parameters={"thread": "fork", ...built_params})`
+       `rye_execute(item_id="{input:directive_id}", parameters={"thread": "fork", ...built_params})`
        Wait for the thread to complete. Record the thread_id.
 
     4. Get the list of changed files from git:
-       `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "status"})`
+       `rye_execute(item_id="rye/code/git/git", parameters={"action": "status"})`
 
     5. Spawn the review directive:
-       `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": "fork", "thread_id": "<build_thread_id>", "changed_files": <changed_files>})`
+       `rye_execute(item_id="rye/code/quality/review", parameters={"thread": "fork", "thread_id": "<build_thread_id>", "changed_files": <changed_files>})`
        Wait for the review thread to complete.
 
     6. Check the review verdict:

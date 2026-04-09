@@ -18,8 +18,7 @@ def execute(params: Dict, project_path: str) -> Dict:
     state_store_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(state_store_mod)
 
-    ctx = params.get("_thread_context", {})
-    thread_id = ctx.get("thread_id")
+    thread_id = params.get("thread_id")
     state = params.get("state", {})
 
     if not thread_id:

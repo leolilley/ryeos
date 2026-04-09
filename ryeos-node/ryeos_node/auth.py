@@ -302,12 +302,13 @@ class ResolvedExecution:
 
     Both signed-request and webhook paths produce this. The /execute handler
     doesn't know or care which auth path was used.
+    
+    item_id is a canonical ref (e.g. "tool:my/tool", "directive:my/workflow").
     """
     principal: Principal
-    item_type: str
     item_id: str
     project_path: str
     parameters: dict
-    thread: str
+    thread: str | None
     secret_envelope: dict | None = None
     vault_keys: list[str] | None = None

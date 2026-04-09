@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:f09f243cd34dec1ad6ee9da05fed961f7b124d810b41915bb5191ccbf59ca7f7:Axo_AzxyJUNomM4dJcn3qNuNlU2qPBBSxmtmrLs0WIEULZ-AUM5nO8BVNUVE8AsdsZH-nMOzeWLR-XFtH4hyAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:f09f243cd34dec1ad6ee9da05fed961f7b124d810b41915bb5191ccbf59ca7f7:Axo_AzxyJUNomM4dJcn3qNuNlU2qPBBSxmtmrLs0WIEULZ-AUM5nO8BVNUVE8AsdsZH-nMOzeWLR-XFtH4hyAw:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Manage Processes
@@ -57,19 +57,19 @@ Manage running processes — check status, cancel, list, and resume graphs and t
 
     **status** — Check the status of a running process.
     Requires {input:run_id}.
-    `rye_execute(item_type="tool", item_id="rye/core/processes/status", parameters={"run_id": "{input:run_id}"})`
+    `rye_execute(item_id="rye/core/processes/status", parameters={"run_id": "{input:run_id}"})`
 
     **cancel** — Cancel a running process via SIGTERM-based graceful shutdown.
     Requires {input:run_id}. Optional {input:grace} (default: 5).
-    `rye_execute(item_type="tool", item_id="rye/core/processes/cancel", parameters={"run_id": "{input:run_id}", "grace": {input:grace}})`
+    `rye_execute(item_id="rye/core/processes/cancel", parameters={"run_id": "{input:run_id}", "grace": {input:grace}})`
 
     **list** — List active or filtered processes.
     Optional {input:status_filter}.
-    `rye_execute(item_type="tool", item_id="rye/core/processes/list", parameters={"status_filter": "{input:status_filter}"})`
+    `rye_execute(item_id="rye/core/processes/list", parameters={"status_filter": "{input:status_filter}"})`
 
     **resume** — Resume a cancelled graph from its last persisted CAS state.
     Requires {input:graph_id} and {input:run_id}.
-    `rye_execute(item_type="tool", item_id="{input:graph_id}", parameters={"resume": true, "graph_run_id": "{input:run_id}"})`
+    `rye_execute(item_id="{input:graph_id}", parameters={"resume": true, "graph_run_id": "{input:run_id}"})`
   </step>
 
   <step name="return_result">

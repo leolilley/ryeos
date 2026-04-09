@@ -68,7 +68,7 @@ Create a new directive file with proper metadata, validate, and sign it.
 
     Use {input:process_steps} if provided to inform the step content.
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
   </step>
 
   <step name="sign_directive">

@@ -40,7 +40,7 @@ Write content to a file, creating directories as needed.
 
   <step name="call_write">
     Write the file:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:file_path}", "content": "{input:content}"})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": "{input:file_path}", "content": "{input:content}"})`
   </step>
 
   <step name="return_result">

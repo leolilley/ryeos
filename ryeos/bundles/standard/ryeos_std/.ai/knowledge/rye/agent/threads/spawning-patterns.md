@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:d056f853eb8868fc97fb1938b813e48632749ce0f65e8994d003d4e9d02cf47e:ExScHLKJ3NKnrtdb2vS-K9WsI6r8ty-6--0ccLiTSAV3MQxxbwwZFFwfRKzHlMMa3cqUYGAH5L4on7Z1pS0vAw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:b1981a305ce634c0cb7e78d5f82cfd30f9e72b6e3f2e92b0ed96e13e87ae2b9d:eYp88X1mHCih72I5c5TDUuoIRnl2wx_Gjj7b54x8Zk3mqyNo7MyUf8e52GKMrWKFqabUN1yHw6hXMpsrfxdDDg:4b987fd4e40303ac -->
 ```yaml
 name: spawning-patterns
 title: Spawning Patterns
@@ -28,7 +28,6 @@ All spawning goes through `execute directive`:
 
 ```python
 rye_execute(
-    item_type="directive",
     item_id="agency-kiwi/leads/discover_leads",
     parameters={"niche": "plumbers", "city": "Dunedin"},
     async=True,
@@ -86,17 +85,17 @@ Standard orchestration pattern for parallel work:
 
 ```
 Phase 1: Spawn children (async=True)
-         rye_execute(item_type="directive", item_id="domain/discover",
+         rye_execute(item_id="domain/discover",
            parameters={...}, async=True, limit_overrides={...})
          → collect all thread_ids
 
 Phase 2: Wait for all children
-         rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+         rye_execute(item_id="rye/agent/threads/orchestrator",
            parameters={"operation": "wait_threads",
                         "thread_ids": [...], "timeout": 300})
 
 Phase 3: Aggregate results
-         rye_execute(item_type="tool", item_id="rye/agent/threads/orchestrator",
+         rye_execute(item_id="rye/agent/threads/orchestrator",
            parameters={"operation": "aggregate_results",
                         "thread_ids": [...]})
 ```
@@ -107,7 +106,6 @@ Phase 3: Aggregate results
 
 ```python
 rye_execute(
-    item_type="tool",
     item_id="rye/agent/threads/orchestrator",
     parameters={
         "operation": "wait_threads",
@@ -171,7 +169,6 @@ If a child thread reaches its context limit, it's automatically handed off to a 
 
 ```python
 rye_execute(
-    item_type="tool",
     item_id="rye/agent/threads/orchestrator",
     parameters={
         "operation": "read_transcript",
@@ -185,7 +182,6 @@ rye_execute(
 
 ```python
 rye_execute(
-    item_type="tool",
     item_id="rye/agent/threads/orchestrator",
     parameters={"operation": "kill_thread", "thread_id": "..."}
 )

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:adaf464d7d25a313d14b7b5d32c55b3ae65c68cef658e603783ba53e1802495e:olzVQIM6EG0cIZlk-mmMZXqjiEc87Y-4s675Skxgl2FJFBLSVi6nVEC0ObTs7lPyTjAZaNJdcLFbhvsQq19vCQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:adaf464d7d25a313d14b7b5d32c55b3ae65c68cef658e603783ba53e1802495e:olzVQIM6EG0cIZlk-mmMZXqjiEc87Y-4s675Skxgl2FJFBLSVi6nVEC0ObTs7lPyTjAZaNJdcLFbhvsQq19vCQ:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Web Fetch
 
@@ -38,7 +38,7 @@ Fetch the content of a web page and return it in the specified format.
 
   <step name="fetch_content">
     Call the web fetch tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/web/fetch/fetch", parameters={"url": "{input:url}", "format": "{input:format}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/web/fetch/fetch", parameters={"url": "{input:url}", "format": "{input:format}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_content">

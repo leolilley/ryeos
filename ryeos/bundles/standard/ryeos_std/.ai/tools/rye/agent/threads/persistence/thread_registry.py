@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:25Z:21b25ff68cee16d52c4da36d52605dca2daa6833e4572a2e94db7d55881ba21a:_PX2T_VprF8B6CqVvBsavnhLLx9TvbYTLGbcBQUMeodNqHsZx1uzIcKNsJq393mDZ5j9ufGfaRlde_Bs5_lPBQ:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:35:30Z:c2e09af509eb53fc6d67cdd9259ae61c4cf27f701ee081a97cb589e974df2b42:xiO9zMk5BeH9aZr6mvG36aqjtW8X427uH3mbThxnQqMdJxiDa_sxDHSdnSnWUwNWUYmcvKVrABy7LquTCv0jDw:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -61,13 +61,14 @@ class ThreadRegistry:
                 ("continuation_of", "TEXT"),
                 ("continuation_thread_id", "TEXT"),
                 ("chain_root_id", "TEXT"),
+                ("tool_id", "TEXT"),
             ]
             for col_name, col_type in migrations:
                 if col_name not in existing:
                     conn.execute(f"ALTER TABLE threads ADD COLUMN {col_name} {col_type}")
             conn.commit()
 
-    def register(self, thread_id: str, directive: str, parent_id: str = None) -> None:
+    def register(self, thread_id: str, directive: str, parent_id: str = None, tool_id: str = None) -> None:
         """Register a new thread."""
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
@@ -83,6 +84,11 @@ class ThreadRegistry:
                 "UPDATE threads SET pid = ? WHERE thread_id = ?",
                 (os.getpid(), thread_id),
             )
+            if tool_id:
+                conn.execute(
+                    "UPDATE threads SET tool_id = ? WHERE thread_id = ?",
+                    (tool_id, thread_id),
+                )
             conn.commit()
 
     def update_pid(self, thread_id: str, pid: int) -> None:

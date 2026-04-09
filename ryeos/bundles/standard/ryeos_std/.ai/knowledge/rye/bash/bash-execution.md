@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:ffda66d6378ed78ef5c12b25c3dde150b828c47f157b5e91e853c5be7bbe2cb5:XJmdE5AgvxEh1bDwDsDP4xXrwfylHaNVyGMixBsV4JMYjsZS96LodHrADYipTdy52LYozNhC_u27xkRm-hsVCg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:a3b0a33dd20c4e28a1ce3145faaedbf0c7a2c218a874db0fa920ce94b738b58d:q8wxrRUunaDMyeTKc5BbplKIEVtZZFlTBY_oyZL0iCYlZdVrqtDAP-iFpeYIu-QZQmECQpc4NQyV-TxzWZznDQ:4b987fd4e40303ac -->
 
 ```yaml
 name: bash-execution
@@ -41,10 +41,10 @@ Execute shell commands via `subprocess.run()` with `shell=True`, sandboxed to th
 ## Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/bash/bash",
+rye_execute(item_id="rye/bash/bash",
     parameters={"command": "git status --short"})
 
-rye_execute(item_type="tool", item_id="rye/bash/bash",
+rye_execute(item_id="rye/bash/bash",
     parameters={
         "command": "npm test",
         "timeout": 300,

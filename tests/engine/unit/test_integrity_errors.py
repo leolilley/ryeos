@@ -50,7 +50,7 @@ class TestIntegrityErrorMessages:
             tool_file = tools_dir / "tool.py"
             tool_file.write_text('__version__ = "1.0.0"\n')
 
-            with pytest.raises(IntegrityError, match=r"rye sign tool my/tool"):
+            with pytest.raises(IntegrityError, match=r"rye sign tool:my/tool"):
                 verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
     def test_unsigned_error_includes_item_type(self, _setup_user_space):
@@ -62,7 +62,7 @@ class TestIntegrityErrorMessages:
             tool_file = tools_dir / "test.py"
             tool_file.write_text("pass\n")
 
-            with pytest.raises(IntegrityError, match=r"Item type: tool"):
+            with pytest.raises(IntegrityError, match=r"Kind: tool"):
                 verify_item(tool_file, ItemType.TOOL, ctx=ExecutionContext.from_env(project_path=project))
 
     def test_unsigned_error_mentions_expected_header(self, _setup_user_space):
@@ -150,8 +150,8 @@ class TestExecuteToolIntegrityErrorType:
     """Test that ExecuteTool.handle() propagates error_type='integrity' for IntegrityErrors."""
 
     @pytest.mark.asyncio
-    async def test_execute_unsigned_knowledge_returns_integrity_error_type(self, _setup_user_space):
-        """Unsigned knowledge item should return error_type='integrity'."""
+    async def test_execute_unsigned_knowledge_returns_integrity_error(self, _setup_user_space):
+        """Unsigned knowledge returns integrity error during resolution."""
         with tempfile.TemporaryDirectory() as tmpdir:
             project = Path(tmpdir)
             knowledge_dir = project / ".ai" / "knowledge"
@@ -162,13 +162,11 @@ class TestExecuteToolIntegrityErrorType:
 
             tool = ExecuteTool(project_path=str(project))
             result = await tool.handle(
-                item_type=ItemType.KNOWLEDGE,
-                item_id="unsigned_entry",
+                item_id="knowledge:unsigned_entry",
                 project_path=str(project),
             )
             assert result["status"] == "error"
-            assert result["error_type"] == "integrity"
-            assert result["item_id"] == "unsigned_entry"
+            assert result.get("error_type") == "integrity"
 
     @pytest.mark.asyncio
     async def test_load_unsigned_directive_returns_integrity_error_type(self, _setup_user_space):
@@ -183,13 +181,12 @@ class TestExecuteToolIntegrityErrorType:
 
             result = await resolve_item(
                 "",
-                item_type=ItemType.DIRECTIVE,
-                item_id="unsigned_workflow",
+                item_ref="directive:unsigned_workflow",
                 project_path=str(project),
             )
             assert result["status"] == "error"
             assert result["error_type"] == "integrity"
-            assert result["item_id"] == "unsigned_workflow"
+            assert result["item_ref"] == "directive:unsigned_workflow"
 
     @pytest.mark.asyncio
     async def test_execute_non_integrity_error_has_no_error_type(self, _setup_user_space):
@@ -200,8 +197,7 @@ class TestExecuteToolIntegrityErrorType:
 
             tool = ExecuteTool(project_path=str(project))
             result = await tool.handle(
-                item_type=ItemType.KNOWLEDGE,
-                item_id="nonexistent_item",
+                item_id="knowledge:nonexistent_item",
                 project_path=str(project),
             )
             assert result["status"] == "error"

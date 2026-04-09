@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:d543dac2f966b87559af6b4f45ba60285059cdf3f7ea06703a208647e7272874:gFwaq1I8uQJINmZdhtq6ml9mAALnqt804eZCKHThyoF9T-UQw1TTnzQJ4a_ZXoLjenaEVFSQiZxf5N2w0hnYDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:f27b589a046ed3d154f58f1f471911171aa18a2accde2ba5f97b2abae5093dc1:pbfQ9ArEekZaEPXfWtYS_qH7uG8tzW6wv4M0YpIp6hZaKVbkLKuXY-d-a0_khixQXaMJkczICH0ffTe1UYdaDQ:4b987fd4e40303ac -->
 ```yaml
 name: email-directives
 title: Email Bundle — Tools, Directives & Provider Abstraction
@@ -178,24 +178,24 @@ Webhook → /execute → handle_inbound.yaml (graph) → route → act
 
 ```python
 # Send an email (tool, not directive)
-rye_execute(item_type="tool", item_id="rye/email/send",
+rye_execute(item_id="rye/email/send",
     parameters={"to": "user@example.com", "subject": "Hello", "body": "..."})
 
 # Forward an email (tool)
-rye_execute(item_type="tool", item_id="rye/email/forward",
+rye_execute(item_id="rye/email/forward",
     parameters={"email_id": "...", "classification": "unknown_sender"})
 
 # Handle inbound (graph tool — typically triggered by webhook)
-rye_execute(item_type="tool", item_id="rye/email/handle_inbound",
+rye_execute(item_id="rye/email/handle_inbound",
     parameters={"email_id": "...", "from_address": "...", "to_address": "...",
                 "subject": "...", "body": "..."})
 
 # Draft a response (directive — requires LLM)
-rye_execute(item_type="directive", item_id="rye/email/draft_response",
+rye_execute(item_id="rye/email/draft_response",
     parameters={"email_body": "...", "email_subject": "...",
                 "from_name": "...", "thread_id": "..."})
 
 # Daily digest (directive — requires LLM)
-rye_execute(item_type="directive", item_id="rye/email/daily_digest",
+rye_execute(item_id="rye/email/daily_digest",
     parameters={})
 ```

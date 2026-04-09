@@ -27,7 +27,7 @@ def _get_tools_roots(
     from rye.constants import AI_DIR, ItemType
     from rye.utils.path_utils import get_system_spaces, get_user_ai_path
 
-    tools_dir = ItemType.TYPE_DIRS[ItemType.TOOL]
+    tools_dir = ItemType.KIND_DIRS[ItemType.TOOL]
     roots: List[Path] = []
 
     for bundle in get_system_spaces():

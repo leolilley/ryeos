@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:c2a9e4e385dc08ff8eb6672237444c44fd0177c33b8426059be6119e74086e4a:VMPs8SdWhx85Chr7a4zQMSvkobdpzMBWEZhe0pTk4SodvxJbNLbswUPDymhvP9Ez31KTfUWpeIJ_DMuVcFBHBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:c2a9e4e385dc08ff8eb6672237444c44fd0177c33b8426059be6119e74086e4a:VMPs8SdWhx85Chr7a4zQMSvkobdpzMBWEZhe0pTk4SodvxJbNLbswUPDymhvP9Ez31KTfUWpeIJ_DMuVcFBHBg:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # TypeScript Type Check
 
@@ -40,7 +40,7 @@ Type check TypeScript code — run tsc --noEmit on a project or single file.
 
   <step name="run_tsc">
     Call the TypeScript type check tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/code/typescript/typescript", parameters={"action": "{input:action}", "file_path": "{input:file_path}", "working_dir": "{input:working_dir}", "strict": "{input:strict}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/code/typescript/typescript", parameters={"action": "{input:action}", "file_path": "{input:file_path}", "working_dir": "{input:working_dir}", "strict": "{input:strict}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_result">

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 from rye.primitives import cas
 from rye.primitives.integrity import compute_integrity
 
-from rye.cas.objects import ItemRef, ItemSource
+from rye.cas.objects import IngestResult, ItemSource
 from rye.constants import AI_DIR, ItemType, STATE_DIR, STATE_OBJECTS
 from rye.utils.metadata_manager import MetadataManager, compute_content_hash
 from rye.utils.path_utils import get_user_space
@@ -35,11 +35,11 @@ def user_cas_root() -> Path:
 
 
 def ingest_item(
-    item_type: str,
+    kind: str,
     file_path: Path,
     project_path: Path,
-) -> ItemRef:
-    """Read file → store as blob + create item_source object → return ItemRef.
+) -> IngestResult:
+    """Read file → store as blob + create item_source object → return IngestResult.
 
     Works for both signed and unsigned .ai/ files.
     """
@@ -57,7 +57,7 @@ def ingest_item(
     signature_info: Optional[Dict[str, str]] = None
     try:
         signature_info = MetadataManager.get_signature_info(
-            item_type,
+            kind,
             content_text,
             file_path=file_path,
             project_path=project_path,
@@ -65,29 +65,29 @@ def ingest_item(
     except ValueError:
         pass  # unsigned file — expected for PEM keys, etc.
 
-    # Derive item_id from path relative to .ai/{type_dir}/
-    type_dir_name = ItemType.TYPE_DIRS.get(item_type, item_type)
-    item_id = file_path.stem  # fallback
-    # Try to find the .ai/{type_dir}/ ancestor in the path
+    # Derive bare_id from path relative to .ai/{kind_dir}/
+    kind_dir_name = ItemType.KIND_DIRS.get(kind, kind)
+    bare_id = file_path.stem  # fallback
+    # Try to find the .ai/{kind_dir}/ ancestor in the path
     parts = file_path.parts
     for i, part in enumerate(parts):
-        if part == AI_DIR and i + 1 < len(parts) and parts[i + 1] == type_dir_name:
-            # Everything after .ai/{type_dir}/ minus extension is the item_id
+        if part == AI_DIR and i + 1 < len(parts) and parts[i + 1] == kind_dir_name:
+            # Everything after .ai/{kind_dir}/ minus extension is the bare_id
             relative = file_path.relative_to(Path(*parts[: i + 2]))
-            item_id = relative.with_suffix("").as_posix()
+            bare_id = relative.with_suffix("").as_posix()
             break
 
     # Build item_source object and store
+    item_ref = ItemType.make_canonical_ref(kind, bare_id)
     item_source = ItemSource(
-        item_type=item_type,
-        item_id=item_id,
+        item_ref=item_ref,
         content_blob_hash=blob_hash,
         integrity=integrity,
         signature_info=signature_info,
     )
     object_hash = cas.store_object(item_source.to_dict(), root)
 
-    return ItemRef(
+    return IngestResult(
         blob_hash=blob_hash,
         object_hash=object_hash,
         integrity=integrity,
@@ -122,14 +122,14 @@ def ingest_directory(
             file_path = Path(dirpath) / filename
             rel_path = str(file_path.relative_to(base_path))
 
-            # Determine item type from path
-            item_type = item_type_from_path(rel_path)
-            if item_type is None:
+            # Determine kind from path
+            kind = kind_from_path(rel_path)
+            if kind is None:
                 logger.debug("Skipping unrecognised path %s", rel_path)
                 continue
 
             try:
-                ref = ingest_item(item_type, file_path, project_path)
+                ref = ingest_item(kind, file_path, project_path)
                 results[rel_path] = ref.object_hash
             except Exception:
                 logger.warning("Failed to ingest %s", rel_path, exc_info=True)
@@ -157,13 +157,12 @@ def materialize_item(
         exists_on_disk = blob_path.exists()
         logger.error(
             "Blob %s not found via lillux. root=%s, exists_on_disk=%s, blob_path=%s, "
-            "item_type=%s, item_id=%s, object_hash=%s",
+            "item_ref=%s, object_hash=%s",
             blob_hash,
             root,
             exists_on_disk,
             blob_path,
-            obj.get("item_type"),
-            obj.get("item_id"),
+            obj.get("item_ref"),
             object_hash,
         )
         if exists_on_disk:
@@ -175,7 +174,7 @@ def materialize_item(
         raise FileNotFoundError(
             f"Blob {blob_hash} not found in CAS "
             f"(root={root}, exists_on_disk={exists_on_disk}, "
-            f"item_type={obj.get('item_type')}, item_id={obj.get('item_id')})"
+            f"item_ref={obj.get('item_ref')})"
         )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -234,12 +233,12 @@ def read_ref(ref_path: Path) -> Optional[str]:
 # --- Helpers ---
 
 
-def item_type_from_path(rel_path: str) -> Optional[str]:
-    """Derive item type from a .ai/-relative path. Returns None if unrecognised."""
+def kind_from_path(rel_path: str) -> Optional[str]:
+    """Derive kind from a .ai/-relative path. Returns None if unrecognised."""
     parts = rel_path.split("/")
     if len(parts) >= 2 and parts[0] == AI_DIR:
         type_dir = parts[1]
-        for item_type, dir_name in ItemType.SIGNABLE_DIRS.items():
+        for kind, dir_name in ItemType.SIGNABLE_KINDS.items():
             if type_dir == dir_name:
-                return item_type
+                return kind
     return None

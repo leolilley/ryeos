@@ -74,8 +74,7 @@ def _simple_graph():
                 "greet": {
                     "action": {
                         "primary": "execute",
-                        "item_type": "tool",
-                        "item_id": "test/echo",
+                        "item_id": "tool:test/echo",
                         "params": {"message": "hello"},
                     },
                     "assign": {
@@ -108,8 +107,7 @@ def _cached_graph():
                     "cache_result": True,
                     "action": {
                         "primary": "execute",
-                        "item_type": "tool",
-                        "item_id": "test/expensive",
+                        "item_id": "tool:test/expensive",
                         "params": {"x": 42},
                     },
                     "assign": {
@@ -283,8 +281,7 @@ class TestCachedNodeExecution:
         # Reconstruct the action as the walker would after interpolation
         action = {
             "primary": "execute",
-            "item_type": "tool",
-            "item_id": "test/expensive",
+            "item_id": "tool:test/expensive",
             "params": {"x": 42},
         }
         cache_key = compute_cache_key(
@@ -321,7 +318,7 @@ class TestCachedNodeExecution:
             for c in mock_dispatch2.call_args_list
             if c.args
             and isinstance(c.args[0], dict)
-            and c.args[0].get("item_id") == "test/expensive"
+            and c.args[0].get("item_id") == "tool:test/expensive"
         ]
         assert len(compute_calls) == 0, (
             f"Expected 0 dispatch calls for compute node (cached), got {len(compute_calls)}"
@@ -428,7 +425,7 @@ class TestCachedNodeExecution:
             for c in mock_dispatch2.call_args_list
             if c.args
             and isinstance(c.args[0], dict)
-            and c.args[0].get("item_id") == "test/expensive"
+            and c.args[0].get("item_id") == "tool:test/expensive"
         ]
         assert len(compute_calls) == 1, "Expected recompute after cache corruption"
         assert result2["output"]["value"] == 99

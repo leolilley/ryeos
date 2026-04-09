@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:74bfd1ae79f31c8eb173dabc4a0f1267f5aca700d7f8c14b5d5545a76ea5afb5:3uytmqEQbVZ5-oCgq7fRNhgfgPxGmHUBu5wVe1rTVdLC9NhTWBczKckBmByMacJCKV2nx9Rk1m11Fq4nr_6QBw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:fdb11deb6afccb38835189bce532d0d85d203815d8636b969b9f821092a4034e:UEDepzWoFO14HJxkBpX6y_8vnipP5xZJgjPxYS9IIEMcIDG-8t_JddAsjzc9T8_qHPfdOJGyHUhvI4VIs4qGBw:4b987fd4e40303ac -->
 
 ```yaml
 name: mcp-integration
@@ -61,7 +61,7 @@ Execute a tool call on an MCP server. Two modes of operation.
 ### Server Config Mode
 
 ```python
-rye_execute(item_type="tool", item_id="rye/mcp/connect",
+rye_execute(item_id="rye/mcp/connect",
     parameters={
         "server_config": ".ai/tools/mcp/servers/context7.yaml",
         "tool": "query-docs",
@@ -72,7 +72,7 @@ rye_execute(item_type="tool", item_id="rye/mcp/connect",
 ### Direct Mode
 
 ```python
-rye_execute(item_type="tool", item_id="rye/mcp/connect",
+rye_execute(item_id="rye/mcp/connect",
     parameters={
         "transport": "http",
         "url": "https://mcp.example.com/mcp",
@@ -227,7 +227,7 @@ Server configs support `${VAR}` and `${VAR:-default}` syntax. Resolution order:
 
 ```python
 # Add a server
-rye_execute(item_type="tool", item_id="rye/mcp/manager",
+rye_execute(item_id="rye/mcp/manager",
     parameters={
         "action": "add",
         "name": "context7",
@@ -237,15 +237,15 @@ rye_execute(item_type="tool", item_id="rye/mcp/manager",
     })
 
 # List servers with tools
-rye_execute(item_type="tool", item_id="rye/mcp/manager",
+rye_execute(item_id="rye/mcp/manager",
     parameters={"action": "list", "include_tools": true})
 
 # Refresh
-rye_execute(item_type="tool", item_id="rye/mcp/manager",
+rye_execute(item_id="rye/mcp/manager",
     parameters={"action": "refresh", "name": "context7"})
 
 # Remove
-rye_execute(item_type="tool", item_id="rye/mcp/manager",
+rye_execute(item_id="rye/mcp/manager",
     parameters={"action": "remove", "name": "context7"})
 ```
 

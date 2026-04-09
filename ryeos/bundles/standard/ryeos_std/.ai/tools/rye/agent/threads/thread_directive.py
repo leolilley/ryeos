@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:25Z:00ba8d755a621a68dad0a2dbc219f73d28b1ffc7332b48391da3aef48eefb5f2:IgG2WejvqKx3br52DH26FpF-96_nS_syIEeLEILcErLRwLC6dn0Vc2ewwmFaP7tKFn1qNids2GRTNHnGNevvDw:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:36Z:63516f99144cae931a68f8c6e5dd1c9cb3b901d2b86ccdffa5c0b5dd26eebfa1:DjJA5nDrNh5Ny-HTP39iXCTmxV-W5nW4ISWpKjDqUAALy3qf6wMy-L-EGWve5vFIAltFcEGSxAlRrYYUxSuKAg:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -7,6 +7,8 @@ __tool_description__ = "Execute a directive in a managed thread with LLM loop"
 __execution_owner__ = "callee"
 __native_async__ = True
 __native_resume__ = True
+__allowed_threads__ = ["inline", "fork"]
+__allowed_targets__ = ["local", "remote"]
 
 import argparse
 import asyncio
@@ -132,6 +134,7 @@ def _write_thread_meta(
     meta = {
         "thread_id": thread_id,
         "directive": directive_name,
+        "tool_id": "rye/agent/threads/thread_directive",
         "status": status,
         "created_at": created_at,
         "updated_at": updated_at,
@@ -338,8 +341,7 @@ async def _resolve_directive_chain(
 
         result = await resolve_item(
             str(get_user_space()),
-            item_type="directive",
-            item_id=parent_id,
+            item_ref=f"directive:{parent_id}",
             project_path=project_path,
         )
         if result["status"] != "success":
@@ -488,7 +490,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
     registry = thread_registry.get_registry(proj_path)
     if not pre_registered:
-        registry.register(thread_id, directive_name, parent_id=parent_thread_id)
+        registry.register(thread_id, directive_name, parent_id=parent_thread_id, tool_id="rye/agent/threads/thread_directive")
 
     # 3. Load and parse directive
     from rye.utils.resolvers import get_user_space
@@ -500,8 +502,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         from rye.utils.parser_router import ParserRouter
         result = await resolve_item(
             user_space,
-            item_type="directive",
-            item_id=directive_name,
+            item_ref=f"directive:{directive_name}",
             project_path=project_path,
         )
         if result["status"] != "success":
@@ -586,17 +587,16 @@ async def execute(params: Dict, project_path: str) -> Dict:
             # Execute knowledge items for all context positions
             # (execute parses frontmatter and returns body only, unlike load
             # which returns raw content with YAML metadata and signatures)
-            from rye.actions.execute import ExecuteTool
-            from rye.utils.resolvers import get_user_space
-            exec_tool = ExecuteTool(user_space=str(get_user_space()))
+            from rye.actions.fetch import FetchTool
+            fetch_tool = FetchTool()
             suppressed = set(chain_result["context"].get("suppress", []))
             for position in ("system", "before", "after"):
                 parts = []
                 for kid in chain_result["context"].get(position, []):
                     if kid in suppressed:
                         continue
-                    kr = await exec_tool.handle(
-                        item_type="knowledge", item_id=kid, project_path=project_path,
+                    kr = await fetch_tool.handle(
+                        item_id=f"knowledge:{kid}", project_path=project_path,
                     )
                     if kr.get("status") != "success":
                         error = kr.get("error", "unknown error")

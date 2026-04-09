@@ -46,13 +46,13 @@ The discover tool probes an MCP server and returns its available tools with full
     <render>
 **HTTP transport** — for remote servers:
 ```
-rye_execute(item_type="tool", item_id="rye/mcp/discover",
+rye_execute(item_id="rye/mcp/discover",
   parameters={"transport": "http", "url": "https://example.com/mcp"})
 ```
 
 **stdio transport** — for local CLI tools:
 ```
-rye_execute(item_type="tool", item_id="rye/mcp/discover",
+rye_execute(item_id="rye/mcp/discover",
   parameters={"transport": "stdio", "command": "npx", "args": ["-y", "@example/mcp-server"]})
 ```
 
@@ -65,7 +65,7 @@ Both return the same thing — a list of tools with names, descriptions, and inp
     <render>
 Once you've discovered a server, register it with the manager. This saves the connection config so you don't have to specify transport details every time.
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "add", "name": "my-server", "transport": "http", "url": "https://example.com/mcp"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/mcp/manager", parameters={"action": "add", "name": "my-server", "transport": "http", "url": "https://example.com/mcp"})</tool_call>
     <render>
 Server configs are stored as YAML in `.ai/tools/mcp/servers/`. The manager also auto-discovers the server's tools on add.
 
@@ -84,7 +84,7 @@ The connect tool executes a tool call on a registered server.
     <render>
 **Server config mode** (recommended — uses saved config):
 ```
-rye_execute(item_type="tool", item_id="rye/mcp/connect",
+rye_execute(item_id="rye/mcp/connect",
   parameters={
     "server_config": ".ai/tools/mcp/servers/my-server.yaml",
     "tool": "tool-name",
@@ -94,7 +94,7 @@ rye_execute(item_type="tool", item_id="rye/mcp/connect",
 
 **Direct mode** (no saved config needed):
 ```
-rye_execute(item_type="tool", item_id="rye/mcp/connect",
+rye_execute(item_id="rye/mcp/connect",
   parameters={
     "transport": "http",
     "url": "https://example.com/mcp",

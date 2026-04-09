@@ -47,15 +47,15 @@ Two ways in:
 Present both options to the user:
 
 1. **Email signup** — create an account with email and password:
-   <tool_call>rye_execute(item_type="tool", item_id="rye/core/registry/registry", parameters={"action": "signup", "email": "you@example.com", "password": "your-password"})</tool_call>
+   <tool_call>rye_execute(item_id="rye/core/registry/registry", parameters={"action": "signup", "email": "you@example.com", "password": "your-password"})</tool_call>
 
 2. **OAuth login** — opens your browser for device auth (works with GitHub):
-   <tool_call>rye_execute(item_type="tool", item_id="rye/core/registry/registry", parameters={"action": "login"})</tool_call>
+   <tool_call>rye_execute(item_id="rye/core/registry/registry", parameters={"action": "login"})</tool_call>
 </instruction>
     <render>
 Login opens your browser for device auth — works with GitHub OAuth. Once authenticated, check who you are:
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/registry/registry", parameters={"action": "whoami"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/registry/registry", parameters={"action": "whoami"})</tool_call>
     <instruction>
 Ask the user which method they prefer. Execute the appropriate one. If signup, ask for their email and password before executing.
 </instruction>
@@ -67,19 +67,19 @@ The registry workflow is three operations:
 
 **Push** — upload a local item to the registry
 ```
-rye_execute(item_type="tool", item_id="rye/core/registry/registry",
+rye_execute(item_id="rye/core/registry/registry",
   parameters={"action": "push", "item_type": "tool", "item_id": "your-namespace/category/name"})
 ```
 
 **Pull** — download an item from the registry to your local space
 ```
-rye_execute(item_type="tool", item_id="rye/core/registry/registry",
+rye_execute(item_id="rye/core/registry/registry",
   parameters={"action": "pull", "item_type": "tool", "item_id": "author/category/name"})
 ```
 
 **Publish** — make a pushed item publicly visible
 ```
-rye_execute(item_type="tool", item_id="rye/core/registry/registry",
+rye_execute(item_id="rye/core/registry/registry",
   parameters={"action": "publish", "item_type": "tool", "item_id": "your-namespace/category/name"})
 ```
 

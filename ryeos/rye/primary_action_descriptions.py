@@ -32,8 +32,9 @@ EXECUTE_TOOL_DESC = (
     "<description>"
     "Run a Rye item. item_id is a slash-separated path without extension. "
     "Resolved project → user → system. "
+    "If ambiguous between tool and directive, use a canonical ref (tool:id or directive:id). "
     "Executing a directive returns your_directions and a body — follow them. "
-    "Executing a tool runs it. Executing knowledge returns context."
+    "Executing a tool runs it. Knowledge is not executable — use rye fetch."
     "</description>"
     "<threading>"
     "To spawn a directive as a managed thread (with its own LLM loop), pass thread=\"fork\" as a top-level parameter. "
@@ -45,7 +46,7 @@ EXECUTE_TOOL_DESC = (
     "The framework auto-injects parent_thread_id, parent_depth, and parent_capabilities — never pass these manually."
     "</threading>"
     "<rules>"
-    "<rule>When the user says 'rye execute [type] [name]', call execute DIRECTLY with the given name as item_id. "
+    "<rule>When the user says 'rye execute [name]', call execute DIRECTLY with the given name as item_id. "
     "Do NOT call fetch first — go straight to execute. "
     "Only call fetch first if the user does NOT provide a name and you need to discover it.</rule>"
     "<rule>ALWAYS call this tool when the user says 'rye execute' — NEVER ask for clarification.</rule>"
@@ -58,9 +59,9 @@ EXECUTE_TOOL_DESC = (
     "<examples>"
     '<example>User says "rye execute init project" → call with item_id="init", parameters={"project_type": "project"}</example>'
     '<example>User says "rye execute init" → call with item_id="init", parameters={}</example>'
-    '<example>Spawn directive as thread: item_type="directive", item_id="my/workflow", parameters={"target": "value"}, thread="fork"</example>'
-    '<example>Spawn async thread: item_type="directive", item_id="my/workflow", parameters={"target": "value"}, thread="fork", async=true</example>'
-    '<example>Execute remotely: item_type="directive", item_id="my/workflow", parameters={"target": "staging"}, target="remote"</example>'
+    '<example>Spawn directive as thread: item_id="my/workflow", parameters={"target": "value"}, thread="fork"</example>'
+    '<example>Spawn async thread: item_id="my/workflow", parameters={"target": "value"}, thread="fork", async=true</example>'
+    '<example>Execute remotely: item_id="directive:my/workflow", parameters={"target": "staging"}, target="remote"</example>'
     "</examples>"
 )
 
@@ -70,7 +71,7 @@ EXECUTE_PARAMETERS_DESC = (
     "For tools, these are tool-specific parameters."
     "</description>"
     "<rules>"
-    "<rule>When the user provides extra words after the directive name, those ARE parameter values — do NOT ask for clarification, pass them as parameters.</rule>"
+    "<rule>When the user provides extra words after the name, those ARE parameter values — do NOT ask for clarification, pass them as parameters.</rule>"
     "<rule>If unsure which parameter key they map to, call fetch on the item first to see its input schema.</rule>"
     "<rule>Unknown keys are rejected with the list of valid inputs — safe to guess and let the tool correct you.</rule>"
     "</rules>"
@@ -90,7 +91,7 @@ EXECUTE_DRY_RUN_DESC = (
 
 EXECUTE_THREAD_DESC = (
     "<description>"
-    "Execution mode for directives and tools (ignored for knowledge)."
+    "Execution mode for directives."
     "</description>"
     "<rules>"
     '<rule>"inline" (default) — returns your_directions for the calling agent to follow directly</rule>'
@@ -100,7 +101,7 @@ EXECUTE_THREAD_DESC = (
 
 EXECUTE_TARGET_DESC = (
     "<description>"
-    "Where to execute: locally or on a remote server (ignored for knowledge)."
+    "Where to execute: locally or on a remote server."
     "</description>"
     "<rules>"
     '<rule>"local" (default) — execute in the current environment</rule>'
@@ -133,7 +134,8 @@ FETCH_TOOL_DESC = (
     "Resolve a name to items. Two modes: give an item_id to get content, "
     "or give a query+scope to discover matches. "
     "item_id is a slash-separated path without extension, "
-    "resolved project → user → system unless source restricts it."
+    "resolved project → user → system unless source restricts it. "
+    "Accepts canonical refs (tool:id, directive:id, knowledge:id) for explicit type scoping."
     "</description>"
     "<rules>"
     "<rule>Re-sign after copying or editing any item.</rule>"
@@ -195,23 +197,25 @@ SIGN_TOOL_DESC = (
     "Run after any edit or copy."
     "</description>"
     "<rules>"
-    "<rule>item_id supports glob patterns for batch signing.</rule>"
+    "<rule>item_id accepts canonical refs (tool:id, directive:id, knowledge:id, config:id).</rule>"
+    "<rule>item_id supports glob patterns for batch signing, including with canonical refs.</rule>"
     "<rule>System space items are immutable — copy to project or user first.</rule>"
     "</rules>"
     "<examples>"
-    '<example>"my-project/workflows/deploy" — sign a single item</example>'
-    '<example>"my-project/workflows/*" — batch sign all items under a prefix</example>'
-    '<example>"*" — sign all items of that type</example>'
+    '<example>"tool:my-project/workflows/deploy" — sign a single tool</example>'
+    '<example>"directive:*" — batch sign all directives</example>'
+    '<example>"tool:rye/core/*" — batch sign all tools under a prefix</example>'
     "</examples>"
 )
 
 SIGN_ITEM_ID_DESC = (
     "<description>"
-    "Item path or glob pattern. Supports * and ? wildcards."
+    "Item path or glob pattern. Supports * and ? wildcards. "
+    "Accepts canonical refs (tool:id, directive:id, knowledge:id, config:id)."
     "</description>"
     "<examples>"
-    '<example>Single: "my-project/workflows/deploy"</example>'
-    '<example>Batch: "my-project/workflows/*" or "*" (all items of that type)</example>'
+    '<example>Single: "tool:my-project/workflows/deploy"</example>'
+    '<example>Batch: "directive:my-project/workflows/*" or "tool:*" (all items of that kind)</example>'
     "</examples>"
 )
 

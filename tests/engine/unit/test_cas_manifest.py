@@ -244,7 +244,7 @@ class TestBuildManifest:
         _make_project(tmp_path)
         h, m = build_manifest(tmp_path, "project")
 
-        assert m["schema"] == 1
+        assert m["schema"] == 2
         assert m["kind"] == "source_manifest"
         assert m["space"] == "project"
         assert len(m["items"]) == 4

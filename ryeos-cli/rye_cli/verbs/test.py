@@ -37,8 +37,7 @@ def handle(args, project_path: str):
 
     tool = ExecuteTool(str(get_user_space()))
     result = run_async(tool.handle(
-        item_type="tool",
-        item_id="rye/dev/test-runner",
+        item_id="tool:rye/dev/test-runner",
         project_path=project_path,
         parameters=params,
     ))

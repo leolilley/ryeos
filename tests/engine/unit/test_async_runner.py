@@ -20,8 +20,7 @@ class TestRun:
     @pytest.mark.asyncio
     async def test_calls_execute_tool(self, tmp_path):
         payload = {
-            "item_type": "tool",
-            "item_id": "my/tool",
+            "item_id": "tool:my/tool",
             "parameters": {"key": "val"},
         }
         expected = {"status": "success", "data": {"output": "done"}}
@@ -33,8 +32,7 @@ class TestRun:
 
         assert result == expected
         mock_handle.assert_awaited_once_with(
-            item_type="tool",
-            item_id="my/tool",
+            item_id="tool:my/tool",
             project_path=str(tmp_path),
             parameters={"key": "val"},
             target="local",
@@ -44,8 +42,7 @@ class TestRun:
     @pytest.mark.asyncio
     async def test_forwards_target_and_thread_params(self, tmp_path):
         payload = {
-            "item_type": "tool",
-            "item_id": "my/tool",
+            "item_id": "tool:my/tool",
             "parameters": {},
             "target": "remote",
             "thread": "inline",
@@ -62,7 +59,7 @@ class TestRun:
 
     @pytest.mark.asyncio
     async def test_defaults_empty_parameters(self, tmp_path):
-        payload = {"item_type": "tool", "item_id": "x"}
+        payload = {"item_id": "tool:x"}
 
         mock_handle = AsyncMock(return_value={"status": "success"})
         with patch("rye.actions.execute.ExecuteTool") as MockET:
@@ -122,7 +119,7 @@ class TestRegistryIntegration:
 
             actual_result = asyncio.run(
                 _run(
-                    {"item_type": "tool", "item_id": "x", "parameters": {}},
+                    {"item_id": "tool:x", "parameters": {}},
                     str(tmp_path),
                 )
             )
@@ -150,7 +147,7 @@ class TestRegistryIntegration:
 
             actual_result = asyncio.run(
                 _run(
-                    {"item_type": "tool", "item_id": "x", "parameters": {}},
+                    {"item_id": "tool:x", "parameters": {}},
                     str(tmp_path),
                 )
             )

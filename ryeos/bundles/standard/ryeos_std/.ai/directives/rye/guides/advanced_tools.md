@@ -89,15 +89,15 @@ The `_ANCHOR` pattern is used throughout Rye's own tools. The executor sets up t
 Bundles package multi-file tools (and directives and knowledge) for distribution. The manifest lists every file with its SHA256 hash.
 </render>
     <instruction>Output the render block above, then list existing bundles:</instruction>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "list"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "list"})</tool_call>
     <render>
 To create a bundle from your project's .ai/ directory:
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "create", "bundle_id": "my-bundle", "version": "1.0.0"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "create", "bundle_id": "my-bundle", "version": "1.0.0"})</tool_call>
     <render>
 To verify an existing bundle:
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "verify", "bundle_id": "rye-os"})</tool_call>
+    <tool_call>rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "verify", "bundle_id": "rye-os"})</tool_call>
     <instruction>Execute the verify command on the rye-os bundle above. Show the verification report to the user.</instruction>
     <render>
 Dual protection — the manifest itself is signed, AND each file inside has its own signature. If anyone tampers with a single file, both the inline signature and the manifest hash catch it.

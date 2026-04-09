@@ -287,7 +287,7 @@ def _load_exclude_dirs(tool_search_paths: List[Tuple[Path, str]]) -> frozenset:
 
 
 def _resolve_items_for_type(
-    item_type: str,
+    kind: str,
     patterns: List[str],
     search_paths: List[Tuple[Path, str]],
     extensions: List[str],

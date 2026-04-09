@@ -14,7 +14,7 @@ from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel import NotificationOptions
 from mcp.types import Tool, TextContent
 
-from rye.constants import ItemType, Action
+from rye.constants import Action
 from rye.primary_action_descriptions import (
     EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
@@ -30,7 +30,6 @@ from rye.primary_action_descriptions import (
     FETCH_SOURCE_DESC,
     FETCH_TOOL_DESC,
     ITEM_ID_DESC,
-    ITEM_TYPE_DESC,
     PROJECT_PATH_DESC,
     SIGN_ITEM_ID_DESC,
     SIGN_SOURCE_DESC,
@@ -79,11 +78,6 @@ class RYEServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "item_type": {
-                                "type": "string",
-                                "enum": ["directive", "tool", "knowledge"],
-                                "description": ITEM_TYPE_DESC,
-                            },
                             "item_id": {
                                 "type": "string",
                                 "description": ITEM_ID_DESC,
@@ -129,11 +123,6 @@ class RYEServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "item_type": {
-                                "type": "string",
-                                "enum": ["directive", "tool", "knowledge"],
-                                "description": ITEM_TYPE_DESC,
-                            },
                             "item_id": {
                                 "type": "string",
                                 "description": ITEM_ID_DESC,
@@ -172,7 +161,7 @@ class RYEServer:
                                 "description": EXECUTE_RESUME_THREAD_ID_DESC,
                             },
                         },
-                        "required": ["item_type", "item_id", "project_path"],
+                        "required": ["item_id", "project_path"],
                     },
                 ),
                 Tool(
@@ -181,11 +170,6 @@ class RYEServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "item_type": {
-                                "type": "string",
-                                "enum": ItemType.SIGNABLE,
-                                "description": ITEM_TYPE_DESC,
-                            },
                             "item_id": {
                                 "type": "string",
                                 "description": SIGN_ITEM_ID_DESC,
@@ -202,7 +186,7 @@ class RYEServer:
                             },
                             "parameters": {"type": "object"},
                         },
-                        "required": ["item_type", "item_id", "project_path"],
+                        "required": ["item_id", "project_path"],
                     },
                 ),
             ]

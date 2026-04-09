@@ -83,7 +83,7 @@ Create a directive with full thread execution support — model configuration, c
     Parse {input:permissions_needed} into hierarchical permission entries grouped by primary action (execute, fetch, sign).
     Use {input:process_steps} if provided to write the process steps.
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/directives/{input:category}/{input:name}.md", "content": "<generated directive content>", "create_dirs": true})`
 
   </step>
 

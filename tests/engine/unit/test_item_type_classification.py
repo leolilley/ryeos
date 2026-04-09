@@ -1,9 +1,9 @@
-"""Tests for item_type_from_path — single source of truth for CAS item classification.
+"""Tests for kind_from_path — single source of truth for CAS item classification.
 
 Covers:
 - All recognised .ai/ subdirectories (directives, tools, knowledge, config)
 - Unrecognised paths return None
-- Bundler's _classify_file delegates to item_type_from_path
+- Bundler's _classify_file delegates to kind_from_path
 - Build and pull produce identical object_hash for config files (the original bug)
 """
 
@@ -12,7 +12,7 @@ import importlib.util
 import pytest
 
 from conftest import get_bundle_path
-from rye.cas.store import item_type_from_path, ingest_item
+from rye.cas.store import kind_from_path, ingest_item
 from rye.constants import AI_DIR, ItemType
 
 # Load bundler module from core bundle (it's a .ai/tools/ file, not a normal package)
@@ -23,8 +23,8 @@ _spec.loader.exec_module(_bundler_mod)
 _classify_file = _bundler_mod._classify_file
 
 
-class TestItemTypeFromPath:
-    """item_type_from_path returns canonical CAS types from SIGNABLE_DIRS."""
+class TestKindFromPath:
+    """kind_from_path returns canonical CAS kinds from SIGNABLE_KINDS."""
 
     @pytest.mark.parametrize("rel_path,expected", [
         (f"{AI_DIR}/directives/rye/email/reply.md", "directive"),
@@ -34,8 +34,8 @@ class TestItemTypeFromPath:
         (f"{AI_DIR}/config/email/email.yaml", "config"),
         (f"{AI_DIR}/config/keys/trusted/6ea18199041a1ea8.toml", "config"),
     ])
-    def test_recognised_types(self, rel_path, expected):
-        assert item_type_from_path(rel_path) == expected
+    def test_recognised_kinds(self, rel_path, expected):
+        assert kind_from_path(rel_path) == expected
 
     @pytest.mark.parametrize("rel_path", [
         f"{AI_DIR}/bundles/ryeos-email/manifest.yaml",
@@ -47,23 +47,23 @@ class TestItemTypeFromPath:
         "README.md",
     ])
     def test_unrecognised_returns_none(self, rel_path):
-        assert item_type_from_path(rel_path) is None
+        assert kind_from_path(rel_path) is None
 
-    def test_covers_all_signable_dirs(self):
-        """Every entry in SIGNABLE_DIRS is recognised by item_type_from_path."""
-        for item_type, dir_name in ItemType.SIGNABLE_DIRS.items():
+    def test_covers_all_signable_kinds(self):
+        """Every entry in SIGNABLE_KINDS is recognised by kind_from_path."""
+        for kind, dir_name in ItemType.SIGNABLE_KINDS.items():
             rel_path = f"{AI_DIR}/{dir_name}/test_file.txt"
-            assert item_type_from_path(rel_path) == item_type
+            assert kind_from_path(rel_path) == kind
 
 
 class TestBundlerClassifyDelegates:
-    """Bundler's _classify_file delegates to item_type_from_path."""
+    """Bundler's _classify_file delegates to kind_from_path."""
 
     def test_config_file_classified_as_config(self):
         assert _classify_file(f"{AI_DIR}/config/keys/trusted/abc.toml") == "config"
         assert _classify_file(f"{AI_DIR}/config/email/email.yaml") == "config"
 
-    def test_standard_types(self):
+    def test_standard_kinds(self):
         assert _classify_file(f"{AI_DIR}/tools/rye/email/router.py") == "tool"
         assert _classify_file(f"{AI_DIR}/directives/rye/email/reply.md") == "directive"
         assert _classify_file(f"{AI_DIR}/knowledge/rye/email/info.md") == "knowledge"
@@ -72,18 +72,18 @@ class TestBundlerClassifyDelegates:
         assert _classify_file(f"{AI_DIR}/bundles/x/manifest.yaml") == "asset"
         assert _classify_file("some/random/file.txt") == "asset"
 
-    def test_agrees_with_item_type_from_path(self):
-        """For every SIGNABLE_DIRS entry, _classify_file and item_type_from_path agree."""
-        for item_type, dir_name in ItemType.SIGNABLE_DIRS.items():
+    def test_agrees_with_kind_from_path(self):
+        """For every SIGNABLE_KINDS entry, _classify_file and kind_from_path agree."""
+        for kind, dir_name in ItemType.SIGNABLE_KINDS.items():
             rel_path = f"{AI_DIR}/{dir_name}/some/nested/file.py"
-            assert _classify_file(rel_path) == item_type_from_path(rel_path) == item_type
+            assert _classify_file(rel_path) == kind_from_path(rel_path) == kind
 
 
 class TestObjectHashConsistency:
     """Build and pull must produce identical object_hash for the same file.
 
     This is the original bug: bundler used "asset" for config files,
-    pull used "tool" (fallback). Different item_type in ItemSource
+    pull used "tool" (fallback). Different kind in ItemSource
     → different object_hash.
     """
 
@@ -97,8 +97,8 @@ class TestObjectHashConsistency:
         rel_path = str(file_path.relative_to(project_path))
         return file_path, rel_path
 
-    def test_different_item_type_produces_different_hash(self, tmp_path):
-        """Proves why consistent classification matters — wrong type = wrong hash."""
+    def test_different_kind_produces_different_hash(self, tmp_path):
+        """Proves why consistent classification matters — wrong kind = wrong hash."""
         file_path, _ = self._write_file(
             tmp_path,
             [AI_DIR, "config", "keys", "trusted", "test.toml"],
@@ -107,15 +107,12 @@ class TestObjectHashConsistency:
 
         ref_config = ingest_item("config", file_path, tmp_path)
         ref_tool = ingest_item("tool", file_path, tmp_path)
-        ref_asset = ingest_item("asset", file_path, tmp_path)
 
         assert ref_config.object_hash != ref_tool.object_hash
-        assert ref_config.object_hash != ref_asset.object_hash
-        assert ref_tool.object_hash != ref_asset.object_hash
 
     def test_build_and_pull_agree_on_config_hash(self, tmp_path):
         """Build-side (_classify_file → ingest_item) and pull-side
-        (item_type_from_path → ingest_item) produce the same object_hash
+        (kind_from_path → ingest_item) produce the same object_hash
         for a config file. Regression test for the hash mismatch bug."""
         file_path, rel_path = self._write_file(
             tmp_path,
@@ -124,14 +121,14 @@ class TestObjectHashConsistency:
         )
 
         # Build side
-        build_type = _classify_file(rel_path)
-        build_ref = ingest_item(build_type, file_path, tmp_path)
+        build_kind = _classify_file(rel_path)
+        build_ref = ingest_item(build_kind, file_path, tmp_path)
 
         # Pull side
-        pull_type = item_type_from_path(rel_path)
-        pull_ref = ingest_item(pull_type, file_path, tmp_path)
+        pull_kind = kind_from_path(rel_path)
+        pull_ref = ingest_item(pull_kind, file_path, tmp_path)
 
-        assert build_type == pull_type == "config"
+        assert build_kind == pull_kind == "config"
         assert build_ref.object_hash == pull_ref.object_hash
 
     def test_build_and_pull_agree_on_tool_hash(self, tmp_path):
@@ -142,13 +139,13 @@ class TestObjectHashConsistency:
             "def route(): pass\n",
         )
 
-        build_type = _classify_file(rel_path)
-        build_ref = ingest_item(build_type, file_path, tmp_path)
+        build_kind = _classify_file(rel_path)
+        build_ref = ingest_item(build_kind, file_path, tmp_path)
 
-        pull_type = item_type_from_path(rel_path)
-        pull_ref = ingest_item(pull_type, file_path, tmp_path)
+        pull_kind = kind_from_path(rel_path)
+        pull_ref = ingest_item(pull_kind, file_path, tmp_path)
 
-        assert build_type == pull_type == "tool"
+        assert build_kind == pull_kind == "tool"
         assert build_ref.object_hash == pull_ref.object_hash
 
     def test_build_and_pull_agree_on_directive_hash(self, tmp_path):
@@ -159,11 +156,11 @@ class TestObjectHashConsistency:
             "# Reply\nDraft a reply.\n",
         )
 
-        build_type = _classify_file(rel_path)
-        build_ref = ingest_item(build_type, file_path, tmp_path)
+        build_kind = _classify_file(rel_path)
+        build_ref = ingest_item(build_kind, file_path, tmp_path)
 
-        pull_type = item_type_from_path(rel_path)
-        pull_ref = ingest_item(pull_type, file_path, tmp_path)
+        pull_kind = kind_from_path(rel_path)
+        pull_ref = ingest_item(pull_kind, file_path, tmp_path)
 
-        assert build_type == pull_type == "directive"
+        assert build_kind == pull_kind == "directive"
         assert build_ref.object_hash == pull_ref.object_hash

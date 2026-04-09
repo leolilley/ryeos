@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:bb91580d1d4e297308c1ac99ecd753880a69105cbcc85a0cd9030ff25e07fc3e:ZMHPNCbCZtaxzjwNFi_HNnGuUwmGwseV9rEUkQMqIOHiLogBM-xIimAZ2xzwINMCG76re5gwVUueCFIAzttyDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:bb91580d1d4e297308c1ac99ecd753880a69105cbcc85a0cd9030ff25e07fc3e:ZMHPNCbCZtaxzjwNFi_HNnGuUwmGwseV9rEUkQMqIOHiLogBM-xIimAZ2xzwINMCG76re5gwVUueCFIAzttyDQ:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Web Search
 
@@ -38,7 +38,7 @@ Search the web using DuckDuckGo or Exa and return results.
 
   <step name="execute_search">
     Call the web search tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/web/search/search", parameters={"query": "{input:query}", "num_results": "{input:num_results}", "provider": "{input:provider}"})`
+    `rye_execute(item_id="rye/web/search/search", parameters={"query": "{input:query}", "num_results": "{input:num_results}", "provider": "{input:provider}"})`
   </step>
 
   <step name="return_results">

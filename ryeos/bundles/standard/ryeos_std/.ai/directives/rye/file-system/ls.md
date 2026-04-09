@@ -37,7 +37,7 @@ List files and directories at a given path.
 
   <step name="call_ls">
     List the directory:
-    `rye_execute(item_type="tool", item_id="rye/file-system/ls", parameters={"path": "{input:path}"})`
+    `rye_execute(item_id="rye/file-system/ls", parameters={"path": "{input:path}"})`
   </step>
 
   <step name="return_result">

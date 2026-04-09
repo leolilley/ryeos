@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:f546b5f6421d47d19963c045c036f98a43070b2b55ca349751074feb7b8ed4f3:0_8-sIdM01OwaktWDcEpDjiVLp3_5xiIQShRna0wq84z14RNRmkxrJadqtpE-9Mb_uJD-Ym3G_gjpMVgrMRlAw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:f546b5f6421d47d19963c045c036f98a43070b2b55ca349751074feb7b8ed4f3:0_8-sIdM01OwaktWDcEpDjiVLp3_5xiIQShRna0wq84z14RNRmkxrJadqtpE-9Mb_uJD-Ym3G_gjpMVgrMRlAw:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # LSP Query
 
@@ -40,7 +40,7 @@ Query language servers — go to definition, find references, hover info, docume
 
   <step name="run_lsp">
     Call the LSP tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/code/lsp/lsp", parameters={"operation": "{input:operation}", "file_path": "{input:file_path}", "line": "{input:line}", "character": "{input:character}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/code/lsp/lsp", parameters={"operation": "{input:operation}", "file_path": "{input:file_path}", "line": "{input:line}", "character": "{input:character}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_result">

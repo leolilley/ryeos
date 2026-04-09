@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:25Z:103e5e42d6078c6ad5b492f85d4697330840133dc9b1aab4428082c93c15c304:E_NoLRpoMBigAXb5EZqr_VkRCHzPJJsxc3RjLJoWL_CEsJYLj9WcYnHtX_r7neaql-61wcJs7OT6-98HUM1WBg:4b987fd4e40303ac
+# rye:signed:2026-04-09T05:07:28Z:e51aa3f3dc8d4800e0e8c3fdc13753a0dd20a01254cabe1ff062e00835bd1657:BxH23od_grIjs26xe8m3ivjYMM1AqyzuCx_okpD6Vck9IhP8y2ZE_s8s-VhrdAMF42gL44t_nJsdATxv4UNrCg:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rye.constants import Action
+from rye.constants import Action, ItemType
 from rye.actions.fetch import FetchTool
 from rye.actions.execute import ExecuteTool
 from rye.actions.sign import SignTool
@@ -27,15 +27,15 @@ class ToolDispatcher:
     Translates hook/action dict format to core tool handle() kwargs.
 
     Action dict format (from hooks and parsed directive actions):
-        {"primary": "execute", "item_type": "tool", "item_id": "...", "params": {...}}
+        {"primary": "execute", "kind": "tool", "item_id": "...", "params": {...}}
 
     Internal tools (rye/agent/threads/internal/*) are executed in-process
     to preserve live thread context objects (emitter, transcript).
 
     Core tool handle() kwargs:
-        ExecuteTool.handle(item_type=, item_id=, project_path=, parameters=, dry_run=)
-        FetchTool.handle(item_id=, item_type=, project_path=, source=, query=, scope=, limit=)
-        SignTool.handle(item_type=, item_id=, project_path=, source=)
+        ExecuteTool.handle(item_id=, project_path=, parameters=, dry_run=)
+        FetchTool.handle(item_id=, project_path=, source=, query=, scope=, limit=)
+        SignTool.handle(item_id=, project_path=, source=)
     """
 
     def __init__(self, project_path: Path):
@@ -53,17 +53,16 @@ class ToolDispatcher:
             return action[key]
         return params.get(key, default)
 
-    async def dispatch(
-        self, action: Dict, thread_context: Optional[Dict] = None
-    ) -> Dict:
+    async def dispatch(self, action: Dict) -> Dict:
         """Dispatch an action dict to the appropriate core tool."""
         primary = action.get("primary", "execute")
         tool = self._tools.get(primary)
         if not tool:
             return {"status": "error", "error": f"Unknown primary action: {primary}"}
 
-        item_type = action.get("item_type", "tool")
-        item_id = action.get("item_id", "")
+        kind = action.get("kind", "tool")
+        bare_id = action.get("item_id", "")
+        item_ref = ItemType.make_canonical_ref(kind, bare_id) if bare_id else ""
         params = dict(action.get("params", {}))
 
         project_path_str = str(self.project_path)
@@ -80,8 +79,7 @@ class ToolDispatcher:
         try:
             if primary == Action.EXECUTE:
                 return await tool.handle(
-                    item_type=item_type,
-                    item_id=item_id,
+                    item_id=item_ref,
                     project_path=project_path_str,
                     parameters=params,
                     dry_run=action.get("dry_run", False),
@@ -89,11 +87,9 @@ class ToolDispatcher:
             elif primary == Action.FETCH:
                 # Pass through all fetch params — FetchTool handles mode detection
                 fetch_kwargs = {"project_path": project_path_str}
-                # ID mode params
-                if item_id:
-                    fetch_kwargs["item_id"] = item_id
-                if item_type and item_type != "tool":  # Don't pass default
-                    fetch_kwargs["item_type"] = item_type
+                # ID mode params — pass canonical ref
+                if bare_id:
+                    fetch_kwargs["item_id"] = item_ref
                 # Query mode params
                 query = self._get(action, params, "query", None)
                 if query:
@@ -114,8 +110,7 @@ class ToolDispatcher:
                 return await tool.handle(**fetch_kwargs)
             elif primary == Action.SIGN:
                 return await tool.handle(
-                    item_type=item_type,
-                    item_id=item_id,
+                    item_id=item_ref,
                     project_path=project_path_str,
                     source=self._get(action, params, "source", "project"),
                 )
@@ -124,17 +119,15 @@ class ToolDispatcher:
                 import traceback
                 logger.error(
                     "Dispatch %s %s/%s failed: %s\n%s",
-                    primary, item_type, item_id, e, traceback.format_exc()
+                    primary, kind, bare_id, e, traceback.format_exc()
                 )
             return {"status": "error", "error": str(e)}
 
         return {"status": "error", "error": f"Unhandled primary: {primary}"}
 
-    async def dispatch_parallel(
-        self, actions: list, thread_context: Optional[Dict] = None
-    ) -> list:
+    async def dispatch_parallel(self, actions: list) -> list:
         """Dispatch multiple actions concurrently."""
         import asyncio
 
-        tasks = [self.dispatch(action, thread_context) for action in actions]
+        tasks = [self.dispatch(action) for action in actions]
         return await asyncio.gather(*tasks, return_exceptions=True)

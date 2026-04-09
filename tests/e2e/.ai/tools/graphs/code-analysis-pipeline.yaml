@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T09:47:33Z:31e3242581ffe492e005529ef4b6568ecbf95362f408a7167edbc5e45650bb07:Mblj0igImPBI07C-XUHQe1KzbBLekz60v90lPaIEZQRr9PUozunVCgl0OZuof2tUgO0tdV14WeSccccoNcG1BA==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:946669fa4eff9fc6f81e41af8ca58b53b821f6bf3b126cf69bde147136a0567b:SbkcKD4BlpapnBfTU0rgzVB_vFQF26tpXqGz2r8suAhyIyX5MMO3Ht3foCw-ARs2SiaBCC2PbplEOmjqdUSbBw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -29,8 +29,7 @@ config:
     read_file:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat ${inputs.file_path}"
       assign:
@@ -40,8 +39,7 @@ config:
     analyze:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/analyze_code
           inputs:
@@ -58,8 +56,7 @@ config:
     read_analysis:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat ${inputs.output_dir}/analysis.json 2>/dev/null || echo '{\"error\": \"file not found\"}'"
       assign:
@@ -69,8 +66,7 @@ config:
     write_report:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir} && echo '# Code Analysis Report\n\n## Source File\n${inputs.file_path}\n\n## Analysis\n${state.analysis_json}\n\n## Thread\n${state.thread_id}' > ${inputs.output_dir}/report.md"
       assign:

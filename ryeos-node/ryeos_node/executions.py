@@ -17,7 +17,6 @@ def register_execution(
     cas_base: str,
     user_fp: str,
     thread_id: str,
-    item_type: str,
     item_id: str,
     project_manifest_hash: str,
     user_manifest_hash: str | None,
@@ -31,7 +30,6 @@ def register_execution(
         record = {
             "thread_id": thread_id,
             "user_id": user_fp,
-            "item_type": item_type,
             "item_id": item_id,
             "execution_mode": "remote",
             "remote_name": remote_name,

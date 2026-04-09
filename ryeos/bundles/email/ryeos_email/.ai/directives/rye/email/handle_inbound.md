@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:8691bced5af8a19f96eb9001804a0dcd0a496a475e3ee3663a4b5f813a127302:6uSymr08NxjLyuJ2DNlIq6b6MApxors6N3LzRRYNqQLmLfFj3-buV1Sysr9Yb7lTAeKZwiLTm3GEfNFQU2CsCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:8691bced5af8a19f96eb9001804a0dcd0a496a475e3ee3663a4b5f813a127302:6uSymr08NxjLyuJ2DNlIq6b6MApxors6N3LzRRYNqQLmLfFj3-buV1Sysr9Yb7lTAeKZwiLTm3GEfNFQU2CsCw:4b987fd4e40303ac -->
 # Handle Inbound Email
 
 Process an inbound email: classify it, take appropriate action based on handling rules.
@@ -77,7 +77,7 @@ Process an inbound email: classify it, take appropriate action based on handling
 
     **If forward required (lead reply, business inquiry, unknown):**
     Draft a suggested response if applicable, then forward:
-    `rye_execute(item_type="directive", item_id="rye/email/forward", parameters={"email_id": "{input:email_id}", "classification": "<classification>", "lead_context": "<lead_data>", "suggested_response": "<draft>"})`
+    `rye_execute(item_id="rye/email/forward", parameters={"email_id": "{input:email_id}", "classification": "<classification>", "lead_context": "<lead_data>", "suggested_response": "<draft>"})`
 
     **If auto-action (spam, out-of-office, delivery confirmation):**
     Suppress — no forwarding. Update lead status if applicable.

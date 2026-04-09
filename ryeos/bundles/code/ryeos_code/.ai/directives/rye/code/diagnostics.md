@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:b1569f1d53127f25326f90ef2ad2db5bd9c453586c6ab9d044384832df726cdb:XXTeXX4UdBosjoi_Z_Kc8rLHfRn8F6-AVEqnNatLMFvZxXevwhrB4zUPQYxJwxk78G4OEd5TzB1XRlkLp9onCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:b1569f1d53127f25326f90ef2ad2db5bd9c453586c6ab9d044384832df726cdb:XXTeXX4UdBosjoi_Z_Kc8rLHfRn8F6-AVEqnNatLMFvZxXevwhrB4zUPQYxJwxk78G4OEd5TzB1XRlkLp9onCg:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Code Diagnostics
 
@@ -38,7 +38,7 @@ Run linters and type checkers on a file — ruff, mypy, eslint, tsc, and more.
 
   <step name="run_diagnostics">
     Call the diagnostics tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/code/diagnostics/diagnostics", parameters={"file_path": "{input:file_path}", "linters": "{input:linters}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/code/diagnostics/diagnostics", parameters={"file_path": "{input:file_path}", "linters": "{input:linters}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_diagnostics">

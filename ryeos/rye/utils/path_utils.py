@@ -45,14 +45,14 @@ class BundleInfo:
     source: str
     categories: Optional[List[str]] = None
 
-    def get_type_paths(self, item_type: str) -> List[Path]:
-        """Get item type directories for this bundle.
+    def get_kind_paths(self, kind: str) -> List[Path]:
+        """Get kind directories for this bundle.
 
         If categories is set, returns one path per category
         (e.g., .ai/tools/rye/core/). Otherwise returns the top-level
-        type directory (e.g., .ai/tools/).
+        kind directory (e.g., .ai/tools/).
         """
-        folder_name = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
+        folder_name = ItemType.SIGNABLE_KINDS.get(kind, kind)
         base = self.root_path / AI_DIR / folder_name
         if self.categories:
             return [base / cat for cat in self.categories]
@@ -99,7 +99,7 @@ def get_user_space() -> Path:
     """Get user space base directory from env var or default to home directory.
 
     Returns the base path (home dir or $USER_SPACE), not including .ai folder.
-    AI_DIR is appended by get_user_ai_path() and get_user_type_path().
+    AI_DIR is appended by get_user_ai_path() and get_user_kind_path().
     """
     user_space = os.getenv("USER_SPACE")
     if user_space:
@@ -264,26 +264,26 @@ def get_project_ai_path(project_path: Path) -> Path:
     return project_path / AI_DIR
 
 
-def get_project_type_path(project_path: Path, item_type: str) -> Path:
-    """Get item type directory in project space (e.g., {project}/.ai/tools/)."""
-    folder_name = get_type_folder(item_type)
+def get_project_kind_path(project_path: Path, kind: str) -> Path:
+    """Get kind directory in project space (e.g., {project}/.ai/tools/)."""
+    folder_name = get_kind_folder(kind)
     return project_path / AI_DIR / folder_name
 
 
-def get_user_type_path(item_type: str) -> Path:
-    """Get item type directory in user space (e.g., ~/.ai/tools/)."""
-    folder_name = get_type_folder(item_type)
+def get_user_kind_path(kind: str) -> Path:
+    """Get kind directory in user space (e.g., ~/.ai/tools/)."""
+    folder_name = get_kind_folder(kind)
     return get_user_space() / AI_DIR / folder_name
 
 
-def get_system_type_paths(item_type: str) -> List[Tuple[str, Path]]:
-    """Get item type directories across all system bundles.
+def get_system_kind_paths(kind: str) -> List[Tuple[str, Path]]:
+    """Get kind directories across all system bundles.
 
     Each bundle may contribute multiple paths if it has categories set.
     """
     result: List[Tuple[str, Path]] = []
     for bundle in get_system_spaces():
-        for path in bundle.get_type_paths(item_type):
+        for path in bundle.get_kind_paths(kind):
             result.append((bundle.bundle_id, path))
     return result
 
@@ -325,20 +325,20 @@ def get_extractor_search_paths(project_path: Optional[Path] = None) -> List[Path
     return paths
 
 
-def get_type_folder(item_type: str) -> str:
-    """Get folder name for item type.
+def get_kind_folder(kind: str) -> str:
+    """Get folder name for kind.
 
-    Uses SIGNABLE_DIRS so config items resolve correctly in signing
+    Uses SIGNABLE_KINDS so config items resolve correctly in signing
     and path-validation contexts.  Execute/fetch/sign gate on
-    TYPE_DIRS before calling path helpers, so config never leaks
+    KIND_DIRS before calling path helpers, so config never leaks
     into those flows.
     """
-    return ItemType.SIGNABLE_DIRS.get(item_type, item_type)
+    return ItemType.SIGNABLE_KINDS.get(kind, kind)
 
 
 def extract_category_path(
     file_path: Path,
-    item_type: str,
+    kind: str,
     location: str,
     project_path: Optional[Path] = None,
 ) -> str:
@@ -346,7 +346,7 @@ def extract_category_path(
 
     Args:
         file_path: Full path to the file
-        item_type: "directive", "tool", or "knowledge"
+        kind: "directive", "tool", or "knowledge"
         location: "project", "user", or "system"
         project_path: Project root (for project location)
 
@@ -358,7 +358,7 @@ def extract_category_path(
         .ai/directives/core/api/research.md -> "core/api"
         .ai/knowledge/patterns/api.md -> "patterns"
     """
-    folder_name = get_type_folder(item_type)
+    folder_name = get_kind_folder(kind)
     expected_base: Optional[Path] = None
 
     if location == "project":
@@ -429,7 +429,7 @@ def validate_name_matches_filename(
 def validate_category_matches_path(
     metadata_category: Optional[str],
     file_path: Path,
-    item_type: str,
+    kind: str,
     location: str,
     project_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -438,14 +438,14 @@ def validate_category_matches_path(
     Args:
         metadata_category: Category from metadata
         file_path: Path to the file
-        item_type: "directive", "tool", or "knowledge"
+        kind: "directive", "tool", or "knowledge"
         location: "project", "user", or "system"
         project_path: Project root (for project location)
 
     Returns:
         {"valid": bool, "issues": List[str], "path_category": str, "metadata_category": str}
     """
-    path_category = extract_category_path(file_path, item_type, location, project_path)
+    path_category = extract_category_path(file_path, kind, location, project_path)
     issues = []
 
     # Normalize: None or empty string both mean "root"
@@ -466,7 +466,7 @@ def validate_category_matches_path(
 
 def validate_path_structure(
     file_path: Path,
-    item_type: str,
+    kind: str,
     location: str,
     project_path: Optional[Path] = None,
     metadata_name: Optional[str] = None,
@@ -476,7 +476,7 @@ def validate_path_structure(
 
     Args:
         file_path: Path to validate
-        item_type: "directive", "tool", or "knowledge"
+        kind: "directive", "tool", or "knowledge"
         location: "project", "user", or "system"
         project_path: Project root (for project location)
         metadata_name: Name from metadata to validate against filename
@@ -493,7 +493,7 @@ def validate_path_structure(
     """
     issues: List[str] = []
     filename = extract_filename(file_path)
-    category = extract_category_path(file_path, item_type, location, project_path)
+    category = extract_category_path(file_path, kind, location, project_path)
 
     # Validate name if provided
     if metadata_name is not None:
@@ -503,7 +503,7 @@ def validate_path_structure(
     # Validate category if provided
     if metadata_category is not None:
         cat_result = validate_category_matches_path(
-            metadata_category, file_path, item_type, location, project_path
+            metadata_category, file_path, kind, location, project_path
         )
         issues.extend(cat_result["issues"])
 

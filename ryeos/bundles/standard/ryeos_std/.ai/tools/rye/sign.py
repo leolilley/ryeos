@@ -1,18 +1,16 @@
-# rye:signed:2026-04-06T04:14:24Z:4ed46d82c918090ac7e93e4888298111acf84f1020765e73f30f16f71a85fd91:m3H09WqlRajRWVl07WA0K12WfYJIqzYSXkjhR5JaSUCWkBo9H-R94HWhpiY45AWGKGU0G9pJtOhaGNlDxAYnDw:4b987fd4e40303ac
-"""Validate and sign a directive, tool, knowledge, or config item."""
+# rye:signed:2026-04-09T01:05:57Z:78dd1d36e791570314885ae8d0388f6b65f702e9444aa29b6984aca2ebe03743:wy5MmZ-UDyTos3fngDsruGFNQWWZPdzyUrCgKs20UXsTelJdsqRCG2rzaGu7-MSNKj2ffPIM8thyv-1ojZyqBA:4b987fd4e40303ac
+"""Validate and sign a Rye item file."""
 
 import argparse
 import json
 import asyncio
 
-from rye.constants import ItemType
 from rye.primary_action_descriptions import (
-    ITEM_TYPE_DESC,
     SIGN_ITEM_ID_DESC,
     SIGN_SOURCE_DESC,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
 __category__ = "rye"
@@ -21,11 +19,6 @@ __tool_description__ = "Validate structure and write an Ed25519 signature to a R
 CONFIG_SCHEMA = {
     "type": "object",
     "properties": {
-        "item_type": {
-            "type": "string",
-            "enum": ItemType.SIGNABLE,
-            "description": ITEM_TYPE_DESC,
-        },
         "item_id": {
             "type": "string",
             "description": SIGN_ITEM_ID_DESC,
@@ -37,7 +30,7 @@ CONFIG_SCHEMA = {
             "description": SIGN_SOURCE_DESC,
         },
     },
-    "required": ["item_type", "item_id"],
+    "required": ["item_id"],
 }
 
 
@@ -47,7 +40,6 @@ def execute(params: dict, project_path: str) -> dict:
 
         tool = SignTool()
         result = asyncio.run(tool.handle(
-            item_type=params["item_type"],
             item_id=params["item_id"],
             project_path=project_path,
             source=params.get("source", "project"),

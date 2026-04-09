@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:efc91f305a603c520848ee49e9f14fbddaae4dfe394cb0f2246649e6b4396480:yG-_IMkilrv1gozVl9LOWyC0F3Qc-33sD5k1rwWPxnDWwKKQPbc2L4Q5IFEQaqDZPUwEkOHtlfQfuCZRQRJRDA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:b08905c6ef9ae6b63caf49e66dae3830b8fe5acb51df1c9986ed34369dd8530b:QbMqOEEZTbOuyMkey7b6kS_NFkGB0NvxpJpKF_qj92deAPiQOvuvIfxR96JRsqo_r-lBXbU82d27HZoZLGjyCQ:4b987fd4e40303ac -->
 
 ```yaml
 name: file-operations
@@ -90,10 +90,10 @@ All read output includes persistent line IDs:
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/file-system/read",
+rye_execute(item_id="rye/file-system/read",
     parameters={"file_path": "src/main.py"})
 
-rye_execute(item_type="tool", item_id="rye/file-system/read",
+rye_execute(item_id="rye/file-system/read",
     parameters={"file_path": "src/main.py", "offset": 100, "limit": 50})
 ```
 

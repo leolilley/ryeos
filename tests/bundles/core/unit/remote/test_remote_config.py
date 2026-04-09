@@ -210,8 +210,7 @@ class TestRemoteExecuteThreadValidation:
         """_execute with no thread param → error."""
         mod = self._load_remote()
         result = await mod._execute(Path("/tmp/fake"), {
-            "item_type": "tool",
-            "item_id": "test/tool",
+            "item_id": "tool:test/tool",
             "parameters": {},
         })
         assert "error" in result
@@ -221,8 +220,7 @@ class TestRemoteExecuteThreadValidation:
         """_execute with thread='' → error."""
         mod = self._load_remote()
         result = await mod._execute(Path("/tmp/fake"), {
-            "item_type": "tool",
-            "item_id": "test/tool",
+            "item_id": "tool:test/tool",
             "parameters": {},
             "thread": "",
         })
@@ -230,20 +228,19 @@ class TestRemoteExecuteThreadValidation:
         assert "thread" in result["error"].lower()
 
     async def test_missing_item_type_returns_error(self):
-        """_execute with no item_type → error."""
+        """_execute with bare item_id (no canonical ref) → error."""
         mod = self._load_remote()
         result = await mod._execute(Path("/tmp/fake"), {
             "item_id": "test/tool",
             "thread": "inline",
         })
         assert "error" in result
-        assert "item_type" in result["error"]
+        assert "canonical" in result["error"].lower() or "item_id" in result["error"]
 
     async def test_missing_item_id_returns_error(self):
         """_execute with no item_id → error."""
         mod = self._load_remote()
         result = await mod._execute(Path("/tmp/fake"), {
-            "item_type": "tool",
             "thread": "inline",
         })
         assert "error" in result

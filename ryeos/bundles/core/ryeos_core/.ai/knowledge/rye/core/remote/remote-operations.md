@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:15:08Z:69ca8fd6f759aa6a5d27ac317e16b934d4ae90300c7701155fdb398fd1e95ecb:ERJQncf8XIFnH1zGeIEpwQjyS-4npnVcT8FAw4PEcdZQam_tfsAbPFVHypSo2Rkt4XzmmwQ3BzX2xbMMmYMNCA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:69ca8fd6f759aa6a5d27ac317e16b934d4ae90300c7701155fdb398fd1e95ecb:ERJQncf8XIFnH1zGeIEpwQjyS-4npnVcT8FAw4PEcdZQam_tfsAbPFVHypSo2Rkt4XzmmwQ3BzX2xbMMmYMNCA:4b987fd4e40303ac -->
 
 ```yaml
 name: remote-operations

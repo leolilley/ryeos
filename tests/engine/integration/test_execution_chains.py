@@ -147,7 +147,7 @@ class TestErrorHandling:
         """Test tool not found scenario."""
         from rye.utils.errors import ErrorResponse
         
-        err = ErrorResponse.not_found("tool", "missing_tool")
+        err = ErrorResponse.not_found("tool:missing_tool")
         result = err.to_dict()
         
         assert result["success"] is False

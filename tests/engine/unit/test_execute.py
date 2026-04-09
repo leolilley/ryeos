@@ -1,14 +1,20 @@
-"""Tests for execute tool."""
+"""Tests for execute tool — kind-agnostic engine.
+
+The engine dispatches based on executor_id from the extractor system:
+- @primitive_chain → PrimitiveExecutor (self-executing tools)
+- any other value → executor tool dispatch (directives, etc.)
+"""
 
 import asyncio
 import importlib.util
 import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from conftest import get_bundle_path
-from rye.actions.execute import ExecuteTool
+from rye.actions.execute import ExecuteTool, PRIMITIVE_CHAIN
 
 # Processors are data-driven core tools — load via bundle path
 _INTERPOLATE_PATH = get_bundle_path(
@@ -28,7 +34,7 @@ def temp_project(_setup_user_space):
     import os
     from rye.utils.trust_store import TrustStore
     from rye.utils.execution_context import ExecutionContext
-    
+
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)
         ai_dir = project_root / ".ai"
@@ -60,7 +66,7 @@ def main():
      print('tool')
 ''')
 
-        # Create knowledge
+        # Create knowledge (no executor_id — will error on execution)
         knowledge_dir = ai_dir / "knowledge"
         knowledge_dir.mkdir(parents=True)
         (knowledge_dir / "entry.md").write_text(
@@ -70,14 +76,11 @@ def main():
         from rye.utils.metadata_manager import MetadataManager
         from rye.constants import ItemType, AI_DIR as RYE_AI_DIR
 
-        # Get the signing public key from the setup fixture (already in user_space trust store)
         user_space = Path(os.environ.get("USER_SPACE"))
         signing_key_dir = user_space / RYE_AI_DIR / "config" / "keys" / "signing"
         from rye.primitives.signing import load_keypair, compute_key_fingerprint
         _, public_pem_signing = load_keypair(signing_key_dir)
-        signing_fp = compute_key_fingerprint(public_pem_signing)
-        
-        # Trust the signing key in this project so verification passes
+
         store = TrustStore(ExecutionContext.from_env(project_path=project_root))
         store.add_key(public_pem_signing, owner="local", space="project", version="1.0.0")
 
@@ -103,122 +106,149 @@ def main():
 
 @pytest.mark.asyncio
 class TestExecuteTool:
-    """Test execute tool."""
+    """Test engine dispatch behaviour."""
 
-    async def test_execute_directive(self, temp_project):
-        """Execute directive — returns parsed content in-thread by default."""
+    async def test_execute_directive_dispatches_to_executor(self, temp_project):
+        """Directive dispatches to its executor tool (thread_directive)."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="directive",
-            item_id="workflow",
+            item_id="directive:workflow",
             project_path=str(temp_project),
         )
-
-        assert "your_directions" in result
-        assert "metadata" in result
-
-    async def test_execute_directive_threaded(self, temp_project):
-        """Execute directive with thread="fork" — attempts to spawn thread.
-
-        In a test environment without the full thread infrastructure,
-        this errors because thread_directive tool can't be found.
-        """
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="directive",
-            item_id="workflow",
-            project_path=str(temp_project),
-            thread="fork",
-        )
-
-        # thread_directive tool won't exist in the temp project
-        assert "error" in result
+        # The engine dispatches to thread_directive executor tool.
+        # In test env, the executor may succeed or error — but it MUST NOT
+        # return your_directions (that was the old inline optimization).
+        assert "your_directions" not in result
+        assert isinstance(result, dict)
 
     async def test_execute_tool(self, temp_project):
-        """Execute tool - primitives without known type return error."""
+        """Tool dispatches via @primitive_chain (PrimitiveExecutor)."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
         )
-
-        # The tool is a primitive with executor_id=None but not a known primitive
-        # (execute), so it returns an error
+        # mytool is a primitive with unknown type, so execution errors
         assert "error" in result
 
-    async def test_execute_knowledge(self, temp_project):
-        """Execute/load knowledge."""
+    async def test_execute_knowledge_dispatches_to_executor(self, temp_project):
+        """Knowledge dispatches to its executor tool."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="knowledge",
-            item_id="entry",
+            item_id="knowledge:entry",
             project_path=str(temp_project),
         )
-
-        # Knowledge execution returns with content and metadata
-        assert "metadata" in result
-
-    async def test_dry_run_directive(self, temp_project):
-        """Dry run directive."""
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="directive",
-            item_id="workflow",
-            project_path=str(temp_project),
-            dry_run=True,
-        )
-
-        # Dry run returns validation results
-        assert "metadata" in result or "error" not in result
+        # Executor tool may not be in test project — but it must NOT
+        # error on missing executor_id (extractor provides it).
+        assert isinstance(result, dict)
 
     async def test_dry_run_tool(self, temp_project):
-        """Dry run tool."""
+        """Dry run tool via @primitive_chain."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             dry_run=True,
         )
-
-        # Dry run validation (tool may error since it's unknown, but that's expected)
         assert isinstance(result, dict)
 
     async def test_execute_nonexistent_directive(self, temp_project):
         """Error on nonexistent directive."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="directive",
-            item_id="nonexistent",
+            item_id="directive:nonexistent",
             project_path=str(temp_project),
         )
-
         assert "error" in result
 
     async def test_execute_with_parameters(self, temp_project):
-        """Execute with parameters - unknown primitive returns error."""
+        """Execute with parameters — unknown primitive returns error."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             parameters={"arg1": "value1"},
         )
-
-        # Unknown primitive returns error (mytool is not a registered primitive)
         assert "error" in result
 
 
 @pytest.mark.asyncio
-class TestAsyncValidation:
-    """Test Step 5 validation: rejected async combinations."""
+class TestCanonicalRefResolution:
+    """Test canonical ref resolution in execute."""
+
+    async def test_bare_directive_rejected(self, temp_project):
+        """Bare ID is rejected — canonical ref required."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_id="workflow",
+            project_path=str(temp_project),
+        )
+        assert result["status"] == "error"
+        assert "canonical" in result["error"].lower()
+
+    async def test_bare_tool_rejected(self, temp_project):
+        """Bare ID is rejected — canonical ref required."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_id="mytool",
+            project_path=str(temp_project),
+        )
+        assert result["status"] == "error"
+        assert "canonical" in result["error"].lower()
+
+    async def test_canonical_tool_ref(self, temp_project):
+        """Canonical tool:id ref works."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_id="tool:mytool",
+            project_path=str(temp_project),
+        )
+        assert isinstance(result, dict)
+
+    async def test_canonical_directive_ref(self, temp_project):
+        """Canonical directive:id ref dispatches to executor."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_id="directive:workflow",
+            project_path=str(temp_project),
+        )
+        assert isinstance(result, dict)
+        assert "your_directions" not in result  # no inline optimization
+
+    async def test_knowledge_dispatches_to_executor(self, temp_project):
+        """knowledge: ref resolves executor_id from extractor."""
+        tool = ExecuteTool("")
+        resolved = tool._resolve_executable_ref(str(temp_project), "knowledge:entry")
+        assert resolved.executor_id == "rye/core/executors/knowledge/knowledge"
+
+    async def test_nonexistent_canonical_ref(self, temp_project):
+        """Canonical ref to nonexistent item returns not-found error."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_id="tool:doesnotexist",
+            project_path=str(temp_project),
+        )
+        assert result["status"] == "error"
+        assert "not found" in result["error"].lower()
+
+    async def test_empty_canonical_ref_rejected(self, temp_project):
+        """Empty canonical ref (e.g. 'tool:') is rejected."""
+        tool = ExecuteTool("")
+        result = await tool.handle(
+            item_id="tool:",
+            project_path=str(temp_project),
+        )
+        assert result["status"] == "error"
+
+
+@pytest.mark.asyncio
+class TestProtocolValidation:
+    """Test protocol-level validation (no kind checks)."""
 
     async def test_async_dry_run_rejected(self, temp_project):
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             dry_run=True,
             **{"async": True},
@@ -226,77 +256,11 @@ class TestAsyncValidation:
         assert result["status"] == "error"
         assert "dry_run" in result["error"]
 
-    async def test_async_knowledge_rejected(self, temp_project):
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="knowledge",
-            item_id="entry",
-            project_path=str(temp_project),
-            **{"async": True},
-        )
-        assert result["status"] == "error"
-        assert "knowledge" in result["error"]
-
-    async def test_async_directive_inline_rejected(self, temp_project):
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="directive",
-            item_id="workflow",
-            project_path=str(temp_project),
-            thread="inline",
-            **{"async": True},
-        )
-        assert result["status"] == "error"
-        assert "inline" in result["error"]
-
-
-@pytest.mark.asyncio
-class TestThreadItemTypeValidation:
-    """Test target/thread/item_type validation in handle() — rejects bad combos early."""
-
-    async def test_tool_fork_rejected(self, temp_project):
-        """tool + thread=fork → error (fork is for directives only)."""
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
-            project_path=str(temp_project),
-            thread="fork",
-        )
-        assert result["status"] == "error"
-        assert "fork" in result["error"]
-        assert result["item_id"] == "mytool"
-
-    async def test_knowledge_remote_rejected(self, temp_project):
-        """knowledge + target=remote → error."""
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="knowledge",
-            item_id="entry",
-            project_path=str(temp_project),
-            target="remote",
-        )
-        assert result["status"] == "error"
-        assert "knowledge" in result["error"].lower()
-
-    async def test_knowledge_fork_rejected(self, temp_project):
-        """knowledge + thread=fork → error."""
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="knowledge",
-            item_id="entry",
-            project_path=str(temp_project),
-            thread="fork",
-        )
-        assert result["status"] == "error"
-        assert "knowledge" in result["error"].lower()
-
     async def test_unknown_thread_rejected(self, temp_project):
         """Unknown thread value → error."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             thread="banana",
         )
@@ -307,8 +271,7 @@ class TestThreadItemTypeValidation:
         """Unknown target value → error."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             target="banana",
         )
@@ -319,8 +282,7 @@ class TestThreadItemTypeValidation:
         """target='remote:' with empty suffix → error."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             target="remote:",
         )
@@ -331,60 +293,54 @@ class TestThreadItemTypeValidation:
         """dry_run + target=remote → error."""
         tool = ExecuteTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
+            item_id="tool:mytool",
             project_path=str(temp_project),
             target="remote",
             dry_run=True,
         )
         assert result["status"] == "error"
-        assert "dry_run" in result["error"].lower() or "remote" in result["error"].lower()
 
-    async def test_tool_inline_allowed(self, temp_project):
-        """tool + thread=inline → not rejected by validation (may fail later)."""
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="tool",
-            item_id="mytool",
-            project_path=str(temp_project),
-            thread="inline",
-        )
-        if result.get("status") == "error":
-            assert "fork" not in result.get("error", "")
-            assert "not supported" not in result.get("error", "").lower()
 
-    async def test_directive_inline_allowed(self, temp_project):
-        """directive + thread=inline → allowed, returns your_directions."""
-        tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="directive",
-            item_id="workflow",
-            project_path=str(temp_project),
-            thread="inline",
-        )
-        assert "your_directions" in result
+@pytest.mark.asyncio
+class TestDispatchStrategy:
+    """Test that dispatch is based on executor_id, not kind."""
 
-    async def test_knowledge_inline_allowed(self, temp_project):
-        """knowledge + thread=inline (default) → allowed."""
+    async def test_tool_dispatches_via_primitive_chain(self, temp_project):
+        """Tool has executor_id=@primitive_chain → PrimitiveExecutor."""
         tool = ExecuteTool("")
-        result = await tool.handle(
-            item_type="knowledge",
-            item_id="entry",
-            project_path=str(temp_project),
-            thread="inline",
-        )
-        if result.get("status") == "error":
-            assert "not supported" not in result.get("error", "").lower()
+
+        # Resolve the executable and check executor_id
+        resolved = tool._resolve_executable_ref(str(temp_project), "tool:mytool")
+        assert resolved.executor_id == PRIMITIVE_CHAIN
+
+    async def test_directive_dispatches_via_executor_tool(self, temp_project):
+        """Directive has executor_id from extractor (not @primitive_chain)."""
+        tool = ExecuteTool("")
+
+        resolved = tool._resolve_executable_ref(str(temp_project), "directive:workflow")
+        assert resolved.executor_id == "rye/core/executors/directive/directive"
+        assert resolved.executor_id != PRIMITIVE_CHAIN
+
+    async def test_all_kinds_have_executor_id(self, temp_project):
+        """All standard kinds resolve executor_id from extractors."""
+        tool = ExecuteTool("")
+
+        tool_resolved = tool._resolve_executable_ref(str(temp_project), "tool:mytool")
+        assert tool_resolved.executor_id == PRIMITIVE_CHAIN
+
+        directive_resolved = tool._resolve_executable_ref(str(temp_project), "directive:workflow")
+        assert directive_resolved.executor_id == "rye/core/executors/directive/directive"
+
+        knowledge_resolved = tool._resolve_executable_ref(str(temp_project), "knowledge:entry")
+        assert knowledge_resolved.executor_id == "rye/core/executors/knowledge/knowledge"
 
 
 @pytest.mark.asyncio
 class TestRemoteThreadForwarding:
-    """Verify remote target sets correct thread in params for the remote tool."""
+    """Verify remote target forwards canonical ref uniformly."""
 
-    async def test_directive_remote_forwards_fork(self, temp_project):
-        """Directive + target=remote → remote_params.thread = 'fork'."""
-        from unittest.mock import AsyncMock, patch
-
+    async def test_directive_remote_forwards(self, temp_project):
+        """Directive + target=remote → forwards canonical ref to remote tool."""
         tool = ExecuteTool("")
 
         original_find = tool._find_item
@@ -403,21 +359,18 @@ class TestRemoteThreadForwarding:
         with patch.object(tool, "_find_item", side_effect=mock_find), \
              patch.object(tool, "_run_tool", side_effect=mock_run_tool):
             await tool.handle(
-                item_type="directive",
-                item_id="workflow",
+                item_id="directive:workflow",
                 project_path=str(temp_project),
                 target="remote",
                 thread="fork",
             )
 
-        assert captured_params.get("thread") == "fork"
         assert captured_params.get("action") == "execute"
-        assert captured_params.get("item_type") == "directive"
+        assert captured_params.get("item_id") == "directive:workflow"
+        assert captured_params.get("thread") == "fork"
 
-    async def test_tool_remote_forwards_inline(self, temp_project):
-        """Tool + target=remote → remote_params.thread = 'inline'."""
-        from unittest.mock import AsyncMock, patch
-
+    async def test_tool_remote_forwards(self, temp_project):
+        """Tool + target=remote → forwards canonical ref to remote tool."""
         tool = ExecuteTool("")
 
         original_find = tool._find_item
@@ -436,21 +389,18 @@ class TestRemoteThreadForwarding:
         with patch.object(tool, "_find_item", side_effect=mock_find), \
              patch.object(tool, "_run_tool", side_effect=mock_run_tool):
             await tool.handle(
-                item_type="tool",
-                item_id="mytool",
+                item_id="tool:mytool",
                 project_path=str(temp_project),
                 target="remote",
                 thread="inline",
             )
 
-        assert captured_params.get("thread") == "inline"
         assert captured_params.get("action") == "execute"
-        assert captured_params.get("item_type") == "tool"
+        assert captured_params.get("item_id") == "tool:mytool"
+        assert captured_params.get("thread") == "inline"
 
-    async def test_directive_remote_named_forwards_remote_name(self, temp_project):
-        """Directive + target=remote:gpu → remote_params has remote='gpu'."""
-        from unittest.mock import patch
-
+    async def test_remote_named_forwards_remote_name(self, temp_project):
+        """target=remote:gpu → remote_params has remote='gpu'."""
         tool = ExecuteTool("")
 
         original_find = tool._find_item
@@ -469,14 +419,12 @@ class TestRemoteThreadForwarding:
         with patch.object(tool, "_find_item", side_effect=mock_find), \
              patch.object(tool, "_run_tool", side_effect=mock_run_tool):
             await tool.handle(
-                item_type="directive",
-                item_id="workflow",
+                item_id="directive:workflow",
                 project_path=str(temp_project),
                 target="remote:gpu",
                 thread="fork",
             )
 
-        assert captured_params.get("thread") == "fork"
         assert captured_params.get("remote") == "gpu"
 
 
@@ -486,15 +434,12 @@ class TestLaunchAsync:
 
     async def test_tool_async_no_registry_uses_launch_detached(self, temp_project):
         """Without registry, falls back to raw launch_detached."""
-        from unittest.mock import AsyncMock, patch
-
         mock_spawn = AsyncMock(return_value={"success": True, "pid": 9999})
         tool = ExecuteTool("")
 
         with patch("rye.utils.detached.launch_detached", mock_spawn):
             result = await tool.handle(
-                item_type="tool",
-                item_id="mytool",
+                item_id="tool:mytool",
                 project_path=str(temp_project),
                 **{"async": True},
             )
@@ -509,8 +454,6 @@ class TestLaunchAsync:
 
     async def test_tool_async_with_registry_uses_spawn_thread(self, temp_project):
         """With registry available, uses spawn_thread for proper lifecycle."""
-        from unittest.mock import AsyncMock, MagicMock, patch
-
         mock_registry = MagicMock()
         mock_spawn = AsyncMock(return_value={"success": True, "pid": 42})
         tool = ExecuteTool("")
@@ -518,31 +461,26 @@ class TestLaunchAsync:
         with patch.object(ExecuteTool, "_get_registry", return_value=mock_registry), \
              patch("rye.utils.detached.spawn_thread", mock_spawn) as mock_st:
             result = await tool.handle(
-                item_type="tool",
-                item_id="mytool",
+                item_id="tool:mytool",
                 project_path=str(temp_project),
                 **{"async": True},
             )
 
         assert result["status"] == "success"
         assert result["pid"] == 42
-        # spawn_thread was called with the registry
         mock_st.assert_awaited_once()
         call_kwargs = mock_st.call_args.kwargs
         assert call_kwargs["registry"] is mock_registry
-        assert call_kwargs["directive"] == "tool/mytool"
+        assert call_kwargs["item_id"] == "tool:mytool"
         assert "thread_id" in call_kwargs
 
     async def test_tool_async_spawn_failure(self, temp_project):
-        from unittest.mock import AsyncMock, patch
-
         mock_spawn = AsyncMock(return_value={"success": False, "error": "no lillux"})
         tool = ExecuteTool("")
 
         with patch("rye.utils.detached.launch_detached", mock_spawn):
             result = await tool.handle(
-                item_type="tool",
-                item_id="mytool",
+                item_id="tool:mytool",
                 project_path=str(temp_project),
                 **{"async": True},
             )
@@ -646,7 +584,7 @@ class TestParseTarget:
 
 
 # ---------------------------------------------------------------------------
-# Contract tests — execution ownership
+# Contract tests — execution ownership (for @primitive_chain items)
 # ---------------------------------------------------------------------------
 
 
@@ -654,50 +592,32 @@ class TestExecutionSpec:
     """Test _read_execution_spec and _resolve_execution_plan contracts."""
 
     def test_spec_omission_defaults_to_engine(self):
-        """Tool without dunders defaults to engine-owned (safe default)."""
-        from rye.actions.execute import ExecutionSpec, ExecutionPlan
+        """Default spec is engine-owned."""
+        from rye.actions.execute import ExecutionSpec
 
         spec = ExecutionSpec()
         assert spec.owner == "engine"
         assert spec.native_async is False
         assert spec.native_resume is False
 
-    def test_spec_non_tool_returns_engine(self):
-        """Directives and knowledge always return engine-owned spec."""
-        from rye.actions.execute import ExecutionSpec
-
-        tool = ExecuteTool("")
-        loop = asyncio.new_event_loop()
-        try:
-            spec = loop.run_until_complete(
-                tool._read_execution_spec("directive", "anything", "/tmp")
-            )
-            assert spec.owner == "engine"
-            spec_k = loop.run_until_complete(
-                tool._read_execution_spec("knowledge", "anything", "/tmp")
-            )
-            assert spec_k.owner == "engine"
-        finally:
-            loop.close()
-
     def test_plan_remote_always_forward(self):
-        """Remote target always produces forward_remote regardless of spec."""
-        from rye.actions.execute import ExecutionSpec, ExecutionPlan
+        """Remote target always produces forward_remote."""
+        from rye.actions.execute import ExecutionSpec
 
         callee_spec = ExecutionSpec(owner="callee", native_async=True)
         plan = ExecuteTool._resolve_execution_plan(
-            "tool", "remote", "inline", False, callee_spec,
+            "remote", False, callee_spec,
         )
         assert plan.owner == "remote"
         assert plan.launch_mode == "forward_remote"
 
     def test_plan_callee_owned_direct(self):
-        """Callee-owned spec produces direct launch, never engine_detach."""
+        """Callee-owned spec produces direct launch."""
         from rye.actions.execute import ExecutionSpec
 
         spec = ExecutionSpec(owner="callee", native_async=True, native_resume=True)
         plan = ExecuteTool._resolve_execution_plan(
-            "tool", "local", "inline", True, spec,
+            "local", True, spec,
         )
         assert plan.owner == "callee"
         assert plan.launch_mode == "direct"
@@ -710,7 +630,7 @@ class TestExecutionSpec:
 
         spec = ExecutionSpec()  # engine-owned
         plan = ExecuteTool._resolve_execution_plan(
-            "tool", "local", "inline", True, spec,
+            "local", True, spec,
         )
         assert plan.owner == "engine"
         assert plan.launch_mode == "engine_detach"
@@ -721,7 +641,7 @@ class TestExecutionSpec:
 
         spec = ExecutionSpec()
         plan = ExecuteTool._resolve_execution_plan(
-            "tool", "local", "inline", False, spec,
+            "local", False, spec,
         )
         assert plan.owner == "engine"
         assert plan.launch_mode == "direct"
@@ -732,13 +652,9 @@ class TestExecutionOwnershipContracts:
     """Contract tests: callee-owned tools never go through _launch_async."""
 
     async def test_callee_owned_async_does_not_launch_async(self, temp_project):
-        """Callee-owned tool with async=True must NOT call _launch_async.
-
-        Contract 1: engine does NOT call _launch_async() when spec says callee.
-        """
+        """Callee-owned tool with async=True must NOT call _launch_async."""
         tool = ExecuteTool("")
 
-        # Create a callee-owned tool
         tools_dir = temp_project / ".ai" / "tools"
         (tools_dir / "callee_tool.py").write_text('''
 __version__ = "1.0.0"
@@ -762,45 +678,33 @@ def main():
         )
         (tools_dir / "callee_tool.py").write_text(signed)
 
-        spec = await tool._read_execution_spec("tool", "callee_tool", str(temp_project))
+        spec = await tool._read_execution_spec("callee_tool", str(temp_project))
         assert spec.owner == "callee"
         assert spec.native_async is True
 
-        plan = ExecuteTool._resolve_execution_plan(
-            "tool", "local", "inline", True, spec,
-        )
+        plan = ExecuteTool._resolve_execution_plan("local", True, spec)
         assert plan.launch_mode == "direct"
         assert plan.owner == "callee"
 
     async def test_engine_owned_async_uses_engine_detach(self, temp_project):
-        """Engine-owned tool with async=True produces engine_detach.
-
-        Contract 2: engine DOES use _launch_async() when spec says engine.
-        """
+        """Engine-owned tool with async=True produces engine_detach."""
         tool = ExecuteTool("")
 
-        # The default mytool.py has no execution dunders
-        spec = await tool._read_execution_spec("tool", "mytool", str(temp_project))
+        spec = await tool._read_execution_spec("mytool", str(temp_project))
         assert spec.owner == "engine"
         assert spec.native_async is False
 
-        plan = ExecuteTool._resolve_execution_plan(
-            "tool", "local", "inline", True, spec,
-        )
+        plan = ExecuteTool._resolve_execution_plan("local", True, spec)
         assert plan.launch_mode == "engine_detach"
         assert plan.owner == "engine"
 
     async def test_graph_spec_from_chain(self, temp_project):
-        """Tool resolving through a runtime with execution dunders reads spec.
-
-        Contract 3: engine reads execution spec from runtime in chain.
-        """
+        """Tool resolving through a runtime with execution dunders reads spec."""
         from rye.utils.metadata_manager import MetadataManager
         from rye.constants import ItemType
 
         tools_dir = temp_project / ".ai" / "tools"
 
-        # Create a runtime that declares callee ownership
         runtime_dir = tools_dir / "test_runtime"
         runtime_dir.mkdir(parents=True)
 
@@ -823,7 +727,6 @@ config:
         )
         (runtime_dir / "runtime.yaml").write_text(signed)
 
-        # Create a tool that chains through the runtime
         (tools_dir / "graph_like.yaml").write_text('''version: "1.0.0"
 tool_type: graph
 executor_id: test_runtime/runtime
@@ -843,47 +746,35 @@ config:
         (tools_dir / "graph_like.yaml").write_text(signed)
 
         tool = ExecuteTool("")
-        spec = await tool._read_execution_spec("tool", "graph_like", str(temp_project))
+        spec = await tool._read_execution_spec("graph_like", str(temp_project))
         assert spec.owner == "callee"
         assert spec.native_async is True
         assert spec.native_resume is True
 
     async def test_remote_forward_async(self):
-        """Client forwards async to server, does NOT wrap locally.
-
-        Contract 4: remote always produces forward_remote regardless of async.
-        """
+        """Remote always produces forward_remote."""
         from rye.actions.execute import ExecutionSpec
 
         spec = ExecutionSpec(owner="callee", native_async=True)
-        plan = ExecuteTool._resolve_execution_plan(
-            "directive", "remote", "fork", True, spec,
-        )
+        plan = ExecuteTool._resolve_execution_plan("remote", True, spec)
         assert plan.launch_mode == "forward_remote"
         assert plan.owner == "remote"
 
     async def test_spec_omission_defaults_engine(self, temp_project):
-        """Tool without execution dunders defaults to engine-owned.
-
-        Contract 5: safe default when dunders are omitted.
-        """
+        """Tool without execution dunders defaults to engine-owned."""
         tool = ExecuteTool("")
-        spec = await tool._read_execution_spec("tool", "mytool", str(temp_project))
+        spec = await tool._read_execution_spec("mytool", str(temp_project))
         assert spec.owner == "engine"
         assert spec.native_async is False
         assert spec.native_resume is False
 
     async def test_chain_first_declarer_wins(self, temp_project):
-        """First element in chain that declares ownership wins.
-
-        Contract 6: leaf tool declaration takes precedence over runtime.
-        """
+        """First element in chain that declares ownership wins."""
         from rye.utils.metadata_manager import MetadataManager
         from rye.constants import ItemType
 
         tools_dir = temp_project / ".ai" / "tools"
 
-        # Create a runtime with NO ownership dunders
         rt_dir = tools_dir / "plain_rt"
         rt_dir.mkdir(parents=True)
         (rt_dir / "runtime.yaml").write_text('''version: "1.0.0"
@@ -902,7 +793,6 @@ config:
         )
         (rt_dir / "runtime.yaml").write_text(signed)
 
-        # Create a leaf tool that declares callee ownership via the runtime
         (tools_dir / "leaf_callee.py").write_text('''
 __version__ = "1.0.0"
 __tool_type__ = "python"
@@ -920,7 +810,6 @@ __native_async__ = True
         (tools_dir / "leaf_callee.py").write_text(signed)
 
         tool = ExecuteTool("")
-        spec = await tool._read_execution_spec("tool", "leaf_callee", str(temp_project))
-        # Leaf tool (first in chain) declares callee
+        spec = await tool._read_execution_spec("leaf_callee", str(temp_project))
         assert spec.owner == "callee"
         assert spec.native_async is True

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:293513316872f6533a1abff00314e9c6dcd3838269e840e9894470cda80d8ec5:c_qzBh55w1RBuv3Tp_xJkC36Tk1Hs33sUdDZ7yBksmUT4ggbX3OzSWFgPMapMc9c11CqygdI2V6Wj-YowPa1Cw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:293513316872f6533a1abff00314e9c6dcd3838269e840e9894470cda80d8ec5:c_qzBh55w1RBuv3Tp_xJkC36Tk1Hs33sUdDZ7yBksmUT4ggbX3OzSWFgPMapMc9c11CqygdI2V6Wj-YowPa1Cw:4b987fd4e40303ac -->
 # Process Reply
 
 When a reply is received to a forwarded email, parse the response and send it through the correct domain/inbox.
@@ -59,7 +59,7 @@ When a reply is received to a forwarded email, parse the response and send it th
 
   <step name="send_through_correct_domain">
     Send the reply through the original domain/inbox, properly threaded:
-    `rye_execute(item_type="directive", item_id="rye/email/send", parameters={"to": "<original_sender>", "subject": "<cleaned_subject>", "body": "<reply_text>", "from_inbox": "<original_inbox>", "thread_id": "<thread_id>"})`
+    `rye_execute(item_id="rye/email/send", parameters={"to": "<original_sender>", "subject": "<cleaned_subject>", "body": "<reply_text>", "from_inbox": "<original_inbox>", "thread_id": "<thread_id>"})`
   </step>
 
   <step name="update_state">

@@ -1,50 +1,50 @@
-# rye:signed:2026-03-17T01:02:01Z:00d8dd6ffc8c46d8cd48be20502299f5fa2a1bd1719f13012b0d64b0cb6fc469:-5xNOwIdFVNQW-Is0oBmZxa0ykFeMtFduhKx8R6mNI7ZX6QNhd0kx3-ivcFEO82xaRX9lfKrrMiVzB3S9p5dAQ==:4b987fd4e40303ac
+# rye:signed:2026-04-09T01:47:22Z:2018e681642afed6c344025ddb67c0771e2de216cdcbcb902e4391a94213aced:l_RyNhTZPAW-kztp_qShLnPQwFtv7ao5yZfip6XoZKQsjFhb0PE385HXRFDAXUhr3i69NLYSgkIogm-qEM-eCw:4b987fd4e40303ac
 bundle:
   id: ryeos-email
   version: 0.1.0
   entrypoint: ''
   description: ''
-  created_at: '2026-03-17T01:02:01Z'
+  created_at: '2026-04-09T01:47:22Z'
   type: package
 files:
   .ai/directives/rye/email/daily_digest.md:
-    object_hash: f80b0ef61f47f9e1431fb98d206b89f7a8184b6ab9ba7fd54d9859938a6be146
+    object_hash: 15bdbf593e68743abbbe5ec873aaa723a3a0657773321a8d56d943887cb9ac68
     inline_signed: true
   .ai/directives/rye/email/draft_response.md:
-    object_hash: ce7a359ca60abc6ece53132194eb9628f0ef2b9e5f4c1eb6e513004059d67293
+    object_hash: 8899df8445366ad0e6734a6358dccdcc949177d9599aadfd61cec01e2c97baf8
     inline_signed: true
   .ai/directives/rye/email/forward.md:
-    object_hash: 42c95062caf1b1fc2731ef7da4f6bb392d0f23e4f80d972877c3e44d8fc5c846
+    object_hash: 72e08549b6120c8635010af85324dbeac5444abf450ceeeb0da0d2d0b0094d38
     inline_signed: true
   .ai/directives/rye/email/handle_inbound.md:
-    object_hash: 057fa99834f33597b527f805de90c5b725eac9d6d30b91a720b857c19b8e1c4e
+    object_hash: 89565915db05fdff47c07e122cd0ce3fceaeb4975e634b7e1eedafc13d716b13
     inline_signed: true
   .ai/directives/rye/email/reply.md:
-    object_hash: 59c1a99234b935e48e5d00c6bed067e88e67f8644df90470e24baa380f65800d
+    object_hash: cd210c1f7521738b60487d8ff5d93fe2f13c79b4ad6621d8504e2dc0e7f06244
     inline_signed: true
   .ai/directives/rye/email/send.md:
-    object_hash: 27bd2af6d8dc49c787943af0d5a2d51326bb41acbbbfb87169f55598621f3b63
+    object_hash: e674d0b49ce849d6c6da9ea8898dc76f4023d775b4fadd3148c19da1bf089d1b
     inline_signed: true
   .ai/tools/rye/email/forward.py:
-    object_hash: 69e6521848c88edc2b40c9c2ffffa67c0f12b97b4aeaa2e1031e01af9165e60b
+    object_hash: c1c514d4aef4a0b0a7439950495f0f08d4ec3169574fb38af3cf9bdba4c62942
     inline_signed: true
   .ai/tools/rye/email/handle_inbound.yaml:
-    object_hash: 44a7c24db9aad2f87ac49de73250ff818586f13467e7ea97ca03f47861236fca
+    object_hash: fbe277589c11a71ae8f678851aeb836a98801e72129226f7e402b7033b9537e9
     inline_signed: true
   .ai/tools/rye/email/providers/campaign-kiwi/campaign-kiwi.yaml:
-    object_hash: 1db034abbb474215da807b669f3ebee4bc4407a3f4504ea4018f0c124137d2c6
+    object_hash: 03e7158b184f78dec85f6a851e76bce0cf95837fc0dbc32aad01f520d725b7df
     inline_signed: true
   .ai/tools/rye/email/providers/gmail/gmail.yaml:
-    object_hash: aa173576774fde0184172e55f652d06e6d3f6be9ef3ff28668910c2ae57628a8
+    object_hash: 6b9f4ab1990fafddfd1f51a81eae77fd3d970592d15b39fc0024d3b1826f6748
     inline_signed: true
   .ai/tools/rye/email/router.py:
     object_hash: d82f390a106d35dea34c503c4b0fc1e78f91652bd61ffb19db624425159b4dd5
     inline_signed: true
   .ai/tools/rye/email/send.py:
-    object_hash: ff264a70e07ecfeb0ac0a9e0e6c17c2960741074310b5b5d1747295ca340a3c5
+    object_hash: 4d136bff325eb1e68890d9c4544f004d349d2a10fa34ef22e9c8fab513a790b3
     inline_signed: true
   .ai/knowledge/rye/email/email-directives.md:
-    object_hash: ef66c9de9e777a029ee310d69905be22aa3533253fcf28a54ae89441d01ad247
+    object_hash: f765b2b657bd1d554c9e27b2daac0d9ddb6c23db0bc561fa011c16108c557dd5
     inline_signed: true
   .ai/config/email/email.yaml:
     object_hash: 87c4539ec9b24625d23f975759ef8360246677997c6b0840c2387dd57ff1966b

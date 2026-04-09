@@ -74,8 +74,6 @@ async def run(
     If resume_messages is provided, skips first message construction
     and uses the pre-built messages directly (for thread resumption).
     """
-    thread_ctx = {"emitter": emitter, "transcript": transcript, "thread_id": thread_id}
-
     orchestrator.register_thread(thread_id, harness)
 
     # Build name → item_id and name → primary action lookups from tool schemas
@@ -225,7 +223,7 @@ async def run(
                 limit_result["error_context"]["recent_llm_errors"] = recent_llm_errors[-3:]
 
                 hook_result = await harness.run_hooks(
-                    "limit", limit_result, dispatcher, thread_ctx
+                    "limit", limit_result, dispatcher
                 )
                 if hook_result:
                     hook_result.setdefault("error_context", limit_result["error_context"])
@@ -336,7 +334,6 @@ async def run(
                     "error",
                     {"error": e, "classification": classification},
                     dispatcher,
-                    thread_ctx,
                 )
                 if hook_result:
                     if hook_result.get("action") == "retry":
@@ -475,20 +472,20 @@ async def run(
                 resolved_id = tool_id_map.get(tc_name, tc_name)
 
                 if primary == "execute":
-                    inner_item_type = tc_input.get("item_type", "tool")
+                    inner_kind = tc_input.get("kind", "tool")
                     inner_item_id = tc_input.get("item_id", "") or resolved_id
-                    denied = harness.check_permission("execute", inner_item_type, inner_item_id)
+                    denied = harness.check_permission("execute", inner_kind, inner_item_id)
                 elif primary == "fetch":
                     # Fetch can be ID mode or query mode
-                    fetch_item_type = tc_input.get("item_type", "")
+                    fetch_kind = tc_input.get("kind", "")
                     fetch_item_id = tc_input.get("item_id", "")
-                    if not fetch_item_type:
+                    if not fetch_kind:
                         scope = tc_input.get("scope", "")
-                        fetch_item_type = scope.split(".")[0] if scope else ""
-                    denied = harness.check_permission("fetch", fetch_item_type, fetch_item_id)
+                        fetch_kind = scope.split(".")[0] if scope else ""
+                    denied = harness.check_permission("fetch", fetch_kind, fetch_item_id)
                 else:
                     denied = harness.check_permission(
-                        primary, tc_input.get("item_type", ""), tc_input.get("item_id", "")
+                        primary, tc_input.get("kind", ""), tc_input.get("item_id", "")
                     )
 
                 if denied:
@@ -554,7 +551,6 @@ async def run(
                         "directive_return",
                         {"outputs": outputs, "cost": cost, "thread_id": thread_id},
                         dispatcher,
-                        thread_ctx,
                     )
 
                     return _finalize(
@@ -584,17 +580,15 @@ async def run(
                     result = await dispatcher.dispatch(
                         {
                             "primary": "execute",
-                            "item_type": "tool",
+                            "kind": "tool",
                             "item_id": resolved_id,
                             "params": dispatch_params,
                         },
-                        thread_context=thread_ctx,
                     )
                 else:
                     # fetch/sign — params are the tool input directly
                     result = await dispatcher.dispatch(
                         {"primary": primary, **dispatch_params},
-                        thread_context=thread_ctx,
                     )
 
                 clean = _clean_tool_result(result)
@@ -627,7 +621,7 @@ async def run(
 
             # Post-turn hooks
             await harness.run_hooks(
-                "after_step", {"cost": cost, "thread_id": thread_id}, dispatcher, thread_ctx
+                "after_step", {"cost": cost, "thread_id": thread_id}, dispatcher
             )
 
             # Update cost snapshot in registry (post-turn)
@@ -669,7 +663,7 @@ async def run(
                     logger.error("Handoff failed: %s", handoff_err)
                 # Handoff failed — fall back to hook-based handling
                 hook_result = await harness.run_hooks(
-                    "context_limit_reached", limit_info, dispatcher, thread_ctx
+                    "context_limit_reached", limit_info, dispatcher
                 )
                 if hook_result and hook_result.get("action") == "continue":
                     return _finalize(
@@ -707,7 +701,6 @@ async def run(
                 "after_complete",
                 {"thread_id": thread_id, "cost": cost, "project_path": str(project_path)},
                 dispatcher,
-                {"emitter": emitter, "transcript": transcript, "thread_id": thread_id},
             )
         except Exception:
             pass  # after_complete hooks must not break thread finalization

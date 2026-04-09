@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Global cache - single source of truth
 _extensions_cache: Optional[List[str]] = None
-_type_extensions_cache: Dict[str, List[str]] = {}
+_kind_extensions_cache: Dict[str, List[str]] = {}
 _parsers_map_cache: Optional[Dict[str, str]] = None
 
 
@@ -81,27 +81,27 @@ _TYPE_EXTRACTOR_GLOB = {
 
 
 def get_item_extensions(
-    item_type: str,
+    kind: str,
     project_path: Optional[Path] = None,
     force_reload: bool = False,
 ) -> List[str]:
-    """Get supported file extensions for an item type from its extractor.
+    """Get supported file extensions for a kind from its extractor.
 
-    Reads the `extensions` field from the type-specific extractor YAML
+    Reads the `extensions` field from the kind-specific extractor YAML
     (e.g., knowledge/knowledge_extractor.yaml) across the 3-tier space.
 
     Raises:
-        ValueError: If no extractor glob pattern is configured for the item type,
+        ValueError: If no extractor glob pattern is configured for the kind,
             or if no extensions could be loaded from any extractor.
     """
-    if item_type in _type_extensions_cache and not force_reload:
-        return _type_extensions_cache[item_type]
+    if kind in _kind_extensions_cache and not force_reload:
+        return _kind_extensions_cache[kind]
 
-    glob_pattern = _TYPE_EXTRACTOR_GLOB.get(item_type)
+    glob_pattern = _TYPE_EXTRACTOR_GLOB.get(kind)
     if not glob_pattern:
         raise ValueError(
-            f"No extractor glob pattern configured for item type {item_type!r}. "
-            f"Known types: {list(_TYPE_EXTRACTOR_GLOB.keys())}"
+            f"No extractor glob pattern configured for kind {kind!r}. "
+            f"Known kinds: {list(_TYPE_EXTRACTOR_GLOB.keys())}"
         )
 
     extensions = set()
@@ -116,13 +116,13 @@ def get_item_extensions(
     if not extensions:
         search_paths = get_extractor_search_paths(project_path)
         raise ValueError(
-            f"No extensions found for item type {item_type!r}. "
+            f"No extensions found for kind {kind!r}. "
             f"Expected extractors matching {glob_pattern!r} in: "
             f"{[str(p) for p in search_paths]}"
         )
 
-    _type_extensions_cache[item_type] = list(extensions)
-    return _type_extensions_cache[item_type]
+    _kind_extensions_cache[kind] = list(extensions)
+    return _kind_extensions_cache[kind]
 
 
 def _extract_extensions_from_file(file_path: Path) -> List[str]:
@@ -206,4 +206,4 @@ def clear_extensions_cache():
     global _extensions_cache, _parsers_map_cache
     _extensions_cache = None
     _parsers_map_cache = None
-    _type_extensions_cache.clear()
+    _kind_extensions_cache.clear()

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:50:06Z:762b82c743e2df4bf8cb8485df06e6bc0a4ac110ad654afe7ac600492211c947:EeSRFGMK5L7qTgLNPAKylIdeDJR8J2oMIC0fZ_ZGX-EsigkGlNHL-9yLqM3HAuE0Gbb_D0HYmo3NIInEDbymCA==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:36Z:7a01c9eaf8d4eb7c83ac5f22a139aad35cc187c81c0acb3dbfb1c7b07ba1cf26:nUVpYs69brivZr49cirV0pY9uqVQwwI9b16UvZeUIDhIUKkr1S8xqU07B1Aq_M37avO5aqACvZnNsg54Ip-JCw:4b987fd4e40303ac
 """Forward an email to a private address with agent context."""
 
 import argparse
@@ -68,8 +68,7 @@ async def execute(params: dict, project_path: str) -> dict:
 
     mcp_tool_id = f"mcp/{mcp_server}/{get_tool.replace('.', '/')}"
     fetch_result = await executor.handle(
-        item_type="tool",
-        item_id=mcp_tool_id,
+        item_id=f"tool:{mcp_tool_id}",
         project_path=project_path,
         parameters=get_params,
     )
@@ -127,8 +126,7 @@ Subject: {original_subject}
     else:
         # Fallback: use ExecuteTool to call rye/email/send
         send_result = await executor.handle(
-            item_type="tool",
-            item_id="rye/email/send",
+            item_id="tool:rye/email/send",
             project_path=project_path,
             parameters={
                 "to": forward_to,

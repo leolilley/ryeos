@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:50:06Z:c1854f464340d01feef1419c2a200124bc08a7d099061eb27152d7727909836e:VqvNaR9uOIWYyTf0-biFOiM9OLj5VuqKSUKqqYAz85woPzfDDeNxR34RxbHX6UFzypkHVe8vWwXAnXT88o-aCg==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:36Z:04c92ed2b026bfc34aa9314d3fc4002105fcf1e5aea517a4b02a7e63dc22c385:-CjoNPWyqs_OU-N98JSqxMtUUbHhvBVuqV7pr2Cetf0Ao7pwxCIxXEQvAKB1xs7ZskBI0mESNimjcrOibLeqDQ:4b987fd4e40303ac
 """Send an email via the configured email provider."""
 
 import argparse
@@ -171,8 +171,7 @@ async def _execute_mcp(
     mcp_tool_id = f"mcp/{mcp_server}/{type_name}/{action}"
 
     result = await executor.handle(
-        item_type="tool",
-        item_id=mcp_tool_id,
+        item_id=f"tool:{mcp_tool_id}",
         project_path=project_path,
         parameters=step_params,
     )

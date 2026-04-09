@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:886120f81254f4780dd5e7eeca53c8aa04eff2da5cb74fe9ef29db78386903a4:BKRGFcN2QikXSopF1KFMD3o5JgVmF2otMeSM9Ei2wpNHaFCppMZ16krs_Rl7qfvLhUatrcmL_RzY6AoreDbsBg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:2cbc07a3a29c74a8336cc697e14f9bef50fa5dccad337500a6d90c3ee1548d28:98h-hA-FjYurgrBArKd7u8nGS4EbTFp8_PveUJZsilCsMK1U1iQSWVA1mWNnzC3SZzH5msOoKX_Q3WL2Sr6WCQ:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -101,10 +101,10 @@ Severity values: `error`, `warning`, `info`
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/code/diagnostics/diagnostics",
+rye_execute(item_id="rye/code/diagnostics/diagnostics",
     parameters={"file_path": "src/main.py"})
 
-rye_execute(item_type="tool", item_id="rye/code/diagnostics/diagnostics",
+rye_execute(item_id="rye/code/diagnostics/diagnostics",
     parameters={"file_path": "src/main.py", "linters": ["ruff", "mypy"]})
 ```
 
@@ -166,16 +166,16 @@ File URIs in results are converted to project-relative paths.
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/code/lsp/lsp",
+rye_execute(item_id="rye/code/lsp/lsp",
     parameters={"operation": "goToDefinition", "file_path": "src/main.ts", "line": 10, "character": 5})
 
-rye_execute(item_type="tool", item_id="rye/code/lsp/lsp",
+rye_execute(item_id="rye/code/lsp/lsp",
     parameters={"operation": "findReferences", "file_path": "src/auth.py", "line": 42, "character": 8})
 
-rye_execute(item_type="tool", item_id="rye/code/lsp/lsp",
+rye_execute(item_id="rye/code/lsp/lsp",
     parameters={"operation": "hover", "file_path": "src/utils.ts", "line": 15, "character": 12})
 
-rye_execute(item_type="tool", item_id="rye/code/lsp/lsp",
+rye_execute(item_id="rye/code/lsp/lsp",
     parameters={"operation": "incomingCalls", "file_path": "src/api.ts", "line": 20, "character": 10})
 ```
 
@@ -232,13 +232,13 @@ TypeScript type checker — runs `tsc --noEmit` for type checking without produc
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/code/typescript/typescript",
+rye_execute(item_id="rye/code/typescript/typescript",
     parameters={"action": "check"})
 
-rye_execute(item_type="tool", item_id="rye/code/typescript/typescript",
+rye_execute(item_id="rye/code/typescript/typescript",
     parameters={"action": "check-file", "file_path": "src/main.ts", "strict": true})
 
-rye_execute(item_type="tool", item_id="rye/code/typescript/typescript",
+rye_execute(item_id="rye/code/typescript/typescript",
     parameters={"action": "check", "working_dir": "packages/core"})
 ```
 
@@ -299,19 +299,19 @@ Flags object keys are converted to CLI flags: single-char keys become `-k`, mult
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "install", "args": ["express", "cors"]})
 
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "install", "args": ["typescript"], "flags": {"save_dev": true}})
 
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "run", "args": ["lint"]})
 
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "exec", "args": ["prisma", "migrate", "dev"]})
 
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "build", "working_dir": "packages/frontend"})
 ```
 
@@ -331,19 +331,19 @@ rye_execute(item_type="tool", item_id="rye/code/npm/npm",
 
 ```python
 # Run diagnostics then jump to definition of an error symbol
-diag = rye_execute(item_type="tool", item_id="rye/code/diagnostics/diagnostics",
+diag = rye_execute(item_id="rye/code/diagnostics/diagnostics",
     parameters={"file_path": "src/main.py"})
 
-defn = rye_execute(item_type="tool", item_id="rye/code/lsp/lsp",
+defn = rye_execute(item_id="rye/code/lsp/lsp",
     parameters={"operation": "goToDefinition", "file_path": "src/main.py", "line": 42, "character": 8})
 
 # Full project type check
-rye_execute(item_type="tool", item_id="rye/code/typescript/typescript",
+rye_execute(item_id="rye/code/typescript/typescript",
     parameters={"action": "check"})
 
 # Install deps then build
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "install"})
-rye_execute(item_type="tool", item_id="rye/code/npm/npm",
+rye_execute(item_id="rye/code/npm/npm",
     parameters={"action": "build"})
 ```

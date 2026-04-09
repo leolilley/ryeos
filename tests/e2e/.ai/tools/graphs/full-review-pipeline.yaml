@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T06:48:33Z:c0c5d8e5cf6624842d225551f3a81b8f775e36c66b8295e14215051d20bf0ba1:x5JdrSMKmkt4Ft9OZtS5KFJO5CMEW_5nlCSiwLJP0fL2Br1XS5SVZgJIs5eylrA-nlItXeK2x2NQXfqanYkpBw==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:3b0f92558298000b65657636edc406813aa61e7406c705f96513196ace53b94d:8qPf0qQFFDrBgmWdGyeTlwq_jnriNy3K0dS-uxJ4PaHf9daHEGhLya-buoHzojqxDi1be032Qbdi0B2-CFHTDw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -28,8 +28,7 @@ config:
     setup:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir}/samples ${inputs.output_dir}/analyses && echo 'setup done'"
       next: generate_samples
@@ -37,8 +36,7 @@ config:
     generate_samples:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: |
             cat > ${inputs.output_dir}/samples/utils.py << 'PYEOF'
@@ -133,8 +131,7 @@ config:
       as: file_info
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat ${file_info.path}"
       collect: file_contents
@@ -143,8 +140,7 @@ config:
     analyze_first:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/analyze_code
           inputs:
@@ -160,8 +156,7 @@ config:
     analyze_second:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/analyze_code
           inputs:
@@ -178,8 +173,7 @@ config:
     collect_analyses:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: |
             echo '{"analyses": [' > ${inputs.output_dir}/combined_analyses.json
@@ -202,8 +196,7 @@ config:
     check_complexity:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'total_functions=${state.total_functions}'"
       next:
@@ -219,8 +212,7 @@ config:
     deep_review:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat ${inputs.output_dir}/samples/utils.py"
       assign:
@@ -230,8 +222,7 @@ config:
     run_orchestrate:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/orchestrate_review
           inputs:
@@ -249,8 +240,7 @@ config:
     quick_summary:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat ${inputs.output_dir}/combined_analyses.json"
       assign:
@@ -260,8 +250,7 @@ config:
     run_quick_summary_thread:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/summarize_text
           inputs:
@@ -279,8 +268,7 @@ config:
     run_nested_graph:
       action:
         primary: execute
-        item_type: tool
-        item_id: graphs/code-analysis-pipeline
+        item_id: tool:graphs/code-analysis-pipeline
         params:
           file_path: "${state.files.1.path}"
           output_dir: "${inputs.output_dir}/nested-pipeline"
@@ -298,8 +286,7 @@ config:
     handle_nested_error:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'Nested graph failed, continuing with partial results'"
       assign:
@@ -310,8 +297,7 @@ config:
     final_report:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: |
             cat > ${state.inputs.output_dir}/final_report.md << 'REPORTEOF'

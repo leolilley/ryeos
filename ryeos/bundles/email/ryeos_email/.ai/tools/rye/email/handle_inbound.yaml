@@ -1,4 +1,4 @@
-# rye:signed:2026-03-17T05:46:02Z:a25193b949a4466798b950292bd4ffc9042f31bf60c2345b74bbc4db9cf1bf0d:JAnM0axFtwqRz1WAq6drCTvsf5wnt_S4SsZ6eR-Mufreqw-bKJgeQaL0EAIBPHOxNtqKBREsoQO4-s1mOnMwDw==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:36Z:3ceed71268e859d7b5e1908da2487bb500ca59d6e5050d826e20cb62eadeeea0:IAAnnsTrzA1s3cagRL3VHGblht5f_AyfQcz3omiOFfGIe2LU0Y0ecviEBnRPzAyGvz-8hmRqO12miP42XyexAg:4b987fd4e40303ac
 # rye:unsigned
 tool_id: handle_inbound
 tool_type: graph
@@ -33,8 +33,7 @@ config:
     route:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/email/router
+        item_id: tool:rye/email/router
         params:
           from_address: "${inputs.from_address}"
           to_address: "${inputs.to_address}"
@@ -56,8 +55,7 @@ config:
     draft_reply:
       action:
         primary: execute
-        item_type: directive
-        item_id: rye/email/draft_response
+        item_id: directive:rye/email/draft_response
         params:
           email_body: "${inputs.body}"
           email_subject: "${inputs.subject}"
@@ -72,8 +70,7 @@ config:
     send_reply:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/email/send
+        item_id: tool:rye/email/send
         params:
           to: "${inputs.from_address}"
           subject: "${state.draft_subject}"
@@ -85,8 +82,7 @@ config:
     forward_email:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/email/forward
+        item_id: tool:rye/email/forward
         params:
           email_id: "${inputs.email_id}"
           forward_to: "${state.forward_to}"

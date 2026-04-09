@@ -120,7 +120,7 @@ async def spawn_thread(
     *,
     registry,
     thread_id: str,
-    directive: str,
+    item_id: str,
     cmd: List[str],
     log_dir: Path,
     input_data: Optional[str] = None,
@@ -140,7 +140,7 @@ async def spawn_thread(
         registry: ThreadRegistry instance (must support register,
             update_status, update_pid).
         thread_id: Thread identifier (from ``generate_thread_id()``).
-        directive: Directive/item string for registry (e.g. "tool/my-tool").
+        item_id: Canonical item ref for registry (e.g. "tool:my-tool").
         cmd: Command list for the child process.
         log_dir: Directory for spawn.log.
         input_data: Optional JSON payload piped to child stdin.
@@ -150,7 +150,7 @@ async def spawn_thread(
     Returns:
         Dict with ``success``, ``pid``, and optional ``error``.
     """
-    registry.register(thread_id, directive, parent_id)
+    registry.register(thread_id, item_id, parent_id)
     registry.update_status(thread_id, "running")
 
     result = await launch_detached(

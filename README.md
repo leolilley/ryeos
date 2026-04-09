@@ -9,7 +9,7 @@ RYE is a portable operating system for AI. It gives any LLM a persistent, signed
 | Tool      | Purpose                                    |
 | --------- | ------------------------------------------ |
 | `fetch`   | Find items by ID or discover by query      |
-| `execute` | Run a directive, tool, or knowledge item   |
+| `execute` | Run a directive or tool                    |
 | `sign`    | Cryptographically sign items               |
 
 ---
@@ -122,10 +122,10 @@ remotes:
     key_env: "GPU_REMOTE_API_KEY"
 ```
 
-Target a remote via the `thread` parameter:
+Target a remote via the `target` parameter:
 
 ```python
-rye_execute(item_type="tool", item_id="my/heavy-compute", thread="remote:gpu")
+rye_execute(item_id="tool:my/heavy-compute", target="remote:gpu")
 ```
 
 State graph nodes can also specify per-node remotes for hybrid local/remote workflows.

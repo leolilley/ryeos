@@ -44,19 +44,19 @@ class RegistrySpaceProvider(ABC):
         self,
         *,
         query: str,
-        item_type: str,
+        kind: str,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Search for items in this remote space.
 
         Args:
             query: Search query string.
-            item_type: Filter by type ("directive", "tool", "knowledge").
+            kind: Filter by type ("directive", "tool", "knowledge").
             limit: Maximum results to return.
 
         Returns:
-            List of result dicts with keys: id, name, description, type,
-            source, score, metadata.
+            List of result dicts with keys: item_ref, name, description,
+            type, source, score, metadata.
         """
         ...
 
@@ -64,7 +64,7 @@ class RegistrySpaceProvider(ABC):
     async def pull(
         self,
         *,
-        item_type: str,
+        kind: str,
         item_id: str,
         version: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -74,12 +74,12 @@ class RegistrySpaceProvider(ABC):
         The caller (FetchTool) handles destination path resolution.
 
         Args:
-            item_type: "directive", "tool", or "knowledge".
+            kind: "directive", "tool", or "knowledge".
             item_id: Item identifier in provider-specific format.
             version: Specific version or None for latest.
 
         Returns:
-            Dict with keys: status, content, item_type, item_id, version,
+            Dict with keys: status, content, item_ref, version,
             metadata (author, namespace, signature, etc.).
             On error: dict with "error" key.
         """

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:87f34a7ed433afb671388390140b596987f4c8935d0d50228491788f0398e100:2sLuZgcIuFn3LFWqU30PgJxD53B7Rs9C1mL-3q4txcRyEFCD2y8GrIXW0kMnz-KRwCvhRi-ZDzxfMeDomDcRCg:4b987fd4e40303ac
+# rye:signed:2026-04-09T03:35:38Z:9d7f52c784fa06e6358c18bf8086930c1a936b140a322b683bb0a8dd3b9575d8:R-P45ubwRpEykGw-pQUU2xEBD2ufnKmY8aWkM1D21JSPKKlIYyCXaSVxS9zmUgLbLu8K3Raa07OUJ6Fvf39JBQ:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: extractor
 executor_id: null
@@ -61,6 +61,9 @@ extraction_rules:
   content:
     type: path
     key: content
+  executor_id:
+    type: constant
+    value: "rye/core/executors/directive/directive"
 
 search_fields:
   title: 3.0

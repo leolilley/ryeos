@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:283e7ec1c3d54be7d35c1feddf752b6044991e61226e904196c4bbc7bc509236:NoCip58RQ1FY3a3UUN4ndkkVThAQZ1ElbjvT8UglwIkHFSWxvIqW1f_ts5XCIpcTVlknSnnI5CyI5y3gDnUqCw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:283e7ec1c3d54be7d35c1feddf752b6044991e61226e904196c4bbc7bc509236:NoCip58RQ1FY3a3UUN4ndkkVThAQZ1ElbjvT8UglwIkHFSWxvIqW1f_ts5XCIpcTVlknSnnI5CyI5y3gDnUqCw:4b987fd4e40303ac -->
 # Create Bundle
 
 Create a new bundle using the bundler tool.
@@ -40,7 +40,7 @@ Create a new bundle using the bundler tool.
 
   <step name="call_bundler_create">
     Call the bundler tool with action=create.
-    `rye_execute(item_type="tool", item_id="rye/core/bundler/bundler", parameters={"action": "create", "bundle_id": "{input:bundle_id}", "version": "{input:version}"})`
+    `rye_execute(item_id="rye/core/bundler/bundler", parameters={"action": "create", "bundle_id": "{input:bundle_id}", "version": "{input:version}"})`
   </step>
 
   <step name="return_result">

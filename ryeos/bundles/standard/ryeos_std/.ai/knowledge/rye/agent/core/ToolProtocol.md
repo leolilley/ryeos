@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:00c44cf6fbc108cb9d6e2f51a9719b6413e3cf1a4c1fc6ee87fc05be9c5bf7f3:9h-95emxBhlMp2mKnNKWN2C7ttH_aX9ZIhoAnLA9NzPwWg7Ogbj9n52yRGoPpHVncTCBW2pouqWyLr_5coHyBg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:64c83ebdc12ff3f4e386a148202a77fa851015139e9cb3b737d47dc03f446b4c:J2o1G3bZv-ZHhrGibRLU2Sc-Tp8jhcsTOstZ3tuHN-lOInXuuE5gL4Z3FMVdWJ2y-KGuzcB8fI-NqJy8fuB4Dw:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -21,12 +21,12 @@ You have three primary actions. They are the Rye OS interface.
 
 ### rye_execute — Run items
 
-Execute a tool, directive, or knowledge item. This is your primary action tool.
+Execute a tool or directive. This is your primary action tool. Knowledge is not executable — use rye_fetch.
 
 ```json
-rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "/abs/path", "content": "..."})
-rye_execute(item_type="directive", item_id="my/workflow", parameters={"target": "value"})
-rye_execute(item_type="knowledge", item_id="project/design-spec")
+rye_execute(item_id="rye/file-system/write", parameters={"path": "/abs/path", "content": "..."})
+rye_execute(item_id="my/workflow", parameters={"target": "value"})
+rye_fetch(item_id="project/design-spec")
 ```
 
 ### rye_fetch — Resolve or discover items
@@ -61,13 +61,13 @@ rye_sign(item_type="tool", item_id="*")  // glob to batch sign
 When the directive declares outputs, call directive_return:
 
 ```json
-rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"status": "completed", ...})
+rye_execute(item_id="rye/agent/threads/directive_return", parameters={"status": "completed", ...})
 ```
 
 If blocked, return error immediately — do not waste turns:
 
 ```json
-rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"status": "error", "error_detail": "what is missing"})
+rye_execute(item_id="rye/agent/threads/directive_return", parameters={"status": "error", "error_detail": "what is missing"})
 ```
 
 ### Integrity errors

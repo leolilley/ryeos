@@ -121,7 +121,7 @@ Now you have your own copy in user space. You can edit it, change the welcome me
       <tool_call>rye_fetch(scope="knowledge", query="spaces")</tool_call>
 
       Then load a knowledge entry:
-      <tool_call>rye_execute(item_type="knowledge", item_id="rye/core/three-tier-spaces")</tool_call>
+      <tool_call>rye_fetch(item_id="rye/core/three-tier-spaces")</tool_call>
 
       After the results come back, output the render block below.
     </instruction>
@@ -134,7 +134,7 @@ Knowledge entries are reference docs that ship with Rye. They have YAML metadata
   <step name="tools_create">
     <instruction>
       First resolve the user_space path:
-      <tool_call>rye_execute(item_type="tool", item_id="rye/core/system/system", parameters={"item": "paths"})</tool_call>
+      <tool_call>rye_execute(item_id="rye/core/system/system", parameters={"item": "paths"})</tool_call>
 
       Then create a hello world tool in user space using the write tool. The file content is:
 
@@ -164,7 +164,7 @@ Knowledge entries are reference docs that ship with Rye. They have YAML metadata
           main()
       ```
 
-      <tool_call>rye_execute(item_type="tool", item_id="rye/file-system/write", project_path="{user_space}", parameters={"path": "{user_space}/.ai/tools/hello/hello.py", "content": "\"\"\"Hello world — your first Rye tool.\"\"\"\n\n__version__ = \"1.0.0\"\n__tool_type__ = \"python\"\n__executor_id__ = \"rye/core/runtimes/python_script_runtime\"\n__category__ = \"hello\"\n__tool_description__ = \"A simple hello world tool\"\n\nimport json\nimport sys\nimport argparse\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--params\", required=True)\n    parser.add_argument(\"--project-path\", required=True)\n    args = parser.parse_args()\n    params = json.loads(args.params)\n    name = params.get(\"name\", \"world\")\n    print(json.dumps({\"success\": True, \"message\": f\"Hello, {name}!\"}))\n\nif __name__ == \"__main__\":\n    main()\n"})</tool_call>
+      <tool_call>rye_execute(item_id="rye/file-system/write", project_path="{user_space}", parameters={"path": "{user_space}/.ai/tools/hello/hello.py", "content": "\"\"\"Hello world — your first Rye tool.\"\"\"\n\n__version__ = \"1.0.0\"\n__tool_type__ = \"python\"\n__executor_id__ = \"rye/core/runtimes/python_script_runtime\"\n__category__ = \"hello\"\n__tool_description__ = \"A simple hello world tool\"\n\nimport json\nimport sys\nimport argparse\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--params\", required=True)\n    parser.add_argument(\"--project-path\", required=True)\n    args = parser.parse_args()\n    params = json.loads(args.params)\n    name = params.get(\"name\", \"world\")\n    print(json.dumps({\"success\": True, \"message\": f\"Hello, {name}!\"}))\n\nif __name__ == \"__main__\":\n    main()\n"})</tool_call>
 
       <rule>You MUST use rye_execute to call the file-system write tool. Do NOT use shell commands.</rule>
       <rule>The write tool rejects paths outside project_path. Pass project_path={user_space}.</rule>
@@ -184,7 +184,7 @@ That's your first tool. A Python script with metadata in dunder variables. The `
       <tool_call>rye_sign(item_type="tool", item_id="hello/hello", source="user")</tool_call>
 
       Then execute it:
-      <tool_call>rye_execute(item_type="tool", item_id="hello/hello", parameters={"name": "Rye"})</tool_call>
+      <tool_call>rye_execute(item_id="hello/hello", parameters={"name": "Rye"})</tool_call>
 
       After the results come back, output the render block below.
     </instruction>

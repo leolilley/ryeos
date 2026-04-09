@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:079a137dbf9311a7d778702431e5ebe9b5039e1160fb68113fb252dcbe62e132:jF3a3hSFxUNdsTMLKYsNcI8KDhtcm5RxA9uYR5eVxK6E3pKa0KZE3YIwGfEQoKbqaGwG4b5DmQWB_EzpTjZnBw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:06d5689eea307667af459cf96b68ff4aab1323f6b6db88d8044d07faa48ec6d2:RCMwRziwTtsFTxSydd3eTWkcqRQdlFZJr2A-Yyg6TIHoMUc5y3VziKjjN3Ztnn2mV9f9-5dsVk2LovQ3XPlICw:4b987fd4e40303ac -->
 ```yaml
 name: test-runner
 title: "Tool Test Runner"
@@ -125,11 +125,11 @@ rye_execute(
 
 ```python
 # Run only unit tests
-rye_execute(item_type="tool", item_id="rye/dev/test-runner",
+rye_execute(item_id="rye/dev/test-runner",
             parameters={"tool": "my/tool", "include_tags": "unit"})
 
 # Skip integration tests
-rye_execute(item_type="tool", item_id="rye/dev/test-runner",
+rye_execute(item_id="rye/dev/test-runner",
             parameters={"tool": "my/tool", "exclude_tags": "integration,slow"})
 ```
 

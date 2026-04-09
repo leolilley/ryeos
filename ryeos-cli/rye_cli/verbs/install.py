@@ -67,8 +67,7 @@ def _handle_install(args, project_path: str):
 
     params["remote"] = "registry"
     result = run_async(tool.handle(
-        item_type="tool",
-        item_id="rye/core/remote/remote",
+        item_id="tool:rye/core/remote/remote",
         project_path=target_path,
         parameters=params,
     ))
@@ -83,8 +82,7 @@ def _handle_install(args, project_path: str):
         "bundle_id": bundle_id,
     }
     verify_result = run_async(tool.handle(
-        item_type="tool",
-        item_id="rye/core/bundler/bundler",
+        item_id="tool:rye/core/bundler/bundler",
         project_path=target_path,
         parameters=verify_params,
     ))

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-07T03:17:14Z:c8c14a111ab1d95210a2b0e8c3be39ad2c0f219f2e23921b945fc5d798ce0771:-mP5K8PA6xzDylC6PdG_NFGjoO4-AaFmWp-4FGkGnr2AMgmhc4_LOaonTDRIM04Doy_nTsinhoJaGF-ClQxNAg:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:36Z:c7854eb34e28f898e68b838c027fa5ac067650120957c6c55dbcbc204f063bb2:FI12nXJGiz6V28D8zdGQvApmlNrM-HKH4BOEWZQFnTnfz1L_LOh6cH0YxuK1Bjj6DyxwDPkKjhtayYXSTg4sAg:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -77,13 +77,9 @@ CONFIG_SCHEMA = {
             "enum": ACTIONS,
             "description": "Remote operation: push, pull, status, execute, seal, vault_set, vault_list, vault_delete, threads, thread_status, webhooks, webhook_create, webhook_delete, webhook_trigger",
         },
-        "item_type": {
-            "type": "string",
-            "description": "Item type for execute (tool, directive, knowledge)",
-        },
         "item_id": {
             "type": "string",
-            "description": "Item ID for execute",
+            "description": "Canonical ref for execute (e.g. 'tool:my/tool', 'directive:my/flow')",
         },
         "parameters": {
             "type": "object",
@@ -862,25 +858,31 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
       5. Pull new result objects
       6. Materialize runtime outputs
     """
-    item_type = params.get("item_type")
+    from rye.constants import ItemType
+
     item_id = params.get("item_id")
     exec_params = params.get("parameters", {})
     thread = params.get("thread")
 
-    if not item_type or not item_id:
-        return {"error": "item_type and item_id are required for execute"}
+    if not item_id:
+        return {"error": "item_id (canonical ref) is required for execute"}
+
+    kind, bare_id = ItemType.parse_canonical_ref(item_id)
+    if not kind:
+        return {"error": f"item_id must be a canonical ref (e.g. 'tool:my/tool'), got: {item_id!r}"}
+
     if not thread:
         return {"error": "thread is required for execute"}
 
-    # Validate thread/item_type before hitting the server
-    if item_type == "directive" and thread != "fork":
+    # Validate thread/kind before hitting the server
+    if kind == ItemType.DIRECTIVE and thread != "fork":
         return {
             "error": (
                 f"Directives must use thread=fork on remote, got thread={thread!r}. "
                 "The remote server needs to spawn an LLM thread to follow directive steps."
             ),
         }
-    if item_type == "tool" and thread != "inline":
+    if kind == ItemType.TOOL and thread != "inline":
         return {
             "error": (
                 f"Tools must use thread=inline on remote, got thread={thread!r}. "
@@ -917,7 +919,6 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     proj_name = get_project_path(project_path)
     exec_body = {
         "project_path": proj_name,
-        "item_type": item_type,
         "item_id": item_id,
         "parameters": exec_params,
         "thread": thread,
@@ -1134,10 +1135,15 @@ async def _webhooks(project_path: Path, params: Dict) -> Dict:
 
 async def _webhook_create(project_path: Path, params: Dict) -> Dict:
     """Create a webhook binding for a tool or directive."""
-    item_type = params.get("item_type")
+    from rye.constants import ItemType
+
     item_id = params.get("item_id")
-    if not item_type or not item_id:
-        return {"error": "item_type and item_id are required for webhook_create"}
+    if not item_id:
+        return {"error": "item_id (canonical ref) is required for webhook_create"}
+
+    kind, bare_id = ItemType.parse_canonical_ref(item_id)
+    if not kind:
+        return {"error": f"item_id must be a canonical ref (e.g. 'tool:my/tool'), got: {item_id!r}"}
 
     remote_name = params.get("remote")
     client = _get_client(remote_name, project_path)
@@ -1147,7 +1153,6 @@ async def _webhook_create(project_path: Path, params: Dict) -> Dict:
     proj_name = get_project_path(project_path)
 
     body = {
-        "item_type": item_type,
         "item_id": item_id,
         "project_path": proj_name,
     }
@@ -1272,12 +1277,12 @@ async def _webhook_trigger(project_path: Path, params: Dict) -> Dict:
 async def _publish(project_path: Path, params: Dict) -> Dict:
     """Register an item in the registry index on a remote node."""
     remote_name = params.get("remote")
-    item_type = params.get("item_type")
+    kind = params.get("kind")
     item_id = params.get("item_id")
     version = params.get("version")
 
-    if not item_type or not item_id:
-        return {"error": "Required: item_type, item_id"}
+    if not kind or not item_id:
+        return {"error": "Required: kind, item_id"}
 
     client = _get_client(remote_name, project_path)
     key_err = await _verify_remote_key(client, remote_name)
@@ -1311,7 +1316,7 @@ async def _publish(project_path: Path, params: Dict) -> Dict:
     result = await client.post(
         "/registry/publish",
         {
-            "item_type": item_type,
+            "kind": kind,
             "item_id": item_id,
             "version": version,
             "manifest_hash": ph,
@@ -1334,7 +1339,7 @@ async def _publish(project_path: Path, params: Dict) -> Dict:
 
     return {
         "status": "published",
-        "item_type": item_type,
+        "kind": kind,
         "item_id": item_id,
         "version": version,
         "manifest_hash": ph,
@@ -1355,11 +1360,11 @@ async def _registry_search(project_path: Path, params: Dict) -> Dict:
         return key_err
 
     search_params = f"?query={query}"
-    item_type = params.get("item_type")
+    kind = params.get("kind")
     namespace = params.get("namespace")
     limit = params.get("limit", 20)
-    if item_type:
-        search_params += f"&item_type={item_type}"
+    if kind:
+        search_params += f"&kind={kind}"
     if namespace:
         search_params += f"&namespace={namespace}"
     search_params += f"&limit={limit}"

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:3a8867b33d952136b7cb9c09dd9b0666efdc303f6a1aa42db9953654b7f884b8:6qlRtHmnEVgzous-O54xpsTBjqe1zmlAFtr43ODILykbv-fI1pQE_-4Hn-C_Fguafj7bYn5a1jMa5AEugBG0Bw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:7d41f7f3f3b6985cd58a190185ac23fa6a8ac7873b2216732804b798ef8598e4:cnYbTWOOEzo4JYnUMJo54UUX22m6qhlZq4qaxa-ef9O1rHxRkU0qBn05RrdNdxtdSe7Gb2d48g6cXEOBZGN_Bg:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -83,7 +83,7 @@ outputs = [
 
 # Output in prompt
 When you have completed all steps, return structured results:
-`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"directive_path": "<Path to the created file>", "signed": "<Whether signing succeeded>"})`
+`rye_execute(item_id="rye/agent/threads/directive_return", parameters={"directive_path": "<Path to the created file>", "signed": "<Whether signing succeeded>"})`
 ```
 
 If an output has no description, the field name is used as the placeholder:
@@ -102,7 +102,7 @@ outputs = {"score": "Numeric score 0-100", "tier": "hot, warm, cold"}
 
 # Output in prompt
 When you have completed all steps, return structured results:
-`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", parameters={"score": "<Numeric score 0-100>", "tier": "<hot, warm, cold>"})`
+`rye_execute(item_id="rye/agent/threads/directive_return", parameters={"score": "<Numeric score 0-100>", "tier": "<hot, warm, cold>"})`
 ```
 
 ## Why This Matters
@@ -162,7 +162,7 @@ def _build_prompt(directive: Dict) -> str:
             params_obj = ", ".join(f'"{k}": "<{v or k}>"' for k, v in output_fields.items())
             parts.append(
                 "When you have completed all steps, return structured results:\n"
-                f'`rye_execute(item_type="tool", item_id="rye/agent/threads/directive_return", '
+                f'`rye_execute(item_id="rye/agent/threads/directive_return", '
                 f"parameters={{{params_obj}}})`"
             )
 

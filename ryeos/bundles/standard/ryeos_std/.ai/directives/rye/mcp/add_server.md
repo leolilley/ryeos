@@ -84,11 +84,11 @@ Register a new MCP server with Rye OS end-to-end — creates server config, disc
 
   <step name="check_existing">
     Check if a server named {input:name} already exists:
-    `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "list", "include_tools": true})`
+    `rye_execute(item_id="rye/mcp/manager", parameters={"action": "list", "include_tools": true})`
 
     If the server exists:
     - Ask if user wants to refresh (re-discover tools) or abort
-    - To refresh: `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "refresh", "name": "{input:name}"})`
+    - To refresh: `rye_execute(item_id="rye/mcp/manager", parameters={"action": "refresh", "name": "{input:name}"})`
     - Then skip to the sign step
   </step>
 
@@ -98,7 +98,7 @@ Register a new MCP server with Rye OS end-to-end — creates server config, disc
     all available tools, and generates per-tool YAML wrappers at
     .ai/tools/mcp/{input:name}/{tool_name}.yaml.
 
-    `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "add", "name": "{input:name}", "transport": "{input:transport}", "scope": "{input:scope}", "url": "{input:url}", "headers": {input:headers}, "command": "{input:command}", "args": {input:args}, "mcp_server_env": {input:mcp_server_env}, "cwd": "{input:cwd}", "timeout": {input:timeout}})`
+    `rye_execute(item_id="rye/mcp/manager", parameters={"action": "add", "name": "{input:name}", "transport": "{input:transport}", "scope": "{input:scope}", "url": "{input:url}", "headers": {input:headers}, "command": "{input:command}", "args": {input:args}, "mcp_server_env": {input:mcp_server_env}, "cwd": "{input:cwd}", "timeout": {input:timeout}})`
 
     If this fails, check:
     - For stdio: is the command path correct? Is the venv activated?
@@ -114,7 +114,7 @@ Register a new MCP server with Rye OS end-to-end — creates server config, disc
 
   <step name="verify">
     Verify the registration by listing servers with tools:
-    `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "list", "include_tools": true})`
+    `rye_execute(item_id="rye/mcp/manager", parameters={"action": "list", "include_tools": true})`
 
     Confirm {input:name} appears with the correct transport and discovered tools.
   </step>

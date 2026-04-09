@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:01Z:2ea05c7921c1958346dad85b005c03305cb3e337dada8fce62b7a860cf50fddf:P9akrydKDkaOjmjj6Q-uZxft3184xA_G1_P3ZIViEmewjo1S37b4GJRZnLX87Hy83l498Ck4QvaSQA7OaIG7Aw:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:07:55Z:b7320a54d9e828c7d4660ff1e2a03841b3007b3b832aba5bd134d1502652d513:QFLSWR00Wrlcl-lvUTpDCWTIDUCPhsqkMguH7bzc-44XhsJZKoHj-WA4KU_Z187SfEmnoU0uIocssJeYZcVgCg:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -88,7 +88,7 @@ def _find_agent_threads_anchor() -> Optional[Path]:
 
         for bundle in get_system_spaces():
             candidate = (
-                bundle.root_path / AI_DIR / ItemType.TYPE_DIRS[ItemType.TOOL] / _AGENT_THREADS_REL
+                bundle.root_path / AI_DIR / ItemType.KIND_DIRS[ItemType.TOOL] / _AGENT_THREADS_REL
             )
             if candidate.is_dir():
                 return candidate
@@ -564,20 +564,21 @@ async def _dispatch_action(
     """
     tools = _tools_instance()
     primary = action.get("primary", "execute")
-    item_type = action.get("item_type", "tool")
     item_id = action.get("item_id", "")
     params = action.get("params", {})
+
+    # Parse canonical ref from item_id (e.g. "tool:rye/email/send")
+    kind, bare_id = ItemType.parse_canonical_ref(item_id)
 
     # Directives need an LLM thread — the walker has no LLM, so inline
     # would just return your_directions with no one to follow them.
     # Only upgrade "inline" → "fork"; preserve explicit remote routing.
-    if primary == "execute" and item_type == "directive" and thread == "inline":
+    if primary == "execute" and kind == "directive" and thread == "inline":
         thread = "fork"
 
     try:
         if primary == "execute":
             return await tools["execute"].handle(
-                item_type=item_type,
                 item_id=item_id,
                 project_path=project_path,
                 parameters=params,
@@ -597,14 +598,11 @@ async def _dispatch_action(
                     fetch_kwargs["limit"] = params["limit"]
             else:
                 fetch_kwargs["item_id"] = item_id
-                if item_type:
-                    fetch_kwargs["item_type"] = item_type
                 if params.get("source"):
                     fetch_kwargs["source"] = params["source"]
             return await tools["fetch"].handle(**fetch_kwargs)
         elif primary == "sign":
             return await tools["sign"].handle(
-                item_type=item_type,
                 item_id=item_id,
                 project_path=project_path,
                 source=params.get("source", "project"),
@@ -616,9 +614,8 @@ async def _dispatch_action(
             import traceback
 
             logger.error(
-                "Dispatch %s %s/%s failed: %s\n%s",
+                "Dispatch %s %s failed: %s\n%s",
                 primary,
-                item_type,
                 item_id,
                 e,
                 traceback.format_exc(),
@@ -769,17 +766,35 @@ def _resolve_execution_context(
 
 
 def _check_permission(
-    exec_ctx: Dict, primary: str, item_type: str, item_id: str
+    exec_ctx: Dict, primary: str, item_id: str
 ) -> Optional[Dict]:
     """Check if action is permitted by resolved capabilities.
+
+    Parses canonical refs (e.g. "tool:rye/email/send") to construct the
+    capability string "rye.execute.tool.rye.email.send".
+
+    Requires canonical refs for deterministic permission strings.
 
     Same logic as SafetyHarness.check_permission():
     - Empty capabilities = deny all (fail-closed)
     - Internal thread tools always allowed
     - fnmatch wildcards for glob matching
     """
-    if item_id and item_id.startswith("rye/agent/threads/internal/"):
+    kind, bare_id = ItemType.parse_canonical_ref(item_id)
+
+    if bare_id and bare_id.startswith("rye/agent/threads/internal/"):
         return None
+
+    # Require canonical ref for deterministic capability strings
+    if not kind:
+        return {
+            "status": "error",
+            "error": (
+                f"Canonical ref required for permissioned actions "
+                f"(e.g. 'tool:{item_id}' or 'directive:{item_id}'). "
+                f"Cannot generate capability string for bare item_id: {item_id!r}"
+            ),
+        }
 
     capabilities = exec_ctx.get("capabilities", [])
     if not capabilities:
@@ -787,15 +802,12 @@ def _check_permission(
             "status": "error",
             "error": (
                 f"Permission denied: no capabilities. "
-                f"Cannot {primary} {item_type} '{item_id}'"
+                f"Cannot {primary} '{item_id}'"
             ),
         }
 
-    if item_id:
-        item_id_dotted = item_id.replace("/", ".")
-        required = f"rye.{primary}.{item_type}.{item_id_dotted}"
-    else:
-        required = f"rye.{primary}.{item_type}"
+    bare_id_dotted = bare_id.replace("/", ".")
+    required = f"rye.{primary}.{kind}.{bare_id_dotted}"
 
     for cap in capabilities:
         if fnmatch.fnmatch(required, cap):
@@ -2111,7 +2123,6 @@ async def execute(
         denied = _check_permission(
             exec_ctx,
             action.get("primary", "execute"),
-            action.get("item_type", "tool"),
             action.get("item_id", ""),
         )
         cache_hit = False
@@ -2627,7 +2638,6 @@ async def _foreach_dispatch_one(
     denied = _check_permission(
         exec_ctx,
         action.get("primary", "execute"),
-        action.get("item_type", "tool"),
         action.get("item_id", ""),
     )
 

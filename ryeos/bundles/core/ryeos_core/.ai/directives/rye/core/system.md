@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:4a69e6391587a2f9d993edc3440317cf1d42b93a0022b7c8c507f28a7edde235:HENv278cEeNrHIxQgaHM4IyqFzjnDWtxxQrBV5rdFVnsXF3nsjc0YNuj3tXZKOPdtKrvpRf0Wi6bMzyBGZNvDQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:4a69e6391587a2f9d993edc3440317cf1d42b93a0022b7c8c507f28a7edde235:HENv278cEeNrHIxQgaHM4IyqFzjnDWtxxQrBV5rdFVnsXF3nsjc0YNuj3tXZKOPdtKrvpRf0Wi6bMzyBGZNvDQ:4b987fd4e40303ac -->
 # System
 
 Retrieve system information such as paths, time, and runtime details.
@@ -37,7 +37,7 @@ Retrieve system information such as paths, time, and runtime details.
 
   <step name="call_system_tool">
     Call the system tool with the specified item.
-    `rye_execute(item_type="tool", item_id="rye/core/system/system", parameters={"item": "{input:item}"})`
+    `rye_execute(item_id="rye/core/system/system", parameters={"item": "{input:item}"})`
   </step>
 
   <step name="return_result">

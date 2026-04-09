@@ -529,13 +529,11 @@ class TestHandleInboundGraph:
 
     def test_route_node_calls_router_tool(self):
         route = self.graph["config"]["nodes"]["route"]
-        assert route["action"]["item_type"] == "tool"
-        assert route["action"]["item_id"] == "rye/email/router"
+        assert route["action"]["item_id"] == "tool:rye/email/router"
 
     def test_draft_reply_calls_directive(self):
         draft = self.graph["config"]["nodes"]["draft_reply"]
-        assert draft["action"]["item_type"] == "directive"
-        assert draft["action"]["item_id"] == "rye/email/draft_response"
+        assert draft["action"]["item_id"] == "directive:rye/email/draft_response"
 
     def test_draft_reply_has_error_edge(self):
         draft = self.graph["config"]["nodes"]["draft_reply"]
@@ -543,13 +541,11 @@ class TestHandleInboundGraph:
 
     def test_send_reply_calls_tool(self):
         send = self.graph["config"]["nodes"]["send_reply"]
-        assert send["action"]["item_type"] == "tool"
-        assert send["action"]["item_id"] == "rye/email/send"
+        assert send["action"]["item_id"] == "tool:rye/email/send"
 
     def test_forward_email_calls_tool(self):
         forward = self.graph["config"]["nodes"]["forward_email"]
-        assert forward["action"]["item_type"] == "tool"
-        assert forward["action"]["item_id"] == "rye/email/forward"
+        assert forward["action"]["item_id"] == "tool:rye/email/forward"
 
     def test_done_is_return_node(self):
         assert self.graph["config"]["nodes"]["done"]["type"] == "return"

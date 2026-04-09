@@ -135,18 +135,18 @@ class ToolMetadataStrategy(MetadataStrategy):
 
     def __init__(
         self, file_path: Optional[Path] = None, project_path: Optional[Path] = None,
-        item_type: str = "tool",
+        kind: str = "tool",
     ):
         self.file_path = file_path
         self.project_path = project_path
-        self._item_type = item_type
+        self._kind = kind
         self._sig_format = None
 
     def _get_signature_format(self) -> Dict[str, Any]:
         if self._sig_format is None:
             if self.file_path:
                 self._sig_format = get_signature_format(
-                    self.file_path, self.project_path, item_type=self._item_type
+                    self.file_path, self.project_path, kind=self._kind
                 )
             else:
                 self._sig_format = {"prefix": "#", "after_shebang": True}
@@ -279,33 +279,33 @@ class MetadataManager:
     @classmethod
     def get_strategy(
         cls,
-        item_type: str,
+        kind: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
     ) -> MetadataStrategy:
-        if item_type == ItemType.DIRECTIVE:
+        if kind == ItemType.DIRECTIVE:
             return DirectiveMetadataStrategy()
-        elif item_type == ItemType.TOOL:
+        elif kind == ItemType.TOOL:
             return ToolMetadataStrategy(file_path=file_path, project_path=project_path)
-        elif item_type == ItemType.KNOWLEDGE:
+        elif kind == ItemType.KNOWLEDGE:
             return KnowledgeMetadataStrategy()
-        elif item_type == "config":
-            return ToolMetadataStrategy(file_path=file_path, project_path=project_path, item_type="config")
+        elif kind == "config":
+            return ToolMetadataStrategy(file_path=file_path, project_path=project_path, kind="config")
         else:
             raise ValueError(
-                f"Unknown item_type: {item_type}. Supported: {ItemType.ALL}"
+                f"Unknown kind: {kind}. Supported: {ItemType.ALL}"
             )
 
     @classmethod
     def compute_hash(
         cls,
-        item_type: str,
+        kind: str,
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
     ) -> str:
         strategy = cls.get_strategy(
-            item_type, file_path=file_path, project_path=project_path
+            kind, file_path=file_path, project_path=project_path
         )
         content_for_hash = strategy.extract_content_for_hash(file_content)
         return compute_content_hash(content_for_hash)
@@ -313,7 +313,7 @@ class MetadataManager:
     @classmethod
     def create_signature(
         cls,
-        item_type: str,
+        kind: str,
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
@@ -325,7 +325,7 @@ class MetadataManager:
         or `rye/core/keys/keys generate`). Raises if no keypair exists.
         """
         strategy = cls.get_strategy(
-            item_type, file_path=file_path, project_path=project_path
+            kind, file_path=file_path, project_path=project_path
         )
         content_for_hash = strategy.extract_content_for_hash(file_content)
         content_hash = compute_content_hash(content_for_hash)
@@ -356,7 +356,7 @@ class MetadataManager:
     @classmethod
     def create_signature_from_hash(
         cls,
-        item_type: str,
+        kind: str,
         content_hash: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
@@ -364,7 +364,7 @@ class MetadataManager:
     ) -> str:
         """Create Ed25519 signature using a precomputed integrity hash."""
         strategy = cls.get_strategy(
-            item_type, file_path=file_path, project_path=project_path
+            kind, file_path=file_path, project_path=project_path
         )
         timestamp = generate_timestamp()
 
@@ -392,7 +392,7 @@ class MetadataManager:
     @classmethod
     def sign_content(
         cls,
-        item_type: str,
+        kind: str,
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
@@ -400,10 +400,10 @@ class MetadataManager:
     ) -> str:
         """Add Ed25519 signature to content."""
         strategy = cls.get_strategy(
-            item_type, file_path=file_path, project_path=project_path
+            kind, file_path=file_path, project_path=project_path
         )
         signature = cls.create_signature(
-            item_type, file_content, file_path=file_path, project_path=project_path,
+            kind, file_content, file_path=file_path, project_path=project_path,
             signing_key_dir=signing_key_dir,
         )
         return strategy.insert_signature(file_content, signature)
@@ -411,7 +411,7 @@ class MetadataManager:
     @classmethod
     def sign_content_with_hash(
         cls,
-        item_type: str,
+        kind: str,
         file_content: str,
         content_hash: str,
         file_path: Optional[Path] = None,
@@ -420,10 +420,10 @@ class MetadataManager:
     ) -> str:
         """Add Ed25519 signature to content using a precomputed integrity hash."""
         strategy = cls.get_strategy(
-            item_type, file_path=file_path, project_path=project_path
+            kind, file_path=file_path, project_path=project_path
         )
         signature = cls.create_signature_from_hash(
-            item_type, content_hash, file_path=file_path, project_path=project_path,
+            kind, content_hash, file_path=file_path, project_path=project_path,
             signing_key_dir=signing_key_dir,
         )
         return strategy.insert_signature(file_content, signature)
@@ -431,27 +431,27 @@ class MetadataManager:
     @classmethod
     def get_signature_info(
         cls,
-        item_type: str,
+        kind: str,
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
     ) -> Optional[Dict[str, str]]:
         """Get signature information without verification."""
         strategy = cls.get_strategy(
-            item_type, file_path=file_path, project_path=project_path
+            kind, file_path=file_path, project_path=project_path
         )
         return strategy.extract_signature(file_content)
 
     @classmethod
     def get_signature_hash(
         cls,
-        item_type: str,
+        kind: str,
         file_content: str,
         file_path: Optional[Path] = None,
         project_path: Optional[Path] = None,
     ) -> Optional[str]:
         """Extract integrity hash from signature without verification."""
         signature_data = cls.get_signature_info(
-            item_type, file_content, file_path, project_path
+            kind, file_content, file_path, project_path
         )
         return signature_data["hash"] if signature_data else None

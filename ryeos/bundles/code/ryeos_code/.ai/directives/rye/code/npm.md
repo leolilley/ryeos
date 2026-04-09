@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:5b690a6704b241e12076949b9049a1f1b08a7c966dabc2421667691b47e180fc:EBB6ttzUcMAgZwMFvJxvpqUx5a33uCodNnlquRsCS-biVOxeoGe6PuBjwcfBY5amqwdwsC1fNuozLt6T8d-MCg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:5b690a6704b241e12076949b9049a1f1b08a7c966dabc2421667691b47e180fc:EBB6ttzUcMAgZwMFvJxvpqUx5a33uCodNnlquRsCS-biVOxeoGe6PuBjwcfBY5amqwdwsC1fNuozLt6T8d-MCg:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # NPM
 
@@ -40,7 +40,7 @@ Run NPM operations — install packages, run scripts, build, test, init, and exe
 
   <step name="run_npm">
     Call the npm tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/code/npm/npm", parameters={"action": "{input:action}", "args": "{input:args}", "flags": "{input:flags}", "working_dir": "{input:working_dir}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/code/npm/npm", parameters={"action": "{input:action}", "args": "{input:args}", "flags": "{input:flags}", "working_dir": "{input:working_dir}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_result">

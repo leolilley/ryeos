@@ -57,8 +57,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="directive",
-                item_id="acme/core/bootstrap",
+                item_ref="directive:acme/core/bootstrap",
                 project_path=str(temp_project),
                 source="registry",
             )
@@ -66,10 +65,10 @@ class TestLoadFromRegistry:
         assert result["status"] == "success"
         assert "# Bootstrapper" in result["content"]
         assert result["source"] == "registry"
-        assert result["item_id"] == "acme/core/bootstrap"
+        assert result["item_ref"] == "directive:acme/core/bootstrap"
         provider.pull.assert_called_once_with(
-            item_type="directive",
-            item_id="acme/core/bootstrap",
+            kind="directive",
+            bare_id="acme/core/bootstrap",
             version=None,
         )
 
@@ -83,8 +82,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="directive",
-                item_id="acme/core/bootstrap",
+                item_ref="directive:acme/core/bootstrap",
                 project_path=str(temp_project),
                 source="registry",
                 version="2.0.0",
@@ -92,8 +90,8 @@ class TestLoadFromRegistry:
 
         assert result["status"] == "success"
         provider.pull.assert_called_once_with(
-            item_type="directive",
-            item_id="acme/core/bootstrap",
+            kind="directive",
+            bare_id="acme/core/bootstrap",
             version="2.0.0",
         )
 
@@ -107,8 +105,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="directive",
-                item_id="acme/core/bootstrap",
+                item_ref="directive:acme/core/bootstrap",
                 project_path=str(temp_project),
                 source="registry",
                 destination="project",
@@ -132,8 +129,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="directive",
-                item_id="acme/core/bootstrap",
+                item_ref="directive:acme/core/bootstrap",
                 project_path=str(temp_project),
                 source="registry",
                 destination="user",
@@ -155,8 +151,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="directive",
-                item_id="acme/core/nonexistent",
+                item_ref="directive:acme/core/nonexistent",
                 project_path=str(temp_project),
                 source="registry",
             )
@@ -172,8 +167,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="directive",
-                item_id="acme/core/bootstrap",
+                item_ref="directive:acme/core/bootstrap",
                 project_path=str(temp_project),
                 source="registry",
             )
@@ -205,8 +199,7 @@ class TestLoadFromRegistry:
         ):
             result = await resolve_item(
                 str(temp_project),
-                item_type="tool",
-                item_id="acme/utils/helper",
+                item_ref="tool:acme/utils/helper",
                 project_path=str(temp_project),
                 source="registry",
                 destination="project",

@@ -59,7 +59,7 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
 
     **resume** — Resume a failed or interrupted graph run from its last persisted state.
     Requires {input:graph_id} and {input:graph_run_id}.
-    `rye_execute(item_type="tool", item_id="{input:graph_id}", parameters={"resume": true, "graph_run_id": "{input:graph_run_id}", "capabilities": {input:capabilities}, "depth": {input:depth}})`
+    `rye_execute(item_id="{input:graph_id}", parameters={"resume": true, "graph_run_id": "{input:graph_run_id}", "capabilities": {input:capabilities}, "depth": {input:depth}})`
 
     **read_state** — Load the persisted state knowledge item for a graph run.
     Requires {input:graph_run_id}. The graph_id can be inferred from the run ID prefix.
@@ -72,12 +72,12 @@ Graph-specific orchestration — resume, read state, list runs, cancel, and stat
 
     **cancel** — Cancel a running graph via SIGTERM signal.
     Requires {input:graph_run_id}.
-    `rye_execute(item_type="tool", item_id="rye/core/processes/cancel", parameters={"run_id": "{input:graph_run_id}"})`
+    `rye_execute(item_id="rye/core/processes/cancel", parameters={"run_id": "{input:graph_run_id}"})`
     The walker's SIGTERM handler triggers clean shutdown — persists CAS state, updates registry, writes transcript event.
 
     **status** — Check the status and liveness of a graph run.
     Requires {input:graph_run_id}. Uses the process status tool which checks both registry status and PID liveness.
-    `rye_execute(item_type="tool", item_id="rye/core/processes/status", parameters={"run_id": "{input:graph_run_id}"})`
+    `rye_execute(item_id="rye/core/processes/status", parameters={"run_id": "{input:graph_run_id}"})`
   </step>
 
   <step name="return_result">

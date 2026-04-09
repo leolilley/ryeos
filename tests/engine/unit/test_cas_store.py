@@ -88,8 +88,7 @@ class TestRefs:
 class TestObjectModel:
     def test_item_source_to_dict(self):
         obj = ItemSource(
-            item_type="tool",
-            item_id="my_tool",
+            item_ref="tool:my_tool",
             content_blob_hash="a" * 64,
             integrity="b" * 64,
             signature_info=None,
@@ -97,6 +96,7 @@ class TestObjectModel:
         d = obj.to_dict()
         assert d["schema"] == SCHEMA_VERSION
         assert d["kind"] == "item_source"
+        assert d["item_ref"] == "tool:my_tool"
         assert d["signature_info"] is None
 
     def test_source_manifest_to_dict(self):

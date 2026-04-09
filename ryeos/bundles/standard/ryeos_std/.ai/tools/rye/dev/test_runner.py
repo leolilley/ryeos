@@ -349,8 +349,7 @@ async def _run_single_test(
     start = time.time()
     try:
         raw = await execute_tool.handle(
-            item_type="tool",
-            item_id=tool_id,
+            item_id=f"tool:{tool_id}",
             project_path=project_path,
             parameters=params,
         )

@@ -24,9 +24,9 @@ SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _validation_lock = threading.RLock()
 _extraction_lock = threading.RLock()
 
-# Global cache: item_type -> validation schema
+# Global cache: kind -> validation schema
 _validation_schemas: Optional[Dict[str, Dict[str, Any]]] = None
-# Global cache: item_type -> extraction rules
+# Global cache: kind -> extraction rules
 _extraction_rules: Optional[Dict[str, Dict[str, Any]]] = None
 
 
@@ -48,15 +48,15 @@ def _load_validation_schemas(
                 continue
 
             # Extract item type from filename (e.g., directive_extractor.yaml -> directive)
-            item_type = file_path.stem.replace("_extractor", "")
+            kind = file_path.stem.replace("_extractor", "")
 
             # Only set if not already set (precedence: project > user > system)
-            if item_type in schemas:
+            if kind in schemas:
                 continue
 
             schema = _extract_schema_from_file(file_path)
             if schema:
-                schemas[item_type] = schema
+                schemas[kind] = schema
 
     logger.debug(f"Loaded validation schemas for: {list(schemas.keys())}")
     return schemas
@@ -119,7 +119,7 @@ def _extract_schema_regex(content: str) -> Optional[Dict[str, Any]]:
 
 
 def get_validation_schema(
-    item_type: str, project_path: Optional[Path] = None
+    kind: str, project_path: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
     """Get validation schema for an item type (thread-safe)."""
     global _validation_schemas
@@ -127,7 +127,7 @@ def get_validation_schema(
     with _validation_lock:
         if _validation_schemas is None:
             _validation_schemas = _load_validation_schemas(project_path)
-        return _validation_schemas.get(item_type)
+        return _validation_schemas.get(kind)
 
 
 def clear_validation_schemas_cache():
@@ -157,15 +157,15 @@ def _load_extraction_rules(
                 continue
 
             # Extract item type from filename (e.g., directive_extractor.yaml -> directive)
-            item_type = file_path.stem.replace("_extractor", "")
+            kind = file_path.stem.replace("_extractor", "")
 
             # Only set if not already set (precedence: project > user > system)
-            if item_type in rules:
+            if kind in rules:
                 continue
 
             extraction_rules = _extract_rules_from_file(file_path)
             if extraction_rules:
-                rules[item_type] = extraction_rules
+                rules[kind] = extraction_rules
 
     logger.debug(f"Loaded extraction rules for: {list(rules.keys())}")
     return rules
@@ -227,7 +227,7 @@ def _extract_rules_regex(content: str) -> Optional[Dict[str, Any]]:
 
 
 def get_extraction_rules(
-    item_type: str, project_path: Optional[Path] = None
+    kind: str, project_path: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
     """Get extraction rules for an item type (thread-safe)."""
     global _extraction_rules
@@ -235,11 +235,11 @@ def get_extraction_rules(
     with _extraction_lock:
         if _extraction_rules is None:
             _extraction_rules = _load_extraction_rules(project_path)
-        return _extraction_rules.get(item_type)
+        return _extraction_rules.get(kind)
 
 
 def apply_field_mapping(
-    item_type: str,
+    kind: str,
     parsed_data: Dict[str, Any],
     project_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -250,14 +250,14 @@ def apply_field_mapping(
     e.g., __version__ -> version, __tool_type__ -> tool_type.
 
     Args:
-        item_type: "directive", "tool", or "knowledge"
+        kind: "directive", "tool", or "knowledge"
         parsed_data: Raw parsed data from parser
         project_path: Project root path for loading extractors
 
     Returns:
         Parsed data with fields mapped to standard names
     """
-    rules = get_extraction_rules(item_type, project_path)
+    rules = get_extraction_rules(kind, project_path)
     if not rules:
         return parsed_data
 
@@ -283,7 +283,7 @@ def validate_field(
     value: Any,
     field_schema: Dict[str, Any],
     file_path: Optional[Path] = None,
-    item_type: Optional[str] = None,
+    kind: Optional[str] = None,
     location: str = "project",
     project_path: Optional[Path] = None,
 ) -> List[str]:
@@ -398,7 +398,7 @@ def validate_field(
                     nested_value,
                     nested_field_schema,
                     file_path,
-                    item_type,
+                    kind,
                     location,
                     project_path,
                 )
@@ -410,11 +410,11 @@ def validate_field(
                 f"Field '{field_name}' must be an array, got {type(value).__name__}"
             )
         else:
-            item_type_schema = field_schema.get("item_type")
+            kind_schema = field_schema.get("item_type")
             item_required = field_schema.get("item_required", [])
 
             for i, item in enumerate(value):
-                if item_type_schema == "object":
+                if kind_schema == "object":
                     if not isinstance(item, dict):
                         issues.append(f"Field '{field_name}[{i}]' must be an object")
                     else:
@@ -432,11 +432,11 @@ def validate_field(
                 f"Field '{field_name}' value '{value}' must match filename '{filename}'"
             )
 
-    if field_schema.get("match_path") and file_path and item_type:
+    if field_schema.get("match_path") and file_path and kind:
         from rye.utils.path_utils import extract_category_path
 
         path_category = extract_category_path(
-            file_path, item_type, location, project_path
+            file_path, kind, location, project_path
         )
         if value != path_category:
             issues.append(
@@ -447,7 +447,7 @@ def validate_field(
 
 
 def validate_parsed_data(
-    item_type: str,
+    kind: str,
     parsed_data: Dict[str, Any],
     file_path: Path,
     location: str = "project",
@@ -457,7 +457,7 @@ def validate_parsed_data(
     Validate parsed data against schema loaded from extractor.
 
     Args:
-        item_type: "directive", "tool", or "knowledge"
+        kind: "directive", "tool", or "knowledge"
         parsed_data: Data from parser
         file_path: Path to the item file
         location: "project", "user", or "system"
@@ -469,10 +469,10 @@ def validate_parsed_data(
     issues = []
     warnings = []
 
-    schema = get_validation_schema(item_type, project_path)
+    schema = get_validation_schema(kind, project_path)
     if not schema:
         raise ValueError(
-            f"Extractor not found for tool type: {item_type}. Extractors should be packaged with their tools."
+            f"Extractor not found for tool type: {kind}. Extractors should be packaged with their tools."
         )
 
     fields_schema = schema.get("fields", {})
@@ -484,7 +484,7 @@ def validate_parsed_data(
             value,
             field_schema,
             file_path,
-            item_type,
+            kind,
             location,
             project_path,
         )

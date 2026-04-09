@@ -263,10 +263,10 @@ def prune_executions(
             data = json.loads(exec_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValueError):
             continue
-        # Execution records use item_type/item_id, not graph_id
+        # Execution records use item_ref, not graph_id
         graph_id = data.get("graph_id", "")
         if not graph_id:
-            graph_id = f"{data.get('item_type', '')}/{data.get('item_id', '')}"
+            graph_id = data.get("item_ref", "")
         key = (data.get("project_path", ""), graph_id)
         # Records use "state" not "status", "created_at"/"completed_at" not "timestamp"
         timestamp = (

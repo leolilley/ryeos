@@ -35,7 +35,7 @@ Refresh a registered MCP server's tool discovery.
 
   <step name="refresh_server">
     Call the MCP manager tool with action=refresh.
-    `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "refresh", "name": "{input:name}"})`
+    `rye_execute(item_id="rye/mcp/manager", parameters={"action": "refresh", "name": "{input:name}"})`
   </step>
 
   <step name="return_server">

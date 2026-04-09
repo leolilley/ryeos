@@ -364,9 +364,9 @@ def attenuate_token(
 
 
 # ---------------------------------------------------------------------------
-# Capability format: rye.{primary}.{item_type}.{specifics...}
+# Capability format: rye.{primary}.{kind}.{specifics...}
 #   primary:   execute | fetch | sign
-#   item_type: tool | directive | knowledge
+#   kind:      tool | directive | knowledge
 #   specifics: item_id with / converted to .
 #
 # Examples:
@@ -386,25 +386,25 @@ PRIMARY_IMPLIES = {
 }
 
 
-def item_id_to_cap(primary: str, item_type: str, item_id: str) -> str:
+def item_id_to_cap(primary: str, kind: str, item_id: str) -> str:
     """Convert item_id to capability string.
 
     Args:
         primary: Primary action (execute, fetch, sign)
-        item_type: Item type (tool, directive, knowledge)
+        kind: Item type (tool, directive, knowledge)
         item_id: Item ID with / separators (e.g., "rye/file-system/fs_write")
 
     Returns:
         Capability string (e.g., "rye.execute.tool.rye.file-system.fs_write")
     """
     segments = item_id.replace("/", ".")
-    return f"rye.{primary}.{item_type}.{segments}"
+    return f"rye.{primary}.{kind}.{segments}"
 
 
 def parse_capability(cap: str) -> Optional[Dict[str, Any]]:
     """Parse a capability string into its components.
 
-    Returns dict with keys: primary, item_type, specifics, is_wildcard
+    Returns dict with keys: primary, kind, specifics, is_wildcard
     Returns None if not a valid rye capability.
     """
     if not cap.startswith("rye."):
@@ -417,29 +417,29 @@ def parse_capability(cap: str) -> Optional[Dict[str, Any]]:
 
     # rye.* — god mode
     if parts[0] == "*":
-        return {"primary": "*", "item_type": "*", "specifics": "*", "is_wildcard": True}
+        return {"primary": "*", "kind": "*", "specifics": "*", "is_wildcard": True}
 
     primary = parts[0]
     if primary not in PRIMARY_ACTIONS:
         return None
 
     if len(parts) == 1:
-        return {"primary": primary, "item_type": "*", "specifics": "*", "is_wildcard": True}
+        return {"primary": primary, "kind": "*", "specifics": "*", "is_wildcard": True}
 
-    item_type = parts[1]
-    if item_type == "*":
-        return {"primary": primary, "item_type": "*", "specifics": "*", "is_wildcard": True}
+    kind = parts[1]
+    if kind == "*":
+        return {"primary": primary, "kind": "*", "specifics": "*", "is_wildcard": True}
 
-    if item_type not in ITEM_TYPES:
+    if kind not in ITEM_TYPES:
         return None
 
     if len(parts) == 2:
-        return {"primary": primary, "item_type": item_type, "specifics": "*", "is_wildcard": True}
+        return {"primary": primary, "kind": kind, "specifics": "*", "is_wildcard": True}
 
     specifics = parts[2]
     is_wildcard = specifics.endswith("*")
 
-    return {"primary": primary, "item_type": item_type, "specifics": specifics, "is_wildcard": is_wildcard}
+    return {"primary": primary, "kind": kind, "specifics": specifics, "is_wildcard": is_wildcard}
 
 
 def cap_matches(granted: str, required: str) -> bool:
@@ -470,9 +470,9 @@ def cap_matches(granted: str, required: str) -> bool:
         if g_parsed["primary"] == "*":
             return True
         if g_parsed["primary"] == r_parsed["primary"]:
-            if g_parsed["item_type"] == "*":
+            if g_parsed["kind"] == "*":
                 return True
-            if g_parsed["item_type"] == r_parsed["item_type"]:
+            if g_parsed["kind"] == r_parsed["kind"]:
                 return True
 
     return False
@@ -485,7 +485,7 @@ def expand_capabilities(caps) -> Set[str]:
     rye.sign.* implies rye.fetch.*
 
     Also: rye.execute.tool.* implies rye.fetch.tool.*
-    (implication preserves item_type specificity)
+    (implication preserves kind specificity)
     """
     expanded = set(caps)
 
@@ -498,7 +498,7 @@ def expand_capabilities(caps) -> Set[str]:
                 continue
 
             primary = parsed["primary"]
-            item_type = parsed["item_type"]
+            kind = parsed["kind"]
             specifics = parsed["specifics"]
 
             # God mode implies everything
@@ -513,13 +513,13 @@ def expand_capabilities(caps) -> Set[str]:
             # Structural implication
             implied_primaries = PRIMARY_IMPLIES.get(primary, [])
             for implied_p in implied_primaries:
-                if item_type == "*":
+                if kind == "*":
                     new_cap = f"rye.{implied_p}.*"
                 else:
                     if specifics == "*":
-                        new_cap = f"rye.{implied_p}.{item_type}.*"
+                        new_cap = f"rye.{implied_p}.{kind}.*"
                     else:
-                        new_cap = f"rye.{implied_p}.{item_type}.{specifics}"
+                        new_cap = f"rye.{implied_p}.{kind}.{specifics}"
 
                 if new_cap not in expanded:
                     expanded.add(new_cap)

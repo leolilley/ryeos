@@ -127,11 +127,11 @@ class TestGetItemExtensions:
             get_item_extensions("bogus", project_path=empty_project, force_reload=True)
 
     def test_error_lists_known_types(self, empty_project):
-        with pytest.raises(ValueError, match="Known types:"):
+        with pytest.raises(ValueError, match="Known kinds:"):
             get_item_extensions("bogus", project_path=empty_project, force_reload=True)
 
     def test_raises_when_no_extractors_for_type(self, empty_project):
-        with pytest.raises(ValueError, match="No extensions found for item type 'tool'"):
+        with pytest.raises(ValueError, match="No extensions found for kind 'tool'"):
             get_item_extensions("tool", project_path=empty_project, force_reload=True)
 
     def test_error_includes_glob_and_paths(self, empty_project):

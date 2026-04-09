@@ -65,7 +65,7 @@ Execute a declarative state graph tool — walks graph YAML nodes, dispatching a
 
   <step name="execute_graph">
     Execute the graph tool:
-    `rye_execute(item_type="tool", item_id="{input:graph_id}", parameters=<built parameters>)`
+    `rye_execute(item_id="{input:graph_id}", parameters=<built parameters>)`
 
     The graph runtime walks nodes, dispatches actions, persists state after each step, and registers the run in the thread registry.
   </step>

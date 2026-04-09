@@ -1,22 +1,21 @@
 ```yaml
 id: execute
 title: "rye_execute"
-description: Execute directives, tools, or knowledge items
+description: Execute directives or tools
 category: tools-reference
 tags: [execute, mcp-tool, api]
-version: "1.0.0"
+version: "2.0.0"
 ```
 
 # rye_execute
 
-Execute directives, tools, or knowledge items. Routes execution based on `item_type`: directives are validated and returned in-thread by default (set `thread="fork"` to spawn a managed thread), tools are executed via the PrimitiveExecutor chain, and knowledge entries are parsed and returned as context. Set `target="remote"` to execute on a remote server.
+Execute directives or tools. The `item_id` parameter accepts canonical refs (`directive:X` or `tool:X`) or plain IDs. Directives are validated and returned in-thread by default (set `thread="fork"` to spawn a managed thread). Tools are dispatched through the PrimitiveExecutor chain. Set `target="remote"` to execute on a remote server.
 
 ## Parameters
 
 | Parameter         | Type   | Required | Default    | Description                                                                                                                                                                                                        |
 | ----------------- | ------ | -------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `item_type`       | string | yes      | —          | `"directive"`, `"tool"`, or `"knowledge"`                                                                                                                                                                          |
-| `item_id`         | string | yes      | —          | Relative path from `.ai/<type>/` without extension (e.g., `"rye/core/create_directive"`)                                                                                                                           |
+| `item_id`         | string | yes      | —          | Canonical ref (`directive:X`, `tool:X`) or plain path. Resolved from `.ai/<type>/` without extension (e.g., `"tool:rye/bash"` or `"directive:rye/core/create_directive"`)                                          |
 | `project_path`    | string | yes      | —          | Absolute path to the project root                                                                                                                                                                                  |
 | `parameters`      | dict   | no       | `{}`       | Parameters to pass to the item                                                                                                                                                                                     |
 | `dry_run`         | bool   | no       | `false`    | Validate without executing                                                                                                                                                                                         |
@@ -26,17 +25,24 @@ Execute directives, tools, or knowledge items. Routes execution based on `item_t
 | `model`           | string | no       | —          | For directives: override LLM model for thread execution                                                                                                                                                            |
 | `limit_overrides` | object | no       | —          | For directives: override limits (`turns`, `tokens`, `spend`, `spawns`, `duration_seconds`, `depth`)                                                                                                                |
 
+## Two-Path Execution Model
+
+Execute routes items through two distinct paths based on type:
+
+1. **Directives** — Validated, inputs interpolated, and either returned in-thread (`your_directions`) or dispatched to a managed LLM thread (`thread="fork"`). No executor chain involved.
+2. **Tools** — Dispatched through the PrimitiveExecutor chain. The tool's `__executor_id__` is resolved to a runtime, then to a Lillux primitive, forming a signed chain that is validated and executed.
+
 ## Item Resolution
 
 Items are resolved by searching three spaces in order: **project** → **user** → **system**.
 
 ```
-project:  <project_path>/.ai/{item_type}/<item_id>.py
-user:     <USER_SPACE>/.ai/{item_type}/<item_id>.py
-system:   <rye-package>/.ai/{item_type}/<item_id>.py
+project:  <project_path>/.ai/<type>/<item_id>.py
+user:     <USER_SPACE>/.ai/<type>/<item_id>.py
+system:   <rye-package>/.ai/<type>/<item_id>.py
 ```
 
-File extensions are tried automatically based on item type. Directives and knowledge use `.md`. Tools try `.py`, `.yaml`, `.yml`, `.js`, `.sh`, and others registered via extractors.
+File extensions are tried automatically based on item type. Directives use `.md`. Tools try `.py`, `.yaml`, `.yml`, `.js`, `.sh`, and others registered via extractors.
 
 ## Behavior by Item Type
 
@@ -108,7 +114,7 @@ If `async: true`, the execution is wrapped in a detached child process via `_lau
 }
 ```
 
-**Async response (tool or remote directive):**
+**Async response (tool):**
 
 ```json
 {
@@ -116,7 +122,7 @@ If `async: true`, the execution is wrapped in a detached child process via `_lau
   "async": true,
   "thread_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "type": "tool",
-  "item_id": "rye/bash",
+  "item_id": "tool:rye/bash",
   "execution_mode": "inline",
   "state": "running",
   "pid": 42857
@@ -144,7 +150,7 @@ Executes through the PrimitiveExecutor with recursive chain resolution:
 {
   "status": "success",
   "type": "tool",
-  "item_id": "rye/file-system/write",
+  "item_id": "tool:rye/file-system/write",
   "data": { "...execution output..." },
   "chain": ["rye/file-system/write", "rye/core/runtimes/python/script", "rye/core/primitives/execute"],
   "metadata": { "duration_ms": 45 }
@@ -165,26 +171,9 @@ Any tool execution (inline or remote) can be made async. The tool is wrapped in 
 {
   "status": "validation_passed",
   "message": "Tool chain validation passed (dry run)",
-  "item_id": "rye/file-system/write",
+  "item_id": "tool:rye/file-system/write",
   "chain": ["..."],
   "validated_pairs": ["..."]
-}
-```
-
-### Knowledge
-
-Parses markdown with YAML frontmatter and returns the content for the agent to use as context.
-
-**Response fields:**
-
-```json
-{
-  "status": "success",
-  "type": "knowledge",
-  "item_id": "rye/core/directive-metadata-reference",
-  "data": { "...parsed frontmatter + content..." },
-  "instructions": "Use this knowledge to inform your decisions.",
-  "metadata": { "duration_ms": 3 }
 }
 ```
 
@@ -206,33 +195,32 @@ Not all target/thread combinations apply to all item types. Invalid combinations
 
 ### Sync (`async: false`)
 
-| Target / Thread | Directive                       | Tool                              | Knowledge                     |
-| --------------- | ------------------------------- | --------------------------------- | ----------------------------- |
-| local + inline  | ✅ Returns `your_directions`    | ✅ Executes via PrimitiveExecutor | ✅ Returns parsed content     |
-| local + fork    | ✅ Spawns managed LLM thread   | ❌ Fork is for directives only    | ❌ Knowledge is always inline |
-| remote + fork   | ✅ Server spawns LLM thread    | ❌ Fork is for directives only    | ❌ Knowledge is local only    |
-| remote + inline | ❌ Directives need fork         | ✅ Server runs inline             | ❌ Knowledge is local only    |
+| Target / Thread | Directive                       | Tool                              |
+| --------------- | ------------------------------- | --------------------------------- |
+| local + inline  | ✅ Returns `your_directions`    | ✅ Executes via PrimitiveExecutor |
+| local + fork    | ✅ Spawns managed LLM thread   | ❌ Fork is for directives only    |
+| remote + fork   | ✅ Server spawns LLM thread    | ❌ Fork is for directives only    |
+| remote + inline | ❌ Directives need fork         | ✅ Server runs inline             |
 
 ### Async (`async: true`)
 
-| Target / Thread | Directive                | Tool                           | Knowledge                 |
-| --------------- | ------------------------ | ------------------------------ | ------------------------- |
-| local + inline  | ❌ Nothing to detach     | ✅ Detached child process      | ❌ Knowledge is immediate |
-| local + fork    | ✅ Detached fork         | ❌ Fork is for directives only | ❌ Knowledge is immediate |
-| remote + fork   | ✅ Detached remote+fork  | ❌ Fork is for directives only | ❌ Knowledge is immediate |
-| remote + inline | ❌ Directives need fork  | ✅ Detached remote+inline      | ❌ Knowledge is immediate |
+| Target / Thread | Directive                | Tool                           |
+| --------------- | ------------------------ | ------------------------------ |
+| local + inline  | ❌ Nothing to detach     | ✅ Detached child process      |
+| local + fork    | ✅ Detached fork         | ❌ Fork is for directives only |
+| remote + fork   | ✅ Detached remote+fork  | ❌ Fork is for directives only |
+| remote + inline | ❌ Directives need fork  | ✅ Detached remote+inline      |
 
 ### Where validation happens
 
 | Rule                                  | Validated by                                                   |
 | ------------------------------------- | -------------------------------------------------------------- |
-| Invalid (target, thread, item_type)   | `_validate_execution()` in execute.py `handle()`               |
+| Invalid (target, thread, type)        | `_validate_execution()` in execute.py `handle()`               |
 | `dry_run + remote`                    | `_validate_execution()` in execute.py `handle()`               |
 | `async + dry_run`                     | `_validate_execution()` in execute.py `handle()`               |
-| `async + knowledge`                   | `_validate_execution()` in execute.py `handle()`               |
 | `async + directive + local + inline`  | `_validate_execution()` in execute.py `handle()`               |
-| Remote tool defense-in-depth          | `_execute()` in remote.py validates thread matches item_type   |
-| Server-side defense-in-depth          | `server.py` re-validates thread/item_type on `/execute`        |
+| Remote tool defense-in-depth          | `_execute()` in remote.py validates thread matches type        |
+| Server-side defense-in-depth          | `server.py` re-validates thread/type on `/execute`             |
 
 ## Error Responses
 
@@ -242,7 +230,7 @@ Errors return `"status": "error"` with an `error` message and `item_id`:
 {
   "status": "error",
   "error": "Missing required inputs: name, category",
-  "item_id": "rye/core/create_directive",
+  "item_id": "directive:rye/core/create_directive",
   "declared_inputs": [
     { "name": "name", "type": "string", "required": true },
     { "name": "category", "type": "string", "required": true },
@@ -262,7 +250,7 @@ Tool chain failures include the partial chain and metadata:
 {
   "status": "error",
   "error": "Chain validation failed: incompatible spaces",
-  "item_id": "rye/file-system/write",
+  "item_id": "tool:rye/file-system/write",
   "chain": ["rye/file-system/write"],
   "metadata": { "duration_ms": 8 }
 }
@@ -275,8 +263,7 @@ Tool chain failures include the partial chain and metadata:
 ```python
 # Returns parsed content for the calling agent to follow
 rye_execute(
-    item_type="directive",
-    item_id="rye/core/create_directive",
+    item_id="directive:rye/core/create_directive",
     project_path="/home/user/my-project",
     parameters={
         "name": "deploy_app",
@@ -291,8 +278,7 @@ rye_execute(
 ```python
 # Spawns a managed thread and blocks until completion
 rye_execute(
-    item_type="directive",
-    item_id="my-project/run_pipeline",
+    item_id="directive:my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
     thread="fork"
@@ -304,8 +290,7 @@ rye_execute(
 ```python
 # Returns immediately with thread_id
 rye_execute(
-    item_type="directive",
-    item_id="my-project/run_pipeline",
+    item_id="directive:my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin", "batch_size": 5},
     thread="fork",
@@ -318,8 +303,7 @@ rye_execute(
 
 ```python
 rye_execute(
-    item_type="directive",
-    item_id="my-project/run_pipeline",
+    item_id="directive:my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin"},
     target="remote",
@@ -331,8 +315,7 @@ rye_execute(
 
 ```python
 rye_execute(
-    item_type="directive",
-    item_id="my-project/run_pipeline",
+    item_id="directive:my-project/run_pipeline",
     project_path="/home/user/my-project",
     parameters={"location": "Dunedin"},
     target="remote:gpu",
@@ -345,8 +328,7 @@ rye_execute(
 ```python
 # Returns immediately with thread_id — result stored in ThreadRegistry
 rye_execute(
-    item_type="tool",
-    item_id="rye/bash",
+    item_id="tool:rye/bash",
     project_path="/home/user/my-project",
     parameters={"command": "python train.py --epochs 100"},
     async=True
@@ -357,8 +339,7 @@ rye_execute(
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="my-project/heavy-compute",
+    item_id="tool:my-project/heavy-compute",
     project_path="/home/user/my-project",
     parameters={"data": "input.csv"},
     target="remote:gpu"
@@ -369,8 +350,7 @@ rye_execute(
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/file-system/write",
+    item_id="tool:rye/file-system/write",
     project_path="/home/user/my-project",
     parameters={
         "path": "output.txt",
@@ -383,20 +363,9 @@ rye_execute(
 
 ```python
 rye_execute(
-    item_type="tool",
-    item_id="rye/bash",
+    item_id="tool:rye/bash",
     project_path="/home/user/my-project",
     parameters={"command": "echo test"},
     dry_run=True
-)
-```
-
-### Load a knowledge entry
-
-```python
-rye_execute(
-    item_type="knowledge",
-    item_id="rye/core/directive-metadata-reference",
-    project_path="/home/user/my-project"
 )
 ```

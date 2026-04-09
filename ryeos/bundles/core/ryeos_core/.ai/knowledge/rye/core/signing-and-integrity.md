@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:15:08Z:05d243a48386be658613bd23d40475e61e726d4c912ec2779e734606d0bd178b:nCj3qV7xTSrARe9HmgCF6p4EPwXSAkDVfOdxC1tqWr2JtxH2DKnZNamiwYQWw23vV04p3gpBPJa2izON_3BbDA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:850da1f8284b622cb995ac4f9dea99ec7e9e47db188a5e3062688df41f035339:AB3WETL8-vNWAIKvJ1WRYM5OYrlkK4fwW-3L4o4k2dwFoMQbzwQvUKFBZQkxHH6Yw3662vmeB8_nNEAcsY93Bg:4b987fd4e40303ac -->
 
 ```yaml
 name: signing-and-integrity
@@ -78,10 +78,10 @@ Signing requires an existing Ed25519 keypair. `MetadataManager.create_signature(
 
 ```python
 # Generate a new keypair
-rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "generate"})
+rye_execute(item_id="rye/core/keys/keys", parameters={"action": "generate"})
 
 # View key info
-rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "info"})
+rye_execute(item_id="rye/core/keys/keys", parameters={"action": "info"})
 
 # Other actions: trust, list, remove
 ```

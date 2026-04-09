@@ -53,7 +53,7 @@ Execute a directive in a managed thread with an LLM loop.
 
   <step name="execute_thread">
     Execute the directive in a managed thread:
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "{input:directive_id}", "async": {input:async}, "inputs": {input:inputs}, "model": "{input:model}", "limit_overrides": {input:limit_overrides}})`
+    `rye_execute(item_id="rye/agent/threads/thread_directive", parameters={"directive_id": "{input:directive_id}", "async": {input:async}, "inputs": {input:inputs}, "model": "{input:model}", "limit_overrides": {input:limit_overrides}})`
   </step>
 
   <step name="return_result">

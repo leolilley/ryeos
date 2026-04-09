@@ -56,8 +56,7 @@ def handle(args, project_path: str):
 
     tool = ExecuteTool(str(get_user_space()))
     result = run_async(tool.handle(
-        item_type="directive",
-        item_id=args.directive_id,
+        item_id=f"directive:{args.directive_id}",
         project_path=project_path,
         parameters=params,
     ))

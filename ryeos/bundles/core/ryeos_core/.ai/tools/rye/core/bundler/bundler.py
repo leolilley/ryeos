@@ -79,8 +79,8 @@ CONFIG_SCHEMA = {
 # Signature regex for detecting inline-signed files
 _SIGNED_RE = re.compile(r"(?:<!--|#|//) rye:signed:")
 
-# Item type → directory name (all bundleable types)
-_TYPE_DIRS = ItemType.SIGNABLE_DIRS
+# Kind → directory name (all bundleable types)
+_KIND_DIRS = ItemType.SIGNABLE_KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +193,10 @@ def validate_bundle_manifest(
 
         # If file claims inline signature, verify it too
         if meta.get("inline_signed"):
-            item_type = _classify_file(rel_path)
-            if item_type in ("directive", "tool", "knowledge"):
+            kind = _classify_file(rel_path)
+            if kind in ("directive", "tool", "knowledge"):
                 try:
-                    verify_item(file_path, item_type, ctx=ExecutionContext.from_env(project_path=base_path))
+                    verify_item(file_path, kind, ctx=ExecutionContext.from_env(project_path=base_path))
                 except IntegrityError:
                     result["files_tampered"].append(rel_path)
                     continue
@@ -219,10 +219,10 @@ def validate_bundle_manifest(
 
 
 def _classify_file(rel_path: str) -> str:
-    """Canonical CAS item type for known .ai items, else asset."""
-    from rye.cas.store import item_type_from_path
+    """Canonical CAS kind for known .ai items, else asset."""
+    from rye.cas.store import kind_from_path
 
-    return item_type_from_path(rel_path) or "asset"
+    return kind_from_path(rel_path) or "asset"
 
 
 def _has_inline_signature(path: Path) -> bool:
@@ -269,8 +269,8 @@ def _ingest_file(file_path: Path, project_path: Path, rel_path: str) -> Dict[str
     """Ingest a single file into CAS and return its metadata entry."""
     from rye.cas.store import ingest_item
 
-    item_type = _classify_file(rel_path)
-    ref = ingest_item(item_type, file_path, project_path)
+    kind = _classify_file(rel_path)
+    ref = ingest_item(kind, file_path, project_path)
     return {
         "path": rel_path,
         "object_hash": ref.object_hash,
@@ -290,7 +290,7 @@ def _collect_bundle_files(project_path: Path, bundle_id: str) -> List[Dict[str, 
     files: List[Dict[str, Any]] = []
 
     # Standard item type directories
-    for dir_name in _TYPE_DIRS.values():
+    for dir_name in _KIND_DIRS.values():
         bundle_dir = project_path / AI_DIR / dir_name / bundle_id
         if not bundle_dir.is_dir():
             continue
@@ -386,7 +386,7 @@ async def _create(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
     if not files:
         return {
             "error": f"No files found for bundle '{bundle_id}'",
-            "searched": [f"{AI_DIR}/{d}/{bundle_id}/" for d in _TYPE_DIRS.values()],
+            "searched": [f"{AI_DIR}/{d}/{bundle_id}/" for d in _KIND_DIRS.values()],
         }
 
     manifest = {
@@ -466,7 +466,7 @@ async def _create_package(project_path: Path, params: Dict[str, Any]) -> Dict[st
     if not files:
         return {
             "error": f"No files found for bundle '{bundle_id}' in package",
-            "searched_paths": [str(ai_dir / d) for d in _TYPE_DIRS.values()],
+            "searched_paths": [str(ai_dir / d) for d in _KIND_DIRS.values()],
         }
 
     manifest = {
@@ -521,8 +521,8 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
     if not ai_dir.exists():
         return files
 
-    # Walk all item type directories
-    for item_type, dir_name in _TYPE_DIRS.items():
+    # Walk all kind directories
+    for kind, dir_name in _KIND_DIRS.items():
         type_dir = ai_dir / dir_name
         if not type_dir.is_dir():
             continue
@@ -535,7 +535,7 @@ def _collect_package_files(package_path: Path, bundle_id: str) -> List[Dict[str,
 
             rel = str(file_path.relative_to(package_path))
             entry = _ingest_file(file_path, package_path, rel)
-            entry["item_type"] = item_type
+            entry["kind"] = kind
             files.append(entry)
 
     return files
@@ -596,12 +596,12 @@ async def _verify(project_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
 
         # If file claims inline signature, verify it too
         if meta.get("inline_signed"):
-            item_type = _classify_file(rel_path)
-            if item_type in ("directive", "tool", "knowledge"):
+            kind = _classify_file(rel_path)
+            if kind in ("directive", "tool", "knowledge"):
                 try:
                     verify_item(
                         file_path,
-                        item_type,
+                        kind,
                         ctx=ExecutionContext.from_env(project_path=project_path),
                     )
                 except IntegrityError:

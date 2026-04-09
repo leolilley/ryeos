@@ -35,7 +35,7 @@ Remove a registered MCP server.
 
   <step name="remove_server">
     Call the MCP manager tool with action=remove.
-    `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "remove", "name": "{input:name}"})`
+    `rye_execute(item_id="rye/mcp/manager", parameters={"action": "remove", "name": "{input:name}"})`
   </step>
 
   <step name="return_confirmation">

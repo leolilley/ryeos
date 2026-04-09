@@ -11,7 +11,7 @@ Uses the established thread system: thread_id registered in ThreadRegistry
 Usage (internal — spawned by launch_detached, not called directly):
     python -m rye.utils.async_runner --project-path /path --thread-id <uuid>
 
-Stdin: JSON payload with item_type, item_id, parameters, thread, etc.
+Stdin: JSON payload with item_id, parameters, thread, etc.
 """
 
 import asyncio
@@ -31,7 +31,6 @@ async def _run(payload: dict, project_path: str) -> dict:
     tool = ExecuteTool(project_path=project_path)
 
     return await tool.handle(
-        item_type=payload["item_type"],
         item_id=payload["item_id"],
         project_path=project_path,
         parameters=payload.get("parameters", {}),

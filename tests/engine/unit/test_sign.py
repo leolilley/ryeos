@@ -70,10 +70,8 @@ class TestSignTool:
         """Sign directive file."""
         tool = SignTool("")
         result = await tool.handle(
-            item_type="directive",
-            item_id="test",
+            item_id="directive:test",
             project_path=str(temp_project),
-            location="project",
         )
 
         assert result["status"] == "signed"
@@ -88,8 +86,7 @@ class TestSignTool:
         """Sign tool file."""
         tool = SignTool("")
         result = await tool.handle(
-            item_type="tool",
-            item_id="test/script",  # Full relative path from .ai/tools/
+            item_id="tool:test/script",
             project_path=str(temp_project),
             source="project",
         )
@@ -105,10 +102,8 @@ class TestSignTool:
         """Sign knowledge file."""
         tool = SignTool("")
         result = await tool.handle(
-            item_type="knowledge",
-            item_id="entry",
+            item_id="knowledge:entry",
             project_path=str(temp_project),
-            location="project",
         )
 
         assert result["status"] == "signed"
@@ -124,19 +119,15 @@ class TestSignTool:
 
         # Sign once
         result1 = await tool.handle(
-            item_type="tool",
-            item_id="test/script",  # Full relative path from .ai/tools/
+            item_id="tool:test/script",
             project_path=str(temp_project),
-            location="project",
         )
         sig1 = result1["signature"]
 
         # Sign again
         result2 = await tool.handle(
-            item_type="tool",
-            item_id="test/script",  # Full relative path from .ai/tools/
+            item_id="tool:test/script",
             project_path=str(temp_project),
-            location="project",
         )
         sig2 = result2["signature"]
 
@@ -149,10 +140,8 @@ class TestSignTool:
         """Error on nonexistent item."""
         tool = SignTool("")
         result = await tool.handle(
-            item_type="directive",
-            item_id="nonexistent",
+            item_id="directive:nonexistent",
             project_path=str(temp_project),
-            location="project",
         )
 
         assert result["status"] == "error"
@@ -166,10 +155,8 @@ class TestSignTool:
 
         tool = SignTool("")
         result = await tool.handle(
-            item_type="directive",
-            item_id="invalid",
+            item_id="directive:invalid",
             project_path=str(temp_project),
-            location="project",
         )
 
         assert result["status"] == "error"
@@ -191,8 +178,7 @@ class TestSignNotFoundErrors:
 
             tool = SignTool("")
             result = await tool.handle(
-                item_type="directive",
-                item_id="missing",
+                item_id="directive:missing",
                 project_path=str(root),
                 source="project",
             )
@@ -210,8 +196,7 @@ class TestSignNotFoundErrors:
 
             tool = SignTool("")
             result = await tool.handle(
-                item_type="tool",
-                item_id="my/tool",
+                item_id="tool:my/tool",
                 project_path=str(root),
                 source="project",
             )
@@ -228,8 +213,7 @@ class TestSignNotFoundErrors:
 
             tool = SignTool("")
             result = await tool.handle(
-                item_type="knowledge",
-                item_id="topic",
+                item_id="knowledge:topic",
                 project_path=str(root),
                 source="project",
             )
@@ -237,3 +221,59 @@ class TestSignNotFoundErrors:
             assert result["status"] == "error"
             assert "searched_in" in result
             assert ".ai/knowledge" in result["searched_in"]
+
+
+@pytest.mark.asyncio
+class TestSignCanonicalRefs:
+    """Canonical refs (tool:id, directive:id) derive item_type from prefix."""
+
+    async def test_sign_tool_via_canonical_ref(self, temp_project):
+        """Sign tool using canonical ref instead of item_type."""
+        tool = SignTool("")
+        result = await tool.handle(
+            item_id="tool:test/script",
+            project_path=str(temp_project),
+            source="project",
+        )
+        assert result["status"] == "signed"
+
+    async def test_sign_directive_via_canonical_ref(self, temp_project):
+        """Sign directive using canonical ref instead of item_type."""
+        tool = SignTool("")
+        result = await tool.handle(
+            item_id="directive:test",
+            project_path=str(temp_project),
+            source="project",
+        )
+        assert result["status"] == "signed"
+
+    async def test_sign_knowledge_via_canonical_ref(self, temp_project):
+        """Sign knowledge using canonical ref instead of item_type."""
+        tool = SignTool("")
+        result = await tool.handle(
+            item_id="knowledge:entry",
+            project_path=str(temp_project),
+            source="project",
+        )
+        assert result["status"] == "signed"
+
+    async def test_canonical_ref_overrides_item_type(self, temp_project):
+        """Canonical ref kind is derived from prefix."""
+        tool = SignTool("")
+        result = await tool.handle(
+            item_id="tool:test/script",
+            project_path=str(temp_project),
+            source="project",
+        )
+        assert result["status"] == "signed"
+
+    async def test_missing_item_type_and_no_prefix_errors(self, temp_project):
+        """Error when no canonical prefix."""
+        tool = SignTool("")
+        result = await tool.handle(
+            item_id="test/script",
+            project_path=str(temp_project),
+            source="project",
+        )
+        assert result["status"] == "error"
+        assert "canonical ref" in result["error"].lower()

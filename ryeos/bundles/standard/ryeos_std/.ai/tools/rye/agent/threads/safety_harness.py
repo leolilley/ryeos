@@ -53,7 +53,7 @@ class SafetyHarness:
     and enforces directive permissions on tool calls.
 
     Permissions are declared in directive XML as capability strings:
-        rye.<primary>.<item_type>.<item_id_dotted>
+        rye.<primary>.<kind>.<item_id_dotted>
     Example: rye.execute.tool.rye.file-system.* allows executing any
     tool under rye/file-system/.
 
@@ -111,7 +111,7 @@ class SafetyHarness:
         else:
             self._capabilities = []
 
-    def check_permission(self, primary: str, item_type: str, item_id: str = "") -> Optional[Dict]:
+    def check_permission(self, primary: str, kind: str, item_id: str = "") -> Optional[Dict]:
         """Check if an action is permitted by directive capabilities.
 
         Returns None if allowed, or an error dict if denied.
@@ -120,7 +120,7 @@ class SafetyHarness:
         Internal thread tools (rye/agent/threads/internal/*) are always allowed.
 
         Capability format depends on the primary action:
-          execute/fetch/sign: rye.<primary>.<item_type>.<item_id_dotted>
+          execute/fetch/sign: rye.<primary>.<kind>.<item_id_dotted>
 
         Item IDs use / separators, capabilities use . separators with fnmatch wildcards.
         Example: capability "rye.execute.tool.rye.file-system.*"
@@ -130,22 +130,22 @@ class SafetyHarness:
             return None
 
         if not self._capabilities:
-            target = item_id or item_type
+            target = item_id or kind
             return {
                 "error": f"Permission denied: no capabilities declared. "
-                f"Cannot {primary} {item_type} '{target}'",
+                f"Cannot {primary} {kind} '{target}'",
                 "denied_action": primary,
-                "denied_item_type": item_type,
+                "denied_kind": kind,
                 "denied_item_id": item_id,
             }
 
         # Build the capability string to check
         if item_id:
             item_id_dotted = item_id.replace("/", ".")
-            required = f"rye.{primary}.{item_type}.{item_id_dotted}"
+            required = f"rye.{primary}.{kind}.{item_id_dotted}"
         else:
-            # fetch query mode has no item_id — check rye.fetch.<item_type>
-            required = f"rye.{primary}.{item_type}"
+            # fetch query mode has no item_id — check rye.fetch.<kind>
+            required = f"rye.{primary}.{kind}"
 
         for cap in self._capabilities:
             if fnmatch.fnmatch(required, cap):
@@ -155,7 +155,7 @@ class SafetyHarness:
             "error": f"Permission denied: '{required}' not covered by "
             f"capabilities {self._capabilities}",
             "denied_action": primary,
-            "denied_item_type": item_type,
+            "denied_kind": kind,
             "denied_item_id": item_id,
         }
 
@@ -185,7 +185,6 @@ class SafetyHarness:
         event: str,
         context: Dict,
         dispatcher: Any,
-        thread_context: Dict,
     ) -> Optional[Dict]:
         """Evaluate hooks for error/limit/after_step events.
 
@@ -205,9 +204,7 @@ class SafetyHarness:
 
             action = hook.get("action", {})
             interpolated = interpolation.interpolate_action(action, context)
-            result = await dispatcher.dispatch(
-                interpolated, thread_context=thread_context
-            )
+            result = await dispatcher.dispatch(interpolated)
 
             if hook.get("layer") == 3:
                 continue
@@ -286,7 +283,7 @@ class SafetyHarness:
                     content = interpolation.interpolate(content, context)
 
                     item_id = action.get("item_id", "")
-                    item_type = action.get("item_type", "")
+                    kind = action.get("item_type", "")
                     # Hook-level wrap control (default: true)
                     wrap = hook.get("wrap", True)
 
@@ -295,7 +292,7 @@ class SafetyHarness:
                         tag = data.get("name", "") if isinstance(data, dict) else ""
                         if not tag:
                             tag = result.get("name", "") or item_id.rsplit("/", 1)[-1] or "context"
-                        type_attr = f' type="{item_type}"' if item_type else ""
+                        type_attr = f' type="{kind}"' if kind else ""
                         block = f'<{tag} id="{item_id}"{type_attr}>\n{content.strip()}\n</{tag}>'
                     else:
                         tag = data.get("name", "") if isinstance(data, dict) else item_id.rsplit("/", 1)[-1]

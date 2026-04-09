@@ -44,7 +44,7 @@ Instead of writing orchestration logic in Python, you declare the graph. Rye wal
     <render>
 Create a graph with the authoring directive:
 </render>
-    <tool_call>rye_execute(item_type="directive", item_id="rye/agent/graphs/create_graph")</tool_call>
+    <tool_call>rye_execute(item_id="rye/agent/graphs/create_graph")</tool_call>
     <render>
 A graph is a tool — it lives in `.ai/tools/` — with `tool_type: state_graph` and `executor_id: rye/core/runtimes/state_graph_runtime`. The graph walker runtime handles the rest.
 </render>
@@ -116,7 +116,7 @@ Key elements:
     <render>
 Execute a graph like any other tool:
 </render>
-    <tool_call>rye_execute(item_type="tool", item_id="my-project/my-graph", parameters={"input": "hello"})</tool_call>
+    <tool_call>rye_execute(item_id="my-project/my-graph", parameters={"input": "hello"})</tool_call>
     <render>
 The `state_graph_walker` takes over:
 

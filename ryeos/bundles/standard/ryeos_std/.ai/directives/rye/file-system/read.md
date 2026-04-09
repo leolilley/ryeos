@@ -44,7 +44,7 @@ Read file contents with optional offset and line limit.
 
   <step name="call_read">
     Read the file:
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "{input:file_path}", "offset": {input:offset}, "limit": {input:limit}})`
+    `rye_execute(item_id="rye/file-system/read", parameters={"path": "{input:file_path}", "offset": {input:offset}, "limit": {input:limit}})`
   </step>
 
   <step name="return_result">

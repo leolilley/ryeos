@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:15:08Z:f381532f6f41ccabe5f89a5bf700adcb36ebee90a00faad8a3371f189d006d78:EdytXy6m0E0V6xOQ-VumtPfBZOz0ZIDrQQa55-Doxm4Da8nn6cjF5exuQmtfLTQC2_0Vwv9AFuzh6mrtDuoGCQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:54350c06d8dc4d746b59c91f6175d7f461fc8b5ddb65d493e10c78ac68019d63:oVBxVZOrEbXds8EEhQhfODOcoWyL26dNWHdMYh1SZGDOZlifQpbMwvHNQRd1h0IsxzVRP5ZeT85NdDYY8VMCDA:4b987fd4e40303ac -->
 
 ```yaml
 name: parsers
@@ -161,7 +161,7 @@ tags:
 - YAML inside the fence is parsed with `yaml.safe_load` — full YAML support
 - Content below the closing ` ``` ` is the knowledge body
 - Pure `.yaml`/`.yml` files: entire content parsed as YAML metadata (signature stripped first)
-- `rye_execute(item_type="knowledge")` returns only body content
+- `rye_fetch(item_id="...")` for knowledge returns only body content
 - `rye_fetch(item_type="knowledge")` returns full file with metadata
 
 ## `python/ast` — Python Tool Parser

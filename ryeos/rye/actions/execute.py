@@ -1,52 +1,46 @@
-"""Execute tool - execute directives, tools, or knowledge items.
+"""Execute tool — the dumb engine.
 
-Routes execution through PrimitiveExecutor for tools, which handles:
-    - Multi-layer routing: Tool → Runtime → Primitive (up to 10 links)
-    - On-demand tool loading from .ai/tools/
-    - Recursive executor chain resolution via __executor_id__
-    - ENV_CONFIG resolution for runtimes
-    - Space compatibility validation
+The engine resolves an item_id to its ``executor_id`` via the data-driven
+extractor system and dispatches.  It does NOT know what directives,
+knowledge, or tools are.
 
-Execution matrix (sync):
+Dispatch is determined solely by ``executor_id``:
 
-    +--------+--------+-----------+------+-----------+
-    | target | thread | directive | tool | knowledge |
-    +--------+--------+-----------+------+-----------+
-    | local  | inline |  ✓        |  ✓   |  ✓        |
-    | local  | fork   |  ✓        |  ✗   |  ✗        |
-    | remote | fork   |  ✓        |  ✗   |  ✗        |
-    | remote | inline |  ✗        |  ✓   |  ✗        |
-    +--------+--------+-----------+------+-----------+
+* ``@primitive_chain`` — the item is self-executing code.  The engine
+  dispatches it through ``PrimitiveExecutor`` which handles the
+  tool → runtime → primitive chain internally.
+* Any other value — the item is data that needs an executor tool.
+  The engine calls ``_run_tool(executor_id, {item_id, parameters, …})``.
 
-Validation ownership:
-    - Invalid (target, thread, item_type) triples: rejected by
-      ``_validate_execution()`` in ``handle()``
-    - remote tool validates thread matches item_type before POST
-    - server re-validates as defense-in-depth
+Allowed thread/target combinations come from the executor tool's metadata
+(``__allowed_threads__``, ``__allowed_targets__``), not from a hardcoded
+matrix.
 """
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from rye.constants import AI_DIR, ItemType, STATE_DIR, STATE_THREADS
 from rye.executor import ExecutionResult, PrimitiveExecutor
 from rye.utils.execution_context import ExecutionContext
-from rye.utils.extensions import get_tool_extensions, get_item_extensions
+from rye.utils.extensions import get_item_extensions
 from rye.utils.parser_router import ParserRouter
-from rye.utils.processor_router import ProcessorRouter
 from rye.utils.path_utils import (
-    get_project_type_path,
+    get_project_kind_path,
     get_system_spaces,
-    get_user_type_path,
+    get_user_kind_path,
 )
 from rye.utils.integrity import verify_item, IntegrityError
 from rye.utils.resolvers import get_user_space
+from rye.actions._search import get_extraction_rules, get_parser_name
 
 logger = logging.getLogger(__name__)
+
+# Sentinel: item is self-executing via PrimitiveExecutor chain.
+PRIMITIVE_CHAIN = "@primitive_chain"
 
 
 @dataclass(frozen=True)
@@ -68,11 +62,46 @@ class ExecutionPlan:
     native_resume: bool = False
 
 
-class ExecuteTool:
-    """Execute items (directives, tools, knowledge).
+@dataclass(frozen=True)
+class ResolvedExecutable:
+    """Resolved executable artifact — WHERE and HOW to run."""
 
-    For tools, uses PrimitiveExecutor for data-driven execution
-    with recursive chain resolution.
+    kind: str          # "tool", "directive", "knowledge", …
+    bare_id: str       # "mytool" or "workflow"
+    path: Path
+    executor_id: str   # "@primitive_chain" or a tool id
+
+    @property
+    def canonical_ref(self) -> str:
+        """Canonical item reference (e.g. 'tool:mytool')."""
+        return f"{self.kind}:{self.bare_id}"
+
+
+@dataclass(frozen=True)
+class ExecutionEnvelope:
+    """WHAT is being executed — the per-request payload.
+
+    Flows through async, resume, and registry without the engine
+    ever hardcoding kind-specific prefixes or field names.
+
+    Separate from ExecutionContext (WHERE — project, user space,
+    signing keys) which is environment config shared across calls.
+    """
+
+    item_ref: str          # canonical ref: "tool:mytool", "directive:workflow"
+    executor_id: str       # "@primitive_chain" or executor tool id
+    parameters: Dict[str, Any]
+    thread: str            # "inline" or "fork"
+    async_exec: bool
+    dry_run: bool
+
+
+class ExecuteTool:
+    """Execute items by dispatching to their declared executor.
+
+    The engine is kind-agnostic.  Every item declares ``executor_id``
+    in its metadata (via the extractor system).  The engine reads it
+    and routes accordingly.
     """
 
     def __init__(
@@ -82,16 +111,6 @@ class ExecuteTool:
         extra_env: Optional[Dict[str, str]] = None,
         ctx: Optional[ExecutionContext] = None,
     ):
-        """Initialize execute tool.
-
-        Args:
-            user_space: User space base path (~ or $USER_SPACE)
-            project_path: Project root path for .ai/ resolution
-            extra_env: Extra environment variables to pass to subprocess
-                execution without mutating os.environ.
-            ctx: Explicit execution context. If provided, user_space and
-                project_path are ignored in favour of ctx values.
-        """
         if ctx is not None:
             self._base_ctx = ctx
             self.user_space = str(ctx.user_space)
@@ -102,118 +121,189 @@ class ExecuteTool:
             self.project_path = project_path
 
         self.parser_router = ParserRouter()
-        self.processor_router = ProcessorRouter()
         self.extra_env = extra_env or {}
 
         # Lazy-loaded executor (created per-project)
         self._executor: Optional[PrimitiveExecutor] = None
 
+    # ------------------------------------------------------------------
+    # Resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_executable_ref(self, project_path: str, item_id: str) -> ResolvedExecutable:
+        """Resolve a canonical ref to a ResolvedExecutable.
+
+        Accepts any kind that has a ``KIND_DIRS`` entry.  Reads
+        ``executor_id`` from the extractor system.
+
+        Raises:
+            ValueError: If the ref is invalid, bare, the item is not
+                found, or the item does not declare an executor.
+        """
+        kind, bare_id = ItemType.parse_canonical_ref(item_id)
+
+        if not kind:
+            raise ValueError(
+                f"Canonical ref required for execution "
+                f"(e.g. 'tool:{item_id}' or 'directive:{item_id}'). "
+                f"Got bare item_id: {item_id!r}"
+            )
+
+        if kind not in ItemType.KIND_DIRS:
+            raise ValueError(
+                f"Unknown kind {kind!r} — no KIND_DIRS entry. Got: {item_id!r}"
+            )
+
+        path = self._find_item(project_path, kind, bare_id)
+        if not path:
+            raise ValueError(f"{kind.capitalize()} not found: {bare_id}")
+
+        # Verify integrity before trusting metadata
+        ctx = self._build_ctx(project_path)
+        verify_item(path, kind, ctx=ctx)
+
+        # Extract executor_id via the extractor system
+        executor_id = self._extract_executor_id(kind, path, project_path)
+        if not executor_id:
+            raise ValueError(
+                f"Item does not declare an executor: {item_id!r}. "
+                f"Add executor_id to the item's metadata."
+            )
+
+        return ResolvedExecutable(
+            kind=kind,
+            bare_id=bare_id,
+            path=path,
+            executor_id=executor_id,
+        )
+
+    def _extract_executor_id(
+        self, kind: str, path: Path, project_path: str,
+    ) -> Optional[str]:
+        """Extract executor_id from an item using the extractor system.
+
+        Uses ``get_parser_name(kind)`` and ``get_extraction_rules(kind)``
+        to parse the item and apply extraction rules.  Returns the
+        ``executor_id`` value or None if not found.
+        """
+        proj = Path(project_path) if project_path else None
+        rules = get_extraction_rules(kind, proj)
+        if not rules:
+            return None
+
+        executor_rule = rules.get("executor_id")
+        if not executor_rule:
+            return None
+
+        # Constant rules don't need parsing
+        if executor_rule.get("type") == "constant":
+            return executor_rule.get("value")
+
+        # Path rules need file content parsed
+        parser_name = get_parser_name(kind, proj)
+        if not parser_name:
+            return None
+
+        try:
+            content = path.read_text(encoding="utf-8")
+            parsed = self.parser_router.parse(parser_name, content)
+            if "error" in parsed:
+                return None
+            key = executor_rule.get("key", "executor_id")
+            return parsed.get(key)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Main dispatch
+    # ------------------------------------------------------------------
+
     async def handle(self, **kwargs) -> Dict[str, Any]:
         """Handle execute request."""
-        item_type: str = kwargs.get("item_type", "")
         item_id: str = kwargs.get("item_id", "")
         project_path = kwargs["project_path"]
-        parameters: Dict[str, Any] = kwargs.get("parameters", {})
+        parameters: Dict[str, Any] = kwargs.get("parameters") or {}
         dry_run = kwargs.get("dry_run", False)
         target = kwargs.get("target", "local")
         thread = kwargs.get("thread", "inline")
         async_exec = kwargs.get("async", False)
         resume_thread_id = kwargs.get("resume_thread_id")
 
-        # Resume mode: look up thread, route to its callee
+        # Resume mode
         if resume_thread_id:
             return await self._resume(
-                resume_thread_id,
-                item_type,
-                item_id,
-                project_path,
-                parameters,
-                thread,
-                async_exec,
+                resume_thread_id, item_id, project_path, parameters, thread, async_exec,
             )
 
-        # Outside resume, item_type and item_id are required
-        if not item_type or not item_id:
-            return {"status": "error", "error": "item_type and item_id are required."}
+        if not item_id:
+            return {"status": "error", "error": "item_id is required."}
 
-        # Parse target (validates format, extracts remote name)
+        # Parse target
         try:
             target_mode, remote_name = self._parse_target(target)
         except ValueError as e:
             return {"status": "error", "error": str(e), "item_id": item_id}
 
-        logger.debug(
-            f"Execute: {item_type} item_id={item_id} target={target} "
-            f"thread={thread} async={async_exec}"
+        # Resolve executable (includes integrity verification)
+        try:
+            resolved = self._resolve_executable_ref(project_path, item_id)
+        except IntegrityError as e:
+            return {
+                "status": "error", "error": str(e), "error_type": "integrity", "item_id": item_id,
+            }
+        except ValueError as e:
+            return {"status": "error", "error": str(e), "item_id": item_id}
+
+        # Build envelope — the per-request payload that flows everywhere
+        envelope = ExecutionEnvelope(
+            item_ref=resolved.canonical_ref,
+            executor_id=resolved.executor_id,
+            parameters=parameters,
+            thread=thread,
+            async_exec=async_exec,
+            dry_run=dry_run,
         )
 
-        # Validate the full execution triple
-        err = self._validate_execution(
-            item_type, target_mode, thread, async_exec, dry_run
+        logger.debug(
+            f"Execute: {envelope.item_ref} executor={envelope.executor_id} "
+            f"target={target} thread={thread} async={async_exec}"
         )
+
+        # Protocol-level validation
+        err = self._validate_protocol(target_mode, thread, async_exec, dry_run)
         if err:
             return {"status": "error", "error": err, "item_id": item_id}
+
+        # Executor capability validation
+        if envelope.executor_id != PRIMITIVE_CHAIN:
+            err = await self._validate_executor_capabilities(
+                project_path, envelope.executor_id, target_mode, thread,
+            )
+            if err:
+                return {"status": "error", "error": err, "item_id": item_id}
 
         try:
             start = time.time()
 
-            # Resolve execution plan
-            spec = await self._read_execution_spec(item_type, item_id, project_path)
-            plan = self._resolve_execution_plan(
-                item_type,
-                target_mode,
-                thread,
-                async_exec,
-                spec,
-            )
-
-            if plan.launch_mode == "forward_remote":
+            if target_mode == "remote":
                 result = await self._dispatch_remote(
-                    item_type=item_type,
-                    item_id=item_id,
+                    resolved=resolved,
+                    envelope=envelope,
                     project_path=project_path,
-                    parameters=parameters,
-                    thread=thread,
                     remote_name=remote_name,
-                    async_exec=async_exec,
                 )
-            elif item_type == ItemType.DIRECTIVE:
-                result = await self._run_directive(
-                    item_id,
-                    project_path,
-                    parameters,
-                    dry_run,
-                    thread=thread,
-                    async_exec=async_exec,
-                )
-            elif plan.launch_mode == "engine_detach":
-                result = await self._launch_async(
-                    item_type=item_type,
-                    item_id=item_id,
+            elif envelope.executor_id == PRIMITIVE_CHAIN:
+                result = await self._dispatch_primitive_chain(
+                    resolved=resolved,
+                    envelope=envelope,
                     project_path=project_path,
-                    parameters=parameters,
-                    target="local",
-                    thread=thread,
                 )
-            elif item_type == ItemType.TOOL:
-                if async_exec:
-                    if not plan.native_async:
-                        return {
-                            "status": "error",
-                            "error": "Tool does not support async execution (native_async=False)",
-                            "item_id": item_id,
-                        }
-                    parameters = {**(parameters or {}), "async": True}
-                result = await self._run_tool(
-                    item_id,
-                    project_path,
-                    parameters,
-                    dry_run,
-                )
-            elif item_type == ItemType.KNOWLEDGE:
-                result = await self._run_knowledge(item_id, project_path)
             else:
-                return {"status": "error", "error": f"Unknown item type: {item_type}"}
+                result = await self._dispatch_executor_tool(
+                    resolved=resolved,
+                    envelope=envelope,
+                    project_path=project_path,
+                )
 
             duration_ms = int((time.time() - start) * 1000)
             if "metadata" not in result:
@@ -225,24 +315,24 @@ class ExecuteTool:
         except IntegrityError as e:
             logger.error(f"Integrity error: {e}")
             return {
-                "status": "error",
-                "error": str(e),
-                "error_type": "integrity",
-                "item_id": item_id,
+                "status": "error", "error": str(e), "error_type": "integrity", "item_id": item_id,
             }
         except Exception as e:
             logger.error(f"Execute error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}
 
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _validate_execution(
-        item_type: str,
+    def _validate_protocol(
         target: str,
         thread: str,
         async_exec: bool,
         dry_run: bool,
     ) -> Optional[str]:
-        """Validate the (item_type, target, thread) execution triple.
+        """Validate protocol-level constraints (no kind checks).
 
         Returns an error message string if invalid, None if valid.
         """
@@ -252,93 +342,324 @@ class ExecuteTool:
         if target not in ("local", "remote"):
             return f'Unknown target: {target!r}. Must be "local", "remote", or "remote:<name>".'
 
-        VALID_SYNC = {
-            ("directive", "local", "inline"),
-            ("directive", "local", "fork"),
-            ("directive", "remote", "fork"),
-            ("tool", "local", "inline"),
-            ("tool", "remote", "inline"),
-            ("knowledge", "local", "inline"),
-        }
-
-        triple = (item_type, target, thread)
-        if triple not in VALID_SYNC:
-            if item_type == "knowledge" and (target != "local" or thread != "inline"):
-                return (
-                    f'Knowledge items only support target="local" + thread="inline". '
-                    "Knowledge loading is immediate and always local+inline."
-                )
-            if item_type == "tool" and thread == "fork":
-                return (
-                    'thread="fork" is not supported for tools. '
-                    "Fork spawns a managed LLM thread, which only applies to directives. "
-                    'Use thread="inline" (default).'
-                )
-            if item_type == "directive" and target == "remote" and thread == "inline":
-                return (
-                    'Directives on remote must use thread="fork". '
-                    "The remote server needs to spawn an LLM thread to follow directive steps."
-                )
-            if item_type == "tool" and target == "remote" and thread == "fork":
-                return (
-                    'Tools on remote must use thread="inline". '
-                    "Fork spawns a managed LLM thread, which only applies to directives."
-                )
-            return f"Invalid execution combination: item_type={item_type!r}, target={target!r}, thread={thread!r}."
-
-        if async_exec:
-            if dry_run:
-                return "async + dry_run is not supported. Validation is instant, nothing to detach."
-            if item_type == "knowledge":
-                return "async + knowledge is not supported. Knowledge loading is immediate."
-            if item_type == "directive" and thread == "inline" and target == "local":
-                return (
-                    "async + directive + inline is not supported. "
-                    "Inline directives return text for the agent to follow — "
-                    'there is nothing to detach. Use thread="fork" for async directives.'
-                )
+        if async_exec and dry_run:
+            return "async + dry_run is not supported. Validation is instant, nothing to detach."
 
         if dry_run and target == "remote":
             return "dry_run + remote is not supported. Dry run validates locally."
 
         return None
 
+    async def _validate_executor_capabilities(
+        self,
+        project_path: str,
+        executor_id: str,
+        target_mode: str,
+        thread: str,
+    ) -> Optional[str]:
+        """Validate thread/target against executor tool's declared capabilities.
+
+        Returns an error message string if invalid, None if valid.
+        """
+        caps = await self._read_executor_capabilities(project_path, executor_id)
+        allowed_threads = caps.get("allowed_threads", ["inline", "fork"])
+        allowed_targets = caps.get("allowed_targets", ["local", "remote"])
+
+        if thread not in allowed_threads:
+            return (
+                f"Executor tool {executor_id} does not support "
+                f"thread={thread!r}. Allowed: {allowed_threads}"
+            )
+        if target_mode not in allowed_targets:
+            return (
+                f"Executor tool {executor_id} does not support "
+                f"target={target_mode!r}. Allowed: {allowed_targets}"
+            )
+        return None
+
+    async def _read_executor_capabilities(self, project_path: str, executor_id: str) -> Dict[str, Any]:
+        """Read execution capabilities from an executor tool's metadata."""
+        defaults = {
+            "allowed_threads": ["inline", "fork"],
+            "allowed_targets": ["local", "remote"],
+        }
+        try:
+            executor = self._get_executor(project_path)
+            chain = await executor._build_chain(executor_id)
+            if not chain:
+                return defaults
+            metadata = executor._load_metadata_cached(chain[0].path)
+            return {
+                "allowed_threads": metadata.get("allowed_threads", defaults["allowed_threads"]),
+                "allowed_targets": metadata.get("allowed_targets", defaults["allowed_targets"]),
+            }
+        except Exception:
+            return defaults
+
+    # ------------------------------------------------------------------
+    # Dispatch strategies
+    # ------------------------------------------------------------------
+
+    async def _dispatch_primitive_chain(
+        self,
+        *,
+        resolved: ResolvedExecutable,
+        envelope: ExecutionEnvelope,
+        project_path: str,
+    ) -> Dict[str, Any]:
+        """Dispatch a self-executing item via PrimitiveExecutor.
+
+        Used when executor_id == "@primitive_chain".
+        """
+        spec = await self._read_execution_spec(resolved.bare_id, project_path)
+        plan = self._resolve_execution_plan(target="local", async_exec=envelope.async_exec, spec=spec)
+
+        if plan.launch_mode == "engine_detach":
+            return await self._launch_async(
+                envelope=envelope,
+                project_path=project_path,
+            )
+
+        if envelope.async_exec and not plan.native_async:
+            return {
+                "status": "error",
+                "error": "Item does not support async execution (native_async=False)",
+                "item_id": resolved.bare_id,
+            }
+
+        parameters = envelope.parameters
+        if envelope.async_exec:
+            parameters = {**parameters, "async": True}
+
+        return await self._run_tool(resolved.bare_id, project_path, parameters, envelope.dry_run)
+
+    async def _dispatch_executor_tool(
+        self,
+        *,
+        resolved: ResolvedExecutable,
+        envelope: ExecutionEnvelope,
+        project_path: str,
+    ) -> Dict[str, Any]:
+        """Dispatch an item to its declared executor tool.
+
+        Used when executor_id is an actual tool (not @primitive_chain).
+        The engine passes the envelope to the executor tool.
+        """
+        if not self._find_item(project_path, ItemType.TOOL, resolved.executor_id):
+            return {
+                "status": "error",
+                "error": (
+                    f"Executor tool not found: {resolved.executor_id!r}. "
+                    f"Required by {envelope.item_ref}."
+                ),
+                "item_id": resolved.bare_id,
+            }
+
+        tool_params: Dict[str, Any] = {
+            "item_id": envelope.item_ref,
+            "parameters": envelope.parameters,
+            "thread": envelope.thread,
+            "async": envelope.async_exec,
+            "dry_run": envelope.dry_run,
+        }
+
+        result = await self._run_tool(
+            resolved.executor_id, project_path, tool_params, dry_run=False,
+        )
+
+        # Normalize: preserve the originally requested item identity
+        if result.get("status") == "success" and result.get("data"):
+            data = result["data"]
+            if isinstance(data, dict) and "stdout" in data:
+                import json as _json
+                try:
+                    data = _json.loads(data["stdout"])
+                except (ValueError, TypeError):
+                    data = {"raw": data["stdout"]}
+            return {
+                "status": data.get("status", "success"),
+                "type": resolved.kind,
+                "item_id": resolved.bare_id,
+                **{k: v for k, v in data.items() if k not in ("status",)},
+                "metadata": result.get("metadata", {}),
+            }
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Remote dispatch
+    # ------------------------------------------------------------------
+
+    async def _dispatch_remote(
+        self,
+        *,
+        resolved: ResolvedExecutable,
+        envelope: ExecutionEnvelope,
+        project_path: str,
+        remote_name: Optional[str],
+    ) -> Dict[str, Any]:
+        """Dispatch execution to a remote ryeos server.
+
+        Forwards the envelope to the remote tool.
+        """
+        remote_tool = "rye/core/remote/remote"
+        if not self._find_item(project_path, ItemType.TOOL, remote_tool):
+            return {
+                "status": "error",
+                "error": (
+                    f"Remote execution requires the remote tool ('{remote_tool}' not found). "
+                    'Install ryeos-core or use target="local".'
+                ),
+                "item_id": resolved.bare_id,
+            }
+
+        remote_params = {
+            "action": "execute",
+            "item_id": envelope.item_ref,
+            "parameters": envelope.parameters,
+            "thread": envelope.thread,
+        }
+        if remote_name is not None:
+            remote_params["remote"] = remote_name
+        if envelope.async_exec:
+            remote_params["async"] = True
+
+        remote_result = await self._run_tool(
+            remote_tool, project_path, remote_params, dry_run=False,
+        )
+
+        if remote_result.get("status") == "success" and remote_result.get("data"):
+            data = remote_result["data"]
+            if isinstance(data, dict) and "stdout" in data:
+                import json as _json
+                try:
+                    data = _json.loads(data["stdout"])
+                except (ValueError, TypeError):
+                    data = {"raw": data["stdout"]}
+            return {
+                "status": data.get("status", "success"),
+                "type": resolved.kind,
+                "item_id": resolved.bare_id,
+                "execution_mode": "remote",
+                **{k: v for k, v in data.items() if k not in ("status",)},
+                "metadata": remote_result.get("metadata", {}),
+            }
+
+        return remote_result
+
+    # ------------------------------------------------------------------
+    # Resume
+    # ------------------------------------------------------------------
+
+    async def _resume(
+        self,
+        resume_thread_id: str,
+        item_id: str,
+        project_path: str,
+        parameters: Dict[str, Any],
+        thread: str,
+        async_exec: bool,
+    ) -> Dict[str, Any]:
+        """Resume a completed or interrupted thread.
+
+        Looks up the thread in the registry, resolves the original item,
+        and dispatches through its executor with resume parameters.
+        """
+        proj = Path(project_path)
+        registry = self._get_registry(proj)
+        thread_record = registry.get_thread(resume_thread_id) if registry else None
+
+        if not thread_record:
+            return {
+                "status": "error",
+                "error": f"Thread not found: {resume_thread_id}",
+                "resume_thread_id": resume_thread_id,
+            }
+
+        resolved_id = item_id or thread_record.get("item_id", "")
+
+        if not resolved_id:
+            return {
+                "status": "error",
+                "error": (
+                    "Cannot determine item_id for resume: not provided "
+                    "and thread record has no item_id field."
+                ),
+                "resume_thread_id": resume_thread_id,
+            }
+
+        try:
+            resolved = self._resolve_executable_ref(project_path, resolved_id)
+        except IntegrityError as e:
+            return {
+                "status": "error", "error": str(e), "error_type": "integrity",
+                "resume_thread_id": resume_thread_id,
+            }
+        except ValueError as e:
+            return {"status": "error", "error": str(e), "resume_thread_id": resume_thread_id}
+
+        parameters["previous_thread_id"] = resume_thread_id
+
+        envelope = ExecutionEnvelope(
+            item_ref=resolved.canonical_ref,
+            executor_id=resolved.executor_id,
+            parameters=parameters,
+            thread=thread if thread != "inline" else "fork",
+            async_exec=async_exec,
+            dry_run=False,
+        )
+
+        if resolved.executor_id == PRIMITIVE_CHAIN:
+            spec = await self._read_execution_spec(resolved.bare_id, project_path)
+            if not spec.native_resume:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Item {envelope.item_ref} does not support resume "
+                        f"(native_resume=False)."
+                    ),
+                    "resume_thread_id": resume_thread_id,
+                }
+            parameters["resume"] = True
+            parameters["graph_run_id"] = resume_thread_id
+            return await self._run_tool(
+                resolved.bare_id, project_path, parameters, dry_run=False,
+            )
+        else:
+            return await self._dispatch_executor_tool(
+                resolved=resolved,
+                envelope=envelope,
+                project_path=project_path,
+            )
+
+    # ------------------------------------------------------------------
+    # Execution spec / plan (for @primitive_chain items)
+    # ------------------------------------------------------------------
+
     async def _read_execution_spec(
         self,
-        item_type: str,
         item_id: str,
         project_path: str,
     ) -> ExecutionSpec:
         """Read execution ownership dunders from the resolved executor chain.
 
-        Only tools have executor chains. Directives and knowledge always
-        return the default (engine-owned) spec — their lifecycle is
-        handled by higher-level dispatch (``_run_directive``,
-        ``_run_knowledge``).
-
-        For tools, builds the executor chain via PrimitiveExecutor and
-        walks it looking for ``execution_owner``.  The first element in
-        the chain that declares ownership wins (leaf tool first, then
-        runtimes up the chain).  This lets runtimes like
-        ``state-graph/runtime`` declare ownership on behalf of the walker.
+        Builds the chain via PrimitiveExecutor and walks it looking for
+        ``execution_owner``.  The first element in the chain that declares
+        ownership wins.
         """
-        if item_type != ItemType.TOOL:
-            return ExecutionSpec()
-
         try:
             executor = self._get_executor(project_path)
             chain = await executor._build_chain(item_id)
             if not chain:
                 return ExecutionSpec()
 
-            # Walk chain: first element that declares execution_owner wins
             for element in chain:
                 metadata = executor._load_metadata_cached(element.path)
                 owner = metadata.get("execution_owner")
                 if owner is not None:
                     if owner not in ("engine", "callee"):
                         logger.warning(
-                            "Tool %s (chain element %s) declares unknown "
+                            "Item %s (chain element %s) declares unknown "
                             "execution_owner=%r, defaulting to engine",
                             item_id,
                             element.item_id,
@@ -360,16 +681,11 @@ class ExecuteTool:
 
     @staticmethod
     def _resolve_execution_plan(
-        item_type: str,
         target: str,
-        thread: str,
         async_exec: bool,
         spec: ExecutionSpec,
     ) -> ExecutionPlan:
-        """Resolve execution routing from spec + request parameters.
-
-        One resolver, one routing decision — no hardcoded item type checks.
-        """
+        """Resolve execution routing from spec + request parameters."""
         if target == "remote":
             return ExecutionPlan(owner="remote", launch_mode="forward_remote")
 
@@ -386,123 +702,15 @@ class ExecuteTool:
 
         return ExecutionPlan(owner="engine", launch_mode="direct")
 
-    async def _resume(
-        self,
-        resume_thread_id: str,
-        item_type: str,
-        item_id: str,
-        project_path: str,
-        parameters: Dict[str, Any],
-        thread: str,
-        async_exec: bool,
-    ) -> Dict[str, Any]:
-        """Resume a completed or interrupted thread.
-
-        Looks up the thread in the registry to determine the original
-        item, reads the execution spec, and routes to the right callee
-        with resume parameters.
-
-        - Directives: re-invokes ``thread_directive`` with
-          ``previous_thread_id`` for transcript reconstruction.
-        - Graphs: re-invokes the graph tool with ``resume=True`` and
-          ``graph_run_id`` for checkpoint reload.
-        """
-        proj = Path(project_path)
-        registry = self._get_registry(proj)
-        thread_record = registry.get_thread(resume_thread_id) if registry else None
-
-        if not thread_record:
-            return {
-                "status": "error",
-                "error": f"Thread not found: {resume_thread_id}",
-                "resume_thread_id": resume_thread_id,
-            }
-
-        # Determine the item from the registry record
-        directive_field = thread_record.get("directive", "")
-
-        # Graph threads store graph_id in directive field
-        # Directive threads store directive item_id
-        # Use the caller-provided item_type/item_id if given, else infer
-        if item_id:
-            resolved_item_id = item_id
-            resolved_item_type = item_type or ItemType.DIRECTIVE
-        else:
-            resolved_item_id = directive_field
-            resolved_item_type = item_type or ItemType.DIRECTIVE
-
-        if not resolved_item_id:
-            return {
-                "status": "error",
-                "error": (
-                    "Cannot determine item_id for resume: not provided "
-                    "and thread record has no directive field."
-                ),
-                "resume_thread_id": resume_thread_id,
-            }
-
-        # Route to the callee with resume params
-        # Directives always support resume via transcript reconstruction
-        # (previous_thread_id). Only tools need native_resume from spec.
-        if resolved_item_type == ItemType.DIRECTIVE:
-            parameters["previous_thread_id"] = resume_thread_id
-            return await self._run_directive(
-                resolved_item_id,
-                project_path,
-                parameters,
-                dry_run=False,
-                thread="fork",
-                async_exec=async_exec,
-            )
-        elif resolved_item_type == ItemType.TOOL:
-            spec = await self._read_execution_spec(
-                resolved_item_type,
-                resolved_item_id,
-                project_path,
-            )
-            if not spec.native_resume:
-                return {
-                    "status": "error",
-                    "error": (
-                        f"Tool {resolved_item_id} does not support resume "
-                        f"(native_resume=False)."
-                    ),
-                    "resume_thread_id": resume_thread_id,
-                }
-            parameters["resume"] = True
-            parameters["graph_run_id"] = resume_thread_id
-            return await self._run_tool(
-                resolved_item_id,
-                project_path,
-                parameters,
-                dry_run=False,
-            )
-        else:
-            return {
-                "status": "error",
-                "error": f"Resume not supported for item_type={resolved_item_type!r}",
-                "resume_thread_id": resume_thread_id,
-            }
+    # ------------------------------------------------------------------
+    # Target parsing
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _parse_target(target: str) -> tuple:
-        """Parse target string into ``(target_mode, remote_name)``.
-
-        Returns:
-            A 2-tuple ``(target_mode, remote_name)`` where *target_mode* is
-            ``"local"`` or ``"remote"``, and *remote_name* is the named remote
-            suffix (``None`` when unspecified or when target is "local").
-
-        Raises:
-            ValueError: If target is "remote:" with an empty suffix.
-
-        Examples::
-            "local"        -> ("local", None)
-            "remote"       -> ("remote", None)
-            "remote:gpu"   -> ("remote", "gpu")
-        """
+        """Parse target string into ``(target_mode, remote_name)``."""
         if target.startswith("remote:"):
-            name = target[len("remote:") :]
+            name = target[len("remote:"):]
             if not name:
                 raise ValueError(
                     'Invalid target "remote:" — remote name cannot be empty. '
@@ -517,250 +725,9 @@ class ExecuteTool:
             f'Unknown target: {target!r}. Must be "local", "remote", or "remote:<name>".'
         )
 
-    async def _dispatch_remote(
-        self,
-        *,
-        item_type: str,
-        item_id: str,
-        project_path: str,
-        parameters: Dict[str, Any],
-        thread: str,
-        remote_name: Optional[str],
-        async_exec: bool = False,
-    ) -> Dict[str, Any]:
-        """Dispatch execution to a remote ryeos server.
-
-        Pushes CAS objects and triggers remote execution via the
-        ``rye/core/remote/remote`` tool.
-        """
-        if item_type == ItemType.DIRECTIVE:
-            model = parameters.pop("model", None)
-            limit_overrides = parameters.pop("limit_overrides", None)
-
-            file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
-            if not file_path:
-                return {"status": "error", "error": f"Directive not found: {item_id}"}
-
-            ctx = self._build_ctx(project_path)
-            try:
-                verify_item(file_path, ItemType.DIRECTIVE, ctx=ctx)
-            except IntegrityError as exc:
-                return {"status": "error", "error": str(exc), "item_id": item_id}
-
-            content = file_path.read_text(encoding="utf-8")
-            parsed = self.parser_router.parse("markdown/xml", content)
-            if "error" in parsed:
-                return {
-                    "status": "error",
-                    "error": parsed.get("error"),
-                    "item_id": item_id,
-                }
-
-            processor_router = ProcessorRouter(ctx.project_path)
-            validation = processor_router.run("inputs/validate", parsed, parameters)
-            if validation.get("status") == "error":
-                validation["item_id"] = item_id
-                return validation
-
-            processor_router.run("inputs/interpolate", parsed, validation["inputs"])
-            send_params = validation["inputs"]
-        else:
-            send_params = parameters
-
-        remote_tool = "rye/core/remote/remote"
-        if not self._find_item(project_path, ItemType.TOOL, remote_tool):
-            return {
-                "status": "error",
-                "error": (
-                    f"Remote execution requires the remote tool ('{remote_tool}' not found). "
-                    'Install ryeos-core or use target="local".'
-                ),
-                "item_id": item_id,
-            }
-
-        remote_params = {
-            "action": "execute",
-            "item_type": item_type,
-            "item_id": item_id,
-            "parameters": send_params,
-            "thread": thread,
-        }
-        if remote_name is not None:
-            remote_params["remote"] = remote_name
-        if async_exec:
-            remote_params["async"] = True
-
-        remote_result = await self._run_tool(
-            remote_tool,
-            project_path,
-            remote_params,
-            dry_run=False,
-        )
-
-        if remote_result.get("status") == "success" and remote_result.get("data"):
-            data = remote_result["data"]
-            if isinstance(data, dict) and "stdout" in data:
-                import json as _json
-
-                try:
-                    data = _json.loads(data["stdout"])
-                except (ValueError, TypeError):
-                    data = {"raw": data["stdout"]}
-            return {
-                "status": data.get("status", "success"),
-                "type": item_type,
-                "item_id": item_id,
-                "execution_mode": "remote",
-                **{k: v for k, v in data.items() if k not in ("status", "success")},
-                "metadata": remote_result.get("metadata", {}),
-            }
-
-        return remote_result
-
-    async def _run_directive(
-        self,
-        item_id: str,
-        project_path: str,
-        parameters: Dict[str, Any],
-        dry_run: bool,
-        *,
-        thread: str = "inline",
-        async_exec: bool = False,
-    ) -> Dict[str, Any]:
-        """Run a directive — parse, validate, and dispatch to execution mode.
-
-        Three modes controlled by ``thread`` and ``async_exec``:
-
-        - **Inline** (default): Parse, validate inputs, interpolate
-          placeholders, and return the directive content with an
-          ``your_directions`` field.  The calling agent follows the steps
-          in its own context.  No LLM infrastructure required.
-
-        - **Fork** (``thread="fork"``): Spawn a managed thread via
-          ``rye/agent/threads/thread_directive`` (LLM loop, safety
-          harness, budgets).  Blocks until the thread completes.
-
-        - **Fork + async** (``thread="fork", async_exec=True``): Same as
-          fork but returns immediately with a thread_id handle.
-          ``thread_directive`` owns the full lifecycle — no wrapper process.
-
-        ``model`` and ``limit_overrides`` are read from ``parameters``.
-        Validation is always done eagerly for fast feedback on bad inputs.
-        """
-        model = parameters.pop("model", None)
-        limit_overrides = parameters.pop("limit_overrides", None)
-        previous_thread_id = parameters.pop("previous_thread_id", None)
-        # 1. Find the directive file
-        file_path = self._find_item(project_path, ItemType.DIRECTIVE, item_id)
-        if not file_path:
-            return {"status": "error", "error": f"Directive not found: {item_id}"}
-
-        # 2. Integrity check
-        ctx = self._build_ctx(project_path)
-        try:
-            verify_item(file_path, ItemType.DIRECTIVE, ctx=ctx)
-        except IntegrityError as exc:
-            return {"status": "error", "error": str(exc), "item_id": item_id}
-
-        # 3. Parse
-        content = file_path.read_text(encoding="utf-8")
-        parsed = self.parser_router.parse("markdown/xml", content)
-        if "error" in parsed:
-            return {"status": "error", "error": parsed.get("error"), "item_id": item_id}
-
-        # 4. Validate inputs (data-driven processor)
-        processor_router = ProcessorRouter(ctx.project_path)
-        validation = processor_router.run("inputs/validate", parsed, parameters)
-        if validation.get("status") == "error":
-            validation["item_id"] = item_id
-            return validation
-
-        # 5. Interpolate placeholders (data-driven processor)
-        processor_router.run("inputs/interpolate", parsed, validation["inputs"])
-
-        # 6. Dry run stops here
-        if dry_run:
-            return {
-                "status": "validation_passed",
-                "type": ItemType.DIRECTIVE,
-                "item_id": item_id,
-                "data": parsed,
-                "inputs": validation["inputs"],
-                "message": "Directive validation passed (dry run)",
-            }
-
-        # 7a. Inline mode (default): return only the directive for
-        #     the LLM to follow.  Nothing else — extra fields distract.
-        if thread == "inline":
-            return {
-                "your_directions": parsed.get("body", ""),
-            }
-
-        # 7b. Fork mode: spawn managed thread via thread_directive tool
-        #     Requires rye/agent infrastructure (thread_directive tool + LLM config)
-        if thread == "fork":
-            td_tool = "rye/agent/threads/thread_directive"
-            if not self._find_item(project_path, ItemType.TOOL, td_tool):
-                return {
-                    "status": "error",
-                    "error": (
-                        'thread="fork" requires the rye/agent thread infrastructure '
-                        f"(tool '{td_tool}' not found). "
-                        'Either install the rye-agent package or use thread="inline" '
-                        "to execute the directive inline."
-                    ),
-                    "item_id": item_id,
-                }
-
-            td_params: Dict[str, Any] = {
-                "directive_id": item_id,
-                "inputs": validation["inputs"],
-                "async": async_exec,
-            }
-            if model:
-                td_params["model"] = model
-            if limit_overrides:
-                td_params["limit_overrides"] = limit_overrides
-            if previous_thread_id:
-                td_params["previous_thread_id"] = previous_thread_id
-
-            # Forward parent thread context if present
-            parent_tid = os.environ.get("RYE_PARENT_THREAD_ID")
-            if parent_tid:
-                td_params["parent_thread_id"] = parent_tid
-
-            thread_result = await self._run_tool(
-                "rye/agent/threads/thread_directive",
-                project_path,
-                td_params,
-                dry_run=False,
-            )
-
-            # Normalise the response — thread_directive returns its own format
-            if thread_result.get("status") == "success" and thread_result.get("data"):
-                data = thread_result["data"]
-                # Unwrap: PrimitiveExecutor wraps stdout JSON in data.stdout
-                if isinstance(data, dict) and "stdout" in data:
-                    import json as _json
-
-                    try:
-                        data = _json.loads(data["stdout"])
-                    except (ValueError, TypeError):
-                        data = {"raw": data["stdout"]}
-                resp = {
-                    "status": "success" if data.get("success", True) else "error",
-                    "type": ItemType.DIRECTIVE,
-                    "item_id": item_id,
-                    **{k: v for k, v in data.items() if k != "success"},
-                    "metadata": thread_result.get("metadata", {}),
-                }
-                if async_exec:
-                    resp["async"] = True
-                    resp["execution_mode"] = "fork"
-                    resp["state"] = data.get("status", "running")
-                return resp
-
-            return thread_result
+    # ------------------------------------------------------------------
+    # Low-level execution helpers
+    # ------------------------------------------------------------------
 
     async def _run_tool(
         self,
@@ -769,15 +736,7 @@ class ExecuteTool:
         parameters: Dict[str, Any],
         dry_run: bool,
     ) -> Dict[str, Any]:
-        """Run a tool via PrimitiveExecutor with chain resolution.
-
-        Execution flow:
-            1. Get or create PrimitiveExecutor for project
-            2. Build executor chain (tool → runtime → primitive)
-            3. Validate chain (space compatibility, I/O matching)
-            4. Resolve ENV_CONFIG through chain
-            5. Execute via root Lillux primitive
-        """
+        """Run a tool via PrimitiveExecutor with chain resolution."""
         executor = self._get_executor(project_path)
 
         if dry_run:
@@ -804,7 +763,6 @@ class ExecuteTool:
             except Exception as e:
                 return {"status": "error", "error": str(e), "item_id": item_id}
 
-        # Execute via PrimitiveExecutor
         result: ExecutionResult = await executor.execute(
             item_id=item_id,
             parameters=parameters,
@@ -815,7 +773,7 @@ class ExecuteTool:
         if result.success:
             return {
                 "status": "success",
-                "type": ItemType.TOOL,
+                "type": "tool",
                 "item_id": item_id,
                 "data": result.data,
                 "chain": result.chain,
@@ -839,37 +797,25 @@ class ExecuteTool:
     async def _launch_async(
         self,
         *,
-        item_type: str,
-        item_id: str,
+        envelope: ExecutionEnvelope,
         project_path: str,
-        parameters: Dict[str, Any],
-        target: str = "local",
-        thread: str = "inline",
     ) -> Dict[str, Any]:
-        """Launch a tool in a detached child process, return immediately.
-
-        Used for async tool execution only.  Directive async is handled
-        by ``thread_directive`` via ``_run_directive(async_exec=True)``.
-
-        Generates a name-based thread_id, registers in ThreadRegistry,
-        spawns ``async_runner.py``, and returns a handle dict.
-        """
+        """Launch an item in a detached child process, return immediately."""
         import json as _json
         import sys
         from rye.utils.detached import generate_thread_id
 
-        thread_id = generate_thread_id(item_id)
+        thread_id = generate_thread_id(envelope.item_ref)
         proj = Path(project_path)
 
         registry = self._get_registry(proj)
         thread_dir = proj / AI_DIR / STATE_DIR / STATE_THREADS / thread_id
 
         payload = {
-            "item_type": item_type,
-            "item_id": item_id,
-            "parameters": parameters,
-            "target": target,
-            "thread": thread,
+            "item_id": envelope.item_ref,
+            "parameters": envelope.parameters,
+            "target": "local",
+            "thread": envelope.thread,
         }
 
         cmd = [
@@ -888,7 +834,7 @@ class ExecuteTool:
             spawn_result = await spawn_thread(
                 registry=registry,
                 thread_id=thread_id,
-                directive=f"{item_type}/{item_id}",
+                item_id=envelope.item_ref,
                 cmd=cmd,
                 log_dir=thread_dir,
                 input_data=_json.dumps(payload),
@@ -907,16 +853,18 @@ class ExecuteTool:
             return {
                 "status": "error",
                 "error": f"Failed to spawn async process: {spawn_result.get('error')}",
-                "item_id": item_id,
+                "item_id": envelope.item_ref,
             }
 
+        # Parse kind from canonical ref for response
+        kind, bare_id = ItemType.parse_canonical_ref(envelope.item_ref)
         return {
             "status": "success",
             "async": True,
             "thread_id": thread_id,
-            "type": item_type,
-            "item_id": item_id,
-            "execution_mode": thread,
+            "type": kind,
+            "item_id": bare_id,
+            "execution_mode": envelope.thread,
             "state": "running",
             "pid": spawn_result["pid"],
         }
@@ -956,7 +904,6 @@ class ExecuteTool:
         """Build an ExecutionContext for the given project path."""
         proj_path = Path(project_path) if project_path else Path.cwd()
         if self._base_ctx is not None:
-            # Re-derive from the explicit base, only overriding project_path
             return ExecutionContext(
                 project_path=proj_path,
                 user_space=self._base_ctx.user_space,
@@ -966,72 +913,33 @@ class ExecuteTool:
         return ExecutionContext.from_env(project_path=proj_path)
 
     def _get_executor(self, project_path: str) -> PrimitiveExecutor:
-        """Get or create PrimitiveExecutor for project.
-
-        Creates new executor if project_path changed.
-        """
+        """Get or create PrimitiveExecutor for project."""
         proj_path = Path(project_path) if project_path else Path.cwd()
 
-        # Check if we need a new executor
         if self._executor is None or self._executor.project_path != proj_path:
             ctx = self._build_ctx(project_path)
             self._executor = PrimitiveExecutor(ctx=ctx)
 
         return self._executor
 
-    async def _run_knowledge(self, item_id: str, project_path: str) -> Dict[str, Any]:
-        """Run/load knowledge - parse and return content."""
-        file_path = self._find_item(project_path, ItemType.KNOWLEDGE, item_id)
-        if not file_path:
-            return {"status": "error", "error": f"Knowledge entry not found: {item_id}"}
-
-        verify_item(
-            file_path,
-            ItemType.KNOWLEDGE,
-            ctx=self._build_ctx(project_path),
-        )
-
-        content = file_path.read_text(encoding="utf-8")
-        parsed = self.parser_router.parse("markdown/frontmatter", content)
-
-        if "name" not in parsed:
-            parsed["name"] = item_id
-
-        return {
-            "status": "success",
-            "type": ItemType.KNOWLEDGE,
-            "item_id": item_id,
-            "data": parsed,
-            "your_directions": "Use this knowledge to inform your decisions.",
-        }
-
     def _find_item(
-        self, project_path: str, item_type: str, item_id: str
+        self, project_path: str, kind: str, item_id: str
     ) -> Optional[Path]:
-        """Find item file by relative path ID searching project > user > system.
-
-        Args:
-            item_id: Relative path from .ai/<type>/ without extension.
-                    e.g., "rye/core/registry/registry" -> .ai/tools/rye/core/registry/registry.py
-        """
-        type_dir = ItemType.TYPE_DIRS.get(item_type)
-        if not type_dir:
+        """Find item file by relative path ID searching project > user > system."""
+        kind_dir = ItemType.KIND_DIRS.get(kind)
+        if not kind_dir:
             return None
 
-        # Search order: project > user > system
-        # System uses type roots (not category-scoped paths) so item_id
-        # resolution matches search — e.g. "rye/core/system" resolves
-        # against .ai/directives/ not .ai/directives/rye/core/.
         search_bases = []
         if project_path:
-            search_bases.append(get_project_type_path(Path(project_path), item_type))
-        search_bases.append(get_user_type_path(item_type))
-        type_folder = ItemType.TYPE_DIRS.get(item_type, item_type)
+            search_bases.append(get_project_kind_path(Path(project_path), kind))
+        search_bases.append(get_user_kind_path(kind))
+        kind_folder = ItemType.KIND_DIRS.get(kind, kind)
         for bundle in get_system_spaces():
-            search_bases.append(bundle.root_path / AI_DIR / type_folder)
+            search_bases.append(bundle.root_path / AI_DIR / kind_folder)
 
         extensions = get_item_extensions(
-            item_type, Path(project_path) if project_path else None
+            kind, Path(project_path) if project_path else None
         )
 
         for base in search_bases:

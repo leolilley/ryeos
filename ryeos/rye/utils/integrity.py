@@ -23,9 +23,9 @@ class IntegrityError(Exception):
     pass
 
 
-def _infer_item_id(file_path: Path, item_type: str, project_path: Optional[Path]) -> str:
+def _infer_item_id(file_path: Path, kind: str, project_path: Optional[Path]) -> str:
     """Best-effort extraction of item_id from file path."""
-    type_dir = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
+    type_dir = ItemType.SIGNABLE_KINDS.get(kind, kind)
     parts = file_path.parts
     for i, part in enumerate(parts):
         if part == ".ai" and i + 1 < len(parts) and parts[i + 1] == type_dir:
@@ -36,7 +36,7 @@ def _infer_item_id(file_path: Path, item_type: str, project_path: Optional[Path]
 
 def verify_item(
     file_path: Path,
-    item_type: str,
+    kind: str,
     *,
     ctx: "ExecutionContext",
     allow_unsigned: bool = False,
@@ -53,7 +53,7 @@ def verify_item(
 
     Args:
         file_path: Path to the item file
-        item_type: One of ItemType.DIRECTIVE, ItemType.TOOL, ItemType.KNOWLEDGE
+        kind: One of ItemType.DIRECTIVE, ItemType.TOOL, ItemType.KNOWLEDGE
         ctx: Execution context with project_path, user_space, etc.
         allow_unsigned: If True, unsigned items return "unsigned" instead of raising.
 
@@ -65,32 +65,32 @@ def verify_item(
         content = file_path.read_text(encoding="utf-8")
 
         sig_info = MetadataManager.get_signature_info(
-            item_type, content, file_path=file_path, project_path=project_path
+            kind, content, file_path=file_path, project_path=project_path
         )
         if not sig_info:
             if allow_unsigned:
                 logger.debug("Unsigned config (allowed): %s", file_path)
                 return "unsigned"
-            item_id = _infer_item_id(file_path, item_type, project_path)
+            item_id = _infer_item_id(file_path, kind, project_path)
             raise IntegrityError(
                 f"Unsigned item: {file_path}\n"
-                f"  Item type: {item_type}\n"
+                f"  Kind: {kind}\n"
                 f"  Expected: rye:signed: header\n"
-                f"  Fix: rye sign {item_type} {item_id}"
+                f"  Fix: rye sign {kind}:{item_id}"
             )
 
         expected = sig_info["hash"]
         actual = MetadataManager.compute_hash(
-            item_type, content, file_path=file_path, project_path=project_path
+            kind, content, file_path=file_path, project_path=project_path
         )
         if actual != expected:
-            item_id = _infer_item_id(file_path, item_type, project_path)
+            item_id = _infer_item_id(file_path, kind, project_path)
             raise IntegrityError(
                 f"Content modified since signing: {file_path}\n"
                 f"  Expected hash: {expected[:16]}…\n"
                 f"  Actual hash: {actual[:16]}…\n"
                 f"  Fix: Re-sign after editing:\n"
-                f"    rye sign {item_type} {item_id}"
+                f"    rye sign {kind}:{item_id}"
             )
 
         ed25519_sig = sig_info["ed25519_sig"]
@@ -105,13 +105,13 @@ def verify_item(
         if key_info is None:
             trusted_keys = trust_store.list_keys()
             trusted_fps = [k.fingerprint for k in trusted_keys]
-            item_id = _infer_item_id(file_path, item_type, project_path)
+            item_id = _infer_item_id(file_path, kind, project_path)
             raise IntegrityError(
                 f"Untrusted key {pubkey_fp} for {file_path}\n"
                 f"  Item signed by: {pubkey_fp}\n"
                 f"  Trusted keys: {', '.join(trusted_fps) or 'none'}\n"
                 f"  Fix: Add this key to your trust store, or re-sign:\n"
-                f"    rye sign {item_type} {item_id}"
+                f"    rye sign {kind}:{item_id}"
             )
 
         if not verify_signature(expected, ed25519_sig, key_info.public_key_pem):

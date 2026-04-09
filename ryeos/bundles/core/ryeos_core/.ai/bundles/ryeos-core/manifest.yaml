@@ -1,228 +1,330 @@
-# rye:unsigned
+# rye:signed:2026-04-09T01:46:18Z:949c8162707c5a0927a41695b457344c834f86a4ef819a569fff4de1e264f0e8:C7PUGXSM2vD90_umCxr0xjat8ufssT_r9kzR9HUd1F7OXqwawA4aMXAvX7sd1WypSVI4d9ePD7zppbreUTpDAQ:4b987fd4e40303ac
 bundle:
   id: ryeos-core
   version: 0.1.0
   entrypoint: ''
   description: ''
-  created_at: '2026-02-26T06:08:35Z'
+  created_at: '2026-04-09T01:46:18Z'
   type: package
 files:
   .ai/directives/rye/core/bundler/create_bundle.md:
-    sha256: 68cf9194945467ce6dc11fe157285a49e9177d5a2f0300d6307141cc5567d0fb
+    object_hash: 6c8de758281c5cf5ccec2bf920a95fa0ae61766f29c00be9a9e2c260e40d24c3
     inline_signed: true
   .ai/directives/rye/core/bundler/inspect_bundle.md:
-    sha256: 291c74d0d19cc0cf404ef74d22e4ff8b71fb647c4968946dae97925427633668
+    object_hash: 9b45f9cac6c645baae7f7bf4314ea9f58c1c1010178f4f9e838eb9de42e5bf3e
     inline_signed: true
   .ai/directives/rye/core/bundler/list_bundles.md:
-    sha256: f9dbd39ff9dbebd76526ed3e5b25429f3f774cd86e35b9acc390635f3bc817c1
+    object_hash: ed340237f0541ee8994700e42bd06c3c16b7ffe43f822d8fcc097fafcd7e2e06
     inline_signed: true
   .ai/directives/rye/core/bundler/verify_bundle.md:
-    sha256: 4843463339f93ff1b67db548d469d7dc1a515f717a9d5ab4f1de41501044b0ef
+    object_hash: ccfc2312b564d6350d2e3b6f7c83d4e6083bc733714d951012f95d7c8f5e10fd
     inline_signed: true
   .ai/directives/rye/core/create_directive.md:
-    sha256: 924bd589c02607cfa6d4a90e84c21e5b2c28f61266eceb5b2d4b773210db412b
+    object_hash: e737c99c41e8298179ee2448f34b5660516da807814ade3245c90be567ec743e
     inline_signed: true
   .ai/directives/rye/core/create_knowledge.md:
-    sha256: 7c6a301c84a2791e5afe6ed813c9a0efa4af7ce164407584d5d1345f4959ae70
+    object_hash: 45e80e8e7fedb4f51033872a3fef1980e6159e7811f9c23eed4ad42e7e4077fe
     inline_signed: true
   .ai/directives/rye/core/create_threaded_directive.md:
-    sha256: a86f9ae8017ec1a8b293150bd7d84a14e649f842573cef38635430191c9d39cb
+    object_hash: d828ab71aba80044da2f56c943014b80dc0aeac7f19271212309ae56ad5c8cfd
     inline_signed: true
   .ai/directives/rye/core/create_tool.md:
-    sha256: a4522a1a8bc96b77695d56e5b9555ff157ff231e063219a2a41ca06189157b2c
+    object_hash: 2f12cce0486b72829bac665ff4b6814faa36004eb2d0a32d0ca4b99fba6b1523
     inline_signed: true
-  .ai/directives/rye/core/registry/delete.md:
-    sha256: 02df8db6a4c4de134f4d63f1a195a44cff3e332a04b93b29afab47202f6d7e72
+  .ai/directives/rye/core/processes/manage.md:
+    object_hash: 4840b30d887cfb317bac72e2fe0a81846b5c2a27bf54a39d6a14b944e8b5c75d
     inline_signed: true
-  .ai/directives/rye/core/registry/login.md:
-    sha256: ba8f237a3ccf7629cee42798d91836cd16895838a46828be89436736df9abfa5
+  .ai/directives/rye/core/remote/execute.md:
+    object_hash: b69d2ba9b1ced936ffc718d54e38974c7f785d53eb5aefd438381608f6f3a9a9
     inline_signed: true
-  .ai/directives/rye/core/registry/login_poll.md:
-    sha256: 41bc3f52b92300c6dc429b09c90cc1f9de81d0feef552f7c25cae33823aaf860
+  .ai/directives/rye/core/remote/init.md:
+    object_hash: 8ee33ebc2eab94e7098667a525a1ae88100ab6664d91847a2759e37806834b87
     inline_signed: true
-  .ai/directives/rye/core/registry/logout.md:
-    sha256: ad99c1a2d92cd72cd7393b63cbbeafb6a23b3b8ea1484d5555a9ced14063ee9c
+  .ai/directives/rye/core/remote/push.md:
+    object_hash: 7d937e8872e5f0c79526a58f0d9c572b58f41d044da5d257426ebc7a70472a45
     inline_signed: true
-  .ai/directives/rye/core/registry/publish.md:
-    sha256: cb45af047d4948fb78fbf26b572a140d8c97699c762c22e4904dcea1f7564cd7
-    inline_signed: true
-  .ai/directives/rye/core/registry/pull.md:
-    sha256: 11e783783072575e02c40226ba5a54ac323a8efa36a552054f79b435a7b4a4b8
-    inline_signed: true
-  .ai/directives/rye/core/registry/push.md:
-    sha256: 4c7c3f13af9aa15ed9bc334a7075ad7b5318e29fb8b3df3c768528c912615fc8
-    inline_signed: true
-  .ai/directives/rye/core/registry/search.md:
-    sha256: 896f71334ef4d5d4d6a65cb62fa5fff729a2aa78c023f58ad8ce000d0b714135
-    inline_signed: true
-  .ai/directives/rye/core/registry/signup.md:
-    sha256: 9bbc39475f25a661bb213be22b9fe4dd94c6fdf71ccb23e555ec5df2b78c3a5e
-    inline_signed: true
-  .ai/directives/rye/core/registry/unpublish.md:
-    sha256: ffac1fc9653b285c150c933e31044be70b0cef1d693f9c02c109ad050a4e2b43
-    inline_signed: true
-  .ai/directives/rye/core/registry/whoami.md:
-    sha256: d98a3fd62d59bc66aa84c9e1e47e17a371a636809494279bd9dcb674e04e8755
+  .ai/directives/rye/core/remote/secrets.md:
+    object_hash: 4787d0bb17e1aecdece794609b4895efd6ba636a6460d27af6d5d2b0ef6bae20
     inline_signed: true
   .ai/directives/rye/core/system.md:
-    sha256: 89248e0ce03641ef5de6b14133718cb15ece80e267117eacc0e08d9af7bd2f78
+    object_hash: 5ae02d004a13ecca11771158445ed3b57391b878820f2aee87fb234722eae754
     inline_signed: true
   .ai/directives/rye/core/telemetry.md:
-    sha256: e1e0d1a6724d04f94dc94a27c86bc436bbee338173dac77b9bc6538d90f3ec9f
+    object_hash: ec0f2306ae2ebce86f4ecdb6d1010f0599783cde08bd96633edad2ec4079f736
+    inline_signed: true
+  .ai/tools/node/status/status.py:
+    object_hash: 7fb08c9dd81da8a2f70c1b5b27c68a7c09c293ceefa5f92cf0fc0906255b930b
     inline_signed: true
   .ai/tools/rye/core/bundler/__init__.py:
-    sha256: 5596cd703356c90e6af3e392c9be866bf868a76c030956c95583b14a8513b2f5
+    object_hash: c4d72aba027374b9534a6b4d277e58baa69637cae87e03ed51a353aa41a8c535
     inline_signed: true
   .ai/tools/rye/core/bundler/bundler.py:
-    sha256: 29cfa48d872c7e29bc251bfd6d40a24ca981c993792ebafca5ac62704d9a06df
+    object_hash: 2abf1d83a9d636d4514a489deb348a0a16a08abb423ed24dff9e3e3047a3aedf
     inline_signed: true
   .ai/tools/rye/core/bundler/collect.yaml:
-    sha256: 2da7849d4865b3723af81a902046af338f73a9834645a0a7a28369a45db59c2e
+    object_hash: a26657f7f7409ec5dbb464fdcbc3b2ab380998319feba7515e01637ec0a46d4c
+    inline_signed: true
+  .ai/tools/rye/core/cluster/topology.config-schema.yaml:
+    object_hash: 6ec31c817c670149731149ec6173af2653a6dd0d241a33d30fd115676eab1518
+    inline_signed: true
+  .ai/tools/rye/core/crypto/__init__.py:
+    object_hash: 9418f6d9ef62f6a3966f297ca6d069256266fb50a4b33a57a8e9baedc7c33bb9
+    inline_signed: false
+  .ai/tools/rye/core/crypto/envelope.py:
+    object_hash: cc83ea7476746e5068e295e8b763bec0ff8023ce974cfd50d4d14c2d0dee06ee
+    inline_signed: true
+  .ai/tools/rye/core/crypto/request_signing.py:
+    object_hash: 878b42891b88c36e5d29a40a4cff93bc04733d9d935a582714854e481ee87164
+    inline_signed: true
+  .ai/tools/rye/core/crypto/sign_object.py:
+    object_hash: a4e078683d26235d7032396bb1253311163f088a33021a1a6c0219faa0734780
     inline_signed: true
   .ai/tools/rye/core/extractors/__init__.py:
-    sha256: f74db07d63b603796f7a2fa5c85307fa2f0140b711df0187b00c667c6e4924b2
+    object_hash: df20da7014d01f59b395e05b8c13e933f7fd3984fd3c9dbd6f92120315ced67d
+    inline_signed: true
+  .ai/tools/rye/core/extractors/config/config_extractor.yaml:
+    object_hash: 7dbb0475f47544698c28d1e868494de2a60c19a40805c81fa49aa5f4cc6882c8
     inline_signed: true
   .ai/tools/rye/core/extractors/directive/directive_extractor.yaml:
-    sha256: b32f83a0b6f2f6199b2164822885f325318fbc878a0eaa99d92e665bb3ea8071
+    object_hash: 27960fcbf73699a1d6d5f36fc7ac9747b088bb3a723133b911eaa37cc65e1c8e
     inline_signed: true
   .ai/tools/rye/core/extractors/knowledge/knowledge_extractor.yaml:
-    sha256: 605661b7a0f14ce25408cc2310cab3bae67cd779dc95d73e8289c8254a0642f1
+    object_hash: 6132c7b12c82bf50fe541f2f7f7c62cbac2ba7bf169198fa9b8ada9f4f11a204
     inline_signed: true
   .ai/tools/rye/core/extractors/tool/tool_extractor.yaml:
-    sha256: d43dfbdb8a337d05431149cf83a4df7d557bf6a5cdd64813d015325228cf9355
+    object_hash: d0b58783ef5f3dc47eb96516f78b897d8cf7407ee6c2d666e825d9aaaa407f09
+    inline_signed: true
+  .ai/tools/rye/core/gc/gc.py:
+    object_hash: 09c75d21d2242a006e4fd6df94296ea89178ff73f35eb7e96b68c25d0c3fa94e
+    inline_signed: true
+  .ai/tools/rye/core/identity/__init__.py:
+    object_hash: 7518adec2c71789695c192f7338171488aa2cfaf87b3e8fb67bad4faf3ba3466
+    inline_signed: false
+  .ai/tools/rye/core/identity/identity.py:
+    object_hash: e3364a0b0666eda7069a6b5cf6ffcc2d537adb7f4032fbc9fb6e09d9b086c461
     inline_signed: true
   .ai/tools/rye/core/keys/keys.py:
-    sha256: 63a1e825e14ee56af845d33a7c2515ce72f8f5b6a359d0c02c594699a4124608
+    object_hash: ea98da5234aefc37cbe2cda24e479981b2747cc82b658596285ef5b26c4509dc
+    inline_signed: true
+  .ai/tools/rye/core/keys/node_keys.py:
+    object_hash: ab267f4a45c33b52d86a24fe02094668698bdb4d4af72cac45b8d86f63e4f00f
+    inline_signed: false
+  .ai/tools/rye/core/keys/trusted-key.config-schema.yaml:
+    object_hash: 28de2bc645a8f48cba01e897867e3adf2c5cadbcc51d33f4146620c21ab98213
+    inline_signed: true
+  .ai/tools/rye/core/node/node.config-schema.yaml:
+    object_hash: cf99a803bf193b23b2f703db3d7c1fb042c079db8989865a39131f287f6e0d6f
+    inline_signed: true
+  .ai/tools/rye/core/node/node.py:
+    object_hash: 125626d10173d58efda1bb0292d9633e7885905baadfc9bc83b4e1fc22ddf833
     inline_signed: true
   .ai/tools/rye/core/parsers/__init__.py:
-    sha256: 12cfe657ca721279ea700a3ac4b885482936907d4217002cd8d5d545c4a415b8
+    object_hash: 9bc0ee8e025317bb29acbf8e494a61ade471d02ed1210ab37d9a44ec6bb77c44
     inline_signed: true
   .ai/tools/rye/core/parsers/javascript/javascript.py:
-    sha256: 72290536f002edbe5f6e9ae83ce0ad32f2ae489535a08ee4ca1c89bf8f5b37f5
+    object_hash: 5deaae498d9a826e10115cc41cf006876187d585e3d8aa56d195edd28ca04b25
     inline_signed: true
   .ai/tools/rye/core/parsers/markdown/frontmatter.py:
-    sha256: c13b4f1d6ade583de5dac37ba394b79f2695ae3b41af66403dd399a17d9d855b
+    object_hash: e9fc7054e97736f21d10dbe7c32d1f30780026c2acb82c37a435632e0c435e4e
     inline_signed: true
   .ai/tools/rye/core/parsers/markdown/xml.py:
-    sha256: 50aac2272660cc78cb8f80cf3a8be95a3d2c79993688f022e1891742a2637465
+    object_hash: 36030c1fbb07f67ff3e714554a7c894e12cacfa6d4f5335f6b07e6105229f13e
     inline_signed: true
   .ai/tools/rye/core/parsers/python/ast.py:
-    sha256: 47f02a6dce396c8ce6207d81ec73412d15b3fd06a0b2a99c42d5f63e4277e266
+    object_hash: beb74e7f763e201b48d417129452323fb7ba4b409c01b7de55fd74e8cf48e704
+    inline_signed: true
+  .ai/tools/rye/core/parsers/toml/toml.py:
+    object_hash: 81581872b79e0e01fbb4f59ee1fe06720842b701431434b1174f9b1b0cea61f3
     inline_signed: true
   .ai/tools/rye/core/parsers/yaml/yaml.py:
-    sha256: 670f74c436674bacc1b8af2bc8e26cf5d26ff63d7039f7d919ea76b6e9880079
+    object_hash: 2549ef719aa0f068572c6688872958e7457389cd851fc30ff6183750ef070da4
     inline_signed: true
   .ai/tools/rye/core/primitives/__init__.py:
-    sha256: 841c4453d13a0fc1100a28d4cc2b824ddda9785020a5356a31f4c670fe3c41d3
+    object_hash: dff2bac788ad7e23f31cb0fea5e106bab17ad6df136052ce108a75e549fd4973
     inline_signed: true
   .ai/tools/rye/core/primitives/execute.yaml:
-    sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    object_hash: dfa8f5b6d2519964d0cf08c3b9da9d390f5b7e258c69671d83b1b2d2fedcde89
     inline_signed: true
-  .ai/tools/rye/core/registry/__init__.py:
-    sha256: 045145209937d87d947329ab97c40bf16468066788a83c9099669ec5ee1e35d0
+  .ai/tools/rye/core/processes/cancel.py:
+    object_hash: 61cc17734c8815c2750a458961e53225902ea66336030282577ada6394f539bf
     inline_signed: true
-  .ai/tools/rye/core/registry/registry.py:
-    sha256: f2ed08034ce58b19e4ff82b619267d5975daac76496ddc0414de5a6ad3fb0b05
+  .ai/tools/rye/core/processes/list.py:
+    object_hash: f6cb0a41c9de2f631cbf0593cb23aa2c496e7676f3ea4b80b00952d14c80ebef
+    inline_signed: true
+  .ai/tools/rye/core/processes/status.py:
+    object_hash: 5e9719afbbc15a62b25c2464b9afa925f691d3cc138e0b0979667b09c88e01f1
+    inline_signed: true
+  .ai/tools/rye/core/processes/steps.py:
+    object_hash: 3b26f483d5e2e35afb75e8fefc009d0ee99d177fef1e0d11ba52b3cf24146de7
+    inline_signed: true
+  .ai/tools/rye/core/processors/__init__.py:
+    object_hash: 8a2d2773f662f46897fb3b138cedf8ac96737d799c88d0249f4cf5b5db4c7806
+    inline_signed: true
+  .ai/tools/rye/core/processors/inputs/__init__.py:
+    object_hash: bb7304fa907fb26a289de2ae7093c8f63003da3444449be7e38be80f2f7457d9
+    inline_signed: true
+  .ai/tools/rye/core/processors/inputs/interpolate.py:
+    object_hash: 2077604961c9934c550e082e7ecce4f5528e2107abe2294f2ea53ed7d4383456
+    inline_signed: true
+  .ai/tools/rye/core/processors/inputs/validate.py:
+    object_hash: 3fb87afeae5998d94886c4f3ad7be47093f6c4397363989916912f7da78379da
+    inline_signed: true
+  .ai/tools/rye/core/remote/__init__.py:
+    object_hash: 64de89252b5bfdbb099c8aadf80f38da6eda8086ef475ef07603ace768823c8e
+    inline_signed: true
+  .ai/tools/rye/core/remote/manifest.config-schema.yaml:
+    object_hash: ac3d6475fc31a8c3507f8bd100594ce7ed679fef99316a780d47f0b36a5828c7
+    inline_signed: true
+  .ai/tools/rye/core/remote/remote.py:
+    object_hash: 90e528dd46c9f017c917c47bb66dcd6cc3ad8e9d1e8e7db748ab5eefb1f8fb27
+    inline_signed: true
+  .ai/tools/rye/core/remote/remote_config.py:
+    object_hash: 31cdc19acc1b98da9c5a8132f807eee98e7305a60e34b8859f0b04177f64883e
+    inline_signed: true
+  .ai/tools/rye/core/remote/remotes.config-schema.yaml:
+    object_hash: c5e379171f2ea873d95ccdd6f07a807e18bfc5247e4d211f3c6520f830c75d33
+    inline_signed: true
+  .ai/tools/rye/core/remote/route/route.py:
+    object_hash: dcbb7a4e65391713604f0ab768ca7840a5d373140cd7dd8bed8a11c5801e4237
+    inline_signed: true
+  .ai/tools/rye/core/remote/status_cache.py:
+    object_hash: 8b5f105bff02d92aa69e44e9d2d474ced251120759a66da10fe11f0c02af9b8f
     inline_signed: true
   .ai/tools/rye/core/runtimes/bash/bash.yaml:
-    sha256: 39e28ce1b88972e60cb3b3546989eabc99e3f1fa2912586193191574385b2829
+    object_hash: fd467cadc6aadd1cfa56d380d4e196ddcdccc2f7d4b3f849c91838a4cfd270c1
     inline_signed: true
   .ai/tools/rye/core/runtimes/mcp/http.yaml:
-    sha256: f7a1752f69432cc48420445439f80b23c75e0104e4cfb95bad18deb106657a0d
+    object_hash: 99649e204b84acd1a6e42e7ec34a4aa662bed9d7fcba58801adafc9b5b05bf61
     inline_signed: true
   .ai/tools/rye/core/runtimes/mcp/stdio.yaml:
-    sha256: b2b39f8d8d12dc3bac77ec60aec69fb9468ce8555c8333c3485134c68dd01869
+    object_hash: cac6bbcf14ef54c0bc0ca902db812ec0801021813b9bf74fe07012dd5d2b43b2
     inline_signed: true
   .ai/tools/rye/core/runtimes/node/node.yaml:
-    sha256: ae6d417c2731c7449866e35d69e2b9d6f5f8141f2b46702f4dd6d7d5d9f2ab78
+    object_hash: 16ed894722f89c45a0cb618dfc5b125594e3ca0b670c544ed26f1466a4fd1adf
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/function.yaml:
-    sha256: c4ba16104e2f591e418de9148ae59437871820eaa52410cfeb0cddd5ad2f478e
+    object_hash: 750888c13067f02e1eb96fab10ca033ed58c37726e9796bd3a0ccc26c118a73f
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/lib/__init__.py:
-    sha256: 2232457532fee946be6519aa3ebfdaffb39e004095f0014b682a2049a03a0933
+    object_hash: c97cab7fd5fa2dacf341fe70e8b1569782530adc17d56de1ef4a7bfa81a881bc
+    inline_signed: true
+  .ai/tools/rye/core/runtimes/python/lib/condition_evaluator.py:
+    object_hash: db8eb3a8f268714475699e673c1c47881956b93991b7814622d90919a9754a2f
+    inline_signed: true
+  .ai/tools/rye/core/runtimes/python/lib/interpolation.py:
+    object_hash: 8c2ef81ca528b9e53d9bbc2c29fe5a8d71cba3d4169aa9348597ffa7531b4003
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/lib/module_loader.py:
-    sha256: 87133cc22f92bed7b52ef70fd57e4d8eb34feec9fe7c443c5a9cea0397b028a0
+    object_hash: 759e57491b77b59bf5160f1bd74fc94619bb551b412abec305ac135d981f19fe
     inline_signed: true
   .ai/tools/rye/core/runtimes/python/script.yaml:
-    sha256: 1c4287356334a5ac328da56b4f8c186a88393e4f8c8e6b1feb5a62beb96d8146
+    object_hash: 16b5d84b492dc0de9950bbeea8620520921beb5303eae6daa5cab0a40d6b0d1d
     inline_signed: true
   .ai/tools/rye/core/runtimes/rust/runtime.yaml:
-    sha256: 532c3efbf18f53cdeea4270ebef955fa5da7d327f6967db5292765f33f5af953
+    object_hash: 6271065a76f5d274e7cac88ef69facb0436f1ac711f1e31800ff3eb0001b87ef
     inline_signed: true
   .ai/tools/rye/core/runtimes/state-graph/runtime.yaml:
-    sha256: 81ad782e9f7d22f814fccfe48721d0a0aa6535d3bd25c6f5db98406f3aafe6d6
+    object_hash: edf33776364255e917c162a2cbbdf2921a6a3c49ec09be3f3905629b7dc215c7
     inline_signed: true
   .ai/tools/rye/core/runtimes/state-graph/walker.py:
-    sha256: 470a3bec1414a99aa129b11e129573a785ef0fec613ef6713d31c3a9c2c7212b
+    object_hash: 9ddfd4225f70ffdb79d44496a52cea73b4fb7f1b7214d7d3536416d2fd8da06a
+    inline_signed: true
+  .ai/tools/rye/core/secrets/__init__.py:
+    object_hash: c5ba3c073bf01c596f0f7123119a11fe5c74a3fdf3034dc2b45f2776ac906680
+    inline_signed: true
+  .ai/tools/rye/core/secrets/secrets.py:
+    object_hash: 4450317bdb1b0677c3f15fe8a879d28adf61bd5885d869014e95024f3c89b058
     inline_signed: true
   .ai/tools/rye/core/sinks/file_sink.py:
-    sha256: b58592e73bc5fe25d4a374a98093b7f4cc0415e2dae11f8a1066222eff8d31c2
+    object_hash: b564f92edbcb071a2734328582dd218706ca8cf0467ca8515f676aa399c36141
     inline_signed: true
   .ai/tools/rye/core/sinks/null_sink.py:
-    sha256: 6a2198472cf388147be92b99d277f119550db31258b8965f85869bd4f31a4da3
+    object_hash: 0eb27015b971c21d63c7ee36d17eadc901618056cf12fa4e5e752c9bc66d25e5
     inline_signed: true
   .ai/tools/rye/core/sinks/websocket_sink.py:
-    sha256: cda71db7ad4ccf0b7a8372279d05fe19bb297bea42e60f60726fdf2b4f79a0e8
+    object_hash: 7ea4bb53b44800107e417b2086ba169412d409f0e0dcdb600b17ebb54d48a987
     inline_signed: true
   .ai/tools/rye/core/system/system.py:
-    sha256: 6c3dd8ce30e24824283573a428b3c73ce4ff944804f16e7856553baadc006f6e
+    object_hash: e0cfffb40b053921167870abd0cf1b88cc75e8463e0d4310e0289760b3bba5bf
     inline_signed: true
   .ai/tools/rye/core/telemetry/__init__.py:
-    sha256: 8d327b61411a30d135967492f540e3bebc006f82c0e694284ac9938198e3fe1b
+    object_hash: eda0cd019ad9d4513ee9b2218229aa76860e4412e07c4153f5a14b8e57e0a4f3
     inline_signed: true
   .ai/tools/rye/core/telemetry/telemetry.py:
-    sha256: 449591b77470c6afaaed43e925be3eeb98dc426fb3e91f679143be1fb256ed4e
+    object_hash: 2f4c229fea32ab372ad30c4d879b0713e1932dd312a4234934f6d88959b0c63c
     inline_signed: true
   .ai/knowledge/rye/core/ai-directory.md:
-    sha256: 4c48b3ca733aa1658fbf87ee5b3f1b59de70cb3b2810d04cc84de440954718db
+    object_hash: a569fc0c50bbcdfa85fd942f7a164e77aaed2d9c6a100d04dd79b02c06e1c486
     inline_signed: true
   .ai/knowledge/rye/core/bundler/bundle-format.md:
-    sha256: 7f273b69d62048c3855e283d7d768e795a2729f34b344a93639a618cfd2d314b
+    object_hash: d4044c7ce31fcb717586f9ba61b5c6063a3252f057c74dd942146ae786e0386e
     inline_signed: true
   .ai/knowledge/rye/core/capability-strings.md:
-    sha256: d1e88cfeac5e53521142f601522b9ab38482ffca79150661d1211bb58335f65e
+    object_hash: 4dbbda00e8acb46e29712cb89184d61348d8d273df369e1caa83af7a9337f3f5
+    inline_signed: true
+  .ai/knowledge/rye/core/cas/object-kinds.md:
+    object_hash: bb93bad694001cc71e2873ea2f6e608fd554e6f23434b2dddc39cbef044ed6cd
+    inline_signed: true
+  .ai/knowledge/rye/core/cas/remote-architecture.md:
+    object_hash: 95826a2b156fb9046ca00ff2aa5400ee8526085c08b6e3e4157a31443c4b4150
     inline_signed: true
   .ai/knowledge/rye/core/executor-chain.md:
-    sha256: 5ae70f415b5a8502261fa6b07a25e0b6db160c783fe09c6c42d9f217b0429439
+    object_hash: 789a725b7d32c7c609671b810495dbcd5c19e34e6a3da1cacdfb9f44d9f19142
     inline_signed: true
   .ai/knowledge/rye/core/input-interpolation.md:
-    sha256: 04917dbb71ed12c78c1b4c58f1ba5e315071f23b68ebce4f66ea2969f5ffc40d
+    object_hash: 6c82347f627b311b12cb95a9bfc88c4dba13de28cbc2d2e40d187328a6cbd92b
     inline_signed: true
   .ai/knowledge/rye/core/parsers.md:
-    sha256: ca9815b90bd9de440cd1d93699991eaf7538b90bc81c7e47cc55979edc0a23e4
+    object_hash: 06be09006e6eaa507e0a23ee04aa2edf2a7d76d76d66f3b7bd01aeca8917e2f3
+    inline_signed: true
+  .ai/knowledge/rye/core/processes.md:
+    object_hash: 1cafb0a373178fef85784a564572365309259e4a4d265137ccf237aecabfd078
     inline_signed: true
   .ai/knowledge/rye/core/registry/registry-api.md:
-    sha256: d8528088e6ef41ccd330db49c03c9712ad5dd88fa070cce86ea2f23ced85efbb
+    object_hash: 770b3a9162b00236ca13f536aea0dd7f4b22757bbc0e8c68c9579978ebc07a5d
     inline_signed: true
   .ai/knowledge/rye/core/registry/trust-model.md:
-    sha256: 7cbcb0285bdc8b456f1bef1f38f6f310c321228f8065f2b97602dc667695dae9
+    object_hash: 11d07a0b3010f64d38dc85b998775dad5e15930ace3a0faf8670b7ebc86296e5
+    inline_signed: true
+  .ai/knowledge/rye/core/remote/remote-operations.md:
+    object_hash: fa9436d378b01e729ee24ec9e25ac6fe55020875cee069aa93c102d1e4e256aa
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/runtime-authoring.md:
-    sha256: 15f457fe75aa8addd6c531b8ac642589b73ada05cf67b5bf5ca709c7caa96c60
+    object_hash: 1a1f268c59bda8978c31d1156a0024439871074476443b6010b29a36c317e812
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/standard-runtimes.md:
-    sha256: b603e7216f196dede807238bb31236b1192fa4ea47bd06396f74aa88d43383c5
+    object_hash: 1622d7ad5643ce3dd9a76961693442611e35579ddf4b295ba4aded1c0191e340
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/state-graph-runtime.md:
-    sha256: b6fbd4bf2021eac119e2a4bdc7775ff4c6cce50a36aa808649d06d3ea6301697
+    object_hash: f27be28cb51ff57ed01efe9da62b96c304fc6a8815adae432af5c466fe4329f2
     inline_signed: true
   .ai/knowledge/rye/core/runtimes/state-graph-walker.md:
-    sha256: be0d570f4ec9322470560fbc107e7063c13a32bf1974ce423a20a055ac0fad3d
+    object_hash: 1625b15aafcde824490ee7012bb8be70513b91ce953a6544e5e0beaca739eed0
     inline_signed: true
   .ai/knowledge/rye/core/signing-and-integrity.md:
-    sha256: bb5b8ecfe1c457a8adcdcac8917ccf62b5106fa12b2e5a5c00f6e2abbe51f0d0
+    object_hash: 73969de9f4fef34a23494c6e8ed7032b15aee96f5930a61b42bd16ff167eb666
     inline_signed: true
   .ai/knowledge/rye/core/templating-systems.md:
-    sha256: d3e70beec571041b590962e891585fd592d85b09713c80bb9e6f343996d003b8
+    object_hash: 70d0fc8e4ad6f20f95e9cb95d38c17b44165ae7f8b768cb0139ed24c456917eb
     inline_signed: true
   .ai/knowledge/rye/core/terminology.md:
-    sha256: 47b619d299a82165f46e3b002c06011040e07bd0da9b1d3129184b3b906f994d
+    object_hash: f1d0e1a6283606aea4a7ff8b6cdae3f291868981b1a0a7e73419d5069709ca06
     inline_signed: true
   .ai/knowledge/rye/core/three-tier-spaces.md:
-    sha256: edb973e9043e21ca534972b1c89eda80c966079e6a718d5bc8f7944f6fc5a33f
+    object_hash: c52d8e8896118eb9eeedf7b38cc62ee6a613a5c5b2c0413026b83a90cfbf917f
     inline_signed: true
-  .ai/config/keys/trusted/4b987fd4e40303ac.toml:
-    sha256: 0c34453af4c443b2d60fab2709cce214e8516f6aef99e8206ccba633d205ecfd
+  .ai/config/cas/manifest.yaml:
+    object_hash: 49b3d8bb68a51b155138d6d42b50b3b642b2bb9d57af506386b51ddf7721c3a8
+    inline_signed: false
+  .ai/config/cluster/topology.yaml:
+    object_hash: 8bcf59277faf9b22a4984e923723a5b7900da79d17185f78e592d39b0f460756
     inline_signed: true
+  .ai/config/execution/execution.yaml:
+    object_hash: 425d7c8a16ec231a90fe7b2c906a8913579eb505041f380813bb9b25dcaa3862
+    inline_signed: true
+  .ai/config/keys/trusted/6ea18199041a1ea8.toml:
+    object_hash: b289b1157431d9803cebe7bb6c473b47b0b37175f3866cbd775d2f1214ab8c9a
+    inline_signed: true
+  .ai/config/remotes/remotes.yaml:
+    object_hash: f34b2aa5f5517b59e1744f2276c6c46399c3eec5c6a6362fd4d2599931a47f5f
+    inline_signed: false

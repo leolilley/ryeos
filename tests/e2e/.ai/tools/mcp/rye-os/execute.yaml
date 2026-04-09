@@ -1,9 +1,9 @@
-# rye:signed:2026-03-10T04:07:19Z:71d33ed22bd9d034664cc1d3cefcd915bf4e88d6d9e83b31519976a29935bcaa:AYeF4tr8E9VA6C4qfhYGh1KVOe4NOMb238fI9Tl-g4gBRkruNDdcH_dUdC7WZwN-ke7QHELz6wkeNDRzcUx5Cg==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:603f7e0b77a4c208edb5c06857cdb4e3b67a5fa66ec9a1afc315073809c0b8f3:ceeYHEXWyYtDDRN0TLzitmWERGPzbqW_mCDzr_vZjvwFCoLEaf2ioCF1iArwgdpZeIchwe9ezJQalaVhyJ1uAQ:4b987fd4e40303ac
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/stdio
 category: mcp/rye-os
 version: 1.0.0
-description: Execute a directive, tool, or knowledge item
+description: Execute a directive or tool
 config:
   server: mcp/servers/rye-os
   server_config_path: '{project_path}/.ai/tools/mcp/servers/rye-os.yaml'
@@ -11,14 +11,9 @@ config:
 input_schema:
   type: object
   properties:
-    item_type:
-      type: string
-      enum:
-      - directive
-      - tool
-      - knowledge
     item_id:
       type: string
+      description: "Canonical ref (directive:X or tool:X) or plain path"
     project_path:
       type: string
     parameters:
@@ -27,6 +22,5 @@ input_schema:
       type: boolean
       default: false
   required:
-  - item_type
   - item_id
   - project_path

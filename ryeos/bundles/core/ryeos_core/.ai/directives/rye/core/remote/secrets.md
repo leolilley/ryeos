@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:552af36c25d246a9a3180648eab7115a69b36f3d1cfbac7a318f0332735e3b7b:mfMhACtM70iCOpflVCNDLuOE-WpjPljpsgPV39-hihRKw_IDnwSOyYTcoH3spP8VOTUoA4Moi6c5G6EAA6JBBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:552af36c25d246a9a3180648eab7115a69b36f3d1cfbac7a318f0332735e3b7b:mfMhACtM70iCOpflVCNDLuOE-WpjPljpsgPV39-hihRKw_IDnwSOyYTcoH3spP8VOTUoA4Moi6c5G6EAA6JBBQ:4b987fd4e40303ac -->
 # Manage Remote Secrets
 
 Manage secrets stored in the remote Vault for use during remote execution.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:d1e956d15ed30bb6b977a02e595047a8b5fd29daa673da3b07ebb56f4ba8c580:SyJUgUzWYoic3abDYtZPnl7j8pqwZHmt_IpIkT0HMMbmYcZvqL7IUgB_dC9Si6XNNo2uXWtX4TA4DqsXhGZrAA==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:d1e956d15ed30bb6b977a02e595047a8b5fd29daa673da3b07ebb56f4ba8c580:SyJUgUzWYoic3abDYtZPnl7j8pqwZHmt_IpIkT0HMMbmYcZvqL7IUgB_dC9Si6XNNo2uXWtX4TA4DqsXhGZrAA:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Web Browser
 
@@ -40,7 +40,7 @@ Control a browser via playwright-cli — open pages, take screenshots, interact 
 
   <step name="execute_command">
     Call the browser tool with the provided parameters.
-    `rye_execute(item_type="tool", item_id="rye/web/browser/browser", parameters={"command": "{input:command}", "args": "{input:args}", "flags": "{input:flags}", "session": "{input:session}", "timeout": "{input:timeout}"})`
+    `rye_execute(item_id="rye/web/browser/browser", parameters={"command": "{input:command}", "args": "{input:args}", "flags": "{input:flags}", "session": "{input:session}", "timeout": "{input:timeout}"})`
   </step>
 
   <step name="return_result">

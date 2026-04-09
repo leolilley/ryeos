@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-16T11:23:58Z:bd8508c709117e28bcc98c68b41d6c45eb90cb7c9ffc9684c99d16b4ba135424:oWLXkx-Vk9-YBOzzKSLlztrIXK8gOqRT42ambDp8liDf9CFb8W6KoWYAjjdSeI_tVMUTVIGlDCRNiKUmq_C8DQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:a6650c8e70b9abf3f6ab1d8403db2af166c52d5db64052f35443315aa18eebd8:9lzPKQnZDVYmoMGJ8NB3RNozCL8UhDBawrIXuO6f3rN8lN6Efms4xHlJXuRkFQkTaRAzYL3nxG4jLFR2iCBhDA:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -90,10 +90,10 @@ providers:
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/search/search",
+rye_execute(item_id="rye/web/search/search",
     parameters={"query": "python asyncio tutorial", "num_results": 5})
 
-rye_execute(item_type="tool", item_id="rye/web/search/search",
+rye_execute(item_id="rye/web/search/search",
     parameters={"query": "next.js routing", "provider": "exa"})
 ```
 
@@ -163,10 +163,10 @@ The built-in converter handles:
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
+rye_execute(item_id="rye/web/fetch/fetch",
     parameters={"url": "https://docs.example.com/api", "format": "markdown"})
 
-rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
+rye_execute(item_id="rye/web/fetch/fetch",
     parameters={"url": "https://example.com/data.json", "format": "text"})
 ```
 
@@ -266,22 +266,22 @@ Screenshots are saved to `.ai/cache/tools/rye/web/browser/screenshots/`. Snapsho
 ### Invocation
 
 ```python
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "open", "args": ["https://example.com"]})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "screenshot"})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "click", "args": ["e15"]})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "fill", "args": ["e22", "user@example.com"]})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "eval", "args": ["document.title"]})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "close"})
 ```
 
@@ -299,19 +299,19 @@ rye_execute(item_type="tool", item_id="rye/web/browser/browser",
 
 ```python
 # Search then fetch — common two-step pattern
-search = rye_execute(item_type="tool", item_id="rye/web/search/search",
+search = rye_execute(item_id="rye/web/search/search",
     parameters={"query": "python dataclasses docs"})
 
-fetch = rye_execute(item_type="tool", item_id="rye/web/fetch/fetch",
+fetch = rye_execute(item_id="rye/web/fetch/fetch",
     parameters={"url": search["results"][0]["url"]})
 
 # Browser automation — open, interact, screenshot
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "open", "args": ["https://example.com"]})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "screenshot"})
 
-rye_execute(item_type="tool", item_id="rye/web/browser/browser",
+rye_execute(item_id="rye/web/browser/browser",
     parameters={"command": "close"})
 ```

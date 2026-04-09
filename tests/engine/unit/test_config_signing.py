@@ -13,7 +13,7 @@ from rye.utils.execution_context import ExecutionContext
 
 
 class TestConfigMetadataStrategy:
-    """Test that item_type='config' routes to ToolMetadataStrategy."""
+    """Test that kind='config' routes to ToolMetadataStrategy."""
 
     def test_get_strategy_returns_tool_strategy_for_config(self):
         strategy = MetadataManager.get_strategy("config")
@@ -21,17 +21,17 @@ class TestConfigMetadataStrategy:
 
     def test_config_strategy_has_correct_item_type(self):
         strategy = MetadataManager.get_strategy("config")
-        assert strategy._item_type == "config"
+        assert strategy._kind == "config"
 
-    def test_tool_strategy_default_item_type(self):
-        """Default item_type remains 'tool' for backward compatibility."""
+    def test_tool_strategy_default_kind(self):
+        """Default kind remains 'tool' for backward compatibility."""
         strategy = ToolMetadataStrategy()
-        assert strategy._item_type == "tool"
+        assert strategy._kind == "tool"
 
     def test_trust_store_strategy_unchanged(self):
         """trust_store.py creates ToolMetadataStrategy() with no args — must still work."""
         strategy = ToolMetadataStrategy()
-        assert strategy._item_type == "tool"
+        assert strategy._kind == "tool"
         # Default sig format should work
         fmt = strategy._get_signature_format()
         assert fmt["prefix"] == "#"

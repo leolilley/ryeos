@@ -31,7 +31,7 @@ List all registered MCP servers.
 <process>
   <step name="list_servers">
     Call the MCP manager tool with action=list.
-    `rye_execute(item_type="tool", item_id="rye/mcp/manager", parameters={"action": "list", "include_tools": "{input:include_tools}"})`
+    `rye_execute(item_id="rye/mcp/manager", parameters={"action": "list", "include_tools": "{input:include_tools}"})`
   </step>
 
   <step name="return_servers">

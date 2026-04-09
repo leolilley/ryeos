@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:447f30e9f4fe0bd885b9c59b50685ebb83d7be187b632479a321585ed40cffa5:YXcEcE1vsqx9Fn-xOSYZBmEEq2naqu4L_B3sJ3nJ56L-tQwSxgWUeLxgNE0vYC_7HwYLySHBBhtmYbsiTGZDBQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:12Z:447f30e9f4fe0bd885b9c59b50685ebb83d7be187b632479a321585ed40cffa5:YXcEcE1vsqx9Fn-xOSYZBmEEq2naqu4L_B3sJ3nJ56L-tQwSxgWUeLxgNE0vYC_7HwYLySHBBhtmYbsiTGZDBQ:4b987fd4e40303ac -->
 # Create Threaded Directive
 
 Create a directive with full thread execution support — model configuration, cost limits,

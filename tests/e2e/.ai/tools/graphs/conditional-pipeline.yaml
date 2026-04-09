@@ -1,4 +1,4 @@
-# rye:signed:2026-03-11T06:52:28Z:e66cbf330a1d8a59fbdb5e622cfe911d14a02b93f554c781cb44a042e9fe68a1:nGdVWBsGme8kRFYqmFT5zLooGAbzGINIyR0w87iorY8PJI-3AS1aCNGirFK_BQgrdRefWRniw6jByc08hYkPAg==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:44c65e2e36ef1d8f4fa385818e416b042aac1d6d95693b45942b9f69e8cc087d:nm5qUSaBoe-cyKMusVficX7eB0_iQkp59ERXKHwKaf-fyMy3JHOnWKjXIzfr9n0X7DShpwJjBjRztE8JA_PsAA:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -26,8 +26,7 @@ config:
     setup:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir} && echo 'setup done'"
       assign:
@@ -39,8 +38,7 @@ config:
     classify_mode:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'routing mode=${state.mode}'"
       next:
@@ -60,8 +58,7 @@ config:
     run_analysis:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/analyze_code
           inputs:
@@ -90,8 +87,7 @@ config:
       cache_result: true
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat ${inputs.output_dir}/analysis.json 2>/dev/null || echo '{\"error\": \"not found\"}'"
       assign:
@@ -101,8 +97,7 @@ config:
     write_summary:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/agent/threads/thread_directive
+        item_id: tool:rye/agent/threads/thread_directive
         params:
           directive_id: test/graphs/summarize_text
           inputs:
@@ -119,8 +114,7 @@ config:
     trigger_error:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat /nonexistent/path/file.txt"
       on_error: recover_from_error
@@ -129,8 +123,7 @@ config:
     recover_from_error:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'recovered from error in trigger_error node'"
       assign:
@@ -140,8 +133,7 @@ config:
     handle_unknown_mode:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'unknown mode: ${state.mode}'"
       assign:
@@ -151,8 +143,7 @@ config:
     write_report:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: |
             cat > ${inputs.output_dir}/report.md << 'ENDREPORT'

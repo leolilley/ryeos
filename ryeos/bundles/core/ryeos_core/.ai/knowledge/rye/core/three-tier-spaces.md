@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:15:08Z:2e52bcffca71ddc4bcfd67763fffaa6467c4c452801d3aa1fb7b2e69c4f309ec:tXJf-fWQcMQLGl-DtM_qxWR3ptcjB5oZQjPEOgixE_fvBY5qeq_QAoANbfEVavaJqwrJoswDY0xaM6cohaOUAw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:7a465127c14fd9dcc7101e01b30394019a980bba3adb3018bd24fa1d9d3f6937:X7uaDZ_8SVUApG09Rq3V9IjzzfPzrBggFHN8u4gdHag7wSwQCC-6Mwazdh4OHDX0WdbROCHX11nc5OUBjOTtCw:4b987fd4e40303ac -->
  -->
 ```yaml
 name: three-tier-spaces
@@ -54,7 +54,7 @@ return None
 
 ### Concrete Example
 
-Resolving `rye_execute(item_type="tool", item_id="rye/bash/bash")`:
+Resolving `rye_execute(item_id="rye/bash/bash")`:
 
 1. **Project:** `{project}/.ai/tools/rye/bash/bash.py` — if exists, use it
 2. **User:** `{USER_SPACE}/.ai/tools/rye/bash/bash.py` — if exists, use it

@@ -1,4 +1,4 @@
-# rye:signed:2026-03-10T04:14:30Z:355009ae2d725f74dcb16504c9e765c1620777fcd3fb35208bfd5ec818d8fab0:KMDuqRonCIexuoDEjJ5tseTELzoHVB2PGQwDMrZMVwvBfF7b63YfOIBp4TZ4T2kE0EgLjzLg89SduOWYFSzYDA==:4b987fd4e40303ac
+# rye:signed:2026-04-09T00:59:52Z:e6bf1a006cc3ffe722804d10e735c621c680c235ab1b1f3d841fc47e5978d292:kMbwS4EiwvlWlg9e6QK_-_xaP3WsiS2WvjeqGtvKGLPKRlJBUYPhb5Rk6xe_8DtV9S1VsA6rrwF3AflJFB60Cg:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
 executor_id: rye/core/runtimes/state-graph/runtime
@@ -25,8 +25,7 @@ config:
       cache: true
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "mkdir -p ${inputs.output_dir} && echo 'initialized'"
       assign:
@@ -38,8 +37,7 @@ config:
       cache: true
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "find /usr/bin -maxdepth 1 -type f | wc -l"
       assign:
@@ -49,8 +47,7 @@ config:
     route_by_count:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'file_count=${state.file_count}'"
       assign:
@@ -72,8 +69,7 @@ config:
       as: task
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "${task.command}"
       collect: scan_results
@@ -82,8 +78,7 @@ config:
     trigger_error:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "cat /nonexistent/path 2>&1; exit 1"
       on_error: recover
@@ -92,8 +87,7 @@ config:
     recover:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo 'recovered from intentional error'"
       assign:
@@ -103,8 +97,7 @@ config:
     write_report:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: |
             cat > ${inputs.output_dir}/report.json << JSONEOF
@@ -124,8 +117,7 @@ config:
     simple_report:
       action:
         primary: execute
-        item_type: tool
-        item_id: rye/bash
+        item_id: tool:rye/bash
         params:
           command: "echo '{\"file_count\": ${state.file_count}, \"status\": \"simple\"}'"
       assign:

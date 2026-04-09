@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:14:32Z:35c64be8b477c0321df28513de5ea5404ce2da4baf88d3e9c2f64f2e1a6a6113:lJFukeOYMdB3eU1_CdGqdG5Ra1d9PJ6r8N70SqKACHRD4uHDP06mvlUa4hzoFjZo4z-vE2PjhDFQHWt49sTfBA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:11:21Z:ce972acab714ef7578db6844473f9af39e11ace852d3cc5f300080b911698882:g-cwPwxJdAikL2DM-EGJ9uUWXMX5kXYFcq1oJhDyupRP5xi7uXLjaZPFgU1ggmk5RZWCTw-rzjQsDorFAzoaAQ:4b987fd4e40303ac -->
 
 ```yaml
 name: directive-format
@@ -137,7 +137,7 @@ Description of what this directive does.
 <process>
   <step name="step_name">
     Natural language instructions the LLM follows.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={...})`
+    `rye_execute(item_id="rye/file-system/write", parameters={...})`
   </step>
 </process>
 
@@ -538,7 +538,7 @@ Process steps go **after** the XML fence. They contain natural language instruct
 
   <step name="write_file">
     Generate the directive and write it to .ai/directives/{input:category}/{input:name}.md
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={...})`
+    `rye_execute(item_id="rye/file-system/write", parameters={...})`
   </step>
 
   <step name="sign">
@@ -575,7 +575,7 @@ Process steps go **after** the XML fence. They contain natural language instruct
 
 | Style | Syntax |
 |-------|--------|
-| Backtick-wrapped | `` `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={...})` `` |
+| Backtick-wrapped | `` `rye_execute(item_id="rye/file-system/write", parameters={...})` `` |
 | XML action element | `<execute item_type="tool" item_id="rye/file-system/write">` |
 | XML fetch | `<fetch item_type="directive" query="{input:name}" />` |
 | XML sign | `<sign item_type="directive" item_id="{input:name}" />` |
@@ -725,12 +725,12 @@ Deploy to staging and run integration tests with parallel verification.
 <process>
   <step name="build_images">
     Build Docker images for the service.
-    `rye_execute(item_type="tool", item_id="rye/shell/docker", parameters={"command": "build"})`
+    `rye_execute(item_id="rye/shell/docker", parameters={"command": "build"})`
   </step>
 
   <step name="deploy">
     Deploy to {input:environment} using kubectl.
-    `rye_execute(item_type="tool", item_id="rye/shell/kubectl", parameters={"command": "apply"})`
+    `rye_execute(item_id="rye/shell/kubectl", parameters={"command": "apply"})`
   </step>
 
   <step name="run_tests">

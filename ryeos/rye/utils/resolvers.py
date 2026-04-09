@@ -21,8 +21,8 @@ from rye.utils.extensions import get_tool_extensions, get_item_extensions
 from rye.utils.path_utils import (
     get_user_space,
     get_system_spaces,
-    get_project_type_path,
-    get_user_type_path,
+    get_project_kind_path,
+    get_user_kind_path,
 )
 from rye.constants import AI_DIR, ItemType
 
@@ -41,18 +41,18 @@ class DirectiveResolver:
         paths = []
 
         # Project space (highest priority)
-        project_dir = get_project_type_path(self.project_path, ItemType.DIRECTIVE)
+        project_dir = get_project_kind_path(self.project_path, ItemType.DIRECTIVE)
         if project_dir.exists():
             paths.append((project_dir, "project"))
 
         # User space
-        user_dir = get_user_type_path(ItemType.DIRECTIVE)
+        user_dir = get_user_kind_path(ItemType.DIRECTIVE)
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
         # System space — all installed bundles (lowest priority)
         for bundle in get_system_spaces():
-            for type_path in bundle.get_type_paths(ItemType.DIRECTIVE):
+            for type_path in bundle.get_kind_paths(ItemType.DIRECTIVE):
                 if type_path.exists():
                     paths.append((type_path, f"system:{bundle.bundle_id}"))
 
@@ -92,20 +92,20 @@ class ToolResolver:
         paths = []
 
         # Project space (highest priority)
-        project_dir = get_project_type_path(self.project_path, ItemType.TOOL)
+        project_dir = get_project_kind_path(self.project_path, ItemType.TOOL)
         if project_dir.exists():
             paths.append((project_dir, "project"))
 
         # User space
-        user_dir = get_user_type_path(ItemType.TOOL)
+        user_dir = get_user_kind_path(ItemType.TOOL)
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
         # System space — all installed bundles (lowest priority).
-        # Use the raw type directory (.ai/tools/), NOT category-scoped paths,
-        # because tool_ids are always relative to the type root
+        # Use the raw kind directory (.ai/tools/), NOT category-scoped paths,
+        # because tool_ids are always relative to the kind root
         # (e.g. "rye/file-system/read" resolves under .ai/tools/).
-        type_folder = ItemType.TYPE_DIRS.get(ItemType.TOOL, "tools")
+        type_folder = ItemType.KIND_DIRS.get(ItemType.TOOL, "tools")
         for bundle in get_system_spaces():
             sys_dir = bundle.root_path / AI_DIR / type_folder
             if sys_dir.exists():
@@ -153,18 +153,18 @@ class KnowledgeResolver:
         paths = []
 
         # Project space (highest priority)
-        project_dir = get_project_type_path(self.project_path, ItemType.KNOWLEDGE)
+        project_dir = get_project_kind_path(self.project_path, ItemType.KNOWLEDGE)
         if project_dir.exists():
             paths.append((project_dir, "project"))
 
         # User space
-        user_dir = get_user_type_path(ItemType.KNOWLEDGE)
+        user_dir = get_user_kind_path(ItemType.KNOWLEDGE)
         if user_dir.exists():
             paths.append((user_dir, "user"))
 
         # System space — all installed bundles (lowest priority)
         for bundle in get_system_spaces():
-            for type_path in bundle.get_type_paths(ItemType.KNOWLEDGE):
+            for type_path in bundle.get_kind_paths(ItemType.KNOWLEDGE):
                 if type_path.exists():
                     paths.append((type_path, f"system:{bundle.bundle_id}"))
 

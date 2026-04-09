@@ -3,6 +3,8 @@
 Centralized constants for the AI directory name, item types, and tool actions.
 """
 
+from typing import Optional
+
 # The name of the working directory used in all three spaces.
 # Every space follows: base_path / AI_DIR / {type_dir} / {item_id}
 AI_DIR = ".ai"
@@ -28,16 +30,16 @@ class ItemType:
     CONFIG = "config"
     SIGNABLE = [DIRECTIVE, TOOL, KNOWLEDGE, CONFIG]
 
-    # Type directory mappings (execute/fetch/sign — NO config)
-    TYPE_DIRS = {
+    # Kind directory mappings (execute/fetch/sign — NO config)
+    KIND_DIRS = {
         DIRECTIVE: "directives",
         TOOL: "tools",
         KNOWLEDGE: "knowledge",
     }
 
     # Extended mapping for signing and integrity (includes config)
-    SIGNABLE_DIRS = {
-        **TYPE_DIRS,
+    SIGNABLE_KINDS = {
+        **KIND_DIRS,
         CONFIG: "config",
     }
 
@@ -46,6 +48,76 @@ class ItemType:
         DIRECTIVE: [".md"],
         KNOWLEDGE: [".md", ".yaml", ".yml"],
     }
+
+    # Canonical ref format: kind:item_id  (e.g. "tool:rye/bash/bash")
+    _CANONICAL_PREFIXES = {
+        "tool:": TOOL,
+        "directive:": DIRECTIVE,
+        "knowledge:": KNOWLEDGE,
+        "config:": CONFIG,
+    }
+
+    @staticmethod
+    def make_canonical_ref(kind: str, bare_id: str) -> str:
+        """Build a canonical ref from kind + bare_id.
+
+        Validates kind against _CANONICAL_PREFIXES. Raises ValueError on
+        unknown kind or empty bare_id.
+
+        >>> ItemType.make_canonical_ref("tool", "rye/bash/bash")
+        'tool:rye/bash/bash'
+        """
+        valid_kinds = {v for v in ItemType._CANONICAL_PREFIXES.values()}
+        if kind not in valid_kinds:
+            raise ValueError(
+                f"Unknown kind {kind!r}. Must be one of: {sorted(valid_kinds)}"
+            )
+        if not bare_id:
+            raise ValueError(
+                f"bare_id must not be empty (kind={kind!r})"
+            )
+        return f"{kind}:{bare_id}"
+
+    @staticmethod
+    def parse_canonical_ref(item_ref: str) -> tuple[Optional[str], str]:
+        """Parse a canonical ref into (kind, bare_id).
+
+        Returns (None, item_ref) when no prefix is present.
+        Raises ValueError when a prefix is present but bare_id is empty.
+
+        >>> ItemType.parse_canonical_ref("tool:rye/bash/bash")
+        ('tool', 'rye/bash/bash')
+        >>> ItemType.parse_canonical_ref("my/workflow")
+        (None, 'my/workflow')
+        """
+        for prefix, kind in ItemType._CANONICAL_PREFIXES.items():
+            if item_ref.startswith(prefix):
+                bare_id = item_ref[len(prefix):]
+                if not bare_id:
+                    raise ValueError(
+                        f"Canonical ref must include an ID after '{kind}:' "
+                        f"(e.g. '{kind}:my/item')"
+                    )
+                return kind, bare_id
+        return None, item_ref
+
+    @staticmethod
+    def require_canonical_ref(item_ref: str) -> tuple[str, str]:
+        """Parse a canonical ref, raising if no kind prefix is present.
+
+        >>> ItemType.require_canonical_ref("tool:rye/bash/bash")
+        ('tool', 'rye/bash/bash')
+        >>> ItemType.require_canonical_ref("my/workflow")
+        Traceback (most recent call last):
+            ...
+        ValueError: ...
+        """
+        kind, bare_id = ItemType.parse_canonical_ref(item_ref)
+        if kind is None:
+            raise ValueError(
+                f"Canonical ref required (e.g. 'tool:my/item'), got bare ID: {item_ref!r}"
+            )
+        return kind, bare_id
 
 
 class NodeDir:

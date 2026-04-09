@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:38:41Z:38a1b84328bc160ea75b20d63f5140e75ad53227b94742e125d9b3b9587081b9:4YogCSKt5ysJP4ikuGO7sfyDL2FDH6CQ0xMnhymrxSQHGl63qB3hCdydijxIh8JjMYOea_eZeXHI_L3A66RFAg==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:38a1b84328bc160ea75b20d63f5140e75ad53227b94742e125d9b3b9587081b9:4YogCSKt5ysJP4ikuGO7sfyDL2FDH6CQ0xMnhymrxSQHGl63qB3hCdydijxIh8JjMYOea_eZeXHI_L3A66RFAg:4b987fd4e40303ac -->
 # Create Knowledge Entry
 
 Create a new knowledge entry with proper metadata, validation, and signing.
@@ -72,7 +72,7 @@ Create a new knowledge entry with proper metadata, validation, and signing.
 
     {input:content}
 
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": ".ai/knowledge/{input:category}/{input:name}.md", "content": "<generated knowledge entry>", "create_dirs": true})`
+    `rye_execute(item_id="rye/file-system/write", parameters={"path": ".ai/knowledge/{input:category}/{input:name}.md", "content": "<generated knowledge entry>", "create_dirs": true})`
   </step>
 
   <step name="sign_entry">

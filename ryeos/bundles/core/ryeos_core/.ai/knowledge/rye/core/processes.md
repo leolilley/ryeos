@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:15:08Z:cb5a9a3a650dd0f5c42e4d3d5f1fb6367f419cb6d22895a6b68240dcfdb91772:9rhNSaNkKwYmnuDzPG90uZZ8S3axgJcAr8nZJx97mpJ3VIA3zdDylN6Lfzsf1Ya6EpYEQyTaE8t_Fzg_K5D-Aw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:bc5d0a0262de46606b6873e135f21c55daea5136b241ebab0a005d7210e31dca:IcBPze6LIbGWHizPKP3mnub1d69hMHjBmha4BoA9m5pcVCzWWOpvfNwvnqLNgtQborY_PLe_ytPrU-iZYEKlCQ:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 ```yaml
@@ -49,7 +49,7 @@ Looks up the PID from the thread registry and checks liveness via `ExecutePrimit
 **Usage:**
 
 ```json
-rye_execute(item_type="tool", item_id="rye/core/processes/status", parameters={"run_id": "abc-123"})
+rye_execute(item_id="rye/core/processes/status", parameters={"run_id": "abc-123"})
 ```
 
 ## rye/core/processes/cancel
@@ -77,8 +77,8 @@ Sends SIGTERM via `ExecutePrimitive.kill(pid, grace)`, which triggers the walker
 **Usage:**
 
 ```json
-rye_execute(item_type="tool", item_id="rye/core/processes/cancel", parameters={"run_id": "abc-123"})
-rye_execute(item_type="tool", item_id="rye/core/processes/cancel", parameters={"run_id": "abc-123", "grace": 10})
+rye_execute(item_id="rye/core/processes/cancel", parameters={"run_id": "abc-123"})
+rye_execute(item_id="rye/core/processes/cancel", parameters={"run_id": "abc-123", "grace": 10})
 ```
 
 ## rye/core/processes/list
@@ -114,8 +114,8 @@ Without a filter, returns all active (non-terminal) processes.
 **Usage:**
 
 ```json
-rye_execute(item_type="tool", item_id="rye/core/processes/list", parameters={})
-rye_execute(item_type="tool", item_id="rye/core/processes/list", parameters={"status": "running"})
+rye_execute(item_id="rye/core/processes/list", parameters={})
+rye_execute(item_id="rye/core/processes/list", parameters={"status": "running"})
 ```
 
 ## SIGTERM-Based Cancellation

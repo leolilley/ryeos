@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-06T04:15:08Z:ad1c231bed2390dd349c6d0bec57eec1b75eac2f254c57962925a3e5df54f262:sPvmvVW5y_p1NBte8IdJ5qcKdRN67w6TSD2wiEW8cveOP1NtHXnEfWSOPslwfsdahODUZwM8uVBf5mno4IeYCQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-09T00:09:13Z:1abff318a770306fce900a641b2c9f9f478123222ab9276c64f071746e599e5e:d4pO9xigHXkmwSgZTyytjev3V8wk6dPwca0-IUPCZlle_RqUsz4Br2ul2kxx-Ll0oUOIzIeY0GbDv2UohW9lBw:4b987fd4e40303ac -->
 ```yaml
 name: input-interpolation
 title: Input Interpolation
@@ -105,7 +105,7 @@ Inputs are declared in the directive's XML metadata fence:
 `rye_fetch(query="{input:name}", scope="directive")`
 
 **Write file**
-`rye_execute(item_type="tool", item_id="rye/file-system/write",
+`rye_execute(item_id="rye/file-system/write",
     parameters={"path": ".ai/directives/{input:category}/{input:name}.md"})`
 ```
 

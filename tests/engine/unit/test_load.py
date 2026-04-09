@@ -81,8 +81,7 @@ class TestFetchResolve:
         """Load directive content."""
         result = await resolve_item(
             "",
-            item_type="directive",
-            item_id="test",
+            item_ref="directive:test",
             project_path=str(temp_project),
             source="project",
         )
@@ -95,8 +94,7 @@ class TestFetchResolve:
         """Load tool content."""
         result = await resolve_item(
             "",
-            item_type="tool",
-            item_id="myscript",
+            item_ref="tool:myscript",
             project_path=str(temp_project),
             source="project",
         )
@@ -108,8 +106,7 @@ class TestFetchResolve:
         """Handle nonexistent item."""
         result = await resolve_item(
             "",
-            item_type="directive",
-            item_id="nonexistent",
+            item_ref="directive:nonexistent",
             project_path=str(temp_project),
             source="project",
         )
@@ -121,8 +118,7 @@ class TestFetchResolve:
         """Load extracts metadata."""
         result = await resolve_item(
             "",
-            item_type="directive",
-            item_id="test",
+            item_ref="directive:test",
             project_path=str(temp_project),
             source="project",
         )
@@ -135,8 +131,7 @@ class TestFetchResolve:
         """Copy item from project to user space."""
         result = await resolve_item(
             str(temp_user_space),
-            item_type="tool",
-            item_id="myscript",
+            item_ref="tool:myscript",
             project_path=str(temp_project),
             source="project",
             destination="user",
@@ -155,8 +150,7 @@ class TestFetchResolve:
         """Load item from user space."""
         result = await resolve_item(
             str(temp_user_space),
-            item_type="tool",
-            item_id="shared",
+            item_ref="tool:shared",
             project_path="/dummy",
             source="user",
         )

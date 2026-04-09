@@ -20,10 +20,10 @@ from rye.utils.metadata_manager import MetadataManager
 from rye.utils.parser_router import ParserRouter
 from rye.utils.path_utils import (
     extract_filename,
-    get_project_type_path,
+    get_project_kind_path,
     get_system_spaces,
-    get_type_folder,
-    get_user_type_path,
+    get_kind_folder,
+    get_user_kind_path,
 )
 from rye.utils.extensions import (
     get_item_extensions,
@@ -84,43 +84,43 @@ class SignTool:
         return "*" in item_id or "?" in item_id
 
     def _get_batch_base_dir(
-        self, item_type: str, project_path: str, source: str
+        self, kind: str, project_path: str, source: str
     ) -> Optional[Path]:
         """Get the base directory for computing relative path IDs."""
         if source == "project":
-            return get_project_type_path(Path(project_path), item_type)
+            return get_project_kind_path(Path(project_path), kind)
         elif source == "user":
-            return get_user_type_path(item_type)
+            return get_user_kind_path(kind)
         elif source == "system":
-            type_folder = get_type_folder(item_type)
+            kind_folder = get_kind_folder(kind)
             for bundle in get_system_spaces():
-                p = bundle.root_path / AI_DIR / type_folder
+                p = bundle.root_path / AI_DIR / kind_folder
                 if p.exists():
                     return p
             return None
         return None
 
     def _resolve_glob_items(
-        self, item_type: str, pattern: str, project_path: str, source: str
+        self, kind: str, pattern: str, project_path: str, source: str
     ) -> List[Path]:
         """Resolve glob pattern to list of item file paths."""
-        type_dir = ItemType.SIGNABLE_DIRS.get(item_type)
-        if not type_dir:
+        kind_dir = ItemType.SIGNABLE_KINDS.get(kind)
+        if not kind_dir:
             return []
 
         if source == "project":
-            base_dir = get_project_type_path(Path(project_path), item_type)
+            base_dir = get_project_kind_path(Path(project_path), kind)
         elif source == "user":
-            base_dir = get_user_type_path(item_type)
+            base_dir = get_user_kind_path(kind)
         elif source == "system":
             all_items = []
-            type_folder = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
+            kind_folder = ItemType.SIGNABLE_KINDS.get(kind, kind)
             for bundle in get_system_spaces():
-                sys_dir = bundle.root_path / AI_DIR / type_folder
+                sys_dir = bundle.root_path / AI_DIR / kind_folder
                 if not sys_dir.exists():
                     continue
                 all_items.extend(
-                    self._glob_in_dir(sys_dir, item_type, pattern, project_path)
+                    self._glob_in_dir(sys_dir, kind, pattern, project_path)
                 )
             return all_items
         else:
@@ -129,10 +129,10 @@ class SignTool:
         if not base_dir.exists():
             return []
 
-        return self._glob_in_dir(base_dir, item_type, pattern, project_path)
+        return self._glob_in_dir(base_dir, kind, pattern, project_path)
 
     def _glob_in_dir(
-        self, base_dir: Path, item_type: str, pattern: str, project_path: str
+        self, base_dir: Path, kind: str, pattern: str, project_path: str
     ) -> List[Path]:
         """Glob for items inside a single base directory.
 
@@ -151,14 +151,14 @@ class SignTool:
             )
 
         proj = Path(project_path) if project_path else None
-        if item_type == ItemType.TOOL:
+        if kind == ItemType.TOOL:
             extensions = get_tool_extensions(proj)
-        elif item_type == ItemType.CONFIG:
+        elif kind == ItemType.CONFIG:
             extensions = get_item_extensions(ItemType.CONFIG, proj)
-        elif item_type in (ItemType.DIRECTIVE, ItemType.KNOWLEDGE):
-            extensions = get_item_extensions(item_type, proj)
+        elif kind in (ItemType.DIRECTIVE, ItemType.KNOWLEDGE):
+            extensions = get_item_extensions(kind, proj)
         else:
-            raise ValueError(f"Unknown item type for glob: {item_type}")
+            raise ValueError(f"Unknown item type for glob: {kind}")
 
         items = []
         for ext in extensions:
@@ -175,12 +175,30 @@ class SignTool:
 
     async def handle(self, **kwargs) -> Dict[str, Any]:
         """Handle sign request."""
-        item_type: str = kwargs["item_type"]
         item_id: str = kwargs["item_id"]
         project_path = kwargs["project_path"]
         source = kwargs.get("source", "project")
 
-        logger.debug(f"Sign: item_type={item_type}, item_id={item_id}, source={source}")
+        # Parse canonical ref (e.g. "tool:rye/bash/bash" → kind="tool", bare_id="rye/bash/bash")
+        ref_kind, bare_id = ItemType.parse_canonical_ref(item_id)
+
+        # Derive kind strictly from canonical ref
+        kind: Optional[str] = ref_kind
+        if ref_kind:
+            item_id = bare_id
+
+        if not kind:
+            return {
+                "status": "error",
+                "error": (
+                    "item_id must use a canonical ref prefix to identify the type "
+                    "(e.g. 'tool:my/item', 'directive:my/workflow', 'knowledge:my/entry', "
+                    "'config:my/config')."
+                ),
+                "item_id": item_id,
+            }
+
+        logger.debug(f"Sign: kind={kind}, item_id={item_id}, source={source}")
 
         if source == "system":
             return {
@@ -192,62 +210,62 @@ class SignTool:
         try:
             # Check for batch signing (glob pattern)
             if self._is_glob_pattern(item_id):
-                return await self._sign_batch(item_type, item_id, project_path, source)
+                return await self._sign_batch(kind, item_id, project_path, source)
 
-            if item_type == ItemType.DIRECTIVE:
+            if kind == ItemType.DIRECTIVE:
                 return await self._sign_directive(item_id, project_path, source)
-            elif item_type == ItemType.TOOL:
+            elif kind == ItemType.TOOL:
                 return await self._sign_tool(item_id, project_path, source)
-            elif item_type == ItemType.KNOWLEDGE:
+            elif kind == ItemType.KNOWLEDGE:
                 return await self._sign_knowledge(item_id, project_path, source)
-            elif item_type == "config":
+            elif kind == "config":
                 return await self._sign_config(item_id, project_path, source)
             else:
-                return {"status": "error", "error": f"Unknown item type: {item_type}"}
+                return {"status": "error", "error": f"Unknown item type: {kind}"}
 
         except Exception as e:
             logger.error(f"Sign error: {e}")
             return {"status": "error", "error": str(e), "item_id": item_id}
 
     async def _sign_batch(
-        self, item_type: str, pattern: str, project_path: str, source: str
+        self, kind: str, pattern: str, project_path: str, source: str
     ) -> Dict[str, Any]:
         """Sign multiple items matching a glob pattern."""
-        items = self._resolve_glob_items(item_type, pattern, project_path, source)
+        items = self._resolve_glob_items(kind, pattern, project_path, source)
 
         if not items:
             return {
                 "status": "error",
-                "error": f"No {item_type}s found matching pattern: {pattern}",
+                "error": f"No {kind}s found matching pattern: {pattern}",
                 "searched_in": str(
-                    get_project_type_path(Path(project_path), item_type)
+                    get_project_kind_path(Path(project_path), kind)
                     if source == "project"
-                    else get_user_type_path(item_type)
+                    else get_user_kind_path(kind)
                 ),
                 "hint": f"Ensure project_path is the parent of the {AI_DIR}/ directory containing this item.",
             }
 
         results: Dict[str, Any] = {"signed": [], "failed": [], "total": len(items)}
 
-        base_dir = self._get_batch_base_dir(item_type, project_path, source)
+        base_dir = self._get_batch_base_dir(kind, project_path, source)
         for file_path in items:
             if base_dir:
                 item_id = str(file_path.relative_to(base_dir).with_suffix(""))
             else:
                 item_id = file_path.stem
             try:
-                if item_type == ItemType.DIRECTIVE:
+                if kind == ItemType.DIRECTIVE:
                     result = await self._sign_directive(item_id, project_path, source)
-                elif item_type == ItemType.TOOL:
+                elif kind == ItemType.TOOL:
                     result = await self._sign_tool(item_id, project_path, source)
-                elif item_type == ItemType.KNOWLEDGE:
+                elif kind == ItemType.KNOWLEDGE:
                     result = await self._sign_knowledge(item_id, project_path, source)
-                elif item_type == "config":
+                elif kind == "config":
                     result = await self._sign_config(item_id, project_path, source)
                 else:
                     result = {
                         "status": "error",
-                        "error": f"Unknown item type: {item_type}",
+                        "error": f"Unknown item type: {kind}",
                     }
 
                 if result.get("status") == "error":
@@ -297,7 +315,7 @@ class SignTool:
 
         # Schema-driven validation
         validation_result = validate_parsed_data(
-            item_type=ItemType.DIRECTIVE,
+            kind=ItemType.DIRECTIVE,
             parsed_data=parsed,
             file_path=file_path,
             location=source,
@@ -390,7 +408,7 @@ class SignTool:
 
         # Schema-driven validation
         validation_result = validate_parsed_data(
-            item_type=ItemType.TOOL,
+            kind=ItemType.TOOL,
             parsed_data=parsed,
             file_path=file_path,
             location=source,
@@ -455,7 +473,7 @@ class SignTool:
 
         # Schema-driven validation
         validation_result = validate_parsed_data(
-            item_type=ItemType.KNOWLEDGE,
+            kind=ItemType.KNOWLEDGE,
             parsed_data=parsed,
             file_path=file_path,
             location=source,
@@ -580,7 +598,7 @@ class SignTool:
 
         # Phase 1: Metadata validation (name, category, version, description)
         metadata_result = validate_parsed_data(
-            item_type="config",
+            kind="config",
             parsed_data=parsed,
             file_path=file_path,
             location=source,
@@ -636,7 +654,7 @@ class SignTool:
         }
 
     def _find_item(
-        self, project_path: str, source: str, item_type: str, item_id: str
+        self, project_path: str, source: str, kind: str, item_id: str
     ) -> Optional[Path]:
         """Find item file by relative path ID in specified source location.
 
@@ -644,22 +662,22 @@ class SignTool:
             item_id: Relative path from .ai/<type>/ without extension.
                     e.g., "rye/core/registry/registry" -> .ai/tools/rye/core/registry/registry.py
         """
-        type_dir = ItemType.SIGNABLE_DIRS.get(item_type)
-        if not type_dir:
+        kind_dir = ItemType.SIGNABLE_KINDS.get(kind)
+        if not kind_dir:
             return None
 
         if source == "project":
-            base = get_project_type_path(Path(project_path), item_type)
+            base = get_project_kind_path(Path(project_path), kind)
         elif source == "user":
-            base = get_user_type_path(item_type)
+            base = get_user_kind_path(kind)
         elif source == "system":
             extensions = get_item_extensions(
-                item_type, Path(project_path) if project_path else None
+                kind, Path(project_path) if project_path else None
             )
 
-            type_folder = ItemType.SIGNABLE_DIRS.get(item_type, item_type)
+            kind_folder = ItemType.SIGNABLE_KINDS.get(kind, kind)
             for bundle in get_system_spaces():
-                base = bundle.root_path / AI_DIR / type_folder
+                base = bundle.root_path / AI_DIR / kind_folder
                 if not base.exists():
                     continue
                 for ext in extensions:
@@ -674,7 +692,7 @@ class SignTool:
             return None
 
         extensions = get_item_extensions(
-            item_type, Path(project_path) if project_path else None
+            kind, Path(project_path) if project_path else None
         )
 
         for ext in extensions:
