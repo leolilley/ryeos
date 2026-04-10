@@ -407,9 +407,12 @@ class TestCapabilityRisk:
     @pytest.fixture
     def project_with_risk_config(self, tmp_path):
         """Create a project dir with capability_risk.yaml so tests don't
-        depend on system bundle entry-point resolution."""
-        import shutil
+        depend on system bundle entry-point resolution.
 
+        Strips the rye:signed line so the config loads as unsigned
+        (allow_unsigned=True) without needing the developer key in the
+        CI trust store.
+        """
         src = (
             PROJECT_ROOT
             / "ryeos"
@@ -423,7 +426,11 @@ class TestCapabilityRisk:
         )
         dst = tmp_path / ".ai" / "config" / "agent" / "capability_risk.yaml"
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        lines = src.read_text().splitlines(keepends=True)
+        with open(dst, "w") as f:
+            for line in lines:
+                if not line.startswith("# rye:signed:"):
+                    f.write(line)
         return tmp_path
 
     def test_unrestricted_blocked_without_ack(self, risk_fn, project_with_risk_config):
