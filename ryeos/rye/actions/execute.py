@@ -225,7 +225,7 @@ class ExecuteTool:
         parameters: Dict[str, Any] = kwargs.get("parameters") or {}
         dry_run = kwargs.get("dry_run", False)
         target = kwargs.get("target", "local")
-        thread = kwargs.get("thread", "inline")
+        thread = kwargs.get("thread") or "inline"
         async_exec = kwargs.get("async", False)
         resume_thread_id = kwargs.get("resume_thread_id")
 
