@@ -405,13 +405,14 @@ class TestCapabilityRisk:
         return mod._assess_capability_risk
 
     @pytest.fixture
-    def project_with_risk_config(self, tmp_path):
-        """Create a project dir with capability_risk.yaml so tests don't
-        depend on system bundle entry-point resolution.
+    def project_with_risk_config(self, tmp_path, monkeypatch):
+        """Create a self-contained project with capability_risk.yaml.
 
-        Strips the rye:signed line so the config loads as unsigned
-        (allow_unsigned=True) without needing the developer key in the
-        CI trust store.
+        - Copies the config without the signature line so it loads as
+          unsigned (allow_unsigned=True) without needing a trusted key.
+        - Patches get_system_spaces to return empty so the loader only
+          finds the project-level config (avoids hitting dev-signed
+          system bundle configs that CI can't verify).
         """
         src = (
             PROJECT_ROOT
@@ -431,6 +432,9 @@ class TestCapabilityRisk:
             for line in lines:
                 if not line.startswith("# rye:signed:"):
                     f.write(line)
+
+        import rye.utils.path_utils as _pu
+        monkeypatch.setattr(_pu, "_system_spaces_cache", [])
         return tmp_path
 
     def test_unrestricted_blocked_without_ack(self, risk_fn, project_with_risk_config):
