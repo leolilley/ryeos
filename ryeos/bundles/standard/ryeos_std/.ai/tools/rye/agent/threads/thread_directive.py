@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T02:01:40Z:69c1aa7cc503bd18e19d21996185457301a5937325f277b0ba314cd670bb2440:xFsedL1tVVOTr-PynV37BE_KRgqT_89xeYbeBi2Nb54gQcweWhtIKKifwatC6AYHDiH4jHDjklagXVukFcNzCA:4b987fd4e40303ac
+# rye:signed:2026-04-10T03:19:47Z:44f556add13063be9a6173c2a38b5a075a5110bd125ecdc7a468fc4c4e68b57c:q9vLov9OsD9wEsWGziEdoh0cumCMzCGjoswJ1YyBCDLsu2TXkROS4vFDd42jPDj_0oJGOiBpr2ONF5tv87feBA:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -597,18 +597,18 @@ async def execute(params: Dict, project_path: str) -> Dict:
             chain_result = await _resolve_directive_chain(
                 directive_name, directive, project_path
             )
-            # Execute knowledge items for all context positions
-            # (execute parses frontmatter and returns body only, unlike load
-            # which returns raw content with YAML metadata and signatures)
-            from rye.actions.fetch import FetchTool
-            fetch_tool = FetchTool()
+            # Execute knowledge items for all context positions.
+            # Execute (not fetch) runs the knowledge executor which
+            # parses frontmatter and returns just the body content.
+            from rye.actions.execute import ExecuteTool
+            exec_tool = ExecuteTool(user_space=user_space)
             suppressed = set(chain_result["context"].get("suppress", []))
             for position in ("system", "before", "after"):
                 parts = []
                 for kid in chain_result["context"].get(position, []):
                     if kid in suppressed:
                         continue
-                    kr = await fetch_tool.handle(
+                    kr = await exec_tool.handle(
                         item_id=f"knowledge:{kid}", project_path=project_path,
                     )
                     if kr.get("status") != "success":
@@ -626,8 +626,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
                             kid, position, error,
                         )
                         continue
-                    data = kr.get("data", {})
-                    content = data.get("body", "") if isinstance(data, dict) else ""
+                    content = kr.get("content", "")
                     if content:
                         parts.append(content.strip())
                 if parts:

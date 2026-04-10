@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:78fdba9d6995a7de5a955a5d3f95494b5e270d00a8b9d94d58afd58624791439:aUDRg4RkgX5AgtCXPjrEySL2QOk_TdkSvUuaw5ltCcGA07y7c2Mr7A69W9TJZeFp8ErCBLBBrFKdWPP7xQfsAA:4b987fd4e40303ac
+# rye:signed:2026-04-10T03:13:00Z:1daf160e3e47a5047cc1884bcca2ea512e7777201b9ef951360c74b8847db995:6pe_7m1d1PpZkLbqdebkWbzNzlLqRWJdcnkqSmETPLs8dYfaHC_f5QSqR_H0zi-yE8unYIO3uFjs_WRfwyXSAw:4b987fd4e40303ac
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -854,9 +854,10 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
       1. Verify remote key
       2. Push (sync objects)
       3. Seal local secrets for the target node
-      4. POST /execute on remote
-      5. Pull new result objects
-      6. Materialize runtime outputs
+      4. Resolve execution config locally and inject into params
+      5. POST /execute on remote
+      6. Pull new result objects
+      7. Materialize runtime outputs
     """
     from rye.constants import ItemType
 
@@ -913,7 +914,29 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
         except Exception as e:
             logger.warning("Failed to seal secrets for remote: %s", e)
 
-    # 4. Execute on remote (longer timeout for execution)
+    # 4. Resolve execution config locally and inject into params.
+    # The remote node's system bundle may lag behind the local source tree
+    # (e.g. execution.yaml added after the last published wheel), so
+    # config_resolve can fail silently on the node side. Resolve locally
+    # where the full 3-tier cascade is available, and forward the defaults
+    # so the walker receives them regardless.
+    try:
+        from rye.cas.manifest import _load_config_3tier
+
+        exec_config = _load_config_3tier("execution/execution.yaml", project_path)
+        if exec_config:
+            exec_defaults = exec_config.get("defaults", {})
+            # Per-tool overrides (key = bare tool item_id)
+            tool_overrides = exec_config.get("tools", {}).get(bare_id, {})
+            merged = {**exec_defaults, **tool_overrides}
+            # Inject with lower priority — don't override user-supplied params
+            for key, value in merged.items():
+                if key not in exec_params:
+                    exec_params[key] = value
+    except Exception:
+        logger.debug("Failed to resolve local execution config", exc_info=True)
+
+    # 5. Execute on remote (longer timeout for execution)
     from remote_config import get_project_path
 
     proj_name = get_project_path(project_path)
@@ -938,7 +961,7 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     if isinstance(exec_body, str):
         exec_body = json.loads(exec_body)
 
-    # 5. Pull execution outputs (CAS objects + runtime output blobs)
+    # 6. Pull execution outputs (CAS objects + runtime output blobs)
     snapshot_hash = exec_body.get("execution_snapshot_hash")
     bundle_hash = exec_body.get("runtime_outputs_bundle_hash")
     pull_hashes = []
@@ -953,7 +976,7 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     else:
         pull_result = {"fetched": 0}
 
-    # 6. Materialize runtime outputs into local project tree
+    # 7. Materialize runtime outputs into local project tree
     outputs_materialized = 0
     if bundle_hash:
         outputs_materialized = _materialize_runtime_outputs(

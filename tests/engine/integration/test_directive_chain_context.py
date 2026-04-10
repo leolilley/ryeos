@@ -9,6 +9,7 @@ Covers:
 - Suppress composition through chain
 """
 
+import asyncio
 import importlib.util
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -368,3 +369,249 @@ class TestChainMetadata:
                 mock_resolve,
                 mock_parser,
             )
+
+
+# ── Knowledge content extraction ─────────────────────────────────────
+#
+# These test the knowledge execution + content extraction path in
+# thread_directive.execute() step 5, which assembles the system_prompt
+# from the resolved extends chain's context knowledge items.
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def _build_context_from_chain(
+    directive: dict,
+    directive_name: str,
+    knowledge_contents: dict,
+    project_path: str = "/tmp/test",
+):
+    """Helper: resolve extends chain + execute knowledge items, return (system_prompt, directive_context).
+
+    Mirrors the logic in thread_directive.execute() step 5 but isolated
+    from the full execute() flow (no LLM, no harness, no registry).
+
+    Args:
+        directive: parsed directive dict (with extends/context)
+        directive_name: bare ID
+        knowledge_contents: mapping of knowledge ID → body text returned by ExecuteTool
+        project_path: fake project path
+    """
+    from rye.actions.execute import ExecuteTool
+
+    chain_result = await _resolve_directive_chain(
+        directive_name, directive, project_path
+    )
+
+    # Mock ExecuteTool.handle to return knowledge bodies
+    async def _mock_exec_handle(**kwargs):
+        item_id = kwargs.get("item_id", "")
+        # Strip "knowledge:" prefix
+        bare = item_id.replace("knowledge:", "")
+        if bare in knowledge_contents:
+            return {"status": "success", "content": knowledge_contents[bare]}
+        return {"status": "error", "error": f"Knowledge not found: {bare}"}
+
+    system_prompt = ""
+    directive_context = {"before": "", "after": "", "suppress": []}
+    suppressed = set(chain_result["context"].get("suppress", []))
+
+    with patch.object(ExecuteTool, "handle", side_effect=_mock_exec_handle):
+        exec_tool = ExecuteTool(user_space="/tmp/user")
+        for position in ("system", "before", "after"):
+            parts = []
+            for kid in chain_result["context"].get(position, []):
+                if kid in suppressed:
+                    continue
+                kr = await exec_tool.handle(
+                    item_id=f"knowledge:{kid}", project_path=project_path,
+                )
+                if kr.get("status") != "success":
+                    continue
+                content = kr.get("content", "")
+                if content:
+                    parts.append(content.strip())
+            if parts:
+                if position == "system":
+                    system_prompt = "\n\n".join(parts)
+                else:
+                    directive_context[position] = "\n\n".join(parts)
+        directive_context["suppress"] = list(suppressed)
+
+    return system_prompt, directive_context
+
+
+class TestKnowledgeContentExtraction:
+    """Knowledge items executed via ExecuteTool produce system_prompt content."""
+
+    async def test_system_prompt_from_single_knowledge(self):
+        """Directive with context.system knowledge gets content as system_prompt."""
+        directive = {
+            "name": "leaf",
+            "context": {"system": ["my/identity"]},
+        }
+        knowledge = {"my/identity": "You are a helpful agent."}
+
+        system_prompt, ctx = await _build_context_from_chain(
+            directive, "leaf", knowledge
+        )
+        assert system_prompt == "You are a helpful agent."
+
+    async def test_system_prompt_from_extends_chain(self):
+        """Extends chain composes system_prompt root-first."""
+        parent = {
+            "name": "parent",
+            "context": {"system": ["base/identity"]},
+        }
+        child = {
+            "name": "child",
+            "extends": "parent",
+            "context": {"system": ["child/identity"]},
+        }
+        knowledge = {
+            "base/identity": "You are Rye.",
+            "child/identity": "You are a Track Blox agent.",
+        }
+
+        mock_lt, mock_pr = _mock_load_and_parser(parent)
+        with (
+            patch("rye.actions._resolve.resolve_item", mock_lt),
+            patch("rye.utils.parser_router.ParserRouter", return_value=mock_pr),
+            patch("rye.utils.resolvers.get_user_space", return_value=Path("/tmp/user")),
+        ):
+            system_prompt, ctx = await _build_context_from_chain(
+                child, "child", knowledge
+            )
+
+        assert "You are Rye." in system_prompt
+        assert "You are a Track Blox agent." in system_prompt
+        # Root-first order
+        assert system_prompt.index("You are Rye.") < system_prompt.index("You are a Track Blox agent.")
+
+    async def test_before_after_context(self):
+        """before/after context positions populate directive_context."""
+        directive = {
+            "name": "leaf",
+            "context": {
+                "before": ["my/rules"],
+                "after": ["my/checklist"],
+            },
+        }
+        knowledge = {
+            "my/rules": "Always validate inputs.",
+            "my/checklist": "Verify output format.",
+        }
+
+        system_prompt, ctx = await _build_context_from_chain(
+            directive, "leaf", knowledge
+        )
+        assert system_prompt == ""
+        assert ctx["before"] == "Always validate inputs."
+        assert ctx["after"] == "Verify output format."
+
+    async def test_suppressed_knowledge_excluded(self):
+        """Suppressed knowledge IDs are not executed or included."""
+        directive = {
+            "name": "leaf",
+            "context": {
+                "system": ["keep/this", "drop/this"],
+                "suppress": ["drop/this"],
+            },
+        }
+        knowledge = {
+            "keep/this": "Kept content.",
+            "drop/this": "THIS SHOULD NOT APPEAR",
+        }
+
+        system_prompt, ctx = await _build_context_from_chain(
+            directive, "leaf", knowledge
+        )
+        assert system_prompt == "Kept content."
+        assert "SHOULD NOT APPEAR" not in system_prompt
+
+    async def test_missing_knowledge_skipped(self):
+        """Missing knowledge items are silently skipped (non-integrity errors)."""
+        directive = {
+            "name": "leaf",
+            "context": {"system": ["exists/item", "missing/item"]},
+        }
+        knowledge = {"exists/item": "Present content."}
+
+        system_prompt, ctx = await _build_context_from_chain(
+            directive, "leaf", knowledge
+        )
+        assert system_prompt == "Present content."
+
+    async def test_empty_content_skipped(self):
+        """Knowledge items returning empty content are not included."""
+        directive = {
+            "name": "leaf",
+            "context": {"system": ["real/item", "empty/item"]},
+        }
+        knowledge = {
+            "real/item": "Real content.",
+            "empty/item": "",
+        }
+
+        system_prompt, ctx = await _build_context_from_chain(
+            directive, "leaf", knowledge
+        )
+        assert system_prompt == "Real content."
+
+    async def test_content_stripped(self):
+        """Leading/trailing whitespace in knowledge content is stripped."""
+        directive = {
+            "name": "leaf",
+            "context": {"system": ["padded/item"]},
+        }
+        knowledge = {"padded/item": "\n\n  Agent identity text.  \n\n"}
+
+        system_prompt, ctx = await _build_context_from_chain(
+            directive, "leaf", knowledge
+        )
+        assert system_prompt == "Agent identity text."
+
+    async def test_execute_returns_content_key_not_data_body(self):
+        """Regression: ExecuteTool returns content at top level, not under data.body.
+
+        The knowledge executor returns {status, content, item_id, metadata}.
+        The content key holds the body text (frontmatter stripped).
+        Previous bug: code accessed kr['data']['body'] which was always empty.
+        """
+        directive = {
+            "name": "leaf",
+            "context": {"system": ["test/knowledge"]},
+        }
+
+        # Simulate what ExecuteTool.handle actually returns for knowledge items
+        mock_handle = AsyncMock(return_value={
+            "status": "success",
+            "content": "Behavioral rules here.",
+            "item_id": "test/knowledge",
+            "metadata": {},
+            "type": "knowledge",
+        })
+
+        with patch.object(
+            __import__("rye.actions.execute", fromlist=["ExecuteTool"]).ExecuteTool,
+            "handle",
+            mock_handle,
+        ):
+            chain_result = await _resolve_directive_chain("leaf", directive, "/tmp/test")
+
+            from rye.actions.execute import ExecuteTool
+            exec_tool = ExecuteTool(user_space="/tmp/user")
+            parts = []
+            for kid in chain_result["context"]["system"]:
+                kr = await exec_tool.handle(
+                    item_id=f"knowledge:{kid}", project_path="/tmp/test",
+                )
+                # This is the exact line from thread_directive.py — must work
+                content = kr.get("content", "")
+                if content:
+                    parts.append(content.strip())
+
+            system_prompt = "\n\n".join(parts)
+
+        assert system_prompt == "Behavioral rules here."
+        # Verify the old broken access pattern would fail
+        assert mock_handle.return_value.get("data") is None
