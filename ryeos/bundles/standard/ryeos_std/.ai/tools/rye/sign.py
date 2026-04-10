@@ -1,4 +1,4 @@
-# rye:signed:2026-04-09T08:31:08Z:78dd1d36e791570314885ae8d0388f6b65f702e9444aa29b6984aca2ebe03743:wy5MmZ-UDyTos3fngDsruGFNQWWZPdzyUrCgKs20UXsTelJdsqRCG2rzaGu7-MSNKj2ffPIM8thyv-1ojZyqBA:4b987fd4e40303ac
+# rye:signed:2026-04-10T00:57:19Z:78dd1d36e791570314885ae8d0388f6b65f702e9444aa29b6984aca2ebe03743:wy5MmZ-UDyTos3fngDsruGFNQWWZPdzyUrCgKs20UXsTelJdsqRCG2rzaGu7-MSNKj2ffPIM8thyv-1ojZyqBA:4b987fd4e40303ac
 """Validate and sign a Rye item file."""
 
 import argparse

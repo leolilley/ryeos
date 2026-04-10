@@ -1,3 +1,4 @@
+# rye:signed:2026-04-10T00:57:18Z:be9d97b2f776e69ea4dfa5f70471971d455ccdf37d6410a7f0b8633a5ad083e8:t1ktWO6WZgg6VhHj6WjkV5bUqTrWvE2zCNWVVpE0S_H1zjh5R0-oywBSGY1FQ0EVMyeI2sFLooLJbvWV0tXoDw:4b987fd4e40303ac
 """Node key management — generate node identity and manage authorized keys.
 
 Node identity lives at ~/.ai/node/identity/ (machine-local, never project space).

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:fd0b17d9113aaf0ba7a9caa69f3f636ea81cf0292c70b6aa34f251ea5e26f462:ASWUQHsZ1bFAOy8eyA-0zIi0FMrxcEvfbGRIU0eOUMO9aMMxKe_eSB-qwVzmvCoRJIJHc2EMXNSPFrqOoXM2AQ==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-10T00:57:19Z:fd0b17d9113aaf0ba7a9caa69f3f636ea81cf0292c70b6aa34f251ea5e26f462:ASWUQHsZ1bFAOy8eyA-0zIi0FMrxcEvfbGRIU0eOUMO9aMMxKe_eSB-qwVzmvCoRJIJHc2EMXNSPFrqOoXM2AQ:4b987fd4e40303ac -->
 # Registry
 
 Guide 4 in the Rye OS onboarding sequence. Walks through the registry — pushing, pulling, publishing, searching, and the trust model.

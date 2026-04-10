@@ -109,17 +109,16 @@ class TestExecuteTool:
     """Test engine dispatch behaviour."""
 
     async def test_execute_directive_dispatches_to_executor(self, temp_project):
-        """Directive dispatches to its executor tool (thread_directive)."""
+        """Directive inline execution returns your_directions."""
         tool = ExecuteTool("")
         result = await tool.handle(
             item_id="directive:workflow",
             project_path=str(temp_project),
         )
-        # The engine dispatches to thread_directive executor tool.
-        # In test env, the executor may succeed or error — but it MUST NOT
-        # return your_directions (that was the old inline optimization).
-        assert "your_directions" not in result
+        # Inline directives return your_directions for the calling
+        # agent to follow — no LLM thread needed.
         assert isinstance(result, dict)
+        assert "your_directions" in result
 
     async def test_execute_tool(self, temp_project):
         """Tool dispatches via @primitive_chain (PrimitiveExecutor)."""
@@ -206,14 +205,14 @@ class TestCanonicalRefResolution:
         assert isinstance(result, dict)
 
     async def test_canonical_directive_ref(self, temp_project):
-        """Canonical directive:id ref dispatches to executor."""
+        """Canonical directive:id ref returns your_directions inline."""
         tool = ExecuteTool("")
         result = await tool.handle(
             item_id="directive:workflow",
             project_path=str(temp_project),
         )
         assert isinstance(result, dict)
-        assert "your_directions" not in result  # no inline optimization
+        assert "your_directions" in result
 
     async def test_knowledge_dispatches_to_executor(self, temp_project):
         """knowledge: ref resolves executor_id from extractor."""

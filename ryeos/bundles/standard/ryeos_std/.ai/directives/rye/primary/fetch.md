@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:39:14Z:73b26ead3d76c88157bd27f9176666561df47ea5d2d6a947197c1d20485e8271:1hal57nuBIyfdr3o3c-VNGcmpkr86Qaa_JL002a2UmTXRc1Cgt1SnPm6vMH6z8khf2WGXPRHaVbwrWkVDqp7Aw==:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-10T00:57:19Z:73b26ead3d76c88157bd27f9176666561df47ea5d2d6a947197c1d20485e8271:1hal57nuBIyfdr3o3c-VNGcmpkr86Qaa_JL002a2UmTXRc1Cgt1SnPm6vMH6z8khf2WGXPRHaVbwrWkVDqp7Aw:4b987fd4e40303ac -->
 # Fetch
 
 Resolve items by ID or discover by query.

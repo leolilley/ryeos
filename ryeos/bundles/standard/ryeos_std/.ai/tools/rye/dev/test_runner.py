@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:25Z:6dd643bfb7c936486f63b420b5e19ce7a36c80edc99494c84434385c0432db03:guum2awo6Qhd8cCWVt01Kq8GaDYYY9w21EhMYqFSXdLrH2T_PrmZG9GqESHNpnQ_rx7K5qsNXoJkzmuqVX70DQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T00:57:19Z:1b7e876f172a824dd07b62115afb9f4af13233654dfc960dc5abdde1c23cf66a:kCQTakcvFARiNsS0RQuRi-w4yyeFk79hFrG3S-9ggnlV6fOIHQr-9tpFBZ6eVKqXGKy0ZTDrNixja_35ugwHAw:4b987fd4e40303ac
 """Rye tool test runner — execute .test.yaml specs against real tools.
 
 Discovers test specs from .ai/tests/**/*.test.yaml, executes tools via

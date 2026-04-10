@@ -1,4 +1,4 @@
-# rye:signed:2026-04-06T04:14:01Z:4205b1150dbf7c59c4d43efeeda88d9c61f51615fd62b2412248648287c7b5ee:t1jv0iWjwv-szVBjHlmgqqO6AoO5eu7y3A-wJtqWle_Rk9KVDeDjaRDN_JV_VVxb8msAevUTVhP_NIaCCBsxBw:4b987fd4e40303ac
+# rye:signed:2026-04-10T01:39:42Z:f8bbbda86453dee6aa7473f1643f8c782b4a000f12f1c457d482ba5b9ef30b69:03xCOnKg7USBO21DQV3sQvT3YMt8XtgW2RZlF-JpHTXIaBzBISSeJkCWMpbnLcpNPKC6yusJH97heHuRMX9fCg:4b987fd4e40303ac
 # rye:unsigned
 version: "1.0.0"
 tool_type: runtime
@@ -40,6 +40,10 @@ verify_deps:
 config_resolve:
   path: "execution/execution.yaml"
   mode: "deep_merge"
+
+execution_params:
+  - max_steps
+  - max_concurrency
 
 config:
   command: "${RYE_PYTHON}"

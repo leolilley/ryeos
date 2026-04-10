@@ -75,6 +75,7 @@ class ChainElement:
     anchor_config: Optional[Dict[str, Any]] = None
     verify_deps_config: Optional[Dict[str, Any]] = None
     config_resolve: Optional[Dict[str, Any]] = None
+    execution_params: Optional[List[str]] = None
 
 
 class PrimitiveExecutor:
@@ -266,14 +267,20 @@ class PrimitiveExecutor:
                 if _ci == 0:
                     parameters["resolved_config"] = _resolved
                 else:
-                    # Execution config: merge defaults + per-tool overrides
+                    # Execution config: merge defaults + per-tool overrides.
+                    # Only inject keys the runtime declares in execution_params
+                    # (plus universal executor keys like timeout).
                     _exec_defaults = _resolved.get("defaults", {})
                     _tool_overrides = (
                         _resolved.get("tools", {}).get(tool_id, {}) if tool_id else {}
                     )
                     _exec_config = {**_exec_defaults, **_tool_overrides}
+                    _UNIVERSAL_EXEC_KEYS = frozenset({"timeout"})
+                    _allowed = _UNIVERSAL_EXEC_KEYS | frozenset(
+                        _element.execution_params or []
+                    )
                     for _ek, _ev in _exec_config.items():
-                        if _ek not in parameters:
+                        if _ek in _allowed and _ek not in parameters:
                             parameters[_ek] = _ev
 
             # 6. Execute via the root primitive
@@ -373,6 +380,7 @@ class PrimitiveExecutor:
                 anchor_config=metadata.get("anchor"),
                 verify_deps_config=metadata.get("verify_deps"),
                 config_resolve=metadata.get("config_resolve"),
+                execution_params=metadata.get("execution_params"),
             )
             chain.append(element)
 

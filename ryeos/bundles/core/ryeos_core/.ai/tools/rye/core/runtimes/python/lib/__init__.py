@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:92135959fc270503eadbcebca8b86044e2c8542e11b5e6748d5970012de441ed:S82kZQQrEuvtZWFmd-9yf5WwtbFqlX9t0yoR8M0Eqix4o3gbRU2TuebRb58FkxDftytn-zUfhzECYXLKpM68Aw:4b987fd4e40303ac
+# rye:signed:2026-04-10T00:57:18Z:92135959fc270503eadbcebca8b86044e2c8542e11b5e6748d5970012de441ed:S82kZQQrEuvtZWFmd-9yf5WwtbFqlX9t0yoR8M0Eqix4o3gbRU2TuebRb58FkxDftytn-zUfhzECYXLKpM68Aw:4b987fd4e40303ac
 """Python runtime library package."""
 
 __version__ = "1.0.0"

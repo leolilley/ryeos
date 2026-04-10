@@ -1,4 +1,4 @@
-# rye:signed:2026-04-09T08:31:08Z:4460c9da160a541036490174da6f7c905b7c46f08c1a7d7427d4a05789cf392e:DW2GYTpcfeKisSC-Tnb902K9E2mN2JJGWmZdM-ZSi-ZXI82C332ifQpDLOsrkqUw5hZJGBVVDHHoR3246gi3CA:4b987fd4e40303ac
+# rye:signed:2026-04-10T01:41:07Z:72ad2d64d8c52e39c43acef3d22a56f907f362e578625092cd826c94051df2b2:eAIrohWJywZFYS-Zh1Q4jVZ03oNUU-rhdgXGs9ul7B124VPBYd9EWe5y4-FlUcxC-vfPW93quxHwKnFGFT8TDQ:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -567,8 +567,13 @@ async def _dispatch_action(
     item_id = action.get("item_id", "")
     params = action.get("params", {})
 
-    # Parse canonical ref from item_id (e.g. "tool:rye/email/send")
+    # Parse canonical ref from item_id (e.g. "tool:rye/email/send").
+    # If item_id is bare but item_type is declared, prepend the prefix.
     kind, bare_id = ItemType.parse_canonical_ref(item_id)
+    if not kind and action.get("item_type"):
+        kind = action["item_type"]
+        bare_id = item_id
+        item_id = f"{kind}:{item_id}"
 
     # Directives need an LLM thread — the walker has no LLM, so inline
     # would just return your_directions with no one to follow them.
@@ -1204,6 +1209,8 @@ def _validate_graph(cfg: Dict, graph_config: Optional[Dict] = None) -> List[str]
             "env_requires",
             "cache_result",
             "remote",
+            "comment",
+            "description",
         }
     )
 

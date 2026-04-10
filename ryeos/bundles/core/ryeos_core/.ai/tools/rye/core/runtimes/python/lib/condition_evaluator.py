@@ -1,4 +1,4 @@
-# rye:signed:2026-03-30T04:30:49Z:16e9fbdfdfd7a185938f92a0418fbc1c3d5213ea609ed7d2535058d809dae9b3:dEbJOG44kcIDbFPxmwThdnOMnSpZdV2rZBpa8TJl76ps2Rb-CWT0LzNlV-foifi7BcrCN1vWGppFME3cvLfwDw:4b987fd4e40303ac
+# rye:signed:2026-04-10T01:41:07Z:36e9f7ef3a834ad70c1ec813ce3f5133ab45d79ff4bd9a08db11deb384810711:9qfsidVj-bv-iabXGEQAn_Asmabei6JGz69jtDlVfb7GEK0ZUl2T1dKXpfKdRsVrZ--tfYdczyWysp6bQwfyAQ:4b987fd4e40303ac
 """Condition evaluator and path resolver.
 
 Shared runtime library — evaluates conditions against documents
@@ -46,12 +46,17 @@ def resolve_path(doc: Dict, path: str) -> Any:
 
     Supports dict key lookups and numeric list indices:
         state.items.0.name  →  state["items"][0]["name"]
+        state.items[0].name →  state["items"][0]["name"]
     """
     if not path:
         return doc
+    # Normalise bracket indices to dot notation: items[0].name → items.0.name
+    path = re.sub(r"\[(\d+)\]", r".\1", path)
     parts = path.split(".")
     current = doc
     for part in parts:
+        if not part:
+            continue
         if isinstance(current, dict):
             current = current.get(part)
         elif isinstance(current, list):

@@ -1,24 +1,21 @@
-# rye:signed:2026-04-09T05:07:28Z:e51aa3f3dc8d4800e0e8c3fdc13753a0dd20a01254cabe1ff062e00835bd1657:BxH23od_grIjs26xe8m3ivjYMM1AqyzuCx_okpD6Vck9IhP8y2ZE_s8s-VhrdAMF42gL44t_nJsdATxv4UNrCg:4b987fd4e40303ac
+# rye:signed:2026-04-10T00:57:19Z:3369423f0a11e7b2577896a74457409fc467ef0f5c0e75fd75beb94ea78c7b59:LaWVWGAsyM0RN-IUx1h2-377W4i3z7kLQq17cyMsAxcVgpEm6owFMZZfzUWAyzi-vHvUqpfPClDzfaTbC-u4AA:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/adapters"
 __tool_description__ = "Tool dispatcher for thread tool calls"
 
-import os
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from rye.constants import Action, ItemType
-from rye.actions.fetch import FetchTool
 from rye.actions.execute import ExecuteTool
+from rye.actions.fetch import FetchTool
 from rye.actions.sign import SignTool
-from module_loader import load_module
+from rye.constants import Action, ItemType
 from rye.utils.resolvers import get_user_space
 
 logger = logging.getLogger(__name__)
-
-_THREADS_ROOT = Path(__file__).resolve().parent.parent
 
 
 class ToolDispatcher:
@@ -71,6 +68,7 @@ class ToolDispatcher:
         # object.  Detect and parse so downstream tools receive a dict.
         if "parameters" in params and isinstance(params["parameters"], str):
             import json
+
             try:
                 params["parameters"] = json.loads(params["parameters"])
             except (json.JSONDecodeError, ValueError):
@@ -117,9 +115,14 @@ class ToolDispatcher:
         except Exception as e:
             if os.environ.get("RYE_DEBUG"):
                 import traceback
+
                 logger.error(
                     "Dispatch %s %s/%s failed: %s\n%s",
-                    primary, kind, bare_id, e, traceback.format_exc()
+                    primary,
+                    kind,
+                    bare_id,
+                    e,
+                    traceback.format_exc(),
                 )
             return {"status": "error", "error": str(e)}
 
