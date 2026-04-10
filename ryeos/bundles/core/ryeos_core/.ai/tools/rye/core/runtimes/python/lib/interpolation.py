@@ -139,7 +139,7 @@ def interpolate_action(action: Dict, context: Dict) -> Dict:
     """Interpolate all ${...} in an action's interpolable fields.
 
     Interpolates: item_id, params.
-    Preserves: primary, item_type (action dict key).
+    Preserves: primary, kind (action dict key).
     """
     result = dict(action)
     if "item_id" in result:

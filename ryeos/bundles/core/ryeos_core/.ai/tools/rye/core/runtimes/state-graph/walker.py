@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:c235768f7a29f3310cb7eda0c895187b7dd771feeecb2894bb8d3e7de0aae3f9:CRZFd2M4Jsd5ieWdsaKPjxthJyhup8BA7w8_dC_dlmQtV9bU-Jx8yTV9tK67_7KzJK5yikgWAxBCynaxb5miDA:4b987fd4e40303ac
+# rye:signed:2026-04-10T10:13:29Z:6e7cb4532458842507c2e0eafc2480d13b98a5010705851ec00a0b83841dd234:qCLUZUGwmrq4_AqlUed_mCgABnFAApn6TDE3P0KW4zGDMT3nAI1q7yzimnpbXQtDI9jgn_vdwYF2tbUKzmguAQ:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -568,12 +568,29 @@ async def _dispatch_action(
     params = action.get("params", {})
 
     # Parse canonical ref from item_id (e.g. "tool:rye/email/send").
-    # If item_id is bare but item_type is declared, prepend the prefix.
+    # If item_id is bare but kind is declared, prepend the prefix.
     kind, bare_id = ItemType.parse_canonical_ref(item_id)
-    if not kind and action.get("item_type"):
-        kind = action["item_type"]
-        bare_id = item_id
-        item_id = f"{kind}:{item_id}"
+    if not kind:
+        declared = action.get("kind") or action.get("item_type")
+        if action.get("item_type"):
+            logger.warning(
+                "Deprecated: action uses 'item_type: %s' — rename to 'kind: %s'",
+                action["item_type"],
+                action["item_type"],
+            )
+        if declared:
+            kind = declared
+            bare_id = item_id
+            item_id = f"{kind}:{item_id}"
+        elif primary == "execute":
+            return {
+                "status": "error",
+                "error": (
+                    f"Action item_id {item_id!r} has no canonical ref prefix "
+                    f"and no 'kind' field. Use a canonical ref (e.g. 'tool:{item_id}') "
+                    f"or add 'kind: tool' to the action."
+                ),
+            }
 
     # Directives need an LLM thread — the walker has no LLM, so inline
     # would just return your_directions with no one to follow them.
@@ -2584,7 +2601,16 @@ async def _handle_foreach(
     interp_ctx: Dict[str, Any] = {"state": state, "inputs": inputs, **_builtins()}
     over_expr = node.get("over", "")
     items = interpolation.interpolate(over_expr, interp_ctx)
-    if not isinstance(items, list):
+    if isinstance(items, str):
+        try:
+            parsed = json.loads(items)
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                items = []
+        except (json.JSONDecodeError, ValueError):
+            items = []
+    elif not isinstance(items, list):
         items = []
 
     as_var = node.get("as", "item")

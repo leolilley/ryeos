@@ -1193,7 +1193,7 @@ async def resolve_execution(
             item_id=binding["item_id"],
             project_path=binding["project_path"],
             parameters=parameters,
-            thread=body.get("thread"),
+            thread=body.get("thread") or "inline",
             secret_envelope=binding.get("secret_envelope"),
             vault_keys=binding.get("vault_keys") or None,
         )
