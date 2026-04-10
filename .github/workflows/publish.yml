@@ -58,7 +58,7 @@ jobs:
           cp lillux/lillux/dist-sdist/* lillux/lillux/dist/
 
       - name: Upload lillux dist
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: lillux-dist
           path: lillux/lillux/dist/
@@ -77,7 +77,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Download lillux dist
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: lillux-dist
           path: lillux/lillux/dist
@@ -181,7 +181,7 @@ jobs:
 
       - name: Download lillux dist
         if: steps.check.outputs.skip == 'false'
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: lillux-dist
           path: lillux/lillux/dist
@@ -290,7 +290,7 @@ jobs:
 
       - name: Download lillux dist
         if: steps.check.outputs.skip == 'false'
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: lillux-dist
           path: lillux/lillux/dist
@@ -377,7 +377,7 @@ jobs:
 
       - name: Download lillux dist
         if: steps.check.outputs.skip == 'false'
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: lillux-dist
           path: dist
