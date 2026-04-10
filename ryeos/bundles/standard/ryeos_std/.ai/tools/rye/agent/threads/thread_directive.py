@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:25d428c6c37256281154074c5074ec12f23a092d70417e5ec3ef4be25ec398cf:lyyNbHFnOwJaSuSXOWpc46Afh92NATJRfxDh2aKfPV2Tk6JXWygOd-g_QhSEJtl3jW4zqAoA0wWQXXNCGQVfAQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T02:01:40Z:69c1aa7cc503bd18e19d21996185457301a5937325f277b0ba314cd670bb2440:xFsedL1tVVOTr-PynV37BE_KRgqT_89xeYbeBi2Nb54gQcweWhtIKKifwatC6AYHDiH4jHDjklagXVukFcNzCA:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -399,10 +399,18 @@ def _assess_capability_risk(
         def __init__(self):
             super().__init__("capability_risk.yaml")
 
+    from rye.utils.integrity import IntegrityError
+
     loader = CapRiskLoader()
     try:
         config = loader.load(project_path)
+    except IntegrityError:
+        raise
     except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to load capability_risk.yaml", exc_info=True,
+        )
         return None
 
     risk_levels = config.get("risk_levels", {})
@@ -458,6 +466,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
     thread_id_override = params.pop("_thread_id", None)
     pre_registered = params.pop("_pre_registered", False)
     continuation_message = params.pop("_continuation_message", None)
+
+    # Pop execution config params that may leak from graph/config layer
+    params.pop("max_steps", None)
+    params.pop("max_concurrency", None)
+    params.pop("timeout", None)
 
     allowed = set(CONFIG_SCHEMA["properties"].keys())
     unknown = set(params.keys()) - allowed
