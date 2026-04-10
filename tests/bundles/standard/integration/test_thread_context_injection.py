@@ -404,72 +404,39 @@ class TestCapabilityRisk:
         spec.loader.exec_module(mod)
         return mod._assess_capability_risk
 
-    @pytest.fixture
-    def project_with_risk_config(self, tmp_path, monkeypatch):
-        """Create a self-contained project with capability_risk.yaml.
-
-        - Copies the config without the signature line so it loads as
-          unsigned (allow_unsigned=True) without needing a trusted key.
-        - Patches get_system_spaces to return empty so the loader only
-          finds the project-level config (avoids hitting dev-signed
-          system bundle configs that CI can't verify).
-        """
-        src = (
-            PROJECT_ROOT
-            / "ryeos"
-            / "bundles"
-            / "standard"
-            / "ryeos_std"
-            / ".ai"
-            / "config"
-            / "agent"
-            / "capability_risk.yaml"
-        )
-        dst = tmp_path / ".ai" / "config" / "agent" / "capability_risk.yaml"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        lines = src.read_text().splitlines(keepends=True)
-        with open(dst, "w") as f:
-            for line in lines:
-                if not line.startswith("# rye:signed:"):
-                    f.write(line)
-
-        import rye.utils.path_utils as _pu
-        monkeypatch.setattr(_pu, "_system_spaces_cache", [])
-        return tmp_path
-
-    def test_unrestricted_blocked_without_ack(self, risk_fn, project_with_risk_config):
+    def test_unrestricted_blocked_without_ack(self, risk_fn, tmp_path):
         """rye.* is classified as unrestricted and blocked."""
-        result = risk_fn(["rye.*"], [], "test-thread", project_with_risk_config)
+        result = risk_fn(["rye.*"], [], "test-thread", tmp_path)
         assert result is not None
         assert result["risk"] == "unrestricted"
         assert "acknowledge" in result["error"].lower()
 
-    def test_unrestricted_allowed_with_ack(self, risk_fn, project_with_risk_config):
+    def test_unrestricted_allowed_with_ack(self, risk_fn, tmp_path):
         """rye.* passes when acknowledged."""
         acks = [{"risk": "unrestricted", "reason": "needed"}]
-        result = risk_fn(["rye.*"], acks, "test-thread", project_with_risk_config)
+        result = risk_fn(["rye.*"], acks, "test-thread", tmp_path)
         assert result is None
 
-    def test_safe_capabilities_pass(self, risk_fn, project_with_risk_config):
+    def test_safe_capabilities_pass(self, risk_fn, tmp_path):
         """rye.fetch.* is safe."""
-        result = risk_fn(["rye.fetch.*"], [], "test-thread", project_with_risk_config)
+        result = risk_fn(["rye.fetch.*"], [], "test-thread", tmp_path)
         assert result is None
-        result = risk_fn(["rye.fetch.*"], [], "test-thread", project_with_risk_config)
+        result = risk_fn(["rye.fetch.*"], [], "test-thread", tmp_path)
         assert result is None
 
-    def test_file_system_write_allowed(self, risk_fn, project_with_risk_config):
+    def test_file_system_write_allowed(self, risk_fn, tmp_path):
         """rye.execute.tool.rye.file-system.* is write risk, policy: allow."""
         result = risk_fn(
-            ["rye.execute.tool.rye.file-system.*"], [], "test-thread", project_with_risk_config
+            ["rye.execute.tool.rye.file-system.*"], [], "test-thread", tmp_path
         )
         assert result is None
 
-    def test_most_specific_wins(self, risk_fn, project_with_risk_config):
+    def test_most_specific_wins(self, risk_fn, tmp_path):
         """Specific pattern (file-system) beats broad pattern (execute.*)."""
         # rye.execute.tool.rye.file-system.* → write (allow)
         # even though rye.execute.* → elevated (acknowledge_required)
         result = risk_fn(
-            ["rye.execute.tool.rye.file-system.fs_write"], [], "test-thread", project_with_risk_config
+            ["rye.execute.tool.rye.file-system.fs_write"], [], "test-thread", tmp_path
         )
         assert result is None
 

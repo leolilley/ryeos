@@ -122,7 +122,7 @@ jobs:
           )
           for bundle in "${BUNDLES[@]}"; do
             for item_type in directive tool knowledge config; do
-              rye -p "$bundle" sign "$item_type" '*' 2>/dev/null || true
+              rye -p "$bundle" sign "${item_type}:*" 2>/dev/null || true
             done
           done
 
@@ -218,13 +218,13 @@ jobs:
           # Re-sign ryeos-core first (provides bundler/verify tools used by all bundles)
           CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           for item_type in directive tool knowledge config; do
-            rye -p "$CORE_DIR" sign "$item_type" '*' 2>/dev/null || true
+            rye -p "$CORE_DIR" sign "${item_type}:*" 2>/dev/null || true
           done
           # Re-sign target bundle items with CI key
           PACKAGE_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           if [ "$PACKAGE_DIR" != "$CORE_DIR" ]; then
             for item_type in directive tool knowledge config; do
-              rye -p "$PACKAGE_DIR" sign "$item_type" '*' 2>/dev/null || true
+              rye -p "$PACKAGE_DIR" sign "${item_type}:*" 2>/dev/null || true
             done
           fi
           # Rebuild manifest so hashes match the re-signed files
@@ -333,12 +333,12 @@ jobs:
           # Re-sign ryeos-core first (provides bundler tools used by all bundles)
           CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
           for item_type in directive tool knowledge config; do
-            rye -p "$CORE_DIR" sign "$item_type" '*' 2>/dev/null || true
+            rye -p "$CORE_DIR" sign "${item_type}:*" 2>/dev/null || true
           done
           # Re-sign target bundle items
           if [ "${{ steps.pkg.outputs.dir }}" != "$CORE_DIR" ]; then
             for item_type in directive tool knowledge config; do
-              rye -p "${{ steps.pkg.outputs.dir }}" sign "$item_type" '*' 2>/dev/null || true
+              rye -p "${{ steps.pkg.outputs.dir }}" sign "${item_type}:*" 2>/dev/null || true
             done
           fi
           BUNDLE_VERSION=$(python -c "import tomllib; print(tomllib.load(open('${{ matrix.path }}/pyproject.toml','rb'))['project']['version'])")
