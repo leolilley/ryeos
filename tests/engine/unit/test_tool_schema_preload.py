@@ -416,6 +416,103 @@ class TestPreloadToolSchemas:
 # ---------------------------------------------------------------------------
 
 
+class TestRegisteredActions:
+    """registered_actions tracks which primary action wrappers were registered."""
+
+    def test_tool_only_caps_skip_rye_execute(self, tool_project):
+        """Pure execute.tool.* capabilities: no rye_execute, registered_actions excludes execute."""
+        from unittest.mock import patch
+
+        mock_paths = [(tool_project / ".ai" / "tools", "project")]
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
+            with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
+                    result = _tsl.preload_tool_schemas(
+                        ["rye.execute.tool.rye.bash.*"],
+                        tool_project,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
+                    )
+
+        names = _tool_names(result["tool_defs"])
+        assert "rye_execute" not in names
+        assert "execute" not in result["registered_actions"]
+        # Direct tool should still be registered
+        ids = _tool_ids(result["tool_defs"])
+        assert "rye/bash/bash" in ids
+
+    def test_execute_directive_registers_rye_execute(self, tool_project):
+        """execute.directive.* capability registers rye_execute wrapper."""
+        result = _tsl.preload_tool_schemas(
+            ["rye.execute.directive.*"],
+            tool_project,
+            primary_actions=_MOCK_PRIMARY_ACTIONS,
+        )
+
+        names = _tool_names(result["tool_defs"])
+        assert "rye_execute" in names
+        assert "execute" in result["registered_actions"]
+
+    def test_execute_knowledge_registers_rye_execute(self, tool_project):
+        """execute.knowledge.* capability registers rye_execute wrapper."""
+        result = _tsl.preload_tool_schemas(
+            ["rye.execute.knowledge.*"],
+            tool_project,
+            primary_actions=_MOCK_PRIMARY_ACTIONS,
+        )
+
+        names = _tool_names(result["tool_defs"])
+        assert "rye_execute" in names
+        assert "execute" in result["registered_actions"]
+
+    def test_mixed_tool_and_directive_keeps_rye_execute(self, tool_project):
+        """execute.tool + execute.directive: rye_execute registered."""
+        from unittest.mock import patch
+
+        mock_paths = [(tool_project / ".ai" / "tools", "project")]
+        with patch.object(
+            _tsl.ToolResolver, "get_search_paths", return_value=mock_paths
+        ):
+            with patch.object(_tsl, "get_tool_extensions", return_value=[".py"]):
+                with patch.object(
+                    _tsl, "get_parsers_map", return_value=_DEFAULT_PARSERS_MAP
+                ):
+                    result = _tsl.preload_tool_schemas(
+                        ["rye.execute.tool.rye.bash.*", "rye.execute.directive.*"],
+                        tool_project,
+                        primary_actions=_MOCK_PRIMARY_ACTIONS,
+                    )
+
+        assert "execute" in result["registered_actions"]
+
+    def test_fetch_sign_tracked_in_registered_actions(self, tool_project):
+        """fetch and sign appear in registered_actions when granted."""
+        result = _tsl.preload_tool_schemas(
+            ["rye.fetch.*", "rye.sign.*"],
+            tool_project,
+            primary_actions=_MOCK_PRIMARY_ACTIONS,
+        )
+
+        assert "fetch" in result["registered_actions"]
+        assert "sign" in result["registered_actions"]
+        assert "execute" not in result["registered_actions"]
+
+    def test_empty_caps_returns_empty_registered_actions(self, tool_project):
+        result = _tsl.preload_tool_schemas([], tool_project)
+        assert result["registered_actions"] == set()
+
+    def test_no_primary_actions_returns_empty_registered_actions(self, tool_project):
+        """Without primary_actions arg, no wrappers registered."""
+        result = _tsl.preload_tool_schemas(
+            ["rye.fetch.*"],
+            tool_project,
+        )
+        assert result["registered_actions"] == set()
+
+
 class TestResolveExtendsConditions:
     def test_has_extends_false_matches(self):
         ctx = {"has_extends": False, "directive": "test/deploy"}
@@ -452,7 +549,7 @@ class TestResolveExtendsConditions:
 
 
 class TestBaseDirectives:
-    def test_base_has_full_permissions_and_protocol(self):
+    def test_base_has_full_permissions(self):
         path = _STD_ROOT / ".ai" / "directives" / "rye" / "agent" / "core" / "base.md"
         assert path.exists()
         content = path.read_text()
@@ -461,6 +558,14 @@ class TestBaseDirectives:
         assert "<sign>*</sign>" in content
         assert "rye/agent/core/Identity" in content
         assert "rye/agent/core/Behavior" in content
+
+    def test_general_base_has_no_protocol_docs(self):
+        """agent/core/base should not inject framework protocol docs."""
+        path = _STD_ROOT / ".ai" / "directives" / "agent" / "core" / "base.md"
+        assert path.exists()
+        content = path.read_text()
+        assert "agent/core/Behavior" in content
+        assert "rye/agent/core/protocol" not in content
 
     def test_base_execute_only_is_narrow(self):
         path = (

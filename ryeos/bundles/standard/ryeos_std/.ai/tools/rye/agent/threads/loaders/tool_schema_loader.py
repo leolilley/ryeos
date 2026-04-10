@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:f70e6728a0c48a5c6a5099bd139283cf9595868e7a02f85ce92d3e15b1b97653:VIrTMqUEi3JB_8W12zG-aAakyVdclYEarDkE166F9B5a2YhCwHLHqOUVwn7sQstjsoGmzCEjQh33VecQMFN2AQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T03:52:47Z:b92cc586a525e88838cc86bc32d61b8bca2724930c20d0bdd27c96150d1462a9:FdtXgfYmHOJ07PdkTh5g7Y3-ldn2ZpKuuW1_4AfrL6PyhdAEC6TBpqrY5jjWTlHkXgVhj1ADMMAqKWoGtaP4Dg:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"
@@ -486,7 +486,7 @@ def preload_tool_schemas(
             tool_patterns.append(classified["pattern"])
 
     if not tool_patterns and not granted_actions:
-        return {"tool_defs": [], "capabilities_summary": []}
+        return {"tool_defs": [], "capabilities_summary": [], "registered_actions": set()}
 
     # Step 2: Build tool defs for primary actions (fetch, sign).
     # rye_execute is NOT registered as an agent tool — its functionality
@@ -494,10 +494,20 @@ def preload_tool_schemas(
     tool_defs: List[dict] = []
     seen: set = set()
     capabilities_summary: List[str] = []
+    registered_actions: set = set()
+
+    execute_types = action_item_types.get("execute", set())
+    _EXECUTE_NEEDS_WRAPPER = {"directive", "knowledge"}
 
     if primary_actions:
         for action in _PRIMARY_ACTIONS:
             if action not in granted_actions:
+                continue
+            # rye_execute is only needed when the directive can execute
+            # directives or knowledge items (which can't be preloaded as
+            # individual tool schemas). Pure execute.tool capabilities
+            # are fully covered by direct tool defs from Step 3.
+            if action == "execute" and not (execute_types & _EXECUTE_NEEDS_WRAPPER):
                 continue
             primary_name = f"rye_{action}"
             for t in primary_actions:
@@ -518,6 +528,7 @@ def preload_tool_schemas(
                         "_item_id": tool_id,
                         "_primary": action,
                     })
+                    registered_actions.add(action)
                     seen.add(tool_id)
 
                     # Build summary entry
@@ -578,4 +589,5 @@ def preload_tool_schemas(
         "tool_defs": tool_defs,
         "capabilities_summary": capabilities_summary,
         "capabilities_tree": _format_capabilities_tree(capabilities, project_path),
+        "registered_actions": registered_actions,
     }

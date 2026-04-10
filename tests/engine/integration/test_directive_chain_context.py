@@ -373,9 +373,8 @@ class TestChainMetadata:
 
 # ── Knowledge content extraction ─────────────────────────────────────
 #
-# These test the knowledge execution + content extraction path in
-# thread_directive.execute() step 5, which assembles the system_prompt
-# from the resolved extends chain's context knowledge items.
+# These test the context materializer in thread_directive.execute()
+# step 10.5 which executes knowledge items from the extends chain.
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -385,10 +384,9 @@ async def _build_context_from_chain(
     knowledge_contents: dict,
     project_path: str = "/tmp/test",
 ):
-    """Helper: resolve extends chain + execute knowledge items, return (system_prompt, directive_context).
+    """Helper: resolve extends chain + materialize context, return (system_prompt, directive_context).
 
-    Mirrors the logic in thread_directive.execute() step 5 but isolated
-    from the full execute() flow (no LLM, no harness, no registry).
+    Mirrors the context materializer in thread_directive.execute() step 10.5.
 
     Args:
         directive: parsed directive dict (with extends/context)
@@ -405,7 +403,6 @@ async def _build_context_from_chain(
     # Mock ExecuteTool.handle to return knowledge bodies
     async def _mock_exec_handle(**kwargs):
         item_id = kwargs.get("item_id", "")
-        # Strip "knowledge:" prefix
         bare = item_id.replace("knowledge:", "")
         if bare in knowledge_contents:
             return {"status": "success", "content": knowledge_contents[bare]}

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T03:19:47Z:44f556add13063be9a6173c2a38b5a075a5110bd125ecdc7a468fc4c4e68b57c:q9vLov9OsD9wEsWGziEdoh0cumCMzCGjoswJ1YyBCDLsu2TXkROS4vFDd42jPDj_0oJGOiBpr2ONF5tv87feBA:4b987fd4e40303ac
+# rye:signed:2026-04-10T04:05:59Z:aed6ada3a0d7d4c4a046f648280fbd158b24abb0ee16145054595d5445b7a281:ZHHq4gTSyeAaqo13iTFmnAQ6EVRufAoqaTKHMrwWf64LkCmruDW_BrXoXVt4wV1qekMmDamROOtw8poe71y_Dw:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -589,52 +589,14 @@ async def execute(params: Dict, project_path: str) -> Dict:
                 )
             break  # first match wins
 
-    # 5. Resolve extends chain and compose context
-    system_prompt = ""
-    directive_context = {"before": "", "after": "", "suppress": []}
+    # 5. Resolve extends chain — collect raw context IDs for deferred materialization
+    chain_context = {"system": [], "before": [], "after": [], "suppress": []}
     if directive.get("extends") or directive.get("context"):
         try:
             chain_result = await _resolve_directive_chain(
                 directive_name, directive, project_path
             )
-            # Execute knowledge items for all context positions.
-            # Execute (not fetch) runs the knowledge executor which
-            # parses frontmatter and returns just the body content.
-            from rye.actions.execute import ExecuteTool
-            exec_tool = ExecuteTool(user_space=user_space)
-            suppressed = set(chain_result["context"].get("suppress", []))
-            for position in ("system", "before", "after"):
-                parts = []
-                for kid in chain_result["context"].get(position, []):
-                    if kid in suppressed:
-                        continue
-                    kr = await exec_tool.handle(
-                        item_id=f"knowledge:{kid}", project_path=project_path,
-                    )
-                    if kr.get("status") != "success":
-                        error = kr.get("error", "unknown error")
-                        # Integrity failures must abort — untrusted/tampered
-                        # context must never be silently injected or skipped.
-                        if "integrity" in error.lower() or "untrusted" in error.lower():
-                            raise ValueError(
-                                f"Context knowledge '{kid}' (position={position}) "
-                                f"integrity failure: {error}"
-                            )
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Context knowledge '%s' (position=%s) failed: %s",
-                            kid, position, error,
-                        )
-                        continue
-                    content = kr.get("content", "")
-                    if content:
-                        parts.append(content.strip())
-                if parts:
-                    if position == "system":
-                        system_prompt = "\n\n".join(parts)
-                    else:
-                        directive_context[position] = "\n\n".join(parts)
-            directive_context["suppress"] = list(suppressed)
+            chain_context = chain_result["context"]
 
             # Merge parent capabilities from extends chain.
             # The root directive provides the broadest capabilities;
@@ -767,7 +729,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             }
         orchestrator_mod.increment_spawn_count(parent_thread_id)
 
-    # 10. Build hooks, harness
+    # 10. Build hooks, harness, preload tool schemas
     hooks = _merge_hooks(directive.get("hooks", []), project_path)
 
     SafetyHarness = load_module("safety_harness", anchor=_ANCHOR).SafetyHarness
@@ -791,6 +753,47 @@ async def execute(params: Dict, project_path: str) -> Dict:
     ) if preload_config.get("enabled", True) else {"tool_defs": [], "capabilities_summary": []}
     harness.available_tools = preload_result["tool_defs"]
     harness.capabilities_tree = preload_result.get("capabilities_tree", "")
+
+    # 11. Materialize context — execute knowledge items declared by the
+    # extends chain.  Deferred to after tool preloading so all capability
+    # information is available; the harness just processes whatever context
+    # the directive declares without injecting framework-specific docs.
+    system_prompt = ""
+    directive_context = {"before": "", "after": "", "suppress": []}
+    if any(chain_context.get(pos) for pos in ("system", "before", "after")):
+        from rye.actions.execute import ExecuteTool
+        exec_tool = ExecuteTool(user_space=user_space)
+        suppressed = set(chain_context.get("suppress", []))
+        for position in ("system", "before", "after"):
+            parts = []
+            for kid in chain_context.get(position, []):
+                if kid in suppressed:
+                    continue
+                kr = await exec_tool.handle(
+                    item_id=f"knowledge:{kid}", project_path=project_path,
+                )
+                if kr.get("status") != "success":
+                    error = kr.get("error", "unknown error")
+                    if "integrity" in error.lower() or "untrusted" in error.lower():
+                        raise ValueError(
+                            f"Context knowledge '{kid}' (position={position}) "
+                            f"integrity failure: {error}"
+                        )
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Context knowledge '%s' (position=%s) failed: %s",
+                        kid, position, error,
+                    )
+                    continue
+                content = kr.get("content", "")
+                if content:
+                    parts.append(content.strip())
+            if parts:
+                if position == "system":
+                    system_prompt = "\n\n".join(parts)
+                else:
+                    directive_context[position] = "\n\n".join(parts)
+        directive_context["suppress"] = list(suppressed)
 
     # Grant directive_return as a direct tool if directive declares <outputs>
     directive_outputs = directive.get("outputs", [])
@@ -859,7 +862,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "thread_id": thread_id,
         }
 
-    # 11. Reserve budget
+    # 12. Reserve budget
     budgets = load_module("persistence/budgets", anchor=_ANCHOR)
     ledger = budgets.get_ledger(proj_path)
     spend_limit = limits.get("spend", 1.0)
@@ -945,7 +948,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         directive_name, directive_desc, directive_body
     ]))
 
-    # 12. Write initial thread.json
+    # 13. Write initial thread.json
     registry.update_status(thread_id, "running")
     _write_thread_meta(
         proj_path, thread_id, directive_name, "running",
@@ -953,7 +956,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         limits=limits, capabilities=harness._capabilities,
     )
 
-    # 13. Async spawn — child re-enters execute() and runs through the sync path.
+    # 14. Async spawn — child re-enters execute() and runs through the sync path.
     # Parent thread ID is forwarded explicitly in child_params so the child
     # discovers its actual parent, not itself (RYE_PARENT_THREAD_ID env is
     # only set for the sync path below, where in-process grandchildren need it).
@@ -1011,12 +1014,12 @@ async def execute(params: Dict, project_path: str) -> Dict:
             "pid": spawn_result["pid"],
         }
 
-    # 14. Set env var so in-process children discover this thread as parent
+    # 15. Set env var so in-process children discover this thread as parent
     # Only needed for sync execution — async children get parent via child_params.
     _prev_parent_env = os.environ.get("RYE_PARENT_THREAD_ID")
     os.environ["RYE_PARENT_THREAD_ID"] = thread_id
 
-    # 15. Run thread synchronously
+    # 16. Run thread synchronously
     # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
     try:
         result = await runner.run(
@@ -1040,7 +1043,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         if not result.get("success") and not result.get("error"):
             result["error"] = result.get("status", "unknown error (no message from runner)")
 
-        # 15. Report spend and finalize
+        # 17. Report spend and finalize
         actual_spend = result.get("cost", {}).get("spend", 0.0)
         try:
             ledger.report_actual(thread_id, actual_spend)
