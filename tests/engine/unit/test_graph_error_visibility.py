@@ -321,10 +321,10 @@ class TestProcessStatusErrorCount:
     """processes/status should include errors_suppressed for completed_with_errors."""
 
     def test_status_completed_with_errors_includes_count(self, tmp_path):
-        from rye.constants import AI_DIR
+        from rye.constants import AI_DIR, STATE_THREADS_REL
 
         # Set up registry with a completed_with_errors thread
-        db_path = tmp_path / AI_DIR / "agent" / "threads"
+        db_path = tmp_path / AI_DIR / STATE_THREADS_REL
         db_path.mkdir(parents=True)
 
         import sqlite3
@@ -399,9 +399,9 @@ class TestProcessStatusErrorCount:
             sys.path.remove(status_dir)
 
     def test_status_completed_no_errors_suppressed(self, tmp_path):
-        from rye.constants import AI_DIR
+        from rye.constants import AI_DIR, STATE_THREADS_REL
 
-        db_path = tmp_path / AI_DIR / "agent" / "threads"
+        db_path = tmp_path / AI_DIR / STATE_THREADS_REL
         db_path.mkdir(parents=True)
 
         import sqlite3
@@ -461,9 +461,9 @@ class TestProcessListErrorCount:
     """processes/list should include errors_suppressed for completed_with_errors entries."""
 
     def test_list_completed_with_errors_includes_count(self, tmp_path):
-        from rye.constants import AI_DIR
+        from rye.constants import AI_DIR, STATE_THREADS_REL
 
-        db_path = tmp_path / AI_DIR / "agent" / "threads"
+        db_path = tmp_path / AI_DIR / STATE_THREADS_REL
         db_path.mkdir(parents=True)
 
         import sqlite3
@@ -528,9 +528,9 @@ class TestProcessListErrorCount:
             sys.path.remove(list_dir)
 
     def test_list_completed_with_errors_excluded_from_active(self, tmp_path):
-        from rye.constants import AI_DIR
+        from rye.constants import AI_DIR, STATE_THREADS_REL
 
-        db_path = tmp_path / AI_DIR / "agent" / "threads"
+        db_path = tmp_path / AI_DIR / STATE_THREADS_REL
         db_path.mkdir(parents=True)
 
         import sqlite3
@@ -595,9 +595,9 @@ class TestProcessListErrorCount:
             sys.path.remove(list_dir)
 
     def test_list_normal_completed_no_errors_suppressed(self, tmp_path):
-        from rye.constants import AI_DIR
+        from rye.constants import AI_DIR, STATE_THREADS_REL
 
-        db_path = tmp_path / AI_DIR / "agent" / "threads"
+        db_path = tmp_path / AI_DIR / STATE_THREADS_REL
         db_path.mkdir(parents=True)
 
         import sqlite3

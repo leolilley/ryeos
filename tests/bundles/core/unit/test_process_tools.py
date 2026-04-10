@@ -54,9 +54,9 @@ _list_tool = _load_tool("list")
 @pytest.fixture
 def registry_db(tmp_path):
     """Create a temporary thread registry database."""
-    from rye.constants import AI_DIR
+    from rye.constants import AI_DIR, STATE_THREADS_REL
 
-    db_dir = tmp_path / AI_DIR / "agent" / "threads"
+    db_dir = tmp_path / AI_DIR / STATE_THREADS_REL
     db_dir.mkdir(parents=True)
     db_path = db_dir / "registry.db"
 
@@ -220,7 +220,9 @@ class TestCancelTool:
         assert result["pid"] == 12345
 
         # Verify registry was updated
-        with sqlite3.connect(registry_db / ".ai" / "agent" / "threads" / "registry.db") as conn:
+        from rye.constants import AI_DIR, STATE_THREADS_REL
+
+        with sqlite3.connect(registry_db / AI_DIR / STATE_THREADS_REL / "registry.db") as conn:
             cursor = conn.execute("SELECT status FROM threads WHERE thread_id = ?", ("test-run-001",))
             assert cursor.fetchone()[0] == "cancelled"
 
