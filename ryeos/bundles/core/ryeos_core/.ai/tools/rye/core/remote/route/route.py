@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:b6414cf76215d4db33675d7834bb998b3b15ace377506ad1fc8af2d7357706f1:HjfElr3EK_k4eyEawaFX76fhuKpFqR-EEoI2fmOG3yinpxB8dtaVc9jGvKWyVYZED8zcRgzVTVgSwM2Hfp21AQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:b6414cf76215d4db33675d7834bb998b3b15ace377506ad1fc8af2d7357706f1:HjfElr3EK_k4eyEawaFX76fhuKpFqR-EEoI2fmOG3yinpxB8dtaVc9jGvKWyVYZED8zcRgzVTVgSwM2Hfp21AQ:4b987fd4e40303ac
 """
 Reference routing tool — capability-based dispatch to cluster nodes.
 

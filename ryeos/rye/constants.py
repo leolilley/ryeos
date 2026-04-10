@@ -16,6 +16,12 @@ STATE_GRAPHS = "graphs"
 STATE_OBJECTS = "objects"
 STATE_CACHE = "cache"
 
+# Derived path segments for thread persistence (use with AI_DIR / ...)
+# State: .ai/state/threads/{thread_id}/  (JSONL, thread.json, capabilities, etc.)
+STATE_THREADS_REL = f"{STATE_DIR}/{STATE_THREADS}"
+# Knowledge: .ai/knowledge/agent/threads/  (rendered markdown transcripts)
+KNOWLEDGE_THREADS_REL = "knowledge/agent/threads"
+
 
 class ItemType:
     """Item type constants."""

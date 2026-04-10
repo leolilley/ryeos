@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:2127910366218e15b1729457bdadd21bb62ce220fb55fadc1eb5ca30d00aeadf:0uscUOgOyfbL9Sy2g6JY12kvMns0PSkB7zraiqYGtGLHU-spGH1Ztz8SNvRDpieslPz_zxg3K1F4enexjYmbAw:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:d79caaa67762fa33fe6c9507ee0b00d28e5eebb25f8bab810673b17a83893424:YWEm9WHdJKOdqZJVcBQTyDajJo79aFZ69gaeV_F77CkYB0ywa6zFWdDhxgTX71Yl-5u_ib8TkM7DS5xploEZBA:4b987fd4e40303ac
 """
 persistence/state_store.py: Atomic thread state persistence
 
@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, STATE_THREADS_REL
 
 
 class StateStore:
@@ -23,7 +23,7 @@ class StateStore:
 
     def __init__(self, project_path: Path):
         self.project_path = Path(project_path)
-        self.state_dir = self.project_path / AI_DIR / "state" / "threads"
+        self.state_dir = self.project_path / AI_DIR / STATE_THREADS_REL
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def save_state(self, thread_id: str, state: Dict[str, Any]):

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:ef5c3b0c788f782597b254e6ca388fc6fbfec9493b1c6becccf30b5380f366a9:6gjSFC0nhES2p_dEeMWivsP3qLMMErX0Hs6xfx-HwK_1tY6w_8v3dzUSJtVLy78fScKedvN0rPh3Z72ayxT0Dw:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:e61fa4c457be9855e0c0e474eeeee0abad922283646745d28452a09e476bd76a:EJJOecNYp6l4uaxBciDiTmWUrEwxZC7T0nvxIu0Ot0GbHIetDsuv8n-u1R_0Jpw_2LFAYG9kTGtCflzuNe_DDg:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from module_loader import load_module
+from rye.constants import AI_DIR, STATE_THREADS_REL
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ async def run(
     # Checkpoint signing for transcript integrity
     transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
     signer = transcript_signer_mod.TranscriptSigner(
-        thread_id, project_path / ".ai" / "agent" / "threads" / thread_id
+        thread_id, project_path / AI_DIR / STATE_THREADS_REL / thread_id
     )
 
     # Directive-level context suppressions (e.g. <suppress>tool-protocol</suppress>)

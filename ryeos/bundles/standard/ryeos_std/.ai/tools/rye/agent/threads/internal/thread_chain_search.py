@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:497deaa35aa7a9ee21303ff89e4e86fa94f27f05f4d4b71966e6178fca0e95d0:fvmpL66QnXrPhLAPDrYi-0GT6zSjlqNlPyhRAb70tvMHxxHXGDyk8SV8PsSWCDYO6_LmyDCCQZRBHUyz3plrBg:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:a013634a889ff8ee8871b950ba4008c5b4f8f2e8ee2896ceceeb00c36391b0ea:2_BDEvqRfWCUCpfuzFCxQ0FHYkO7uoT3-kOkV5YsMVsL1Q5tVSYmHx-T4BCOEzzMbmp1ClMxFU71Xk3kDYn7AQ:4b987fd4e40303ac
 # internal/thread_chain_search.py
 __version__ = "1.0.0"
 __tool_type__ = "python"
@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Dict
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, STATE_THREADS_REL
 
 from module_loader import load_module
 
@@ -64,7 +64,7 @@ def execute(params: Dict, project_path: str) -> Dict:
 
     for thread in chain:
         tid = thread["thread_id"]
-        transcript_path = proj_path / AI_DIR / "agent" / "threads" / tid / "transcript.jsonl"
+        transcript_path = proj_path / AI_DIR / STATE_THREADS_REL / tid / "transcript.jsonl"
 
         if not transcript_path.exists():
             continue

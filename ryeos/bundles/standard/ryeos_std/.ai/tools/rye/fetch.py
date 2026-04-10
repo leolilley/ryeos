@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:dde97f9db693d10103b0f7c46f62106de857e865928f492dd7cadcf5cec25e20:URJWmZK2_H3OIp0dUxuAhZE8n1mDqDlcWM169_ugLAHTYr38g5Z4_OFZ8QiRZxy5pBihCduMf9QvCqW_ZQLqDg:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:dde97f9db693d10103b0f7c46f62106de857e865928f492dd7cadcf5cec25e20:URJWmZK2_H3OIp0dUxuAhZE8n1mDqDlcWM169_ugLAHTYr38g5Z4_OFZ8QiRZxy5pBihCduMf9QvCqW_ZQLqDg:4b987fd4e40303ac
 """Resolve items by ID or discover by query."""
 
 import argparse

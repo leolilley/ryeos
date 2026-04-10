@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:97d094d2098f53d279e1f0a70976f185cb26847e52b88ee354cd623e08224843:ZTG2adSY0laUbg3OdESf7q9TQKoP0cfTief9kgQApR9qcXRvOuuLDOqaz49lblS0WlZZNsyynNW6EGtDzw3hBA:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:97d094d2098f53d279e1f0a70976f185cb26847e52b88ee354cd623e08224843:ZTG2adSY0laUbg3OdESf7q9TQKoP0cfTief9kgQApR9qcXRvOuuLDOqaz49lblS0WlZZNsyynNW6EGtDzw3hBA:4b987fd4e40303ac
 """Node management tool — init, start, stop, authorize, and configure ryeos-node.
 
 Actions:

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:2594597f222c1a3a6f4ee2da9b92fe79f02c1ba817f2b345ab6003a7431febe1:3kn_V06R69AaX9Z239TBeL_7i7ia3TNe-uhIPwsXBVNAoymGhgXCc29gU7hNGXrGCy0fJsppzMiUYh6mIZ5VDw:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:2594597f222c1a3a6f4ee2da9b92fe79f02c1ba817f2b345ab6003a7431febe1:3kn_V06R69AaX9Z239TBeL_7i7ia3TNe-uhIPwsXBVNAoymGhgXCc29gU7hNGXrGCy0fJsppzMiUYh6mIZ5VDw:4b987fd4e40303ac
 """Knowledge executor — returns knowledge content without metadata.
 
 Receives a generic envelope from the engine:

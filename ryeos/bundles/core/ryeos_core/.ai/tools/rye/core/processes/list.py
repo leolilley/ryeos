@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:13343cd1529a02c102fccbea0f1e488d7366c822553c807fd02b9f7f779335f9:qHWgLpB2NYp7KGjPwDws5pSfWa3NGpZOzAu4btyG12XZcrFfNeqEEynxEFzn0KuGryPc6NNIbxlQNR1xJl8BAg:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:7af27ac87773f7b6cc1fac81078b39afb48391c8c6cafa87135fbac14650a5fa:6SSSo9j6TXoKUyZTw9Qb7uY2_zkREjo3wFfZHgUy5hX5FP8knanSgjoR7UqfO7YduAQ2M0WMF_1qpEKv7-DCBw:4b987fd4e40303ac
 """List running processes from thread registry."""
 
 import argparse
@@ -26,10 +26,10 @@ CONFIG_SCHEMA = {
 
 
 def execute(params: dict, project_path: str) -> dict:
-    from rye.constants import AI_DIR
+    from rye.constants import AI_DIR, STATE_THREADS_REL
 
     proj = Path(project_path)
-    db_path = proj / AI_DIR / "agent" / "threads" / "registry.db"
+    db_path = proj / AI_DIR / STATE_THREADS_REL / "registry.db"
     if not db_path.exists():
         return {"success": True, "runs": [], "count": 0}
 

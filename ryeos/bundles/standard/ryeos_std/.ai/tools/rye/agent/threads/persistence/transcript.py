@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:a8b27975a6bac001a8b53347bacaa3bf18b6d5de13914343b9d3e44bfed32ed3:slQDeQjwPP66X4sVvzK2VUir5fvOmS3xcvZ0uPZScIywEjOWKgi8EAXW0caQ0HGOb2hy_-ZS2JYDTbrE-supCA:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:0f772060294fa79e85873eaa8e18700c170365b77577843175b5311134525e0c:6jbWjZJe2A-DzkKWFzoLl93TB67iDeRRRfT233mNDOX7Jwqu71f4kOF_K2sGUk4O7j65NyZrWLitcheAQjyPAw:4b987fd4e40303ac
 """
 persistence/transcript.py: Thread execution transcript (JSONL)
 
@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, STATE_THREADS_REL, KNOWLEDGE_THREADS_REL
 
 
 class Transcript:
@@ -30,7 +30,7 @@ class Transcript:
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
         self._project_path = project_path
-        self._dir = project_path / AI_DIR / "state" / "threads" / thread_id
+        self._dir = project_path / AI_DIR / STATE_THREADS_REL / thread_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "transcript.jsonl"
         self._events: List[Dict[str, Any]] = []
@@ -80,7 +80,7 @@ class Transcript:
     @property
     def knowledge_path(self) -> Path:
         """Path to the knowledge markdown file for this thread."""
-        knowledge_dir = self._project_path / AI_DIR / "knowledge" / "agent" / "threads"
+        knowledge_dir = self._project_path / AI_DIR / KNOWLEDGE_THREADS_REL
         thread_path = Path(self.thread_id)
         if thread_path.parent != Path("."):
             knowledge_dir = knowledge_dir / thread_path.parent
@@ -260,7 +260,7 @@ class Transcript:
         if permissions:
             perms_str = ", ".join(permissions)
             frontmatter += f"permissions: [{perms_str}]\n"
-        frontmatter += f"capabilities_ref: .ai/state/threads/{self.thread_id}/capabilities.md\n"
+        frontmatter += f"capabilities_ref: {AI_DIR}/{STATE_THREADS_REL}/{self.thread_id}/capabilities.md\n"
         frontmatter += (
             f"```\n\n"
         )
@@ -295,7 +295,7 @@ class Transcript:
         # Mirror thread directory structure under knowledge/agent/threads/
         # e.g. thread_id "test/tools/file_system/write_file-123" →
         #   .ai/knowledge/agent/threads/test/tools/file_system/write_file-123.md
-        knowledge_dir = self._project_path / AI_DIR / "knowledge" / "agent" / "threads"
+        knowledge_dir = self._project_path / AI_DIR / KNOWLEDGE_THREADS_REL
         # Use the thread_id path components for subdirectories
         thread_path = Path(self.thread_id)
         if thread_path.parent != Path("."):

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T01:41:07Z:72ad2d64d8c52e39c43acef3d22a56f907f362e578625092cd826c94051df2b2:eAIrohWJywZFYS-Zh1Q4jVZ03oNUU-rhdgXGs9ul7B124VPBYd9EWe5y4-FlUcxC-vfPW93quxHwKnFGFT8TDQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:c235768f7a29f3310cb7eda0c895187b7dd771feeecb2894bb8d3e7de0aae3f9:CRZFd2M4Jsd5ieWdsaKPjxthJyhup8BA7w8_dC_dlmQtV9bU-Jx8yTV9tK67_7KzJK5yikgWAxBCynaxb5miDA:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from rye.constants import AI_DIR, ItemType
+from rye.constants import AI_DIR, STATE_THREADS_REL, ItemType
 from rye.utils.metadata_manager import MetadataManager
 from rye.utils.resolvers import get_user_space
 from rye.actions.execute import ExecuteTool
@@ -676,7 +676,7 @@ def _unwrap_result(raw_result: Any) -> Dict:
 def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
     """Read a thread's thread.json."""
     meta_path = (
-        Path(project_path) / AI_DIR / "state" / "threads" / thread_id / "thread.json"
+        Path(project_path) / AI_DIR / STATE_THREADS_REL / thread_id / "thread.json"
     )
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:

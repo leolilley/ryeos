@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T04:05:59Z:aed6ada3a0d7d4c4a046f648280fbd158b24abb0ee16145054595d5445b7a281:ZHHq4gTSyeAaqo13iTFmnAQ6EVRufAoqaTKHMrwWf64LkCmruDW_BrXoXVt4wV1qekMmDamROOtw8poe71y_Dw:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:2071dd9eb59989ebc266f7161134b1b0d536e4a69695a178f20e26ea7e40434e:fWk4Muu21wdGm0vvUqXtJB75AAOAuenUqdcG1kLaAL9XeDuvgG3atV88dvpgFJuaPaPs8whC54ys-70iAIEoDA:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, STATE_THREADS_REL
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
@@ -128,7 +128,7 @@ def _write_thread_meta(
     Stores resolved limits (including depth) and capabilities so child
     threads can look up parent context from the filesystem.
     """
-    thread_dir = project_path / AI_DIR / "agent" / "threads" / thread_id
+    thread_dir = project_path / AI_DIR / STATE_THREADS_REL / thread_id
     thread_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {
@@ -163,7 +163,7 @@ def _write_thread_meta(
 
 def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
     """Read a thread's thread.json. Returns None if not found."""
-    meta_path = project_path / AI_DIR / "agent" / "threads" / thread_id / "thread.json"
+    meta_path = project_path / AI_DIR / STATE_THREADS_REL / thread_id / "thread.json"
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -619,7 +619,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         # Verify transcript integrity before trusting JSONL content
         transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
         signer = transcript_signer_mod.TranscriptSigner(
-            prev_tid, proj_path / AI_DIR / "agent" / "threads" / prev_tid
+            prev_tid, proj_path / AI_DIR / STATE_THREADS_REL / prev_tid
         )
         coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
         cont_config = coordination_loader.get_coordination_loader().get_continuation_config(proj_path)
@@ -973,7 +973,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
         if parent_thread_id:
             child_params["parent_thread_id"] = parent_thread_id
 
-        thread_dir = proj_path / AI_DIR / "agent" / "threads" / thread_id
+        thread_dir = proj_path / AI_DIR / STATE_THREADS_REL / thread_id
 
         # Write params to thread dir for execution tracing
         params_json = json.dumps(child_params)
@@ -1073,7 +1073,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
         # Write per-thread diagnostics file on error for debugging
         if not result.get("success") and os.environ.get("RYE_DEBUG"):
-            diag_path = proj_path / ".ai" / "agent" / "threads" / thread_id.replace("/", os.sep) / "diagnostics.json"
+            diag_path = proj_path / AI_DIR / STATE_THREADS_REL / thread_id.replace("/", os.sep) / "diagnostics.json"
             try:
                 import json as _json
                 diag_path.parent.mkdir(parents=True, exist_ok=True)

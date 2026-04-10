@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:c2e09af509eb53fc6d67cdd9259ae61c4cf27f701ee081a97cb589e974df2b42:xiO9zMk5BeH9aZr6mvG36aqjtW8X427uH3mbThxnQqMdJxiDa_sxDHSdnSnWUwNWUYmcvKVrABy7LquTCv0jDw:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:564c85b9f4954f666453776eba508589c57d4cd2f8419eac6386b1f8ec1feb06:F7r8q7JRVdt6dj1wkoDygSWnVLTiVfY24jpaTC-zPhVsnOfdK2a6VqbfICARLJMYaMRMV39zgfHG6FTbUrHDDQ:4b987fd4e40303ac
 __version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, STATE_THREADS_REL
 
 DB_FILE = "registry.db"
 
@@ -21,7 +21,7 @@ class ThreadRegistry:
     """
 
     def __init__(self, project_path: Path):
-        self.db_path = project_path / AI_DIR / "state" / "threads" / DB_FILE
+        self.db_path = project_path / AI_DIR / STATE_THREADS_REL / DB_FILE
         self._ensure_schema()
 
     def _ensure_schema(self):

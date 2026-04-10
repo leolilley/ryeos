@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:470b3a56f0ab6f36ada26038f9a311db726b181484d5861ecb8ae2fe8c169927:IkO7fAAoftDahq7luzfnWrMepU6zUEgKPQc-j6ps99mL_9hhYn9bIGTIg5Umfwh7d9T6D8_zd785hCsTgo-qAQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:872a55476d0eb0cdebe94297f07e24432000ce725caae6e605e9231f54bd260b:LtAxdvYetYJUHsv_PeQM6c68Ph88mzVmq1sdUVeQ8nDybf3w1o269bwCqA72uZ0hweF6GyRTl6c5tfGvwxyICA:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
@@ -416,10 +416,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
         thread_id = params.get("thread_id")
         if not thread_id:
             return {"success": False, "error": "thread_id required"}
-        from rye.constants import AI_DIR
+        from rye.constants import AI_DIR, KNOWLEDGE_THREADS_REL
         from pathlib import PurePosixPath
         thread_path = PurePosixPath(thread_id)
-        transcript_path = proj_path / AI_DIR / "knowledge" / "agent" / "threads" / thread_path.parent / f"{thread_path.name}.md"
+        transcript_path = proj_path / AI_DIR / KNOWLEDGE_THREADS_REL / thread_path.parent / f"{thread_path.name}.md"
         if not transcript_path.exists():
             return {"success": False, "error": f"Transcript not found for thread: {thread_id}"}
         content = transcript_path.read_text(encoding="utf-8")

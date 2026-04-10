@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:19Z:378fb14abb7135b462d72ae36e224546a2889e2bb8a7cdc82274db1706268e90:44buGG5LFpPWPDTaaN2ZrDG2fDvXWiCjfea8ERE0-6CvPbEQZKaPd49xeo0I0A5CsquJBT7wpPKBNP2otNBWDQ:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:57Z:ce202c04c1097e7cc4b722e9b37b738014f068a1f9b8f6ad8ab1ef3d5817fa51:0vzb6aAXzSkwQlqTC99oOqhKNa0aPczaf_IvqGm-xTf7YFu0SxFPV9dYRRxbtN1gBGvqdLAY7Imvs6GVFdA6Dg:4b987fd4e40303ac
 __version__ = "1.1.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rye.constants import AI_DIR
+from rye.constants import AI_DIR, STATE_THREADS_REL
 from ..errors import BudgetNotRegistered, InsufficientBudget, BudgetOverspend, BudgetLedgerLocked
 
 DB_FILE = "budget_ledger.db"
@@ -28,7 +28,7 @@ class BudgetLedger:
     """
 
     def __init__(self, project_path: Path):
-        self.db_path = project_path / AI_DIR / "state" / "threads" / DB_FILE
+        self.db_path = project_path / AI_DIR / STATE_THREADS_REL / DB_FILE
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T02:27:03Z:941dd2aa15de79c38ae50da6ab0e911df672ae1d42d4547bcf66ce9bbd5346e0:wk_PeB95OEkAxS17tmYJpOlN4GiRfcZ1cKN96bp-v3kLPPlMbroQCa4snmVQVXGljI-lxz0A-gpXky4vNHihCw:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:941dd2aa15de79c38ae50da6ab0e911df672ae1d42d4547bcf66ce9bbd5346e0:wk_PeB95OEkAxS17tmYJpOlN4GiRfcZ1cKN96bp-v3kLPPlMbroQCa4snmVQVXGljI-lxz0A-gpXky4vNHihCw:4b987fd4e40303ac
 """Directive executor — parse, validate, and return directive content.
 
 Receives a generic envelope from the engine:

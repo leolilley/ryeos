@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:0e8c720461d8f3dc334d308cbd4ea266fbb470370a3aa565231c05b9d3433c8b:tOowIwsVQBrFDInCieHBfpjSL4fkXTCHAhqSqxI3B3DRWwIckFK0mtxD432vcQ_N0K30Wg6NPnTtk9usPCIQCg:4b987fd4e40303ac
+# rye:signed:2026-04-10T08:31:58Z:b9b73333435ecd4b57ff2c3291850e816161fb11231f80226a730a6344166cac:rHa5hKoHaMUgwsPm-j2HTUOTBqFJ44e5KcpjfZPHOZckrc00GthpoaioKTMLhkVKv-gsGOxQ8_8sO5hybSoAAw:4b987fd4e40303ac
 """Cancel a running process by run_id via SIGTERM."""
 
 import argparse
@@ -32,9 +32,9 @@ CONFIG_SCHEMA = {
 
 def _get_registry(project_path: Path):
     """Get thread registry instance."""
-    from rye.constants import AI_DIR
+    from rye.constants import AI_DIR, STATE_THREADS_REL
 
-    db_path = project_path / AI_DIR / "agent" / "threads" / "registry.db"
+    db_path = project_path / AI_DIR / STATE_THREADS_REL / "registry.db"
     if not db_path.exists():
         return None
 
