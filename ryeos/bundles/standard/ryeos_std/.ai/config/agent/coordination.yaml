@@ -1,4 +1,4 @@
-# rye:signed:2026-03-29T05:38:21Z:e3055757c6dc8e4100120dc321a7298845fabdf6e23e5487cebc28b294fd9db3:8mZLzynCTTrThbBgQqz6we3ZdSZpNIcV4dAq5xbE_st_CKXIxlyOs3YgCZslD2vPr8kCHeC5OtdStO4imrTIDA==:4b987fd4e40303ac
+# rye:signed:2026-04-10T02:11:41Z:e3055757c6dc8e4100120dc321a7298845fabdf6e23e5487cebc28b294fd9db3:8mZLzynCTTrThbBgQqz6we3ZdSZpNIcV4dAq5xbE_st_CKXIxlyOs3YgCZslD2vPr8kCHeC5OtdStO4imrTIDA:4b987fd4e40303ac
 # config/coordination.yaml
 category: "agent"
 tool_type: "config"

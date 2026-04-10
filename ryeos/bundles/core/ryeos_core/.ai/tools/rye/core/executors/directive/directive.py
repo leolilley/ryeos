@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T00:57:18Z:e8787a066232ed76980a356bcf777f71f697aafec10dfeda24583e8367789d87:gFjvZPI4CIPYkE5OtJM6_otyIVtkLo1Ko4gdbWZc8RZWgTZwhedb4pJpglNLvHYpTyG1FjJMVQyfltmypJ76AA:4b987fd4e40303ac
+# rye:signed:2026-04-10T02:27:03Z:941dd2aa15de79c38ae50da6ab0e911df672ae1d42d4547bcf66ce9bbd5346e0:wk_PeB95OEkAxS17tmYJpOlN4GiRfcZ1cKN96bp-v3kLPPlMbroQCa4snmVQVXGljI-lxz0A-gpXky4vNHihCw:4b987fd4e40303ac
 """Directive executor — parse, validate, and return directive content.
 
 Receives a generic envelope from the engine:
@@ -140,7 +140,12 @@ def _dispatch_fork(
     executor = PrimitiveExecutor(ctx=ctx)
 
     # Check if thread_directive is available
-    chain = asyncio.get_event_loop().run_until_complete(
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    chain = loop.run_until_complete(
         executor._build_chain(td_tool)
     )
     if not chain:
@@ -171,7 +176,7 @@ def _dispatch_fork(
     if parent_tid:
         td_params["parent_thread_id"] = parent_tid
 
-    result = asyncio.get_event_loop().run_until_complete(
+    result = loop.run_until_complete(
         executor.execute(
             item_id=td_tool,
             parameters=td_params,

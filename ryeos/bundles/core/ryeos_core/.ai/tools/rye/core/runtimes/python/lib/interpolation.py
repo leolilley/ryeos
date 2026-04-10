@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T01:39:42Z:ec40736e16cd7b7955b0f46b57536f1665007d77b9b52e052212121894fed2ae:NvN6GtrbhK2kzW7fmRrfjZGc4ZUu7LvUjn34sDszIgTtPjJZ9U98FwJaVfzl8qxEtnglFj2G1D-_6AfSiw0ACA:4b987fd4e40303ac
+# rye:signed:2026-04-10T02:14:05Z:d8507a493193b041194bc25ced7155f1f7ea96ca42a43ed88a63361c7c625550:r9L8F5syHxHDQL_L8NtSM7X8L8NGodJU_2q4ddTffL7HeFEWAdJh2eBNevCYcSwCSMAL8M45ig7YuNbx_bNsCQ:4b987fd4e40303ac
 """Template interpolation for ${...} and {input:...} expressions.
 
 Shared runtime library — resolves template expressions against
@@ -27,6 +27,7 @@ _WHOLE_EXPR_RE = re.compile(r"^\$\{([^}]+)\}$")
 
 _PIPES: Dict[str, Any] = {
     "json": lambda v: _json.dumps(v, default=str),
+    "from_json": lambda v: _json.loads(v) if isinstance(v, str) else v,
     "length": lambda v: len(v) if v is not None else 0,
     "keys": lambda v: list(v.keys()) if isinstance(v, dict) else [],
     "upper": lambda v: str(v).upper(),
