@@ -258,5 +258,6 @@ Build this when:
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | [ryeosd v3 Hardening](../../.tmp/ryeosd-v3/16-hardening.md)  | Worker process architecture defines the engine trait boundary                   |
 | [Future Evolution](../../.tmp/ryeosd-v2/future-evolution.md) | JIT optimizations, capability refs, temporal resolution depend on native engine |
+| [Advanced Native Runtime Path](advanced-native-runtime-path.md) | The stricter remote-correct from day one contract for the same native runtime direction |
 | [Sovereign Inference](sovereign-inference.md)                | Single-binary deployment enables edge node distribution                         |
 | [Cluster Bootstrap](cluster-bootstrap.md)                    | Static binary simplifies multi-node deployment                                  |

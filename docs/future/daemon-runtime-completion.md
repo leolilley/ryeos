@@ -269,3 +269,4 @@ For **multi-node deployment**:
 | [Sovereign Inference](sovereign-inference.md)               | Remote GPU dispatch depends on forwarding                     |
 | [Mission Control](mission-control.md)                       | TUI depends on MCP unification for visibility                 |
 | [Execution Graph Scheduling](execution-graph-scheduling.md) | Graph walkers depend on budget enforcement                    |
+| [Advanced Native Runtime Path](advanced-native-runtime-path.md) | Remote-correct from day one version of the native runtime and forwarding contract |
