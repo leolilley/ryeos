@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:2071dd9eb59989ebc266f7161134b1b0d536e4a69695a178f20e26ea7e40434e:fWk4Muu21wdGm0vvUqXtJB75AAOAuenUqdcG1kLaAL9XeDuvgG3atV88dvpgFJuaPaPs8whC54ys-70iAIEoDA:4b987fd4e40303ac
+# rye:signed:2026-04-10T10:39:01Z:08b37716e15fe64121de158f632d5b9478ed22d3940ed042bc041f7e6785fcf9:f1f1EuGE_Oip-4DUbdpeRAXoVRD3OtUn3HMdmO95P4pEkyW2iUE1mwkZGLEtv1YMZv8j-Rh6OCvfeWA4ktuxCQ:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -759,7 +759,8 @@ async def execute(params: Dict, project_path: str) -> Dict:
     # information is available; the harness just processes whatever context
     # the directive declares without injecting framework-specific docs.
     system_prompt = ""
-    directive_context = {"before": "", "after": "", "suppress": []}
+    runtime = directive.get("runtime", {})
+    directive_context = {"before": "", "after": "", "suppress": [], "runtime": runtime}
     if any(chain_context.get(pos) for pos in ("system", "before", "after")):
         from rye.actions.execute import ExecuteTool
         exec_tool = ExecuteTool(user_space=user_space)

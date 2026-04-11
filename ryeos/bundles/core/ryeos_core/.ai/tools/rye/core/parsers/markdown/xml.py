@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:b91e06332a8fb0dcee0ab1ef8d6759115a8d1765c0e4eecdf22417e3219dd6ce:1pQlj5xUYGL_K02IO5py6KzyM_OuL1E1WHjSBiXbeHIwnFr0_sVt9xM5o6NzMcTwyqllRq_6KdsWbR7gTbscDA:4b987fd4e40303ac
+# rye:signed:2026-04-10T10:39:00Z:dc338879686319a961b8a1e3e21ee0463f050dc86e49100269ede0e1adda13e0:NxX-Y1TLHzIawrJM2bObVi4orqPvRuh1MZZByppCqhzD010FjdLErDkYaE8FZR3tUIruF2SlZmI3UbHHTUi-Cg:4b987fd4e40303ac
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -227,6 +227,18 @@ def _extract_from_xml(root: ET.Element, result: Dict[str, Any]) -> None:
                     except ValueError:
                         limits[k] = v
                 result["limits"] = limits
+
+            elif tag == "runtime":
+                runtime = {}
+                for k, v in child.attrib.items():
+                    if v.lower() in ("true", "false"):
+                        runtime[k] = v.lower() == "true"
+                    else:
+                        try:
+                            runtime[k] = int(v) if '.' not in v else float(v)
+                        except ValueError:
+                            runtime[k] = v
+                result["runtime"] = runtime
 
             elif tag == "hooks":
                 hooks = []

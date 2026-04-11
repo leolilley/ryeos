@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:ce972acab714ef7578db6844473f9af39e11ace852d3cc5f300080b911698882:g-cwPwxJdAikL2DM-EGJ9uUWXMX5kXYFcq1oJhDyupRP5xi7uXLjaZPFgU1ggmk5RZWCTw-rzjQsDorFAzoaAQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-10T10:41:23Z:247916d012e60987e3958994774728639c35d713d7a3a646192c8ae7468ab59c:RZ0y6mvmxCAchU7XgP5kVyl4DzNKX0dCviOtZ9QFqkXzU7JO_y6qYKCxti--WiiFHBUDLNXzrJctKCz6Nme0DA:4b987fd4e40303ac -->
 
 ```yaml
 name: directive-format
@@ -32,7 +32,7 @@ Canonical format and metadata reference for directive files — XML-in-Markdown 
 
 ## File Structure
 
-```
+````
 Line 1:  Signature comment (added by rye_sign, never written manually)
          Blank line
          Markdown title (# heading) and description paragraph
@@ -41,14 +41,14 @@ Line 1:  Signature comment (added by rye_sign, never written manually)
          Blank line
          Process steps AFTER the fence (LLM reads these)
          Success criteria AFTER the fence
-```
+````
 
 ### The Two-Zone Rule
 
-| Zone | Location | Purpose | Consumer |
-|------|----------|---------|----------|
-| **XML fence** | Inside ` ```xml ``` ` | Infrastructure metadata: limits, permissions, model, inputs, outputs | Parser / infrastructure |
-| **Process steps** | After the fence | LLM instructions: natural language, tool calls, step logic | LLM agent |
+| Zone              | Location              | Purpose                                                              | Consumer                |
+| ----------------- | --------------------- | -------------------------------------------------------------------- | ----------------------- |
+| **XML fence**     | Inside ` ```xml ``` ` | Infrastructure metadata: limits, permissions, model, inputs, outputs | Parser / infrastructure |
+| **Process steps** | After the fence       | LLM instructions: natural language, tool calls, step logic           | LLM agent               |
 
 The XML fence is **not parsed by the LLM** — it reads it as structured text. The parser extracts metadata for infrastructure (limits, permissions, model config, inputs). Process steps are what the agent actually follows.
 
@@ -60,12 +60,12 @@ Line 1 of every signed directive:
 <!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 ```
 
-| Field | Format | Example |
-|-------|--------|---------|
-| `TIMESTAMP` | ISO 8601 | `2026-02-10T02:00:00Z` |
-| `HASH` | SHA-256 hex | `ae410d018a0a8367...` |
-| `SIGNATURE` | Base64url Ed25519 | `jMpCTdpY3HZY2c4p...` |
-| `KEYID` | Hex key fingerprint | `440443d0858f0199` |
+| Field       | Format              | Example                |
+| ----------- | ------------------- | ---------------------- |
+| `TIMESTAMP` | ISO 8601            | `2026-02-10T02:00:00Z` |
+| `HASH`      | SHA-256 hex         | `ae410d018a0a8367...`  |
+| `SIGNATURE` | Base64url Ed25519   | `jMpCTdpY3HZY2c4p...`  |
+| `KEYID`     | Hex key fingerprint | `440443d0858f0199`     |
 
 - Added by `rye_sign` — never write manually
 - Unsigned placeholder: `<!-- rye:signed:TIMESTAMP:placeholder:unsigned:unsigned -->`
@@ -114,6 +114,7 @@ Description of what this directive does.
       <depends_on>build-images</depends_on>
       <suggests>monitoring-setup</suggests>
     </context>
+    <runtime truncate_tool_results="false" />
     <hooks>
       <hook>
         <when>cost.current > cost.limit * 0.9</when>
@@ -160,10 +161,10 @@ Description of what this directive does.
 
 ### Attributes
 
-| Attribute | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string (snake_case) | **Yes** | Identifier matching the filename |
-| `version` | string (semver) | **Yes** | Semantic version `X.Y.Z` |
+| Attribute | Type                | Required | Description                      |
+| --------- | ------------------- | -------- | -------------------------------- |
+| `name`    | string (snake_case) | **Yes**  | Identifier matching the filename |
+| `version` | string (semver)     | **Yes**  | Semantic version `X.Y.Z`         |
 
 ---
 
@@ -224,22 +225,22 @@ Controls which LLM tier runs the directive.
 <model tier="orchestrator" fallback="general" fallback_id="claude-3-5-sonnet-20241022" />
 ```
 
-| Attribute | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `tier` | string | **Yes** | Model complexity tier (user-defined) |
-| `id` | string | No | Specific model identifier |
-| `fallback` | string | No | Fallback tier if primary fails |
-| `fallback_id` | string | No | Fallback model ID if primary fails |
+| Attribute     | Type   | Required | Description                          |
+| ------------- | ------ | -------- | ------------------------------------ |
+| `tier`        | string | **Yes**  | Model complexity tier (user-defined) |
+| `id`          | string | No       | Specific model identifier            |
+| `fallback`    | string | No       | Fallback tier if primary fails       |
+| `fallback_id` | string | No       | Fallback model ID if primary fails   |
 
 **Text content:** Optional 1–2 sentence description of reasoning approach.
 
 **Common tiers:**
 
-| Tier | Use Case |
-|------|----------|
-| `low` / `haiku` | Cheap/fast for simple tasks (file writes, searches) |
-| `sonnet` / `general` | Moderate reasoning and orchestration |
-| `orchestrator` | Complex multi-step workflows, subagent spawning |
+| Tier                 | Use Case                                            |
+| -------------------- | --------------------------------------------------- |
+| `low` / `haiku`      | Cheap/fast for simple tasks (file writes, searches) |
+| `sonnet` / `general` | Moderate reasoning and orchestration                |
+| `orchestrator`       | Complex multi-step workflows, subagent spawning     |
 
 ### `<permissions>`
 
@@ -267,11 +268,11 @@ Declares capabilities this directive requires. Uses three primary actions with i
 
 **Primary elements:**
 
-| Element | Purpose |
-|---------|---------|
-| `<execute>` | Run/execute items |
-| `<fetch>` | Search for or load item content |
-| `<sign>` | Sign/validate items |
+| Element     | Purpose                         |
+| ----------- | ------------------------------- |
+| `<execute>` | Run/execute items               |
+| `<fetch>`   | Search for or load item content |
+| `<sign>`    | Sign/validate items             |
 
 **Item type children:** `<tool>`, `<directive>`, `<knowledge>`
 
@@ -304,19 +305,19 @@ Resource usage tracking and budget management.
 
 **Sub-elements:**
 
-| Element | Required | Attributes | Text Content |
-|---------|----------|------------|-------------|
-| `<context>` | **Recommended** | `estimated_usage` (low/medium/high), `turns` (int), `spawn_threshold` (int) | Max context tokens (int) |
-| `<duration>` | No | — | Max execution time in seconds (int) |
-| `<spend>` | No | `currency` (e.g., USD) | Max spend amount (decimal) |
+| Element      | Required        | Attributes                                                                  | Text Content                        |
+| ------------ | --------------- | --------------------------------------------------------------------------- | ----------------------------------- |
+| `<context>`  | **Recommended** | `estimated_usage` (low/medium/high), `turns` (int), `spawn_threshold` (int) | Max context tokens (int)            |
+| `<duration>` | No              | —                                                                           | Max execution time in seconds (int) |
+| `<spend>`    | No              | `currency` (e.g., USD)                                                      | Max spend amount (decimal)          |
 
 **Complexity defaults:**
 
 | Complexity | `max_turns` | `max_tokens` | `spend` |
-|-----------|------------|-------------|---------|
-| simple | 6 | 4,096 | $0.05 |
-| moderate | 15 | 200,000 | $0.50 |
-| complex | 30 | 200,000 | $1.00 |
+| ---------- | ----------- | ------------ | ------- |
+| simple     | 6           | 4,096        | $0.05   |
+| moderate   | 15          | 200,000      | $0.50   |
+| complex    | 30          | 200,000      | $1.00   |
 
 ---
 
@@ -353,21 +354,35 @@ Contextual information for execution and relationships.
 
 **Sub-elements:**
 
-| Element | Purpose |
-|---------|---------|
-| `<related_files>` | Relevant file paths (markdown list) |
-| `<dependencies>` | External dependencies (markdown list) |
+| Element           | Purpose                               |
+| ----------------- | ------------------------------------- |
+| `<related_files>` | Relevant file paths (markdown list)   |
+| `<dependencies>`  | External dependencies (markdown list) |
 
 **Relationships (direct children of `<context>`):**
 
-| Element | Purpose |
-|---------|---------|
-| `<requires>` | Required capability or directive |
-| `<depends_on>` | Depends on another directive |
-| `<used_by>` | This directive is used by (can appear multiple times) |
-| `<suggests>` | Optionally suggests related directive |
-| `<conflicts_with>` | Incompatible with directive |
-| `<example_of>` | Is an example of pattern/base directive |
+| Element            | Purpose                                               |
+| ------------------ | ----------------------------------------------------- |
+| `<requires>`       | Required capability or directive                      |
+| `<depends_on>`     | Depends on another directive                          |
+| `<used_by>`        | This directive is used by (can appear multiple times) |
+| `<suggests>`       | Optionally suggests related directive                 |
+| `<conflicts_with>` | Incompatible with directive                           |
+| `<example_of>`     | Is an example of pattern/base directive               |
+
+### `<runtime>`
+
+Thread runtime behavior overrides. Controls how the runner processes tool results, errors, etc.
+
+```xml
+<runtime truncate_tool_results="false" />
+```
+
+**Attributes:**
+
+| Attribute               | Type    | Default | Purpose                                                                                                                                                                       |
+| ----------------------- | ------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `truncate_tool_results` | boolean | `true`  | When `false`, tool results are passed to the LLM without summarization or truncation. Use for data-processing directives that need full results. Deduplication still applies. |
 
 ### `<hooks>`
 
@@ -399,21 +414,21 @@ Event-driven conditional actions, triggered by the harness on an LLM thread.
 
 **Hook structure:**
 
-| Element | Required | Purpose |
-|---------|----------|---------|
-| `<when>` | **Yes** | Expression evaluated against event context |
-| `<execute>` | **Yes** | Item to execute; `item_type` attribute = `directive`, `tool`, or `knowledge` |
-| `<inputs>` | No | Parameters using `${variable}` substitution |
+| Element     | Required | Purpose                                                                      |
+| ----------- | -------- | ---------------------------------------------------------------------------- |
+| `<when>`    | **Yes**  | Expression evaluated against event context                                   |
+| `<execute>` | **Yes**  | Item to execute; `item_type` attribute = `directive`, `tool`, or `knowledge` |
+| `<inputs>`  | No       | Parameters using `${variable}` substitution                                  |
 
 **Available context variables:**
 
-| Variable | Description |
-|----------|-------------|
-| `cost.current` / `cost.limit` | Cost tracking |
-| `loop_count` | Loop iterations detected |
-| `error.type` / `error.resource` | Error context |
+| Variable                               | Description                 |
+| -------------------------------------- | --------------------------- |
+| `cost.current` / `cost.limit`          | Cost tracking               |
+| `loop_count`                           | Loop iterations detected    |
+| `error.type` / `error.resource`        | Error context               |
 | `deviation.type` / `deviation.message` | Deviation/exception details |
-| `directive.name` | Current directive name |
+| `directive.name`                       | Current directive name      |
 
 ---
 
@@ -437,12 +452,12 @@ Declared inside the XML fence in the `<inputs>` block.
 
 ### Input Attributes
 
-| Attribute | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | **Yes** | Parameter identifier |
-| `type` | string | **Yes** | Data type: `string`, `integer`, `boolean`, `object`, `array` |
-| `required` | boolean | No | Whether mandatory (default: `false`) |
-| `default` | varies | No | Default value if not provided |
+| Attribute  | Type    | Required | Description                                                  |
+| ---------- | ------- | -------- | ------------------------------------------------------------ |
+| `name`     | string  | **Yes**  | Parameter identifier                                         |
+| `type`     | string  | **Yes**  | Data type: `string`, `integer`, `boolean`, `object`, `array` |
+| `required` | boolean | No       | Whether mandatory (default: `false`)                         |
+| `default`  | varies  | No       | Default value if not provided                                |
 
 **Text content:** Description of the input parameter.
 
@@ -450,11 +465,11 @@ Declared inside the XML fence in the `<inputs>` block.
 
 Input values are interpolated in process steps using these patterns:
 
-| Syntax | Behavior |
-|--------|----------|
-| `{input:name}` | Required — fails if not provided |
-| `{input:name?}` | Optional — replaced with empty string if absent |
-| `{input:name:default_value}` | Default — uses `default_value` if input absent |
+| Syntax                        | Behavior                                                     |
+| ----------------------------- | ------------------------------------------------------------ |
+| `{input:name}`                | Required — fails if not provided                             |
+| `{input:name?}`               | Optional — replaced with empty string if absent              |
+| `{input:name:default_value}`  | Default — uses `default_value` if input absent               |
 | `{input:name\|default_value}` | Default — uses `default_value` if input absent (pipe syntax) |
 
 ```xml
@@ -503,10 +518,10 @@ When a directive is executed via `thread_directive`, the `<outputs>` block is **
 
 **Transformation rules:**
 
-| `outputs` format | Behavior |
-|------------------|----------|
+| `outputs` format                    | Behavior                                               |
+| ----------------------------------- | ------------------------------------------------------ |
 | List of `{name, description}` dicts | Each becomes `<output name="...">description</output>` |
-| Dict of `{key: value}` pairs | Each becomes `<output name="key">value</output>` |
+| Dict of `{key: value}` pairs        | Each becomes `<output name="key">value</output>`       |
 
 Parent threads and orchestrators match output keys when consuming child results — names must be consistent between the directive's `<outputs>` and what the parent expects.
 
@@ -573,12 +588,12 @@ Process steps go **after** the XML fence. They contain natural language instruct
 
 ### Tool Call Styles in Steps
 
-| Style | Syntax |
-|-------|--------|
-| Backtick-wrapped | `` `rye_execute(item_id="rye/file-system/write", parameters={...})` `` |
-| XML action element | `<execute item_type="tool" item_id="rye/file-system/write">` |
-| XML fetch | `<fetch item_type="directive" query="{input:name}" />` |
-| XML sign | `<sign item_type="directive" item_id="{input:name}" />` |
+| Style              | Syntax                                                                 |
+| ------------------ | ---------------------------------------------------------------------- |
+| Backtick-wrapped   | `` `rye_execute(item_id="rye/file-system/write", parameters={...})` `` |
+| XML action element | `<execute item_type="tool" item_id="rye/file-system/write">`           |
+| XML fetch          | `<fetch item_type="directive" query="{input:name}" />`                 |
+| XML sign           | `<sign item_type="directive" item_id="{input:name}" />`                |
 
 ---
 
@@ -619,11 +634,13 @@ Each criterion should be **verifiable** — not vague ("it works") but specific 
 ## Best Practices
 
 ### Naming
+
 - snake_case: `deploy_staging`, not `DeployStaging` or `deploy-staging`
 - Action-oriented: `deploy_staging`, not `staging` or `deployment_handler`
 - Include outcomes: `sync_and_publish`, not just `sync`
 
 ### Structure
+
 - **One fence, one process** — metadata inside XML fence, instructions outside
 - **Principle of least privilege** — only declare permissions the directive actually needs
 - **Measurable success criteria** — each criterion should be verifiable
@@ -631,18 +648,21 @@ Each criterion should be **verifiable** — not vague ("it works") but specific 
 - Category matches directory: `category: rye/core` → `.ai/directives/rye/core/`
 
 ### Model Selection
+
 - Choose tier based on reasoning complexity
 - Provide meaningful fallback for robustness
 - Use `low`/`haiku` for simple file operations
 - Use `orchestrator` only for multi-step workflows with subagents
 
 ### Cost Tracking
+
 - Always define `<context>` in cost section
 - Set realistic `turns` based on expected complexity
 - Set `spawn_threshold` to control subagent spawning
 - Include `<spend>` for cost-conscious directives
 
 ### Hooks
+
 - Use hooks to handle failure conditions gracefully
 - Keep hook directives small and focused
 - Document hook triggering conditions clearly

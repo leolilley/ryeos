@@ -701,6 +701,73 @@ class TestContextSuppressParsing:
         assert ctx["suppress"] == []
 
 
+# ── XML Parser: <runtime> in <metadata> ───────────────────────────────
+
+
+class TestRuntimeMetadataParsing:
+    """Test <runtime> metadata parsing in directives."""
+
+    def test_runtime_truncate_false(self):
+        md = """# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+    <runtime truncate_tool_results="false" />
+  </metadata>
+</directive>
+```
+"""
+        result = md_parse(md)
+        assert result["runtime"] == {"truncate_tool_results": False}
+
+    def test_runtime_truncate_true(self):
+        md = """# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+    <runtime truncate_tool_results="true" />
+  </metadata>
+</directive>
+```
+"""
+        result = md_parse(md)
+        assert result["runtime"] == {"truncate_tool_results": True}
+
+    def test_runtime_multiple_attrs(self):
+        md = """# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+    <runtime truncate_tool_results="false" error_retries="3" />
+  </metadata>
+</directive>
+```
+"""
+        result = md_parse(md)
+        assert result["runtime"]["truncate_tool_results"] is False
+        assert result["runtime"]["error_retries"] == 3
+
+    def test_no_runtime(self):
+        md = """# Test
+```xml
+<directive name="test" version="1.0.0">
+  <metadata>
+    <description>Test</description>
+    <model tier="general" />
+  </metadata>
+</directive>
+```
+"""
+        result = md_parse(md)
+        assert "runtime" not in result
+
+
 # ── _is_suppressed helper ─────────────────────────────────────────────
 
 

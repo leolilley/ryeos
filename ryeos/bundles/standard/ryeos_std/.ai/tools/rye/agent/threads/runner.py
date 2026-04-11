@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:e61fa4c457be9855e0c0e474eeeee0abad922283646745d28452a09e476bd76a:EJJOecNYp6l4uaxBciDiTmWUrEwxZC7T0nvxIu0Ot0GbHIetDsuv8n-u1R_0Jpw_2LFAYG9kTGtCflzuNe_DDg:4b987fd4e40303ac
+# rye:signed:2026-04-10T10:39:01Z:0e94988e090d0178a17d06a02f952b1a0d1cdcb7ff37f28c04e1e40cc28aef28:Mw88M4xUuNX9a-Io7l7B9FhMPoYAr7Mxe0_TnvgPY5V9DqUgAl_4KvqroUN_6fHgW-NwIFynYW1m7ClH1T_bBg:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -111,6 +111,9 @@ async def run(
 
     # Directive-level context suppressions (e.g. <suppress>tool-protocol</suppress>)
     suppress = (directive_context or {}).get("suppress", [])
+
+    # Directive-level runtime config (e.g. <runtime truncate_tool_results="false" />)
+    runtime_config = (directive_context or {}).get("runtime", {})
 
     # Assemble system prompt from build_system_prompt hooks + caller override
     system_ctx = await harness.run_hooks_context(
@@ -603,6 +606,7 @@ async def run(
                     thread_id=thread_id,
                     project_path=project_path,
                     context_usage_ratio=context_ratio,
+                    no_truncate=runtime_config.get("truncate_tool_results") is False,
                 )
 
                 emitter.emit(
