@@ -1,18 +1,15 @@
-# rye:signed:2026-04-10T08:31:57Z:ad03394953302fbca661fb8823dbb90f1b4ad22dffc12526eb943b6d9b86fc37:C_EeZlLHOVgLWokA3Il5KaghClkawtm2DsGQxe8SC1kcwAJNmeX7bMD3BbrzK32pbmfLMtPy8IoVBCfFKu2AAg:4b987fd4e40303ac
-"""Checkpoint signing for transcript integrity and JSON signing utilities.
+# rye:signed:2026-04-11T01:06:04Z:e8fece76658913867b5b33df3a4c24f8a4d610dfdb3266c33c5298bb1e11c2a0:S2Jss5h8LRxjtP9lQudS9qG13N2kJpK-hEcCThIbjHP58m4I9XndsxfoygQ7Iii_cKBnpVFi9SRcmZZavrGiAA:4b987fd4e40303ac
+"""Checkpoint signing for JSONL fallback transcripts and JSON signing utilities.
 
-Signs transcript.jsonl at turn boundaries by appending checkpoint events
-to the JSONL stream. Each checkpoint's hash covers all bytes before the
-checkpoint line (byte_offset = start of checkpoint line).
-
-Also provides sign_json / verify_json for JSON files (thread.json) using
-a _signature field with canonical serialization.
+In daemon-backed v3 execution, the chain journal is authoritative and
+checkpoint signing is bypassed. The file-based checkpoint path remains only
+as a fallback for older non-daemon transcript consumers.
 """
 
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
-__tool_description__ = "Transcript checkpoint signing and JSON signing utilities"
+__tool_description__ = "JSONL fallback checkpoint signing and JSON signing utilities"
 
 import hashlib
 import json
@@ -21,6 +18,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
+
+from rye.runtime.daemon_rpc import get_daemon_runtime_context
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ def _ensure_self_trusted(public_pem: bytes, fingerprint: str) -> None:
 
 
 class TranscriptSigner:
-    """Checkpoint signing for transcript integrity.
+    """Checkpoint signing for JSONL fallback transcripts.
 
     Signs transcript.jsonl at turn boundaries by appending a checkpoint
     event to the JSONL stream. Each checkpoint's hash covers all bytes
@@ -53,6 +52,9 @@ class TranscriptSigner:
 
     Verification reads the JSONL, extracts checkpoint events, and verifies
     each hash + signature against the file content.
+
+    When daemon runtime context is present, this helper becomes a no-op so
+    transcript JSONL is not treated as authoritative runtime state.
     """
 
     def __init__(self, thread_id: str, thread_dir: Path):
@@ -65,6 +67,9 @@ class TranscriptSigner:
         Called by runner.py at turn boundaries. The checkpoint event is
         appended to the same JSONL file as all other events.
         """
+        if self._is_daemon_backed():
+            return
+
         if not self._jsonl_path.exists():
             return
 
@@ -112,6 +117,9 @@ class TranscriptSigner:
             {"valid": True, "checkpoints": N} on success.
             {"valid": False, "error": "...", "failed_at_turn": N} on failure.
         """
+        if self._is_daemon_backed():
+            return {"valid": True, "checkpoints": 0, "mode": "daemon"}
+
         if not self._jsonl_path.exists():
             return {"valid": True, "checkpoints": 0, "unsigned": True}
 
@@ -189,6 +197,10 @@ class TranscriptSigner:
             )
 
         return {"valid": True, "checkpoints": len(checkpoints)}
+
+    @staticmethod
+    def _is_daemon_backed() -> bool:
+        return bool(get_daemon_runtime_context().get("socket_path"))
 
 
 # --- JSON signing utilities ---

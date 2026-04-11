@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:e61fa4c457be9855e0c0e474eeeee0abad922283646745d28452a09e476bd76a:EJJOecNYp6l4uaxBciDiTmWUrEwxZC7T0nvxIu0Ot0GbHIetDsuv8n-u1R_0Jpw_2LFAYG9kTGtCflzuNe_DDg:4b987fd4e40303ac
+# rye:signed:2026-04-11T04:03:37Z:5c12d4eb8ae24cc15ab0f6ab7649fccb41fe331561de2afbb9c2638065d60565:CgFnqFK4lSap3Idzp-niX5wc--rsSZAJ6LREhqL-j1DiUnhwHCzx2-QO1H3I0sQ7gn0VcVT-a4HdIpdAWOASBg:4b987fd4e40303ac
 """
 runner.py: Core LLM loop for thread execution
 
@@ -32,7 +32,6 @@ _ANCHOR = Path(__file__).parent
 
 orchestrator = load_module("orchestrator", anchor=_ANCHOR)
 text_tool_parser = load_module("internal/text_tool_parser", anchor=_ANCHOR)
-thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
 tool_result_guard = load_module("internal/tool_result_guard", anchor=_ANCHOR)
 
 
@@ -89,7 +88,7 @@ async def run(
         if "_primary" in t
     }
 
-    # Write signed capabilities.json alongside transcript.jsonl
+    # Write signed capabilities metadata alongside the thread state directory.
     transcript.write_capabilities(
         harness.available_tools,
         tree=getattr(harness, "capabilities_tree", ""),
@@ -103,7 +102,7 @@ async def run(
     max_consecutive_errors = 3
     recent_llm_errors = []
 
-    # Checkpoint signing for transcript integrity
+    # JSONL checkpoint signing is only active in non-daemon fallback mode.
     transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
     signer = transcript_signer_mod.TranscriptSigner(
         thread_id, project_path / AI_DIR / STATE_THREADS_REL / thread_id
@@ -282,7 +281,6 @@ async def run(
                 if provider.supports_streaming:
                     from .events.transcript_sink import TranscriptSink
                     stream_sink = TranscriptSink(
-                        transcript_path=transcript._path,
                         thread_id=thread_id,
                         response_format=getattr(provider, "_response_format", "content_blocks"),
                         knowledge_path=transcript.knowledge_path,
@@ -574,7 +572,6 @@ async def run(
                     # Auto-inject parent context for child thread spawns
                     if resolved_id == "rye/agent/threads/thread_directive":
                         dispatch_params.setdefault("parent_thread_id", thread_id)
-                        dispatch_params.setdefault("parent_depth", orchestrator.get_depth(thread_id))
                         dispatch_params.setdefault("parent_limits", harness.limits)
                         dispatch_params.setdefault("parent_capabilities", harness._capabilities)
 
@@ -625,66 +622,37 @@ async def run(
                 "after_step", {"cost": cost, "thread_id": thread_id}, dispatcher
             )
 
-            # Update cost snapshot in registry (post-turn)
-            try:
-                registry = thread_registry.get_registry(project_path)
-                registry.update_cost_snapshot(thread_id, cost)
-            except Exception:
-                pass  # cost snapshot is best-effort
-
-            # Context limit check — handoff to a new thread
+            # Context limit check — continuation is daemon-managed in v3.
             limit_info = _check_context_limit(messages, provider, project_path)
             if limit_info:
                 emitter.emit(
                     thread_id,
-                    "context_limit_reached",
-                    limit_info,
+                    "continuation_requested",
+                    {**limit_info, "reason": "context_limit"},
                     transcript,
                     criticality="critical",
                 )
-                try:
-                    handoff_result = await orchestrator.handoff_thread(
-                        thread_id, project_path, messages=list(messages),
-                    )
-                    if handoff_result.get("success"):
-                        return _finalize(
-                            thread_id,
-                            cost,
-                            {
-                                "success": True,
-                                "status": "continued",
-                                "continuation_thread_id": handoff_result.get("new_thread_id"),
-                                "handoff": handoff_result,
-                            },
-                            emitter,
-                            transcript,
-                            signer,
-                        )
-                except Exception as handoff_err:
-                    logger.error("Handoff failed: %s", handoff_err)
-                # Handoff failed — fall back to hook-based handling
-                hook_result = await harness.run_hooks(
-                    "context_limit_reached", limit_info, dispatcher
+                return _finalize(
+                    thread_id,
+                    cost,
+                    {
+                        "success": True,
+                        "status": "continuation_needed",
+                        "error": (
+                            "Context window exhausted; daemon-owned continuation is required"
+                        ),
+                        "continuation_requested": limit_info,
+                    },
+                    emitter,
+                    transcript,
+                    signer,
                 )
-                if hook_result and hook_result.get("action") == "continue":
-                    return _finalize(
-                        thread_id,
-                        cost,
-                        {
-                            "success": True,
-                            "status": "continued",
-                            "continuation_thread_id": hook_result.get("continuation_thread_id"),
-                        },
-                        emitter,
-                        transcript,
-                        signer,
-                    )
 
     finally:
         cost["elapsed_seconds"] = time.monotonic() - start_time
         final = {
             **cost,
-            "status": cost.get("_status", "completed" if cost.get("turns") else "error"),
+            "status": cost.get("_status", "completed" if cost.get("turns") else "failed"),
         }
         orchestrator.complete_thread(thread_id, final)
 
@@ -716,14 +684,15 @@ def _finalize(thread_id, cost, result, emitter, transcript, signer=None) -> Dict
     elif result.get("success"):
         status = "completed"
     else:
-        status = "error"
+        status = "failed"
     if not result.get("success") and not result.get("error"):
         result["error"] = "Unknown error (no message provided)"
     emit_payload = {"cost": cost}
     if result.get("error"):
         emit_payload["error"] = result["error"]
+    emit_event_type = "thread_failed" if status == "failed" else f"thread_{status}"
     emitter.emit(
-        thread_id, f"thread_{status}", emit_payload, transcript, criticality="critical"
+        thread_id, emit_event_type, emit_payload, transcript, criticality="critical"
     )
     # Record status in cost so the finally block uses the authoritative value
     cost["_status"] = status

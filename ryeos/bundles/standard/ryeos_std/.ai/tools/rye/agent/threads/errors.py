@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:a10d2b176bab755251d8d5fa79ae1b3f7faeb72fa9abcb30e3245e0ea813d18c:Ji1tK6rMX768jq0XKN6A3aG1nMYuaBITdP8Or_D4z0FuVGRic_jq-R61DLhCFQ9mFVKcoXVyKsrq2u1NuorxBg:4b987fd4e40303ac
+# rye:signed:2026-04-11T01:10:50Z:e29023e6b03e17922ea4f4e729d5805c1b9af467152ded0c6fc553bfbc9ddb5c:GkW_D-WkHbSunublL_mOAkA1A2CBwzEADULQBvUigz6FNZK4Oyy_bUiAXNGc_PMELL_l7UEjV6MC8_N6e93aDg:4b987fd4e40303ac
 """
 errors.py: Typed exceptions for the thread system.
 
@@ -17,7 +17,7 @@ class ThreadSystemError(Exception):
 
 
 class TranscriptCorrupt(ThreadSystemError):
-    """Transcript JSONL has unparseable lines."""
+    """Fallback transcript JSONL has unparseable lines."""
 
     def __init__(self, path: str, line_no: int, raw_line: str):
         self.path = path

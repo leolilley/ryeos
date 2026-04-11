@@ -1,5 +1,5 @@
-# rye:signed:2026-04-10T08:31:57Z:cc2b2b0cc22da1502c2fe0e84b597c8f76ca4699c92fd9e4c79322d40df6161b:v7dXMfg-cHld5z3wTH6XgWuh1P21GkMbO8R6a2Ui6IIY0A7V8AzaObxxNCGPN8eaxN2KWlKYH3LFfszDSyBoAA:4b987fd4e40303ac
-__version__ = "1.1.0"
+# rye:signed:2026-04-11T01:58:56Z:fa6cfe845e4abf1776e7c7f9c994b02a7c0d998f740d6307e4576bcab7f669c8:rKyg42b3syDG2SbjDjXIlIly9Ro-TRU2Vw4NQA6aXwBW0sBuQaRnw1OTbarvgaMEAgGu55kCuWqQoZuZ3HkaAw:4b987fd4e40303ac
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
@@ -27,44 +27,12 @@ CONFIG_SCHEMA = {
 
 
 def execute(params: Dict, project_path: str) -> Dict:
-    """Execute budget operation."""
-    from pathlib import Path
-
-    from module_loader import load_module
-    _anchor = Path(__file__).parent.parent
-    budgets = load_module("persistence/budgets", anchor=_anchor)
-
-    operation = params["operation"]
-    thread_id = params["thread_id"]
-    ledger = budgets.get_ledger(Path(project_path))
-
-    if operation == "reserve":
-        parent_id = params.get("parent_thread_id")
-        amount = params.get("amount", 0.0)
-        ledger.reserve(thread_id, amount, parent_id)
-        return {"success": True, "reserved": amount}
-
-    if operation == "report_actual":
-        amount = params.get("amount", 0.0)
-        ledger.report_actual(thread_id, amount)
-        return {"success": True, "reported": amount}
-
-    if operation == "release":
-        ledger.release(thread_id, params.get("final_status", "completed"))
-        return {"success": True, "released": True}
-
-    if operation == "check_remaining":
-        remaining = ledger.get_remaining(thread_id)
-        return {"success": True, "remaining": remaining}
-
-    if operation == "can_spawn":
-        return ledger.can_spawn(thread_id, params.get("amount", 0.0))
-
-    if operation == "increment_actual":
-        ledger.increment_actual(thread_id, params.get("amount", 0.0))
-        return {"success": True}
-
-    if operation == "get_tree_spend":
-        return {"success": True, **ledger.get_tree_spend(thread_id)}
-
-    return {"success": False, "error": f"Unknown operation: {operation}"}
+    """Budget operations are daemon-owned in v3."""
+    return {
+        "success": False,
+        "error": (
+            "Budget operations are daemon-owned in v3; "
+            "the Python budget ledger is no longer authoritative. "
+            "Use daemon RPC for budget queries."
+        ),
+    }

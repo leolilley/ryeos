@@ -6,14 +6,12 @@ Directive inputs are read as JSON from stdin.
 
 import sys
 
-from rye_cli.output import run_async, print_result, parse_params
+from rye_cli.output import daemon_execute, print_result, parse_params
 
 
 def register(subparsers):
     p = subparsers.add_parser("thread", help="Spawn a directive thread")
     p.add_argument("directive_id", help="Directive ID (slash-separated path)")
-
-    # Thread-level flags (known fixed set)
     p.add_argument("--model", help="LLM model to use")
     p.add_argument("--max-spend", type=float, help="Maximum spend budget in dollars")
     p.add_argument("--max-turns", type=int, help="Maximum conversation turns")
@@ -23,19 +21,14 @@ def register(subparsers):
 
 
 def handle(args, project_path: str):
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
     raw = sys.stdin.read().strip() if not sys.stdin.isatty() else "{}"
     params = parse_params(raw)
 
-    # Thread execution is always threaded
     params["thread"] = True
 
     if args.is_async:
         params["async"] = True
 
-    # Build limit_overrides from thread flags
     limit_overrides = {}
     if args.model:
         limit_overrides["model"] = args.model
@@ -46,7 +39,10 @@ def handle(args, project_path: str):
     if limit_overrides:
         params["limit_overrides"] = limit_overrides
 
-    # Print what we're about to do
+    budget = None
+    if args.max_spend is not None:
+        budget = {"max_spend": args.max_spend}
+
     print(
         f"[thread] spawning: {args.directive_id}"
         + (f" (model={args.model})" if args.model else "")
@@ -54,10 +50,10 @@ def handle(args, project_path: str):
         file=sys.stderr,
     )
 
-    tool = ExecuteTool(str(get_user_space()))
-    result = run_async(tool.handle(
-        item_id=f"directive:{args.directive_id}",
-        project_path=project_path,
-        parameters=params,
-    ))
+    result = daemon_execute(
+        f"directive:{args.directive_id}",
+        params,
+        model=args.model,
+        budget=budget,
+    )
     print_result(result)

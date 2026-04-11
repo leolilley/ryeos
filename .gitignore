@@ -126,3 +126,4 @@ tests/e2e/.venv
 
 ## E2E test generated knowledge (ephemeral)
 tests/e2e/.ai/knowledge/
+ryeosd/target/

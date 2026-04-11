@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:a013634a889ff8ee8871b950ba4008c5b4f8f2e8ee2896ceceeb00c36391b0ea:2_BDEvqRfWCUCpfuzFCxQ0FHYkO7uoT3-kOkV5YsMVsL1Q5tVSYmHx-T4BCOEzzMbmp1ClMxFU71Xk3kDYn7AQ:4b987fd4e40303ac
+# rye:signed:2026-04-11T01:46:35Z:8d8b156c33a07534ee77f09220272490d57a9a8c63f9ac18fed96041e2c5f8de:w0ByaxustM_3h1UvNlFBnIjDc4K_35C9aofwjCl0lywBqmMD9B8ywrpaWzahC42JFhCo5xVf6lXPcPFV-hpzBg:4b987fd4e40303ac
 # internal/thread_chain_search.py
 __version__ = "1.0.0"
 __tool_type__ = "python"
@@ -8,14 +8,33 @@ __tool_description__ = "Search across all threads in a continuation chain"
 
 import json
 import re
-from pathlib import Path
 from typing import Dict
 
-from rye.constants import AI_DIR, STATE_THREADS_REL
+from rye.runtime.daemon_rpc import RpcError, ThreadLifecycleClient, resolve_daemon_socket_path
 
-from module_loader import load_module
 
-_ANCHOR = Path(__file__).parent.parent
+def _daemon_client() -> ThreadLifecycleClient:
+    socket_path = resolve_daemon_socket_path()
+    if not socket_path:
+        raise RuntimeError("ryeosd socket path is unavailable")
+    return ThreadLifecycleClient(socket_path)
+
+
+def _load_thread_events(client: ThreadLifecycleClient, thread_id: str) -> list[Dict]:
+    loaded = []
+    cursor = None
+
+    while True:
+        page = client.replay_events(thread_id=thread_id, after_chain_seq=cursor, limit=200)
+        events = page.get("events") or []
+        if not events:
+            break
+        loaded.extend(events)
+        cursor = page.get("next_cursor")
+        if cursor is None:
+            break
+
+    return loaded
 
 CONFIG_SCHEMA = {
     "type": "object",
@@ -38,10 +57,10 @@ CONFIG_SCHEMA = {
 def execute(params: Dict, project_path: str) -> Dict:
     """Search across all threads in a continuation chain.
 
-    Collects the full chain from root to current, then searches
-    each thread's transcript for the query.
+    Collects the daemon-owned chain from root to current, then searches
+    each thread's indexed event history for the query.
     """
-    thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
+    del project_path
 
     thread_id = params["thread_id"]
     query = params["query"]
@@ -51,66 +70,60 @@ def execute(params: Dict, project_path: str) -> Dict:
     ]))
     max_results = params.get("max_results", 50)
 
-    proj_path = Path(project_path)
-    registry = thread_registry.get_registry(proj_path)
+    try:
+        client = _daemon_client()
+        chain = client.get_chain(thread_id)
+    except (OSError, RuntimeError, RpcError) as exc:
+        return {"success": False, "error": str(exc)}
 
-    # Get the full chain
-    chain = registry.get_chain(thread_id)
     if not chain:
         return {"success": False, "error": f"No chain found for thread {thread_id}"}
+
+    threads = chain.get("threads") or []
 
     results = []
     pattern = re.compile(query, re.IGNORECASE) if search_type == "regex" else None
 
-    for thread in chain:
+    for thread in threads:
         tid = thread["thread_id"]
-        transcript_path = proj_path / AI_DIR / STATE_THREADS_REL / tid / "transcript.jsonl"
-
-        if not transcript_path.exists():
+        try:
+            events = _load_thread_events(client, tid)
+        except (OSError, RpcError):
             continue
 
-        with open(transcript_path) as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+        for line_no, event in enumerate(events, 1):
+            event_type = event.get("event_type", "")
+            if event_type not in include_events:
+                continue
 
-                event_type = event.get("event_type", "")
-                if event_type not in include_events:
-                    continue
+            payload_str = json.dumps(event.get("payload", {}))
 
-                payload_str = json.dumps(event.get("payload", {}))
+            if search_type == "regex":
+                matches = pattern.findall(payload_str)
+            else:
+                matches = [query] if query.lower() in payload_str.lower() else []
 
-                if search_type == "regex":
-                    matches = pattern.findall(payload_str)
-                else:
-                    matches = [query] if query.lower() in payload_str.lower() else []
+            if matches:
+                results.append({
+                    "thread_id": tid,
+                    "event_type": event_type,
+                    "line_no": line_no,
+                    "snippet": payload_str[:500],
+                    "matches": matches[:5],
+                })
 
-                if matches:
-                    results.append({
-                        "thread_id": tid,
-                        "event_type": event_type,
-                        "line_no": line_no,
-                        "snippet": payload_str[:500],
-                        "matches": matches[:5],
-                    })
-
-                    if len(results) >= max_results:
-                        return {
-                            "success": True,
-                            "chain_length": len(chain),
-                            "results": results,
-                            "truncated": True,
-                        }
+                if len(results) >= max_results:
+                    return {
+                        "success": True,
+                        "chain_length": len(threads),
+                        "results": results,
+                        "truncated": True,
+                    }
 
     return {
         "success": True,
-        "chain_length": len(chain),
-        "chain_threads": [t["thread_id"] for t in chain],
+        "chain_length": len(threads),
+        "chain_threads": [t["thread_id"] for t in threads],
         "results": results,
         "truncated": False,
     }

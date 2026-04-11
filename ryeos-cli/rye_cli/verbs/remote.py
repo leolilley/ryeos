@@ -6,7 +6,7 @@ Subcommands:
   bundle build / push / verify     Bundle operations
 """
 
-from rye_cli.output import run_async, print_result
+from rye_cli.output import print_result
 
 
 def register(subparsers):
@@ -89,27 +89,13 @@ def register(subparsers):
 
 
 def _remote_execute(project_path: str, params: dict) -> dict:
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
-    tool = ExecuteTool(str(get_user_space()))
-    return run_async(tool.handle(
-        item_id="tool:rye/core/remote/remote",
-        project_path=project_path,
-        parameters=params,
-    ))
+    from rye_cli.output import daemon_execute
+    return daemon_execute("tool:rye/core/remote/remote", params)
 
 
 def _bundler_execute(project_path: str, params: dict) -> dict:
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
-    tool = ExecuteTool(str(get_user_space()))
-    return run_async(tool.handle(
-        item_id="tool:rye/core/bundler/bundler",
-        project_path=project_path,
-        parameters=params,
-    ))
+    from rye_cli.output import daemon_execute
+    return daemon_execute("tool:rye/core/bundler/bundler", params)
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────

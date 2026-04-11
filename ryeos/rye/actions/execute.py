@@ -562,75 +562,19 @@ class ExecuteTool:
     ) -> Dict[str, Any]:
         """Resume a completed or interrupted thread.
 
-        Looks up the thread in the registry, resolves the original item,
-        and dispatches through its executor with resume parameters.
+        The v3 daemon plan deletes transcript- and registry-driven resume.
+        Until daemon-owned continuation lands, this control surface is
+        intentionally unavailable.
         """
-        proj = Path(project_path)
-        registry = self._get_registry(proj)
-        thread_record = registry.get_thread(resume_thread_id) if registry else None
-
-        if not thread_record:
-            return {
-                "status": "error",
-                "error": f"Thread not found: {resume_thread_id}",
-                "resume_thread_id": resume_thread_id,
-            }
-
-        resolved_id = item_id or thread_record.get("item_id", "")
-
-        if not resolved_id:
-            return {
-                "status": "error",
-                "error": (
-                    "Cannot determine item_id for resume: not provided "
-                    "and thread record has no item_id field."
-                ),
-                "resume_thread_id": resume_thread_id,
-            }
-
-        try:
-            resolved = self._resolve_executable_ref(project_path, resolved_id)
-        except IntegrityError as e:
-            return {
-                "status": "error", "error": str(e), "error_type": "integrity",
-                "resume_thread_id": resume_thread_id,
-            }
-        except ValueError as e:
-            return {"status": "error", "error": str(e), "resume_thread_id": resume_thread_id}
-
-        parameters["previous_thread_id"] = resume_thread_id
-
-        envelope = ExecutionEnvelope(
-            item_ref=resolved.canonical_ref,
-            executor_id=resolved.executor_id,
-            parameters=parameters,
-            thread=thread if thread != "inline" else "fork",
-            async_exec=async_exec,
-            dry_run=False,
-        )
-
-        if resolved.executor_id == PRIMITIVE_CHAIN:
-            spec = await self._read_execution_spec(resolved.bare_id, project_path)
-            if not spec.native_resume:
-                return {
-                    "status": "error",
-                    "error": (
-                        f"Item {envelope.item_ref} does not support resume "
-                        f"(native_resume=False)."
-                    ),
-                    "resume_thread_id": resume_thread_id,
-                }
-            parameters["resume"] = True
-            parameters["graph_run_id"] = resume_thread_id
-            return await self._run_tool(
-                resolved.bare_id, project_path, parameters, dry_run=False,
-            )
-        else:
-            return await self._dispatch_executor_tool(
-                resolved=resolved,
-                envelope=envelope,
-                project_path=project_path,
-            )
+        del item_id, project_path, parameters, thread, async_exec
+        return {
+            "status": "error",
+            "error": (
+                "resume_thread_id is not supported on the daemon-owned v3 path until "
+                "continuation is created and resolved by ryeosd"
+            ),
+            "resume_thread_id": resume_thread_id,
+        }
 
     # ------------------------------------------------------------------
     # Execution spec / plan (for @primitive_chain items)
@@ -800,105 +744,19 @@ class ExecuteTool:
         envelope: ExecutionEnvelope,
         project_path: str,
     ) -> Dict[str, Any]:
-        """Launch an item in a detached child process, return immediately."""
-        import json as _json
-        import sys
-        from rye.utils.detached import generate_thread_id
-
-        thread_id = generate_thread_id(envelope.item_ref)
-        proj = Path(project_path)
-
-        registry = self._get_registry(proj)
-        thread_dir = proj / AI_DIR / STATE_DIR / STATE_THREADS / thread_id
-
-        payload = {
-            "item_id": envelope.item_ref,
-            "parameters": envelope.parameters,
-            "target": "local",
-            "thread": envelope.thread,
-        }
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "rye.utils.async_runner",
-            "--project-path",
-            project_path,
-            "--thread-id",
-            thread_id,
-        ]
-
-        if registry:
-            from rye.utils.detached import spawn_thread
-
-            spawn_result = await spawn_thread(
-                registry=registry,
-                thread_id=thread_id,
-                item_id=envelope.item_ref,
-                cmd=cmd,
-                log_dir=thread_dir,
-                input_data=_json.dumps(payload),
-            )
-        else:
-            from rye.utils.detached import launch_detached
-
-            spawn_result = await launch_detached(
-                cmd,
-                thread_id=thread_id,
-                log_dir=thread_dir,
-                input_data=_json.dumps(payload),
-            )
-
-        if not spawn_result.get("success"):
-            return {
-                "status": "error",
-                "error": f"Failed to spawn async process: {spawn_result.get('error')}",
-                "item_id": envelope.item_ref,
-            }
-
-        # Parse kind from canonical ref for response
+        """Detached execution is disabled until it is daemon-owned."""
         kind, bare_id = ItemType.parse_canonical_ref(envelope.item_ref)
         return {
-            "status": "success",
+            "status": "error",
             "async": True,
-            "thread_id": thread_id,
             "type": kind,
             "item_id": bare_id,
             "execution_mode": envelope.thread,
-            "state": "running",
-            "pid": spawn_result["pid"],
+            "error": (
+                "Detached execution is disabled on the daemon-owned v3 path until "
+                "async runtime helpers stop using local registry authority"
+            ),
         }
-
-    @staticmethod
-    def _get_registry(project_path: Path):
-        """Try to get thread registry. Returns None if unavailable."""
-        try:
-            from rye.utils.path_utils import get_system_spaces
-            from rye.constants import AI_DIR as _AI_DIR
-
-            for bundle in get_system_spaces():
-                mod_path = (
-                    bundle.root_path
-                    / _AI_DIR
-                    / "tools"
-                    / "rye"
-                    / "agent"
-                    / "threads"
-                    / "persistence"
-                    / "thread_registry.py"
-                )
-                if mod_path.is_file():
-                    import importlib.util
-
-                    spec = importlib.util.spec_from_file_location(
-                        "thread_registry", mod_path
-                    )
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    return mod.get_registry(project_path)
-        except Exception:
-            pass
-        return None
 
     def _build_ctx(self, project_path: str) -> ExecutionContext:
         """Build an ExecutionContext for the given project path."""

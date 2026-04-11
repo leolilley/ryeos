@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:bb499e7bf397a37e2a30a90d42082bc6f5e6ca6ce02096f66382b8a3e3b9d990:TmxiFc5CggRsaxZ6ZQSD27RLs8Ivbtp4V-MYLncxJPV7HUJSVvO2ugnY3uB_lqXgaGTP8_HUTnHWLdDyplKUAw:4b987fd4e40303ac
+# rye:signed:2026-04-11T01:10:50Z:b1437fe3d6d2bf76d71d9b2e078a63daf3be71850b1858186bbaacc45829c721:T67Rqy-IPGRLp4svRhh_hqdwi7wbbGXj-H0wpJwUX3Ot48wul5ZxMyjaweSKNh3BMSYJOqw0mG13DbnoLL6uBA:4b987fd4e40303ac
 """
 http_provider.py: ProviderAdapter for LLM HTTP API calls.
 
@@ -665,7 +665,8 @@ class HttpProvider(ProviderAdapter):
     ) -> Dict:
         """Send messages to LLM via streaming, with real-time sink fan-out.
 
-        Sinks receive raw SSE events as they arrive (for transcript writing).
+        Sinks receive raw SSE events as they arrive so they can append
+        daemon-owned history and mirror human-readable knowledge output.
         A _ReturnSink is always added to buffer events for final response assembly.
 
         Returns the same response dict as create_completion().

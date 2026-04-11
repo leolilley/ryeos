@@ -1,0 +1,34 @@
+[package]
+name = "ryeosd"
+version = "0.1.0"
+edition = "2021"
+description = "ryeosd daemon - Rust control plane for Rye OS"
+license = "MIT"
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeosd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+axum = "0.7"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+futures-core = "0.3"
+pyo3 = { version = "0.28", features = ["auto-initialize"] }
+rand = "0.8"
+rmp-serde = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

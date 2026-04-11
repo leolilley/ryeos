@@ -172,6 +172,40 @@ class TestTranscriptSigner:
         assert result["valid"] is True
         assert result["checkpoints"] == 2
 
+    def test_checkpoint_is_noop_with_daemon_runtime_context(self, temp_env, monkeypatch):
+        td = temp_env["thread_dir"]
+        jsonl = td / "transcript.jsonl"
+        _write_event(jsonl, "cognition_in", {"text": "hello", "role": "user"})
+
+        monkeypatch.setattr(
+            _signer_mod,
+            "get_daemon_runtime_context",
+            lambda: {"socket_path": "/tmp/ryeosd.sock", "thread_id": "test-thread"},
+        )
+
+        signer = TranscriptSigner("test-thread", td)
+        signer.checkpoint(1)
+
+        events = [json.loads(line) for line in jsonl.read_text().splitlines()]
+        assert len(events) == 1
+        assert events[0]["event_type"] == "cognition_in"
+
+    def test_verify_bypasses_jsonl_gate_with_daemon_runtime_context(self, temp_env, monkeypatch):
+        td = temp_env["thread_dir"]
+        jsonl = td / "transcript.jsonl"
+        _write_event(jsonl, "cognition_in", {"text": "hello", "role": "user"})
+
+        monkeypatch.setattr(
+            _signer_mod,
+            "get_daemon_runtime_context",
+            lambda: {"socket_path": "/tmp/ryeosd.sock", "thread_id": "test-thread"},
+        )
+
+        signer = TranscriptSigner("test-thread", td)
+        result = signer.verify()
+
+        assert result == {"valid": True, "checkpoints": 0, "mode": "daemon"}
+
 
 class TestJsonSigning:
     def test_sign_and_verify(self, temp_env):

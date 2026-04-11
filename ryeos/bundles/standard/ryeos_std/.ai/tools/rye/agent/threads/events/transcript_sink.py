@@ -1,47 +1,59 @@
-# rye:signed:2026-04-10T08:31:57Z:de05f62956404a69893644deb6d5bd1f0f571a2b5ec63b09d674acdea0e18cf8:OiRKJHp0nblOPs_RXd2k3OO2aNWnWKhrye27c30KMD2h7U1zNLtUVPDqzpMPqJQHOAtox1zIZFyYHjjWzJQeBA:4b987fd4e40303ac
-__version__ = "1.1.0"
+# rye:signed:2026-04-11T04:03:37Z:df4cc743ad35a5a8ab87d5d79d110cc6098a6f25db997f59be88945411580a2d:QspDs0Qh3oXvucvQDbigO4vBwpxxxb_I8NF8XvBK0fmMqHTdOFG8N6kXH7MQp36X-GichRTJqiQ5lXdT-gUxCA:4b987fd4e40303ac
+__version__ = "1.2.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/events"
-__tool_description__ = "Streaming sink that writes token_delta events to transcript JSONL and knowledge markdown"
+__tool_description__ = "Streaming sink that appends daemon events and mirrors knowledge markdown"
 
+import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any, Optional
 
+from rye.runtime.daemon_rpc import require_daemon_runtime_context
+
 
 class TranscriptSink:
-    """Sink that writes token_delta events to both transcript JSONL and knowledge markdown.
+    """Sink that appends daemon-owned stream events and mirrors knowledge markdown.
 
     Implements the write/close interface expected by the streaming provider
-    adapter's fan-out. Each SSE event is parsed and written as a JSONL line
-    so `tail -f transcript.jsonl` shows tokens arriving in real-time.
+    adapter's fan-out. Each SSE event is parsed and appended through the
+    daemon chain journal so live subscribers receive gap-free streaming.
 
     When knowledge_path is set, text deltas are also appended to the
-    knowledge markdown file so `tail -f *.md` shows the response forming.
-    render_knowledge_transcript() rewrites the file cleanly at each checkpoint.
+    knowledge markdown file so human-readable thread output still forms live.
     """
 
     def __init__(
         self,
-        transcript_path: Path,
         thread_id: str,
         response_format: str = "content_blocks",
         knowledge_path: Optional[Path] = None,
         turn: int = 0,
     ):
-        self.transcript_path = transcript_path
         self.thread_id = thread_id
         self._response_format = response_format
         self._knowledge_path = knowledge_path
         self._turn = turn
-        self._fh = None
         self._kfh = None
         self._wrote_turn_header = False
+        self._client = None
+        self._resolved_thread_id = thread_id
+        self._delta_count = 0
+        self._text_parts: list[str] = []
+        self._thinking_parts: list[str] = []
+        self._tool_calls: list[dict[str, str]] = []
+        self._last_message_delta: dict[str, Any] | None = None
+        self._stream_opened = False
+        self._pending_deltas: list[dict[str, Any]] = []
+        self._flush_interval = 0.05  # 50ms batching window
 
-    def _ensure_open(self):
-        if self._fh is None:
-            self._fh = open(self.transcript_path, "a")
+    def _ensure_client(self):
+        if self._client is None:
+            client, resolved_thread_id, _ = require_daemon_runtime_context(
+                thread_id=self.thread_id
+            )
+            self._client = client
+            self._resolved_thread_id = resolved_thread_id
 
     def _ensure_knowledge_open(self):
         if self._kfh is None and self._knowledge_path:
@@ -49,7 +61,7 @@ class TranscriptSink:
             self._kfh = open(self._knowledge_path, "a")
 
     async def write(self, event: str) -> None:
-        """Parse an SSE event string and write token_delta to transcript + markdown."""
+        """Parse an SSE event string and append token deltas through the daemon."""
         if not event or event == "[DONE]":
             return
 
@@ -62,20 +74,90 @@ class TranscriptSink:
         if not delta:
             return
 
-        # Write JSONL token_delta
-        entry = {
-            "timestamp": time.time(),
-            "thread_id": self.thread_id,
-            "event_type": "token_delta",
-            "payload": delta,
-        }
+        self._ensure_client()
+        if not self._stream_opened:
+            self._stream_opened = True
+            await self._append_events(
+                [
+                    {
+                        "event_type": "stream_opened",
+                        "storage_class": "indexed",
+                        "payload": {
+                            "turn": self._turn,
+                            "response_format": self._response_format,
+                        },
+                    }
+                ]
+            )
 
-        self._ensure_open()
-        self._fh.write(json.dumps(entry, default=str) + "\n")
-        self._fh.flush()
+        self._record_delta(delta)
+        self._pending_deltas.append(
+            {
+                "event_type": "token_delta",
+                "storage_class": "journal_only",
+                "payload": delta,
+            }
+        )
+        await self._flush_deltas()
 
-        # Write to knowledge markdown
         self._write_knowledge_delta(delta)
+
+    async def _flush_deltas(self, force: bool = False) -> None:
+        """Flush pending token_delta events in a single batched RPC call.
+
+        Accumulates deltas for up to _flush_interval seconds before
+        flushing, unless force=True which flushes immediately.
+        """
+        if not self._pending_deltas:
+            return
+        if not force and len(self._pending_deltas) < 16:
+            # Yield briefly to let more deltas accumulate within the batch window
+            await asyncio.sleep(0)
+            if not self._pending_deltas:
+                return
+        batch = self._pending_deltas
+        self._pending_deltas = []
+        await self._append_events(batch)
+
+    async def _append_events(self, events: list[dict[str, Any]]) -> None:
+        await asyncio.to_thread(
+            self._client.append_events,
+            self._resolved_thread_id,
+            events,
+        )
+
+    def _record_delta(self, delta: dict[str, Any]) -> None:
+        self._delta_count += 1
+        delta_type = delta.get("type", "")
+        if delta_type == "text":
+            self._text_parts.append(delta.get("text", ""))
+        elif delta_type == "thinking":
+            self._thinking_parts.append(delta.get("text", ""))
+        elif delta_type == "tool_call_start":
+            self._tool_calls.append(
+                {
+                    "id": delta.get("id", ""),
+                    "name": delta.get("name", ""),
+                }
+            )
+        elif delta_type == "message_delta":
+            self._last_message_delta = delta
+
+    def _snapshot_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "turn": self._turn,
+            "response_format": self._response_format,
+            "delta_count": self._delta_count,
+            "text": "".join(self._text_parts),
+        }
+        thinking = "".join(self._thinking_parts)
+        if thinking:
+            payload["thinking"] = thinking
+        if self._tool_calls:
+            payload["tool_calls"] = self._tool_calls
+        if self._last_message_delta:
+            payload["message_delta"] = self._last_message_delta
+        return payload
 
     def _write_knowledge_delta(self, delta: dict) -> None:
         """Append delta content to the knowledge markdown file."""
@@ -185,10 +267,32 @@ class TranscriptSink:
         return None
 
     async def close(self) -> None:
-        if self._fh is not None:
-            self._fh.flush()
-            self._fh.close()
-            self._fh = None
+        # Flush any remaining buffered token deltas before closing
+        if self._pending_deltas:
+            self._ensure_client()
+            await self._flush_deltas(force=True)
+        if self._stream_opened:
+            self._ensure_client()
+            snapshot = self._snapshot_payload()
+            await self._append_events(
+                [
+                    {
+                        "event_type": "stream_snapshot",
+                        "storage_class": "indexed",
+                        "payload": snapshot,
+                    },
+                    {
+                        "event_type": "stream_closed",
+                        "storage_class": "indexed",
+                        "payload": {
+                            "turn": self._turn,
+                            "response_format": self._response_format,
+                            "delta_count": self._delta_count,
+                        },
+                    },
+                ]
+            )
+            self._stream_opened = False
         if self._kfh is not None:
             self._kfh.write("\n")
             self._kfh.flush()

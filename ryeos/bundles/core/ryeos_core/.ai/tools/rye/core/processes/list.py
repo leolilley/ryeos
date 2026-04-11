@@ -1,13 +1,11 @@
-# rye:signed:2026-04-10T08:31:58Z:7af27ac87773f7b6cc1fac81078b39afb48391c8c6cafa87135fbac14650a5fa:6SSSo9j6TXoKUyZTw9Qb7uY2_zkREjo3wFfZHgUy5hX5FP8knanSgjoR7UqfO7YduAQ2M0WMF_1qpEKv7-DCBw:4b987fd4e40303ac
-"""List running processes from thread registry."""
+# rye:signed:2026-04-11T01:59:39Z:80018174f409b48b4b9ef67009f9c195bcb55a9ce563948335194c443f391bc3:oeHd4OuObBKL4dJUs5Tf8eVx9uASXQxEtuT9rauH-p3A1oPIuiKYK6CemaRIpno3XzJ0oq8FQD_iBWUiIymiDQ:4b987fd4e40303ac
+"""List running processes from daemon."""
 
 import argparse
 import json
-import sqlite3
 import sys
-from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/processes"
@@ -24,46 +22,47 @@ CONFIG_SCHEMA = {
     },
 }
 
+_TERMINAL_STATUSES = frozenset({"completed", "completed_with_errors", "error", "cancelled", "killed"})
+
 
 def execute(params: dict, project_path: str) -> dict:
-    from rye.constants import AI_DIR, STATE_THREADS_REL
+    from rye.runtime.daemon_rpc import (
+        ThreadLifecycleClient,
+        resolve_daemon_socket_path,
+        RpcError,
+    )
 
-    proj = Path(project_path)
-    db_path = proj / AI_DIR / STATE_THREADS_REL / "registry.db"
-    if not db_path.exists():
+    socket_path = resolve_daemon_socket_path()
+    if not socket_path:
         return {"success": True, "runs": [], "count": 0}
 
-    status_filter = params.get("status")
+    try:
+        client = ThreadLifecycleClient(socket_path)
+        resp = client.list_threads(limit=200)
+    except RpcError as e:
+        return {"success": False, "error": f"Daemon RPC error: {e}"}
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        if status_filter:
-            cursor = conn.execute(
-                "SELECT * FROM threads WHERE status = ? ORDER BY created_at DESC",
-                (status_filter,),
-            )
-        else:
-            cursor = conn.execute("""
-                SELECT * FROM threads
-                WHERE status NOT IN ('completed', 'completed_with_errors', 'error', 'cancelled', 'killed')
-                ORDER BY created_at DESC
-            """)
-        rows = cursor.fetchall()
+    all_threads = resp.get("threads", []) if resp else []
+
+    status_filter = params.get("status")
+    if status_filter:
+        threads = [t for t in all_threads if t.get("status") == status_filter]
+    else:
+        threads = [t for t in all_threads if t.get("status") not in _TERMINAL_STATUSES]
 
     runs = []
-    for row in rows:
-        r = dict(row)
+    for t in threads:
         entry = {
-            "run_id": r.get("thread_id"),
-            "directive": r.get("directive"),
-            "status": r.get("status"),
-            "pid": r.get("pid"),
-            "parent_id": r.get("parent_id"),
-            "created_at": r.get("created_at"),
-            "updated_at": r.get("updated_at"),
+            "run_id": t.get("thread_id"),
+            "directive": t.get("item_ref"),
+            "status": t.get("status"),
+            "pid": t.get("pid"),
+            "parent_id": t.get("parent_id"),
+            "created_at": t.get("created_at"),
+            "updated_at": t.get("updated_at"),
         }
-        if r.get("status") == "completed_with_errors":
-            stored_result = r.get("result")
+        if t.get("status") == "completed_with_errors":
+            stored_result = t.get("result")
             if stored_result:
                 try:
                     parsed = json.loads(stored_result) if isinstance(stored_result, str) else stored_result

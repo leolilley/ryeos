@@ -144,7 +144,7 @@ class TestStatusTool:
     """Test rye/core/processes/status."""
 
     def test_module_metadata(self):
-        assert _status_tool.__version__ == "1.0.0"
+        assert _status_tool.__version__ == "1.1.0"
         assert _status_tool.__category__ == "rye/core/processes"
         assert "run_id" in _status_tool.CONFIG_SCHEMA["required"]
 
@@ -187,7 +187,7 @@ class TestCancelTool:
     """Test rye/core/processes/cancel."""
 
     def test_module_metadata(self):
-        assert _cancel_tool.__version__ == "1.0.0"
+        assert _cancel_tool.__version__ == "1.1.0"
         assert _cancel_tool.__category__ == "rye/core/processes"
         assert "run_id" in _cancel_tool.CONFIG_SCHEMA["required"]
 
@@ -236,7 +236,7 @@ class TestListTool:
     """Test rye/core/processes/list."""
 
     def test_module_metadata(self):
-        assert _list_tool.__version__ == "1.0.0"
+        assert _list_tool.__version__ == "1.1.0"
         assert _list_tool.__category__ == "rye/core/processes"
 
     def test_no_registry(self, tmp_path):

@@ -116,54 +116,9 @@ async def launch_detached(
         return {"success": False, "error": str(exc)}
 
 
-async def spawn_thread(
-    *,
-    registry,
-    thread_id: str,
-    item_id: str,
-    cmd: List[str],
-    log_dir: Path,
-    input_data: Optional[str] = None,
-    parent_id: Optional[str] = None,
-    env_extra: Optional[Dict[str, str]] = None,
-) -> Dict:
-    """Register a thread, spawn a detached child, and update PID.
-
-    Encapsulates the full lifecycle so callers can't forget a step:
-      1. Register in ThreadRegistry (``created``)
-      2. Mark ``running``
-      3. Spawn via ``launch_detached()``
-      4. On success: update PID to the child's actual PID
-      5. On failure: mark ``error``
-
-    Args:
-        registry: ThreadRegistry instance (must support register,
-            update_status, update_pid).
-        thread_id: Thread identifier (from ``generate_thread_id()``).
-        item_id: Canonical item ref for registry (e.g. "tool:my-tool").
-        cmd: Command list for the child process.
-        log_dir: Directory for spawn.log.
-        input_data: Optional JSON payload piped to child stdin.
-        parent_id: Optional parent thread ID.
-        env_extra: Additional env vars for the child.
-
-    Returns:
-        Dict with ``success``, ``pid``, and optional ``error``.
-    """
-    registry.register(thread_id, item_id, parent_id)
-    registry.update_status(thread_id, "running")
-
-    result = await launch_detached(
-        cmd,
-        thread_id=thread_id,
-        log_dir=log_dir,
-        input_data=input_data,
-        env_extra=env_extra,
+async def spawn_thread(**kwargs) -> Dict:
+    """DELETED in v3 — detached spawn with registry lifecycle is daemon-owned."""
+    raise RuntimeError(
+        "spawn_thread() is deleted in v3; "
+        "detached execution must be recreated as a daemon client"
     )
-
-    if result.get("success"):
-        registry.update_pid(thread_id, result["pid"])
-    else:
-        registry.update_status(thread_id, "error")
-
-    return result

@@ -1,5 +1,5 @@
-# rye:signed:2026-04-10T08:31:57Z:c5c2c024b88aa6f7eb92a64d4dee91e4ee07456d5cb63683eed2d7d0e0cad101:SdHacKHFtI7Jvjny3YRNUV8-LO7MsbDPq40WtLP0gj2xAMDDxKCeLl8cv0gyySivcJqFRtycwXhiB9-2K4b6BA:4b987fd4e40303ac
-__version__ = "1.0.0"
+# rye:signed:2026-04-11T01:58:56Z:3656240b22cc1de89be4e94ed0a5a6294e122a7614f9ee21157d15ff6c2a0a37:Few5K10W9Bcb-SLonRorylT32Q13XiU1IzpgqTOhXLFAvbPsjCVmjmJbeOI7Pzz1p362wer5za_WSLnMw4pWBg:4b987fd4e40303ac
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads/internal"
@@ -9,21 +9,25 @@ from typing import Dict
 
 
 def execute(params: Dict, project_path: str) -> Dict:
-    """Check if thread cancellation has been requested."""
-    from pathlib import Path
-    import importlib.util
-
-    state_path = Path(__file__).parent.parent / "persistence" / "state_store.py"
-    spec = importlib.util.spec_from_file_location("state_store", state_path)
-    state_store_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(state_store_mod)
+    """Check if thread cancellation has been requested via daemon."""
+    from rye.runtime.daemon_rpc import ThreadLifecycleClient, resolve_daemon_socket_path, RpcError
 
     thread_id = params.get("thread_id")
-
     if not thread_id:
-        return {"success": False, "error": "Missing thread_id in context"}
+        return {"success": False, "error": "Missing thread_id"}
 
-    store = state_store_mod.StateStore(Path(project_path), thread_id)
-    cancelled = store.is_cancel_requested()
+    socket_path = resolve_daemon_socket_path()
+    if not socket_path:
+        return {"success": True, "cancelled": False}
 
-    return {"success": True, "cancelled": cancelled}
+    try:
+        client = ThreadLifecycleClient(socket_path)
+        record = client.get_thread(thread_id)
+        if not record:
+            return {"success": True, "cancelled": False}
+        thread = record.get("thread") or {}
+        status = thread.get("status", "")
+        cancelled = status in ("cancelled", "killed")
+        return {"success": True, "cancelled": cancelled}
+    except (OSError, RuntimeError, RpcError):
+        return {"success": True, "cancelled": False}

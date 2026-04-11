@@ -1,43 +1,17 @@
-"""Generic async runner — child process entrypoint for detached execution.
+"""Legacy detached child entrypoint.
 
-Invoked by launch_detached() when async=True on a tool or remote directive.
-Reads an execute payload from stdin, runs ExecuteTool.handle() synchronously,
-and updates the ThreadRegistry on completion.
-
-Uses the established thread system: thread_id registered in ThreadRegistry
-    (SQLite at .ai/state/threads/registry.db), log dir at
-    .ai/state/threads/{thread_id}/, results stored via registry.set_result().
-
-Usage (internal — spawned by launch_detached, not called directly):
-    python -m rye.utils.async_runner --project-path /path --thread-id <uuid>
-
-Stdin: JSON payload with item_id, parameters, thread, etc.
+Detached execution is disabled on the v3 daemon-owned path because the old
+async runner still depended on local registry authority. If this module is
+invoked directly, it returns a structured error instead of mutating local
+lifecycle state.
 """
 
-import asyncio
 import json
 import logging
 import os
 import sys
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-async def _run(payload: dict, project_path: str) -> dict:
-    """Execute the payload via ExecuteTool and return the result."""
-    from rye.actions.execute import ExecuteTool
-
-    tool = ExecuteTool(project_path=project_path)
-
-    return await tool.handle(
-        item_id=payload["item_id"],
-        project_path=project_path,
-        parameters=payload.get("parameters", {}),
-        target=payload.get("target", "local"),
-        thread=payload.get("thread", "inline"),
-        # Never re-async — we ARE the async child
-    )
 
 
 def main():
@@ -55,39 +29,18 @@ def main():
             stream=sys.stderr,
         )
 
-    # Read payload from stdin
-    payload = json.loads(sys.stdin.read())
-
-    project_path = args.project_path
-    thread_id = args.thread_id
-    proj = Path(project_path)
-
-    # Get registry (optional — degrades gracefully)
-    from rye.actions.execute import ExecuteTool
-
-    registry = ExecuteTool._get_registry(proj)
-
-    try:
-        result = asyncio.run(_run(payload, project_path))
-
-        status = "completed" if result.get("status") != "error" else "error"
-
-        if registry:
-            registry.update_status(thread_id, status)
-            registry.set_result(thread_id, result)
-
-        # Print result to stdout (captured in spawn.log by lillux)
-        print(json.dumps(result, default=str))
-
-    except Exception as exc:
-        error_result = {"status": "error", "error": str(exc), "thread_id": thread_id}
-
-        if registry:
-            registry.update_status(thread_id, "error")
-            registry.set_result(thread_id, error_result)
-
-        print(json.dumps(error_result, default=str))
-        sys.exit(1)
+    # Read stdin to avoid broken-pipe surprises for callers that still send a payload.
+    _ = sys.stdin.read()
+    result = {
+        "status": "error",
+        "thread_id": args.thread_id,
+        "error": (
+            "rye.utils.async_runner is disabled on the daemon-owned v3 path; "
+            "detached execution must be recreated as a daemon client"
+        ),
+    }
+    print(json.dumps(result, default=str))
+    sys.exit(1)
 
 
 if __name__ == "__main__":

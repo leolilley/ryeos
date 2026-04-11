@@ -1,17 +1,16 @@
-# rye:signed:2026-04-10T08:31:57Z:872a55476d0eb0cdebe94297f07e24432000ce725caae6e605e9231f54bd260b:LtAxdvYetYJUHsv_PeQM6c68Ph88mzVmq1sdUVeQ8nDybf3w1o269bwCqA72uZ0hweF6GyRTl6c5tfGvwxyICA:4b987fd4e40303ac
+# rye:signed:2026-04-11T02:23:01Z:ee7100cd46014081ac90feca9b085c422a5f044350686def889eb0d988218050:ePSBnANQ4bJNLaIdS8Xv6hl8x6kJSEiR-d5dQJ519SQuJDwMkZ9x4ru-elTDNB2a_hHcYpMpYRzOqsB2ly70Bg:4b987fd4e40303ac
 __version__ = "1.6.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/agent/threads"
 __tool_description__ = "Thread coordination: wait, cancel, status, chain resolution"
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import asyncio
-import json as _json
 from pathlib import Path
 
-from rye.primitives.execute import ExecutePrimitive
+from rye.runtime.daemon_rpc import RpcError, ThreadLifecycleClient, resolve_daemon_socket_path
 from module_loader import load_module
 
 _ANCHOR = Path(__file__).parent
@@ -35,7 +34,7 @@ CONFIG_SCHEMA = {
         "query": {"type": "string", "description": "Search query for chain_search"},
         "search_type": {"type": "string", "enum": ["regex", "text"], "default": "text"},
         "max_results": {"type": "integer", "default": 50},
-        "tail_lines": {"type": "integer", "description": "Number of lines from end of transcript to return"},
+        "tail_lines": {"type": "integer", "description": "Number of lines from the end of the thread history export to return"},
         "message": {"type": "string", "description": "User message to append for resume_thread"},
     },
     "required": ["operation"],
@@ -48,6 +47,9 @@ _thread_results: Dict[str, Dict] = {}
 _active_harnesses: Dict[str, Any] = {}
 _spawn_counts: Dict[str, int] = {}
 _thread_depths: Dict[str, int] = {}
+
+_ACTIVE_STATUSES = {"created", "running"}
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "killed", "timed_out", "continued"}
 
 
 def register_thread(thread_id: str, harness: Any, depth: int = 0) -> None:
@@ -90,190 +92,82 @@ def complete_thread(thread_id: str, result: Dict) -> None:
     _spawn_counts.pop(thread_id, None)
 
 
-def resolve_thread_chain(thread_id: str, project_path: Path) -> str:
-    """Follow continuation chain to terminal thread.
+def _normalize_status(status: Optional[str]) -> str:
+    if status == "error":
+        return "failed"
+    return status or "unknown"
 
-    Returns the thread_id of the terminal thread (completed/error/running).
-    If the thread is not continued or not in registry, returns the original id.
-    """
-    thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-    registry = thread_registry.get_registry(project_path)
 
-    current = thread_id
-    visited = set()
+def _daemon_client() -> ThreadLifecycleClient:
+    socket_path = resolve_daemon_socket_path()
+    if not socket_path:
+        raise RuntimeError("ryeosd socket path is unavailable")
+    return ThreadLifecycleClient(socket_path)
 
-    while True:
-        if current in visited:
-            return current  # cycle — stop
-        visited.add(current)
 
-        thread = registry.get_thread(current)
-        if not thread:
-            return current
+def _local_result(thread_id: str) -> Dict:
+    result = dict(_thread_results.get(thread_id, {}))
+    result["status"] = _normalize_status(result.get("status"))
+    result.setdefault("thread_id", thread_id)
+    return result
 
-        if thread.get("status") != "continued":
-            return current
 
-        continuation_id = thread.get("continuation_thread_id")
-        if not continuation_id:
-            return current
-        current = continuation_id
+def _daemon_result(record: Dict) -> Dict:
+    thread = record.get("thread") or {}
+    result = record.get("result") or {}
+    return {
+        "thread_id": thread.get("thread_id"),
+        "status": _normalize_status(thread.get("status")),
+        "outcome_code": result.get("outcome_code"),
+        "result": result.get("result"),
+        "error": result.get("error"),
+        "artifacts": record.get("artifacts") or [],
+    }
 
 
 async def _wait_single(thread_id: str, timeout: float, project_path: Path) -> Dict:
-    """Wait for a single thread, resolving continuation chains."""
-    # Resolve chain first
-    resolved_id = resolve_thread_chain(thread_id, project_path)
+    """Wait for a single thread using daemon-owned state once it leaves-process."""
+    del project_path
 
-    # Check if already completed in-process
-    if resolved_id in _thread_results:
-        return _thread_results[resolved_id]
+    if thread_id in _thread_results:
+        return _local_result(thread_id)
 
-    # Wait on in-process event
-    event = _thread_events.get(resolved_id)
+    event = _thread_events.get(thread_id)
     if event:
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
-            return _thread_results.get(resolved_id, {"status": "unknown"})
+            return _local_result(thread_id)
         except asyncio.TimeoutError:
-            return {"status": "timeout", "thread_id": resolved_id}
+            return {"status": "timeout", "thread_id": thread_id}
 
-    # Not in-process — check registry for final status
-    thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-    registry = thread_registry.get_registry(project_path)
-    thread = registry.get_thread(resolved_id)
-    if thread:
-        status = thread.get("status", "unknown")
-        if status in ("completed", "error", "cancelled", "continued"):
-            return {"status": status, "thread_id": resolved_id}
-        # Still running but not in our process — poll registry
-        return await _poll_registry(resolved_id, registry, timeout)
-
-    return {"status": "not_found", "thread_id": resolved_id}
+    return await _poll_daemon_thread(thread_id, timeout)
 
 
-async def _poll_registry(thread_id: str, registry, timeout: float) -> Dict:
-    """Wait for thread completion via polling."""
+async def _poll_daemon_thread(thread_id: str, timeout: float) -> Dict:
+    """Wait for thread completion via daemon polling."""
     import time
+
+    client = _daemon_client()
     deadline = time.monotonic() + timeout
     poll_interval = 0.5
 
-    while time.monotonic() < deadline:
-        thread = registry.get_thread(thread_id)
-        if thread:
-            status = thread.get("status", "unknown")
-            if status in ("completed", "error", "cancelled", "continued"):
-                return {"status": status, "thread_id": thread_id}
-        await asyncio.sleep(min(poll_interval, deadline - time.monotonic()))
+    while True:
+        record = client.get_thread(thread_id)
+        if not record:
+            return {"status": "not_found", "thread_id": thread_id}
 
-    return {"status": "timeout", "thread_id": thread_id}
+        result = _daemon_result(record)
+        if result["status"] in _TERMINAL_STATUSES:
+            return result
 
-
-_subprocess = ExecutePrimitive()
-
-
-async def _kill_pid(pid: int, grace: float = 3.0) -> Dict:
-    """Kill a process by PID via ExecutePrimitive."""
-    result = await _subprocess.kill(pid, grace=grace)
-    return {"success": result.success, "pid": pid, "method": result.method, "error": result.error}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {"status": "timeout", "thread_id": thread_id}
+        await asyncio.sleep(min(poll_interval, remaining))
 
 
-async def spawn_detached(
-    cmd: str, args: List[str],
-    log_path: Optional[str] = None,
-    envs: Optional[Dict[str, str]] = None,
-    input_data: Optional[str] = None,
-) -> Dict:
-    """Spawn a detached process via ExecutePrimitive.
-
-    Returns dict with 'success' and 'pid' on success.
-    """
-    result = await _subprocess.spawn(cmd, args, log_path=log_path, envs=envs, input_data=input_data)
-    if result.success:
-        return {"success": True, "pid": result.pid}
-    return {"success": False, "error": result.error}
-
-
-async def handoff_thread(
-    thread_id: str,
-    project_path: Path,
-    messages: Optional[List[Dict]] = None,
-    continuation_message: Optional[str] = None,
-) -> Dict:
-    """Handoff a stopping thread to a new continuation thread.
-
-    Spawns a new thread with the same directive and links old→new
-    via the continuation chain. The new thread reconstructs resume
-    context from the previous thread's transcript JSONL (verified
-    for integrity in execute() step 3.5).
-
-    Args:
-        thread_id: The stopping thread to hand off from.
-        project_path: Project root path.
-        messages: Ignored (kept for API compat). Resume is from JSONL.
-        continuation_message: Optional user message to append (for resume_thread).
-
-    Returns:
-        Dict with new_thread_id, success, and handoff metadata.
-    """
-    thread_registry_mod = load_module("persistence/thread_registry", anchor=_ANCHOR)
-    registry = thread_registry_mod.get_registry(project_path)
-
-    thread = registry.get_thread(thread_id)
-    if not thread:
-        return {"success": False, "error": f"Thread not found: {thread_id}"}
-
-    directive_name = thread.get("directive")
-    if not directive_name:
-        return {"success": False, "error": "No directive recorded for thread"}
-
-    # Spawn new thread — execute() step 3.5 handles transcript integrity
-    # verification, JSONL reconstruction, and ceiling trimming.
-    thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
-    parent_id = thread.get("parent_id")
-    spawn_params = {
-        "directive_id": directive_name,
-        "previous_thread_id": thread_id,
-    }
-    if continuation_message:
-        spawn_params["_continuation_message"] = continuation_message
-    if parent_id:
-        spawn_params["parent_thread_id"] = parent_id
-
-    new_result = await thread_directive_mod.execute(spawn_params, str(project_path))
-
-    new_thread_id = new_result.get("thread_id")
-
-    # Link old → new in registry
-    if new_thread_id:
-        registry.set_continuation(thread_id, new_thread_id)
-        chain = registry.get_chain(thread_id)
-        chain_root_id = chain[0]["thread_id"] if chain else thread_id
-        registry.set_chain_info(new_thread_id, chain_root_id, thread_id)
-
-    # Log handoff in old thread's transcript
-    EventEmitter = load_module("events/event_emitter", anchor=_ANCHOR).EventEmitter
-    Transcript = load_module("persistence/transcript", anchor=_ANCHOR).Transcript
-    emitter = EventEmitter(project_path)
-    old_transcript = Transcript(thread_id, project_path)
-    emitter.emit(
-        thread_id,
-        "thread_handoff",
-        {
-            "new_thread_id": new_thread_id,
-            "directive": directive_name,
-        },
-        old_transcript,
-        criticality="critical",
-    )
-
-    return {
-        "success": new_result.get("success", False),
-        "old_thread_id": thread_id,
-        "new_thread_id": new_thread_id,
-        "directive": directive_name,
-        "new_thread_result": new_result,
-    }
+def _unsupported(message: str) -> Dict:
+    return {"success": False, "error": message}
 
 
 async def execute(params: Dict, project_path: str) -> Dict:
@@ -319,83 +213,92 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
     if operation == "cancel_thread":
         thread_id = params.get("thread_id")
-        harness = _active_harnesses.get(thread_id)
-        if harness:
-            harness.request_cancel()
-            return {"success": True, "cancelled": thread_id}
-        return {"success": False, "error": f"Thread not found: {thread_id}"}
+        if not thread_id:
+            return {"success": False, "error": "thread_id required"}
+        try:
+            result = _daemon_client().send_command(thread_id, "cancel")
+            return {"success": True, "thread_id": thread_id, "command": result}
+        except (OSError, RuntimeError, RpcError) as exc:
+            return {"success": False, "error": str(exc)}
 
     if operation == "kill_thread":
         thread_id = params.get("thread_id")
         if not thread_id:
             return {"success": False, "error": "thread_id required"}
-        thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-        registry = thread_registry.get_registry(proj_path)
-        thread = registry.get_thread(thread_id)
-        if not thread:
-            return {"success": False, "error": f"Thread not found: {thread_id}"}
-        pid = thread.get("pid")
-        if not pid:
-            return {"success": False, "error": f"No PID recorded for thread: {thread_id}"}
-        kill_result = await _kill_pid(pid)
-        if not kill_result.get("success"):
-            return {"success": False, "error": f"Failed to kill PID {pid}: {kill_result.get('error')}"}
-        registry.update_status(thread_id, "killed")
-        # Clean up in-process tracking if it exists
-        _active_harnesses.pop(thread_id, None)
-        event = _thread_events.get(thread_id)
-        if event:
-            event.set()
-        return {"success": True, "killed": thread_id, "pid": pid}
+        try:
+            result = _daemon_client().send_command(thread_id, "kill")
+            return {"success": True, "thread_id": thread_id, "command": result}
+        except (OSError, RuntimeError, RpcError) as exc:
+            return {"success": False, "error": str(exc)}
 
     if operation == "get_status":
         thread_id = params.get("thread_id")
+        if not thread_id:
+            return {"success": False, "error": "thread_id required"}
         # In-process check first
         if thread_id in _thread_results:
-            return {"success": True, **_thread_results[thread_id]}
+            return {"success": True, **_local_result(thread_id)}
         if thread_id in _thread_events:
-            return {"success": True, "status": "running"}
-        # Registry fallback
-        thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-        registry = thread_registry.get_registry(proj_path)
-        thread = registry.get_thread(thread_id)
-        if thread:
-            return {"success": True, "status": thread.get("status"), "thread_id": thread_id}
-        return {"success": False, "error": f"Thread not found: {thread_id}"}
+            return {"success": True, "status": "running", "thread_id": thread_id}
+        try:
+            record = _daemon_client().get_thread(thread_id)
+        except (OSError, RuntimeError, RpcError) as exc:
+            return {"success": False, "error": str(exc)}
+        if not record:
+            return {"success": False, "error": f"Thread not found: {thread_id}"}
+        return {"success": True, **_daemon_result(record)}
 
     if operation == "list_active":
-        active = [tid for tid, event in _thread_events.items() if not event.is_set()]
-        return {"success": True, "active_threads": active, "count": len(active)}
+        try:
+            threads = (_daemon_client().list_threads(limit=200) or {}).get("threads") or []
+        except (OSError, RuntimeError, RpcError) as exc:
+            return {"success": False, "error": str(exc)}
+        active_threads = [
+            thread["thread_id"]
+            for thread in threads
+            if _normalize_status(thread.get("status")) in _ACTIVE_STATUSES
+        ]
+        return {"success": True, "active_threads": active_threads, "count": len(active_threads)}
 
     if operation == "aggregate_results":
         thread_ids = params.get("thread_ids", [])
         results = {}
+        try:
+            client = _daemon_client()
+        except (OSError, RuntimeError, RpcError) as exc:
+            return {"success": False, "error": str(exc)}
         for tid in thread_ids:
             if tid in _thread_results:
-                results[tid] = _thread_results[tid]
+                results[tid] = _local_result(tid)
             else:
-                thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-                registry = thread_registry.get_registry(proj_path)
-                thread = registry.get_thread(tid)
-                if thread:
-                    results[tid] = {"status": thread.get("status"), "thread_id": tid}
-                else:
-                    results[tid] = {"status": "not_found"}
+                record = client.get_thread(tid)
+                results[tid] = _daemon_result(record) if record else {"status": "not_found", "thread_id": tid}
         return {"success": True, "results": results}
 
     if operation == "get_chain":
         thread_id = params.get("thread_id")
         if not thread_id:
             return {"success": False, "error": "thread_id required"}
-        thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-        registry = thread_registry.get_registry(proj_path)
-        chain = registry.get_chain(thread_id)
+        try:
+            chain = _daemon_client().get_chain(thread_id)
+        except (OSError, RuntimeError, RpcError) as exc:
+            return {"success": False, "error": str(exc)}
+        if not chain:
+            return {"success": False, "error": f"Thread not found: {thread_id}"}
+        threads = chain.get("threads") or []
         return {
             "success": True,
-            "chain_length": len(chain),
+            "chain_length": len(threads),
+            "threads": threads,
+            "edges": chain.get("edges") or [],
             "chain": [
-                {"thread_id": t["thread_id"], "status": t.get("status"), "directive": t.get("directive")}
-                for t in chain
+                {
+                    "thread_id": thread.get("thread_id"),
+                    "status": thread.get("status"),
+                    "kind": thread.get("kind"),
+                    "item_ref": thread.get("item_ref"),
+                }
+                for thread in threads
             ],
         }
 
@@ -419,10 +322,10 @@ async def execute(params: Dict, project_path: str) -> Dict:
         from rye.constants import AI_DIR, KNOWLEDGE_THREADS_REL
         from pathlib import PurePosixPath
         thread_path = PurePosixPath(thread_id)
-        transcript_path = proj_path / AI_DIR / KNOWLEDGE_THREADS_REL / thread_path.parent / f"{thread_path.name}.md"
-        if not transcript_path.exists():
-            return {"success": False, "error": f"Transcript not found for thread: {thread_id}"}
-        content = transcript_path.read_text(encoding="utf-8")
+        history_path = proj_path / AI_DIR / KNOWLEDGE_THREADS_REL / thread_path.parent / f"{thread_path.name}.md"
+        if not history_path.exists():
+            return {"success": False, "error": f"Thread history export not found for thread: {thread_id}"}
+        content = history_path.read_text(encoding="utf-8")
         tail_lines = params.get("tail_lines")
         if tail_lines and tail_lines > 0:
             lines = content.splitlines()
@@ -436,77 +339,16 @@ async def execute(params: Dict, project_path: str) -> Dict:
             return {"success": False, "error": "thread_id required"}
         if not message:
             return {"success": False, "error": "message required"}
-        thread_registry_local = load_module("persistence/thread_registry", anchor=_ANCHOR)
-        registry = thread_registry_local.get_registry(proj_path)
-
-        resolved_id = resolve_thread_chain(thread_id, proj_path)
-        thread = registry.get_thread(resolved_id)
-        if not thread:
-            return {"success": False, "error": f"Thread not found: {resolved_id}"}
-        status = thread.get("status")
-        if status in ("running", "created"):
-            return {"success": False, "error": f"Thread is still {status}, cannot resume"}
-
-        directive_name = thread.get("directive")
-        if not directive_name:
-            return {"success": False, "error": "No directive recorded for thread"}
-
-        # Spawn new thread — execute() step 3.5 handles transcript integrity
-        # verification, JSONL reconstruction, and ceiling trimming.
-        thread_directive_mod = load_module("thread_directive", anchor=_ANCHOR)
-        parent_id = thread.get("parent_id")
-        spawn_params = {
-            "directive_id": directive_name,
-            "previous_thread_id": resolved_id,
-            "_continuation_message": message,
-        }
-        if parent_id:
-            spawn_params["parent_thread_id"] = parent_id
-
-        new_result = await thread_directive_mod.execute(spawn_params, str(proj_path))
-
-        new_thread_id = new_result.get("thread_id")
-
-        # Link old → new
-        if new_thread_id:
-            registry.set_continuation(resolved_id, new_thread_id)
-            chain = registry.get_chain(resolved_id)
-            chain_root_id = chain[0]["thread_id"] if chain else resolved_id
-            registry.set_chain_info(new_thread_id, chain_root_id, resolved_id)
-
-        # Log in old transcript
-        EventEmitter = load_module("events/event_emitter", anchor=_ANCHOR).EventEmitter
-        Transcript = load_module("persistence/transcript", anchor=_ANCHOR).Transcript
-        emitter = EventEmitter(proj_path)
-        old_transcript = Transcript(resolved_id, proj_path)
-        emitter.emit(
-            resolved_id,
-            "thread_resumed",
-            {
-                "new_thread_id": new_thread_id,
-                "directive": directive_name,
-                "message_preview": message[:200],
-            },
-            old_transcript,
-            criticality="critical",
+        return _unsupported(
+            "resume_thread is not available until daemon-owned continuation replaces transcript-driven resume",
         )
-
-        return {
-            "success": new_result.get("success", False),
-            "resumed": True,
-            "old_thread_id": resolved_id,
-            "new_thread_id": new_thread_id,
-            "original_thread_id": thread_id if thread_id != resolved_id else None,
-            "resolved_thread_id": resolved_id,
-            "directive": directive_name,
-            "new_thread_result": new_result,
-        }
 
     if operation == "handoff_thread":
         thread_id = params.get("thread_id")
         if not thread_id:
             return {"success": False, "error": "thread_id required"}
-        result = await handoff_thread(thread_id, proj_path)
-        return result
+        return _unsupported(
+            "handoff_thread is not available until daemon-owned continuation creates successor threads and continued edges",
+        )
 
     return {"success": False, "error": f"Unknown operation: {operation}"}

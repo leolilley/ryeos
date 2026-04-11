@@ -1,31 +1,23 @@
-# rye:signed:2026-04-10T08:31:57Z:0f772060294fa79e85873eaa8e18700c170365b77577843175b5311134525e0c:6jbWjZJe2A-DzkKWFzoLl93TB67iDeRRRfT233mNDOX7Jwqu71f4kOF_K2sGUk4O7j65NyZrWLitcheAQjyPAw:4b987fd4e40303ac
-"""
-persistence/transcript.py: Thread execution transcript (JSONL)
+# rye:signed:2026-04-11T04:03:37Z:44640ec7ccdfe62f03d4ea0519f7739c1dafbffdf96398eec4650c92ed05f738:xZryEjwgHfcTkl7QBa6gf1PiatcM3vgCT-LPRH1mZaFOnXLkSA6biXu5816WMEKsOB91nBLzBcqEDCpJk23cAw:4b987fd4e40303ac
+"""Thread history helpers for daemon-backed and file-backed runtimes."""
 
-Provides write_event() interface expected by EventEmitter.
-Events are appended to .ai/threads/{thread_id}/transcript.jsonl
-as newline-delimited JSON for crash resilience.
-"""
-
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
-__tool_description__ = "Thread transcript JSONL persistence"
+__tool_description__ = "Thread history helpers for daemon-backed thread events"
 
+from datetime import datetime, timezone
 import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rye.constants import AI_DIR, STATE_THREADS_REL, KNOWLEDGE_THREADS_REL
+from rye.runtime.daemon_rpc import ThreadLifecycleClient, get_daemon_runtime_context
 
 
 class Transcript:
-    """Append-only JSONL transcript for a thread.
-
-    Each event is written as a single JSON line, flushed immediately.
-    This survives crashes — partial transcripts are still readable.
-    """
+    """Thread history helper backed by daemon events when runtime context is present."""
 
     def __init__(self, thread_id: str, project_path: Path):
         self.thread_id = thread_id
@@ -34,9 +26,11 @@ class Transcript:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "transcript.jsonl"
         self._events: List[Dict[str, Any]] = []
+        self._daemon_client: Optional[ThreadLifecycleClient] = None
+        self._daemon_socket_path: Optional[str] = None
 
     def write_event(self, thread_id: str, event_type: str, payload: Dict) -> None:
-        """Append event to JSONL file and in-memory list."""
+        """Append an event through the daemon when available, else fall back to JSONL."""
         entry = {
             "timestamp": time.time(),
             "thread_id": thread_id,
@@ -44,13 +38,28 @@ class Transcript:
             "payload": payload,
         }
         self._events.append(entry)
+
+        context = get_daemon_runtime_context()
+        socket_path = context.get("socket_path")
+        if socket_path:
+            if self._daemon_client is None or self._daemon_socket_path != socket_path:
+                self._daemon_client = ThreadLifecycleClient(socket_path)
+                self._daemon_socket_path = socket_path
+            self._daemon_client.append_event(
+                thread_id,
+                event_type,
+                "journal_only" if event_type == "token_delta" else "indexed",
+                payload,
+            )
+            return
+
         with open(self._path, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
             f.flush()
 
     def get_events(self) -> List[Dict[str, Any]]:
-        """Return accumulated events."""
-        return list(self._events)
+        """Return thread events, preferring daemon replay when available."""
+        return self._load_events(allow_corrupt=False)
 
     def write_capabilities(self, tool_defs: list, tree: str = "") -> Path:
         """Write signed capabilities.md alongside transcript.jsonl.
@@ -87,7 +96,7 @@ class Transcript:
         return knowledge_dir / f"{thread_path.name}.md"
 
     def reconstruct_messages(self) -> Optional[List[Dict]]:
-        """Reconstruct conversation messages from transcript.jsonl.
+        """Reconstruct conversation messages from daemon-backed history or JSONL fallback.
 
         Rebuilds the exact message format that runner.py uses internally:
           - user messages from cognition_in
@@ -101,21 +110,7 @@ class Transcript:
         groups tool_call_start events by their preceding cognition_out since
         the runner interleaves start/result pairs sequentially.
         """
-        if not self._path.exists():
-            return None
-
-        # Pass 1: Parse all events
-        events = []
-        with open(self._path) as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    from ..errors import TranscriptCorrupt
-                    raise TranscriptCorrupt(str(self._path), line_no, line[:100])
+        events = self._load_events(allow_corrupt=False)
 
         if not events:
             return None
@@ -189,24 +184,12 @@ class Transcript:
         Produces a cognition-framed markdown file in .ai/knowledge/threads/
         with YAML frontmatter. Signed via KnowledgeMetadataStrategy.
 
-        Called at each checkpoint (same cadence as JSONL signing) so the
-        knowledge file stays in sync with the signed transcript.
+        Called at each checkpoint so the knowledge file stays in sync with
+        daemon-backed history, falling back to JSONL only outside daemon mode.
 
         Returns the path to the knowledge file, or None if no events.
         """
-        if not self._path.exists():
-            return None
-
-        events = []
-        with open(self._path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+        events = self._load_events(allow_corrupt=True)
 
         if not events:
             return None
@@ -223,11 +206,8 @@ class Transcript:
         directive_leaf = directive.rsplit("/", 1)[-1] if directive else name
         created_at = ""
         for e in events:
-            if e.get("timestamp"):
-                from datetime import datetime, timezone
-                created_at = datetime.fromtimestamp(
-                    e["timestamp"], tz=timezone.utc
-                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            created_at = self._event_created_at(e)
+            if created_at:
                 break
 
         elapsed = cost.get("elapsed_seconds", 0)
@@ -312,8 +292,87 @@ class Transcript:
         knowledge_path.write_text(signed_content, encoding="utf-8")
         return knowledge_path
 
+    def _load_events(self, allow_corrupt: bool) -> List[Dict[str, Any]]:
+        daemon_events = self._load_daemon_events()
+        if daemon_events is not None:
+            return daemon_events
+        return self._load_file_events(allow_corrupt=allow_corrupt)
+
+    def _load_daemon_events(self) -> Optional[List[Dict[str, Any]]]:
+        context = get_daemon_runtime_context()
+        socket_path = context.get("socket_path")
+        if not socket_path:
+            return None
+
+        client = ThreadLifecycleClient(socket_path)
+        cursor = None
+        loaded: List[Dict[str, Any]] = []
+
+        while True:
+            page = client.replay_events(
+                thread_id=self.thread_id,
+                after_chain_seq=cursor,
+                limit=200,
+            )
+            events = page.get("events") or []
+            if not events:
+                break
+            loaded.extend(self._normalize_daemon_event(event) for event in events)
+            cursor = page.get("next_cursor")
+            if cursor is None:
+                break
+
+        return loaded
+
+    def _load_file_events(self, allow_corrupt: bool) -> List[Dict[str, Any]]:
+        if not self._path.exists():
+            return []
+
+        events = []
+        with open(self._path) as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    if allow_corrupt:
+                        continue
+                    from ..errors import TranscriptCorrupt
+                    raise TranscriptCorrupt(str(self._path), line_no, line[:100])
+
+        return events
+
+    @staticmethod
+    def _normalize_daemon_event(event: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = {
+            "thread_id": event.get("thread_id", ""),
+            "event_type": event.get("event_type", ""),
+            "payload": event.get("payload") or {},
+            "ts": event.get("ts"),
+        }
+        if event.get("ts"):
+            try:
+                normalized["timestamp"] = datetime.fromisoformat(
+                    event["ts"].replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                pass
+        return normalized
+
+    @staticmethod
+    def _event_created_at(event: Dict[str, Any]) -> str:
+        if event.get("ts"):
+            return str(event["ts"])
+        if event.get("timestamp"):
+            return datetime.fromtimestamp(
+                event["timestamp"], tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return ""
+
     # Maximum characters for a single tool result in the knowledge markdown.
-    # Full output is always preserved in transcript.jsonl.
+    # Full output is preserved in the daemon event store or JSONL fallback.
     _MAX_RESULT_CHARS = 2000
 
     # Maximum characters for file content shown in tool call inputs.
@@ -400,7 +459,7 @@ class Transcript:
                 f"**Completed** -- {turns} turns, {tokens} tokens, ${spend:.4f}, {dur}\n"
             )
 
-        if event_type == "thread_error":
+        if event_type in {"thread_error", "thread_failed"}:
             return f"\n> **Error**: {payload.get('error', 'unknown')}\n\n"
 
         return ""

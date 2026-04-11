@@ -3,7 +3,7 @@
 Runs .test.yaml specs via rye/dev/test-runner.
 """
 
-from rye_cli.output import run_async, print_result
+from rye_cli.output import daemon_execute, print_result
 
 
 def register(subparsers):
@@ -20,9 +20,6 @@ def register(subparsers):
 
 
 def handle(args, project_path: str):
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
     params = {}
     if args.tool_id:
         params["tool"] = args.tool_id
@@ -35,10 +32,5 @@ def handle(args, project_path: str):
     if args.validate_only:
         params["validate_only"] = True
 
-    tool = ExecuteTool(str(get_user_space()))
-    result = run_async(tool.handle(
-        item_id="tool:rye/dev/test-runner",
-        project_path=project_path,
-        parameters=params,
-    ))
+    result = daemon_execute("tool:rye/dev/test-runner", params)
     print_result(result)

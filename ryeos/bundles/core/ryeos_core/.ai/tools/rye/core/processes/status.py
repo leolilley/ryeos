@@ -1,13 +1,12 @@
-# rye:signed:2026-04-10T08:31:58Z:d53c1c0f6e70a7a79871b8b67dd48f9593327bc64165b8d5acdde274d3376e88:6Ndc6SY_lYzjSVh9rpXMmKVTBMVzrZMa2qnaxg9DGEUZxre8UzO3R40hLbJq5JZs7wXWKls6UtyR8KR-FtDYBg:4b987fd4e40303ac
+# rye:signed:2026-04-11T01:59:39Z:f0f07111c42e853ac54d70fddd04d32a57a91ce1337e5c1add98d63745513cd6:3QDv551zSHH3lD8IIwuJjvoEGxiw-R7Z48akUeNmT7jlR1YRLqeZAoAfvC7QYoBYtUYtRkZtiBkADxyVNbBBCw:4b987fd4e40303ac
 """Check status of a running process by run_id."""
 
 import argparse
 import asyncio
 import json
 import sys
-from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/function"
 __category__ = "rye/core/processes"
@@ -25,32 +24,6 @@ CONFIG_SCHEMA = {
 }
 
 
-def _get_registry(project_path: Path):
-    """Get thread registry instance."""
-    from rye.constants import AI_DIR, STATE_THREADS_REL
-
-    db_path = project_path / AI_DIR / STATE_THREADS_REL / "registry.db"
-    if not db_path.exists():
-        return None
-
-    import sqlite3
-
-    class _Registry:
-        def __init__(self, db):
-            self.db_path = db
-
-        def get_thread(self, thread_id):
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute(
-                    "SELECT * FROM threads WHERE thread_id = ?", (thread_id,)
-                )
-                row = cursor.fetchone()
-                return dict(row) if row else None
-
-    return _Registry(db_path)
-
-
 async def _check_pid(pid: int) -> dict:
     """Check if PID is alive via ExecutePrimitive."""
     from rye.primitives.execute import ExecutePrimitive
@@ -61,14 +34,25 @@ async def _check_pid(pid: int) -> dict:
 
 
 async def _execute_async(params: dict, project_path: str) -> dict:
+    from rye.runtime.daemon_rpc import (
+        ThreadLifecycleClient,
+        resolve_daemon_socket_path,
+        RpcError,
+    )
+
     run_id = params["run_id"]
-    proj = Path(project_path)
 
-    registry = _get_registry(proj)
-    if registry is None:
-        return {"success": False, "error": "Thread registry not found"}
+    socket_path = resolve_daemon_socket_path()
+    if not socket_path:
+        return {"success": False, "error": "Daemon not available (no socket path)"}
 
-    thread = registry.get_thread(run_id)
+    try:
+        client = ThreadLifecycleClient(socket_path)
+        resp = client.get_thread(run_id)
+    except RpcError as e:
+        return {"success": False, "error": f"Daemon RPC error: {e}"}
+
+    thread = resp.get("thread") if resp else None
     if not thread:
         return {"success": False, "error": f"Run not found: {run_id}"}
 
@@ -80,7 +64,7 @@ async def _execute_async(params: dict, project_path: str) -> dict:
         "run_id": run_id,
         "status": status,
         "pid": pid,
-        "directive": thread.get("directive"),
+        "directive": thread.get("item_ref"),
         "created_at": thread.get("created_at"),
         "updated_at": thread.get("updated_at"),
     }
@@ -92,7 +76,7 @@ async def _execute_async(params: dict, project_path: str) -> dict:
         result["alive"] = False
 
     if status == "completed_with_errors":
-        stored_result = thread.get("result")
+        stored_result = resp.get("result")
         if stored_result:
             try:
                 parsed = json.loads(stored_result) if isinstance(stored_result, str) else stored_result

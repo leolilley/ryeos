@@ -1,0 +1,277 @@
+mod api;
+mod auth;
+mod bootstrap;
+mod bridge;
+mod broker;
+mod cas;
+mod config;
+mod db;
+mod identity;
+mod kind_profiles;
+mod process;
+mod reconcile;
+mod refs;
+mod registry;
+mod services;
+mod state;
+mod uds;
+mod vault;
+mod webhooks;
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use axum::routing::{get, post};
+use axum::{serve, Router};
+use chrono::Utc;
+use clap::Parser;
+use config::{Cli, Config};
+use tokio::net::{TcpListener, UnixListener};
+
+use crate::bridge::PythonBridge;
+use crate::broker::{LiveBroker, DEFAULT_BROKER_CAPACITY};
+use crate::cas::CasStore;
+use crate::db::Database;
+use crate::identity::NodeIdentity;
+use crate::refs::RefStore;
+use crate::registry::RegistryStore;
+use crate::services::budget_service::BudgetService;
+use crate::services::command_service::CommandService;
+use crate::services::event_store::EventStoreService;
+use crate::services::thread_lifecycle::ThreadLifecycleService;
+use crate::state::AppState;
+use crate::vault::VaultStore;
+use crate::webhooks::WebhookStore;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let config = Config::load(&cli)?;
+
+    // Init-if-missing convenience
+    if cli.init_if_missing && !config.signing_key_path.exists() {
+        bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
+    }
+
+    // Verify initialization
+    bootstrap::verify_initialized(&config)?;
+
+    process::remove_stale_socket(&config.uds_path)?;
+
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
+    let db = Database::new(&config.db_path, kind_profiles)?;
+    let bridge = PythonBridge::initialize()?;
+    let identity = NodeIdentity::load(&config.signing_key_path)?;
+    let db = Arc::new(db);
+    let broker = Arc::new(LiveBroker::new(DEFAULT_BROKER_CAPACITY));
+    let events = Arc::new(EventStoreService::new(db.clone(), broker.clone()));
+    let threads = Arc::new(ThreadLifecycleService::new(db.clone(), events.clone()));
+    let commands = Arc::new(CommandService::new(db.clone(), events.clone()));
+    let budgets = Arc::new(BudgetService::new(db.clone(), events.clone()));
+    let cas = Arc::new(CasStore::new(config.cas_root.clone()));
+    let refs = Arc::new(RefStore::new(config.cas_root.clone()));
+    let registry = Arc::new(RegistryStore::new(config.cas_root.clone()));
+    let vault = Arc::new(VaultStore::new(config.cas_root.clone()));
+    let webhooks = Arc::new(WebhookStore::new(config.cas_root.clone()));
+
+    let state = AppState {
+        config: Arc::new(config.clone()),
+        db,
+        bridge: Arc::new(bridge),
+        identity: Arc::new(identity),
+        threads,
+        events,
+        broker,
+        commands,
+        budgets,
+        cas,
+        refs,
+        registry,
+        vault,
+        webhooks,
+        started_at: Instant::now(),
+        started_at_iso: Utc::now().to_rfc3339(),
+    };
+
+    reconcile::reconcile(&state).await?;
+
+    let app = build_router(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth_middleware,
+        ));
+    let tcp_listener = TcpListener::bind(config.bind)
+        .await
+        .with_context(|| format!("failed to bind {}", config.bind))?;
+    let uds_listener = UnixListener::bind(&config.uds_path)
+        .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o660))
+            .with_context(|| format!("failed to set socket permissions on {}", config.uds_path.display()))?;
+    }
+
+    let uds_state = Arc::new(state.clone());
+    let uds_task = tokio::spawn(async move { uds::server::serve(uds_listener, uds_state).await });
+
+    let shutdown = shutdown_signal();
+    let http = serve(tcp_listener, app).with_graceful_shutdown(shutdown);
+
+    tokio::select! {
+        result = http => {
+            result.context("http server exited unexpectedly")?;
+        }
+        result = uds_task => {
+            result.context("uds task join failed")??;
+        }
+    }
+
+    // Drain running threads on shutdown
+    drain_running_threads(&state);
+
+    if config.uds_path.exists() {
+        let _ = std::fs::remove_file(&config.uds_path);
+    }
+
+    Ok(())
+}
+
+fn drain_running_threads(state: &AppState) {
+    let threads = match state.db.list_threads_by_status(&["running"]) {
+        Ok(threads) => threads,
+        Err(err) => {
+            eprintln!("ryeosd shutdown: failed to list running threads: {err:#}");
+            return;
+        }
+    };
+
+    if threads.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "ryeosd shutdown: draining {} running threads",
+        threads.len()
+    );
+
+    let daemon_pgid = process::daemon_pgid();
+
+    for thread in &threads {
+        if let Some(pgid) = thread.runtime.pgid {
+            if pgid == daemon_pgid {
+                eprintln!(
+                    "ryeosd shutdown: skipping thread {} — PGID {} matches daemon",
+                    thread.thread_id, pgid
+                );
+                continue;
+            }
+            eprintln!(
+                "ryeosd shutdown: killing pgid {} (thread {})",
+                pgid, thread.thread_id
+            );
+            let result = process::kill_process_group(pgid, std::time::Duration::from_secs(3));
+            if !result.success {
+                eprintln!(
+                    "ryeosd shutdown: failed to kill pgid {} (method={})",
+                    pgid, result.method
+                );
+            }
+        }
+    }
+}
+
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(api::health::health))
+        .route("/status", get(api::health::status))
+        .route("/public-key", get(api::health::public_key))
+        .route("/threads", get(api::threads::list_threads))
+        .route("/threads/:thread_id", get(api::threads::get_thread))
+        .route(
+            "/threads/:thread_id/children",
+            get(api::threads::list_children),
+        )
+        .route("/threads/:thread_id/chain", get(api::threads::get_chain))
+        .route(
+            "/threads/:thread_id/commands",
+            post(api::commands::submit_command),
+        )
+        .route(
+            "/threads/:thread_id/events",
+            get(api::events::get_thread_events),
+        )
+        .route(
+            "/threads/:thread_id/events/stream",
+            get(api::events::stream_thread_events),
+        )
+        .route(
+            "/chains/:chain_root_id/events",
+            get(api::events::get_chain_events),
+        )
+        .route(
+            "/chains/:chain_root_id/events/stream",
+            get(api::events::stream_chain_events),
+        )
+        .route("/execute", post(api::execute::execute))
+        .route("/objects/has", post(api::objects::has_objects))
+        .route("/objects/put", post(api::objects::put_objects))
+        .route("/objects/get", post(api::objects::get_objects))
+        .route("/push", post(api::push::push))
+        .route("/push/user-space", post(api::push::push_user_space))
+        .route("/user-space", get(api::push::get_user_space))
+        .route("/registry/publish", post(api::registry::publish))
+        .route("/registry/search", get(api::registry::search))
+        .route("/registry/items/:kind/:item_id", get(api::registry::get_item))
+        .route(
+            "/registry/items/:kind/:item_id/versions/:version",
+            get(api::registry::get_version),
+        )
+        .route(
+            "/registry/namespaces/claim",
+            post(api::registry::claim_namespace),
+        )
+        .route(
+            "/registry/identity",
+            post(api::registry::register_identity),
+        )
+        .route(
+            "/registry/identity/:fingerprint",
+            get(api::registry::lookup_identity),
+        )
+        .route("/vault/set", post(api::vault::vault_set))
+        .route("/vault/list", get(api::vault::vault_list))
+        .route("/vault/delete", post(api::vault::vault_delete))
+        .route(
+            "/webhook-bindings",
+            get(api::webhooks::list_webhooks).post(api::webhooks::create_webhook),
+        )
+        .route(
+            "/webhook-bindings/:hook_id",
+            axum::routing::delete(api::webhooks::revoke_webhook),
+        )
+        .with_state(state)
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("sigterm handler");
+        sigterm.recv().await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}

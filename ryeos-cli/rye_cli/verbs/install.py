@@ -4,7 +4,7 @@ Flow: search_bundle → pull_bundle via CAS sync → materialize into
 ~/.ai/bundles/{bundle_id}/ → verify signatures.
 """
 
-from rye_cli.output import run_async, print_result
+from rye_cli.output import daemon_execute, print_result
 
 
 def register(subparsers):
@@ -27,11 +27,6 @@ def register(subparsers):
 
 def _handle_install(args, project_path: str):
     """Install a bundle by pulling from registry and materializing locally."""
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
-    # Parse bundle_spec: "bundle_id", "bundle_id@version",
-    # "namespace/bundle_id", or "namespace/bundle_id@version"
     spec = args.bundle_spec
     if "@" in spec:
         bundle_part, version = spec.rsplit("@", 1)
@@ -39,38 +34,22 @@ def _handle_install(args, project_path: str):
         bundle_part = spec
         version = None
 
-    # Check if namespace is included (contains /)
     if "/" in bundle_part:
         namespace, bundle_id = bundle_part.split("/", 1)
-        # Pass full namespace/bundle_id so the registry API resolves it
         bundle_id = f"{namespace}/{bundle_id}"
     else:
         bundle_id = bundle_part
 
     # Step 1: Pull bundle from registry
-    tool = ExecuteTool(str(get_user_space()))
     params = {
         "action": "pull_bundle",
         "bundle_id": bundle_id,
+        "remote": "registry",
     }
     if version:
         params["version"] = version
 
-    # Use project_path for pull target based on --space
-    if args.space == "user":
-        from rye.utils.path_utils import get_user_space as get_user_root
-        target_path = str(get_user_root())
-    else:
-        target_path = project_path
-
-    params["project_path"] = target_path
-
-    params["remote"] = "registry"
-    result = run_async(tool.handle(
-        item_id="tool:rye/core/remote/remote",
-        project_path=target_path,
-        parameters=params,
-    ))
+    result = daemon_execute("tool:rye/core/remote/remote", params)
 
     if result.get("error"):
         print_result(result)
@@ -81,13 +60,8 @@ def _handle_install(args, project_path: str):
         "action": "verify",
         "bundle_id": bundle_id,
     }
-    verify_result = run_async(tool.handle(
-        item_id="tool:rye/core/bundler/bundler",
-        project_path=target_path,
-        parameters=verify_params,
-    ))
+    verify_result = daemon_execute("tool:rye/core/bundler/bundler", verify_params)
 
-    # Combine results
     verify_ok = (
         verify_result.get("status") != "failed"
         and not verify_result.get("error")
@@ -97,7 +71,6 @@ def _handle_install(args, project_path: str):
         "bundle_id": bundle_id,
         "version": result.get("version", version or "latest"),
         "space": args.space,
-        "target_path": target_path,
         "file_count": result.get("file_count", 0),
         "verification": verify_result.get("status", "skipped"),
     }

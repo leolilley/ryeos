@@ -1,20 +1,17 @@
 """rye graph run|step|validate <graph_id> [flags]
 
 Graph-specific verb that translates flags into walker params.
-Not a new execution engine — just a parameter translator.
 """
 
-import json
 import sys
 
-from rye_cli.output import run_async, print_result, parse_params, die
+from rye_cli.output import daemon_execute, print_result, parse_params
 
 
 def register(subparsers):
     p = subparsers.add_parser("graph", help="State-graph operations")
     sub = p.add_subparsers(dest="subcommand", required=True)
 
-    # rye graph run <id> [--async]
     run_p = sub.add_parser("run", help="Run a graph end-to-end")
     run_p.add_argument("graph_id", help="Graph tool ID")
     run_p.add_argument("--async", action="store_true", dest="is_async",
@@ -25,7 +22,6 @@ def register(subparsers):
                        help="Max depth for nested execution (default: 5)")
     run_p.set_defaults(handler=handle_run)
 
-    # rye graph step <id> --node <name> [--resume-from <run_id>] [--state '{...}']
     step_p = sub.add_parser("step", help="Execute a single node")
     step_p.add_argument("graph_id", help="Graph tool ID")
     step_p.add_argument("--node", required=True, help="Target node to execute")
@@ -37,24 +33,9 @@ def register(subparsers):
                         help="Capability tokens (comma-separated)")
     step_p.set_defaults(handler=handle_step)
 
-    # rye graph validate <id>
     val_p = sub.add_parser("validate", help="Static analysis without execution")
     val_p.add_argument("graph_id", help="Graph tool ID")
     val_p.set_defaults(handler=handle_validate)
-
-
-def _execute_graph(graph_id: str, params: dict, project_path: str):
-    """Execute a graph tool via ExecuteTool."""
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
-    tool = ExecuteTool(str(get_user_space()))
-    result = run_async(tool.handle(
-        item_id=f"tool:{graph_id}",
-        project_path=project_path,
-        parameters=params,
-    ))
-    print_result(result)
 
 
 def handle_run(args, project_path: str):
@@ -67,7 +48,8 @@ def handle_run(args, project_path: str):
         params["async"] = True
 
     print(f"[graph] running: {args.graph_id}", file=sys.stderr)
-    _execute_graph(args.graph_id, params, project_path)
+    result = daemon_execute(f"tool:{args.graph_id}", params)
+    print_result(result)
 
 
 def handle_step(args, project_path: str):
@@ -84,10 +66,12 @@ def handle_step(args, project_path: str):
         params["inject_state"] = parse_params(args.state_json)
 
     print(f"[graph] stepping: {args.graph_id} → {args.node}", file=sys.stderr)
-    _execute_graph(args.graph_id, params, project_path)
+    result = daemon_execute(f"tool:{args.graph_id}", params)
+    print_result(result)
 
 
 def handle_validate(args, project_path: str):
     params = {"validate": True}
     print(f"[graph] validating: {args.graph_id}", file=sys.stderr)
-    _execute_graph(args.graph_id, params, project_path)
+    result = daemon_execute(f"tool:{args.graph_id}", params)
+    print_result(result)

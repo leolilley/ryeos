@@ -4,7 +4,7 @@ Parameters are read as JSON from stdin."""
 
 import sys
 
-from rye_cli.output import run_async, print_result, parse_params
+from rye_cli.output import daemon_execute, print_result, parse_params
 
 
 def register(subparsers):
@@ -16,17 +16,11 @@ def register(subparsers):
 
 
 def handle(args, project_path: str):
-    from rye.actions.execute import ExecuteTool
-    from rye.utils.resolvers import get_user_space
-
     raw = sys.stdin.read().strip() if not sys.stdin.isatty() else "{}"
     params = parse_params(raw)
 
-    tool = ExecuteTool(str(get_user_space()))
-    result = run_async(tool.handle(
-        item_id=args.item_id,
-        project_path=project_path,
-        parameters=params,
-        dry_run=args.dry_run,
-    ))
+    if args.dry_run:
+        params["dry_run"] = True
+
+    result = daemon_execute(args.item_id, params)
     print_result(result)

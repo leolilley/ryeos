@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:2071dd9eb59989ebc266f7161134b1b0d536e4a69695a178f20e26ea7e40434e:fWk4Muu21wdGm0vvUqXtJB75AAOAuenUqdcG1kLaAL9XeDuvgG3atV88dvpgFJuaPaPs8whC54ys-70iAIEoDA:4b987fd4e40303ac
+# rye:signed:2026-04-11T01:54:22Z:1637d6997ef3c72174e8fb30a1244c6fa96049f4289298c30162355be4c0ef8a:BxnXivpndUp7Mx28z_7Y4Pug1epPtkQ1dJN9t3o0aqknsuczjVi63ZPLbcexBgPH5_ymk7d666rrIQ7oKIBJAQ:4b987fd4e40303ac
 __version__ = "2.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
@@ -64,6 +64,15 @@ CONFIG_SCHEMA = {
             "description": "Override default limits (turns, tokens, spend, spawns, duration_seconds, depth)",
         },
         "parent_thread_id": {"type": "string", "description": "Parent thread for hierarchy tracking"},
+        "parent_limits": {
+            "type": "object",
+            "description": "Resolved parent limits for child attenuation (internal)",
+        },
+        "parent_capabilities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Resolved parent capabilities for child attenuation (internal)",
+        },
         "previous_thread_id": {"type": "string", "description": "Previous thread for resume/continuation"},
         "resume_messages": {"type": "array", "description": "Messages to resume from (internal)"},
     },
@@ -125,8 +134,8 @@ def _write_thread_meta(
 ) -> None:
     """Write thread.json metadata atomically.
 
-    Stores resolved limits (including depth) and capabilities so child
-    threads can look up parent context from the filesystem.
+    In v3 this is a derived export only. It is not runtime authority for
+    parent lookup, status inspection, or continuation.
     """
     thread_dir = project_path / AI_DIR / STATE_THREADS_REL / thread_id
     thread_dir.mkdir(parents=True, exist_ok=True)
@@ -159,15 +168,6 @@ def _write_thread_meta(
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     tmp_path.rename(meta_path)
-
-
-def _read_thread_meta(project_path: Path, thread_id: str) -> Optional[Dict]:
-    """Read a thread's thread.json. Returns None if not found."""
-    meta_path = project_path / AI_DIR / STATE_THREADS_REL / thread_id / "thread.json"
-    if meta_path.exists():
-        with open(meta_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
 
 
 def _build_prompt(directive: Dict) -> str:
@@ -464,7 +464,7 @@ def _assess_capability_risk(
 async def execute(params: Dict, project_path: str) -> Dict:
     # Pop internal-only params before validation (set by subprocess spawn path)
     thread_id_override = params.pop("_thread_id", None)
-    pre_registered = params.pop("_pre_registered", False)
+    params.pop("_pre_registered", False)
     continuation_message = params.pop("_continuation_message", None)
 
     # Pop execution config params that may leak from graph/config layer
@@ -483,72 +483,58 @@ async def execute(params: Dict, project_path: str) -> Dict:
     thread_created_at = datetime.now(timezone.utc).isoformat()
     proj_path = Path(project_path)
 
-    # 1. Resolve parent context — explicit param > env var > no parent
-    parent_thread_id = params.get("parent_thread_id") or os.environ.get("RYE_PARENT_THREAD_ID")
-    parent_meta = None
-    if parent_thread_id:
-        parent_meta = _read_thread_meta(proj_path, parent_thread_id)
-        if not parent_meta:
-            return {
-                "success": False,
-                "error": (
-                    f"Parent thread '{parent_thread_id}' declared via "
-                    f"RYE_PARENT_THREAD_ID but thread.json not found. "
-                    f"Misaligned parent thread data."
-                ),
-                "thread_id": thread_id,
-            }
+    # 1. Resolve parent context from explicit internal params only.
+    # thread.json is a derived export in v3 and must not be consulted.
+    parent_thread_id = params.get("parent_thread_id")
+    parent_limits = params.get("parent_limits")
+    parent_capabilities = params.get("parent_capabilities") or []
+    if parent_thread_id and parent_limits is None:
+        return {
+            "success": False,
+            "error": (
+                "parent_thread_id requires explicit parent_limits on the v3 path; "
+                "thread.json parent lookup has been removed"
+            ),
+            "thread_id": thread_id,
+        }
 
-    # 2. Register thread
-    thread_registry = load_module("persistence/thread_registry", anchor=_ANCHOR)
-    registry = thread_registry.get_registry(proj_path)
-    if not pre_registered:
-        registry.register(thread_id, directive_name, parent_id=parent_thread_id, tool_id="rye/agent/threads/thread_directive")
+    if params.get("previous_thread_id") or params.get("resume_messages") or continuation_message:
+        return {
+            "success": False,
+            "error": (
+                "thread_directive continuation inputs are disabled until ryeosd owns "
+                "successor creation and continued edges"
+            ),
+            "thread_id": thread_id,
+        }
 
-    # 3. Load and parse directive
+    # 2. Load and parse directive
     from rye.utils.resolvers import get_user_space
     user_space = str(get_user_space())
 
-    if params.get("resume_messages"):
-        # Handoff/resume: use resolve_item (no input validation) then parse manually
-        from rye.actions._resolve import resolve_item
-        from rye.utils.parser_router import ParserRouter
-        result = await resolve_item(
-            user_space,
-            item_ref=f"directive:{directive_name}",
-            project_path=project_path,
-        )
-        if result["status"] != "success":
-            registry.update_status(thread_id, "error")
-            return result
-        directive = ParserRouter().parse("markdown_xml", result["content"])
-    else:
-        # Data-driven: parse via ParserRouter, validate+interpolate via ProcessorRouter
-        from rye.utils.parser_router import ParserRouter
-        from rye.utils.processor_router import ProcessorRouter
-        from rye.actions.execute import ExecuteTool
+    # Data-driven: parse via ParserRouter, validate+interpolate via ProcessorRouter
+    from rye.utils.parser_router import ParserRouter
+    from rye.utils.processor_router import ProcessorRouter
+    from rye.actions.execute import ExecuteTool
 
-        exec_tool = ExecuteTool(user_space=user_space)
-        file_path = exec_tool._find_item(project_path, "directive", directive_name)
-        if not file_path:
-            registry.update_status(thread_id, "error")
-            return {"success": False, "error": f"Directive not found: {directive_name}", "thread_id": thread_id}
+    exec_tool = ExecuteTool(user_space=user_space)
+    file_path = exec_tool._find_item(project_path, "directive", directive_name)
+    if not file_path:
+        return {"success": False, "error": f"Directive not found: {directive_name}", "thread_id": thread_id}
 
-        content = file_path.read_text(encoding="utf-8")
-        directive = ParserRouter().parse("markdown/xml", content)
-        if "error" in directive:
-            registry.update_status(thread_id, "error")
-            return {"success": False, "error": directive.get("error", "Directive parse failed"), "thread_id": thread_id}
+    content = file_path.read_text(encoding="utf-8")
+    directive = ParserRouter().parse("markdown/xml", content)
+    if "error" in directive:
+        return {"success": False, "error": directive.get("error", "Directive parse failed"), "thread_id": thread_id}
 
-        proj_path_obj = Path(project_path) if project_path else None
-        processor_router = ProcessorRouter(proj_path_obj)
-        validation = processor_router.run("inputs/validate", directive, inputs)
-        if validation.get("status") == "error":
-            registry.update_status(thread_id, "error")
-            return {"success": False, "error": validation.get("error", "Directive validation failed"), "thread_id": thread_id}
-        processor_router.run("inputs/interpolate", directive, validation["inputs"])
+    proj_path_obj = Path(project_path) if project_path else None
+    processor_router = ProcessorRouter(proj_path_obj)
+    validation = processor_router.run("inputs/validate", directive, inputs)
+    if validation.get("status") == "error":
+        return {"success": False, "error": validation.get("error", "Directive validation failed"), "thread_id": thread_id}
+    processor_router.run("inputs/interpolate", directive, validation["inputs"])
 
-    # 4. Resolve extends — fire resolve_extends hooks to route into extends chains
+    # 3. Resolve extends — fire resolve_extends hooks to route into extends chains
     hooks_loader = load_module("loaders/hooks_loader", anchor=_ANCHOR)
     loader = hooks_loader.get_hooks_loader()
     resolve_hooks = (
@@ -609,119 +595,28 @@ async def execute(params: Dict, project_path: str) -> Dict:
                         directive["permissions"] = parent_d["permissions"]
                         break
         except ValueError as e:
-            registry.update_status(thread_id, "error")
             return {"success": False, "error": str(e), "thread_id": thread_id}
 
-    # 6. Reconstruct resume messages from previous thread transcript
-    if params.get("previous_thread_id") and not params.get("resume_messages"):
-        prev_tid = params["previous_thread_id"]
-
-        # Verify transcript integrity before trusting JSONL content
-        transcript_signer_mod = load_module("persistence/transcript_signer", anchor=_ANCHOR)
-        signer = transcript_signer_mod.TranscriptSigner(
-            prev_tid, proj_path / AI_DIR / STATE_THREADS_REL / prev_tid
-        )
-        coordination_loader = load_module("loaders/coordination_loader", anchor=_ANCHOR)
-        cont_config = coordination_loader.get_coordination_loader().get_continuation_config(proj_path)
-        integrity_policy = cont_config.get("transcript_integrity", "strict")
-        integrity = signer.verify(allow_unsigned_trailing=(integrity_policy == "lenient"))
-        if not integrity["valid"]:
-            registry.update_status(thread_id, "error")
-            return {
-                "success": False,
-                "error": f"Transcript integrity check failed: {integrity['error']}. "
-                         f"Cannot resume from tampered transcript.",
-                "thread_id": thread_id,
-            }
-
-        transcript_mod = load_module("persistence/transcript", anchor=_ANCHOR)
-        prev_transcript = transcript_mod.Transcript(prev_tid, proj_path)
-        full_messages = prev_transcript.reconstruct_messages()
-        if not full_messages:
-            registry.update_status(thread_id, "error")
-            return {
-                "success": False,
-                "error": f"Cannot reconstruct messages for thread: {prev_tid}",
-                "thread_id": thread_id,
-            }
-
-        resume_ceiling = cont_config.get("resume_ceiling_tokens", 16000)
-
-        # Trim trailing messages to ceiling
-        trailing: list = []
-        trailing_tokens = 0
-        for msg in reversed(full_messages):
-            msg_tokens = len(str(msg.get("content", ""))) // 4
-            if trailing_tokens + msg_tokens > resume_ceiling:
-                break
-            trailing.insert(0, msg)
-            trailing_tokens += msg_tokens
-
-        if not trailing and full_messages:
-            trailing = [full_messages[-1]]
-
-        # Ensure starts with user message (providers require it)
-        while trailing and trailing[0].get("role") != "user":
-            trailing.pop(0)
-
-        # Resolve continuation directive — per-directive override or system default
-        cont_directive_id = directive.get("continuation_directive", "rye/agent/continuation")
-        cont_message = continuation_message or (
-            "Pick up where the previous thread left off. "
-            "Continue executing the directive's instructions."
-        )
-
-        # Parse continuation directive (just parse + interpolate, don't spawn a thread)
-        from rye.utils.parser_router import ParserRouter
-        from rye.utils.processor_router import ProcessorRouter
-        from rye.actions.execute import ExecuteTool
-        cont_exec_tool = ExecuteTool(user_space=user_space)
-        cont_file = cont_exec_tool._find_item(project_path, "directive", cont_directive_id)
-        cont_prompt = cont_message
-        if cont_file:
-            cont_content = cont_file.read_text(encoding="utf-8")
-            cont_parsed = ParserRouter().parse("markdown/xml", cont_content)
-            if "error" not in cont_parsed:
-                cont_params = {
-                    "original_directive": directive_name,
-                    "original_directive_body": directive.get("body", ""),
-                    "previous_thread_id": prev_tid,
-                    "continuation_message": cont_message,
-                }
-                proj_path_obj = Path(project_path) if project_path else None
-                cont_processor = ProcessorRouter(proj_path_obj)
-                cont_validation = cont_processor.run("inputs/validate", cont_parsed, cont_params)
-                if cont_validation.get("status") != "error":
-                    cont_processor.run("inputs/interpolate", cont_parsed, cont_validation["inputs"])
-                    cont_prompt = cont_parsed.get("body", cont_message)
-
-        trailing.append({"role": "user", "content": cont_prompt})
-
-        params["resume_messages"] = trailing
-
-    # 7. Build limits
-    parent_limits = parent_meta.get("limits") if parent_meta else None
+    # 5. Build limits
     limits = _resolve_limits(
         directive.get("limits", {}), params.get("limit_overrides", {}),
         project_path, parent_limits=parent_limits,
     )
 
-    # 8. Check depth limit
+    # 6. Check depth limit
     if limits.get("depth", 10) < 0:
-        registry.update_status(thread_id, "error")
         return {
             "success": False,
             "error": f"Depth limit exhausted (resolved depth={limits['depth']})",
             "thread_id": thread_id,
         }
 
-    # 9. Check spawns limit
+    # 7. Check spawns limit
     orchestrator_mod = load_module("orchestrator", anchor=_ANCHOR)
     if parent_thread_id:
         spawns_limit = parent_limits.get("spawns", 10) if parent_limits else limits.get("spawns", 10)
         spawn_exceeded = orchestrator_mod.check_spawn_limit(parent_thread_id, spawns_limit)
         if spawn_exceeded:
-            registry.update_status(thread_id, "error")
             return {
                 "success": False,
                 "error": f"Spawn limit exceeded for parent {parent_thread_id}: {spawn_exceeded['current_value']}/{spawn_exceeded['current_max']}",
@@ -729,12 +624,11 @@ async def execute(params: Dict, project_path: str) -> Dict:
             }
         orchestrator_mod.increment_spawn_count(parent_thread_id)
 
-    # 10. Build hooks, harness, preload tool schemas
+    # 8. Build hooks, harness, preload tool schemas
     hooks = _merge_hooks(directive.get("hooks", []), project_path)
 
     SafetyHarness = load_module("safety_harness", anchor=_ANCHOR).SafetyHarness
     permissions = directive.get("permissions", [])
-    parent_capabilities = parent_meta.get("capabilities", []) if parent_meta else []
     harness = SafetyHarness(
         thread_id, limits, hooks, proj_path,
         directive_name=directive_name, permissions=permissions,
@@ -754,7 +648,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
     harness.available_tools = preload_result["tool_defs"]
     harness.capabilities_tree = preload_result.get("capabilities_tree", "")
 
-    # 11. Materialize context — execute knowledge items declared by the
+    # 9. Materialize context — execute knowledge items declared by the
     # extends chain.  Deferred to after tool preloading so all capability
     # information is available; the harness just processes whatever context
     # the directive declares without injecting framework-specific docs.
@@ -834,7 +728,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
         harness._capabilities, acknowledged_risks, thread_id, proj_path
     )
     if risk_result:
-        registry.update_status(thread_id, "error")
         return {
             "success": False,
             "error": risk_result["error"],
@@ -852,7 +745,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
         )
 
     if not harness.available_tools:
-        registry.update_status(thread_id, "error")
         return {
             "success": False,
             "error": (
@@ -861,23 +753,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
             ),
             "thread_id": thread_id,
         }
-
-    # 12. Reserve budget
-    budgets = load_module("persistence/budgets", anchor=_ANCHOR)
-    ledger = budgets.get_ledger(proj_path)
-    spend_limit = limits.get("spend", 1.0)
-    if parent_thread_id:
-        try:
-            ledger.reserve(thread_id, spend_limit, parent_thread_id)
-        except Exception as e:
-            registry.update_status(thread_id, "error")
-            return {
-                "success": False,
-                "error": f"Budget reservation failed: {e}",
-                "thread_id": thread_id,
-            }
-    else:
-        ledger.register(thread_id, max_spend=spend_limit)
 
     user_prompt = _build_prompt(directive)
 
@@ -902,7 +777,6 @@ async def execute(params: Dict, project_path: str) -> Dict:
             model, project_path=proj_path, provider=provider_hint
         )
     except Exception as e:
-        registry.update_status(thread_id, "error")
         return {
             "success": False,
             "error": (
@@ -948,79 +822,21 @@ async def execute(params: Dict, project_path: str) -> Dict:
         directive_name, directive_desc, directive_body
     ]))
 
-    # 13. Write initial thread.json
-    registry.update_status(thread_id, "running")
+    # 10. Write initial derived thread.json export.
     _write_thread_meta(
         proj_path, thread_id, directive_name, "running",
         thread_created_at, thread_created_at, model=resolved_model,
         limits=limits, capabilities=harness._capabilities,
     )
 
-    # 14. Async spawn — child re-enters execute() and runs through the sync path.
-    # Parent thread ID is forwarded explicitly in child_params so the child
-    # discovers its actual parent, not itself (RYE_PARENT_THREAD_ID env is
-    # only set for the sync path below, where in-process grandchildren need it).
     if params.get("async"):
-        child_params = {"directive_id": directive_name, "inputs": inputs}
-        if params.get("model"):
-            child_params["model"] = params["model"]
-        if params.get("limit_overrides"):
-            child_params["limit_overrides"] = params["limit_overrides"]
-        if params.get("previous_thread_id"):
-            child_params["previous_thread_id"] = params["previous_thread_id"]
-        # Forward resolved parent (explicit param or env) so the child
-        # doesn't resolve itself as its own parent.
-        if parent_thread_id:
-            child_params["parent_thread_id"] = parent_thread_id
-
-        thread_dir = proj_path / AI_DIR / STATE_THREADS_REL / thread_id
-
-        # Write params to thread dir for execution tracing
-        params_json = json.dumps(child_params)
-        trace_file = thread_dir / "spawn_params.json"
-        trace_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(trace_file, "w") as f:
-            f.write(params_json)
-
-        from rye.utils.detached import launch_detached
-        spawn_result = await launch_detached(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--project-path", str(proj_path),
-                "--thread-id", thread_id,
-                "--pre-registered",
-            ],
-            thread_id=thread_id,
-            log_dir=thread_dir,
-            input_data=params_json,
-        )
-
-        if spawn_result.get("success"):
-            registry.update_pid(thread_id, spawn_result["pid"])
-        else:
-            registry.update_status(thread_id, "error")
-            return {
-                "success": False,
-                "error": f"Failed to spawn async thread: {spawn_result.get('error')}",
-                "thread_id": thread_id,
-            }
-
         return {
-            "success": True,
+            "success": False,
+            "error": "async directive threads are disabled until detached execution is daemon-owned",
             "thread_id": thread_id,
-            "status": "running",
-            "directive": directive_name,
-            "pid": spawn_result["pid"],
         }
 
-    # 15. Set env var so in-process children discover this thread as parent
-    # Only needed for sync execution — async children get parent via child_params.
-    _prev_parent_env = os.environ.get("RYE_PARENT_THREAD_ID")
-    os.environ["RYE_PARENT_THREAD_ID"] = thread_id
-
-    # 16. Run thread synchronously
-    # resume_messages is an internal param from handoff_thread — not in CONFIG_SCHEMA
+    # 11. Run thread synchronously
     try:
         result = await runner.run(
             thread_id,
@@ -1031,9 +847,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
             emitter,
             transcript,
             proj_path,
-            resume_messages=params.get("resume_messages"),
             directive_body=clean_directive_text,
-            previous_thread_id=params.get("previous_thread_id"),
             inputs=inputs,
             system_prompt=system_prompt,
             directive_context=directive_context,
@@ -1043,26 +857,8 @@ async def execute(params: Dict, project_path: str) -> Dict:
         if not result.get("success") and not result.get("error"):
             result["error"] = result.get("status", "unknown error (no message from runner)")
 
-        # 17. Report spend and finalize
-        actual_spend = result.get("cost", {}).get("spend", 0.0)
-        try:
-            ledger.report_actual(thread_id, actual_spend)
-        except Exception:
-            pass  # overspend is logged but shouldn't block finalization
-        if parent_thread_id:
-            ledger.cascade_spend(thread_id, parent_thread_id, actual_spend)
+        # 12. Write final derived thread.json export.
         status = result.get("status", "completed")
-        ledger.release(thread_id, final_status=status)
-
-        # Update registry with final status
-        status = result.get("status", "completed")
-        registry.update_status(thread_id, status)
-        result_data = {"cost": result.get("cost")}
-        if result.get("outputs"):
-            result_data["outputs"] = result["outputs"]
-        registry.set_result(thread_id, result_data)
-
-        # Write final thread.json
         _write_thread_meta(
             proj_path, thread_id, directive_name, status,
             thread_created_at, datetime.now(timezone.utc).isoformat(),
@@ -1099,11 +895,7 @@ async def execute(params: Dict, project_path: str) -> Dict:
 
         return {**result, "directive": directive_name}
     finally:
-        # Restore previous env to prevent leaking into subsequent top-level spawns
-        if _prev_parent_env is not None:
-            os.environ["RYE_PARENT_THREAD_ID"] = _prev_parent_env
-        else:
-            os.environ.pop("RYE_PARENT_THREAD_ID", None)
+        pass
 
 
 if __name__ == "__main__":

@@ -1,117 +1,24 @@
-# rye:signed:2026-04-10T08:31:57Z:d79caaa67762fa33fe6c9507ee0b00d28e5eebb25f8bab810673b17a83893424:YWEm9WHdJKOdqZJVcBQTyDajJo79aFZ69gaeV_F77CkYB0ywa6zFWdDhxgTX71Yl-5u_ib8TkM7DS5xploEZBA:4b987fd4e40303ac
-"""
-persistence/state_store.py: Atomic thread state persistence
+# rye:signed:2026-04-11T02:05:09Z:ac2e0a1722bba014b7df18adb8628b8386639226a0632517573a4aee310cd6c1:iZIAWxwvst_5TvEV2Eo1KdLEJD4BwQdlUlBRlAV-r6WMrzX4vCXSasVhIs6qT8HAORil5Mpph1xY6OS9DUTqCQ:4b987fd4e40303ac
+"""Thread state persistence — DELETED as runtime authority in v3.
 
-Persists thread state to state.json in .ai/state/threads/
+The daemon (ryeosd) owns thread state, cancellation, and suspension.
+Filesystem control files (.cancel_requested, .suspend_requested, state.json)
+are no longer authoritative.
+
+This module is retained only as a stub so existing imports fail loudly.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/persistence"
-__tool_description__ = "Thread state persistence store"
-
-import json
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, Optional
-
-from rye.constants import AI_DIR, STATE_THREADS_REL
+__tool_description__ = "DELETED — thread state persistence is daemon-owned in v3"
 
 
 class StateStore:
-    """Atomic thread state persistence."""
+    """Stub — raises on instantiation."""
 
-    def __init__(self, project_path: Path):
-        self.project_path = Path(project_path)
-        self.state_dir = self.project_path / AI_DIR / STATE_THREADS_REL
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-    def save_state(self, thread_id: str, state: Dict[str, Any]):
-        """Save thread state atomically.
-
-        Writes to .ai/state/threads/{thread_id}/state.json
-        """
-        thread_dir = self.state_dir / thread_id
-        thread_dir.mkdir(parents=True, exist_ok=True)
-
-        state_file = thread_dir / "state.json"
-        tmp_file = thread_dir / "state.json.tmp"
-
-        # Write to temp file
-        with open(tmp_file, "w") as f:
-            json.dump(
-                {
-                    **state,
-                    "saved_at": datetime.utcnow().isoformat(),
-                },
-                f,
-                indent=2,
-            )
-
-        # Atomic rename
-        tmp_file.replace(state_file)
-
-    def load_state(self, thread_id: str) -> Optional[Dict[str, Any]]:
-        """Load thread state."""
-        state_file = self.state_dir / thread_id / "state.json"
-        if not state_file.exists():
-            return None
-
-        with open(state_file) as f:
-            return json.load(f)
-
-    def save_transcript(self, thread_id: str, transcript: list):
-        """Save event transcript."""
-        thread_dir = self.state_dir / thread_id
-        thread_dir.mkdir(parents=True, exist_ok=True)
-
-        transcript_file = thread_dir / "transcript.json"
-        with open(transcript_file, "w") as f:
-            json.dump(transcript, f, indent=2)
-
-    def load_transcript(self, thread_id: str) -> list:
-        """Load event transcript."""
-        transcript_file = self.state_dir / thread_id / "transcript.json"
-        if not transcript_file.exists():
-            return []
-
-        with open(transcript_file) as f:
-            return json.load(f)
-
-    def request_cancel(self, thread_id: str):
-        """Request thread cancellation."""
-        thread_dir = self.state_dir / thread_id
-        thread_dir.mkdir(parents=True, exist_ok=True)
-
-        cancel_file = thread_dir / ".cancel_requested"
-        cancel_file.write_text("")
-
-    def check_cancel_requested(self, thread_id: str) -> bool:
-        """Check if cancellation requested."""
-        cancel_file = self.state_dir / thread_id / ".cancel_requested"
-        return cancel_file.exists()
-
-    def clear_cancel_request(self, thread_id: str):
-        """Clear cancellation request."""
-        cancel_file = self.state_dir / thread_id / ".cancel_requested"
-        if cancel_file.exists():
-            cancel_file.unlink()
-
-    def request_suspend(self, thread_id: str):
-        """Request thread suspension."""
-        thread_dir = self.state_dir / thread_id
-        thread_dir.mkdir(parents=True, exist_ok=True)
-
-        suspend_file = thread_dir / ".suspend_requested"
-        suspend_file.write_text("")
-
-    def check_suspend_requested(self, thread_id: str) -> bool:
-        """Check if suspension requested."""
-        suspend_file = self.state_dir / thread_id / ".suspend_requested"
-        return suspend_file.exists()
-
-    def clear_suspend_request(self, thread_id: str):
-        """Clear suspension request."""
-        suspend_file = self.state_dir / thread_id / ".suspend_requested"
-        if suspend_file.exists():
-            suspend_file.unlink()
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError(
+            "StateStore is deleted in v3; "
+            "thread state and control is daemon-owned via ryeosd"
+        )

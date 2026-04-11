@@ -1,11 +1,10 @@
-# rye:signed:2026-04-10T10:13:29Z:6e7cb4532458842507c2e0eafc2480d13b98a5010705851ec00a0b83841dd234:qCLUZUGwmrq4_AqlUed_mCgABnFAApn6TDE3P0KW4zGDMT3nAI1q7yzimnpbXQtDI9jgn_vdwYF2tbUKzmguAQ:4b987fd4e40303ac
+# rye:signed:2026-04-11T02:05:09Z:f07da231009d0cc72fc82434b89644509e287c4cc6b68da49225d36b7d06eb7f:mJMzRL2DH6Xes5qFeSU2VnGkdmB8DFMPn3-StfntnAk-33hP2ebcMcTbWiVy5ogSIaijvN95Mf7oYyTfyGQJCg:4b987fd4e40303ac
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
 Walks a graph YAML tool definition, dispatching rye_execute calls for each
 node action.  State is persisted as CAS execution_snapshot + state_snapshot
-objects after each step.  Graph runs register in the thread registry for
-status tracking and wait_threads support.
+objects after each step.  Thread lifecycle is daemon-owned (ryeosd v3).
 
 Entry point: same pattern as thread_directive.py — argparse + asyncio.run().
 """
@@ -701,20 +700,6 @@ def _read_thread_meta(project_path: str, thread_id: str) -> Optional[Dict]:
     return None
 
 
-def _update_registry_pid(registry, run_id: str) -> None:
-    """Update registry PID to this process (the actual walker child)."""
-    import sqlite3
-
-    try:
-        with sqlite3.connect(registry.db_path) as conn:
-            conn.execute(
-                "UPDATE threads SET pid = ? WHERE thread_id = ?",
-                (os.getpid(), run_id),
-            )
-            conn.commit()
-    except Exception:
-        logger.debug("Failed to update registry PID for %s", run_id, exc_info=True)
-
 
 def _resolve_execution_context(
     params: Dict,
@@ -1042,7 +1027,6 @@ async def _finalize_graph_run(
     step_count: int,
     node_receipts: List[str],
     errors: List[Dict],
-    registry,
     hooks: List[Dict],
     elapsed_s: float,
     error_message: Optional[str] = None,
@@ -1054,8 +1038,7 @@ async def _finalize_graph_run(
     1. Transcript event (graph_error or graph_completed)
     2. Transcript checkpoint + render_knowledge
     3. CAS state persistence (execution_snapshot + state_snapshot)
-    4. Registry status update
-    5. Hook dispatch (graph_completed or graph_error)
+    4. Hook dispatch (graph_completed or graph_error)
 
     Callers still build their own return dicts (shapes differ per exit).
     Best-effort — never raises, logs warnings on failure.
@@ -1105,11 +1088,7 @@ async def _finalize_graph_run(
         )
         transcript.render_knowledge(status, step_count, elapsed_s)
 
-        # 3. Registry
-        if registry is not None:
-            registry.update_status(graph_run_id, status)
-
-        # 4. Hooks
+        # 3. Hooks
         if hook_event:
             await _run_hooks(
                 hook_event,
@@ -1464,33 +1443,35 @@ def _error_to_context(result: Dict) -> Dict:
 
 
 def _follow_continuation_chain(continuation_id: str, project_path: str) -> Dict:
-    """Follow a continuation chain to the terminal thread's persisted result."""
-    orchestrator = _try_load_module("orchestrator")
-    thread_registry = _try_load_module("persistence/thread_registry")
-    if orchestrator is None or thread_registry is None:
-        return {
-            "success": False,
-            "error": "Agent bundle required for continuation chain resolution",
-        }
+    """Follow a continuation chain to the terminal thread via daemon."""
+    from rye.runtime.daemon_rpc import ThreadLifecycleClient, resolve_daemon_socket_path, RpcError
 
-    terminal_id = orchestrator.resolve_thread_chain(continuation_id, Path(project_path))
-    registry = thread_registry.get_registry(Path(project_path))
-    terminal_thread = registry.get_thread(terminal_id)
+    socket_path = resolve_daemon_socket_path()
+    if not socket_path:
+        return {"success": False, "error": "Daemon unavailable for continuation chain resolution"}
 
-    if terminal_thread:
-        persisted = terminal_thread.get("result", {})
-        if isinstance(persisted, str):
-            try:
-                persisted = json.loads(persisted)
-            except (json.JSONDecodeError, ValueError):
-                persisted = {"result": persisted}
-        return {
-            **persisted,
-            "status": terminal_thread.get("status", "completed"),
-            "thread_id": terminal_id,
-        }
-
-    return {"status": "error", "error": f"Terminal thread not found: {terminal_id}"}
+    try:
+        client = ThreadLifecycleClient(socket_path)
+        chain = client.get_chain(continuation_id)
+        if not chain:
+            return {"success": False, "error": f"Chain not found for: {continuation_id}"}
+        threads = chain.get("threads") or []
+        if not threads:
+            return {"status": "error", "error": f"Empty chain for: {continuation_id}"}
+        terminal = threads[-1]
+        terminal_id = terminal.get("thread_id", continuation_id)
+        # Get the full thread record for result
+        record = client.get_thread(terminal_id)
+        if record:
+            result = record.get("result") or {}
+            return {
+                **(result.get("result") or {}),
+                "status": terminal.get("status", "completed"),
+                "thread_id": terminal_id,
+            }
+        return {"status": terminal.get("status", "unknown"), "thread_id": terminal_id}
+    except (OSError, RuntimeError, RpcError) as exc:
+        return {"success": False, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1585,7 +1566,6 @@ async def execute(
 ) -> Dict:
     """Walk a state graph, dispatching actions for each node."""
     error_loader = _try_load_module("loaders/error_loader")
-    thread_registry = _try_load_module("persistence/thread_registry")
 
     cfg = graph_config.get("config", {})
     nodes = cfg.get("nodes", {})
@@ -1664,7 +1644,6 @@ async def execute(
         status="error",
         step_count=0,
         node_receipts=[],
-        registry=None,
         hooks=hooks,
         elapsed_s=0,
         hook_event=None,
@@ -1723,8 +1702,6 @@ async def execute(
         )
         return {"success": False, "error": error_msg}
 
-    registry = None
-
     # Resume: reload state from signed knowledge item
     if is_resume and resume_run_id:
         resumed = _load_resume_state(project_path, graph_id, graph_run_id)
@@ -1765,10 +1742,6 @@ async def execute(
             )
             return {"success": False, "error": error_msg}
 
-        if thread_registry is not None:
-            registry = thread_registry.get_registry(Path(project_path))
-            _update_registry_pid(registry, graph_run_id)
-            registry.update_status(graph_run_id, "running")
         await _persist_state(
             project_path,
             graph_id,
@@ -1809,18 +1782,6 @@ async def execute(
             )
             return {"success": False, "error": error_msg}
 
-        # Register + create initial state
-        # (skip register if graph_run_id was pre-provided — already registered
-        # by run_sync() for async)
-        if thread_registry is not None:
-            registry = thread_registry.get_registry(Path(project_path))
-            if not pre_registered:
-                registry.register(graph_run_id, graph_id, parent_thread_id)
-                registry.update_status(graph_run_id, "running")
-            else:
-                # Async child: update PID to this process (the actual walker)
-                # so process tools can find/kill the right PID
-                _update_registry_pid(registry, graph_run_id)
         await _persist_state(
             project_path,
             graph_id,
@@ -1885,7 +1846,6 @@ async def execute(
                         "phase": "execution",
                     }
                 ],
-                registry=registry,
                 hooks=hooks,
                 elapsed_s=time.monotonic() - graph_start_time,
                 error_message=error_msg,
@@ -1938,7 +1898,6 @@ async def execute(
                 step_count=step_count,
                 node_receipts=node_receipt_hashes,
                 errors=suppressed_errors,
-                registry=registry,
                 hooks=hooks,
                 elapsed_s=elapsed,
             )
@@ -1974,8 +1933,6 @@ async def execute(
             if suppressed_errors:
                 result_dict["errors_suppressed"] = len(suppressed_errors)
                 result_dict["errors"] = suppressed_errors
-            if registry is not None:
-                registry.set_result(graph_run_id, result_dict)
             return result_dict
 
         # Foreach node — iterate
@@ -2311,7 +2268,6 @@ async def execute(
                             "phase": "execution",
                         }
                     ],
-                    registry=registry,
                     hooks=hooks,
                     elapsed_s=time.monotonic() - graph_start_time,
                     error_message=error_msg,
@@ -2466,7 +2422,6 @@ async def execute(
                         "phase": "execution",
                     }
                 ],
-                registry=registry,
                 hooks=hooks,
                 elapsed_s=time.monotonic() - graph_start_time,
                 hook_event=None,
@@ -2501,7 +2456,6 @@ async def execute(
         errors=[
             {"code": "max_steps_exceeded", "message": error_msg, "phase": "execution"}
         ],
-        registry=registry,
         hooks=hooks,
         elapsed_s=elapsed,
         error_message=error_msg,
@@ -2849,67 +2803,12 @@ def run_sync(graph_config: Dict, params: Dict, project_path: str) -> Dict:
     is_async = params.pop("async", False)
 
     if is_async:
-        thread_registry = _try_load_module("persistence/thread_registry")
-        if thread_registry is None:
-            return {"success": False, "error": "Agent bundle required for async mode"}
-
-        # Pre-generate graph_run_id so parent can return it
-        cfg = graph_config.get("config", {})
-        graph_id = graph_config.get("_item_id") or graph_config.get(
-            "category", "unknown"
-        )
-        graph_run_id = f"{graph_id.replace('/', '-')}-{int(time.time())}"
-
-        # Register before subprocess so child process sees it
-        parent_thread_id = os.environ.get("RYE_PARENT_THREAD_ID")
-        registry = thread_registry.get_registry(Path(project_path))
-
-        # Get path to walker.py for __main__ invocation
-        walker_path = Path(__file__).resolve()
-
-        # Prepare subprocess arguments
-        params_json = json.dumps(params)
-        cmd = [
-            sys.executable,
-            str(walker_path),
-            "--graph-path",
-            graph_config.get("_file_path", ""),
-            "--project-path",
-            project_path,
-            "--graph-run-id",
-            graph_run_id,
-            "--pre-registered",
-        ]
-
-        # Shared engine-layer detached spawn with lifecycle management
-        from rye.utils.detached import spawn_thread
-
-        log_dir = Path(project_path) / AI_DIR / "state" / "graphs" / graph_run_id
-        spawn_result = asyncio.run(
-            spawn_thread(
-                registry=registry,
-                thread_id=graph_run_id,
-                directive=graph_id,
-                cmd=cmd,
-                log_dir=log_dir,
-                input_data=params_json,
-                parent_id=parent_thread_id,
-            )
-        )
-
-        if not spawn_result.get("success"):
-            return {
-                "success": False,
-                "error": f"Failed to spawn child process: {spawn_result.get('error')}",
-            }
-
-        # Parent — return immediately with child PID
         return {
-            "success": True,
-            "graph_run_id": graph_run_id,
-            "graph_id": graph_id,
-            "status": "running",
-            "pid": spawn_result["pid"],
+            "success": False,
+            "error": (
+                "Async graph execution is disabled on the daemon-owned v3 path; "
+                "detached execution must be recreated as a daemon client"
+            ),
         }
 
     # Synchronous execution

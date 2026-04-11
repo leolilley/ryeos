@@ -105,6 +105,8 @@ Node X25519 key
 
 ## V3 — Cluster Vault (Future)
 
+> **Prerequisite:** [Cluster Bootstrap And Fleet Enrollment](cluster-bootstrap.md). Cluster vault depends on registry-backed node enrollment, join tokens, and attestation-based trust. These must exist before vault federation is meaningful.
+
 Vault federation across node clusters.
 
 - **Replication policies** — declare which secrets sync to which nodes. A production database credential replicates to all worker nodes; a staging key stays on the staging node.

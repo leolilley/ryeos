@@ -1,0 +1,113 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::Config;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadKindProfile {
+    pub root_executable: bool,
+    pub supports_interrupt: bool,
+    pub supports_continuation: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct KindProfileRegistry {
+    profiles: HashMap<String, ThreadKindProfile>,
+}
+
+impl KindProfileRegistry {
+    /// Load profiles from the daemon config file, falling back to defaults.
+    pub fn load_from_config(config: &Config) -> Self {
+        if let Some(config_path) = Self::find_config_path(config) {
+            if let Ok(contents) = fs::read_to_string(&config_path) {
+                if let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(&contents) {
+                    if let Some(profiles_val) = parsed.get("thread_kind_profiles") {
+                        if let Ok(profiles) = serde_yaml::from_value::<
+                            HashMap<String, ThreadKindProfile>,
+                        >(
+                            profiles_val.clone()
+                        ) {
+                            if !profiles.is_empty() {
+                                return Self { profiles };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Self::load_defaults()
+    }
+
+    fn find_config_path(config: &Config) -> Option<PathBuf> {
+        let path = config.state_dir.join("config.yaml");
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// Load with default profiles.
+    pub fn load_defaults() -> Self {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "directive_run".to_string(),
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: true,
+                supports_continuation: true,
+            },
+        );
+        profiles.insert(
+            "tool_run".to_string(),
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
+        profiles.insert(
+            "graph_run".to_string(),
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: true,
+                supports_continuation: true,
+            },
+        );
+        profiles.insert(
+            "graph_step".to_string(),
+            ThreadKindProfile {
+                root_executable: false,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
+        profiles.insert(
+            "system_task".to_string(),
+            ThreadKindProfile {
+                root_executable: false,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
+        Self { profiles }
+    }
+
+    /// Get profile for a kind. Returns None if kind is unknown.
+    pub fn get(&self, kind: &str) -> Option<&ThreadKindProfile> {
+        self.profiles.get(kind)
+    }
+
+    /// Check if a kind is registered.
+    pub fn is_valid(&self, kind: &str) -> bool {
+        self.profiles.contains_key(kind)
+    }
+
+    /// Check if a kind can be used as a root execution.
+    pub fn is_root_executable(&self, kind: &str) -> bool {
+        self.profiles.get(kind).is_some_and(|p| p.root_executable)
+    }
+}
