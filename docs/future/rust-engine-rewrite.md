@@ -93,6 +93,7 @@ The swap is mechanical: implement the same trait in Rust, remove the worker proc
 **Rust equivalent:** Directory walking with `std::fs`. The search roots and extension priority are already implemented in Rust in `thread_lifecycle.rs` (`search_roots()`, `find_item_path()`). This is ~80% done — the Rust daemon already resolves items for the `/execute` endpoint.
 
 **Remaining work:**
+
 - Move resolution into a standalone engine module
 - Support all item types (tools, directives, knowledge, configs)
 - Handle `.pth`-style editable installs for bundle discovery
@@ -105,6 +106,7 @@ The swap is mechanical: implement the same trait in Rust, remove the worker proc
 **Rust equivalent:** The daemon's `auth.rs` already implements Ed25519 signature verification for HTTP requests using `ed25519-dalek`. The same crypto library verifies item signatures. The signature format is identical — `# rye:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>`.
 
 **Remaining work:**
+
 - Port `SignatureFormats` parser (Python `rye/utils/signature_formats.py`)
 - Port trust store loading (Python `rye/utils/trust_store.py`)
 - Implement content hash verification
@@ -117,6 +119,7 @@ The swap is mechanical: implement the same trait in Rust, remove the worker proc
 **Rust equivalent:** Partially implemented in `thread_lifecycle.rs` (`resolve_tool_item()` parses `__executor_id__` and `__tool_type__`). Full chain building needs:
 
 **Remaining work:**
+
 - Parse all tool metadata formats (Python assignments, YAML frontmatter)
 - Build executor chains for directives (the `thread_directive` executor)
 - Build executor chains for state graphs
@@ -130,6 +133,7 @@ The swap is mechanical: implement the same trait in Rust, remove the worker proc
 **Rust equivalent:** Call Lillux directly. No FFI boundary. The executor chain specifies the script path and parameters; Lillux handles fork/exec/isolation.
 
 **Remaining work:**
+
 - Direct Rust API for Lillux (currently invoked via CLI or Python bindings)
 - Pass executor chain as structured data instead of CLI args
 - Handle stdio capture and result marshaling
@@ -140,10 +144,10 @@ The swap is mechanical: implement the same trait in Rust, remove the worker proc
 
 Until the engine rewrite, Ed25519 verification is duplicated:
 
-| Layer | Library | Purpose |
-|---|---|---|
-| Rust daemon (`auth.rs`) | `ed25519-dalek` | HTTP request authentication |
-| Python engine (`rye/primitives/signing.py`) | `cryptography` | Item integrity verification |
+| Layer                                       | Library         | Purpose                     |
+| ------------------------------------------- | --------------- | --------------------------- |
+| Rust daemon (`auth.rs`)                     | `ed25519-dalek` | HTTP request authentication |
+| Python engine (`rye/primitives/signing.py`) | `cryptography`  | Item integrity verification |
 
 Both use the same keys, the same trust store format, the same signature format. The duplication is mechanical, not architectural.
 
@@ -250,9 +254,9 @@ Build this when:
 
 ## Relationship to Other Documents
 
-| Document | Relationship |
-|---|---|
-| [ryeosd v3 Hardening](../../.tmp/ryeosd-v3/16-hardening.md) | Worker process architecture defines the engine trait boundary |
+| Document                                                     | Relationship                                                                    |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| [ryeosd v3 Hardening](../../.tmp/ryeosd-v3/16-hardening.md)  | Worker process architecture defines the engine trait boundary                   |
 | [Future Evolution](../../.tmp/ryeosd-v2/future-evolution.md) | JIT optimizations, capability refs, temporal resolution depend on native engine |
-| [Sovereign Inference](sovereign-inference.md) | Single-binary deployment enables edge node distribution |
-| [Cluster Bootstrap](cluster-bootstrap.md) | Static binary simplifies multi-node deployment |
+| [Sovereign Inference](sovereign-inference.md)                | Single-binary deployment enables edge node distribution                         |
+| [Cluster Bootstrap](cluster-bootstrap.md)                    | Static binary simplifies multi-node deployment                                  |
