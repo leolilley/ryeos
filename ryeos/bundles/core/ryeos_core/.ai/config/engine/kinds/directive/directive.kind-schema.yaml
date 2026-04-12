@@ -1,0 +1,24 @@
+location:
+  directory: directives
+execution:
+  default_executor_id: "tool:rye/core/executors/directive/directive"
+formats:
+  - extensions: [".md"]
+    parser_id: markdown/xml
+    signature:
+      prefix: "<!--"
+      suffix: "-->"
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category

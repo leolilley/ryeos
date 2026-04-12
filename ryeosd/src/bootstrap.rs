@@ -18,20 +18,14 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 2. Generate node signing key
     let key_path = &config.signing_key_path;
     let identity = if key_path.exists() && !options.force {
-        eprintln!(
-            "ryeosd init: signing key already exists at {}",
-            key_path.display()
-        );
+        tracing::info!(path = %key_path.display(), "signing key already exists");
         NodeIdentity::load(key_path)?
     } else {
         if key_path.exists() {
             fs::remove_file(key_path)?;
         }
         let id = NodeIdentity::create(key_path)?;
-        eprintln!(
-            "ryeosd init: generated signing key at {}",
-            key_path.display()
-        );
+        tracing::info!(path = %key_path.display(), "generated signing key");
         id
     };
 
@@ -40,29 +34,25 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     let public_identity_path = identity_dir.join("public-identity.json");
     if !public_identity_path.exists() || options.force {
         identity.write_public_identity(&public_identity_path)?;
-        eprintln!(
-            "ryeosd init: wrote public identity to {}",
-            public_identity_path.display()
-        );
+        tracing::info!(path = %public_identity_path.display(), "wrote public identity");
     }
 
     // 4. Write default config file if missing
     let config_path = config.state_dir.join("config.yaml");
     if !config_path.exists() {
         write_default_config(&config_path, config)?;
-        eprintln!(
-            "ryeosd init: wrote default config to {}",
-            config_path.display()
-        );
+        tracing::info!(path = %config_path.display(), "wrote default config");
     }
 
     // 5. Create auth and trust directories
     fs::create_dir_all(&config.authorized_keys_dir)?;
     fs::create_dir_all(config.state_dir.join("trust").join("trusted_keys"))?;
 
-    eprintln!("ryeosd init: bootstrap complete");
-    eprintln!("  principal: {}", identity.principal_id());
-    eprintln!("  state_dir: {}", config.state_dir.display());
+    tracing::info!(
+        principal = %identity.principal_id(),
+        state_dir = %config.state_dir.display(),
+        "bootstrap complete"
+    );
 
     Ok(())
 }

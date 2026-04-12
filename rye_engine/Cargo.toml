@@ -1,0 +1,20 @@
+[package]
+name = "rye_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Native policy engine for Rye OS — resolution, trust, planning"
+license = "MIT"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+lillux = { path = "../lillux/lillux" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+regex = "1"
+thiserror = "2"
+tracing = "0.1"
+

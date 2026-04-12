@@ -1,0 +1,44 @@
+location:
+  directory: tools
+formats:
+  - extensions: [".py"]
+    parser_id: python/ast
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".yaml", ".yml"]
+    parser_id: yaml/yaml
+    signature:
+      prefix: "#"
+  - extensions: [".js", ".ts", ".mjs", ".cjs"]
+    parser_id: javascript/javascript
+    signature:
+      prefix: "//"
+  - extensions: [".sh"]
+    parser_id: python/ast
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".json", ".toml"]
+    parser_id: yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+    version:
+      from: path
+      key: __version__
+    executor_id:
+      from: path
+      key: __executor_id__
+    description:
+      from: path
+      key: __tool_description__
+    category:
+      from: path
+      key: __category__
+    tool_type:
+      from: path
+      key: __tool_type__

@@ -1,0 +1,20 @@
+location:
+  directory: config
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser_id: yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category

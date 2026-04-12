@@ -14,14 +14,11 @@ pub async fn reconcile(state: &AppState) -> Result<()> {
     let running_threads = state.db.list_threads_by_status(&["created", "running"])?;
 
     if running_threads.is_empty() {
-        eprintln!("ryeosd reconcile: no orphaned threads");
+        tracing::debug!("no orphaned threads");
         return Ok(());
     }
 
-    eprintln!(
-        "ryeosd reconcile: checking {} non-terminal threads",
-        running_threads.len()
-    );
+    tracing::info!(count = running_threads.len(), "checking non-terminal threads");
 
     let mut reconciled = 0;
     for thread in &running_threads {
@@ -33,9 +30,12 @@ pub async fn reconcile(state: &AppState) -> Result<()> {
         };
 
         if process_dead {
-            eprintln!(
-                "ryeosd reconcile: thread {} (kind={}, status={}, pgid={:?}) — dead process, marking failed",
-                thread.thread_id, thread.kind, thread.status, pgid
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                kind = %thread.kind,
+                status = %thread.status,
+                pgid = ?pgid,
+                "dead process, marking failed"
             );
 
             if let Err(err) = state.threads.finalize_thread(&ThreadFinalizeParams {
@@ -53,9 +53,10 @@ pub async fn reconcile(state: &AppState) -> Result<()> {
                 final_cost: None,
                 summary_json: None,
             }) {
-                eprintln!(
-                    "ryeosd reconcile: failed to finalize thread {}: {err:#}",
-                    thread.thread_id
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    error = %err,
+                    "failed to finalize thread"
                 );
             } else {
                 reconciled += 1;
@@ -63,6 +64,6 @@ pub async fn reconcile(state: &AppState) -> Result<()> {
         }
     }
 
-    eprintln!("ryeosd reconcile: reconciled {reconciled} orphaned threads");
+    tracing::info!(count = reconciled, "reconciled orphaned threads");
     Ok(())
 }

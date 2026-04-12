@@ -1,0 +1,23 @@
+location:
+  directory: graphs
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser_id: yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+    executor_id:
+      from: path
+      key: executor_id

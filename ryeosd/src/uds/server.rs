@@ -26,7 +26,7 @@ pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_connection(stream, state).await {
-                eprintln!("ryeosd uds connection error: {err:#}");
+                tracing::warn!(error = %err, "uds connection error");
             }
         });
     }

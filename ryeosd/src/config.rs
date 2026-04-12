@@ -37,6 +37,9 @@ pub struct Cli {
     pub cas_root: Option<PathBuf>,
 
     #[arg(long)]
+    pub system_data_dir: Option<PathBuf>,
+
+    #[arg(long)]
     pub require_auth: bool,
 
     #[arg(long)]
@@ -55,6 +58,7 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub signing_key_path: PathBuf,
     pub cas_root: PathBuf,
+    pub system_data_dir: PathBuf,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
 }
@@ -67,6 +71,7 @@ struct PartialConfig {
     state_dir: Option<PathBuf>,
     signing_key_path: Option<PathBuf>,
     cas_root: Option<PathBuf>,
+    system_data_dir: Option<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
 }
@@ -117,6 +122,15 @@ impl Config {
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.cas_root.clone()))
                 .unwrap_or_else(|| state_dir.join("cas")),
+            system_data_dir: env::var_os("RYE_SYSTEM_SPACE")
+                .map(PathBuf::from)
+                .or_else(|| cli.system_data_dir.clone())
+                .or_else(|| {
+                    file_cfg
+                        .as_ref()
+                        .and_then(|cfg| cfg.system_data_dir.clone())
+                })
+                .unwrap_or_else(|| defaults.system_data_dir.clone()),
             require_auth: cli.require_auth
                 || file_cfg
                     .as_ref()
@@ -166,6 +180,9 @@ impl Config {
             .state_dir()
             .context("could not determine XDG state directory")?
             .join("ryeosd");
+        let data_dir = base_dirs
+            .data_dir()
+            .join("ryeos");
 
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -178,6 +195,7 @@ impl Config {
             state_dir: state_dir.clone(),
             signing_key_path: state_dir.join("identity").join("node-key.pem"),
             cas_root: state_dir.join("cas"),
+            system_data_dir: data_dir,
             require_auth: false,
             authorized_keys_dir: state_dir.join("auth").join("authorized_keys"),
         })

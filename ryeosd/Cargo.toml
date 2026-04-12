@@ -20,15 +20,17 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 futures-core = "0.3"
-pyo3 = { version = "0.28", features = ["auto-initialize"] }
 rand = "0.8"
 rmp-serde = "1"
+rye_engine = { path = "../rye_engine" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
