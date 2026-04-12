@@ -4,10 +4,14 @@ pub mod exec;
 pub mod identity;
 pub mod time;
 
-pub use exec::{SpawnResult, SubprocessRequest, SubprocessResult};
+pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
 
 pub fn run(request: SubprocessRequest) -> SubprocessResult {
     exec::lib_run(request)
+}
+
+pub fn spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
+    exec::lib_spawn(request)
 }
 
 pub fn spawn_detached(

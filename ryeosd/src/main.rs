@@ -7,7 +7,8 @@ mod config;
 mod db;
 mod identity;
 mod kind_profiles;
-mod native_engine;
+mod engine_init;
+mod policy;
 mod process;
 mod reconcile;
 mod refs;
@@ -72,7 +73,7 @@ async fn main() -> Result<()> {
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
     let db = Database::new(&config.db_path, kind_profiles)?;
     let identity = NodeIdentity::load(&config.signing_key_path)?;
-    let engine = Arc::new(native_engine::build_engine(&config)?);
+    let engine = Arc::new(engine_init::build_engine(&config)?);
     let db = Arc::new(db);
     let broker = Arc::new(LiveBroker::new(DEFAULT_BROKER_CAPACITY));
     let events = Arc::new(EventStoreService::new(db.clone(), broker.clone()));
@@ -120,7 +121,7 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o660))
+        std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("failed to set socket permissions on {}", config.uds_path.display()))?;
     }
 

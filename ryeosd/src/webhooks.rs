@@ -32,7 +32,6 @@ pub struct WebhookStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct WebhookBinding {
     pub hook_id: String,
     pub user_id: String,
@@ -121,23 +120,23 @@ impl WebhookStore {
         let now = chrono::Utc::now().to_rfc3339();
         let vk = vault_keys.map(|v| v.to_vec()).unwrap_or_default();
 
-        let record = serde_json::json!({
-            "hook_id": hook_id,
-            "user_id": user_fp,
-            "remote_name": remote_name,
-            "item_id": item_id,
-            "project_path": project_path,
-            "description": description,
-            "secret_envelope": secret_envelope,
-            "vault_keys": vk,
-            "owner": owner,
-            "created_at": now,
-            "revoked_at": null,
-            "active": true,
-        });
+        let binding = WebhookBinding {
+            hook_id: hook_id.clone(),
+            user_id: user_fp.to_string(),
+            remote_name: remote_name.to_string(),
+            item_id: item_id.to_string(),
+            project_path: project_path.to_string(),
+            description: description.map(String::from),
+            secret_envelope: secret_envelope.cloned(),
+            vault_keys: vk.clone(),
+            owner: owner.to_string(),
+            created_at: now,
+            revoked_at: None,
+            active: true,
+        };
 
         let mut index = self.read_index()?;
-        index.insert(hook_id.clone(), record);
+        index.insert(hook_id.clone(), serde_json::to_value(&binding)?);
         self.write_index(&index)?;
 
         let secret_path = self.secret_path(&hook_id);
@@ -169,39 +168,21 @@ impl WebhookStore {
         let index = self.read_index()?;
         let mut results: Vec<BindingListItem> = Vec::new();
         for val in index.values() {
-            if val.get("user_id").and_then(|v| v.as_str()) == Some(user_fp)
-                && val.get("remote_name").and_then(|v| v.as_str()) == Some(remote_name)
-            {
+            let binding: WebhookBinding = match serde_json::from_value(val.clone()) {
+                Ok(b) => b,
+                Err(_) => continue, // skip malformed entries
+            };
+            if binding.user_id == user_fp && binding.remote_name == remote_name {
                 results.push(BindingListItem {
-                    hook_id: val["hook_id"].as_str().unwrap_or("").to_string(),
-                    item_id: val["item_id"].as_str().unwrap_or("").to_string(),
-                    project_path: val["project_path"].as_str().unwrap_or("").to_string(),
-                    description: val
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    created_at: val["created_at"].as_str().unwrap_or("").to_string(),
-                    revoked_at: val
-                        .get("revoked_at")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    has_secret_envelope: val
-                        .get("secret_envelope")
-                        .map_or(false, |v| !v.is_null()),
-                    vault_keys: val
-                        .get("vault_keys")
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    owner: val
-                        .get("owner")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                    hook_id: binding.hook_id,
+                    item_id: binding.item_id,
+                    project_path: binding.project_path,
+                    description: binding.description,
+                    created_at: binding.created_at,
+                    revoked_at: binding.revoked_at,
+                    has_secret_envelope: binding.secret_envelope.is_some(),
+                    vault_keys: binding.vault_keys,
+                    owner: binding.owner,
                 });
             }
         }

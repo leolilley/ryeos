@@ -127,10 +127,13 @@ fn dispatch_subprocess(
     };
 
     let result = lillux::run(request);
+    Ok(translate_result(result))
+}
 
-    // Translate SubprocessResult → ExecutionCompletion
+/// Translate a Lillux SubprocessResult into an ExecutionCompletion.
+fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
     if result.timed_out {
-        return Ok(ExecutionCompletion {
+        return ExecutionCompletion {
             status: ThreadTerminalStatus::Killed,
             outcome_code: Some("timeout".to_owned()),
             result: None,
@@ -146,10 +149,9 @@ fn dispatch_subprocess(
                 "duration_ms": result.duration_ms,
                 "pid": result.pid,
             })),
-        });
+        };
     }
 
-    // Try to parse stdout as JSON; fall back to raw string
     let result_value = if result.success {
         let parsed = serde_json::from_str::<Value>(&result.stdout).ok();
         Some(parsed.unwrap_or(Value::String(result.stdout.clone())))
@@ -167,7 +169,7 @@ fn dispatch_subprocess(
         None
     };
 
-    Ok(ExecutionCompletion {
+    ExecutionCompletion {
         status: if result.success {
             ThreadTerminalStatus::Completed
         } else {
@@ -184,7 +186,115 @@ fn dispatch_subprocess(
             "exit_code": result.exit_code,
             "pid": result.pid,
         })),
-    })
+    }
+}
+
+/// A spawned but not-yet-completed execution.
+/// The daemon can inspect pid/pgid before calling `wait()`.
+pub struct SpawnedExecution {
+    pub pid: u32,
+    pub pgid: i64,
+    running: lillux::RunningProcess,
+}
+
+impl SpawnedExecution {
+    /// Block until the subprocess completes and return the completion.
+    pub fn wait(self) -> ExecutionCompletion {
+        let result = self.running.wait();
+        translate_result(result)
+    }
+}
+
+/// Spawn a plan's subprocess without waiting for completion.
+/// Returns the SpawnedExecution handle with pid/pgid accessible immediately.
+pub fn spawn_plan(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+) -> Result<SpawnedExecution, EngineError> {
+    for node in &plan.nodes {
+        match node {
+            PlanNode::DispatchSubprocess {
+                script_path,
+                interpreter,
+                working_directory,
+                environment,
+                arguments,
+                runtime_bindings,
+                ..
+            } => {
+                return spawn_subprocess(
+                    script_path,
+                    interpreter.as_deref(),
+                    working_directory.as_ref().and_then(|p| p.to_str()),
+                    environment,
+                    arguments,
+                    runtime_bindings,
+                    ctx,
+                );
+            }
+            PlanNode::SpawnChild { child_ref, .. } => {
+                return Err(EngineError::Internal(format!(
+                    "SpawnChild not yet supported (child_ref={child_ref})"
+                )));
+            }
+            PlanNode::Complete { .. } => {
+                return Err(EngineError::Internal(
+                    "plan has no subprocess node to spawn".to_string(),
+                ));
+            }
+        }
+    }
+    Err(EngineError::Internal("empty plan".to_string()))
+}
+
+fn spawn_subprocess(
+    script_path: &std::path::Path,
+    interpreter: Option<&str>,
+    working_directory: Option<&str>,
+    environment: &std::collections::HashMap<String, String>,
+    arguments: &[String],
+    runtime_bindings: &std::collections::HashMap<String, String>,
+    ctx: &EngineContext,
+) -> Result<SpawnedExecution, EngineError> {
+    let script = script_path.to_str().ok_or_else(|| EngineError::ExecutionFailed {
+        reason: format!("script path is not valid UTF-8: {}", script_path.display()),
+    })?;
+
+    let (cmd, mut args) = match interpreter {
+        Some(interp) => (interp.to_owned(), vec![script.to_owned()]),
+        None => (script.to_owned(), Vec::new()),
+    };
+    args.extend_from_slice(arguments);
+
+    let mut envs: Vec<(String, String)> = environment
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in runtime_bindings {
+        envs.push((k.clone(), v.clone()));
+    }
+    envs.push(("RYE_THREAD_ID".to_owned(), ctx.thread_id.clone()));
+    envs.push(("RYE_CHAIN_ROOT_ID".to_owned(), ctx.chain_root_id.clone()));
+
+    let request = lillux::SubprocessRequest {
+        cmd,
+        args,
+        cwd: working_directory.map(String::from),
+        envs,
+        stdin_data: None,
+        timeout: 300.0,
+    };
+
+    match lillux::spawn(request) {
+        Ok(running) => {
+            let pid = running.pid;
+            let pgid = running.pgid;
+            Ok(SpawnedExecution { pid, pgid, running })
+        }
+        Err(err_result) => Err(EngineError::ExecutionFailed {
+            reason: format!("subprocess spawn failed: {}", err_result.stderr),
+        }),
+    }
 }
 
 #[cfg(test)]

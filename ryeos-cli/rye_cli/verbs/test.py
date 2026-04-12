@@ -32,5 +32,5 @@ def handle(args, project_path: str):
     if args.validate_only:
         params["validate_only"] = True
 
-    result = daemon_execute("tool:rye/dev/test-runner", params)
+    result = daemon_execute("tool:rye/dev/test-runner", project_path=project_path, parameters=params)
     print_result(result)

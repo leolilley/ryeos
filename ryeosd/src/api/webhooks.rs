@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::Principal;
+use crate::policy;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -20,7 +20,9 @@ pub async fn create_webhook(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "webhooks")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -53,16 +55,10 @@ pub async fn create_webhook(
             &req.project_path,
             req.description.as_deref(),
             req.secret_envelope.as_ref(),
-            "",
+            &principal_fp,
             req.vault_keys.as_deref(),
         )
-        .map_err(|err| {
-            tracing::error!(error = %err, "internal error in webhook handler");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal server error" })),
-            )
-        })?;
+        .map_err(policy::internal_error)?;
 
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
@@ -71,18 +67,14 @@ pub async fn list_webhooks(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "webhooks")?;
     let remote_name = state.config.bind.to_string();
     let bindings = state
         .webhook_store()
         .list_bindings(&principal_fp, &remote_name)
-        .map_err(|err| {
-            tracing::error!(error = %err, "internal error in webhook handler");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal server error" })),
-            )
-        })?;
+        .map_err(policy::internal_error)?;
     Ok(Json(json!({ "bindings": bindings })))
 }
 
@@ -91,18 +83,14 @@ pub async fn revoke_webhook(
     Path(hook_id): Path<String>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "webhooks")?;
     let remote_name = state.config.bind.to_string();
     let revoked = state
         .webhook_store()
         .revoke_binding(&hook_id, &principal_fp, &remote_name)
-        .map_err(|err| {
-            tracing::error!(error = %err, "internal error in webhook handler");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal server error" })),
-            )
-        })?;
+        .map_err(policy::internal_error)?;
     if !revoked {
         return Err((
             StatusCode::NOT_FOUND,
@@ -110,15 +98,4 @@ pub async fn revoke_webhook(
         ));
     }
     Ok(Json(json!({ "revoked": hook_id })))
-}
-
-fn extract_principal_fp(
-    request: &axum::http::Request<axum::body::Body>,
-    state: &AppState,
-) -> String {
-    request
-        .extensions()
-        .get::<Principal>()
-        .map(|p| p.fingerprint.clone())
-        .unwrap_or_else(|| state.identity.principal_id())
 }

@@ -3,6 +3,7 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::identity::NodeIdentity;
+use crate::policy;
 use crate::state::AppState;
 
 pub async fn health() -> Json<Value> {
@@ -21,12 +22,8 @@ pub async fn public_key(
         .state_dir
         .join("identity")
         .join("public-identity.json");
-    let doc = NodeIdentity::load_public_identity(&identity_path).map_err(|err| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        )
-    })?;
+    let doc = NodeIdentity::load_public_identity(&identity_path)
+        .map_err(policy::internal_error)?;
     Ok(Json(
         serde_json::to_value(doc).unwrap_or_else(|_| json!({ "error": "encode_failed" })),
     ))

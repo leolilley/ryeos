@@ -29,19 +29,12 @@ def handle(args, project_path: str):
     if args.is_async:
         params["async"] = True
 
-    limit_overrides = {}
     if args.model:
-        limit_overrides["model"] = args.model
+        params["model"] = args.model
     if args.max_spend is not None:
-        limit_overrides["spend"] = args.max_spend
+        params["max_spend"] = args.max_spend
     if args.max_turns is not None:
-        limit_overrides["max_turns"] = args.max_turns
-    if limit_overrides:
-        params["limit_overrides"] = limit_overrides
-
-    budget = None
-    if args.max_spend is not None:
-        budget = {"max_spend": args.max_spend}
+        params["max_turns"] = args.max_turns
 
     print(
         f"[thread] spawning: {args.directive_id}"
@@ -52,8 +45,7 @@ def handle(args, project_path: str):
 
     result = daemon_execute(
         f"directive:{args.directive_id}",
-        params,
-        model=args.model,
-        budget=budget,
+        project_path=project_path,
+        parameters=params,
     )
     print_result(result)

@@ -24,7 +24,6 @@ from rye.primary_action_descriptions import (
     EXECUTE_ASYNC_DESC,
     EXECUTE_DRY_RUN_DESC,
     EXECUTE_PARAMETERS_DESC,
-    EXECUTE_RESUME_THREAD_ID_DESC,
     EXECUTE_TARGET_DESC,
     EXECUTE_THREAD_DESC,
     EXECUTE_TOOL_DESC,
@@ -51,19 +50,20 @@ def _daemon_url() -> str:
     return os.environ.get("RYEOSD_URL", "http://127.0.0.1:7400")
 
 
-def _daemon_execute(item_ref: str, parameters: dict = None,
-                    launch_mode: str = "inline", model: str = None,
-                    budget: dict = None) -> dict:
+def _daemon_execute(item_ref: str, project_path: str, parameters: dict = None,
+                    launch_mode: str = "inline", target_site_id: str = None,
+                    validate_only: bool = False) -> dict:
     """Submit an execution request to the ryeosd daemon via HTTP."""
     payload = {
         "item_ref": item_ref,
+        "project_path": project_path,
         "parameters": parameters or {},
         "launch_mode": launch_mode,
     }
-    if model:
-        payload["model"] = model
-    if budget:
-        payload["budget"] = budget
+    if target_site_id:
+        payload["target_site_id"] = target_site_id
+    if validate_only:
+        payload["validate_only"] = True
 
     url = f"{_daemon_url()}/execute"
     data = json.dumps(payload).encode("utf-8")
@@ -202,10 +202,6 @@ class RYEServer:
                                 "default": False,
                                 "description": EXECUTE_ASYNC_DESC,
                             },
-                            "resume_thread_id": {
-                                "type": "string",
-                                "description": EXECUTE_RESUME_THREAD_ID_DESC,
-                            },
                         },
                         "required": ["item_id", "project_path"],
                     },
@@ -261,24 +257,37 @@ class RYEServer:
         """Route execute through the ryeosd daemon HTTP API."""
         item_id = arguments.get("item_id", "")
         parameters = arguments.get("parameters", {})
+        project_path = arguments.get("project_path", "")
 
-        # Pass through execution flags as parameters
-        if arguments.get("dry_run"):
-            parameters["dry_run"] = True
-        if arguments.get("thread"):
-            parameters["thread"] = arguments["thread"]
-        if arguments.get("async"):
-            parameters["async"] = True
         if arguments.get("resume_thread_id"):
-            parameters["resume_thread_id"] = arguments["resume_thread_id"]
-        if arguments.get("target") and arguments["target"] != "local":
-            parameters["target"] = arguments["target"]
+            return {
+                "status": "error",
+                "error": "resume_thread_id is no longer accepted on execute; use the dedicated continuation API instead.",
+            }
+
+        if not isinstance(parameters, dict):
+            return {
+                "status": "error",
+                "error": "parameters must be an object",
+            }
+
+        launch_mode = "detached" if arguments.get("thread") == "fork" or arguments.get("async") else "inline"
+        target = arguments.get("target", "local")
+        target_site_id = None if target == "local" else target
+        validate_only = bool(arguments.get("dry_run"))
 
         # Run the HTTP call in a thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: _daemon_execute(item_id, parameters),
+            lambda: _daemon_execute(
+                item_id,
+                project_path,
+                parameters,
+                launch_mode=launch_mode,
+                target_site_id=target_site_id,
+                validate_only=validate_only,
+            ),
         )
         return result
 

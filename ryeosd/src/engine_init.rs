@@ -1,4 +1,4 @@
-//! Native engine initialization for ryeosd.
+//! Engine initialization for ryeosd.
 //!
 //! Constructs a `rye_engine::engine::Engine` at daemon startup using
 //! the daemon's config-driven system data directory and user space.
@@ -43,8 +43,7 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
 
     // 2. Load kind registry from filesystem
     let kinds = if schema_roots.is_empty() {
-        tracing::warn!("no kind schema roots found, engine has no kinds");
-        KindRegistry::empty()
+        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing .ai/config/engine/kinds/");
     } else {
         KindRegistry::load_base(&schema_roots)
             .context("failed to load kind schemas")?
@@ -77,7 +76,7 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
                 store
             }
             Err(err) => {
-                tracing::warn!(
+                tracing::error!(
                     path = %trust_keys_dir.display(),
                     error = %err,
                     "failed to load trust store"

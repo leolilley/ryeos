@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::TryRecvError;
 
+use crate::policy;
 use crate::services::event_store::EventReplayParams;
 use crate::state::AppState;
 
@@ -29,7 +30,18 @@ pub async fn get_thread_events(
     State(state): State<AppState>,
     Path(thread_id): Path<String>,
     Query(query): Query<EventReplayQuery>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let caller_principal = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+
+    let thread = state
+        .threads
+        .get_thread(&thread_id)
+        .map_err(policy::internal_error)?
+        .ok_or_else(|| not_found(format!("thread not found: {thread_id}")))?;
+    policy::check_thread_access(&caller_principal, &caller_scopes, thread.requested_by.as_deref())?;
+
     let result = state
         .events
         .replay(&EventReplayParams {
@@ -38,7 +50,7 @@ pub async fn get_thread_events(
             after_chain_seq: query.after,
             limit: query.limit,
         })
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     Ok(Json(json!({
         "events": result.events,
         "next_cursor": result.next_cursor,
@@ -49,7 +61,18 @@ pub async fn get_chain_events(
     State(state): State<AppState>,
     Path(chain_root_id): Path<String>,
     Query(query): Query<EventReplayQuery>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let caller_principal = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+
+    let root_thread = state
+        .threads
+        .get_thread(&chain_root_id)
+        .map_err(policy::internal_error)?
+        .ok_or_else(|| not_found(format!("chain not found: {chain_root_id}")))?;
+    policy::check_thread_access(&caller_principal, &caller_scopes, root_thread.requested_by.as_deref())?;
+
     let result = state
         .events
         .replay(&EventReplayParams {
@@ -58,7 +81,7 @@ pub async fn get_chain_events(
             after_chain_seq: query.after,
             limit: query.limit,
         })
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     Ok(Json(json!({
         "events": result.events,
         "next_cursor": result.next_cursor,
@@ -69,15 +92,20 @@ pub async fn stream_thread_events(
     State(state): State<AppState>,
     Path(thread_id): Path<String>,
     Query(query): Query<EventReplayQuery>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<
     Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>,
     (StatusCode, Json<Value>),
 > {
+    let caller_principal = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+
     let thread = state
         .threads
         .get_thread(&thread_id)
-        .map_err(internal_error)?
+        .map_err(policy::internal_error)?
         .ok_or_else(|| not_found(format!("thread not found: {thread_id}")))?;
+    policy::check_thread_access(&caller_principal, &caller_scopes, thread.requested_by.as_deref())?;
 
     Ok(build_event_stream(
         state.events.clone(),
@@ -92,10 +120,21 @@ pub async fn stream_chain_events(
     State(state): State<AppState>,
     Path(chain_root_id): Path<String>,
     Query(query): Query<EventReplayQuery>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<
     Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>,
     (StatusCode, Json<Value>),
 > {
+    let caller_principal = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+
+    let root_thread = state
+        .threads
+        .get_thread(&chain_root_id)
+        .map_err(policy::internal_error)?
+        .ok_or_else(|| not_found(format!("chain not found: {chain_root_id}")))?;
+    policy::check_thread_access(&caller_principal, &caller_scopes, root_thread.requested_by.as_deref())?;
+
     Ok(build_event_stream(
         state.events.clone(),
         chain_root_id,
@@ -287,19 +326,12 @@ fn as_sse_event(event: &crate::db::PersistedEventRecord) -> Event {
 }
 
 fn error_event(code: &str, message: String) -> Event {
+    tracing::error!(code = code, error = %message, "SSE stream error");
     Event::default().event("error").data(
         json!({
             "code": code,
-            "message": message,
         })
         .to_string(),
-    )
-}
-
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": err.to_string() })),
     )
 }
 

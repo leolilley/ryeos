@@ -118,6 +118,14 @@ fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
             request.request_id,
             handle_publish_artifact(&request.params, state),
         ),
+        "threads.set_facets" => rpc_result(
+            request.request_id,
+            handle_set_facets(&request.params, state),
+        ),
+        "threads.get_facets" => rpc_result(
+            request.request_id,
+            handle_get_facets(&request.params, state),
+        ),
         other => RpcResponse::err(
             request.request_id,
             "unknown_method",
@@ -161,12 +169,18 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
     let params: ThreadGetParams =
         serde_json::from_value(params.clone()).context("invalid threads.get params")?;
     match state.threads.get_thread(&params.thread_id)? {
-        Some(thread) => serde_json::to_value(json!({
-            "thread": thread,
-            "result": state.threads.get_thread_result(&params.thread_id)?,
-            "artifacts": state.threads.list_thread_artifacts(&params.thread_id)?,
-        }))
-        .context("failed to encode threads.get result"),
+        Some(thread) => {
+            let facets = state.db.get_facets(&params.thread_id)?;
+            let facets_map: std::collections::HashMap<&str, &str> =
+                facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            serde_json::to_value(json!({
+                "thread": thread,
+                "result": state.threads.get_thread_result(&params.thread_id)?,
+                "artifacts": state.threads.list_thread_artifacts(&params.thread_id)?,
+                "facets": facets_map,
+            }))
+            .context("failed to encode threads.get result")
+        }
         None => Ok(serde_json::Value::Null),
     }
 }
@@ -303,6 +317,33 @@ fn handle_publish_artifact(
         serde_json::from_value(params.clone()).context("invalid artifacts.publish params")?;
     let artifact = state.threads.publish_artifact(&params)?;
     serde_json::to_value(artifact).context("failed to encode artifacts.publish result")
+}
+
+fn handle_set_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+    let thread_id = params
+        .get("thread_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing thread_id"))?;
+    let facets_value = params
+        .get("facets")
+        .ok_or_else(|| anyhow::anyhow!("missing facets"))?;
+    let facets_map: std::collections::HashMap<String, String> =
+        serde_json::from_value(facets_value.clone())
+            .context("facets must be a map of string keys to string values")?;
+    let facets: Vec<(String, String)> = facets_map.into_iter().collect();
+    state.db.set_facets(thread_id, &facets)?;
+    Ok(json!({ "ok": true }))
+}
+
+fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+    let thread_id = params
+        .get("thread_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing thread_id"))?;
+    let facets = state.db.get_facets(thread_id)?;
+    let facets_map: std::collections::HashMap<&str, &str> =
+        facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    Ok(serde_json::to_value(facets_map).context("failed to encode facets")?)
 }
 
 fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {

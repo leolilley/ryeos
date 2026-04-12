@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::policy;
 use crate::process::{is_daemon_pgid, kill_process_group};
 use crate::services::command_service::CommandSubmitParams;
 use crate::services::thread_lifecycle::ThreadFinalizeParams;
@@ -19,9 +20,29 @@ pub struct CommandSubmitRequest {
 pub async fn submit_command(
     State(state): State<AppState>,
     Path(thread_id): Path<String>,
-    Json(request): Json<CommandSubmitRequest>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let command_type = request.command_type.clone();
+    let requested_by = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "threads.command")?;
+
+    let thread = state
+        .threads
+        .get_thread(&thread_id)
+        .map_err(policy::internal_error)?
+        .ok_or_else(|| invalid_request(anyhow::anyhow!("thread not found: {thread_id}")))?;
+    policy::check_thread_access(&requested_by, &caller_scopes, thread.requested_by.as_deref())?;
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "request body too large" })),
+        ))?;
+    let req: CommandSubmitRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|err| invalid_request(err.into()))?;
+
+    let command_type = req.command_type.clone();
 
     // cancel/interrupt/continue are not yet consumed by runtimes — reject early
     if matches!(command_type.as_str(), "cancel" | "interrupt" | "continue") {
@@ -42,8 +63,8 @@ pub async fn submit_command(
         .submit(&CommandSubmitParams {
             thread_id: thread_id.clone(),
             command_type: command_type.clone(),
-            requested_by: Some(state.identity.principal_id()),
-            params: request.params,
+            requested_by: Some(requested_by),
+            params: req.params,
         })
         .map_err(invalid_request)?;
 
@@ -53,9 +74,9 @@ pub async fn submit_command(
         let kill_result =
             tokio::task::spawn_blocking(move || execute_kill(&state, &thread_id))
                 .await
-                .map_err(|err| internal_error(err.into()))?;
+                .map_err(|err| policy::internal_error(err.into()))?;
         if let Err(err) = kill_result {
-            return Err(internal_error(err));
+            return Err(policy::internal_error(err));
         }
     }
 
@@ -105,13 +126,6 @@ fn execute_kill(state: &AppState, thread_id: &str) -> anyhow::Result<()> {
 fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({ "error": err.to_string() })),
-    )
-}
-
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": err.to_string() })),
     )
 }

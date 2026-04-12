@@ -4,15 +4,13 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::Principal;
+use crate::policy;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct PushRequest {
     pub project_path: String,
     pub project_manifest_hash: String,
-    #[allow(dead_code)]
-    pub system_version: String,
     pub expected_snapshot_hash: Option<String>,
 }
 
@@ -26,7 +24,9 @@ pub async fn push(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "push")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -41,7 +41,7 @@ pub async fn push(
 
     let current_head = refs
         .resolve_project_ref(&principal_fp, &req.project_path)
-        .map_err(internal_error)?
+        .map_err(policy::internal_error)?
         .map(|r| r.snapshot_hash);
 
     if req.expected_snapshot_hash.is_some() || current_head.is_some() {
@@ -60,7 +60,7 @@ pub async fn push(
     let cas = state.cas_store();
     if cas
         .get_object(&req.project_manifest_hash)
-        .map_err(internal_error)?
+        .map_err(policy::internal_error)?
         .is_none()
     {
         return Err((
@@ -81,7 +81,7 @@ pub async fn push(
         "source": "push",
         "timestamp": now,
     });
-    let snapshot_hash = cas.store_object(&snapshot).map_err(internal_error)?;
+    let snapshot_hash = cas.store_object(&snapshot).map_err(policy::internal_error)?;
 
     if !refs
         .advance_project_ref(
@@ -90,7 +90,7 @@ pub async fn push(
             &snapshot_hash,
             current_head.as_deref(),
         )
-        .map_err(internal_error)?
+        .map_err(policy::internal_error)?
     {
         return Err((
             StatusCode::CONFLICT,
@@ -110,7 +110,9 @@ pub async fn push_user_space(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "push")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -132,7 +134,7 @@ pub async fn push_user_space(
             } else if msg.contains("not found") {
                 (StatusCode::NOT_FOUND, Json(json!({ "error": msg })))
             } else {
-                internal_error(err)
+                policy::internal_error(err)
             }
         })?;
 
@@ -148,10 +150,12 @@ pub async fn get_user_space(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let fp = extract_principal_fp(&request, &state);
+    let fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "push")?;
 
     let refs = state.refs_store();
-    let result = refs.resolve_user_space_ref(&fp).map_err(internal_error)?;
+    let result = refs.resolve_user_space_ref(&fp).map_err(policy::internal_error)?;
 
     match result {
         Some(r) => Ok(Json(serde_json::to_value(r).unwrap())),
@@ -162,30 +166,9 @@ pub async fn get_user_space(
     }
 }
 
-/// Extract the authenticated principal fingerprint from request extensions.
-/// Falls back to daemon identity when auth is not required.
-fn extract_principal_fp(
-    request: &axum::http::Request<axum::body::Body>,
-    state: &AppState,
-) -> String {
-    request
-        .extensions()
-        .get::<Principal>()
-        .map(|p| p.fingerprint.clone())
-        .unwrap_or_else(|| state.identity.principal_id())
-}
-
 fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": err.to_string() })),
-    )
-}
-
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
-    tracing::error!(error = %err, "internal error in push handler");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": "internal server error" })),
     )
 }

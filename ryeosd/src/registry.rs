@@ -277,6 +277,9 @@ impl RegistryStore {
         if namespace.is_empty() {
             return Ok(json!({ "ok": false, "error": "Missing namespace" }));
         }
+        if namespace.contains('/') || namespace.contains('\\') || namespace.contains("..") || namespace.contains('\0') {
+            return Ok(json!({ "ok": false, "error": "invalid namespace" }));
+        }
         let ns_dir = self.namespace_dir();
         fs::create_dir_all(&ns_dir)?;
         let ns_file = ns_dir.join(namespace);
@@ -308,6 +311,9 @@ impl RegistryStore {
             return Ok(json!({ "ok": false, "error": "Invalid principal_id format" }));
         }
         let fingerprint = &principal_id[3..];
+        if fingerprint.is_empty() || fingerprint.contains('/') || fingerprint.contains('\\') || fingerprint.contains("..") || fingerprint.contains('\0') {
+            return Ok(json!({ "ok": false, "error": "invalid fingerprint" }));
+        }
 
         let identity_hash = self.cas.store_object(identity_doc)?;
 
@@ -322,6 +328,9 @@ impl RegistryStore {
     }
 
     pub fn lookup_identity(&self, fingerprint: &str) -> Result<Option<Value>> {
+        if fingerprint.is_empty() || fingerprint.contains('/') || fingerprint.contains('\\') || fingerprint.contains("..") || fingerprint.contains('\0') {
+            return Ok(None);
+        }
         let id_file = self.identities_dir().join(fingerprint);
         if !id_file.exists() {
             return Ok(None);

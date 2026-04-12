@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS threads (
     origin_site_id TEXT NOT NULL,
     upstream_thread_id TEXT,
     requested_by TEXT,
-    model TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -167,6 +166,17 @@ CREATE TABLE IF NOT EXISTS thread_counters (
     thread_id TEXT PRIMARY KEY,
     next_thread_seq INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS thread_facets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id TEXT NOT NULL REFERENCES threads(thread_id),
+    facet_key TEXT NOT NULL,
+    facet_value TEXT NOT NULL,
+    UNIQUE(thread_id, facet_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_facets_thread ON thread_facets(thread_id);
+CREATE INDEX IF NOT EXISTS idx_thread_facets_key_value ON thread_facets(facet_key, facet_value);
 "#;
 
 #[derive(Debug, Clone)]
@@ -222,7 +232,6 @@ pub struct NewThreadRecord {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
-    pub model: Option<String>,
     pub summary_json: Option<Value>,
 }
 
@@ -350,7 +359,6 @@ pub struct ThreadDetail {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
-    pub model: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -448,7 +456,7 @@ impl Database {
             .query_row(
                 "SELECT thread_id, chain_root_id, kind, status, item_ref, executor_ref,
                         launch_mode, current_site_id, origin_site_id, upstream_thread_id,
-                        requested_by, model, created_at, updated_at, started_at, finished_at
+                        requested_by, created_at, updated_at, started_at, finished_at
                  FROM threads WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
@@ -464,11 +472,10 @@ impl Database {
                         row.get::<_, String>(8)?,
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
-                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, String>(11)?,
                         row.get::<_, String>(12)?,
-                        row.get::<_, String>(13)?,
+                        row.get::<_, Option<String>>(13)?,
                         row.get::<_, Option<String>>(14)?,
-                        row.get::<_, Option<String>>(15)?,
                     ))
                 },
             )
@@ -539,11 +546,10 @@ impl Database {
             origin_site_id: base.8,
             upstream_thread_id: base.9,
             requested_by: base.10,
-            model: base.11,
-            created_at: base.12,
-            updated_at: base.13,
-            started_at: base.14,
-            finished_at: base.15,
+            created_at: base.11,
+            updated_at: base.12,
+            started_at: base.13,
+            finished_at: base.14,
             runtime,
             budget,
             allowed_actions,
@@ -563,8 +569,8 @@ impl Database {
             "INSERT INTO threads (
                 thread_id, chain_root_id, kind, status, item_ref, executor_ref,
                 launch_mode, current_site_id, origin_site_id, upstream_thread_id,
-                requested_by, model, created_at, updated_at, summary_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                requested_by, created_at, updated_at, summary_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 &thread.thread_id,
                 &thread.chain_root_id,
@@ -577,7 +583,6 @@ impl Database {
                 &thread.origin_site_id,
                 &thread.upstream_thread_id,
                 &thread.requested_by,
-                &thread.model,
                 now,
                 now,
                 json_blob(&thread.summary_json)?,
@@ -734,8 +739,8 @@ impl Database {
             "INSERT INTO threads (
                 thread_id, chain_root_id, kind, status, item_ref, executor_ref,
                 launch_mode, current_site_id, origin_site_id, upstream_thread_id,
-                requested_by, created_at, updated_at, model, summary_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
+                requested_by, created_at, updated_at, summary_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
             params![
                 &successor.thread_id,
                 chain_root_id,
@@ -749,7 +754,6 @@ impl Database {
                 &successor.upstream_thread_id,
                 &successor.requested_by,
                 now,
-                &successor.model,
                 json_blob(&successor.summary_json)?,
             ],
         )?;
@@ -1562,6 +1566,38 @@ impl Database {
             artifacts.push(row?);
         }
         Ok(artifacts)
+    }
+
+    pub fn set_facets(
+        &self,
+        thread_id: &str,
+        facets: &[(String, String)],
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        for (key, value) in facets {
+            conn.execute(
+                "INSERT INTO thread_facets (thread_id, facet_key, facet_value)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(thread_id, facet_key) DO UPDATE SET facet_value = excluded.facet_value",
+                params![thread_id, key, value],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_facets(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT facet_key, facet_value FROM thread_facets WHERE thread_id = ?1 ORDER BY facet_key",
+        )?;
+        let rows = stmt.query_map(params![thread_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut facets = Vec::new();
+        for row in rows {
+            facets.push(row?);
+        }
+        Ok(facets)
     }
 
     pub fn list_thread_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {

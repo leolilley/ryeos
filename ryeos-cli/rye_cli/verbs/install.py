@@ -49,7 +49,7 @@ def _handle_install(args, project_path: str):
     if version:
         params["version"] = version
 
-    result = daemon_execute("tool:rye/core/remote/remote", params)
+    result = daemon_execute("tool:rye/core/remote/remote", project_path=project_path, parameters=params)
 
     if result.get("error"):
         print_result(result)
@@ -60,7 +60,7 @@ def _handle_install(args, project_path: str):
         "action": "verify",
         "bundle_id": bundle_id,
     }
-    verify_result = daemon_execute("tool:rye/core/bundler/bundler", verify_params)
+    verify_result = daemon_execute("tool:rye/core/bundler/bundler", project_path=project_path, parameters=verify_params)
 
     verify_ok = (
         verify_result.get("status") != "failed"

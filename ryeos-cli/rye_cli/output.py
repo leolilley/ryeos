@@ -75,18 +75,18 @@ def _daemon_request(method: str, path: str, body: bytes | None = None,
     return conn.getresponse()
 
 
-def daemon_execute(item_ref: str, parameters: dict = None, launch_mode: str = "inline",
-                   model: str = None, budget: dict = None) -> dict:
+def daemon_execute(item_ref: str, project_path: str = None, parameters: dict = None,
+                   launch_mode: str = "inline", validate_only: bool = False) -> dict:
     """Submit an execution request to the ryeosd daemon."""
     payload = {
         "item_ref": item_ref,
         "parameters": parameters or {},
         "launch_mode": launch_mode,
     }
-    if model:
-        payload["model"] = model
-    if budget:
-        payload["budget"] = budget
+    if project_path:
+        payload["project_path"] = project_path
+    if validate_only:
+        payload["validate_only"] = True
 
     data = json.dumps(payload).encode("utf-8")
     try:

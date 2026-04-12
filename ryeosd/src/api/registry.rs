@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::Principal;
+use crate::policy;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +37,9 @@ pub async fn publish(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let publisher_fp = extract_principal_fp(&request, &state);
+    let publisher_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "registry.publish")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -57,7 +59,7 @@ pub async fn publish(
             &req.manifest_hash,
             &publisher_fp,
         )
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err((StatusCode::BAD_REQUEST, Json(result)));
     }
@@ -77,7 +79,7 @@ pub async fn search(
             q.namespace.as_deref(),
             limit,
         )
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     Ok(Json(json!({ "results": results, "total": results.len() })))
 }
 
@@ -88,7 +90,7 @@ pub async fn get_item(
     let item = state
         .registry_store()
         .get_item(&kind, &item_id)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     match item {
         Some(v) => Ok(Json(v)),
         None => Err((
@@ -105,7 +107,7 @@ pub async fn get_version(
     let ver = state
         .registry_store()
         .get_version(&kind, &item_id, &version)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     match ver {
         Some(v) => Ok(Json(v)),
         None => Err((
@@ -119,7 +121,9 @@ pub async fn claim_namespace(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let owner_fp = extract_principal_fp(&request, &state);
+    let owner_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "registry.publish")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -130,10 +134,12 @@ pub async fn claim_namespace(
     let req: ClaimNamespaceRequest = serde_json::from_slice(&body_bytes)
         .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err.to_string() }))))?;
 
+    policy::validate_path_component(&req.namespace)?;
+
     let result = state
         .registry_store()
         .claim_namespace(&req.namespace, &owner_fp)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err((StatusCode::BAD_REQUEST, Json(result)));
     }
@@ -147,7 +153,7 @@ pub async fn register_identity(
     let result = state
         .registry_store()
         .register_identity(&req.identity)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err((StatusCode::BAD_REQUEST, Json(result)));
     }
@@ -161,7 +167,7 @@ pub async fn lookup_identity(
     let doc = state
         .registry_store()
         .lookup_identity(&fingerprint)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     match doc {
         Some(v) => Ok(Json(v)),
         None => Err((
@@ -169,23 +175,4 @@ pub async fn lookup_identity(
             Json(json!({ "error": format!("Identity not found: {fingerprint}") })),
         )),
     }
-}
-
-fn extract_principal_fp(
-    request: &axum::http::Request<axum::body::Body>,
-    state: &AppState,
-) -> String {
-    request
-        .extensions()
-        .get::<Principal>()
-        .map(|p| p.fingerprint.clone())
-        .unwrap_or_else(|| state.identity.principal_id())
-}
-
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
-    tracing::error!(error = %err, "internal error in registry handler");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": "internal server error" })),
-    )
 }

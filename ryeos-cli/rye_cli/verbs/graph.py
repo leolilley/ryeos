@@ -48,7 +48,7 @@ def handle_run(args, project_path: str):
         params["async"] = True
 
     print(f"[graph] running: {args.graph_id}", file=sys.stderr)
-    result = daemon_execute(f"tool:{args.graph_id}", params)
+    result = daemon_execute(f"tool:{args.graph_id}", project_path=project_path, parameters=params)
     print_result(result)
 
 
@@ -66,12 +66,12 @@ def handle_step(args, project_path: str):
         params["inject_state"] = parse_params(args.state_json)
 
     print(f"[graph] stepping: {args.graph_id} → {args.node}", file=sys.stderr)
-    result = daemon_execute(f"tool:{args.graph_id}", params)
+    result = daemon_execute(f"tool:{args.graph_id}", project_path=project_path, parameters=params)
     print_result(result)
 
 
 def handle_validate(args, project_path: str):
     params = {"validate": True}
     print(f"[graph] validating: {args.graph_id}", file=sys.stderr)
-    result = daemon_execute(f"tool:{args.graph_id}", params)
+    result = daemon_execute(f"tool:{args.graph_id}", project_path=project_path, parameters=params)
     print_result(result)

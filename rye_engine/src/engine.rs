@@ -220,6 +220,17 @@ impl Engine {
         result
     }
 
+    /// Spawn a plan's subprocess without waiting.
+    /// Returns a handle the daemon can use to persist pid/pgid before waiting.
+    pub fn spawn_plan(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+    ) -> Result<crate::dispatch::SpawnedExecution, EngineError> {
+        tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
+        crate::dispatch::spawn_plan(plan, ctx)
+    }
+
     /// Build resolution roots for a given project root.
     pub fn resolution_roots(&self, project_root: Option<PathBuf>) -> ResolutionRoots {
         ResolutionRoots {

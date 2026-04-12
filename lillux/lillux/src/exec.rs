@@ -35,21 +35,134 @@ pub struct SpawnResult {
     pub pid: u32,
 }
 
+/// A running subprocess that can be waited on later.
+pub struct RunningProcess {
+    pub pid: u32,
+    pub pgid: i64,
+    child: process::Child,
+    stdout_thread: thread::JoinHandle<Vec<u8>>,
+    stderr_thread: thread::JoinHandle<Vec<u8>>,
+    start: Instant,
+    timeout: f64,
+}
+
+impl RunningProcess {
+    /// Wait for the process to finish (or time out) and return the result.
+    pub fn wait(mut self) -> SubprocessResult {
+        let timeout_dur = Duration::from_secs_f64(self.timeout);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _timer = thread::spawn(move || { thread::sleep(timeout_dur); let _ = tx.send(()); });
+
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let (out, err) = (self.stdout_thread.join().unwrap_or_default(), self.stderr_thread.join().unwrap_or_default());
+                    let code = status.code().unwrap_or(-1);
+                    return SubprocessResult {
+                        success: code == 0, stdout: String::from_utf8_lossy(&out).into_owned(),
+                        stderr: String::from_utf8_lossy(&err).into_owned(), exit_code: code,
+                        duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+                        pid: self.pid, timed_out: false,
+                    };
+                }
+                Ok(None) => {
+                    if rx.try_recv().is_ok() {
+                        #[cfg(unix)]
+                        {
+                            // Kill the entire process group (child + grandchildren)
+                            unsafe { libc::kill(-(self.pgid as i32), libc::SIGKILL); }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = self.child.kill();
+                        }
+                        let _ = self.child.wait();
+                        let (out, err) = (self.stdout_thread.join().unwrap_or_default(), self.stderr_thread.join().unwrap_or_default());
+                        return SubprocessResult {
+                            success: false, stdout: String::from_utf8_lossy(&out).into_owned(),
+                            stderr: format!("Command timed out after {} seconds\n{}", self.timeout, String::from_utf8_lossy(&err)),
+                            exit_code: -1, duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+                            pid: self.pid, timed_out: true,
+                        };
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    let _ = (self.stdout_thread.join(), self.stderr_thread.join());
+                    return SubprocessResult {
+                        success: false, stdout: String::new(), stderr: format!("Wait failed: {e}"),
+                        exit_code: -1, duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+                        pid: self.pid, timed_out: false,
+                    };
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Library functions — public API for in-process callers
 // ---------------------------------------------------------------------------
 
+/// Spawn a subprocess and return a handle that can be waited on later.
+pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
+    let start = Instant::now();
+    let timeout = request.timeout;
+    let envs_str: Vec<String> = request.envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+
+    let mut command = process::Command::new(&request.cmd);
+    command.args(&request.args);
+    set_envs(&mut command, &envs_str);
+    if let Some(ref dir) = request.cwd { command.current_dir(dir); }
+    command.stdin(if request.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe { command.pre_exec(|| { libc::setsid(); Ok(()) }); }
+    }
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => return Err(SubprocessResult {
+            success: false, stdout: String::new(), stderr: format!("Failed to spawn: {e}"),
+            exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+            pid: 0, timed_out: false,
+        }),
+    };
+    let pid = child.id();
+
+    // On Unix with setsid, pid == pgid since the child is its own process group leader.
+    #[cfg(unix)]
+    let pgid = pid as i64;
+    #[cfg(not(unix))]
+    let pgid = -1i64;
+
+    write_stdin(&mut child, request.stdin_data.as_deref());
+
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+    let stdout_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_handle { let _ = out.read_to_end(&mut buf); }
+        buf
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr_handle { let _ = err.read_to_end(&mut buf); }
+        buf
+    });
+
+    Ok(RunningProcess { pid, pgid, child, stdout_thread, stderr_thread, start, timeout })
+}
+
 /// Run a subprocess synchronously and return structured results.
 pub fn lib_run(request: SubprocessRequest) -> SubprocessResult {
-    let envs_str: Vec<String> = request.envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    do_exec_structured(
-        &request.cmd,
-        &request.args,
-        request.cwd.as_deref(),
-        request.stdin_data.as_deref(),
-        &envs_str,
-        request.timeout,
-    )
+    match lib_spawn(request) {
+        Ok(running) => running.wait(),
+        Err(result) => result,
+    }
 }
 
 /// Spawn a detached subprocess.
@@ -202,83 +315,15 @@ pub fn run(action: ExecAction) -> serde_json::Value {
     }
 }
 
-fn do_exec_structured(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> SubprocessResult {
-    let start = Instant::now();
-    let mut command = process::Command::new(cmd);
-    command.args(args);
-    set_envs(&mut command, envs);
-    if let Some(dir) = cwd { command.current_dir(dir); }
-    command.stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let mut child = match command.spawn() {
-        Ok(c) => c,
-        Err(e) => return SubprocessResult {
-            success: false, stdout: String::new(), stderr: format!("Failed to spawn: {e}"),
-            exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-            pid: 0, timed_out: false,
-        },
-    };
-    let pid = child.id();
-    write_stdin(&mut child, stdin_data);
-
-    let stdout_handle = child.stdout.take();
-    let stderr_handle = child.stderr.take();
-    let stdout_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut out) = stdout_handle { let _ = out.read_to_end(&mut buf); }
-        buf
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut err) = stderr_handle { let _ = err.read_to_end(&mut buf); }
-        buf
-    });
-
-    let timeout_dur = Duration::from_secs_f64(timeout);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let _timer = thread::spawn(move || { thread::sleep(timeout_dur); let _ = tx.send(()); });
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let (out, err) = (stdout_thread.join().unwrap_or_default(), stderr_thread.join().unwrap_or_default());
-                let code = status.code().unwrap_or(-1);
-                return SubprocessResult {
-                    success: code == 0, stdout: String::from_utf8_lossy(&out).into_owned(),
-                    stderr: String::from_utf8_lossy(&err).into_owned(), exit_code: code,
-                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                    pid, timed_out: false,
-                };
-            }
-            Ok(None) => {
-                if rx.try_recv().is_ok() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let (out, err) = (stdout_thread.join().unwrap_or_default(), stderr_thread.join().unwrap_or_default());
-                    return SubprocessResult {
-                        success: false, stdout: String::from_utf8_lossy(&out).into_owned(),
-                        stderr: format!("Command timed out after {timeout} seconds\n{}", String::from_utf8_lossy(&err)),
-                        exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                        pid, timed_out: true,
-                    };
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                let _ = (stdout_thread.join(), stderr_thread.join());
-                return SubprocessResult {
-                    success: false, stdout: String::new(), stderr: format!("Wait failed: {e}"),
-                    exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                    pid, timed_out: false,
-                };
-            }
-        }
-    }
-}
-
 fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> serde_json::Value {
-    let r = do_exec_structured(cmd, args, cwd, stdin_data, envs, timeout);
+    let r = lib_run(SubprocessRequest {
+        cmd: cmd.to_string(),
+        args: args.to_vec(),
+        cwd: cwd.map(|s| s.to_string()),
+        envs: envs.iter().filter_map(|e| e.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect(),
+        stdin_data: stdin_data.map(|s| s.to_string()),
+        timeout,
+    });
     serde_json::json!({
         "success": r.success, "stdout": r.stdout, "stderr": r.stderr,
         "return_code": r.exit_code, "duration_ms": r.duration_ms,

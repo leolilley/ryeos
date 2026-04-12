@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use axum::body::Body;
@@ -25,7 +25,6 @@ const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Principal {
     pub fingerprint: String,
     pub scopes: Vec<String>,
@@ -37,27 +36,31 @@ pub struct Principal {
 // ---------------------------------------------------------------------------
 
 struct ReplayGuard {
-    seen: HashMap<String, Vec<String>>,
-    max_per_key: usize,
+    seen: HashMap<String, Vec<(String, Instant)>>,
+    max_age: Duration,
 }
 
 impl ReplayGuard {
     fn new() -> Self {
         Self {
             seen: HashMap::new(),
-            max_per_key: 1000,
+            max_age: Duration::from_secs(TIMESTAMP_MAX_AGE_SECS + 60),
         }
     }
 
     fn check_and_record(&mut self, fingerprint: &str, nonce: &str) -> bool {
-        let nonces = self.seen.entry(fingerprint.to_string()).or_default();
-        if nonces.contains(&nonce.to_string()) {
+        let now = Instant::now();
+        let entries = self.seen.entry(fingerprint.to_string()).or_default();
+
+        // Prune expired entries
+        entries.retain(|(_, ts)| now.duration_since(*ts) < self.max_age);
+
+        // Check for replay
+        if entries.iter().any(|(n, _)| n == nonce) {
             return false;
         }
-        nonces.push(nonce.to_string());
-        if nonces.len() > self.max_per_key {
-            nonces.drain(..nonces.len() / 2);
-        }
+
+        entries.push((nonce.to_string(), now));
         true
     }
 }
@@ -87,8 +90,6 @@ fn sha256_hex(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 struct AuthorizedKey {
-    #[allow(dead_code)]
-    fingerprint: String,
     public_key: VerifyingKey,
     scopes: Vec<String>,
     owner: String,
@@ -227,13 +228,8 @@ fn load_authorized_key(
         .unwrap_or_default();
 
     Ok(AuthorizedKey {
-        fingerprint: fingerprint.to_string(),
         public_key,
-        scopes: if scopes.is_empty() {
-            vec!["*".to_string()]
-        } else {
-            scopes
-        },
+        scopes,
         owner,
     })
 }
@@ -344,9 +340,13 @@ fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers
 
     // Replay check
     {
-        let mut guard = REPLAY_GUARD
-            .lock()
-            .map_err(|_| "internal error: replay guard poisoned".to_string())?;
+        let mut guard = match REPLAY_GUARD.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("replay guard mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         if !guard.check_and_record(fingerprint, nonce) {
             return Err("replayed request".to_string());
         }
@@ -400,7 +400,11 @@ pub async fn auth_middleware(
 
     match verify_request(&state, &method, &uri, &headers, &body_bytes) {
         Ok(principal) => {
-            // Reconstruct the request with the buffered body
+            tracing::debug!(
+                fingerprint = %principal.fingerprint,
+                owner = %principal.owner,
+                "authenticated request"
+            );
             let mut request = Request::from_parts(parts, Body::from(body_bytes));
             request.extensions_mut().insert(principal);
             next.run(request).await

@@ -19,8 +19,10 @@ def handle(args, project_path: str):
     raw = sys.stdin.read().strip() if not sys.stdin.isatty() else "{}"
     params = parse_params(raw)
 
-    if args.dry_run:
-        params["dry_run"] = True
-
-    result = daemon_execute(args.item_id, params)
+    result = daemon_execute(
+        args.item_id,
+        project_path=project_path,
+        parameters=params,
+        validate_only=args.dry_run,
+    )
     print_result(result)

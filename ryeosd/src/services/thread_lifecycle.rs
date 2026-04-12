@@ -10,14 +10,14 @@ use serde_json::{json, Value};
 
 use rye_engine::canonical_ref::CanonicalRef;
 use rye_engine::contracts::{
-    BudgetRequest, EffectivePrincipal, EngineContext, ExecutionArtifact,
-    ExecutionCompletion, ExecutionHints, FinalCost, ItemMetadata, LaunchMode, PlanContext,
+    EffectivePrincipal, EngineContext, ExecutionArtifact,
+    ExecutionCompletion, ExecutionHints, FinalCost, LaunchMode, PlanContext,
     Principal, ProjectContext, ResolvedItem, ThreadTerminalStatus,
 };
 use rye_engine::engine::Engine;
 use crate::db::{
     Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, RuntimeCostRecord,
-    ThreadArtifactRecord, ThreadBudgetRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
+    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use crate::kind_profiles::KindProfileRegistry;
 use crate::services::event_store::EventStoreService;
@@ -27,11 +27,6 @@ pub struct ThreadLifecycleService {
     db: Arc<Database>,
     events: Arc<EventStoreService>,
     current_site_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExecuteBudgetRequest {
-    pub max_spend: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,8 +51,6 @@ pub struct ThreadCreateParams {
     pub upstream_thread_id: Option<String>,
     #[serde(default)]
     pub requested_by: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,9 +148,8 @@ pub struct ResolvedExecutionRequest {
     pub launch_mode: String,
     pub current_site_id: String,
     pub origin_site_id: String,
+    pub target_site_id: Option<String>,
     pub requested_by: Option<String>,
-    pub model: Option<String>,
-    pub budget: Option<ExecuteBudgetRequest>,
     pub parameters: Value,
     /// The engine's resolved item — carried through for verify/build_plan/execute.
     pub resolved_item: ResolvedItem,
@@ -207,19 +199,9 @@ impl ThreadLifecycleService {
                 origin_site_id: request.origin_site_id.clone(),
                 upstream_thread_id: None,
                 requested_by: request.requested_by.clone(),
-                model: request.model.clone(),
                 summary_json: None,
             },
-            Some(&ThreadBudgetRecord {
-                budget_parent_id: None,
-                reserved_spend: 0.0,
-                actual_spend: 0.0,
-                status: "open".to_string(),
-                metadata: request
-                    .budget
-                    .as_ref()
-                    .map(|budget| json!({ "max_spend": budget.max_spend })),
-            }),
+            None,
         )?;
         self.events.publish_persisted_batch(&persisted);
 
@@ -244,7 +226,6 @@ impl ThreadLifecycleService {
                 origin_site_id: params.origin_site_id.clone(),
                 upstream_thread_id: params.upstream_thread_id.clone(),
                 requested_by: params.requested_by.clone(),
-                model: params.model.clone(),
                 summary_json: None,
             },
             None,
@@ -436,7 +417,6 @@ impl ThreadLifecycleService {
             origin_site_id: source.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: source.requested_by.clone(),
-            model: source.model.clone(),
             summary_json: None,
         };
 
@@ -564,7 +544,7 @@ fn new_thread_id() -> String {
     )
 }
 
-/// Resolve a canonical item ref through the native engine.
+/// Resolve a canonical item ref through the engine.
 pub fn resolve_root_execution(
     engine: &Engine,
     site_id: &str,
@@ -574,13 +554,13 @@ pub fn resolve_root_execution(
     parameters: Value,
     requested_by: Option<String>,
     caller_scopes: Vec<String>,
-    model: Option<String>,
-    budget: Option<ExecuteBudgetRequest>,
 ) -> Result<ResolvedExecutionRequest> {
     let project_path = project_path.as_ref().to_path_buf();
 
     let canonical_ref = CanonicalRef::parse(item_ref)
         .map_err(|e| anyhow!("invalid item ref: {e}"))?;
+
+    validate_launch_mode(launch_mode)?;
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -597,11 +577,11 @@ pub fn resolve_root_execution(
     let resolved = engine.resolve(&plan_ctx, &canonical_ref)
         .map_err(|e| anyhow!("resolution failed: {e}"))?;
 
-    let thread_kind = map_to_thread_kind(&resolved.kind, &resolved.metadata);
+    let thread_kind = map_to_thread_kind(&resolved.kind);
 
     let executor_ref = resolved.metadata.executor_id.clone()
         .or_else(|| engine.kinds.default_executor_id(&resolved.kind).map(String::from))
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow!("no executor found for kind '{}' (item: {})", resolved.kind, item_ref))?;
 
     Ok(ResolvedExecutionRequest {
         kind: thread_kind,
@@ -610,24 +590,44 @@ pub fn resolve_root_execution(
         launch_mode: launch_mode.to_string(),
         current_site_id: site_id.to_string(),
         origin_site_id: site_id.to_string(),
+        target_site_id: None,
         requested_by,
-        model,
-        budget,
         parameters,
         resolved_item: resolved,
         plan_context: plan_ctx,
     })
 }
 
-/// Run the full native engine pipeline: verify → build_plan → execute_plan.
-pub fn execute_native(
+/// Result of spawning the engine pipeline.
+pub struct SpawnedItem {
+    pub pid: u32,
+    pub pgid: i64,
+    spawned: rye_engine::dispatch::SpawnedExecution,
+}
+
+impl SpawnedItem {
+    /// Block until subprocess completes.
+    pub fn wait(self) -> ExecutionCompletion {
+        self.spawned.wait()
+    }
+}
+
+/// Run the engine pipeline: verify → build_plan → spawn.
+/// Returns a handle with pid/pgid that the daemon can persist before calling wait().
+pub fn spawn_item(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
     thread_id: &str,
     chain_root_id: &str,
-) -> Result<ExecutionCompletion> {
+) -> Result<SpawnedItem> {
     let verified = engine.verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
+
+    // Trust policy gate: reject untrusted items from user/system space
+    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space)
+        .map_err(|(_status, json_body)| {
+            anyhow!("trust policy denied: {}", json_body.0.get("error").and_then(|e| e.as_str()).unwrap_or("unknown"))
+        })?;
 
     let plan = engine.build_plan(
         &resolved.plan_context,
@@ -651,29 +651,24 @@ pub fn execute_native(
         } else {
             LaunchMode::Inline
         },
-        budget: resolved.budget.as_ref().map(|b| BudgetRequest {
-            max_spend: b.max_spend,
-        }),
+        budget: None,
     };
 
-    engine.execute_plan(&engine_ctx, plan)
-        .map_err(|e| anyhow!("execution failed: {e}"))
+    let spawned = engine.spawn_plan(&engine_ctx, &plan)
+        .map_err(|e| anyhow!("spawn failed: {e}"))?;
+
+    Ok(SpawnedItem {
+        pid: spawned.pid,
+        pgid: spawned.pgid,
+        spawned,
+    })
 }
 
 /// Map a canonical item kind to the daemon's thread kind for profiling.
-fn map_to_thread_kind(canonical_kind: &str, metadata: &ItemMetadata) -> String {
-    match canonical_kind {
-        "directive" => "directive_run".to_string(),
-        "graph" => "graph_run".to_string(),
-        "tool" => {
-            if metadata.extra.get("tool_type").and_then(|v| v.as_str()) == Some("state_graph") {
-                "graph_run".to_string()
-            } else {
-                "tool_run".to_string()
-            }
-        }
-        other => format!("{other}_run"),
-    }
+/// Convention: thread kind = "{item_kind}_run" unless the kind profile
+/// registry has a more specific mapping.
+fn map_to_thread_kind(canonical_kind: &str) -> String {
+    format!("{canonical_kind}_run")
 }
 
 

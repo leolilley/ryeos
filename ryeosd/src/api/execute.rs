@@ -7,25 +7,25 @@ use tokio::task;
 
 use rye_engine::contracts::ExecutionCompletion;
 
-use crate::auth::Principal;
+use crate::policy;
 use crate::services::thread_lifecycle::{
-    self, ExecuteBudgetRequest, ThreadFinalizeParams,
+    self, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct ExecuteRequest {
     pub item_ref: String,
+    /// Project root path for three-tier resolution. Required when the caller
+    /// (e.g. MCP server) runs in a different cwd than the user's project.
+    #[serde(default)]
+    pub project_path: Option<String>,
     #[serde(default)]
     pub parameters: Value,
     #[serde(default = "default_launch_mode")]
     pub launch_mode: String,
     #[serde(default)]
     pub target_site_id: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub budget: Option<ExecuteBudgetRequest>,
 }
 
 fn default_launch_mode() -> String {
@@ -36,18 +36,9 @@ pub async fn execute(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // Extract authenticated principal from request extensions (set by auth middleware).
-    // Falls back to daemon identity when auth is not required.
-    let caller_principal_id = request
-        .extensions()
-        .get::<Principal>()
-        .map(|p| format!("fp:{}", p.fingerprint))
-        .unwrap_or_else(|| state.identity.principal_id());
-    let caller_scopes = request
-        .extensions()
-        .get::<Principal>()
-        .map(|p| p.scopes.clone())
-        .unwrap_or_else(|| vec!["*".to_string()]);
+    let caller_principal_id = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "execute")?;
 
     // Deserialize the body
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
@@ -59,34 +50,25 @@ pub async fn execute(
     let request: ExecuteRequest = serde_json::from_slice(&body_bytes)
         .map_err(|err| invalid_request(err.into()))?;
 
-    // Scope check: caller must have "execute" or "*"
-    if !caller_scopes.iter().any(|s| s == "*" || s == "execute") {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "insufficient scope: 'execute' required" })),
-        ));
-    }
-
     let site_id = state.threads.site_id();
+    let project_path = match &request.project_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir().map_err(|err| policy::internal_error(err.into()))?,
+    };
     let mut resolved = thread_lifecycle::resolve_root_execution(
             &state.engine,
             site_id,
-            std::env::current_dir().map_err(|err| internal_error(err.into()))?,
+            &project_path,
             &request.item_ref,
             &request.launch_mode,
             request.parameters.clone(),
             Some(caller_principal_id),
             caller_scopes,
-            request.model.clone(),
-            request.budget.clone(),
         )
         .map_err(invalid_request)?;
 
-    // Remote site passthrough: tag the thread with the target site metadata
-    // while still executing locally. Real HTTP forwarding will be added when
-    // ryeosd replaces ryeos-node in production.
-    if let Some(target) = &request.target_site_id {
-        resolved.current_site_id = target.clone();
+    if let Some(target) = request.target_site_id {
+        resolved.target_site_id = Some(target);
     }
 
     if !state.threads.kind_profiles().is_root_executable(&resolved.kind) {
@@ -99,42 +81,76 @@ pub async fn execute(
     let created_thread = state
         .threads
         .create_root_thread(&resolved)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     let running_thread = state
         .threads
         .mark_running(&created_thread.thread_id)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
 
     if request.launch_mode == "detached" {
         let bg_state = state.clone();
         let bg_thread_id = running_thread.thread_id.clone();
         let bg_chain_root_id = running_thread.chain_root_id.clone();
         let bg_resolved = resolved.clone();
+        let bg_engine = state.engine.clone();
         tokio::spawn(async move {
-            let thread_id_for_exec = bg_thread_id.clone();
-            let chain_root_for_exec = bg_chain_root_id.clone();
-            let engine_for_exec = bg_state.engine.clone();
-            let resolved_for_exec = bg_resolved.clone();
-            let result = task::spawn_blocking(move || {
-                thread_lifecycle::execute_native(
-                    &engine_for_exec,
-                    &resolved_for_exec,
-                    &thread_id_for_exec,
-                    &chain_root_for_exec,
+            let thread_id_for_spawn = bg_thread_id.clone();
+            let chain_root_for_spawn = bg_chain_root_id.clone();
+            let resolved_for_spawn = bg_resolved.clone();
+            let engine_for_spawn = bg_engine.clone();
+
+            // Spawn phase (blocking)
+            let spawn_result = task::spawn_blocking(move || {
+                thread_lifecycle::spawn_item(
+                    &engine_for_spawn,
+                    &resolved_for_spawn,
+                    &thread_id_for_spawn,
+                    &chain_root_for_spawn,
                 )
-            })
-            .await;
-            match result {
-                Ok(Ok(completion)) => {
-                    let _ = finalize_completion(&bg_state, &bg_thread_id, completion);
+            }).await;
+
+            match spawn_result {
+                Ok(Ok(spawned)) => {
+                    // Attach pid/pgid
+                    let _ = bg_state.threads.attach_process(
+                        &ThreadAttachProcessParams {
+                            thread_id: bg_thread_id.clone(),
+                            pid: spawned.pid as i64,
+                            pgid: spawned.pgid,
+                            metadata: None,
+                        },
+                    );
+
+                    // Wait phase (blocking)
+                    let wait_result = task::spawn_blocking(move || spawned.wait()).await;
+                    match wait_result {
+                        Ok(completion) => {
+                            let _ = finalize_completion(&bg_state, &bg_thread_id, completion);
+                        }
+                        Err(join_err) => {
+                            tracing::error!(error = %join_err, "task panic during detached wait");
+                            let _ = bg_state.threads.finalize_thread(&ThreadFinalizeParams {
+                                thread_id: bg_thread_id,
+                                status: "failed".to_string(),
+                                outcome_code: Some("task_panic".to_string()),
+                                result: None,
+                                error: Some(json!({ "code": "task_panic" })),
+                                metadata: None,
+                                artifacts: Vec::new(),
+                                final_cost: None,
+                                summary_json: None,
+                            });
+                        }
+                    }
                 }
                 Ok(Err(err)) => {
+                    tracing::error!(error = %err, "engine error during detached spawn");
                     let _ = bg_state.threads.finalize_thread(&ThreadFinalizeParams {
                         thread_id: bg_thread_id,
                         status: "failed".to_string(),
                         outcome_code: Some("engine_error".to_string()),
                         result: None,
-                        error: Some(json!({ "message": err.to_string() })),
+                        error: Some(json!({ "code": "engine_error" })),
                         metadata: None,
                         artifacts: Vec::new(),
                         final_cost: None,
@@ -142,12 +158,13 @@ pub async fn execute(
                     });
                 }
                 Err(join_err) => {
+                    tracing::error!(error = %join_err, "task panic during detached spawn");
                     let _ = bg_state.threads.finalize_thread(&ThreadFinalizeParams {
                         thread_id: bg_thread_id,
                         status: "failed".to_string(),
                         outcome_code: Some("task_panic".to_string()),
                         result: None,
-                        error: Some(json!({ "message": join_err.to_string() })),
+                        error: Some(json!({ "code": "task_panic" })),
                         metadata: None,
                         artifacts: Vec::new(),
                         final_cost: None,
@@ -163,36 +180,50 @@ pub async fn execute(
         })));
     }
 
-    // Inline execution: native engine pipeline
+    // Inline execution: spawn → attach process → wait
     let engine = state.engine.clone();
-    let thread_id = running_thread.thread_id.clone();
-    let chain_root_id = running_thread.chain_root_id.clone();
-    let completion = task::spawn_blocking(move || {
-        thread_lifecycle::execute_native(&engine, &resolved, &thread_id, &chain_root_id)
+    let thread_id_for_spawn = running_thread.thread_id.clone();
+    let chain_root_id_for_spawn = running_thread.chain_root_id.clone();
+    let spawned = task::spawn_blocking(move || {
+        thread_lifecycle::spawn_item(&engine, &resolved, &thread_id_for_spawn, &chain_root_id_for_spawn)
     })
     .await
-    .map_err(|err| internal_error(err.into()))?
+    .map_err(|err| policy::internal_error(err.into()))?
     .map_err(|err| {
+        tracing::error!(error = %err, "engine error during inline spawn");
         let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
             thread_id: running_thread.thread_id.clone(),
             status: "failed".to_string(),
             outcome_code: Some("engine_error".to_string()),
             result: None,
-            error: Some(json!({ "message": err.to_string() })),
+            error: Some(json!({ "code": "engine_error" })),
             metadata: None,
             artifacts: Vec::new(),
             final_cost: None,
             summary_json: None,
         });
-        internal_error(err)
+        policy::internal_error(err)
     })?;
 
+    // Persist pid/pgid so kill/shutdown can find this process
+    let _ = state.threads.attach_process(&ThreadAttachProcessParams {
+        thread_id: running_thread.thread_id.clone(),
+        pid: spawned.pid as i64,
+        pgid: spawned.pgid,
+        metadata: None,
+    });
+
+    // Now wait for completion (blocking)
+    let completion = task::spawn_blocking(move || spawned.wait())
+        .await
+        .map_err(|err| policy::internal_error(err.into()))?;
+
     let finalized_thread = finalize_completion(&state, &running_thread.thread_id, completion)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
     let result = state
         .threads
         .build_execute_result(&finalized_thread.thread_id)
-        .map_err(internal_error)?;
+        .map_err(policy::internal_error)?;
 
     Ok(Json(json!({
         "thread": finalized_thread,
@@ -211,15 +242,13 @@ fn finalize_completion(
     {
         Ok(thread) => Ok(thread),
         Err(err) => {
+            tracing::error!(error = %err, "invalid completion during finalization");
             let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: thread_id.to_string(),
                 status: "failed".to_string(),
                 outcome_code: Some("invalid_completion".to_string()),
                 result: None,
-                error: Some(json!({
-                    "message": err.to_string(),
-                    "completion": completion,
-                })),
+                error: Some(json!({ "code": "invalid_completion" })),
                 metadata: None,
                 artifacts: Vec::new(),
                 final_cost: None,
@@ -234,14 +263,6 @@ fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": err.to_string() })),
-    )
-}
-
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
-    tracing::error!(error = %err, "internal error in execute handler");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": "internal server error" })),
     )
 }
 

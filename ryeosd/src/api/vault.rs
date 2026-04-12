@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::Principal;
+use crate::policy;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -22,7 +22,9 @@ pub async fn vault_set(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "vault")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -39,12 +41,7 @@ pub async fn vault_set(
     state
         .vault_store()
         .set_secret(&principal_fp, &req.name, &req.envelope)
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": err.to_string() })),
-            )
-        })?;
+        .map_err(|err| policy::internal_error(err))?;
     Ok(Json(json!({ "stored": req.name })))
 }
 
@@ -52,15 +49,14 @@ pub async fn vault_list(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "vault")?;
 
-    let names = state.vault_store().list_secrets(&principal_fp).map_err(|err| {
-        tracing::error!(error = %err, "internal error in vault handler");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "internal server error" })),
-        )
-    })?;
+    let names = state
+        .vault_store()
+        .list_secrets(&principal_fp)
+        .map_err(policy::internal_error)?;
     Ok(Json(json!({ "names": names })))
 }
 
@@ -68,7 +64,9 @@ pub async fn vault_delete(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let principal_fp = extract_principal_fp(&request, &state);
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "vault")?;
 
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -85,12 +83,7 @@ pub async fn vault_delete(
     let deleted = state
         .vault_store()
         .delete_secret(&principal_fp, &req.name)
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": err.to_string() })),
-            )
-        })?;
+        .map_err(|err| policy::internal_error(err))?;
     if !deleted {
         return Err((
             StatusCode::NOT_FOUND,
@@ -98,15 +91,4 @@ pub async fn vault_delete(
         ));
     }
     Ok(Json(json!({ "deleted": req.name })))
-}
-
-fn extract_principal_fp(
-    request: &axum::http::Request<axum::body::Body>,
-    state: &AppState,
-) -> String {
-    request
-        .extensions()
-        .get::<Principal>()
-        .map(|p| p.fingerprint.clone())
-        .unwrap_or_else(|| state.identity.principal_id())
 }

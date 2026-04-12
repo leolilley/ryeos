@@ -90,12 +90,12 @@ def register(subparsers):
 
 def _remote_execute(project_path: str, params: dict) -> dict:
     from rye_cli.output import daemon_execute
-    return daemon_execute("tool:rye/core/remote/remote", params)
+    return daemon_execute("tool:rye/core/remote/remote", project_path=project_path, parameters=params)
 
 
 def _bundler_execute(project_path: str, params: dict) -> dict:
     from rye_cli.output import daemon_execute
-    return daemon_execute("tool:rye/core/bundler/bundler", params)
+    return daemon_execute("tool:rye/core/bundler/bundler", project_path=project_path, parameters=params)
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────
