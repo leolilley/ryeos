@@ -344,7 +344,9 @@ fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers
 
     // Replay check
     {
-        let mut guard = REPLAY_GUARD.lock().unwrap();
+        let mut guard = REPLAY_GUARD
+            .lock()
+            .map_err(|_| "internal error: replay guard poisoned".to_string())?;
         if !guard.check_and_record(fingerprint, nonce) {
             return Err("replayed request".to_string());
         }

@@ -5,6 +5,78 @@ use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 
+// ---------------------------------------------------------------------------
+// Library types — clean Rust API, no JSON
+// ---------------------------------------------------------------------------
+
+/// Request to run a subprocess synchronously.
+pub struct SubprocessRequest {
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub envs: Vec<(String, String)>,
+    pub stdin_data: Option<String>,
+    pub timeout: f64,
+}
+
+/// Result of a synchronous subprocess execution.
+pub struct SubprocessResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration_ms: f64,
+    pub pid: u32,
+    pub timed_out: bool,
+}
+
+/// Result of a detached spawn.
+pub struct SpawnResult {
+    pub pid: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Library functions — public API for in-process callers
+// ---------------------------------------------------------------------------
+
+/// Run a subprocess synchronously and return structured results.
+pub fn lib_run(request: SubprocessRequest) -> SubprocessResult {
+    let envs_str: Vec<String> = request.envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    do_exec_structured(
+        &request.cmd,
+        &request.args,
+        request.cwd.as_deref(),
+        request.stdin_data.as_deref(),
+        &envs_str,
+        request.timeout,
+    )
+}
+
+/// Spawn a detached subprocess.
+pub fn lib_spawn_detached(
+    cmd: &str,
+    args: &[String],
+    log: Option<&str>,
+    envs: &[(String, String)],
+) -> Result<SpawnResult, String> {
+    let envs_str: Vec<String> = envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    spawn_detached(cmd, args, log, &envs_str, None).map(|pid| SpawnResult { pid })
+}
+
+/// Kill a process by PID. Returns the method used: "terminated", "killed", or "already_dead".
+pub fn lib_kill(pid: u32, grace: f64) -> Result<String, String> {
+    kill_process(pid, grace).map(|s| s.to_string())
+}
+
+/// Check if a process is alive.
+pub fn lib_is_alive(pid: u32) -> bool {
+    is_alive(pid)
+}
+
+// ---------------------------------------------------------------------------
+// CLI types and entry point
+// ---------------------------------------------------------------------------
+
 #[derive(Subcommand)]
 pub enum ExecAction {
     /// Run a command, wait for completion, capture output
@@ -130,7 +202,7 @@ pub fn run(action: ExecAction) -> serde_json::Value {
     }
 }
 
-fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> serde_json::Value {
+fn do_exec_structured(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> SubprocessResult {
     let start = Instant::now();
     let mut command = process::Command::new(cmd);
     command.args(args);
@@ -141,11 +213,13 @@ fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&st
 
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(e) => return serde_json::json!({
-            "success": false, "stdout": "", "stderr": format!("Failed to spawn: {e}"),
-            "return_code": -1, "duration_ms": start.elapsed().as_secs_f64() * 1000.0,
-        }),
+        Err(e) => return SubprocessResult {
+            success: false, stdout: String::new(), stderr: format!("Failed to spawn: {e}"),
+            exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+            pid: 0, timed_out: false,
+        },
     };
+    let pid = child.id();
     write_stdin(&mut child, stdin_data);
 
     let stdout_handle = child.stdout.take();
@@ -170,34 +244,45 @@ fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&st
             Ok(Some(status)) => {
                 let (out, err) = (stdout_thread.join().unwrap_or_default(), stderr_thread.join().unwrap_or_default());
                 let code = status.code().unwrap_or(-1);
-                return serde_json::json!({
-                    "success": code == 0, "stdout": String::from_utf8_lossy(&out),
-                    "stderr": String::from_utf8_lossy(&err), "return_code": code,
-                    "duration_ms": start.elapsed().as_secs_f64() * 1000.0,
-                });
+                return SubprocessResult {
+                    success: code == 0, stdout: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: String::from_utf8_lossy(&err).into_owned(), exit_code: code,
+                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    pid, timed_out: false,
+                };
             }
             Ok(None) => {
                 if rx.try_recv().is_ok() {
                     let _ = child.kill();
                     let _ = child.wait();
                     let (out, err) = (stdout_thread.join().unwrap_or_default(), stderr_thread.join().unwrap_or_default());
-                    return serde_json::json!({
-                        "success": false, "stdout": String::from_utf8_lossy(&out),
-                        "stderr": format!("Command timed out after {timeout} seconds\n{}", String::from_utf8_lossy(&err)),
-                        "return_code": -1, "duration_ms": start.elapsed().as_secs_f64() * 1000.0,
-                    });
+                    return SubprocessResult {
+                        success: false, stdout: String::from_utf8_lossy(&out).into_owned(),
+                        stderr: format!("Command timed out after {timeout} seconds\n{}", String::from_utf8_lossy(&err)),
+                        exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                        pid, timed_out: true,
+                    };
                 }
                 thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
                 let _ = (stdout_thread.join(), stderr_thread.join());
-                return serde_json::json!({
-                    "success": false, "stdout": "", "stderr": format!("Wait failed: {e}"),
-                    "return_code": -1, "duration_ms": start.elapsed().as_secs_f64() * 1000.0,
-                });
+                return SubprocessResult {
+                    success: false, stdout: String::new(), stderr: format!("Wait failed: {e}"),
+                    exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    pid, timed_out: false,
+                };
             }
         }
     }
+}
+
+fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> serde_json::Value {
+    let r = do_exec_structured(cmd, args, cwd, stdin_data, envs, timeout);
+    serde_json::json!({
+        "success": r.success, "stdout": r.stdout, "stderr": r.stderr,
+        "return_code": r.exit_code, "duration_ms": r.duration_ms,
+    })
 }
 
 /// Stream mode: raw passthrough of child stdout/stderr, no JSON wrapping.

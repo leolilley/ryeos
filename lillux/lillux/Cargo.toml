@@ -6,6 +6,10 @@ description = "Lillux microkernel — Execute, Memory, Identity, Time"
 license = "MIT"
 repository = "https://github.com/leolilley/ryeos"
 
+[lib]
+name = "lillux"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lillux"
 path = "src/main.rs"
@@ -32,6 +36,3 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
 ] }
 
-[profile.release]
-strip = true
-lto = true

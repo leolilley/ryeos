@@ -1,13 +1,13 @@
 mod api;
 mod auth;
 mod bootstrap;
-mod bridge;
 mod broker;
 mod cas;
 mod config;
 mod db;
 mod identity;
 mod kind_profiles;
+mod native_engine;
 mod process;
 mod reconcile;
 mod refs;
@@ -28,8 +28,8 @@ use chrono::Utc;
 use clap::Parser;
 use config::{Cli, Config};
 use tokio::net::{TcpListener, UnixListener};
+use tracing_subscriber::EnvFilter;
 
-use crate::bridge::PythonBridge;
 use crate::broker::{LiveBroker, DEFAULT_BROKER_CAPACITY};
 use crate::cas::CasStore;
 use crate::db::Database;
@@ -46,6 +46,16 @@ use crate::webhooks::WebhookStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("ryeosd=info,rye_engine=info")),
+        )
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_file(false)
+        .init();
+
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
 
@@ -61,8 +71,8 @@ async fn main() -> Result<()> {
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
     let db = Database::new(&config.db_path, kind_profiles)?;
-    let bridge = PythonBridge::initialize()?;
     let identity = NodeIdentity::load(&config.signing_key_path)?;
+    let engine = Arc::new(native_engine::build_engine(&config)?);
     let db = Arc::new(db);
     let broker = Arc::new(LiveBroker::new(DEFAULT_BROKER_CAPACITY));
     let events = Arc::new(EventStoreService::new(db.clone(), broker.clone()));
@@ -78,7 +88,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
-        bridge: Arc::new(bridge),
+        engine: engine.clone(),
         identity: Arc::new(identity),
         threads,
         events,
@@ -143,7 +153,7 @@ fn drain_running_threads(state: &AppState) {
     let threads = match state.db.list_threads_by_status(&["running"]) {
         Ok(threads) => threads,
         Err(err) => {
-            eprintln!("ryeosd shutdown: failed to list running threads: {err:#}");
+            tracing::warn!(error = %err, "failed to list running threads during shutdown");
             return;
         }
     };
@@ -152,31 +162,31 @@ fn drain_running_threads(state: &AppState) {
         return;
     }
 
-    eprintln!(
-        "ryeosd shutdown: draining {} running threads",
-        threads.len()
-    );
+    tracing::info!(count = threads.len(), "draining running threads");
 
     let daemon_pgid = process::daemon_pgid();
 
     for thread in &threads {
         if let Some(pgid) = thread.runtime.pgid {
             if pgid == daemon_pgid {
-                eprintln!(
-                    "ryeosd shutdown: skipping thread {} — PGID {} matches daemon",
-                    thread.thread_id, pgid
+                tracing::debug!(
+                    thread_id = %thread.thread_id,
+                    pgid,
+                    "skipping thread — PGID matches daemon"
                 );
                 continue;
             }
-            eprintln!(
-                "ryeosd shutdown: killing pgid {} (thread {})",
-                pgid, thread.thread_id
+            tracing::info!(
+                pgid,
+                thread_id = %thread.thread_id,
+                "killing process group"
             );
             let result = process::kill_process_group(pgid, std::time::Duration::from_secs(3));
             if !result.success {
-                eprintln!(
-                    "ryeosd shutdown: failed to kill pgid {} (method={})",
-                    pgid, result.method
+                tracing::warn!(
+                    pgid,
+                    method = %result.method,
+                    "failed to kill process group"
                 );
             }
         }
@@ -263,8 +273,10 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("sigterm handler");
-        sigterm.recv().await;
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => { sigterm.recv().await; }
+            Err(_) => std::future::pending::<()>().await,
+        }
     };
 
     #[cfg(not(unix))]

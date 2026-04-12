@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth::Principal;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -15,24 +14,33 @@ pub struct PushRequest {
     #[allow(dead_code)]
     pub system_version: String,
     pub expected_snapshot_hash: Option<String>,
-    pub principal_fp: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PushUserSpaceRequest {
     pub user_manifest_hash: String,
     pub expected_revision: Option<i64>,
-    pub principal_fp: String,
 }
 
 pub async fn push(
     State(state): State<AppState>,
-    Json(req): Json<PushRequest>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let principal_fp = extract_principal_fp(&request, &state);
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "request body too large" })),
+        ))?;
+    let req: PushRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|err| invalid_request(err.into()))?;
+
     let refs = state.refs_store();
 
     let current_head = refs
-        .resolve_project_ref(&req.principal_fp, &req.project_path)
+        .resolve_project_ref(&principal_fp, &req.project_path)
         .map_err(internal_error)?
         .map(|r| r.snapshot_hash);
 
@@ -77,7 +85,7 @@ pub async fn push(
 
     if !refs
         .advance_project_ref(
-            &req.principal_fp,
+            &principal_fp,
             &req.project_path,
             &snapshot_hash,
             current_head.as_deref(),
@@ -100,12 +108,23 @@ pub async fn push(
 
 pub async fn push_user_space(
     State(state): State<AppState>,
-    Json(req): Json<PushUserSpaceRequest>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let principal_fp = extract_principal_fp(&request, &state);
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "request body too large" })),
+        ))?;
+    let req: PushUserSpaceRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|err| invalid_request(err.into()))?;
+
     let refs = state.refs_store();
 
     let result = refs
-        .advance_user_space_ref(&req.principal_fp, &req.user_manifest_hash, req.expected_revision)
+        .advance_user_space_ref(&principal_fp, &req.user_manifest_hash, req.expected_revision)
         .map_err(|err| {
             let msg = err.to_string();
             if msg.contains("mismatch") || msg.contains("already exists") {
@@ -127,17 +146,12 @@ pub async fn push_user_space(
 
 pub async fn get_user_space(
     State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let fp = query.get("principal_fp").ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "principal_fp required" })),
-        )
-    })?;
+    let fp = extract_principal_fp(&request, &state);
 
     let refs = state.refs_store();
-    let result = refs.resolve_user_space_ref(fp).map_err(internal_error)?;
+    let result = refs.resolve_user_space_ref(&fp).map_err(internal_error)?;
 
     match result {
         Some(r) => Ok(Json(serde_json::to_value(r).unwrap())),
@@ -148,9 +162,30 @@ pub async fn get_user_space(
     }
 }
 
+/// Extract the authenticated principal fingerprint from request extensions.
+/// Falls back to daemon identity when auth is not required.
+fn extract_principal_fp(
+    request: &axum::http::Request<axum::body::Body>,
+    state: &AppState,
+) -> String {
+    request
+        .extensions()
+        .get::<Principal>()
+        .map(|p| p.fingerprint.clone())
+        .unwrap_or_else(|| state.identity.principal_id())
+}
+
+fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": err.to_string() })),
+    )
+}
+
 fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
+    tracing::error!(error = %err, "internal error in push handler");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": err.to_string() })),
+        Json(json!({ "error": "internal server error" })),
     )
 }

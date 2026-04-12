@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::bridge::{BridgeStatus, PythonBridge};
+use rye_engine::engine::Engine;
+
 use crate::broker::{LiveBroker, LiveBrokerStatus};
 use crate::cas::CasStore;
 use crate::config::Config;
@@ -22,7 +23,7 @@ use crate::webhooks::WebhookStore;
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: Arc<Database>,
-    pub bridge: Arc<PythonBridge>,
+    pub engine: Arc<Engine>,
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,
     pub events: Arc<EventStoreService>,
@@ -68,7 +69,6 @@ pub struct StatusResponse {
     pub bind: String,
     pub uds_path: String,
     pub db_path: String,
-    pub bridge: BridgeStatus,
     pub active_threads: i64,
     pub broker: LiveBrokerStatus,
 }
@@ -82,7 +82,6 @@ impl AppState {
             bind: self.config.bind.to_string(),
             uds_path: self.config.uds_path.display().to_string(),
             db_path: self.config.db_path.display().to_string(),
-            bridge: self.bridge.status(),
             active_threads: self.db.active_thread_count().unwrap_or(0),
             broker: self.broker.status(),
         }

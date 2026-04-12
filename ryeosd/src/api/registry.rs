@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth::Principal;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -12,13 +13,11 @@ pub struct PublishRequest {
     pub item_id: String,
     pub version: String,
     pub manifest_hash: String,
-    pub publisher_fp: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ClaimNamespaceRequest {
     pub namespace: String,
-    pub owner_fp: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,8 +35,19 @@ pub struct SearchQuery {
 
 pub async fn publish(
     State(state): State<AppState>,
-    Json(req): Json<PublishRequest>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let publisher_fp = extract_principal_fp(&request, &state);
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "request body too large" })),
+        ))?;
+    let req: PublishRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err.to_string() }))))?;
+
     let result = state
         .registry_store()
         .publish_item(
@@ -45,7 +55,7 @@ pub async fn publish(
             &req.item_id,
             &req.version,
             &req.manifest_hash,
-            &req.publisher_fp,
+            &publisher_fp,
         )
         .map_err(internal_error)?;
     if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -107,11 +117,22 @@ pub async fn get_version(
 
 pub async fn claim_namespace(
     State(state): State<AppState>,
-    Json(req): Json<ClaimNamespaceRequest>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let owner_fp = extract_principal_fp(&request, &state);
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "request body too large" })),
+        ))?;
+    let req: ClaimNamespaceRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err.to_string() }))))?;
+
     let result = state
         .registry_store()
-        .claim_namespace(&req.namespace, &req.owner_fp)
+        .claim_namespace(&req.namespace, &owner_fp)
         .map_err(internal_error)?;
     if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err((StatusCode::BAD_REQUEST, Json(result)));
@@ -150,9 +171,21 @@ pub async fn lookup_identity(
     }
 }
 
+fn extract_principal_fp(
+    request: &axum::http::Request<axum::body::Body>,
+    state: &AppState,
+) -> String {
+    request
+        .extensions()
+        .get::<Principal>()
+        .map(|p| p.fingerprint.clone())
+        .unwrap_or_else(|| state.identity.principal_id())
+}
+
 fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
+    tracing::error!(error = %err, "internal error in registry handler");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": err.to_string() })),
+        Json(json!({ "error": "internal server error" })),
     )
 }

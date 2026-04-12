@@ -1,0 +1,3 @@
+[workspace]
+members = ["ryeosd", "rye_engine", "lillux/lillux"]
+resolver = "2"

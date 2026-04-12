@@ -1,24 +1,26 @@
 use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-use directories::BaseDirs;
+use anyhow::{anyhow, bail, Result};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::bridge::{ExecutionArtifact, ExecutionCompletion, ExecutionRequest, FinalCost};
+use rye_engine::canonical_ref::CanonicalRef;
+use rye_engine::contracts::{
+    BudgetRequest, EffectivePrincipal, EngineContext, ExecutionArtifact,
+    ExecutionCompletion, ExecutionHints, FinalCost, ItemMetadata, LaunchMode, PlanContext,
+    Principal, ProjectContext, ResolvedItem, ThreadTerminalStatus,
+};
+use rye_engine::engine::Engine;
 use crate::db::{
     Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, RuntimeCostRecord,
     ThreadArtifactRecord, ThreadBudgetRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use crate::kind_profiles::KindProfileRegistry;
 use crate::services::event_store::EventStoreService;
-
-const DIRECTIVE_EXECUTOR_REF: &str = "tool:rye/agent/threads/thread_directive";
 
 #[derive(Debug, Clone)]
 pub struct ThreadLifecycleService {
@@ -157,7 +159,10 @@ pub struct ResolvedExecutionRequest {
     pub model: Option<String>,
     pub budget: Option<ExecuteBudgetRequest>,
     pub parameters: Value,
-    pub project_path: PathBuf,
+    /// The engine's resolved item — carried through for verify/build_plan/execute.
+    pub resolved_item: ResolvedItem,
+    /// The PlanContext used during resolution — reused for verify/build_plan.
+    pub plan_context: PlanContext,
 }
 
 fn default_list_limit() -> usize {
@@ -182,32 +187,8 @@ impl ThreadLifecycleService {
         self.db.kind_profiles()
     }
 
-    pub fn resolve_root_execution(
-        &self,
-        project_path: impl AsRef<Path>,
-        item_ref: &str,
-        launch_mode: &str,
-        parameters: Value,
-        requested_by: Option<String>,
-        model: Option<String>,
-        budget: Option<ExecuteBudgetRequest>,
-    ) -> Result<ResolvedExecutionRequest> {
-        let project_path = project_path.as_ref().to_path_buf();
-        let resolved_item = resolve_item(&project_path, item_ref)?;
-
-        Ok(ResolvedExecutionRequest {
-            kind: resolved_item.kind,
-            item_ref: item_ref.to_string(),
-            executor_ref: resolved_item.executor_ref,
-            launch_mode: launch_mode.to_string(),
-            current_site_id: self.current_site_id.clone(),
-            origin_site_id: self.current_site_id.clone(),
-            requested_by,
-            model,
-            budget,
-            parameters,
-            project_path,
-        })
+    pub fn site_id(&self) -> &str {
+        &self.current_site_id
     }
 
     pub fn create_root_thread(&self, request: &ResolvedExecutionRequest) -> Result<ThreadDetail> {
@@ -301,11 +282,19 @@ impl ThreadLifecycleService {
         thread_id: &str,
         completion: &ExecutionCompletion,
     ) -> Result<ThreadDetail> {
-        let terminal_status = normalize_terminal_status(&completion.status)?;
-        let outcome_code = Some(if terminal_status == "completed" {
-            "success".to_string()
-        } else {
-            completion.status.clone()
+        let terminal_status = match completion.status {
+            ThreadTerminalStatus::Completed => "completed",
+            ThreadTerminalStatus::Failed => "failed",
+            ThreadTerminalStatus::Cancelled => "cancelled",
+            ThreadTerminalStatus::Continued => "continued",
+            ThreadTerminalStatus::Killed => "killed",
+        };
+        let outcome_code = completion.outcome_code.clone().or_else(|| {
+            Some(if terminal_status == "completed" {
+                "success".to_string()
+            } else {
+                terminal_status.to_string()
+            })
         });
 
         let persisted = self.db.finalize_thread(
@@ -330,7 +319,7 @@ impl ThreadLifecycleService {
                 budget_metadata: completion
                     .continuation_request
                     .as_ref()
-                    .map(|value| json!({ "continuation_request": value })),
+                    .map(|cr| json!({ "continuation_request": { "reason": cr.reason } })),
             },
         )?;
         self.events.publish_persisted_batch(&persisted);
@@ -339,24 +328,25 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("thread not found after finalize: {thread_id}"))?;
 
         // Handle continuation request from runtime
-        if completion.continuation_request.is_some() && terminal_status == "completed" {
-            match self.request_continuation(&ThreadContinuationParams {
-                thread_id: thread_id.to_string(),
-                reason: completion
-                    .continuation_request
-                    .as_ref()
-                    .and_then(|v| v.get("reason"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            }) {
-                Ok(_continuation) => {
-                    // Source thread is now "continued", return updated state
-                    return self.get_thread(thread_id)?
-                        .ok_or_else(|| anyhow!("thread not found after continuation: {thread_id}"));
-                }
-                Err(err) => {
-                    eprintln!("ryeosd: continuation request failed for {thread_id}: {err:#}");
-                    // Fall through — thread stays in its finalized state
+        if let Some(cr) = &completion.continuation_request {
+            if terminal_status == "completed" {
+                match self.request_continuation(&ThreadContinuationParams {
+                    thread_id: thread_id.to_string(),
+                    reason: Some(cr.reason.clone()),
+                }) {
+                    Ok(_continuation) => {
+                        // Source thread is now "continued", return updated state
+                        return self.get_thread(thread_id)?
+                            .ok_or_else(|| anyhow!("thread not found after continuation: {thread_id}"));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            error = %err,
+                            "continuation request failed"
+                        );
+                        // Fall through — thread stays in its finalized state
+                    }
                 }
             }
         }
@@ -384,34 +374,6 @@ impl ThreadLifecycleService {
 
         self.get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
-    }
-
-    pub fn build_execution_request(
-        &self,
-        thread: &ThreadDetail,
-        project_path: impl AsRef<Path>,
-        parameters: Value,
-        continuation_from_id: Option<String>,
-    ) -> ExecutionRequest {
-        ExecutionRequest {
-            thread_id: thread.thread_id.clone(),
-            chain_root_id: thread.chain_root_id.clone(),
-            kind: thread.kind.clone(),
-            item_ref: thread.item_ref.clone(),
-            executor_ref: thread.executor_ref.clone(),
-            launch_mode: thread.launch_mode.clone(),
-            project_path: project_path.as_ref().display().to_string(),
-            parameters,
-            requested_by: thread.requested_by.clone(),
-            current_site_id: thread.current_site_id.clone(),
-            origin_site_id: thread.origin_site_id.clone(),
-            upstream_thread_id: thread.upstream_thread_id.clone(),
-            continuation_from_id,
-            model: thread.model.clone(),
-            runtime: crate::bridge::RuntimeBridgeConfig {
-                socket_path: String::new(),
-            },
-        }
     }
 
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
@@ -602,173 +564,116 @@ fn new_thread_id() -> String {
     )
 }
 
-struct ResolvedItem {
-    kind: String,
-    executor_ref: String,
-}
+/// Resolve a canonical item ref through the native engine.
+pub fn resolve_root_execution(
+    engine: &Engine,
+    site_id: &str,
+    project_path: impl AsRef<Path>,
+    item_ref: &str,
+    launch_mode: &str,
+    parameters: Value,
+    requested_by: Option<String>,
+    caller_scopes: Vec<String>,
+    model: Option<String>,
+    budget: Option<ExecuteBudgetRequest>,
+) -> Result<ResolvedExecutionRequest> {
+    let project_path = project_path.as_ref().to_path_buf();
 
-fn resolve_item(project_path: &Path, item_ref: &str) -> Result<ResolvedItem> {
-    let (kind, bare_id) = parse_canonical_ref(item_ref)?;
+    let canonical_ref = CanonicalRef::parse(item_ref)
+        .map_err(|e| anyhow!("invalid item ref: {e}"))?;
 
-    match kind.as_str() {
-        "directive" => {
-            find_item_path(project_path, &kind, &bare_id, &[".md"])?;
-            Ok(ResolvedItem {
-                kind: "directive_run".to_string(),
-                executor_ref: DIRECTIVE_EXECUTOR_REF.to_string(),
-            })
-        }
-        "tool" => resolve_tool_item(project_path, &bare_id),
-        "knowledge" => bail!("knowledge items are not executable: {item_ref}"),
-        other => bail!("unsupported canonical kind: {other}"),
-    }
-}
-
-fn resolve_tool_item(project_path: &Path, bare_id: &str) -> Result<ResolvedItem> {
-    let path = find_item_path(
-        project_path,
-        "tool",
-        bare_id,
-        &[".py", ".yaml", ".yml", ".sh", ".js", ".ts"],
-    )?;
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read tool metadata from {}", path.display()))?;
-
-    let (tool_type, executor_id) = match path.extension().and_then(|value| value.to_str()) {
-        Some("py") | Some("sh") | Some("js") | Some("ts") => (
-            parse_python_assignment(&contents, "__tool_type__"),
-            parse_python_assignment(&contents, "__executor_id__"),
-        ),
-        Some("yaml") | Some("yml") => parse_yaml_tool_metadata(&contents)?,
-        _ => (None, None),
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: requested_by.clone().unwrap_or_else(|| "fp:local".into()),
+            scopes: caller_scopes,
+        }),
+        project_context: ProjectContext::LocalPath { path: project_path },
+        current_site_id: site_id.to_string(),
+        origin_site_id: site_id.to_string(),
+        execution_hints: ExecutionHints::default(),
+        validate_only: false,
     };
 
-    let executor_id =
-        executor_id.ok_or_else(|| anyhow!("tool is missing executor_id: {bare_id}"))?;
-    let kind = if tool_type.as_deref() == Some("state_graph") {
-        "graph_run"
-    } else {
-        "tool_run"
-    };
+    let resolved = engine.resolve(&plan_ctx, &canonical_ref)
+        .map_err(|e| anyhow!("resolution failed: {e}"))?;
 
-    Ok(ResolvedItem {
-        kind: kind.to_string(),
-        executor_ref: format!("tool:{executor_id}"),
+    let thread_kind = map_to_thread_kind(&resolved.kind, &resolved.metadata);
+
+    let executor_ref = resolved.metadata.executor_id.clone()
+        .or_else(|| engine.kinds.default_executor_id(&resolved.kind).map(String::from))
+        .unwrap_or_default();
+
+    Ok(ResolvedExecutionRequest {
+        kind: thread_kind,
+        item_ref: item_ref.to_string(),
+        executor_ref,
+        launch_mode: launch_mode.to_string(),
+        current_site_id: site_id.to_string(),
+        origin_site_id: site_id.to_string(),
+        requested_by,
+        model,
+        budget,
+        parameters,
+        resolved_item: resolved,
+        plan_context: plan_ctx,
     })
 }
 
-fn parse_canonical_ref(item_ref: &str) -> Result<(String, String)> {
-    let (kind, bare_id) = item_ref
-        .split_once(':')
-        .ok_or_else(|| anyhow!("canonical item_ref required: {item_ref}"))?;
-    if bare_id.is_empty() {
-        bail!("canonical item_ref missing bare ID: {item_ref}");
-    }
-    Ok((kind.to_string(), bare_id.to_string()))
-}
+/// Run the full native engine pipeline: verify → build_plan → execute_plan.
+pub fn execute_native(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+    thread_id: &str,
+    chain_root_id: &str,
+) -> Result<ExecutionCompletion> {
+    let verified = engine.verify(&resolved.plan_context, resolved.resolved_item.clone())
+        .map_err(|e| anyhow!("verification failed: {e}"))?;
 
-fn parse_python_assignment(contents: &str, key: &str) -> Option<String> {
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix(key) else {
-            continue;
-        };
-        let Some(rest) = rest.trim_start().strip_prefix('=') else {
-            continue;
-        };
-        let value = rest.trim();
-        let quote = value.chars().next()?;
-        if quote != '"' && quote != '\'' {
-            continue;
-        }
+    let plan = engine.build_plan(
+        &resolved.plan_context,
+        &verified,
+        &resolved.parameters,
+        &resolved.plan_context.execution_hints,
+    ).map_err(|e| anyhow!("plan build failed: {e}"))?;
 
-        let mut parsed = String::new();
-        let mut escape = false;
-        for ch in value[1..].chars() {
-            if escape {
-                parsed.push(ch);
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == quote {
-                return Some(parsed);
-            }
-            parsed.push(ch);
-        }
-    }
-    None
-}
-
-fn parse_yaml_tool_metadata(contents: &str) -> Result<(Option<String>, Option<String>)> {
-    #[derive(Deserialize)]
-    struct ToolMetadata {
-        tool_type: Option<String>,
-        executor_id: Option<String>,
-    }
-
-    let metadata: ToolMetadata =
-        serde_yaml::from_str(contents).context("failed to parse tool yaml")?;
-    Ok((metadata.tool_type, metadata.executor_id))
-}
-
-fn find_item_path(
-    project_path: &Path,
-    kind: &str,
-    bare_id: &str,
-    extensions: &[&str],
-) -> Result<PathBuf> {
-    for base in search_roots(project_path, kind)? {
-        for extension in extensions {
-            let candidate = base.join(format!("{bare_id}{extension}"));
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    bail!("{kind} item not found: {bare_id}")
-}
-
-fn search_roots(project_path: &Path, kind: &str) -> Result<Vec<PathBuf>> {
-    let folder = match kind {
-        "tool" => "tools",
-        "directive" => "directives",
-        "knowledge" => "knowledge",
-        other => bail!("unsupported item kind: {other}"),
+    let engine_ctx = EngineContext {
+        thread_id: thread_id.to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        current_site_id: resolved.current_site_id.clone(),
+        origin_site_id: resolved.origin_site_id.clone(),
+        upstream_site_id: None,
+        upstream_thread_id: None,
+        continuation_from_id: None,
+        requested_by: resolved.plan_context.requested_by.clone(),
+        project_context: resolved.plan_context.project_context.clone(),
+        launch_mode: if resolved.launch_mode == "detached" {
+            LaunchMode::Detached
+        } else {
+            LaunchMode::Inline
+        },
+        budget: resolved.budget.as_ref().map(|b| BudgetRequest {
+            max_spend: b.max_spend,
+        }),
     };
 
-    let mut roots = vec![project_path.join(".ai").join(folder)];
+    engine.execute_plan(&engine_ctx, plan)
+        .map_err(|e| anyhow!("execution failed: {e}"))
+}
 
-    let user_root = env::var_os("USER_SPACE")
-        .map(PathBuf::from)
-        .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
-        .ok_or_else(|| anyhow!("unable to determine user space"))?;
-    roots.push(user_root.join(".ai").join(folder));
-
-    for bundle_root in repo_bundle_roots() {
-        roots.push(bundle_root.join(".ai").join(folder));
+/// Map a canonical item kind to the daemon's thread kind for profiling.
+fn map_to_thread_kind(canonical_kind: &str, metadata: &ItemMetadata) -> String {
+    match canonical_kind {
+        "directive" => "directive_run".to_string(),
+        "graph" => "graph_run".to_string(),
+        "tool" => {
+            if metadata.extra.get("tool_type").and_then(|v| v.as_str()) == Some("state_graph") {
+                "graph_run".to_string()
+            } else {
+                "tool_run".to_string()
+            }
+        }
+        other => format!("{other}_run"),
     }
-
-    Ok(roots)
 }
 
-fn repo_bundle_roots() -> Vec<PathBuf> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    [
-        repo_root.join("ryeos/bundles/standard/ryeos_std"),
-        repo_root.join("ryeos/bundles/code/ryeos_code"),
-        repo_root.join("ryeos/bundles/core/ryeos_core"),
-        repo_root.join("ryeos/bundles/email/ryeos_email"),
-        repo_root.join("ryeos/bundles/web/ryeos_web"),
-    ]
-    .into_iter()
-    .filter(|path| path.join(".ai").is_dir())
-    .collect()
-}
+

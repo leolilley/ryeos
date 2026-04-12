@@ -1,16 +1,14 @@
-use std::collections::HashMap;
-
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth::Principal;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateWebhookRequest {
-    pub principal_fp: String,
     pub item_id: String,
     pub project_path: String,
     pub description: Option<String>,
@@ -20,8 +18,22 @@ pub struct CreateWebhookRequest {
 
 pub async fn create_webhook(
     State(state): State<AppState>,
-    Json(req): Json<CreateWebhookRequest>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let principal_fp = extract_principal_fp(&request, &state);
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "request body too large" })),
+        ))?;
+    let req: CreateWebhookRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|err| (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": err.to_string() })),
+        ))?;
+
     if !req.item_id.contains(':') {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -35,7 +47,7 @@ pub async fn create_webhook(
     let result = state
         .webhook_store()
         .create_binding(
-            &req.principal_fp,
+            &principal_fp,
             &remote_name,
             &req.item_id,
             &req.project_path,
@@ -45,9 +57,10 @@ pub async fn create_webhook(
             req.vault_keys.as_deref(),
         )
         .map_err(|err| {
+            tracing::error!(error = %err, "internal error in webhook handler");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": err.to_string() })),
+                Json(json!({ "error": "internal server error" })),
             )
         })?;
 
@@ -56,22 +69,18 @@ pub async fn create_webhook(
 
 pub async fn list_webhooks(
     State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let fp = query.get("principal_fp").ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "principal_fp required" })),
-        )
-    })?;
+    let principal_fp = extract_principal_fp(&request, &state);
     let remote_name = state.config.bind.to_string();
     let bindings = state
         .webhook_store()
-        .list_bindings(fp, &remote_name)
+        .list_bindings(&principal_fp, &remote_name)
         .map_err(|err| {
+            tracing::error!(error = %err, "internal error in webhook handler");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": err.to_string() })),
+                Json(json!({ "error": "internal server error" })),
             )
         })?;
     Ok(Json(json!({ "bindings": bindings })))
@@ -80,22 +89,18 @@ pub async fn list_webhooks(
 pub async fn revoke_webhook(
     State(state): State<AppState>,
     Path(hook_id): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let fp = query.get("principal_fp").ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "principal_fp required" })),
-        )
-    })?;
+    let principal_fp = extract_principal_fp(&request, &state);
     let remote_name = state.config.bind.to_string();
     let revoked = state
         .webhook_store()
-        .revoke_binding(&hook_id, fp, &remote_name)
+        .revoke_binding(&hook_id, &principal_fp, &remote_name)
         .map_err(|err| {
+            tracing::error!(error = %err, "internal error in webhook handler");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": err.to_string() })),
+                Json(json!({ "error": "internal server error" })),
             )
         })?;
     if !revoked {
@@ -105,4 +110,15 @@ pub async fn revoke_webhook(
         ));
     }
     Ok(Json(json!({ "revoked": hook_id })))
+}
+
+fn extract_principal_fp(
+    request: &axum::http::Request<axum::body::Body>,
+    state: &AppState,
+) -> String {
+    request
+        .extensions()
+        .get::<Principal>()
+        .map(|p| p.fingerprint.clone())
+        .unwrap_or_else(|| state.identity.principal_id())
 }

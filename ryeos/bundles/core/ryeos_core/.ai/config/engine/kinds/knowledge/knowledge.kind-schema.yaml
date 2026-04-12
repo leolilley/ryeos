@@ -1,0 +1,25 @@
+location:
+  directory: knowledge
+execution:
+  default_executor_id: "tool:rye/core/executors/knowledge/knowledge"
+formats:
+  - extensions: [".md"]
+    parser_id: markdown/frontmatter
+    signature:
+      prefix: "<!--"
+      suffix: "-->"
+  - extensions: [".yaml", ".yml"]
+    parser_id: yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+    version:
+      from: path
+      key: version
+    category:
+      from: path
+      key: category
