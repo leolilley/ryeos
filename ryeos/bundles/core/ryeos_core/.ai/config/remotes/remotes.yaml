@@ -3,7 +3,7 @@
 # Loaded via 3-tier resolution (system → user → project).
 # Projects override with their own .ai/config/remotes/remotes.yaml.
 # Deep merge: project can add remotes without restating defaults.
-category: "cas"
+category: "remotes"
 version: "1.0.0"
 
 defaults:
