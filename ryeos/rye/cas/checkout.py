@@ -67,11 +67,19 @@ def ensure_snapshot_cached(
     try:
         staging.rename(cached)
     except OSError:
-        # Another concurrent materialization beat us — clean up our staging
-        shutil.rmtree(staging, ignore_errors=True)
         if cached.exists() and (cached / ".snapshot_complete").exists():
+            shutil.rmtree(staging, ignore_errors=True)
             return cached
-        raise
+        if cached.exists():
+            shutil.rmtree(cached, ignore_errors=True)
+            try:
+                staging.rename(cached)
+            except OSError:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     return cached
 
@@ -128,11 +136,21 @@ def ensure_user_space_cached(
     try:
         staging.rename(cached)
     except OSError:
-        # Another concurrent materialization beat us — clean up our staging
-        shutil.rmtree(staging, ignore_errors=True)
         if cached.exists() and (cached / ".user_space_complete").exists():
+            # Another concurrent materialization beat us — clean up our staging
+            shutil.rmtree(staging, ignore_errors=True)
             return cached
-        raise
+        # Target exists but is incomplete — remove it and retry
+        if cached.exists():
+            shutil.rmtree(cached, ignore_errors=True)
+            try:
+                staging.rename(cached)
+            except OSError:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     return cached
 
