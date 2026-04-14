@@ -17,9 +17,6 @@ on:
           - ryeos-engine
           - ryeos-core
           - ryeos
-          - ryeos-web
-          - ryeos-code
-          - ryeos-email
           - ryeos-mcp
           - ryeos-cli
           - ryeos-node
@@ -88,7 +85,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard \
-                      -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
                       -e ryeos-mcp -e ryeos-cli -e ryeos-node
           pip install pytest pytest-asyncio
 
@@ -116,9 +112,6 @@ jobs:
           BUNDLES=(
             "ryeos/bundles/core/ryeos_core"
             "ryeos/bundles/standard/ryeos_std"
-            "ryeos/bundles/web/ryeos_web"
-            "ryeos/bundles/code/ryeos_code"
-            "ryeos/bundles/email/ryeos_email"
           )
           for bundle in "${BUNDLES[@]}"; do
             for item_type in directive tool knowledge config; do
@@ -143,12 +136,6 @@ jobs:
             path: ryeos/bundles/core
           - package: ryeos
             path: ryeos/bundles/standard
-          - package: ryeos-web
-            path: ryeos/bundles/web
-          - package: ryeos-code
-            path: ryeos/bundles/code
-          - package: ryeos-email
-            path: ryeos/bundles/email
           - package: ryeos-mcp
             path: ryeos-mcp
           - package: ryeos-cli
@@ -194,7 +181,7 @@ jobs:
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
 
       - name: Import CI signing key
-        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos"]'), matrix.package)
         env:
           RYE_SIGNING_KEY: ${{ secrets.RYE_SIGNING_KEY }}
           RYE_SIGNING_PUBKEY: ${{ secrets.RYE_SIGNING_PUBKEY }}
@@ -213,7 +200,7 @@ jobs:
           "
 
       - name: Re-sign and rebuild bundle manifest with CI key
-        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos"]'), matrix.package)
         run: |
           # Re-sign ryeos-core first (provides bundler/verify tools used by all bundles)
           CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
@@ -257,15 +244,6 @@ jobs:
           - bundle: ryeos
             path: ryeos/bundles/standard
             package: ryeos
-          - bundle: ryeos-web
-            path: ryeos/bundles/web
-            package: ryeos-web
-          - bundle: ryeos-code
-            path: ryeos/bundles/code
-            package: ryeos-code
-          - bundle: ryeos-email
-            path: ryeos/bundles/email
-            package: ryeos-email
     runs-on: ubuntu-latest
     environment: pypi
     steps:
