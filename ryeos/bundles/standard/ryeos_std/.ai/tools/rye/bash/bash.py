@@ -12,7 +12,7 @@ from pathlib import Path
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __executor_id__ = "rye/core/runtimes/python/script"
-__category__ = "rye"
+__category__ = "rye/bash"
 __tool_description__ = "Execute shell commands"
 
 CONFIG_SCHEMA = {
