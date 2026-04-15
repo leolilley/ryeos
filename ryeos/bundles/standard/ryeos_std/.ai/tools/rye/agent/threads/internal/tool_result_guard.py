@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:1d40dc57588592056bdfb9c8128c1410f638fee19c4df38f2d440cfb56521192:1gphG7ru5cXuRMPzbhnSADWfwq_RKdxDWvCTXPtdmx9i4DcPQgk5f2XuGW6rc9uWoPp33VSjClkrkLrln05qAA:4b987fd4e40303ac
+# rye:signed:2026-04-10T10:39:01Z:7926a818ab98bbece0a1a365e8087a1031190137e34dadddb46c3b24865d940c:5f_zrZXfe5GKs5lnOvDQaivB4wtuytdkfMFJioOLinCIktKQs8Wo9pMTm8c3HzqqAIaF50wbrn5y36lOYptZBw:4b987fd4e40303ac
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/internal"
@@ -21,12 +21,17 @@ def guard_result(
     thread_id: str,
     project_path: Path,
     context_usage_ratio: float = 0.0,
+    no_truncate: bool = False,
 ) -> Any:
     """Intercept a tool result before it enters conversation context.
 
     Applies heuristic structural summarization to large results,
     stores full data in an artifact store, and handles content-hash
     deduplication.
+
+    When no_truncate is True (directive declares
+    <runtime truncate_tool_results="false" />), the full result is
+    returned without summarization.  Deduplication still applies.
     """
     result_str = _serialize(result)
     max_chars = 1200 if context_usage_ratio > 0.75 else 2400
@@ -47,6 +52,9 @@ def guard_result(
         }
 
     artifact_ref = store.store(call_id, tool_name, result)
+
+    if no_truncate:
+        return result
 
     summary = _summarize_result(result, max_chars)
     summary["_artifact_ref"] = artifact_ref

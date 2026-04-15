@@ -111,6 +111,9 @@ async def run(
     # Directive-level context suppressions (e.g. <suppress>tool-protocol</suppress>)
     suppress = (directive_context or {}).get("suppress", [])
 
+    # Directive-level runtime config (e.g. <runtime truncate_tool_results="false" />)
+    runtime_config = (directive_context or {}).get("runtime", {})
+
     # Assemble system prompt from build_system_prompt hooks + caller override
     system_ctx = await harness.run_hooks_context(
         {
@@ -600,6 +603,7 @@ async def run(
                     thread_id=thread_id,
                     project_path=project_path,
                     context_usage_ratio=context_ratio,
+                    no_truncate=runtime_config.get("truncate_tool_results") is False,
                 )
 
                 emitter.emit(

@@ -17,9 +17,6 @@ on:
           - ryeos-engine
           - ryeos-core
           - ryeos
-          - ryeos-web
-          - ryeos-code
-          - ryeos-email
           - ryeos-mcp
           - ryeos-cli
           - ryeos-node
@@ -88,7 +85,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard \
-                      -e ryeos/bundles/web -e ryeos/bundles/code -e ryeos/bundles/email \
                       -e ryeos-mcp -e ryeos-cli -e ryeos-node
           pip install pytest pytest-asyncio
 
@@ -116,9 +112,6 @@ jobs:
           BUNDLES=(
             "ryeos/bundles/core/ryeos_core"
             "ryeos/bundles/standard/ryeos_std"
-            "ryeos/bundles/web/ryeos_web"
-            "ryeos/bundles/code/ryeos_code"
-            "ryeos/bundles/email/ryeos_email"
           )
           for bundle in "${BUNDLES[@]}"; do
             for item_type in directive tool knowledge config; do
@@ -143,12 +136,6 @@ jobs:
             path: ryeos/bundles/core
           - package: ryeos
             path: ryeos/bundles/standard
-          - package: ryeos-web
-            path: ryeos/bundles/web
-          - package: ryeos-code
-            path: ryeos/bundles/code
-          - package: ryeos-email
-            path: ryeos/bundles/email
           - package: ryeos-mcp
             path: ryeos-mcp
           - package: ryeos-cli
@@ -194,7 +181,7 @@ jobs:
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
 
       - name: Import CI signing key
-        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos"]'), matrix.package)
         env:
           RYE_SIGNING_KEY: ${{ secrets.RYE_SIGNING_KEY }}
           RYE_SIGNING_PUBKEY: ${{ secrets.RYE_SIGNING_PUBKEY }}
@@ -213,7 +200,7 @@ jobs:
           "
 
       - name: Re-sign and rebuild bundle manifest with CI key
-        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos","ryeos-web","ryeos-code","ryeos-email"]'), matrix.package)
+        if: steps.check.outputs.skip == 'false' && contains(fromJSON('["ryeos-core","ryeos"]'), matrix.package)
         run: |
           # Re-sign ryeos-core first (provides bundler/verify tools used by all bundles)
           CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
@@ -243,6 +230,109 @@ jobs:
         with:
           packages-dir: ${{ matrix.path }}/dist/
           skip-existing: true
+
+  # ── Publish data bundles to Rye Registry ──────────────────────────
+  publish-bundles:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: ryeos-core
+            path: ryeos/bundles/core
+            package: ryeos-core
+          - bundle: ryeos
+            path: ryeos/bundles/standard
+            package: ryeos
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Check if this bundle should run
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "all" ]] || \
+             [[ "${{ github.event.inputs.package }}" == "${{ matrix.package }}" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.check.outputs.skip == 'false'
+
+      - uses: actions/setup-python@v6
+        if: steps.check.outputs.skip == 'false'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download lillux dist
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/download-artifact@v6
+        with:
+          name: lillux-dist
+          path: lillux/lillux/dist
+
+      - name: Install from local checkout
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          pip install lillux/lillux/dist/*.whl
+          pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
+
+      - name: Import CI signing key
+        if: steps.check.outputs.skip == 'false'
+        env:
+          RYE_SIGNING_KEY: ${{ secrets.RYE_SIGNING_KEY }}
+          RYE_SIGNING_PUBKEY: ${{ secrets.RYE_SIGNING_PUBKEY }}
+        run: |
+          mkdir -p ~/.ai/config/keys/signing
+          echo "$RYE_SIGNING_KEY" > ~/.ai/config/keys/signing/private_key.pem
+          chmod 600 ~/.ai/config/keys/signing/private_key.pem
+          echo "$RYE_SIGNING_PUBKEY" > ~/.ai/config/keys/signing/public_key.pem
+          python -c "
+          import os
+          from rye.utils.execution_context import ExecutionContext
+          from rye.utils.trust_store import TrustStore
+          pub = open(os.path.expanduser('~/.ai/config/keys/signing/public_key.pem'), 'rb').read()
+          store = TrustStore(ExecutionContext.from_env())
+          store.add_key(pub, owner='github-ci', space='user', version='1.0.0')
+          "
+
+      - name: Find package directory
+        if: steps.check.outputs.skip == 'false'
+        id: pkg
+        run: |
+          PKG_DIR=$(find ${{ matrix.path }} -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
+          echo "dir=$PKG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Re-sign and rebuild bundle manifest with CI key
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          # Re-sign ryeos-core first (provides bundler tools used by all bundles)
+          CORE_DIR=$(find ryeos/bundles/core -maxdepth 2 -type d -name ".ai" -printf '%h\n' | head -1)
+          for item_type in directive tool knowledge config; do
+            rye -p "$CORE_DIR" sign "${item_type}:*" 2>/dev/null || true
+          done
+          # Re-sign target bundle items
+          if [ "${{ steps.pkg.outputs.dir }}" != "$CORE_DIR" ]; then
+            for item_type in directive tool knowledge config; do
+              rye -p "${{ steps.pkg.outputs.dir }}" sign "${item_type}:*" 2>/dev/null || true
+            done
+          fi
+          BUNDLE_VERSION=$(python -c "import tomllib; print(tomllib.load(open('${{ matrix.path }}/pyproject.toml','rb'))['project']['version'])")
+          rye remote bundle build "${{ steps.pkg.outputs.dir }}" --bundle-id ${{ matrix.bundle }} --version "$BUNDLE_VERSION"
+
+      - name: Configure registry remote
+        if: steps.check.outputs.skip == 'false'
+        env:
+          RYE_REGISTRY_URL: ${{ secrets.RYE_REGISTRY_URL }}
+        run: |
+          mkdir -p ~/.ai/config/remotes
+          printf 'defaults:\n  timeout: 300\nremotes:\n  registry:\n    url: %s\n    roles: [registry]\n' "$RYE_REGISTRY_URL" > ~/.ai/config/remotes/remotes.yaml
+
+      - name: Push bundle to registry
+        if: steps.check.outputs.skip == 'false'
+        run: rye -p ${{ steps.pkg.outputs.dir }} remote bundle push ${{ matrix.bundle }}
 
   # ── Publish lillux to PyPI ─────────────────────────────────────────
   publish-rust:

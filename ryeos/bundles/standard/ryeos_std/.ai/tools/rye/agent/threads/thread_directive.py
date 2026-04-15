@@ -653,7 +653,8 @@ async def execute(params: Dict, project_path: str) -> Dict:
     # information is available; the harness just processes whatever context
     # the directive declares without injecting framework-specific docs.
     system_prompt = ""
-    directive_context = {"before": "", "after": "", "suppress": []}
+    runtime = directive.get("runtime", {})
+    directive_context = {"before": "", "after": "", "suppress": [], "runtime": runtime}
     if any(chain_context.get(pos) for pos in ("system", "before", "after")):
         from rye.actions.execute import ExecuteTool
         exec_tool = ExecuteTool(user_space=user_space)
