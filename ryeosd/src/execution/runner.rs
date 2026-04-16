@@ -45,6 +45,7 @@ struct ExecutionGuard {
     epoch_id: Option<String>,
     temp_dir: Option<PathBuf>,
     thread_finalized: bool,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ExecutionGuard {
@@ -55,6 +56,7 @@ impl ExecutionGuard {
             epoch_id: None,
             temp_dir: None,
             thread_finalized: false,
+            heartbeat: None,
         }
     }
 
@@ -66,6 +68,32 @@ impl ExecutionGuard {
             Vec::new(),
         )
         .ok();
+    }
+
+    /// Add root hashes to the registered epoch so sweep marks them reachable.
+    fn update_epoch_roots(&self, hashes: Vec<String>) {
+        if let Some(ref eid) = self.epoch_id {
+            let _ = crate::gc::epochs::update_epoch_roots(
+                &self.state.config.cas_root,
+                eid,
+                hashes,
+            );
+        }
+    }
+
+    /// Start a periodic heartbeat to keep the epoch alive during long-running executions.
+    fn start_epoch_heartbeat(&mut self) {
+        if let Some(ref epoch_id) = self.epoch_id {
+            let cas_root = self.state.config.cas_root.clone();
+            let eid = epoch_id.clone();
+            self.heartbeat = Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                loop {
+                    interval.tick().await;
+                    let _ = crate::gc::epochs::touch_epoch(&cas_root, &eid);
+                }
+            }));
+        }
     }
 
     /// Mark thread as tracked by this guard.
@@ -104,8 +132,11 @@ impl ExecutionGuard {
         self.thread_finalized = true;
     }
 
-    /// Perform all cleanup: complete epoch, remove temp dir.
+    /// Perform all cleanup: abort heartbeat, complete epoch, remove temp dir.
     fn cleanup(&mut self) {
+        if let Some(h) = self.heartbeat.take() {
+            h.abort();
+        }
         if let Some(ref eid) = self.epoch_id {
             let _ = crate::gc::epochs::complete_epoch(&self.state.config.cas_root, eid);
         }
@@ -119,13 +150,13 @@ impl ExecutionGuard {
     /// Consume into parts for moving into tokio::spawn.
     fn into_detached_parts(
         mut self,
-    ) -> (AppState, Option<String>, Option<String>, Option<PathBuf>) {
+    ) -> (AppState, Option<String>, Option<String>, Option<PathBuf>, Option<tokio::task::JoinHandle<()>>) {
         let state = self.state.clone();
         let thread_id = self.thread_id.take();
         let epoch_id = self.epoch_id.take();
         let temp_dir = self.temp_dir.take();
-        // Prevent double-cleanup since detached task will handle it
-        (state, thread_id, epoch_id, temp_dir)
+        let heartbeat = self.heartbeat.take();
+        (state, thread_id, epoch_id, temp_dir, heartbeat)
     }
 }
 
@@ -156,10 +187,9 @@ fn prepare_cas_context(
         guard.track_temp_dir(exec_dir.clone());
         Ok((exec_dir, Some(manifest_hash), Some(snap_hash.clone())))
     } else {
-        // Local path mode — ingest working dir to get pre_manifest_hash
         let cas = state.cas_store();
-        let items = cas.ingest_directory(project_path)?;
-        let manifest = crate::cas::SourceManifest { items };
+        let items = crate::cas::ingest_directory(cas, project_path)?;
+        let manifest = crate::cas::SourceManifest { item_source_hashes: items };
         let manifest_hash = cas.store_object(&manifest.to_json())?;
 
         // Look up current snapshot hash for this project (for fold-back advancement)
@@ -360,6 +390,28 @@ pub async fn run_inline(
         &params.parameters,
     );
 
+    // Register known hashes as epoch roots so GC sweep protects them
+    {
+        let mut epoch_roots = Vec::new();
+        if let Some(ref h) = pre_manifest_hash {
+            epoch_roots.push(h.clone());
+        }
+        if let Some(ref h) = base_snapshot_hash {
+            epoch_roots.push(h.clone());
+        }
+        if let Some(ref h) = state
+            .refs_store()
+            .read_ref(&format!("threads/{}/execution_snapshot", running.thread_id))
+            .ok()
+            .flatten()
+        {
+            epoch_roots.push(h.clone());
+        }
+        guard.update_epoch_roots(epoch_roots);
+    }
+
+    guard.start_epoch_heartbeat();
+
     // Update project context if CAS checkout changed the path
     if effective_path != params.project_path {
         params.resolved.plan_context.project_context =
@@ -491,6 +543,28 @@ pub async fn run_detached(
         &params.parameters,
     );
 
+    // Register known hashes as epoch roots so GC sweep protects them
+    {
+        let mut epoch_roots = Vec::new();
+        if let Some(ref h) = pre_manifest_hash {
+            epoch_roots.push(h.clone());
+        }
+        if let Some(ref h) = base_snapshot_hash {
+            epoch_roots.push(h.clone());
+        }
+        if let Some(ref h) = state
+            .refs_store()
+            .read_ref(&format!("threads/{}/execution_snapshot", running.thread_id))
+            .ok()
+            .flatten()
+        {
+            epoch_roots.push(h.clone());
+        }
+        guard.update_epoch_roots(epoch_roots);
+    }
+
+    guard.start_epoch_heartbeat();
+
     // Update project context if CAS checkout changed the path
     if effective_path != params.project_path {
         params.resolved.plan_context.project_context =
@@ -501,7 +575,7 @@ pub async fn run_detached(
     let running_thread_id = running.thread_id.clone();
 
     // Move guard parts into the background task
-    let (bg_state, _bg_thread_id, bg_epoch_id, bg_temp_dir) = guard.into_detached_parts();
+    let (bg_state, _bg_thread_id, bg_epoch_id, bg_temp_dir, bg_heartbeat) = guard.into_detached_parts();
     let bg_thread_id = running.thread_id.clone();
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
@@ -565,6 +639,9 @@ pub async fn run_detached(
         }
 
         // Always cleanup in detached path
+        if let Some(h) = bg_heartbeat {
+            h.abort();
+        }
         if let Some(ref eid) = bg_epoch_id {
             let _ = crate::gc::epochs::complete_epoch(&bg_state.config.cas_root, eid);
         }

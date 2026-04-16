@@ -6,6 +6,8 @@ pub mod time;
 
 pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
 
+pub use cas::{atomic_write, canonical_json, sha256_hex, shard_path, valid_hash, CasStore};
+
 pub fn run(request: SubprocessRequest) -> SubprocessResult {
     exec::lib_run(request)
 }

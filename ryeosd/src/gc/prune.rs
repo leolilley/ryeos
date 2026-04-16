@@ -23,11 +23,19 @@ pub struct PruneResult {
 ///
 /// - Deletes stale materialized cache snapshots older than `policy.cache_max_age_hours`
 /// - Deletes excess execution metadata beyond retention limits
-pub fn run_prune(cas_root: &Path, policy: &RetentionPolicy, dry_run: bool) -> Result<PruneResult> {
+///
+/// `cas_root` is used for CAS-internal paths (epochs).
+/// `state_dir` is used for ephemeral runtime state (cache, executions).
+pub fn run_prune(
+    cas_root: &Path,
+    state_dir: &Path,
+    policy: &RetentionPolicy,
+    dry_run: bool,
+) -> Result<PruneResult> {
     let mut result = PruneResult::default();
 
     // Prune materialized snapshot cache via MaterializationCache
-    let snapshot_cache_dir = cas_root.join("cache").join("snapshots");
+    let snapshot_cache_dir = state_dir.join("cache").join("snapshots");
     let mat_cache = crate::execution::cache::MaterializationCache::new(snapshot_cache_dir.clone());
     let max_age = Duration::from_secs(policy.cache_max_age_hours * 3600);
     let now = SystemTime::now();
@@ -62,8 +70,19 @@ pub fn run_prune(cas_root: &Path, policy: &RetentionPolicy, dry_run: bool) -> Re
         tracing::info!(cleaned = stale_cleaned, "cleaned stale writer epochs");
     }
 
+    // Rotate GC event log when it exceeds 10MB
+    let gc_log = cas_root.join("logs").join("gc.jsonl");
+    if gc_log.is_file() {
+        if let Ok(meta) = gc_log.metadata() {
+            if meta.len() > 10 * 1024 * 1024 {
+                let rotated = cas_root.join("logs").join("gc.jsonl.old");
+                let _ = fs::rename(&gc_log, &rotated);
+            }
+        }
+    }
+
     // Prune execution records
-    let exec_dir = cas_root.join("executions");
+    let exec_dir = state_dir.join("executions");
     if exec_dir.is_dir() {
         result.execution_records_removed += prune_execution_records(
             &exec_dir,

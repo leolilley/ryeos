@@ -35,20 +35,43 @@ const MAX_VALUE_LENGTH: usize = 64 * 1024; // 64 KB
 const MAX_TOTAL_ENV_BYTES: usize = 1024 * 1024; // 1 MB
 
 const RESERVED_ENV_NAMES: &[&str] = &[
-    "PATH", "HOME", "USER", "SHELL", "LANG", "TERM",
-    "PYTHONPATH", "PYTHONHOME", "PYTHON_PATH",
-    "TMPDIR", "TEMP", "TMP",
-    "RYE_SIGNING_KEY_DIR", "RYE_KERNEL_PYTHON", "RYE_REMOTE_NAME",
-    "RYE_NODE_CONFIG", "USER_SPACE",
-    "VIRTUAL_ENV", "CONDA_PREFIX",
-    "LD_LIBRARY_PATH", "LD_PRELOAD",
-    "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHON_PATH",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "RYE_SIGNING_KEY_DIR",
+    "RYE_KERNEL_PYTHON",
+    "RYE_REMOTE_NAME",
+    "RYE_NODE_CONFIG",
+    "USER_SPACE",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
 ];
 
 const RESERVED_ENV_PREFIXES: &[&str] = &[
-    "SUPABASE_", "MODAL_", "LD_", "SSL_",
-    "AWS_", "GOOGLE_", "AZURE_", "GITHUB_", "CI_",
-    "DOCKER_", "RYE_INTERNAL_",
+    "SUPABASE_",
+    "MODAL_",
+    "LD_",
+    "SSL_",
+    "AWS_",
+    "GOOGLE_",
+    "AZURE_",
+    "GITHUB_",
+    "CI_",
+    "DOCKER_",
+    "RYE_INTERNAL_",
 ];
 
 fn b64url_decode(data: &str) -> Result<Vec<u8>, String> {
@@ -165,9 +188,7 @@ pub fn open(key_dir: &str) -> serde_json::Value {
     let box_key_path = Path::new(key_dir).join("box_key.pem");
     let raw_key_b64 = match fs::read_to_string(&box_key_path) {
         Ok(s) => s,
-        Err(e) => {
-            return serde_json::json!({ "error": format!("read box key: {e}") })
-        }
+        Err(e) => return serde_json::json!({ "error": format!("read box key: {e}") }),
     };
     let private_bytes = match b64url_decode(raw_key_b64.trim()) {
         Ok(b) => b,
@@ -222,7 +243,10 @@ pub fn open(key_dir: &str) -> serde_json::Value {
     let nonce = Nonce::default(); // fixed zero nonce — single-use key
     let plaintext = match cipher.decrypt(
         &nonce,
-        chacha20poly1305::aead::Payload { msg: &ciphertext, aad: &aad },
+        chacha20poly1305::aead::Payload {
+            msg: &ciphertext,
+            aad: &aad,
+        },
     ) {
         Ok(pt) => pt,
         Err(e) => return serde_json::json!({ "error": format!("decryption failed: {e}") }),
@@ -238,9 +262,7 @@ pub fn open(key_dir: &str) -> serde_json::Value {
 
     let obj = match env_map.as_object() {
         Some(o) => o,
-        None => {
-            return serde_json::json!({ "error": "decrypted payload is not a JSON object" })
-        }
+        None => return serde_json::json!({ "error": "decrypted payload is not a JSON object" }),
     };
 
     // Validate

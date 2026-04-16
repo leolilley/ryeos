@@ -25,11 +25,7 @@ fn inflight_dir(cas_root: &Path) -> PathBuf {
 }
 
 /// Register a new writer epoch. Returns the epoch ID.
-pub fn register_epoch(
-    cas_root: &Path,
-    node_id: &str,
-    root_hashes: Vec<String>,
-) -> Result<String> {
+pub fn register_epoch(cas_root: &Path, node_id: &str, root_hashes: Vec<String>) -> Result<String> {
     let dir = inflight_dir(cas_root);
     fs::create_dir_all(&dir)?;
 
@@ -62,6 +58,57 @@ pub fn complete_epoch(cas_root: &Path, epoch_id: &str) -> Result<()> {
     if path.exists() {
         fs::remove_file(&path)?;
     }
+    Ok(())
+}
+
+/// Update the root hashes of an existing epoch.
+///
+/// Call this once manifest/snapshot hashes are known to ensure the
+/// sweep phase marks in-flight writes as reachable.
+pub fn update_epoch_roots(cas_root: &Path, epoch_id: &str, new_roots: Vec<String>) -> Result<()> {
+    let dir = inflight_dir(cas_root);
+    let path = dir.join(format!("{epoch_id}.json"));
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let data = fs::read(&path)?;
+    let mut epoch: Epoch = serde_json::from_slice(&data)?;
+
+    let mut seen = std::collections::HashSet::new();
+    for hash in &epoch.root_hashes {
+        seen.insert(hash.clone());
+    }
+    for hash in new_roots {
+        if seen.insert(hash.clone()) {
+            epoch.root_hashes.push(hash);
+        }
+    }
+
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&epoch)?)?;
+    fs::rename(&tmp, &path)?;
+
+    Ok(())
+}
+
+/// Touch an epoch file to update its mtime, preventing the grace window
+/// from drifting past it during long-running writes.
+///
+/// Call periodically (e.g. every 5 minutes) from the execution runner
+/// so that sweep's mtime-based grace cutoff stays anchored to "this
+/// epoch is still alive".
+pub fn touch_epoch(cas_root: &Path, epoch_id: &str) -> Result<()> {
+    let path = inflight_dir(cas_root).join(format!("{epoch_id}.json"));
+    if !path.exists() {
+        return Ok(());
+    }
+    // Rewrite the file to update mtime
+    let data = fs::read(&path)?;
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &data)?;
+    fs::rename(&tmp, &path)?;
     Ok(())
 }
 

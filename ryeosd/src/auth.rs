@@ -13,7 +13,6 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::identity::NodeIdentity;
 use crate::state::AppState;
@@ -67,23 +66,6 @@ impl ReplayGuard {
 
 static REPLAY_GUARD: LazyLock<Mutex<ReplayGuard>> =
     LazyLock::new(|| Mutex::new(ReplayGuard::new()));
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    hex_encode(&Sha256::digest(data))
-}
 
 // ---------------------------------------------------------------------------
 // Authorized key file loading
@@ -188,7 +170,7 @@ fn load_authorized_key(
     }
 
     // Verify content hash
-    let actual_hash = sha256_hex(body.as_bytes());
+    let actual_hash = crate::cas::sha256_hex(body.as_bytes());
     if actual_hash != content_hash {
         bail!("tampered key file");
     }
@@ -315,7 +297,7 @@ fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers
     let audience = state.identity.principal_id();
 
     // Build string-to-sign
-    let body_hash = sha256_hex(body);
+    let body_hash = crate::cas::sha256_hex(body);
     let canon = canonical_path(uri);
     let string_to_sign = format!(
         "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -326,7 +308,7 @@ fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers
         nonce,
         audience,
     );
-    let content_hash = sha256_hex(string_to_sign.as_bytes());
+    let content_hash = crate::cas::sha256_hex(string_to_sign.as_bytes());
 
     // Verify signature
     let sig_bytes = base64::engine::general_purpose::STANDARD

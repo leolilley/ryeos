@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use hmac::{Hmac, Mac};
@@ -19,16 +19,6 @@ fn random_hex(len: usize) -> String {
         let _ = write!(&mut out, "{b:02x}");
     }
     out
-}
-
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 pub struct WebhookStore {
@@ -105,7 +95,7 @@ impl WebhookStore {
 
     fn write_index(&self, index: &serde_json::Map<String, Value>) -> Result<()> {
         let data = serde_json::to_vec_pretty(&Value::Object(index.clone()))?;
-        atomic_write(&self.bindings_path(), &data)
+        crate::cas::atomic_write(&self.bindings_path(), &data)
     }
 
     pub fn create_binding(
@@ -164,11 +154,7 @@ impl WebhookStore {
         })
     }
 
-    pub fn list_bindings(
-        &self,
-        user_fp: &str,
-        remote_name: &str,
-    ) -> Result<Vec<BindingListItem>> {
+    pub fn list_bindings(&self, user_fp: &str, remote_name: &str) -> Result<Vec<BindingListItem>> {
         let index = self.read_index()?;
         let mut results: Vec<BindingListItem> = Vec::new();
         for val in index.values() {
@@ -247,12 +233,7 @@ impl WebhookStore {
         out
     }
 
-    pub fn revoke_binding(
-        &self,
-        hook_id: &str,
-        user_fp: &str,
-        remote_name: &str,
-    ) -> Result<bool> {
+    pub fn revoke_binding(&self, hook_id: &str, user_fp: &str, remote_name: &str) -> Result<bool> {
         let mut index = self.read_index()?;
         let binding = match index.get_mut(hook_id) {
             Some(Value::Object(map)) => map,
@@ -264,10 +245,7 @@ impl WebhookStore {
         if binding.get("remote_name").and_then(|v| v.as_str()) != Some(remote_name) {
             return Ok(false);
         }
-        if binding
-            .get("revoked_at")
-            .map_or(false, |v| !v.is_null())
-        {
+        if binding.get("revoked_at").map_or(false, |v| !v.is_null()) {
             return Ok(false);
         }
 

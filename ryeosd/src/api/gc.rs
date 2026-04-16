@@ -35,6 +35,7 @@ pub async fn run_gc(
         state.cas_store(),
         state.refs_store(),
         &state.config.cas_root,
+        &state.config.state_dir,
         &node_id,
         &params,
     )

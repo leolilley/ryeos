@@ -1,7 +1,9 @@
-//! File-based distributed GC lock.
+//! Local host advisory GC lock using flock().
 //!
-//! Only one GC process should run at a time per CAS root. The lock file
-//! contains the node ID and phase for progress tracking.
+//! Only one GC process should run at a time per CAS root. Uses an
+//! exclusive advisory file lock via `flock()` for atomic acquisition —
+//! no TOCTOU race. A JSON sidecar file provides observability (who
+//! holds it, which phase).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +11,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-/// GC lock state written to the lock file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LockState {
     node_id: String,
@@ -22,92 +23,104 @@ fn lock_path(cas_root: &Path) -> PathBuf {
     cas_root.join("gc.lock")
 }
 
-/// Acquire the GC lock. Fails if already held by another process.
-///
-/// Stale locks (from dead processes) are automatically broken.
-pub fn acquire(cas_root: &Path, node_id: &str) -> Result<()> {
-    let path = lock_path(cas_root);
+fn state_path(cas_root: &Path) -> PathBuf {
+    cas_root.join("gc.state.json")
+}
 
-    // Check for existing lock
-    if path.exists() {
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(state) = serde_json::from_str::<LockState>(&data) {
-                // Check if the holding process is still alive
-                if is_process_alive(state.pid) {
-                    bail!(
-                        "GC lock held by node {} (pid {}, phase: {})",
-                        state.node_id,
-                        state.pid,
-                        state.phase
-                    );
-                }
-                // Stale lock — break it
-                tracing::warn!(
-                    old_node = %state.node_id,
-                    old_pid = state.pid,
-                    "breaking stale GC lock"
-                );
-            }
+/// RAII guard that holds the flock and cleans up on drop.
+pub struct GcLock {
+    lock_file: fs::File,
+    state_path: PathBuf,
+}
+
+impl GcLock {
+    /// Acquire an exclusive advisory lock via `flock()`.
+    /// Blocks until the lock is available. Stale state from dead
+    /// holders is overwritten.
+    pub fn acquire(cas_root: &Path, node_id: &str) -> Result<Self> {
+        let path = lock_path(cas_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
         }
+
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+
+        acquire_flock(&file)?;
+
+        let state = LockState {
+            node_id: node_id.to_string(),
+            phase: "init".to_string(),
+            acquired_at: chrono::Utc::now().to_rfc3339(),
+            pid: std::process::id(),
+        };
+        let sp = state_path(cas_root);
+        let tmp = sp.with_extension("tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(&state)?)?;
+        fs::rename(&tmp, &sp)?;
+
+        tracing::debug!(node_id, "acquired GC lock");
+        Ok(Self {
+            lock_file: file,
+            state_path: sp,
+        })
     }
 
-    let state = LockState {
-        node_id: node_id.to_string(),
-        phase: "init".to_string(),
-        acquired_at: chrono::Utc::now().to_rfc3339(),
-        pid: std::process::id(),
-    };
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    /// Update the current GC phase in the state file.
+    pub fn update_phase(&self, node_id: &str, phase: &str) -> Result<()> {
+        let state = LockState {
+            node_id: node_id.to_string(),
+            phase: phase.to_string(),
+            acquired_at: chrono::Utc::now().to_rfc3339(),
+            pid: std::process::id(),
+        };
+        let tmp = self.state_path.with_extension("tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(&state)?)?;
+        fs::rename(&tmp, &self.state_path)?;
+        Ok(())
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(&state)?)?;
-    fs::rename(&tmp, &path)?;
+}
 
-    tracing::debug!(node_id, "acquired GC lock");
+impl Drop for GcLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.state_path);
+        let _ = release_flock(&self.lock_file);
+    }
+}
+
+#[cfg(unix)]
+fn acquire_flock(file: &fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+    if ret != 0 {
+        bail!("flock(LOCK_EX) failed: {}", std::io::Error::last_os_error());
+    }
     Ok(())
 }
 
-/// Release the GC lock.
-pub fn release(cas_root: &Path, _node_id: &str) -> Result<()> {
-    let path = lock_path(cas_root);
-    if path.exists() {
-        fs::remove_file(&path)?;
+#[cfg(unix)]
+fn release_flock(file: &fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_UN) };
+    if ret != 0 {
+        bail!("flock(LOCK_UN) failed: {}", std::io::Error::last_os_error());
     }
     Ok(())
 }
 
-/// Update the current GC phase in the lock file.
-pub fn update_phase(cas_root: &Path, node_id: &str, phase: &str) -> Result<()> {
-    let path = lock_path(cas_root);
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let state = LockState {
-        node_id: node_id.to_string(),
-        phase: phase.to_string(),
-        acquired_at: chrono::Utc::now().to_rfc3339(),
-        pid: std::process::id(),
-    };
-
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(&state)?)?;
-    fs::rename(&tmp, &path)?;
+#[cfg(not(unix))]
+fn acquire_flock(file: &fs::File) -> Result<()> {
+    let _ = file;
     Ok(())
 }
 
-/// Check if a process is alive (Unix-specific).
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // Signal 0 checks existence without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false // Conservative: assume dead on non-Unix
-    }
+#[cfg(not(unix))]
+fn release_flock(file: &fs::File) -> Result<()> {
+    let _ = file;
+    Ok(())
 }

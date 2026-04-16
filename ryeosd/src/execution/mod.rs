@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::cas::{CasStore, SourceManifest};
+use crate::cas::{self, CasStore, SourceManifest};
 use crate::refs::RefStore;
 
 use self::cache::MaterializationCache;
@@ -55,7 +55,11 @@ pub fn checkout_project(
 
     // Determine materialization target: stage into cache if available, else direct
     let materialize_dir = if let Some(cache) = mat_cache {
-        let staging = cache.cache_dir(&format!("{manifest_hash}.staging"));
+        let staging = cache.cache_dir(&format!(
+            "{manifest_hash}.staging.{}.{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
         fs::create_dir_all(&staging)?;
         staging
     } else {
@@ -64,32 +68,40 @@ pub fn checkout_project(
     };
 
     // Materialize item_source entries (items field)
-    for (rel_path, object_hash) in &manifest.items {
+    for (rel_path, object_hash) in &manifest.item_source_hashes {
         let target_path = materialize_dir.join(rel_path);
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        cas.materialize_item(object_hash, &target_path)?;
+        cas::materialize_item(cas, object_hash, &target_path)?;
     }
 
     // Layer 2: Atomic cache promotion (staging → final cache dir)
     if let Some(cache) = mat_cache {
         let final_dir = cache.cache_dir(manifest_hash);
         if materialize_dir != target_dir.to_path_buf() {
-            // Rename staging to final
-            if final_dir.exists() {
-                let _ = fs::remove_dir_all(&final_dir);
+            match fs::rename(&materialize_dir, &final_dir) {
+                Ok(_) => {
+                    cache.mark_complete(manifest_hash)?;
+                    copy_dir_recursive(&final_dir, target_dir)?;
+                }
+                Err(_) => {
+                    // Another process won the rename. Use their result if complete,
+                    // otherwise fall back to our staging dir which is still intact.
+                    if cache.is_complete(manifest_hash) {
+                        copy_dir_recursive(&final_dir, target_dir)?;
+                    } else {
+                        copy_dir_recursive(&materialize_dir, target_dir)?;
+                    }
+                    let _ = fs::remove_dir_all(&materialize_dir);
+                }
             }
-            fs::rename(&materialize_dir, &final_dir)?;
-            cache.mark_complete(manifest_hash)?;
-            // Layer 3: Copy from cache to execution space
-            copy_dir_recursive(&final_dir, target_dir)?;
         }
     }
 
     tracing::debug!(
         manifest_hash,
-        items = manifest.items.len(),
+        item_source_hashes = manifest.item_source_hashes.len(),
         "checkout complete"
     );
     Ok(target_dir.to_path_buf())
@@ -118,7 +130,7 @@ pub fn fold_back_outputs(
 
     // Build pre-execution integrity map: rel_path → integrity hash
     let mut pre_integrity: HashMap<String, String> = HashMap::new();
-    for (rel_path, obj_hash) in &pre_manifest.items {
+    for (rel_path, obj_hash) in &pre_manifest.item_source_hashes {
         if let Ok(Some(item_obj)) = cas.get_object(obj_hash) {
             if let Some(integrity) = item_obj.get("integrity").and_then(|v| v.as_str()) {
                 pre_integrity.insert(rel_path.clone(), integrity.to_string());
@@ -128,13 +140,13 @@ pub fn fold_back_outputs(
 
     // Walk working directory, find new/changed files
     // All changed/new files are ingested into `items` (the canonical format).
-    let mut new_items: HashMap<String, String> = pre_manifest.items.clone();
+    let mut new_items: HashMap<String, String> = pre_manifest.item_source_hashes.clone();
     let mut changed = false;
 
     walk_and_diff(cas, working_dir, working_dir, &pre_integrity, &mut new_items, &mut changed)?;
 
     // Detect deletions: entries in pre-manifest but missing from working dir
-    for rel_path in pre_manifest.items.keys() {
+    for rel_path in pre_manifest.item_source_hashes.keys() {
         let path = working_dir.join(rel_path);
         if !path.exists() || !path.is_file() {
             new_items.remove(rel_path);
@@ -147,7 +159,7 @@ pub fn fold_back_outputs(
     }
 
     // Create new manifest
-    let new_manifest = SourceManifest { items: new_items };
+    let new_manifest = SourceManifest { item_source_hashes: new_items };
     let new_hash = cas.store_object(&new_manifest.to_json())?;
 
     tracing::debug!(
@@ -177,7 +189,7 @@ pub fn advance_after_foldback(
         user_manifest_hash: None,
         parent_hashes: vec![current_snapshot_hash.to_string()],
         created_at: now,
-        push_type: "fold-back".to_string(),
+        source: "fold-back".to_string(),
     };
     let new_snapshot_hash = cas.store_object(&snapshot.to_json())?;
 
@@ -222,7 +234,7 @@ fn walk_and_diff(
             walk_and_diff(cas, root, &path, pre_integrity, items, changed)?;
         } else if path.is_file() {
             let bytes = fs::read(&path)?;
-            let integrity = sha256_hex(&bytes);
+            let integrity = cas::sha256_hex(&bytes);
 
             // Check if file is new or changed
             match pre_integrity.get(&rel) {
@@ -231,7 +243,7 @@ fn walk_and_diff(
                 }
                 _ => {
                     // New or changed — ingest into items (canonical format).
-                    let result = cas.ingest_item(&rel, &path)?;
+                    let result: cas::IngestResult = cas::ingest_item(cas, &rel, &path)?;
                     tracing::trace!(
                         rel_path = %rel,
                         blob_hash = %result.blob_hash,
@@ -245,17 +257,6 @@ fn walk_and_diff(
         }
     }
     Ok(())
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(data);
-    let mut out = String::with_capacity(64);
-    for byte in hash.iter() {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {

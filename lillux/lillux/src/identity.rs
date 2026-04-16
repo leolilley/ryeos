@@ -5,11 +5,11 @@ use std::path::Path;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use clap::Subcommand;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
-use x25519_dalek::{StaticSecret, PublicKey as X25519PublicKey};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 #[derive(Subcommand)]
 pub enum KeypairAction {
@@ -38,12 +38,10 @@ pub fn run(action: KeypairAction) -> serde_json::Value {
             Err(e) => serde_json::json!({ "error": format!("read public key: {e}") }),
         },
         KeypairAction::BoxFingerprint { public_key } => match fs::read_to_string(&public_key) {
-            Ok(data) => {
-                match URL_SAFE_NO_PAD.decode(data.trim()) {
-                    Ok(bytes) => serde_json::json!({ "fingerprint": raw_fingerprint(&bytes) }),
-                    Err(e) => serde_json::json!({ "error": format!("decode public key: {e}") }),
-                }
-            }
+            Ok(data) => match URL_SAFE_NO_PAD.decode(data.trim()) {
+                Ok(bytes) => serde_json::json!({ "fingerprint": raw_fingerprint(&bytes) }),
+                Err(e) => serde_json::json!({ "error": format!("decode public key: {e}") }),
+            },
             Err(e) => serde_json::json!({ "error": format!("read public key: {e}") }),
         },
     }
@@ -68,7 +66,9 @@ pub fn verify(hash: &str, signature: &str, public_key_path: &str) -> serde_json:
     };
     let key = match VerifyingKey::from_public_key_pem(&pem) {
         Ok(k) => k,
-        Err(e) => return serde_json::json!({ "valid": false, "error": format!("parse public key: {e}") }),
+        Err(e) => {
+            return serde_json::json!({ "valid": false, "error": format!("parse public key: {e}") })
+        }
     };
     // Accept both padded and unpadded base64url (Python uses padding, Rust emits without)
     let stripped = signature.trim_end_matches('=');
@@ -139,16 +139,20 @@ fn do_generate(key_dir: &str) -> serde_json::Value {
 fn write_secure(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = fs::OpenOptions::new()
-        .write(true).create_new(true).mode(mode)
+        .write(true)
+        .create_new(true)
+        .mode(mode)
         .open(path)
         .map_err(|e| format!("create {}: {e}", path.display()))?;
-    f.write_all(data).map_err(|e| format!("write {}: {e}", path.display()))
+    f.write_all(data)
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 #[cfg(not(unix))]
 fn write_secure(path: &Path, data: &[u8], _mode: u32) -> Result<(), String> {
     fs::OpenOptions::new()
-        .write(true).create_new(true)
+        .write(true)
+        .create_new(true)
         .open(path)
         .map_err(|e| format!("create {}: {e}", path.display()))?
         .write_all(data)

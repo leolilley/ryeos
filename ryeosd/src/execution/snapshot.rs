@@ -40,18 +40,6 @@ impl ExecutionSnapshot {
         v
     }
 
-    pub fn from_json(value: &Value) -> Result<Self> {
-        Ok(Self {
-            thread_id: value.get("thread_id").and_then(|v| v.as_str()).unwrap_or("").into(),
-            project_manifest_hash: value.get("project_manifest_hash").and_then(|v| v.as_str()).unwrap_or("").into(),
-            user_manifest_hash: value.get("user_manifest_hash").and_then(|v| v.as_str()).map(Into::into),
-            item_ref: value.get("item_ref").and_then(|v| v.as_str()).unwrap_or("").into(),
-            parameters: value.get("parameters").cloned(),
-            created_at: value.get("created_at").and_then(|v| v.as_str()).unwrap_or("").into(),
-        })
-    }
-
-    /// Store this snapshot in CAS. Returns the object hash.
     pub fn store(&self, cas: &CasStore) -> Result<String> {
         cas.store_object(&self.to_json())
     }
@@ -90,28 +78,6 @@ impl RuntimeOutputsBundle {
         })
     }
 
-    pub fn from_json(value: &Value) -> Result<Self> {
-        let artifacts = value
-            .get("artifacts")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(Self {
-            thread_id: value.get("thread_id").and_then(|v| v.as_str()).unwrap_or("").into(),
-            execution_snapshot_hash: value.get("execution_snapshot_hash").and_then(|v| v.as_str()).unwrap_or("").into(),
-            output_manifest_hash: value.get("output_manifest_hash").and_then(|v| v.as_str()).map(Into::into),
-            artifacts,
-            status: value.get("status").and_then(|v| v.as_str()).unwrap_or("").into(),
-            created_at: value.get("created_at").and_then(|v| v.as_str()).unwrap_or("").into(),
-        })
-    }
-
-    /// Store this bundle in CAS. Returns the object hash.
     pub fn store(&self, cas: &CasStore) -> Result<String> {
         cas.store_object(&self.to_json())
     }

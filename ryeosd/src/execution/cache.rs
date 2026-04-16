@@ -44,7 +44,9 @@ impl MaterializationCache {
 
     /// Check if a cache entry is fully materialized (not partial).
     pub fn is_complete(&self, manifest_hash: &str) -> bool {
-        self.cache_dir(manifest_hash).join(".materialized").is_file()
+        self.cache_dir(manifest_hash)
+            .join(".materialized")
+            .is_file()
     }
 
     /// Evict a cache entry.
@@ -68,7 +70,9 @@ impl MaterializationCache {
             let entry = entry?;
             if entry.path().is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
-                    entries.push(name.to_string());
+                    if !name.contains(".staging.") {
+                        entries.push(name.to_string());
+                    }
                 }
             }
         }

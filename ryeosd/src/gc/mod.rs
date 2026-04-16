@@ -1,14 +1,16 @@
-//! Three-phase garbage collection pipeline.
+//! Two-phase garbage collection pipeline.
 //!
 //! Phase 1 — Prune: delete stale cache and excess execution records.
-//! Phase 2 — Compact: walk snapshot DAG, apply retention, rewrite history.
-//! Phase 3 — Sweep: mark reachable objects from all refs, delete unreachable.
+//! Phase 2 — Sweep: mark reachable objects from all refs, delete unreachable.
 
-pub mod compact;
 pub mod epochs;
+pub mod event_log;
 pub mod lock;
+pub mod mark_cache;
 pub mod prune;
 pub mod sweep;
+
+pub mod compact;
 
 use std::path::Path;
 use std::time::Instant;
@@ -54,15 +56,14 @@ impl Default for RetentionPolicy {
 /// Parameters for a GC run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GCParams {
-    /// If true, report what would be deleted without actually deleting.
     #[serde(default)]
     pub dry_run: bool,
-    /// If true, use aggressive retention (lower limits).
     #[serde(default)]
     pub aggressive: bool,
-    /// Override retention policy. Uses defaults if None.
     #[serde(default)]
     pub policy: Option<RetentionPolicy>,
+    #[serde(default)]
+    pub compact: bool,
 }
 
 impl Default for GCParams {
@@ -71,6 +72,7 @@ impl Default for GCParams {
             dry_run: false,
             aggressive: false,
             policy: None,
+            compact: false,
         }
     }
 }
@@ -81,7 +83,7 @@ impl Default for GCParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GCResult {
     pub prune: prune::PruneResult,
-    pub compaction: compact::CompactionResult,
+    pub compaction: Option<compact::CompactionResult>,
     pub sweep: sweep::SweepResult,
     pub total_freed_bytes: u64,
     pub duration_ms: u64,
@@ -89,51 +91,56 @@ pub struct GCResult {
 
 // ── Orchestrator ────────────────────────────────────────────────────
 
-/// Run the full three-phase GC pipeline.
+/// Run the full two-phase GC pipeline.
 pub fn run_gc(
     cas: &CasStore,
     refs: &RefStore,
     cas_root: &Path,
+    state_dir: &Path,
     node_id: &str,
     params: &GCParams,
 ) -> Result<GCResult> {
     let start = Instant::now();
 
-    let policy = params
-        .policy
-        .clone()
-        .unwrap_or_else(|| {
-            if params.aggressive {
-                RetentionPolicy {
-                    manual_pushes: 3,
-                    daily_checkpoints: 3,
-                    weekly_checkpoints: 2,
-                    max_success_executions: 10,
-                    max_failure_executions: 5,
-                    cache_max_age_hours: 24,
-                }
-            } else {
-                RetentionPolicy::default()
+    let policy = params.policy.clone().unwrap_or_else(|| {
+        if params.aggressive {
+            RetentionPolicy {
+                manual_pushes: 3,
+                daily_checkpoints: 3,
+                weekly_checkpoints: 2,
+                max_success_executions: 10,
+                max_failure_executions: 5,
+                cache_max_age_hours: 24,
             }
-        });
+        } else {
+            RetentionPolicy::default()
+        }
+    });
 
-    // Acquire GC lock
-    let _lock = lock::acquire(cas_root, node_id)?;
+    // Acquire GC lock (RAII — released on drop)
+    let _lock = lock::GcLock::acquire(cas_root, node_id)?;
 
     // Phase 1: Prune
-    lock::update_phase(cas_root, node_id, "prune")?;
-    let prune_result = prune::run_prune(cas_root, &policy, params.dry_run)?;
+    _lock.update_phase(node_id, "prune")?;
+    let prune_result = prune::run_prune(cas_root, state_dir, &policy, params.dry_run)?;
 
-    // Phase 2: Compact
-    lock::update_phase(cas_root, node_id, "compact")?;
-    let compaction_result = compact::run_compact(cas, refs, cas_root, &policy, params.dry_run)?;
+    // Phase 2: Compact (opt-in)
+    let compaction_result = if params.compact {
+        _lock.update_phase(node_id, "compact")?;
+        Some(compact::run_compact(
+            cas,
+            refs,
+            cas_root,
+            &policy,
+            params.dry_run,
+        )?)
+    } else {
+        None
+    };
 
     // Phase 3: Sweep
-    lock::update_phase(cas_root, node_id, "sweep")?;
+    _lock.update_phase(node_id, "sweep")?;
     let sweep_result = sweep::run_sweep(cas, refs, cas_root, params.dry_run)?;
-
-    // Release lock
-    lock::release(cas_root, node_id)?;
 
     let total_freed = prune_result.freed_bytes + sweep_result.freed_bytes;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -152,6 +159,11 @@ pub fn run_gc(
         dry_run = params.dry_run,
         "GC complete"
     );
+
+    let event = event_log::GCEvent::from_result(&result, params, node_id);
+    if let Err(e) = event_log::append_event(cas_root, &event) {
+        tracing::warn!(error = %e, "failed to write GC event log");
+    }
 
     Ok(result)
 }

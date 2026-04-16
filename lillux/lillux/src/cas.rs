@@ -1,9 +1,171 @@
 use std::fs;
-use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use sha2::{Digest, Sha256};
+
+// ── Public library primitives ──────────────────────────────────────
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
+
+pub fn valid_hash(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn shard_path(root: &Path, namespace: &str, hash: &str, ext: &str) -> PathBuf {
+    root.join(namespace)
+        .join(&hash[..2])
+        .join(&hash[2..4])
+        .join(format!("{hash}{ext}"))
+}
+
+pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    fs::rename(&tmp, target)?;
+    Ok(())
+}
+
+fn escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c if c.is_ascii() => out.push(c),
+            c if (c as u32) <= 0xFFFF => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => {
+                let n = c as u32 - 0x10000;
+                out.push_str(&format!(
+                    "\\u{:04x}\\u{:04x}",
+                    0xD800 + (n >> 10),
+                    0xDC00 + (n & 0x3FF)
+                ));
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => escape_string(s),
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let entries: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{}:{}", escape_string(k), canonical_json(&map[*k])))
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            format!(
+                "[{}]",
+                arr.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+            )
+        }
+    }
+}
+
+// ── CasStore ───────────────────────────────────────────────────────
+
+pub struct CasStore {
+    root: PathBuf,
+}
+
+impl CasStore {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn has_blob(&self, hash: &str) -> bool {
+        valid_hash(hash) && shard_path(&self.root, "blobs", hash, "").exists()
+    }
+
+    pub fn has_object(&self, hash: &str) -> bool {
+        valid_hash(hash) && shard_path(&self.root, "objects", hash, ".json").exists()
+    }
+
+    pub fn has(&self, hash: &str) -> bool {
+        self.has_blob(hash) || self.has_object(hash)
+    }
+
+    pub fn get_blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        if !valid_hash(hash) {
+            return Ok(None);
+        }
+        let path = shard_path(&self.root, "blobs", hash, "");
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(fs::read(&path)?))
+    }
+
+    pub fn get_object(&self, hash: &str) -> Result<Option<serde_json::Value>> {
+        if !valid_hash(hash) {
+            return Ok(None);
+        }
+        let path = shard_path(&self.root, "objects", hash, ".json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read(&path)?;
+        Ok(Some(serde_json::from_slice(&data)?))
+    }
+
+    pub fn store_blob(&self, data: &[u8]) -> Result<String> {
+        let hash = sha256_hex(data);
+        let dest = shard_path(&self.root, "blobs", &hash, "");
+        if dest.exists() {
+            return Ok(hash);
+        }
+        atomic_write(&dest, data)?;
+        Ok(hash)
+    }
+
+    pub fn store_object(&self, value: &serde_json::Value) -> Result<String> {
+        let json = canonical_json(value);
+        let hash = sha256_hex(json.as_bytes());
+        let dest = shard_path(&self.root, "objects", &hash, ".json");
+        if dest.exists() {
+            return Ok(hash);
+        }
+        atomic_write(&dest, json.as_bytes())?;
+        Ok(hash)
+    }
+}
+
+// ── CLI interface ──────────────────────────────────────────────────
 
 use clap::Subcommand;
-use sha2::{Digest, Sha256};
 
 #[derive(Subcommand)]
 pub enum CasAction {
@@ -42,11 +204,14 @@ pub enum CasAction {
 }
 
 pub fn run(action: CasAction) -> serde_json::Value {
-    // Validate hashes before slicing to prevent panics
-    let needs_hash = matches!(&action, CasAction::Fetch { .. } | CasAction::Verify { .. } | CasAction::Has { .. });
-    if needs_hash {
+    if matches!(
+        &action,
+        CasAction::Fetch { .. } | CasAction::Verify { .. } | CasAction::Has { .. }
+    ) {
         let h = match &action {
-            CasAction::Fetch { hash, .. } | CasAction::Verify { hash, .. } | CasAction::Has { hash, .. } => hash,
+            CasAction::Fetch { hash, .. }
+            | CasAction::Verify { hash, .. }
+            | CasAction::Has { hash, .. } => hash,
             _ => unreachable!(),
         };
         if !valid_hash(h) {
@@ -55,125 +220,72 @@ pub fn run(action: CasAction) -> serde_json::Value {
         }
     }
     match action {
-        CasAction::Store { root, blob } => do_store(&root, blob),
-        CasAction::Fetch { root, hash, blob } => do_fetch(&root, &hash, blob),
+        CasAction::Store { root, blob } => cli_store(&root, blob),
+        CasAction::Fetch { root, hash, blob } => cli_fetch(&root, &hash, blob),
         CasAction::Verify { root, hash, blob } => {
-            let (ns, ext) = if blob { ("blobs", "") } else { ("objects", ".json") };
-            match fs::read(shard(&root, ns, &hash, ext)) {
-                Ok(data) => serde_json::json!({ "valid": sha256_hex(&data) == hash, "hash": hash }),
-                Err(_) => serde_json::json!({ "valid": false, "hash": hash }),
+            let store = CasStore::new(PathBuf::from(&root));
+            if blob {
+                match store.get_blob(&hash) {
+                    Ok(Some(data)) => {
+                        serde_json::json!({ "valid": sha256_hex(&data) == hash, "hash": hash })
+                    }
+                    _ => serde_json::json!({ "valid": false, "hash": hash }),
+                }
+            } else {
+                match store.get_object(&hash) {
+                    Ok(Some(val)) => {
+                        let canon = canonical_json(&val);
+                        serde_json::json!({ "valid": sha256_hex(canon.as_bytes()) == hash, "hash": hash })
+                    }
+                    _ => serde_json::json!({ "valid": false, "hash": hash }),
+                }
             }
         }
         CasAction::Has { root, hash } => {
-            let exists = shard(&root, "blobs", &hash, "").exists() || shard(&root, "objects", &hash, ".json").exists();
-            serde_json::json!({ "exists": exists, "hash": hash })
+            let store = CasStore::new(PathBuf::from(&root));
+            serde_json::json!({ "exists": store.has(&hash), "hash": hash })
         }
     }
 }
 
-fn valid_hash(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn shard(root: &str, ns: &str, hash: &str, ext: &str) -> PathBuf {
-    PathBuf::from(root).join(ns).join(&hash[..2]).join(&hash[2..4]).join(format!("{hash}{ext}"))
-}
-
-fn sha256_hex(data: &[u8]) -> String { format!("{:x}", Sha256::digest(data)) }
-
-/// Escape a string the same way Python's json.dumps(ensure_ascii=True) does:
-/// all non-ASCII codepoints become \uXXXX (BMP) or \uXXXX\uXXXX (surrogate pair).
-fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\x08' => out.push_str("\\b"),
-            '\x0C' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => { out.push_str(&format!("\\u{:04x}", c as u32)); }
-            c if c.is_ascii() => out.push(c),
-            c if (c as u32) <= 0xFFFF => { out.push_str(&format!("\\u{:04x}", c as u32)); }
-            c => {
-                // Non-BMP: encode as surrogate pair, matching Python
-                let n = c as u32 - 0x10000;
-                out.push_str(&format!("\\u{:04x}\\u{:04x}", 0xD800 + (n >> 10), 0xDC00 + (n & 0x3FF)));
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn canonical_json(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => escape_string(s),
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let entries: Vec<String> = keys.iter()
-                .map(|k| format!("{}:{}", escape_string(k), canonical_json(&map[*k])))
-                .collect();
-            format!("{{{}}}", entries.join(","))
-        }
-        serde_json::Value::Array(arr) => {
-            format!("[{}]", arr.iter().map(canonical_json).collect::<Vec<_>>().join(","))
-        }
-    }
-}
-
-fn atomic_write(target: &PathBuf, data: &[u8]) -> Result<(), String> {
-    if let Some(p) = target.parent() { fs::create_dir_all(p).map_err(|e| format!("mkdir: {e}"))?; }
-    let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
-    fs::File::create(&tmp).map_err(|e| format!("tmpfile: {e}"))?.write_all(data).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("write: {e}")
-    })?;
-    fs::rename(&tmp, target).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("rename: {e}")
-    })
-}
-
-fn do_store(root: &str, blob: bool) -> serde_json::Value {
+fn cli_store(root: &str, blob: bool) -> serde_json::Value {
     let mut data = Vec::new();
-    if let Err(e) = io::stdin().read_to_end(&mut data) {
+    if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut data) {
         return serde_json::json!({ "error": format!("stdin: {e}") });
     }
+    let store = CasStore::new(PathBuf::from(root));
     if blob {
-        let hash = sha256_hex(&data);
-        let target = shard(root, "blobs", &hash, "");
-        if !target.exists() { if let Err(e) = atomic_write(&target, &data) { return serde_json::json!({ "error": e }); } }
-        serde_json::json!({ "hash": hash })
+        match store.store_blob(&data) {
+            Ok(hash) => serde_json::json!({ "hash": hash }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }
     } else {
         let value: serde_json::Value = match serde_json::from_slice(&data) {
             Ok(v) => v,
             Err(e) => return serde_json::json!({ "error": format!("invalid JSON: {e}") }),
         };
-        let canonical = canonical_json(&value);
-        let hash = sha256_hex(canonical.as_bytes());
-        let target = shard(root, "objects", &hash, ".json");
-        if !target.exists() { if let Err(e) = atomic_write(&target, canonical.as_bytes()) { return serde_json::json!({ "error": e }); } }
-        serde_json::json!({ "hash": hash })
+        match store.store_object(&value) {
+            Ok(hash) => serde_json::json!({ "hash": hash }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }
     }
 }
 
-fn do_fetch(root: &str, hash: &str, blob: bool) -> serde_json::Value {
-    let (ns, ext) = if blob { ("blobs", "") } else { ("objects", ".json") };
-    match fs::read(shard(root, ns, hash, ext)) {
-        Ok(data) => {
-            // Write stored bytes directly — no re-serialization, no drift
-            let _ = io::stdout().lock().write_all(&data);
+fn cli_fetch(root: &str, hash: &str, blob: bool) -> serde_json::Value {
+    let store = CasStore::new(PathBuf::from(root));
+    let data = if blob {
+        store.get_blob(hash)
+    } else {
+        store
+            .get_object(hash)
+            .map(|opt| opt.map(|v| canonical_json(&v).into_bytes()))
+    };
+    match data {
+        Ok(Some(bytes)) => {
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), &bytes);
             std::process::exit(0);
         }
-        Err(_) => {
+        _ => {
             eprintln!("not found");
             std::process::exit(1);
         }

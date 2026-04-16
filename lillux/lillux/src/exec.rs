@@ -51,18 +51,27 @@ impl RunningProcess {
     pub fn wait(mut self) -> SubprocessResult {
         let timeout_dur = Duration::from_secs_f64(self.timeout);
         let (tx, rx) = std::sync::mpsc::channel();
-        let _timer = thread::spawn(move || { thread::sleep(timeout_dur); let _ = tx.send(()); });
+        let _timer = thread::spawn(move || {
+            thread::sleep(timeout_dur);
+            let _ = tx.send(());
+        });
 
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
-                    let (out, err) = (self.stdout_thread.join().unwrap_or_default(), self.stderr_thread.join().unwrap_or_default());
+                    let (out, err) = (
+                        self.stdout_thread.join().unwrap_or_default(),
+                        self.stderr_thread.join().unwrap_or_default(),
+                    );
                     let code = status.code().unwrap_or(-1);
                     return SubprocessResult {
-                        success: code == 0, stdout: String::from_utf8_lossy(&out).into_owned(),
-                        stderr: String::from_utf8_lossy(&err).into_owned(), exit_code: code,
+                        success: code == 0,
+                        stdout: String::from_utf8_lossy(&out).into_owned(),
+                        stderr: String::from_utf8_lossy(&err).into_owned(),
+                        exit_code: code,
                         duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
-                        pid: self.pid, timed_out: false,
+                        pid: self.pid,
+                        timed_out: false,
                     };
                 }
                 Ok(None) => {
@@ -70,19 +79,31 @@ impl RunningProcess {
                         #[cfg(unix)]
                         {
                             // Kill the entire process group (child + grandchildren)
-                            unsafe { libc::kill(-(self.pgid as i32), libc::SIGKILL); }
+                            unsafe {
+                                libc::kill(-(self.pgid as i32), libc::SIGKILL);
+                            }
                         }
                         #[cfg(not(unix))]
                         {
                             let _ = self.child.kill();
                         }
                         let _ = self.child.wait();
-                        let (out, err) = (self.stdout_thread.join().unwrap_or_default(), self.stderr_thread.join().unwrap_or_default());
+                        let (out, err) = (
+                            self.stdout_thread.join().unwrap_or_default(),
+                            self.stderr_thread.join().unwrap_or_default(),
+                        );
                         return SubprocessResult {
-                            success: false, stdout: String::from_utf8_lossy(&out).into_owned(),
-                            stderr: format!("Command timed out after {} seconds\n{}", self.timeout, String::from_utf8_lossy(&err)),
-                            exit_code: -1, duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
-                            pid: self.pid, timed_out: true,
+                            success: false,
+                            stdout: String::from_utf8_lossy(&out).into_owned(),
+                            stderr: format!(
+                                "Command timed out after {} seconds\n{}",
+                                self.timeout,
+                                String::from_utf8_lossy(&err)
+                            ),
+                            exit_code: -1,
+                            duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+                            pid: self.pid,
+                            timed_out: true,
                         };
                     }
                     thread::sleep(Duration::from_millis(10));
@@ -90,9 +111,13 @@ impl RunningProcess {
                 Err(e) => {
                     let _ = (self.stdout_thread.join(), self.stderr_thread.join());
                     return SubprocessResult {
-                        success: false, stdout: String::new(), stderr: format!("Wait failed: {e}"),
-                        exit_code: -1, duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
-                        pid: self.pid, timed_out: false,
+                        success: false,
+                        stdout: String::new(),
+                        stderr: format!("Wait failed: {e}"),
+                        exit_code: -1,
+                        duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+                        pid: self.pid,
+                        timed_out: false,
                     };
                 }
             }
@@ -108,28 +133,49 @@ impl RunningProcess {
 pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
     let start = Instant::now();
     let timeout = request.timeout;
-    let envs_str: Vec<String> = request.envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let envs_str: Vec<String> = request
+        .envs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
 
     let mut command = process::Command::new(&request.cmd);
     command.args(&request.args);
     set_envs(&mut command, &envs_str);
-    if let Some(ref dir) = request.cwd { command.current_dir(dir); }
-    command.stdin(if request.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
+    if let Some(ref dir) = request.cwd {
+        command.current_dir(dir);
+    }
+    command.stdin(if request.stdin_data.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        unsafe { command.pre_exec(|| { libc::setsid(); Ok(()) }); }
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
     }
 
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(e) => return Err(SubprocessResult {
-            success: false, stdout: String::new(), stderr: format!("Failed to spawn: {e}"),
-            exit_code: -1, duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-            pid: 0, timed_out: false,
-        }),
+        Err(e) => {
+            return Err(SubprocessResult {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("Failed to spawn: {e}"),
+                exit_code: -1,
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                pid: 0,
+                timed_out: false,
+            })
+        }
     };
     let pid = child.id();
 
@@ -145,16 +191,28 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
     let stderr_handle = child.stderr.take();
     let stdout_thread = thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(mut out) = stdout_handle { let _ = out.read_to_end(&mut buf); }
+        if let Some(mut out) = stdout_handle {
+            let _ = out.read_to_end(&mut buf);
+        }
         buf
     });
     let stderr_thread = thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(mut err) = stderr_handle { let _ = err.read_to_end(&mut buf); }
+        if let Some(mut err) = stderr_handle {
+            let _ = err.read_to_end(&mut buf);
+        }
         buf
     });
 
-    Ok(RunningProcess { pid, pgid, child, stdout_thread, stderr_thread, start, timeout })
+    Ok(RunningProcess {
+        pid,
+        pgid,
+        child,
+        stdout_thread,
+        stderr_thread,
+        start,
+        timeout,
+    })
 }
 
 /// Run a subprocess synchronously and return structured results.
@@ -262,29 +320,40 @@ fn resolve_stdin(stdin_arg: Option<String>, stdin_pipe: bool) -> Option<String> 
     if stdin_pipe {
         let mut buf = String::new();
         let _ = std::io::stdin().read_to_string(&mut buf);
-        if !buf.is_empty() { return Some(buf); }
+        if !buf.is_empty() {
+            return Some(buf);
+        }
     }
     None
 }
 
 fn set_envs(command: &mut process::Command, envs: &[String]) {
     for env in envs {
-        if let Some((k, v)) = env.split_once('=') { command.env(k, v); }
+        if let Some((k, v)) = env.split_once('=') {
+            command.env(k, v);
+        }
     }
 }
 
 fn write_stdin(child: &mut process::Child, data: Option<&str>) {
     if let Some(data) = data {
-        if let Some(mut s) = child.stdin.take() { let _ = s.write_all(data.as_bytes()); }
+        if let Some(mut s) = child.stdin.take() {
+            let _ = s.write_all(data.as_bytes());
+        }
     }
 }
 
 fn setup_log(command: &mut process::Command, log: Option<&str>) -> Result<(), String> {
     if let Some(path) = log {
         let file = std::fs::OpenOptions::new()
-            .create(true).write(true).truncate(true).open(path)
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
             .map_err(|e| format!("Failed to open log file: {e}"))?;
-        let file2 = file.try_clone().map_err(|e| format!("Failed to clone log fd: {e}"))?;
+        let file2 = file
+            .try_clone()
+            .map_err(|e| format!("Failed to clone log fd: {e}"))?;
         command.stdout(file).stderr(file2);
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -294,17 +363,58 @@ fn setup_log(command: &mut process::Command, log: Option<&str>) -> Result<(), St
 
 pub fn run(action: ExecAction) -> serde_json::Value {
     match action {
-        ExecAction::Run { cmd, args, cwd, stdin, stdin_pipe, envs, timeout } => {
-            do_exec(&cmd, &args, cwd.as_deref(), resolve_stdin(stdin, stdin_pipe).as_deref(), &envs, timeout)
-        }
-        ExecAction::Spawn { cmd, args, log, envs, stdin, stdin_pipe } => {
-            match spawn_detached(&cmd, &args, log.as_deref(), &envs, resolve_stdin(stdin, stdin_pipe).as_deref()) {
+        ExecAction::Run {
+            cmd,
+            args,
+            cwd,
+            stdin,
+            stdin_pipe,
+            envs,
+            timeout,
+        } => do_exec(
+            &cmd,
+            &args,
+            cwd.as_deref(),
+            resolve_stdin(stdin, stdin_pipe).as_deref(),
+            &envs,
+            timeout,
+        ),
+        ExecAction::Spawn {
+            cmd,
+            args,
+            log,
+            envs,
+            stdin,
+            stdin_pipe,
+        } => {
+            match spawn_detached(
+                &cmd,
+                &args,
+                log.as_deref(),
+                &envs,
+                resolve_stdin(stdin, stdin_pipe).as_deref(),
+            ) {
                 Ok(pid) => serde_json::json!({ "success": true, "pid": pid }),
                 Err(e) => serde_json::json!({ "success": false, "error": e }),
             }
         }
-        ExecAction::Stream { cmd, args, cwd, stdin, stdin_pipe, envs, timeout } => {
-            let code = do_stream(&cmd, &args, cwd.as_deref(), resolve_stdin(stdin, stdin_pipe).as_deref(), &envs, timeout);
+        ExecAction::Stream {
+            cmd,
+            args,
+            cwd,
+            stdin,
+            stdin_pipe,
+            envs,
+            timeout,
+        } => {
+            let code = do_stream(
+                &cmd,
+                &args,
+                cwd.as_deref(),
+                resolve_stdin(stdin, stdin_pipe).as_deref(),
+                &envs,
+                timeout,
+            );
             process::exit(code);
         }
         ExecAction::Kill { pid, grace } => match kill_process(pid, grace) {
@@ -315,12 +425,25 @@ pub fn run(action: ExecAction) -> serde_json::Value {
     }
 }
 
-fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> serde_json::Value {
+fn do_exec(
+    cmd: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    stdin_data: Option<&str>,
+    envs: &[String],
+    timeout: f64,
+) -> serde_json::Value {
     let r = lib_run(SubprocessRequest {
         cmd: cmd.to_string(),
         args: args.to_vec(),
         cwd: cwd.map(|s| s.to_string()),
-        envs: envs.iter().filter_map(|e| e.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect(),
+        envs: envs
+            .iter()
+            .filter_map(|e| {
+                e.split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+            })
+            .collect(),
         stdin_data: stdin_data.map(|s| s.to_string()),
         timeout,
     });
@@ -332,14 +455,27 @@ fn do_exec(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&st
 
 /// Stream mode: raw passthrough of child stdout/stderr, no JSON wrapping.
 /// Returns: child exit code, 124 on timeout, 125 on spawn failure.
-fn do_stream(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&str>, envs: &[String], timeout: f64) -> i32 {
+fn do_stream(
+    cmd: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    stdin_data: Option<&str>,
+    envs: &[String],
+    timeout: f64,
+) -> i32 {
     let mut command = process::Command::new(cmd);
     command.args(args);
     set_envs(&mut command, envs);
     // Set PYTHONUNBUFFERED for Python children to ensure streaming latency
     command.env("PYTHONUNBUFFERED", "1");
-    if let Some(dir) = cwd { command.current_dir(dir); }
-    command.stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    command.stdin(if stdin_data.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = match command.spawn() {
@@ -359,7 +495,10 @@ fn do_stream(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&
             loop {
                 match err.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => { let _ = stderr_out.write_all(&buf[..n]); let _ = stderr_out.flush(); }
+                    Ok(n) => {
+                        let _ = stderr_out.write_all(&buf[..n]);
+                        let _ = stderr_out.flush();
+                    }
                     Err(_) => break,
                 }
             }
@@ -375,7 +514,10 @@ fn do_stream(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&
             loop {
                 match out.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => { let _ = stdout_out.write_all(&buf[..n]); let _ = stdout_out.flush(); }
+                    Ok(n) => {
+                        let _ = stdout_out.write_all(&buf[..n]);
+                        let _ = stdout_out.flush();
+                    }
                     Err(_) => break,
                 }
             }
@@ -385,7 +527,10 @@ fn do_stream(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&
     // Wait with timeout
     let timeout_dur = Duration::from_secs_f64(timeout);
     let (tx, rx) = std::sync::mpsc::channel();
-    let _timer = thread::spawn(move || { thread::sleep(timeout_dur); let _ = tx.send(()); });
+    let _timer = thread::spawn(move || {
+        thread::sleep(timeout_dur);
+        let _ = tx.send(());
+    });
 
     loop {
         match child.try_wait() {
@@ -416,29 +561,58 @@ fn do_stream(cmd: &str, args: &[String], cwd: Option<&str>, stdin_data: Option<&
 }
 
 #[cfg(unix)]
-fn spawn_detached(cmd: &str, args: &[String], log: Option<&str>, envs: &[String], stdin_data: Option<&str>) -> Result<u32, String> {
+fn spawn_detached(
+    cmd: &str,
+    args: &[String],
+    log: Option<&str>,
+    envs: &[String],
+    stdin_data: Option<&str>,
+) -> Result<u32, String> {
     use std::os::unix::process::CommandExt;
     let mut command = process::Command::new(cmd);
     command.args(args);
     set_envs(&mut command, envs);
-    command.stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdin(if stdin_data.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     setup_log(&mut command, log)?;
-    unsafe { command.pre_exec(|| { libc::setsid(); Ok(()) }); }
-    let mut child = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Failed to spawn: {e}"))?;
     write_stdin(&mut child, stdin_data);
     Ok(child.id())
 }
 
 #[cfg(windows)]
-fn spawn_detached(cmd: &str, args: &[String], log: Option<&str>, envs: &[String], stdin_data: Option<&str>) -> Result<u32, String> {
+fn spawn_detached(
+    cmd: &str,
+    args: &[String],
+    log: Option<&str>,
+    envs: &[String],
+    stdin_data: Option<&str>,
+) -> Result<u32, String> {
     use std::os::windows::process::CommandExt;
     let mut command = process::Command::new(cmd);
     command.args(args);
     set_envs(&mut command, envs);
-    command.stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdin(if stdin_data.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     setup_log(&mut command, log)?;
     command.creation_flags(0x00000200 | 0x00000008); // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-    let mut child = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Failed to spawn: {e}"))?;
     write_stdin(&mut child, stdin_data);
     Ok(child.id())
 }
@@ -446,17 +620,29 @@ fn spawn_detached(cmd: &str, args: &[String], log: Option<&str>, envs: &[String]
 #[cfg(unix)]
 fn kill_process(pid: u32, grace: f64) -> Result<&'static str, String> {
     let pid = pid as i32;
-    if unsafe { libc::kill(pid, 0) } != 0 { return Ok("already_dead"); }
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return Ok("already_dead");
+    }
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return Err(format!("SIGTERM failed: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "SIGTERM failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     for _ in 0..(grace / 0.1).ceil() as u32 {
         thread::sleep(Duration::from_millis(100));
-        if unsafe { libc::kill(pid, 0) } != 0 { return Ok("terminated"); }
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return Ok("terminated");
+        }
     }
     if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-        if unsafe { libc::kill(pid, 0) } != 0 { return Ok("terminated"); }
-        return Err(format!("SIGKILL failed: {}", std::io::Error::last_os_error()));
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return Ok("terminated");
+        }
+        return Err(format!(
+            "SIGKILL failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok("killed")
 }
@@ -465,26 +651,45 @@ fn kill_process(pid: u32, grace: f64) -> Result<&'static str, String> {
 fn kill_process(pid: u32, grace: f64) -> Result<&'static str, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::*;
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, 0, pid) };
-    if handle == 0 { return Ok("already_dead"); }
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if handle == 0 {
+        return Ok("already_dead");
+    }
     if unsafe { WaitForSingleObject(handle, (grace * 1000.0) as u32) } == WAIT_OBJECT_0 {
         unsafe { CloseHandle(handle) };
         return Ok("terminated");
     }
     let ok = unsafe { TerminateProcess(handle, 1) };
     unsafe { CloseHandle(handle) };
-    if ok != 0 { Ok("killed") } else { Err(format!("TerminateProcess failed: {}", std::io::Error::last_os_error())) }
+    if ok != 0 {
+        Ok("killed")
+    } else {
+        Err(format!(
+            "TerminateProcess failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
 }
 
 #[cfg(unix)]
-fn is_alive(pid: u32) -> bool { unsafe { libc::kill(pid as i32, 0) == 0 } }
+fn is_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
 
 #[cfg(windows)]
 fn is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::*;
     let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, 0, pid) };
-    if handle == 0 { return false; }
+    if handle == 0 {
+        return false;
+    }
     let result = unsafe { WaitForSingleObject(handle, 0) };
     unsafe { CloseHandle(handle) };
     result != 0

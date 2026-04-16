@@ -1,8 +1,12 @@
 //! Phase 3: Mark-and-sweep.
 //!
-//! Mark: collect root hashes from all refs → BFS walk child hashes
-//! using kind-aware `extract_child_hashes()`.
+//! Mark: collect root hashes from all refs (centralized via
+//! `RefStore::gc_root_hashes()`) → BFS walk child hashes using
+//! kind-aware `extract_child_hashes()`.
 //! Sweep: walk `blobs/` and `objects/` → delete unreachable files.
+//!
+//! Supports incremental marking via mark_cache: if the root set is
+//! unchanged since last run, the cached reachable set is reused.
 
 use std::collections::HashSet;
 use std::fs;
@@ -16,6 +20,7 @@ use crate::cas::{self, CasStore};
 use crate::refs::RefStore;
 
 use super::epochs;
+use super::mark_cache;
 
 /// Result of the sweep phase.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -25,6 +30,7 @@ pub struct SweepResult {
     pub blobs_removed: usize,
     pub objects_removed: usize,
     pub freed_bytes: u64,
+    pub mark_cache_hit: bool,
 }
 
 /// Run the mark-and-sweep phase.
@@ -38,25 +44,8 @@ pub fn run_sweep(
 
     // ── Mark phase ──────────────────────────────────────────────────
 
-    // Collect root hashes from all ref sources
-    let mut roots = HashSet::new();
+    let mut roots: HashSet<String> = refs.gc_root_hashes()?.into_iter().collect();
 
-    // Project heads
-    collect_project_head_roots(cas_root, &mut roots)?;
-
-    // User-space heads
-    collect_user_space_roots(cas_root, &mut roots)?;
-
-    // Pin refs
-    if let Ok(pins) = refs.list_pins() {
-        for name in &pins {
-            if let Ok(Some(hash)) = refs.read_pin(name) {
-                roots.insert(hash);
-            }
-        }
-    }
-
-    // In-flight epoch roots
     if let Ok(active) = epochs::list_active_epochs(cas_root) {
         for epoch in &active {
             for hash in &epoch.root_hashes {
@@ -67,17 +56,44 @@ pub fn run_sweep(
 
     result.roots_collected = roots.len();
 
-    // BFS walk from roots to find all reachable hashes
-    let reachable = mark_reachable(cas, &roots)?;
+    // Build comparison roots excluding internal GC refs (mark cache object)
+    // to avoid self-referential root-set churn.
+    let mark_cache_hash = refs
+        .read_ref("internal/last_mark_cache")
+        .ok()
+        .flatten();
+    let comparison_roots: Vec<String> = {
+        let mut v: Vec<String> = roots
+            .iter()
+            .filter(|h| mark_cache_hash.as_deref() != Some(h.as_str()))
+            .cloned()
+            .collect();
+        v.sort();
+        v
+    };
+
+    let reachable = if let Some(cached) = mark_cache::load_mark_cache(cas, refs) {
+        let mut cached_sorted = cached.root_hashes.clone();
+        cached_sorted.sort();
+        if cached_sorted == comparison_roots {
+            result.mark_cache_hit = true;
+            tracing::debug!("mark cache hit — reusing previous reachable set");
+            cached.reachable
+        } else {
+            tracing::debug!("mark cache miss — roots changed, running full BFS");
+            mark_reachable(cas, &roots)?
+        }
+    } else {
+        tracing::debug!("no mark cache — running full BFS");
+        mark_reachable(cas, &roots)?
+    };
+
     result.reachable_objects = reachable.len();
 
     // ── Sweep phase ─────────────────────────────────────────────────
 
-    // Grace period: skip files newer than oldest active epoch
-    let grace_time = epochs::oldest_epoch_time(cas_root)
-        .unwrap_or_else(|_| SystemTime::now());
+    let grace_time = epochs::oldest_epoch_time(cas_root).unwrap_or_else(|_| SystemTime::now());
 
-    // Sweep objects/
     let objects_root = cas_root.join("objects");
     if objects_root.is_dir() {
         sweep_sharded_dir(
@@ -90,7 +106,6 @@ pub fn run_sweep(
         )?;
     }
 
-    // Sweep blobs/
     let blobs_root = cas_root.join("blobs");
     if blobs_root.is_dir() {
         sweep_sharded_dir(
@@ -103,12 +118,19 @@ pub fn run_sweep(
         )?;
     }
 
+    if !dry_run {
+        if let Err(e) = mark_cache::save_mark_cache(cas, refs, &comparison_roots, &reachable) {
+            tracing::warn!(error = %e, "failed to save mark cache");
+        }
+    }
+
     tracing::info!(
         roots = result.roots_collected,
         reachable = result.reachable_objects,
         blobs_removed = result.blobs_removed,
         objects_removed = result.objects_removed,
         freed_bytes = result.freed_bytes,
+        cache_hit = result.mark_cache_hit,
         dry_run,
         "sweep phase complete"
     );
@@ -123,10 +145,9 @@ fn mark_reachable(cas: &CasStore, roots: &HashSet<String>) -> Result<HashSet<Str
 
     while let Some(hash) = queue.pop() {
         if !reachable.insert(hash.clone()) {
-            continue; // Already visited
+            continue;
         }
 
-        // Try as object first
         if let Ok(Some(obj)) = cas.get_object(&hash) {
             let children = cas::extract_child_hashes(&obj);
             for child in children {
@@ -135,7 +156,6 @@ fn mark_reachable(cas: &CasStore, roots: &HashSet<String>) -> Result<HashSet<Str
                 }
             }
         }
-        // Blobs are leaf nodes — no children to follow
     }
 
     Ok(reachable)
@@ -150,7 +170,6 @@ fn sweep_sharded_dir(
     removed_count: &mut usize,
     freed_bytes: &mut u64,
 ) -> Result<()> {
-    // Walk shard dirs: root/XX/YY/HASH[.json]
     for l1 in read_dir_sorted(root)? {
         if !l1.is_dir() {
             continue;
@@ -164,24 +183,19 @@ fn sweep_sharded_dir(
                     continue;
                 }
 
-                // Extract hash from filename (strip .json extension if present)
-                let file_name = file_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let file_name = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if file_name.is_empty() {
                     continue;
                 }
 
                 if reachable.contains(file_name) {
-                    continue; // Reachable — keep
+                    continue;
                 }
 
-                // Grace period check
                 if let Ok(metadata) = file_path.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if modified > grace_time {
-                            continue; // Too new — skip
+                            continue;
                         }
                     }
                     let size = metadata.len();
@@ -195,50 +209,6 @@ fn sweep_sharded_dir(
         }
     }
 
-    Ok(())
-}
-
-/// Collect project head hashes from all principals.
-fn collect_project_head_roots(cas_root: &Path, roots: &mut HashSet<String>) -> Result<()> {
-    for principal_entry in read_dir_sorted(cas_root)? {
-        if !principal_entry.is_dir() {
-            continue;
-        }
-        let projects_dir = principal_entry.join("refs").join("projects");
-        if !projects_dir.is_dir() {
-            continue;
-        }
-        for project_entry in read_dir_sorted(&projects_dir)? {
-            let head = project_entry.join("head");
-            if head.is_file() {
-                if let Ok(hash) = fs::read_to_string(&head) {
-                    let hash = hash.trim().to_string();
-                    if !hash.is_empty() {
-                        roots.insert(hash);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Collect user-space head hashes from all principals.
-fn collect_user_space_roots(cas_root: &Path, roots: &mut HashSet<String>) -> Result<()> {
-    for principal_entry in read_dir_sorted(cas_root)? {
-        if !principal_entry.is_dir() {
-            continue;
-        }
-        let head = principal_entry.join("refs").join("user-space").join("head");
-        if head.is_file() {
-            if let Ok(hash) = fs::read_to_string(&head) {
-                let hash = hash.trim().to_string();
-                if !hash.is_empty() {
-                    roots.insert(hash);
-                }
-            }
-        }
-    }
     Ok(())
 }
 

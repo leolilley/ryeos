@@ -5,7 +5,6 @@ use anyhow::{bail, Result};
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::cas::CasStore;
 
@@ -49,12 +48,7 @@ impl RegistryStore {
 
     fn write_head(&self, hash: &str) -> Result<()> {
         let path = self.index_head_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, hash.as_bytes())?;
-        fs::rename(&tmp, &path)?;
+        crate::cas::atomic_write(&path, hash.as_bytes())?;
         Ok(())
     }
 
@@ -225,7 +219,9 @@ impl RegistryStore {
                         let head = self.read_head()?;
                         return Ok(json!({ "ok": true, "head": head, "skipped": true }));
                     }
-                    return Ok(json!({ "ok": false, "error": format!("Version {version} already exists with different hash") }));
+                    return Ok(
+                        json!({ "ok": false, "error": format!("Version {version} already exists with different hash") }),
+                    );
                 }
             }
 
@@ -290,7 +286,11 @@ impl RegistryStore {
         if namespace.is_empty() {
             return Ok(json!({ "ok": false, "error": "Missing namespace" }));
         }
-        if namespace.contains('/') || namespace.contains('\\') || namespace.contains("..") || namespace.contains('\0') {
+        if namespace.contains('/')
+            || namespace.contains('\\')
+            || namespace.contains("..")
+            || namespace.contains('\0')
+        {
             return Ok(json!({ "ok": false, "error": "invalid namespace" }));
         }
         let ns_dir = self.namespace_dir();
@@ -308,9 +308,7 @@ impl RegistryStore {
         }
 
         let record = json!({ "owner": owner_fp });
-        let tmp = ns_file.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_vec(&record)?)?;
-        fs::rename(&tmp, &ns_file)?;
+        crate::cas::atomic_write(&ns_file, &serde_json::to_vec(&record)?)?;
 
         Ok(json!({ "ok": true }))
     }
@@ -324,7 +322,12 @@ impl RegistryStore {
             return Ok(json!({ "ok": false, "error": "Invalid principal_id format" }));
         }
         let fingerprint = &principal_id[3..];
-        if fingerprint.is_empty() || fingerprint.contains('/') || fingerprint.contains('\\') || fingerprint.contains("..") || fingerprint.contains('\0') {
+        if fingerprint.is_empty()
+            || fingerprint.contains('/')
+            || fingerprint.contains('\\')
+            || fingerprint.contains("..")
+            || fingerprint.contains('\0')
+        {
             return Ok(json!({ "ok": false, "error": "invalid fingerprint" }));
         }
 
@@ -338,15 +341,18 @@ impl RegistryStore {
         let id_dir = self.identities_dir();
         fs::create_dir_all(&id_dir)?;
         let id_file = id_dir.join(fingerprint);
-        let tmp = id_file.with_extension("tmp");
-        fs::write(&tmp, identity_hash.as_bytes())?;
-        fs::rename(&tmp, &id_file)?;
+        crate::cas::atomic_write(&id_file, identity_hash.as_bytes())?;
 
         Ok(json!({ "ok": true, "identity_hash": identity_hash }))
     }
 
     pub fn lookup_identity(&self, fingerprint: &str) -> Result<Option<Value>> {
-        if fingerprint.is_empty() || fingerprint.contains('/') || fingerprint.contains('\\') || fingerprint.contains("..") || fingerprint.contains('\0') {
+        if fingerprint.is_empty()
+            || fingerprint.contains('/')
+            || fingerprint.contains('\\')
+            || fingerprint.contains("..")
+            || fingerprint.contains('\0')
+        {
             return Ok(None);
         }
         let id_file = self.identities_dir().join(fingerprint);
@@ -364,7 +370,10 @@ impl RegistryStore {
             return Ok(None);
         }
         let record: Value = serde_json::from_slice(&fs::read(&ns_file)?)?;
-        Ok(record.get("owner").and_then(|v| v.as_str()).map(String::from))
+        Ok(record
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .map(String::from))
     }
 }
 
@@ -407,19 +416,9 @@ pub(crate) fn verify_identity_self_signature(doc: &Value, expected_fp: &str) -> 
     let verifying_key = VerifyingKey::from_bytes(&key_array)?;
 
     // Verify fingerprint matches the public key
-    let actual_fp = {
-        let hash = Sha256::digest(verifying_key.as_bytes());
-        let mut out = String::with_capacity(64);
-        for byte in hash.iter() {
-            use std::fmt::Write;
-            let _ = write!(&mut out, "{byte:02x}");
-        }
-        out
-    };
+    let actual_fp = crate::cas::sha256_hex(verifying_key.as_bytes());
     if actual_fp != expected_fp {
-        bail!(
-            "signing key fingerprint mismatch: expected {expected_fp}, got {actual_fp}"
-        );
+        bail!("signing key fingerprint mismatch: expected {expected_fp}, got {actual_fp}");
     }
 
     // Extract signature
@@ -469,15 +468,7 @@ mod tests {
 
     fn make_identity(sk: &SigningKey) -> (Value, String) {
         let vk = sk.verifying_key();
-        let fp = {
-            let hash = Sha256::digest(vk.as_bytes());
-            let mut out = String::with_capacity(64);
-            for byte in hash.iter() {
-                use std::fmt::Write;
-                let _ = write!(&mut out, "{byte:02x}");
-            }
-            out
-        };
+        let fp = crate::cas::sha256_hex(vk.as_bytes());
         let principal_id = format!("fp:{fp}");
         let signing_key_str = format!(
             "ed25519:{}",
@@ -566,8 +557,12 @@ mod tests {
     #[test]
     fn register_identity_rejects_bad_signature() {
         let dir = std::env::temp_dir().join(format!(
-            "rye_registry_test_{}_{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+            "rye_registry_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -582,7 +577,11 @@ mod tests {
 
         let result = store.register_identity(&doc).unwrap();
         assert_eq!(result.get("ok").and_then(|v| v.as_bool()), Some(false));
-        assert!(result.get("error").and_then(|v| v.as_str()).unwrap().contains("identity signature invalid"));
+        assert!(result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("identity signature invalid"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -590,8 +589,12 @@ mod tests {
     #[test]
     fn publish_rejects_wrong_namespace_owner() {
         let dir = std::env::temp_dir().join(format!(
-            "rye_registry_test2_{}_{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+            "rye_registry_test2_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -605,7 +608,11 @@ mod tests {
             .publish_item("tool", "myns/mytool", "1.0.0", "hash123", "owner_b")
             .unwrap();
         assert_eq!(result.get("ok").and_then(|v| v.as_bool()), Some(false));
-        assert!(result.get("error").and_then(|v| v.as_str()).unwrap().contains("not authorized"));
+        assert!(result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("not authorized"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

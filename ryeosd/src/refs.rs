@@ -1,33 +1,33 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
+/// Acquire an exclusive advisory lock on a per-project lock file.
+/// Returns the lock file handle — lock is released when dropped.
+fn acquire_project_lock(ref_dir: &Path) -> Result<fs::File> {
+    let lock_path = ref_dir.join("ref.lock");
+    fs::create_dir_all(ref_dir)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            bail!("flock failed: {}", std::io::Error::last_os_error());
+        }
     }
-    out
+    Ok(file)
 }
 
 fn project_path_hash(project_path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(project_path.as_bytes());
-    hex_encode(&hasher.finalize())
-}
-
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    crate::cas::sha256_hex(project_path.as_bytes())
 }
 
 pub struct RefStore {
@@ -64,9 +64,10 @@ impl RefStore {
 
     /// Write a generic ref — atomic JSON write of `{ "hash": "<hash>" }`.
     pub fn write_ref(&self, ref_path: &str, hash: &str) -> Result<()> {
+        anyhow::ensure!(lillux::cas::valid_hash(hash), "invalid hash: {hash}");
         let path = self.generic_ref_path(ref_path);
         let data = serde_json::json!({ "hash": hash });
-        atomic_write(&path, serde_json::to_vec(&data)?.as_slice())
+        crate::cas::atomic_write(&path, serde_json::to_vec(&data)?.as_slice())
     }
 
     /// Read a generic ref — returns the hash if the ref exists.
@@ -81,9 +82,10 @@ impl RefStore {
 
     /// Write a pin ref for GC roots.
     pub fn write_pin(&self, name: &str, hash: &str) -> Result<()> {
+        anyhow::ensure!(lillux::cas::valid_hash(hash), "invalid hash: {hash}");
         let path = self.pin_path(name);
         let data = serde_json::json!({ "hash": hash });
-        atomic_write(&path, serde_json::to_vec(&data)?.as_slice())
+        crate::cas::atomic_write(&path, serde_json::to_vec(&data)?.as_slice())
     }
 
     /// Read a pin ref.
@@ -124,6 +126,64 @@ impl RefStore {
         }
         names.sort();
         Ok(names)
+    }
+
+    /// Collect all GC root hashes from every ref source.
+    ///
+    /// Centralizes root enumeration so new ref types cannot silently
+    /// escape GC. Currently scans: project heads, user-space heads,
+    /// pin refs, and generic refs.
+    pub fn gc_root_hashes(&self) -> Result<Vec<String>> {
+        let mut roots = HashSet::new();
+
+        // Project heads
+        for principal_entry in read_dir_safe(&self.cas_root)? {
+            let projects_dir = principal_entry.join("refs").join("projects");
+            if !projects_dir.is_dir() {
+                continue;
+            }
+            for project_entry in read_dir_safe(&projects_dir)? {
+                let head = project_entry.join("head");
+                if head.is_file() {
+                    if let Ok(hash) = fs::read_to_string(&head) {
+                        let hash = hash.trim().to_string();
+                        if !hash.is_empty() {
+                            roots.insert(hash);
+                        }
+                    }
+                }
+            }
+        }
+
+        // User-space heads
+        for principal_entry in read_dir_safe(&self.cas_root)? {
+            let head = principal_entry.join("refs").join("user-space").join("head");
+            if head.is_file() {
+                if let Ok(hash) = fs::read_to_string(&head) {
+                    let hash = hash.trim().to_string();
+                    if !hash.is_empty() {
+                        roots.insert(hash);
+                    }
+                }
+            }
+        }
+
+        // Pin refs
+        if let Ok(pins) = self.list_pins() {
+            for name in &pins {
+                if let Ok(Some(hash)) = self.read_pin(name) {
+                    roots.insert(hash);
+                }
+            }
+        }
+
+        // Generic refs (recursively walks subdirectories)
+        let generic_dir = self.cas_root.join("refs").join("generic");
+        if generic_dir.is_dir() {
+            collect_generic_ref_hashes(&generic_dir, &mut roots)?;
+        }
+
+        Ok(roots.into_iter().collect())
     }
 
     // ── Project / user-space refs ───────────────────────────────────
@@ -173,6 +233,7 @@ impl RefStore {
         expected_snapshot_hash: Option<&str>,
     ) -> Result<bool> {
         let ref_dir = self.project_ref_dir(user_fp, project_path);
+        let _lock = acquire_project_lock(&ref_dir)?;
         let head_file = ref_dir.join("head");
 
         let current = if head_file.exists() {
@@ -187,10 +248,9 @@ impl RefStore {
                     bail!("project ref already exists; expected_snapshot_hash required");
                 }
                 let now = chrono::Utc::now().to_rfc3339();
-                let meta =
-                    serde_json::json!({ "project_path": project_path, "created_at": now });
-                atomic_write(&head_file, new_snapshot_hash.as_bytes())?;
-                atomic_write(
+                let meta = serde_json::json!({ "project_path": project_path, "created_at": now });
+                crate::cas::atomic_write(&head_file, new_snapshot_hash.as_bytes())?;
+                crate::cas::atomic_write(
                     &ref_dir.join("meta.json"),
                     serde_json::to_vec(&meta)?.as_slice(),
                 )?;
@@ -198,7 +258,7 @@ impl RefStore {
             }
             Some(expected) => match &current {
                 Some(c) if c == expected => {
-                    atomic_write(&head_file, new_snapshot_hash.as_bytes())?;
+                    crate::cas::atomic_write(&head_file, new_snapshot_hash.as_bytes())?;
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -218,10 +278,7 @@ impl RefStore {
         let meta_file = ref_dir.join("meta.json");
         if meta_file.exists() {
             let meta: serde_json::Value = serde_json::from_slice(&fs::read(&meta_file)?)?;
-            revision = meta
-                .get("revision")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1);
+            revision = meta.get("revision").and_then(|v| v.as_i64()).unwrap_or(1);
             pushed_at = meta
                 .get("pushed_at")
                 .and_then(|v| v.as_str())
@@ -241,6 +298,7 @@ impl RefStore {
         expected_revision: Option<i64>,
     ) -> Result<UserSpaceRef> {
         let ref_dir = self.user_space_ref_dir(user_fp);
+        let _lock = acquire_project_lock(&ref_dir)?;
         let head_file = ref_dir.join("head");
         let meta_file = ref_dir.join("meta.json");
         let now = chrono::Utc::now().to_rfc3339();
@@ -255,8 +313,7 @@ impl RefStore {
                 1
             }
             Some(expected) => {
-                let cur =
-                    current.ok_or_else(|| anyhow::anyhow!("user space ref not found"))?;
+                let cur = current.ok_or_else(|| anyhow::anyhow!("user space ref not found"))?;
                 if cur.revision != expected {
                     bail!(
                         "revision mismatch: expected {expected}, current {}",
@@ -268,8 +325,8 @@ impl RefStore {
         };
 
         let meta = serde_json::json!({ "revision": new_revision, "pushed_at": now });
-        atomic_write(&head_file, new_manifest_hash.as_bytes())?;
-        atomic_write(&meta_file, serde_json::to_vec(&meta)?.as_slice())?;
+        crate::cas::atomic_write(&head_file, new_manifest_hash.as_bytes())?;
+        crate::cas::atomic_write(&meta_file, serde_json::to_vec(&meta)?.as_slice())?;
 
         Ok(UserSpaceRef {
             user_manifest_hash: new_manifest_hash.to_string(),
@@ -277,4 +334,33 @@ impl RefStore {
             pushed_at: Some(now),
         })
     }
+}
+
+fn read_dir_safe(dir: &Path) -> Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_generic_ref_hashes(dir: &Path, hashes: &mut HashSet<String>) -> Result<()> {
+    for entry in read_dir_safe(dir)? {
+        if entry.is_file() {
+            if let Ok(data) = fs::read(&entry) {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    if let Some(hash) = val.get("hash").and_then(|v| v.as_str()) {
+                        hashes.insert(hash.to_string());
+                    }
+                }
+            }
+        } else if entry.is_dir() {
+            collect_generic_ref_hashes(&entry, hashes)?;
+        }
+    }
+    Ok(())
 }

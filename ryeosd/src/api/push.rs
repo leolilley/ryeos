@@ -86,7 +86,7 @@ pub async fn push(
         user_manifest_hash: None,
         parent_hashes,
         created_at: now,
-        push_type: "push".to_string(),
+        source: "push".to_string(),
     };
     let snapshot_hash = cas.store_object(&snapshot.to_json()).map_err(policy::internal_error)?;
 
@@ -131,6 +131,27 @@ pub async fn push_user_space(
         .map_err(|err| invalid_request(err.into()))?;
 
     let refs = state.refs_store();
+
+    let cas = state.cas_store();
+    if cas
+        .get_object(&req.user_manifest_hash)
+        .map_err(policy::internal_error)?
+        .is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("manifest {} not found in CAS", req.user_manifest_hash)
+            })),
+        ));
+    }
+
+    if let Err(msg) = crate::cas::validate_manifest(cas, &req.user_manifest_hash) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("manifest validation failed: {msg}") })),
+        ));
+    }
 
     let result = refs
         .advance_user_space_ref(&principal_fp, &req.user_manifest_hash, req.expected_revision)

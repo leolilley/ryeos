@@ -8,16 +8,6 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
 
 #[derive(Debug, Clone)]
 pub struct NodeIdentity {
@@ -76,12 +66,11 @@ impl NodeIdentity {
 
     fn from_signing_key(signing_key: SigningKey) -> Result<Self> {
         let verifying_key = signing_key.verifying_key();
-        let mut hasher = Sha256::new();
-        hasher.update(verifying_key.as_bytes());
+        let fingerprint = crate::cas::sha256_hex(verifying_key.as_bytes());
         Ok(Self {
             signing_key,
             verifying_key,
-            fingerprint: hex_encode(&hasher.finalize()),
+            fingerprint,
         })
     }
 
