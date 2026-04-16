@@ -5,6 +5,8 @@ mod broker;
 mod cas;
 mod config;
 mod db;
+mod execution;
+mod gc;
 mod identity;
 mod kind_profiles;
 mod engine_init;
@@ -230,6 +232,7 @@ fn build_router(state: AppState) -> Router {
         .route("/objects/has", post(api::objects::has_objects))
         .route("/objects/put", post(api::objects::put_objects))
         .route("/objects/get", post(api::objects::get_objects))
+        .route("/gc", post(api::gc::run_gc))
         .route("/push", post(api::push::push))
         .route("/push/user-space", post(api::push::push_user_space))
         .route("/user-space", get(api::push::get_user_space))
@@ -253,6 +256,7 @@ fn build_router(state: AppState) -> Router {
             get(api::registry::lookup_identity),
         )
         .route("/vault/set", post(api::vault::vault_set))
+        .route("/vault/get", post(api::vault::vault_get))
         .route("/vault/list", get(api::vault::vault_list))
         .route("/vault/delete", post(api::vault::vault_delete))
         .route(
@@ -263,6 +267,13 @@ fn build_router(state: AppState) -> Router {
             "/webhook-bindings/:hook_id",
             axum::routing::delete(api::webhooks::revoke_webhook),
         )
+        .route(
+            "/webhooks/inbound/:hook_id",
+            post(api::webhooks::inbound_webhook),
+        )
+        .route("/refs/pins", get(api::pins::list_pins).post(api::pins::write_pin))
+        .route("/refs/pins/:name", axum::routing::delete(api::pins::delete_pin))
+        .route("/refs/generic/*ref_path", get(api::refs::get_ref).put(api::refs::put_ref))
         .with_state(state)
 }
 

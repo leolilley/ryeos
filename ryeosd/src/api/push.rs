@@ -71,17 +71,24 @@ pub async fn push(
         ));
     }
 
+    // Deep manifest validation: verify all referenced objects/blobs exist
+    if let Err(msg) = crate::cas::validate_manifest(cas, &req.project_manifest_hash) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("manifest validation failed: {msg}") })),
+        ));
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
-    let parent_hashes: Vec<&str> = current_head.as_deref().into_iter().collect();
-    let snapshot = json!({
-        "kind": "project_snapshot",
-        "schema": 2,
-        "project_manifest_hash": req.project_manifest_hash,
-        "parent_hashes": parent_hashes,
-        "source": "push",
-        "timestamp": now,
-    });
-    let snapshot_hash = cas.store_object(&snapshot).map_err(policy::internal_error)?;
+    let parent_hashes: Vec<String> = current_head.as_deref().into_iter().map(String::from).collect();
+    let snapshot = crate::cas::ProjectSnapshot {
+        project_manifest_hash: req.project_manifest_hash.clone(),
+        user_manifest_hash: None,
+        parent_hashes,
+        created_at: now,
+        push_type: "push".to_string(),
+    };
+    let snapshot_hash = cas.store_object(&snapshot.to_json()).map_err(policy::internal_error)?;
 
     if !refs
         .advance_project_ref(

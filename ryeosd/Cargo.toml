@@ -20,6 +20,7 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 futures-core = "0.3"
+hmac = "0.12"
 rand = "0.8"
 rmp-serde = "1"
 rye_engine = { path = "../rye_engine" }

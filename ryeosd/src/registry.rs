@@ -1,8 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use base64::Engine as _;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::cas::CasStore;
 
@@ -179,6 +182,16 @@ impl RegistryStore {
             item_id
         };
 
+        // Verify publisher owns or is authorized for the namespace
+        if let Some(ns_owner) = self.namespace_owner(namespace)? {
+            if ns_owner != publisher_fp {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("publisher {publisher_fp} is not authorized for namespace '{namespace}' (owned by {ns_owner})")
+                }));
+            }
+        }
+
         let lock_path = self.registry_dir().join("index.lock");
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
@@ -315,6 +328,11 @@ impl RegistryStore {
             return Ok(json!({ "ok": false, "error": "invalid fingerprint" }));
         }
 
+        // Verify self-signature on identity document
+        if let Err(e) = verify_identity_self_signature(identity_doc, fingerprint) {
+            return Ok(json!({ "ok": false, "error": format!("identity signature invalid: {e}") }));
+        }
+
         let identity_hash = self.cas.store_object(identity_doc)?;
 
         let id_dir = self.identities_dir();
@@ -337,5 +355,258 @@ impl RegistryStore {
         }
         let identity_hash = fs::read_to_string(&id_file)?.trim().to_string();
         self.cas.get_object(&identity_hash)
+    }
+
+    /// Look up who owns a namespace. Returns None if unclaimed.
+    fn namespace_owner(&self, namespace: &str) -> Result<Option<String>> {
+        let ns_file = self.namespace_dir().join(namespace);
+        if !ns_file.exists() {
+            return Ok(None);
+        }
+        let record: Value = serde_json::from_slice(&fs::read(&ns_file)?)?;
+        Ok(record.get("owner").and_then(|v| v.as_str()).map(String::from))
+    }
+}
+
+// ── Identity signature verification ─────────────────────────────────
+
+/// Verify the self-signature on a public identity document.
+///
+/// The identity doc structure (from `ryeosd/src/identity.rs`):
+/// ```json
+/// {
+///   "kind": "identity/v1",
+///   "principal_id": "fp:<fingerprint>",
+///   "signing_key": "ed25519:<base64>",
+///   "created_at": "...",
+///   "_signature": {
+///     "signer": "fp:<fingerprint>",
+///     "sig": "<base64>",
+///     "signed_at": "..."
+///   }
+/// }
+/// ```
+///
+/// The signature is computed over the canonical JSON of the unsigned
+/// document (all fields except `_signature`).
+pub(crate) fn verify_identity_self_signature(doc: &Value, expected_fp: &str) -> Result<()> {
+    // Extract signing key
+    let signing_key_str = doc
+        .get("signing_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing signing_key"))?;
+
+    if !signing_key_str.starts_with("ed25519:") {
+        bail!("unsupported signing key format: {signing_key_str}");
+    }
+    let key_b64 = &signing_key_str["ed25519:".len()..];
+    let key_bytes = base64::engine::general_purpose::STANDARD.decode(key_b64)?;
+    let key_array: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signing key must be 32 bytes"))?;
+    let verifying_key = VerifyingKey::from_bytes(&key_array)?;
+
+    // Verify fingerprint matches the public key
+    let actual_fp = {
+        let hash = Sha256::digest(verifying_key.as_bytes());
+        let mut out = String::with_capacity(64);
+        for byte in hash.iter() {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+        out
+    };
+    if actual_fp != expected_fp {
+        bail!(
+            "signing key fingerprint mismatch: expected {expected_fp}, got {actual_fp}"
+        );
+    }
+
+    // Extract signature
+    let sig_section = doc
+        .get("_signature")
+        .ok_or_else(|| anyhow::anyhow!("missing _signature"))?;
+    let sig_b64 = sig_section
+        .get("sig")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing _signature.sig"))?;
+
+    // Verify signer matches principal
+    let signer = sig_section
+        .get("signer")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let expected_signer = format!("fp:{expected_fp}");
+    if signer != expected_signer {
+        bail!("signer mismatch: expected {expected_signer}, got {signer}");
+    }
+
+    // Reconstruct the unsigned payload (same as identity.rs build_public_identity)
+    let unsigned = json!({
+        "kind": doc.get("kind").and_then(|v| v.as_str()).unwrap_or("identity/v1"),
+        "principal_id": doc.get("principal_id").and_then(|v| v.as_str()).unwrap_or(""),
+        "signing_key": signing_key_str,
+        "created_at": doc.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+    let payload = serde_json::to_vec(&unsigned)?;
+
+    // Decode and verify signature
+    let sig_bytes = base64::engine::general_purpose::STANDARD.decode(sig_b64)?;
+    let signature = Signature::from_slice(&sig_bytes)?;
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|_| anyhow::anyhow!("Ed25519 signature verification failed"))?;
+
+    Ok(())
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn make_identity(sk: &SigningKey) -> (Value, String) {
+        let vk = sk.verifying_key();
+        let fp = {
+            let hash = Sha256::digest(vk.as_bytes());
+            let mut out = String::with_capacity(64);
+            for byte in hash.iter() {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "{byte:02x}");
+            }
+            out
+        };
+        let principal_id = format!("fp:{fp}");
+        let signing_key_str = format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(vk.as_bytes())
+        );
+        let created_at = "2026-04-10T00:00:00Z";
+
+        let unsigned = json!({
+            "kind": "identity/v1",
+            "principal_id": principal_id,
+            "signing_key": signing_key_str,
+            "created_at": created_at,
+        });
+        let payload = serde_json::to_vec(&unsigned).unwrap();
+        let signature: Signature = sk.sign(&payload);
+
+        let doc = json!({
+            "kind": "identity/v1",
+            "principal_id": principal_id,
+            "signing_key": signing_key_str,
+            "created_at": created_at,
+            "_signature": {
+                "signer": principal_id,
+                "sig": base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+                "signed_at": created_at,
+            }
+        });
+        (doc, fp)
+    }
+
+    #[test]
+    fn verify_valid_identity_signature() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let (doc, fp) = make_identity(&sk);
+        assert!(verify_identity_self_signature(&doc, &fp).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_wrong_fingerprint() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let (doc, _) = make_identity(&sk);
+        let err = verify_identity_self_signature(&doc, "wrong_fp").unwrap_err();
+        assert!(err.to_string().contains("fingerprint mismatch"));
+    }
+
+    #[test]
+    fn verify_identity_tampered_doc() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let (mut doc, fp) = make_identity(&sk);
+        // Tamper with created_at — signature should fail
+        doc.as_object_mut()
+            .unwrap()
+            .insert("created_at".to_string(), json!("2099-01-01T00:00:00Z"));
+        let err = verify_identity_self_signature(&doc, &fp).unwrap_err();
+        assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn verify_identity_wrong_signer() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let (mut doc, fp) = make_identity(&sk);
+        // Tamper with signer field
+        doc.get_mut("_signature")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("signer".to_string(), json!("fp:wrong"));
+        let err = verify_identity_self_signature(&doc, &fp).unwrap_err();
+        assert!(err.to_string().contains("signer mismatch"));
+    }
+
+    #[test]
+    fn verify_identity_missing_signature() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let (doc_with_sig, fp) = make_identity(&sk);
+        // Remove _signature from a valid doc
+        let mut doc = doc_with_sig.clone();
+        doc.as_object_mut().unwrap().remove("_signature");
+        let err = verify_identity_self_signature(&doc, &fp).unwrap_err();
+        assert!(
+            err.to_string().contains("missing _signature"),
+            "expected 'missing _signature', got: {err}"
+        );
+    }
+
+    #[test]
+    fn register_identity_rejects_bad_signature() {
+        let dir = std::env::temp_dir().join(format!(
+            "rye_registry_test_{}_{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = RegistryStore::new(dir.clone());
+
+        // Doc with wrong signature
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let (mut doc, _fp) = make_identity(&sk);
+        doc.as_object_mut()
+            .unwrap()
+            .insert("created_at".to_string(), json!("tampered"));
+
+        let result = store.register_identity(&doc).unwrap();
+        assert_eq!(result.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert!(result.get("error").and_then(|v| v.as_str()).unwrap().contains("identity signature invalid"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn publish_rejects_wrong_namespace_owner() {
+        let dir = std::env::temp_dir().join(format!(
+            "rye_registry_test2_{}_{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = RegistryStore::new(dir.clone());
+
+        // Claim namespace as "owner_a"
+        store.claim_namespace("myns", "owner_a").unwrap();
+
+        // Try to publish as "owner_b"
+        let result = store
+            .publish_item("tool", "myns/mytool", "1.0.0", "hash123", "owner_b")
+            .unwrap();
+        assert_eq!(result.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert!(result.get("error").and_then(|v| v.as_str()).unwrap().contains("not authorized"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

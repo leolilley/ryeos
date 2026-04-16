@@ -335,7 +335,6 @@ mod tests {
             }),
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Inline,
-            budget: None,
         }
     }
 

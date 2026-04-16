@@ -52,6 +52,82 @@ impl RefStore {
         Self { cas_root }
     }
 
+    // ── Generic refs ────────────────────────────────────────────────
+
+    fn generic_ref_path(&self, ref_path: &str) -> PathBuf {
+        self.cas_root.join("refs").join("generic").join(ref_path)
+    }
+
+    fn pin_path(&self, name: &str) -> PathBuf {
+        self.cas_root.join("refs").join("pins").join(name)
+    }
+
+    /// Write a generic ref — atomic JSON write of `{ "hash": "<hash>" }`.
+    pub fn write_ref(&self, ref_path: &str, hash: &str) -> Result<()> {
+        let path = self.generic_ref_path(ref_path);
+        let data = serde_json::json!({ "hash": hash });
+        atomic_write(&path, serde_json::to_vec(&data)?.as_slice())
+    }
+
+    /// Read a generic ref — returns the hash if the ref exists.
+    pub fn read_ref(&self, ref_path: &str) -> Result<Option<String>> {
+        let path = self.generic_ref_path(ref_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        Ok(data.get("hash").and_then(|v| v.as_str()).map(String::from))
+    }
+
+    /// Write a pin ref for GC roots.
+    pub fn write_pin(&self, name: &str, hash: &str) -> Result<()> {
+        let path = self.pin_path(name);
+        let data = serde_json::json!({ "hash": hash });
+        atomic_write(&path, serde_json::to_vec(&data)?.as_slice())
+    }
+
+    /// Read a pin ref.
+    pub fn read_pin(&self, name: &str) -> Result<Option<String>> {
+        let path = self.pin_path(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        Ok(data.get("hash").and_then(|v| v.as_str()).map(String::from))
+    }
+
+    /// Delete a pin ref. Returns true if removed, false if not found.
+    pub fn delete_pin(&self, name: &str) -> Result<bool> {
+        let path = self.pin_path(name);
+        if path.exists() {
+            fs::remove_file(&path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List all pin names.
+    pub fn list_pins(&self) -> Result<Vec<String>> {
+        let pins_dir = self.cas_root.join("refs").join("pins");
+        if !pins_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&pins_dir)? {
+            let entry = entry?;
+            if entry.path().is_file() {
+                if let Some(name) = entry.file_name().to_str() {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    // ── Project / user-space refs ───────────────────────────────────
+
     fn project_ref_dir(&self, user_fp: &str, project_path: &str) -> PathBuf {
         self.cas_root
             .join(user_fp)

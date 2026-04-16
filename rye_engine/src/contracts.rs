@@ -185,31 +185,6 @@ pub struct ExecutionHints {
     pub values: HashMap<String, Value>,
 }
 
-// ── Budget ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BudgetRequest {
-    pub max_spend: f64,
-}
-
-// ── Execute request ──────────────────────────────────────────────────
-
-/// The public daemon request shape for root execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteRequest {
-    pub item_ref: String,
-    pub project_context: ProjectContext,
-    #[serde(default)]
-    pub parameters: Value,
-    pub launch_mode: LaunchMode,
-    pub target_site_id: Option<String>,
-    #[serde(default)]
-    pub execution_hints: ExecutionHints,
-    pub budget: Option<BudgetRequest>,
-    #[serde(default)]
-    pub validate_only: bool,
-}
-
 // ── Principal ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,9 +252,6 @@ pub struct EngineContext {
     pub requested_by: EffectivePrincipal,
     pub project_context: ProjectContext,
     pub launch_mode: LaunchMode,
-    /// Optional budget for this execution. Real spend tracking is
-    /// daemon-owned; the engine only validates non-negative values.
-    pub budget: Option<BudgetRequest>,
 }
 
 // ── Plan IR ──────────────────────────────────────────────────────────
@@ -508,15 +480,4 @@ pub struct EventEnvelope {
     pub sequence: i64,
 }
 
-// ── Forwarded execution ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForwardedExecuteRequest {
-    pub protocol_version: String,
-    pub idempotency_key: String,
-    pub request_hash: String,
-    pub origin_site_id: String,
-    pub mirror_thread_id: String,
-    pub delegated_principal: DelegatedPrincipal,
-    pub execute: ExecuteRequest,
-}

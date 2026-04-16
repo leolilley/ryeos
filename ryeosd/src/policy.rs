@@ -10,11 +10,15 @@ use crate::state::AppState;
 /// Canonical principal ID, always in `fp:<hex>` format.
 pub fn request_principal_id(
     request: &axum::http::Request<axum::body::Body>,
-    state: &AppState,
+    _state: &AppState,
 ) -> String {
     match request.extensions().get::<Principal>() {
         Some(p) => normalize_fingerprint(&p.fingerprint),
-        None => state.identity.principal_id(), // auth disabled fallback
+        None => {
+            // TODO: auth required — no fallback when no principal present
+            // None => state.identity.principal_id(), // auth disabled fallback
+            panic!("no principal in request and no auth fallback configured");
+        }
     }
 }
 
@@ -28,10 +32,7 @@ pub fn request_scopes(request: &axum::http::Request<axum::body::Body>) -> Vec<St
 
 /// Check that scopes include a required scope (or wildcard).
 /// Returns Err with 403 FORBIDDEN if insufficient.
-pub fn require_scope(
-    scopes: &[String],
-    required: &str,
-) -> Result<(), (StatusCode, Json<Value>)> {
+pub fn require_scope(scopes: &[String], required: &str) -> Result<(), (StatusCode, Json<Value>)> {
     if scopes.iter().any(|s| s == "*" || s == required) {
         Ok(())
     } else {
@@ -105,7 +106,9 @@ pub fn enforce_trust(
             );
             Err((
                 StatusCode::FORBIDDEN,
-                Json(json!({ "error": format!("{} space requires trusted signatures", space.as_str()) })),
+                Json(
+                    json!({ "error": format!("{} space requires trusted signatures", space.as_str()) }),
+                ),
             ))
         }
     }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -5,12 +7,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::task;
 
-use rye_engine::contracts::ExecutionCompletion;
-
+use crate::execution::runner::{self, ExecutionParams};
 use crate::policy;
-use crate::services::thread_lifecycle::{
-    self, ThreadAttachProcessParams, ThreadFinalizeParams,
-};
+use crate::services::thread_lifecycle;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +25,14 @@ pub struct ExecuteRequest {
     pub launch_mode: String,
     #[serde(default)]
     pub target_site_id: Option<String>,
+    #[serde(default)]
+    pub validate_only: bool,
+    /// Vault secret keys to resolve and inject as env vars.
+    #[serde(default)]
+    pub vault_keys: Option<Vec<String>>,
+    /// CAS project snapshot hash — if set, checkout from CAS instead of local path.
+    #[serde(default)]
+    pub project_snapshot_hash: Option<String>,
 }
 
 fn default_launch_mode() -> String {
@@ -62,8 +69,9 @@ pub async fn execute(
             &request.item_ref,
             &request.launch_mode,
             request.parameters.clone(),
-            Some(caller_principal_id),
+            Some(caller_principal_id.clone()),
             caller_scopes,
+            request.validate_only,
         )
         .map_err(invalid_request)?;
 
@@ -78,185 +86,65 @@ pub async fn execute(
         )));
     }
 
-    let created_thread = state
-        .threads
-        .create_root_thread(&resolved)
-        .map_err(policy::internal_error)?;
-    let running_thread = state
-        .threads
-        .mark_running(&created_thread.thread_id)
-        .map_err(policy::internal_error)?;
-
-    if request.launch_mode == "detached" {
-        let bg_state = state.clone();
-        let bg_thread_id = running_thread.thread_id.clone();
-        let bg_chain_root_id = running_thread.chain_root_id.clone();
-        let bg_resolved = resolved.clone();
-        let bg_engine = state.engine.clone();
-        tokio::spawn(async move {
-            let thread_id_for_spawn = bg_thread_id.clone();
-            let chain_root_for_spawn = bg_chain_root_id.clone();
-            let resolved_for_spawn = bg_resolved.clone();
-            let engine_for_spawn = bg_engine.clone();
-
-            // Spawn phase (blocking)
-            let spawn_result = task::spawn_blocking(move || {
-                thread_lifecycle::spawn_item(
-                    &engine_for_spawn,
-                    &resolved_for_spawn,
-                    &thread_id_for_spawn,
-                    &chain_root_for_spawn,
-                )
-            }).await;
-
-            match spawn_result {
-                Ok(Ok(spawned)) => {
-                    // Attach pid/pgid
-                    let _ = bg_state.threads.attach_process(
-                        &ThreadAttachProcessParams {
-                            thread_id: bg_thread_id.clone(),
-                            pid: spawned.pid as i64,
-                            pgid: spawned.pgid,
-                            metadata: None,
-                        },
-                    );
-
-                    // Wait phase (blocking)
-                    let wait_result = task::spawn_blocking(move || spawned.wait()).await;
-                    match wait_result {
-                        Ok(completion) => {
-                            let _ = finalize_completion(&bg_state, &bg_thread_id, completion);
-                        }
-                        Err(join_err) => {
-                            tracing::error!(error = %join_err, "task panic during detached wait");
-                            let _ = bg_state.threads.finalize_thread(&ThreadFinalizeParams {
-                                thread_id: bg_thread_id,
-                                status: "failed".to_string(),
-                                outcome_code: Some("task_panic".to_string()),
-                                result: None,
-                                error: Some(json!({ "code": "task_panic" })),
-                                metadata: None,
-                                artifacts: Vec::new(),
-                                final_cost: None,
-                                summary_json: None,
-                            });
-                        }
-                    }
-                }
-                Ok(Err(err)) => {
-                    tracing::error!(error = %err, "engine error during detached spawn");
-                    let _ = bg_state.threads.finalize_thread(&ThreadFinalizeParams {
-                        thread_id: bg_thread_id,
-                        status: "failed".to_string(),
-                        outcome_code: Some("engine_error".to_string()),
-                        result: None,
-                        error: Some(json!({ "code": "engine_error" })),
-                        metadata: None,
-                        artifacts: Vec::new(),
-                        final_cost: None,
-                        summary_json: None,
-                    });
-                }
-                Err(join_err) => {
-                    tracing::error!(error = %join_err, "task panic during detached spawn");
-                    let _ = bg_state.threads.finalize_thread(&ThreadFinalizeParams {
-                        thread_id: bg_thread_id,
-                        status: "failed".to_string(),
-                        outcome_code: Some("task_panic".to_string()),
-                        result: None,
-                        error: Some(json!({ "code": "task_panic" })),
-                        metadata: None,
-                        artifacts: Vec::new(),
-                        final_cost: None,
-                        summary_json: None,
-                    });
-                }
-            }
-        });
+    if request.validate_only {
+        let engine = state.engine.clone();
+        let resolved_clone = resolved.clone();
+        let validated = task::spawn_blocking(move || {
+            thread_lifecycle::validate_item(&engine, &resolved_clone)
+        })
+        .await
+        .map_err(|err| policy::internal_error(err.into()))?
+        .map_err(invalid_request)?;
 
         return Ok(Json(json!({
-            "thread": running_thread,
+            "validated": true,
+            "item_ref": resolved.item_ref,
+            "kind": resolved.kind,
+            "executor_ref": resolved.executor_ref,
+            "trust_class": validated.trust_class,
+            "plan_id": validated.plan_id,
+        })));
+    }
+
+    // Resolve vault env vars
+    let vault_bindings = match &request.vault_keys {
+        Some(keys) if !keys.is_empty() => state
+            .vault_store()
+            .resolve_vault_env(&caller_principal_id, keys)
+            .map_err(policy::internal_error)?,
+        _ => HashMap::new(),
+    };
+
+    let params = ExecutionParams {
+        resolved,
+        acting_principal: caller_principal_id,
+        project_path,
+        vault_bindings,
+        project_snapshot_hash: request.project_snapshot_hash,
+        item_ref: request.item_ref,
+        parameters: request.parameters,
+    };
+
+    if request.launch_mode == "detached" {
+        let result = runner::run_detached(state.clone(), params)
+            .await
+            .map_err(|err| policy::internal_error(err.into()))?;
+
+        return Ok(Json(json!({
+            "thread": result.running_thread,
             "detached": true,
         })));
     }
 
-    // Inline execution: spawn → attach process → wait
-    let engine = state.engine.clone();
-    let thread_id_for_spawn = running_thread.thread_id.clone();
-    let chain_root_id_for_spawn = running_thread.chain_root_id.clone();
-    let spawned = task::spawn_blocking(move || {
-        thread_lifecycle::spawn_item(&engine, &resolved, &thread_id_for_spawn, &chain_root_id_for_spawn)
-    })
-    .await
-    .map_err(|err| policy::internal_error(err.into()))?
-    .map_err(|err| {
-        tracing::error!(error = %err, "engine error during inline spawn");
-        let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
-            thread_id: running_thread.thread_id.clone(),
-            status: "failed".to_string(),
-            outcome_code: Some("engine_error".to_string()),
-            result: None,
-            error: Some(json!({ "code": "engine_error" })),
-            metadata: None,
-            artifacts: Vec::new(),
-            final_cost: None,
-            summary_json: None,
-        });
-        policy::internal_error(err)
-    })?;
-
-    // Persist pid/pgid so kill/shutdown can find this process
-    let _ = state.threads.attach_process(&ThreadAttachProcessParams {
-        thread_id: running_thread.thread_id.clone(),
-        pid: spawned.pid as i64,
-        pgid: spawned.pgid,
-        metadata: None,
-    });
-
-    // Now wait for completion (blocking)
-    let completion = task::spawn_blocking(move || spawned.wait())
+    // Inline execution
+    let result = runner::run_inline(state.clone(), params)
         .await
         .map_err(|err| policy::internal_error(err.into()))?;
 
-    let finalized_thread = finalize_completion(&state, &running_thread.thread_id, completion)
-        .map_err(policy::internal_error)?;
-    let result = state
-        .threads
-        .build_execute_result(&finalized_thread.thread_id)
-        .map_err(policy::internal_error)?;
-
     Ok(Json(json!({
-        "thread": finalized_thread,
-        "result": result,
+        "thread": result.finalized_thread,
+        "result": result.result,
     })))
-}
-
-fn finalize_completion(
-    state: &AppState,
-    thread_id: &str,
-    completion: ExecutionCompletion,
-) -> anyhow::Result<crate::db::ThreadDetail> {
-    match state
-        .threads
-        .finalize_from_completion(thread_id, &completion)
-    {
-        Ok(thread) => Ok(thread),
-        Err(err) => {
-            tracing::error!(error = %err, "invalid completion during finalization");
-            let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: thread_id.to_string(),
-                status: "failed".to_string(),
-                outcome_code: Some("invalid_completion".to_string()),
-                result: None,
-                error: Some(json!({ "code": "invalid_completion" })),
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost: None,
-                summary_json: None,
-            });
-            Err(err)
-        }
-    }
 }
 
 fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {

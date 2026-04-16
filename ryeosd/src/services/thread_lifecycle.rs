@@ -12,11 +12,11 @@ use rye_engine::canonical_ref::CanonicalRef;
 use rye_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact,
     ExecutionCompletion, ExecutionHints, FinalCost, LaunchMode, PlanContext,
-    Principal, ProjectContext, ResolvedItem, ThreadTerminalStatus,
+    Principal, ProjectContext, ResolvedItem, ThreadTerminalStatus, TrustClass,
 };
 use rye_engine::engine::Engine;
 use crate::db::{
-    Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, RuntimeCostRecord,
+    Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord,
     ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use crate::kind_profiles::KindProfileRegistry;
@@ -291,7 +291,8 @@ impl ThreadLifecycleService {
                     .iter()
                     .map(artifact_to_record)
                     .collect(),
-                final_cost: completion.final_cost.as_ref().map(cost_to_record),
+                final_cost: completion.final_cost.as_ref().map(cost_to_facets),
+                actual_spend: completion.final_cost.as_ref().map(|c| c.spend),
                 summary_json: completion
                     .result
                     .as_ref()
@@ -345,7 +346,8 @@ impl ThreadLifecycleService {
                 error_json: params.error.clone(),
                 metadata: params.metadata.clone(),
                 artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
-                final_cost: params.final_cost.as_ref().map(cost_to_record),
+                final_cost: params.final_cost.as_ref().map(cost_to_facets),
+                actual_spend: params.final_cost.as_ref().map(|c| c.spend),
                 summary_json: params.summary_json.clone(),
                 budget_status: Some("released".to_string()),
                 budget_metadata: None,
@@ -509,15 +511,22 @@ fn artifact_to_record(artifact: &ExecutionArtifact) -> NewArtifactRecord {
     }
 }
 
-fn cost_to_record(cost: &FinalCost) -> RuntimeCostRecord {
-    RuntimeCostRecord {
-        provider: cost.provider.clone(),
-        turns: cost.turns,
-        input_tokens: cost.input_tokens,
-        output_tokens: cost.output_tokens,
-        spend: cost.spend,
-        metadata: cost.metadata.clone(),
+fn cost_to_facets(cost: &FinalCost) -> Vec<(String, String)> {
+    let mut facets = vec![
+        ("cost.turns".to_string(), cost.turns.to_string()),
+        ("cost.input_tokens".to_string(), cost.input_tokens.to_string()),
+        ("cost.output_tokens".to_string(), cost.output_tokens.to_string()),
+        ("cost.spend".to_string(), cost.spend.to_string()),
+    ];
+    if let Some(provider) = &cost.provider {
+        facets.push(("cost.provider".to_string(), provider.clone()));
     }
+    if let Some(metadata) = &cost.metadata {
+        if let Ok(s) = serde_json::to_string(metadata) {
+            facets.push(("cost.metadata_json".to_string(), s));
+        }
+    }
+    facets
 }
 
 fn new_thread_id() -> String {
@@ -554,6 +563,7 @@ pub fn resolve_root_execution(
     parameters: Value,
     requested_by: Option<String>,
     caller_scopes: Vec<String>,
+    validate_only: bool,
 ) -> Result<ResolvedExecutionRequest> {
     let project_path = project_path.as_ref().to_path_buf();
 
@@ -571,7 +581,7 @@ pub fn resolve_root_execution(
         current_site_id: site_id.to_string(),
         origin_site_id: site_id.to_string(),
         execution_hints: ExecutionHints::default(),
-        validate_only: false,
+        validate_only,
     };
 
     let resolved = engine.resolve(&plan_ctx, &canonical_ref)
@@ -598,6 +608,38 @@ pub fn resolve_root_execution(
     })
 }
 
+/// Result of dry-run validation (verify + trust + build_plan, no spawn).
+pub struct ValidatedItem {
+    pub trust_class: TrustClass,
+    pub plan_id: String,
+}
+
+/// Run verify → trust → build_plan without spawning.
+pub fn validate_item(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+) -> Result<ValidatedItem> {
+    let verified = engine.verify(&resolved.plan_context, resolved.resolved_item.clone())
+        .map_err(|e| anyhow!("verification failed: {e}"))?;
+
+    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space)
+        .map_err(|(_status, json_body)| {
+            anyhow!("trust policy denied: {}", json_body.0.get("error").and_then(|e| e.as_str()).unwrap_or("unknown"))
+        })?;
+
+    let plan = engine.build_plan(
+        &resolved.plan_context,
+        &verified,
+        &resolved.parameters,
+        &resolved.plan_context.execution_hints,
+    ).map_err(|e| anyhow!("plan build failed: {e}"))?;
+
+    Ok(ValidatedItem {
+        trust_class: verified.trust_class,
+        plan_id: plan.plan_id,
+    })
+}
+
 /// Result of spawning the engine pipeline.
 pub struct SpawnedItem {
     pub pid: u32,
@@ -619,6 +661,7 @@ pub fn spawn_item(
     resolved: &ResolvedExecutionRequest,
     thread_id: &str,
     chain_root_id: &str,
+    extra_runtime_bindings: std::collections::HashMap<String, String>,
 ) -> Result<SpawnedItem> {
     let verified = engine.verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
@@ -629,12 +672,21 @@ pub fn spawn_item(
             anyhow!("trust policy denied: {}", json_body.0.get("error").and_then(|e| e.as_str()).unwrap_or("unknown"))
         })?;
 
-    let plan = engine.build_plan(
+    let mut plan = engine.build_plan(
         &resolved.plan_context,
         &verified,
         &resolved.parameters,
         &resolved.plan_context.execution_hints,
     ).map_err(|e| anyhow!("plan build failed: {e}"))?;
+
+    // Inject extra runtime bindings (e.g. vault env vars) into subprocess nodes
+    if !extra_runtime_bindings.is_empty() {
+        for node in &mut plan.nodes {
+            if let rye_engine::contracts::PlanNode::DispatchSubprocess { runtime_bindings, .. } = node {
+                runtime_bindings.extend(extra_runtime_bindings.clone());
+            }
+        }
+    }
 
     let engine_ctx = EngineContext {
         thread_id: thread_id.to_string(),
@@ -651,7 +703,6 @@ pub fn spawn_item(
         } else {
             LaunchMode::Inline
         },
-        budget: None,
     };
 
     let spawned = engine.spawn_plan(&engine_ctx, &plan)

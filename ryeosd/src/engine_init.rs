@@ -45,8 +45,7 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
     let kinds = if schema_roots.is_empty() {
         anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing .ai/config/engine/kinds/");
     } else {
-        KindRegistry::load_base(&schema_roots)
-            .context("failed to load kind schemas")?
+        KindRegistry::load_base(&schema_roots).context("failed to load kind schemas")?
     };
 
     if !kinds.is_empty() {
@@ -67,25 +66,20 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
     // 5. System roots for three-tier resolution
     let system_roots = vec![config.system_data_dir.clone()];
 
-    // 6. Load trust store from daemon's trusted keys directory
-    let trust_keys_dir = config.state_dir.join("trust").join("trusted_keys");
-    let trust_store = if trust_keys_dir.exists() {
-        match TrustStore::load_from_dir(&trust_keys_dir) {
-            Ok(store) => {
-                tracing::info!(path = %trust_keys_dir.display(), "loaded trust store");
-                store
-            }
-            Err(err) => {
-                tracing::error!(
-                    path = %trust_keys_dir.display(),
-                    error = %err,
-                    "failed to load trust store"
-                );
-                TrustStore::empty()
-            }
+    // 6. Load trust store with three-tier resolution (project > user > system)
+    let trust_store = match TrustStore::load_three_tier(
+        None, // project root not known at daemon startup — resolved per-request
+        user_root.as_deref(),
+        &system_roots,
+    ) {
+        Ok(store) => {
+            tracing::info!(count = store.len(), "loaded trust store (three-tier)");
+            store
         }
-    } else {
-        TrustStore::empty()
+        Err(err) => {
+            tracing::error!(error = %err, "failed to load trust store");
+            TrustStore::empty()
+        }
     };
 
     // 7. Construct engine

@@ -78,6 +78,43 @@ impl VaultStore {
         Ok(names)
     }
 
+    /// Retrieve a secret envelope by name.
+    pub fn get_secret(&self, user_fp: &str, name: &str) -> Result<Option<Value>> {
+        if !is_safe_secret_name(name) {
+            bail!("invalid secret name: {name:?}");
+        }
+        let path = self.vault_dir(user_fp).join(format!("{name}.json"));
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let data = fs::read(&path)?;
+        let record: Value = serde_json::from_slice(&data)?;
+        Ok(record.get("envelope").cloned())
+    }
+
+    /// Resolve vault secrets into environment variables for execution.
+    ///
+    /// Given a list of vault key names, looks up each secret and extracts
+    /// the `value` field from the envelope. Returns a map of
+    /// `RYE_VAULT_{NAME}` → value suitable for injection as env vars.
+    pub fn resolve_vault_env(
+        &self,
+        user_fp: &str,
+        vault_keys: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut env = std::collections::HashMap::new();
+        for key in vault_keys {
+            if let Some(envelope) = self.get_secret(user_fp, key)? {
+                // Extract the value from the envelope
+                if let Some(value) = envelope.get("value").and_then(|v| v.as_str()) {
+                    let env_name = format!("RYE_VAULT_{}", key.to_uppercase().replace('-', "_"));
+                    env.insert(env_name, value.to_string());
+                }
+            }
+        }
+        Ok(env)
+    }
+
     pub fn delete_secret(&self, user_fp: &str, name: &str) -> Result<bool> {
         if !is_safe_secret_name(name) {
             bail!("invalid secret name: {name:?}");

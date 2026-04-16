@@ -145,6 +145,14 @@ impl NodeIdentity {
         &self.fingerprint
     }
 
+    pub fn verifying_key(&self) -> &VerifyingKey {
+        &self.verifying_key
+    }
+
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
+
     pub fn verify_hash(&self, hash_hex: &str, signature: &Signature) -> Result<()> {
         self.verifying_key
             .verify(hash_hex.as_bytes(), signature)

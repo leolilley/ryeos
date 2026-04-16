@@ -1,10 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
 
 fn random_hex(len: usize) -> String {
     let mut rng = rand::thread_rng();
@@ -188,6 +192,59 @@ impl WebhookStore {
         }
         results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(results)
+    }
+
+    /// Resolve a webhook binding by hook_id.
+    ///
+    /// Returns the binding if it exists and is active.
+    pub fn resolve_binding(&self, hook_id: &str) -> Result<Option<WebhookBinding>> {
+        let index = self.read_index()?;
+        let val = match index.get(hook_id) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let binding: WebhookBinding = serde_json::from_value(val.clone())?;
+        if !binding.active || binding.revoked_at.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(binding))
+    }
+
+    /// Verify an HMAC signature for an inbound webhook request.
+    ///
+    /// The signature header is expected to be `sha256=<hex>` format.
+    pub fn verify_hmac(
+        &self,
+        hook_id: &str,
+        payload: &[u8],
+        signature_header: &str,
+    ) -> Result<bool> {
+        let secret_path = self.secret_path(hook_id);
+        if !secret_path.exists() {
+            bail!("HMAC secret not found for hook {hook_id}");
+        }
+        let secret = fs::read_to_string(&secret_path)?;
+
+        let expected_hex = signature_header
+            .strip_prefix("sha256=")
+            .unwrap_or(signature_header);
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("HMAC init failed: {e}"))?;
+        mac.update(payload);
+        let result = mac.finalize().into_bytes();
+
+        let computed_hex = Self::hex_encode_bytes(&result);
+        Ok(computed_hex == expected_hex)
+    }
+
+    fn hex_encode_bytes(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
     }
 
     pub fn revoke_binding(

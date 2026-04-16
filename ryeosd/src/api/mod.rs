@@ -1,9 +1,12 @@
 pub mod commands;
 pub mod events;
 pub mod execute;
+pub mod gc;
 pub mod health;
 pub mod objects;
+pub mod pins;
 pub mod push;
+pub mod refs;
 pub mod registry;
 pub mod threads;
 pub mod vault;

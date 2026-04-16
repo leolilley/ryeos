@@ -46,7 +46,21 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // 5. Create auth and trust directories
     fs::create_dir_all(&config.authorized_keys_dir)?;
-    fs::create_dir_all(config.state_dir.join("trust").join("trusted_keys"))?;
+    let trust_keys_dir = config.state_dir.join("trust").join("trusted_keys");
+    fs::create_dir_all(&trust_keys_dir)?;
+
+    // 6. Seed trust store with node's own public key
+    let verifying_key = identity.verifying_key();
+    rye_engine::trust::pin_key(
+        verifying_key,
+        &identity.principal_id(),
+        &trust_keys_dir,
+        Some(identity.signing_key()),
+    )
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to seed trust store with node key");
+        String::new()
+    });
 
     tracing::info!(
         principal = %identity.principal_id(),

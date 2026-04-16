@@ -71,11 +71,6 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     thread_id TEXT PRIMARY KEY REFERENCES threads(thread_id),
     pid INTEGER,
     pgid INTEGER,
-    provider TEXT,
-    turns INTEGER NOT NULL DEFAULT 0,
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    spend REAL NOT NULL DEFAULT 0.0,
     metadata BLOB
 );
 
@@ -203,11 +198,6 @@ pub struct ThreadListItem {
 pub struct RuntimeInfo {
     pub pid: Option<i64>,
     pub pgid: Option<i64>,
-    pub provider: Option<String>,
-    pub turns: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub spend: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,16 +305,6 @@ pub struct CommandRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeCostRecord {
-    pub provider: Option<String>,
-    pub turns: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub spend: f64,
-    pub metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
 pub struct FinalizeThreadRecord {
     pub status: String,
     pub outcome_code: Option<String>,
@@ -332,7 +312,10 @@ pub struct FinalizeThreadRecord {
     pub error_json: Option<Value>,
     pub metadata: Option<Value>,
     pub artifacts: Vec<NewArtifactRecord>,
-    pub final_cost: Option<RuntimeCostRecord>,
+    /// Cost data stored as facets: `[("cost.spend", "0.12"), ...]`
+    pub final_cost: Option<Vec<(String, String)>>,
+    /// Typed spend value for budget settlement (not derived from facets).
+    pub actual_spend: Option<f64>,
     pub summary_json: Option<Value>,
     pub budget_status: Option<String>,
     pub budget_metadata: Option<Value>,
@@ -487,18 +470,12 @@ impl Database {
 
         let runtime = conn
             .query_row(
-                "SELECT pid, pgid, provider, turns, input_tokens, output_tokens, spend
-                 FROM thread_runtime WHERE thread_id = ?1",
+                "SELECT pid, pgid FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
                     Ok(RuntimeInfo {
                         pid: row.get(0)?,
                         pgid: row.get(1)?,
-                        provider: row.get(2)?,
-                        turns: row.get(3)?,
-                        input_tokens: row.get(4)?,
-                        output_tokens: row.get(5)?,
-                        spend: row.get(6)?,
                     })
                 },
             )
@@ -506,11 +483,6 @@ impl Database {
             .unwrap_or(RuntimeInfo {
                 pid: None,
                 pgid: None,
-                provider: None,
-                turns: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-                spend: 0.0,
             });
 
         let budget = conn
@@ -590,9 +562,8 @@ impl Database {
         )?;
 
         tx.execute(
-            "INSERT INTO thread_runtime (
-                thread_id, pid, pgid, provider, turns, input_tokens, output_tokens, spend, metadata
-             ) VALUES (?1, NULL, NULL, NULL, 0, 0, 0, 0.0, NULL)",
+            "INSERT INTO thread_runtime (thread_id, pid, pgid, metadata)
+             VALUES (?1, NULL, NULL, NULL)",
             params![&thread.thread_id],
         )?;
 
@@ -917,27 +888,18 @@ impl Database {
         let mut budget_reported = None;
         let mut budget_released = None;
 
-        if let Some(cost) = &update.final_cost {
-            tx.execute(
-                "UPDATE thread_runtime
-                 SET provider = ?2,
-                     turns = ?3,
-                     input_tokens = ?4,
-                     output_tokens = ?5,
-                     spend = ?6,
-                     metadata = ?7
-                 WHERE thread_id = ?1",
-                params![
-                    thread_id,
-                    &cost.provider,
-                    cost.turns,
-                    cost.input_tokens,
-                    cost.output_tokens,
-                    cost.spend,
-                    json_blob(&cost.metadata)?,
-                ],
-            )?;
+        if let Some(facets) = &update.final_cost {
+            for (key, value) in facets {
+                tx.execute(
+                    "INSERT INTO thread_facets (thread_id, facet_key, facet_value)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(thread_id, facet_key) DO UPDATE SET facet_value = excluded.facet_value",
+                    params![thread_id, key, value],
+                )?;
+            }
+        }
 
+        if let Some(spend) = update.actual_spend {
             let updated_budget_rows = tx.execute(
                 "UPDATE thread_budgets
                  SET actual_spend = ?2,
@@ -946,14 +908,14 @@ impl Database {
                  WHERE thread_id = ?1",
                 params![
                     thread_id,
-                    cost.spend,
+                    spend,
                     &update.budget_status,
                     json_blob(&update.budget_metadata)?,
                 ],
             )?;
             if updated_budget_rows > 0 {
                 budget_reported = Some(json!({
-                    "actual_spend": cost.spend,
+                    "actual_spend": spend,
                 }));
                 if let Some(status) = &update.budget_status {
                     budget_released = Some(json!({
@@ -1327,11 +1289,6 @@ impl Database {
         if updated == 0 {
             bail!("budget not found for thread: {thread_id}");
         }
-
-        tx.execute(
-            "UPDATE thread_runtime SET spend = ?2 WHERE thread_id = ?1",
-            params![thread_id, actual_spend],
-        )?;
 
         let budget = load_budget_in_tx(&tx, thread_id)?;
         let persisted = append_events_tx(
