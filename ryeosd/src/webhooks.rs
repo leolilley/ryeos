@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
 
+use crate::execution::project_source::ProjectSource;
+
 type HmacSha256 = Hmac<Sha256>;
 
 fn random_hex(len: usize) -> String {
@@ -34,11 +36,12 @@ pub struct WebhookBinding {
     pub project_path: String,
     pub description: Option<String>,
     pub secret_envelope: Option<Value>,
-    pub vault_keys: Vec<String>,
     pub owner: String,
     pub created_at: String,
     pub revoked_at: Option<String>,
     pub active: bool,
+    #[serde(default)]
+    pub project_source: ProjectSource,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,7 +51,6 @@ pub struct CreateBindingResult {
     pub item_id: String,
     pub project_path: String,
     pub has_secret_envelope: bool,
-    pub vault_keys: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,7 +62,6 @@ pub struct BindingListItem {
     pub created_at: String,
     pub revoked_at: Option<String>,
     pub has_secret_envelope: bool,
-    pub vault_keys: Vec<String>,
     pub owner: String,
 }
 
@@ -107,12 +108,11 @@ impl WebhookStore {
         description: Option<&str>,
         secret_envelope: Option<&Value>,
         owner: &str,
-        vault_keys: Option<&[String]>,
+        project_source: ProjectSource,
     ) -> Result<CreateBindingResult> {
         let hook_id = format!("wh_{}", random_hex(16));
         let hmac_secret = format!("whsec_{}", random_hex(32));
         let now = chrono::Utc::now().to_rfc3339();
-        let vk = vault_keys.map(|v| v.to_vec()).unwrap_or_default();
 
         let binding = WebhookBinding {
             hook_id: hook_id.clone(),
@@ -122,11 +122,11 @@ impl WebhookStore {
             project_path: project_path.to_string(),
             description: description.map(String::from),
             secret_envelope: secret_envelope.cloned(),
-            vault_keys: vk.clone(),
             owner: owner.to_string(),
             created_at: now,
             revoked_at: None,
             active: true,
+            project_source,
         };
 
         let mut index = self.read_index()?;
@@ -150,7 +150,6 @@ impl WebhookStore {
             item_id: item_id.to_string(),
             project_path: project_path.to_string(),
             has_secret_envelope: secret_envelope.is_some(),
-            vault_keys: vk,
         })
     }
 
@@ -171,7 +170,6 @@ impl WebhookStore {
                     created_at: binding.created_at,
                     revoked_at: binding.revoked_at,
                     has_secret_envelope: binding.secret_envelope.is_some(),
-                    vault_keys: binding.vault_keys,
                     owner: binding.owner,
                 });
             }

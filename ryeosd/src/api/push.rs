@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::execution::project_source;
 use crate::policy;
 use crate::state::AppState;
 
@@ -37,10 +38,13 @@ pub async fn push(
     let req: PushRequest = serde_json::from_slice(&body_bytes)
         .map_err(|err| invalid_request(err.into()))?;
 
+    let project_path = project_source::normalize_project_path(&req.project_path);
+    let project_path_str = project_path.to_string_lossy().to_string();
+
     let refs = state.refs_store();
 
     let current_head = refs
-        .resolve_project_ref(&principal_fp, &req.project_path)
+        .resolve_project_ref(&principal_fp, &project_path_str)
         .map_err(policy::internal_error)?
         .map(|r| r.snapshot_hash);
 
@@ -93,7 +97,7 @@ pub async fn push(
     if !refs
         .advance_project_ref(
             &principal_fp,
-            &req.project_path,
+            &project_path_str,
             &snapshot_hash,
             current_head.as_deref(),
         )
@@ -190,6 +194,38 @@ pub async fn get_user_space(
         None => Err((
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "No user space pushed yet" })),
+        )),
+    }
+}
+
+pub async fn get_project_head(
+    State(state): State<AppState>,
+    request: axum::http::Request<axum::body::Body>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let principal_fp = policy::request_principal_id(&request, &state);
+    let caller_scopes = policy::request_scopes(&request);
+    policy::require_scope(&caller_scopes, "push")?;
+
+    let query = request.uri().query().unwrap_or("");
+    let raw_project_path = form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "project_path")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "project_path query parameter required" })),
+        ))?;
+    let project_path = project_source::normalize_project_path(&raw_project_path);
+    let project_path_str = project_path.to_string_lossy().to_string();
+
+    let refs = state.refs_store();
+    match refs.resolve_project_ref(&principal_fp, &project_path_str).map_err(policy::internal_error)? {
+        Some(project_ref) => Ok(Json(json!({
+            "project_path": project_path_str,
+            "snapshot_hash": project_ref.snapshot_hash,
+        }))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no HEAD exists for this project" })),
         )),
     }
 }

@@ -3,7 +3,7 @@
 //! Constructs a `rye_engine::engine::Engine` at daemon startup using
 //! the daemon's config-driven system data directory and user space.
 //! The engine crate is kind-agnostic — all kind definitions come from
-//! `*.kind-schema.yaml` files found under `.ai/config/engine/kinds/`.
+//! `*.kind-schema.yaml` files found under `{AI_DIR}/config/engine/kinds/`.
 
 use std::path::PathBuf;
 
@@ -24,26 +24,40 @@ use crate::config::Config;
 /// schema files, loads the trust store from the daemon's trusted keys
 /// directory, and registers the terminal executor entries.
 pub fn build_engine(config: &Config) -> Result<Engine> {
-    // 1. Collect kind schema search roots from system + user space
+    // 1. Validate bundle roots exist and are readable
+    for root in &config.bundle_roots {
+        if !root.is_dir() {
+            tracing::warn!(
+                path = %root.display(),
+                "configured bundle root does not exist or is not a directory"
+            );
+        }
+    }
+
+    // 2. Collect all system roots (system_data_dir + bundle_roots, ordered)
+    let system_roots = config.all_system_roots();
     let user_root = discover_user_root();
 
+    // 3. Collect kind schema search roots from all system roots + user space
     let mut schema_roots = Vec::new();
 
-    let system_kinds = config.system_data_dir.join(".ai/config/engine/kinds");
-    if system_kinds.is_dir() {
-        schema_roots.push(system_kinds);
+    for root in &system_roots {
+        let kinds_dir = root.join(rye_engine::AI_DIR).join(rye_engine::KIND_SCHEMAS_DIR);
+        if kinds_dir.is_dir() {
+            schema_roots.push(kinds_dir);
+        }
     }
 
     if let Some(ref ur) = user_root {
-        let user_kinds = ur.join(".ai/config/engine/kinds");
+        let user_kinds = ur.join(rye_engine::AI_DIR).join(rye_engine::KIND_SCHEMAS_DIR);
         if user_kinds.is_dir() {
             schema_roots.push(user_kinds);
         }
     }
 
-    // 2. Load kind registry from filesystem
+    // 4. Load kind registry from filesystem
     let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing .ai/config/engine/kinds/");
+        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", rye_engine::AI_DIR, rye_engine::KIND_SCHEMAS_DIR);
     } else {
         KindRegistry::load_base(&schema_roots).context("failed to load kind schemas")?
     };
@@ -57,16 +71,13 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
         );
     }
 
-    // 3. Build executor registry with terminal entries
+    // 5. Build executor registry with terminal entries
     let executors = build_executor_registry();
 
-    // 4. Build metadata parser registry with builtins
+    // 6. Build metadata parser registry with builtins
     let parsers = MetadataParserRegistry::with_builtins();
 
-    // 5. System roots for three-tier resolution
-    let system_roots = vec![config.system_data_dir.clone()];
-
-    // 6. Load trust store with three-tier resolution (project > user > system)
+    // 7. Load trust store with three-tier resolution (project > user > system)
     let trust_store = match TrustStore::load_three_tier(
         None, // project root not known at daemon startup — resolved per-request
         user_root.as_deref(),
@@ -82,7 +93,7 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
         }
     };
 
-    // 7. Construct engine
+    // 8. Construct engine
     let engine = Engine::new(kinds, executors, parsers, user_root, system_roots)
         .with_trust_store(trust_store);
 

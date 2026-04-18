@@ -30,9 +30,12 @@ pub struct ExecutionParams {
     pub acting_principal: String,
     pub project_path: PathBuf,
     pub vault_bindings: HashMap<String, String>,
-    pub project_snapshot_hash: Option<String>,
+    pub snapshot_hash: Option<String>,
     pub item_ref: String,
     pub parameters: Value,
+    /// Pre-checked-out CAS temp dir (from ResolvedProjectContext).
+    /// When set, the runner should reuse this instead of doing a second checkout.
+    pub temp_dir: Option<PathBuf>,
 }
 
 /// Tracks execution state and ensures cleanup on all exit paths.
@@ -160,50 +163,75 @@ impl ExecutionGuard {
     }
 }
 
-/// Prepare CAS execution context: checkout snapshot or ingest working dir.
+/// Prepare CAS execution context.
+///
+/// Two explicit paths:
+///
+/// 1. **CAS-backed**: `snapshot_hash` is provided → checkout from CAS into
+///    an execution space. Used when the caller explicitly requests execution
+///    against a pushed snapshot.
+/// 2. **Live FS**: no `snapshot_hash` → ingest working dir into CAS for
+///    tracking, execute against the live project path.
 ///
 /// Returns (effective_project_path, pre_manifest_hash, base_snapshot_hash).
 fn prepare_cas_context(
     state: &AppState,
     project_path: &std::path::Path,
     snapshot_hash: &Option<String>,
+    pre_checkout_dir: &Option<PathBuf>,
     thread_id: &str,
     guard: &mut ExecutionGuard,
 ) -> Result<(PathBuf, Option<String>, Option<String>)> {
-    if let Some(snap_hash) = snapshot_hash {
+    // If we have a pre-checked-out dir from ResolvedProjectContext,
+    // reuse it instead of doing a second checkout.
+    if let (Some(snap_hash), Some(checkout_dir)) = (snapshot_hash, pre_checkout_dir) {
         let cas = state.cas_store();
         let snap_obj = cas
             .get_object(snap_hash)?
             .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
         let snapshot = crate::cas::ProjectSnapshot::from_json(&snap_obj)?;
-
         let manifest_hash = snapshot.project_manifest_hash.clone();
-        let exec_dir = state.config.state_dir.join("executions").join(thread_id);
-        let cache = crate::execution::cache::MaterializationCache::new(
-            state.config.state_dir.join("cache").join("snapshots"),
-        );
-        crate::execution::checkout_project(cas, &manifest_hash, &exec_dir, Some(&cache))?;
-
-        guard.track_temp_dir(exec_dir.clone());
-        Ok((exec_dir, Some(manifest_hash), Some(snap_hash.clone())))
-    } else {
-        let cas = state.cas_store();
-        let items = crate::cas::ingest_directory(cas, project_path)?;
-        let manifest = crate::cas::SourceManifest { item_source_hashes: items };
-        let manifest_hash = cas.store_object(&manifest.to_json())?;
-
-        // Look up current snapshot hash for this project (for fold-back advancement)
-        let principal_fp = state.identity.fingerprint();
-        let project_str = project_path.to_string_lossy();
-        let base_snapshot_hash = state
-            .refs_store()
-            .resolve_project_ref(principal_fp, &project_str)
-            .ok()
-            .flatten()
-            .map(|r| r.snapshot_hash);
-
-        Ok((project_path.to_path_buf(), Some(manifest_hash), base_snapshot_hash))
+        guard.track_temp_dir(checkout_dir.clone());
+        return Ok((checkout_dir.clone(), Some(manifest_hash), Some(snap_hash.clone())));
     }
+
+    if let Some(snap_hash) = snapshot_hash {
+        return checkout_from_snapshot(state, snap_hash, thread_id, guard);
+    }
+
+    // Live FS — ingest working dir, no checkout
+    let cas = state.cas_store();
+    let items = crate::cas::ingest_directory(cas, project_path)?;
+    let manifest = crate::cas::SourceManifest { item_source_hashes: items };
+    let manifest_hash = cas.store_object(&manifest.to_json())?;
+
+    Ok((project_path.to_path_buf(), Some(manifest_hash), None))
+}
+
+/// Checkout a project from a CAS snapshot hash into an execution space.
+///
+/// Returns (exec_dir, manifest_hash, snapshot_hash).
+fn checkout_from_snapshot(
+    state: &AppState,
+    snap_hash: &str,
+    thread_id: &str,
+    guard: &mut ExecutionGuard,
+) -> Result<(PathBuf, Option<String>, Option<String>)> {
+    let cas = state.cas_store();
+    let snap_obj = cas
+        .get_object(snap_hash)?
+        .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
+    let snapshot = crate::cas::ProjectSnapshot::from_json(&snap_obj)?;
+
+    let manifest_hash = snapshot.project_manifest_hash.clone();
+    let exec_dir = state.config.state_dir.join("executions").join(thread_id);
+    let cache = crate::execution::cache::MaterializationCache::new(
+        state.config.state_dir.join("cache").join("snapshots"),
+    );
+    crate::execution::checkout_project(cas, &manifest_hash, &exec_dir, Some(&cache))?;
+
+    guard.track_temp_dir(exec_dir.clone());
+    Ok((exec_dir, Some(manifest_hash), Some(snap_hash.to_string())))
 }
 
 /// Store an ExecutionSnapshot in CAS and write a generic ref for the thread.
@@ -357,6 +385,10 @@ pub async fn run_inline(
     mut params: ExecutionParams,
 ) -> Result<InlineResult> {
     let mut guard = ExecutionGuard::new(state.clone());
+    // Track pre-existing temp dir immediately so cleanup covers all exit paths
+    if let Some(ref d) = params.temp_dir {
+        guard.track_temp_dir(d.clone());
+    }
     guard.register_epoch();
 
     // Create and track thread
@@ -372,7 +404,7 @@ pub async fn run_inline(
 
     // Prepare CAS context — if this fails, finalize thread as failed
     let (effective_path, pre_manifest_hash, base_snapshot_hash) =
-        match prepare_cas_context(&state, &params.project_path, &params.project_snapshot_hash, &running.thread_id, &mut guard) {
+        match prepare_cas_context(&state, &params.project_path, &params.snapshot_hash, &params.temp_dir, &running.thread_id, &mut guard) {
             Ok(ctx) => ctx,
             Err(err) => {
                 guard.fail_thread("cas_context_failed");
@@ -510,6 +542,10 @@ pub async fn run_detached(
     mut params: ExecutionParams,
 ) -> Result<DetachedResult> {
     let mut guard = ExecutionGuard::new(state.clone());
+    // Track pre-existing temp dir immediately so cleanup covers all exit paths
+    if let Some(ref d) = params.temp_dir {
+        guard.track_temp_dir(d.clone());
+    }
     guard.register_epoch();
 
     // Create and track thread
@@ -525,7 +561,7 @@ pub async fn run_detached(
 
     // Prepare CAS context
     let (effective_path, pre_manifest_hash, base_snapshot_hash) =
-        match prepare_cas_context(&state, &params.project_path, &params.project_snapshot_hash, &running.thread_id, &mut guard) {
+        match prepare_cas_context(&state, &params.project_path, &params.snapshot_hash, &params.temp_dir, &running.thread_id, &mut guard) {
             Ok(ctx) => ctx,
             Err(err) => {
                 guard.fail_thread("cas_context_failed");

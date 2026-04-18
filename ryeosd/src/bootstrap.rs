@@ -44,12 +44,19 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         tracing::info!(path = %config_path.display(), "wrote default config");
     }
 
-    // 5. Create auth and trust directories
+    // 5. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
-    let trust_keys_dir = config.state_dir.join("trust").join("trusted_keys");
-    fs::create_dir_all(&trust_keys_dir)?;
 
     // 6. Seed trust store with node's own public key
+    //
+    // Write to system_data_dir/.ai/config/keys/trusted/ — the canonical
+    // path that TrustStore::load_three_tier scans. This ensures bootstrap
+    // trust participates in engine verification.
+    let trust_keys_dir = config
+        .system_data_dir
+        .join(rye_engine::AI_DIR)
+        .join(rye_engine::TRUST_KEYS_DIR);
+    fs::create_dir_all(&trust_keys_dir)?;
     let verifying_key = identity.verifying_key();
     rye_engine::trust::pin_key(
         verifying_key,
@@ -75,7 +82,6 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     let dirs = [
         config.state_dir.join("identity"),
         config.state_dir.join("auth").join("authorized_keys"),
-        config.state_dir.join("trust").join("trusted_keys"),
         config.state_dir.join("db"),
         config.cas_root.clone(),
     ];
@@ -87,26 +93,11 @@ fn create_directory_layout(config: &Config) -> Result<()> {
 }
 
 fn write_default_config(path: &Path, config: &Config) -> Result<()> {
-    let yaml = format!(
-        "bind: \"{bind}\"\n\
-         db_path: \"{db}\"\n\
-         uds_path: \"{uds}\"\n\
-         state_dir: \"{state_dir}\"\n\
-         signing_key_path: \"{key}\"\n\
-         cas_root: \"{cas}\"\n\
-         require_auth: false\n\
-         authorized_keys_dir: \"{auth_dir}\"\n",
-        bind = config.bind,
-        db = config.db_path.display(),
-        uds = config.uds_path.display(),
-        state_dir = config.state_dir.display(),
-        key = config.signing_key_path.display(),
-        cas = config.cas_root.display(),
-        auth_dir = config.authorized_keys_dir.display(),
-    );
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let yaml = serde_yaml::to_string(config)
+        .context("failed to serialize default config")?;
     fs::write(path, yaml.as_bytes())?;
     Ok(())
 }

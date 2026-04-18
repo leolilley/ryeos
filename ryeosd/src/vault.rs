@@ -94,23 +94,48 @@ impl VaultStore {
 
     /// Resolve vault secrets into environment variables for execution.
     ///
-    /// Given a list of vault key names, looks up each secret and extracts
-    /// the `value` field from the envelope. Returns a map of
+    /// Given a list of required vault key names, looks up each secret and
+    /// extracts the `value` field from the envelope. Returns a map of
     /// `RYE_VAULT_{NAME}` → value suitable for injection as env vars.
+    ///
+    /// Fails if any required secret is missing or has no extractable value.
     pub fn resolve_vault_env(
         &self,
         user_fp: &str,
         vault_keys: &[String],
     ) -> Result<std::collections::HashMap<String, String>> {
         let mut env = std::collections::HashMap::new();
+        let mut missing = Vec::new();
+        let mut invalid = Vec::new();
         for key in vault_keys {
-            if let Some(envelope) = self.get_secret(user_fp, key)? {
-                // Extract the value from the envelope
-                if let Some(value) = envelope.get("value").and_then(|v| v.as_str()) {
-                    let env_name = format!("RYE_VAULT_{}", key.to_uppercase().replace('-', "_"));
-                    env.insert(env_name, value.to_string());
+            match self.get_secret(user_fp, key)? {
+                None => missing.push(key.as_str()),
+                Some(envelope) => {
+                    match envelope.get("value").and_then(|v| v.as_str()) {
+                        Some(value) => {
+                            let env_name = format!("RYE_VAULT_{}", key.to_uppercase().replace('-', "_"));
+                            env.insert(env_name, value.to_string());
+                        }
+                        None => invalid.push(key.as_str()),
+                    }
                 }
             }
+        }
+        if !missing.is_empty() || !invalid.is_empty() {
+            let mut parts = Vec::new();
+            if !missing.is_empty() {
+                let mut m: Vec<&str> = missing;
+                m.sort();
+                m.dedup();
+                parts.push(format!("missing secrets: {}", m.join(", ")));
+            }
+            if !invalid.is_empty() {
+                let mut inv: Vec<&str> = invalid;
+                inv.sort();
+                inv.dedup();
+                parts.push(format!("secrets with no extractable value: {}", inv.join(", ")));
+            }
+            bail!("required secrets not satisfied: {}", parts.join("; "));
         }
         Ok(env)
     }

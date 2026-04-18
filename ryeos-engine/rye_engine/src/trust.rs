@@ -1,6 +1,7 @@
 //! Item signer trust store and signature verification.
 //!
-//! Loads trusted signer public keys from `{state_dir}/trust/trusted_keys/`.
+//! Loads trusted signer public keys from `.ai/config/keys/trusted/` across
+//! the three-tier space (project > user > system).
 //! Supports two key file formats:
 //!   - Raw `.pub`/`.key` files: base64-encoded 32-byte Ed25519 keys
 //!   - Signed `.toml` identity docs: structured TOML with PEM public keys
@@ -221,18 +222,18 @@ impl TrustStore {
         system_roots: &[PathBuf],
     ) -> Result<Self, EngineError> {
         let mut signers = HashMap::new();
-        let trust_subdir = Path::new(".ai/config/keys/trusted");
+        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
 
         // Collect dirs in resolution order: project > user > system
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Some(root) = project_root {
-            dirs.push(root.join(trust_subdir));
+            dirs.push(root.join(&trust_subdir));
         }
         if let Some(root) = user_root {
-            dirs.push(root.join(trust_subdir));
+            dirs.push(root.join(&trust_subdir));
         }
         for root in system_roots {
-            dirs.push(root.join(trust_subdir));
+            dirs.push(root.join(&trust_subdir));
         }
 
         for dir in &dirs {
@@ -271,6 +272,29 @@ impl TrustStore {
 
     pub fn is_empty(&self) -> bool {
         self.signers.is_empty()
+    }
+
+    /// Return a new trust store that includes project-local keys.
+    ///
+    /// Project keys take priority (first-wins): if a fingerprint exists
+    /// in the project trust dir, it shadows the same fingerprint in this
+    /// store. Keys in this store that don't conflict are preserved.
+    pub fn with_project_keys(&self, project_root: &Path) -> Result<Self, EngineError> {
+        let trust_dir = project_root
+            .join(crate::AI_DIR)
+            .join(crate::TRUST_KEYS_DIR);
+        if !trust_dir.is_dir() {
+            return Ok(self.clone());
+        }
+        let project_keys = Self::load_from_dir(&trust_dir)?;
+        if project_keys.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut merged = project_keys.signers;
+        for (fp, signer) in &self.signers {
+            merged.entry(fp.clone()).or_insert_with(|| signer.clone());
+        }
+        Ok(Self { signers: merged })
     }
 }
 
@@ -1124,9 +1148,9 @@ mod tests {
         let project = tempdir();
         let user = tempdir();
 
-        let trust_subdir = Path::new(".ai/config/keys/trusted");
-        let project_trust = project.join(trust_subdir);
-        let user_trust = user.join(trust_subdir);
+        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
+        let project_trust = project.join(&trust_subdir);
+        let user_trust = user.join(&trust_subdir);
         fs::create_dir_all(&project_trust).unwrap();
         fs::create_dir_all(&user_trust).unwrap();
 
@@ -1153,9 +1177,9 @@ mod tests {
         let project = tempdir();
         let user = tempdir();
 
-        let trust_subdir = Path::new(".ai/config/keys/trusted");
-        let project_trust = project.join(trust_subdir);
-        let user_trust = user.join(trust_subdir);
+        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
+        let project_trust = project.join(&trust_subdir);
+        let user_trust = user.join(&trust_subdir);
         fs::create_dir_all(&project_trust).unwrap();
         fs::create_dir_all(&user_trust).unwrap();
 

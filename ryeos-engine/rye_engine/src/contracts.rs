@@ -111,6 +111,10 @@ pub struct ItemMetadata {
     pub description: Option<String>,
     /// Item category
     pub category: Option<String>,
+    /// Vault secret IDs this item requires (e.g. `["openai-api-key"]`).
+    /// The daemon resolves these per-principal and injects as `RYE_VAULT_*` env vars.
+    #[serde(default)]
+    pub required_secrets: Vec<String>,
     /// Arbitrary additional metadata fields (kind-specific fields live here)
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,

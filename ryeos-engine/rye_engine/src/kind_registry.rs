@@ -111,7 +111,7 @@ impl KindRegistry {
             if !root.exists() {
                 continue;
             }
-            load_schemas_from_dir(root, &mut schemas, &mut fingerprint_data)?;
+            load_schemas_from_dir(root, &mut schemas, &mut fingerprint_data, false)?;
         }
 
         let fingerprint = hex_digest(&fingerprint_data);
@@ -140,7 +140,7 @@ impl KindRegistry {
         let mut schemas = self.schemas.clone();
         let mut fingerprint_data = self.fingerprint.as_bytes().to_vec();
 
-        load_schemas_from_dir(project_kinds_root, &mut schemas, &mut fingerprint_data)?;
+        load_schemas_from_dir(project_kinds_root, &mut schemas, &mut fingerprint_data, true)?;
 
         tracing::debug!(path = %project_kinds_root.display(), "applied project kind overlay");
 
@@ -228,6 +228,7 @@ fn load_schemas_from_dir(
     kinds_root: &Path,
     schemas: &mut HashMap<String, KindSchema>,
     fingerprint_data: &mut Vec<u8>,
+    replace_existing: bool,
 ) -> Result<(), EngineError> {
     let dir_entries = match std::fs::read_dir(kinds_root) {
         Ok(d) => d,
@@ -274,16 +275,31 @@ fn load_schemas_from_dir(
         for yaml_path in schema_files {
             let parsed = parse_kind_schema(&yaml_path)?;
 
-            // Include file content in fingerprint (deterministic order)
-            if let Ok(content) = std::fs::read(&yaml_path) {
-                fingerprint_data.extend_from_slice(&content);
+            if replace_existing {
+                // Project overlay replaces base schemas entirely
+                schemas.insert(kind_name.clone(), parsed);
+                // Always include in fingerprint for overlay
+                if let Ok(content) = std::fs::read(&yaml_path) {
+                    fingerprint_data.extend_from_slice(&content);
+                }
+                tracing::debug!(kind = %kind_name, path = %yaml_path.display(), "loaded kind schema");
+            } else {
+                // First-found wins across roots (matches trust store semantics)
+                use std::collections::hash_map::Entry;
+                match schemas.entry(kind_name.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(parsed);
+                        // Only fingerprint winning schemas
+                        if let Ok(content) = std::fs::read(&yaml_path) {
+                            fingerprint_data.extend_from_slice(&content);
+                        }
+                        tracing::debug!(kind = %kind_name, path = %yaml_path.display(), "loaded kind schema");
+                    }
+                    Entry::Occupied(_) => {
+                        tracing::debug!(kind = %kind_name, path = %yaml_path.display(), "skipped shadowed kind schema");
+                    }
+                }
             }
-
-            tracing::debug!(kind = %kind_name, path = %yaml_path.display(), "loaded kind schema");
-
-            // Replace the entire kind schema (last-found wins within a
-            // directory layer; project overlay replaces base entirely)
-            schemas.insert(kind_name.clone(), parsed);
         }
     }
 

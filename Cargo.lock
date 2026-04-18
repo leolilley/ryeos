@@ -1170,6 +1170,7 @@ dependencies = [
  "clap",
  "directories",
  "ed25519-dalek",
+ "form_urlencoded",
  "futures-core",
  "hmac",
  "libc",

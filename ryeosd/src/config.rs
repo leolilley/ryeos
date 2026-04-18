@@ -39,6 +39,10 @@ pub struct Cli {
     #[arg(long)]
     pub system_data_dir: Option<PathBuf>,
 
+    /// Additional bundle roots (ordered, first match wins for kind schema conflicts)
+    #[arg(long)]
+    pub bundle_root: Vec<PathBuf>,
+
     #[arg(long)]
     pub require_auth: bool,
 
@@ -59,6 +63,8 @@ pub struct Config {
     pub signing_key_path: PathBuf,
     pub cas_root: PathBuf,
     pub system_data_dir: PathBuf,
+    /// Additional bundle roots beyond system_data_dir (ordered, first match wins).
+    pub bundle_roots: Vec<PathBuf>,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
 }
@@ -72,11 +78,20 @@ struct PartialConfig {
     signing_key_path: Option<PathBuf>,
     cas_root: Option<PathBuf>,
     system_data_dir: Option<PathBuf>,
+    #[serde(default)]
+    bundle_roots: Vec<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
 }
 
 impl Config {
+    /// All system roots in resolution order: system_data_dir first, then bundle_roots.
+    pub fn all_system_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.system_data_dir.clone()];
+        roots.extend(self.bundle_roots.iter().cloned());
+        roots
+    }
+
     pub fn load(cli: &Cli) -> Result<Self> {
         let defaults = Self::default_paths(cli.bind)?;
         let file_cfg = if let Some(path) = &cli.config {
@@ -131,6 +146,14 @@ impl Config {
                         .and_then(|cfg| cfg.system_data_dir.clone())
                 })
                 .unwrap_or_else(|| defaults.system_data_dir.clone()),
+            bundle_roots: if cli.bundle_root.is_empty() {
+                file_cfg
+                    .as_ref()
+                    .map(|cfg| cfg.bundle_roots.clone())
+                    .unwrap_or_default()
+            } else {
+                cli.bundle_root.clone()
+            },
             require_auth: cli.require_auth
                 || file_cfg
                     .as_ref()
@@ -196,6 +219,7 @@ impl Config {
             signing_key_path: state_dir.join("identity").join("node-key.pem"),
             cas_root: state_dir.join("cas"),
             system_data_dir: data_dir,
+            bundle_roots: Vec::new(),
             require_auth: false,
             authorized_keys_dir: state_dir.join("auth").join("authorized_keys"),
         })

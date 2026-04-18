@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::task;
 
+use crate::execution::project_source::{self, ProjectSource};
 use crate::execution::runner::{self, ExecutionParams};
 use crate::policy;
 use crate::services::thread_lifecycle;
@@ -27,12 +28,9 @@ pub struct ExecuteRequest {
     pub target_site_id: Option<String>,
     #[serde(default)]
     pub validate_only: bool,
-    /// Vault secret keys to resolve and inject as env vars.
+    /// How the project root is determined. Defaults to live FS.
     #[serde(default)]
-    pub vault_keys: Option<Vec<String>>,
-    /// CAS project snapshot hash — if set, checkout from CAS instead of local path.
-    #[serde(default)]
-    pub project_snapshot_hash: Option<String>,
+    pub project_source: Option<ProjectSource>,
 }
 
 fn default_launch_mode() -> String {
@@ -58,14 +56,52 @@ pub async fn execute(
         .map_err(|err| invalid_request(err.into()))?;
 
     let site_id = state.threads.site_id();
+    let project_source = request.project_source.clone().unwrap_or_default();
     let project_path = match &request.project_path {
-        Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_dir().map_err(|err| policy::internal_error(err.into()))?,
+        Some(p) => project_source::normalize_project_path(p),
+        None => {
+            if matches!(project_source, ProjectSource::PushedHead) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
+                ));
+            }
+            std::env::current_dir().map_err(|err| policy::internal_error(err.into()))?
+        }
     };
+
+    // Reject validate_only + pushed_head — we don't checkout from CAS for dry-run
+    if request.validate_only && matches!(project_source, ProjectSource::PushedHead) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "validate_only is not supported with pushed_head project_source" })),
+        ));
+    }
+
+    // Resolve project execution context BEFORE item resolution.
+    // For pushed_head, this checks out from CAS so resolution runs against
+    // the correct project root.
+    let checkout_id = format!("pre-{}-{:08x}", chrono::Utc::now().timestamp_millis(), rand::random::<u32>());
+    let project_ctx = project_source::resolve_project_context(
+        &state,
+        &project_source,
+        &project_path,
+        &caller_principal_id,
+        &checkout_id,
+    )
+    .map_err(|err| {
+        let msg = err.to_string();
+        if msg.contains("push first") {
+            (StatusCode::CONFLICT, Json(json!({ "error": msg })))
+        } else {
+            policy::internal_error(err)
+        }
+    })?;
+
     let mut resolved = thread_lifecycle::resolve_root_execution(
             &state.engine,
             site_id,
-            &project_path,
+            &project_ctx.effective_path,
             &request.item_ref,
             &request.launch_mode,
             request.parameters.clone(),
@@ -73,13 +109,21 @@ pub async fn execute(
             caller_scopes,
             request.validate_only,
         )
-        .map_err(invalid_request)?;
+        .map_err(|err| {
+            if let Some(ref d) = project_ctx.temp_dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            invalid_request(err)
+        })?;
 
     if let Some(target) = request.target_site_id {
         resolved.target_site_id = Some(target);
     }
 
     if !state.threads.kind_profiles().is_root_executable(&resolved.kind) {
+        if let Some(ref d) = project_ctx.temp_dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
         return Err(not_implemented(&format!(
             "kind '{}' is not root executable",
             resolved.kind
@@ -96,6 +140,10 @@ pub async fn execute(
         .map_err(|err| policy::internal_error(err.into()))?
         .map_err(invalid_request)?;
 
+        if let Some(ref d) = project_ctx.temp_dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+
         return Ok(Json(json!({
             "validated": true,
             "item_ref": resolved.item_ref,
@@ -106,23 +154,31 @@ pub async fn execute(
         })));
     }
 
-    // Resolve vault env vars
-    let vault_bindings = match &request.vault_keys {
-        Some(keys) if !keys.is_empty() => state
+    // Resolve vault secrets from item-declared required_secrets only.
+    let required_secrets = &resolved.resolved_item.metadata.required_secrets;
+    let vault_bindings = if !required_secrets.is_empty() {
+        state
             .vault_store()
-            .resolve_vault_env(&caller_principal_id, keys)
-            .map_err(policy::internal_error)?,
-        _ => HashMap::new(),
+            .resolve_vault_env(&caller_principal_id, required_secrets)
+            .map_err(|err| {
+                if let Some(ref d) = project_ctx.temp_dir {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+                policy::internal_error(err)
+            })?
+    } else {
+        HashMap::new()
     };
 
     let params = ExecutionParams {
         resolved,
         acting_principal: caller_principal_id,
-        project_path,
+        project_path: project_ctx.original_path,
         vault_bindings,
-        project_snapshot_hash: request.project_snapshot_hash,
+        snapshot_hash: project_ctx.snapshot_hash,
         item_ref: request.item_ref,
         parameters: request.parameters,
+        temp_dir: project_ctx.temp_dir,
     };
 
     if request.launch_mode == "detached" {

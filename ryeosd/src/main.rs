@@ -234,6 +234,7 @@ fn build_router(state: AppState) -> Router {
         .route("/objects/get", post(api::objects::get_objects))
         .route("/gc", post(api::gc::run_gc))
         .route("/push", post(api::push::push))
+        .route("/project-head", get(api::push::get_project_head))
         .route("/push/user-space", post(api::push::push_user_space))
         .route("/user-space", get(api::push::get_user_space))
         .route("/registry/publish", post(api::registry::publish))

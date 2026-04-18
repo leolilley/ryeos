@@ -118,6 +118,15 @@ pub fn apply_extraction_rules(
         }
     }
 
+    // Extract required_secrets directly from parsed data (array field,
+    // not covered by string-based extraction rules).
+    if let Some(arr) = parsed.get("required_secrets").and_then(|v| v.as_array()) {
+        metadata.required_secrets = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
     metadata
 }
 
@@ -312,6 +321,22 @@ mod tests {
         let m = apply_extraction_rules(&parsed, &rules_for_yaml(), &fake_path("test"));
         assert_eq!(m.version.as_deref(), Some("1.0.0"));
         assert_eq!(m.executor_id.as_deref(), Some("native:graph_walker"));
+    }
+
+    #[test]
+    fn yaml_extracts_required_secrets() {
+        let src = "version: \"1.0.0\"\nrequired_secrets:\n  - openai-api-key\n  - github-token\n";
+        let parsed = registry().extract(src, "yaml/yaml").unwrap();
+        let m = apply_extraction_rules(&parsed, &rules_for_yaml(), &fake_path("test"));
+        assert_eq!(m.required_secrets, vec!["openai-api-key", "github-token"]);
+    }
+
+    #[test]
+    fn yaml_empty_required_secrets() {
+        let src = "version: \"1.0.0\"\n";
+        let parsed = registry().extract(src, "yaml/yaml").unwrap();
+        let m = apply_extraction_rules(&parsed, &rules_for_yaml(), &fake_path("test"));
+        assert!(m.required_secrets.is_empty());
     }
 
     #[test]

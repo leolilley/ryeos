@@ -590,7 +590,7 @@ pub fn resolve_root_execution(
     let thread_kind = map_to_thread_kind(&resolved.kind);
 
     let executor_ref = resolved.metadata.executor_id.clone()
-        .or_else(|| engine.kinds.default_executor_id(&resolved.kind).map(String::from))
+        .or_else(|| engine.default_executor_id_for(&plan_ctx, &resolved.kind).ok().flatten())
         .ok_or_else(|| anyhow!("no executor found for kind '{}' (item: {})", resolved.kind, item_ref))?;
 
     Ok(ResolvedExecutionRequest {

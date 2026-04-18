@@ -19,12 +19,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive"] }
 directories = "5"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+form_urlencoded = "1"
 futures-core = "0.3"
 hmac = "0.12"
 lillux = { path = "../lillux/lillux" }
 rand = "0.8"
 rmp-serde = "1"
-rye_engine = { path = "../rye_engine" }
+rye_engine = { path = "../ryeos-engine/rye_engine" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -6,6 +6,7 @@
 //! 3. After execution, diff working dir and fold back changes
 
 pub mod cache;
+pub mod project_source;
 pub mod runner;
 pub mod snapshot;
 

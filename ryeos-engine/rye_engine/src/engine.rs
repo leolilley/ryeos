@@ -68,18 +68,8 @@ impl Engine {
             _ => None,
         };
 
-        // Apply project kind-schema overlay if project root has one
-        let effective_kinds = match &project_root {
-            Some(root) => {
-                let project_kinds_path = root.join(".ai/config/engine/kinds");
-                if project_kinds_path.exists() {
-                    self.kinds.with_project_overlay(&project_kinds_path)?
-                } else {
-                    self.kinds.clone()
-                }
-            }
-            None => self.kinds.clone(),
-        };
+        // Apply project kind-schema overlay
+        let effective_kinds = self.effective_kinds(ctx)?;
 
         // Validate kind against the (possibly overlaid) registry
         let kind_schema = effective_kinds.get(&item_ref.kind).ok_or_else(|| {
@@ -152,13 +142,44 @@ impl Engine {
         })
     }
 
+    /// Derive the effective kind registry for a request, applying project
+    /// kind-schema overlay when a project root is available.
+    fn effective_kinds(&self, ctx: &PlanContext) -> Result<KindRegistry, EngineError> {
+        match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => {
+                let project_kinds_path = path.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR);
+                if project_kinds_path.exists() {
+                    self.kinds.with_project_overlay(&project_kinds_path)
+                } else {
+                    Ok(self.kinds.clone())
+                }
+            }
+            _ => Ok(self.kinds.clone()),
+        }
+    }
+
+    /// Derive an effective trust store for a request, including project-local
+    /// trusted keys when a project root is available in the context.
+    ///
+    /// Merges project-local keys into the startup trust store (which already
+    /// contains user + system keys). Project keys take priority on conflict.
+    fn effective_trust_store(&self, ctx: &PlanContext) -> Result<TrustStore, EngineError> {
+        match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => {
+                self.trust_store.with_project_keys(path)
+            }
+            _ => Ok(self.trust_store.clone()),
+        }
+    }
+
     /// Verify trust and integrity on a resolved item.
     pub fn verify(
         &self,
-        _ctx: &PlanContext,
+        ctx: &PlanContext,
         item: ResolvedItem,
     ) -> Result<VerifiedItem, EngineError> {
-        let result = crate::trust::verify_resolved_item(item, &self.trust_store);
+        let trust_store = self.effective_trust_store(ctx)?;
+        let result = crate::trust::verify_resolved_item(item, &trust_store);
         if let Ok(ref verified) = result {
             tracing::debug!(
                 item_ref = %verified.resolved.canonical_ref,
@@ -191,6 +212,8 @@ impl Engine {
             _ => None,
         };
         let roots = self.resolution_roots(project_root);
+        let effective_kinds = self.effective_kinds(ctx)?;
+        let trust_store = self.effective_trust_store(ctx)?;
 
         crate::plan_builder::build_plan(
             item,
@@ -198,11 +221,11 @@ impl Engine {
             hints,
             ctx,
             &self.executors,
-            &self.kinds,
+            &effective_kinds,
             &self.parsers,
             &roots,
-            self.registry_fingerprint(),
-            &self.trust_store,
+            effective_kinds.fingerprint(),
+            &trust_store,
         )
     }
 
@@ -247,6 +270,16 @@ impl Engine {
     /// Get the kind registry's cache fingerprint.
     pub fn registry_fingerprint(&self) -> &str {
         self.kinds.fingerprint()
+    }
+
+    /// Get the default executor ID for a kind, applying project overlay.
+    pub fn default_executor_id_for(
+        &self,
+        ctx: &PlanContext,
+        kind: &str,
+    ) -> Result<Option<String>, EngineError> {
+        let effective = self.effective_kinds(ctx)?;
+        Ok(effective.default_executor_id(kind).map(String::from))
     }
 }
 
@@ -665,7 +698,7 @@ formats:
         let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
 
         // Project overlay: tool → .yaml only
-        let overlay_dir = project_dir.join(".ai/config/engine/kinds/tool");
+        let overlay_dir = project_dir.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR).join("tool");
         fs::create_dir_all(&overlay_dir).unwrap();
         fs::write(
             overlay_dir.join("tool.kind-schema.yaml"),
