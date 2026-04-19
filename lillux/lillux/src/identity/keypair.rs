@@ -6,8 +6,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use clap::Subcommand;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -45,42 +45,6 @@ pub fn run(action: KeypairAction) -> serde_json::Value {
             Err(e) => serde_json::json!({ "error": format!("read public key: {e}") }),
         },
     }
-}
-
-pub fn sign(key_dir: &str, hash: &str) -> serde_json::Value {
-    let pem = match fs::read_to_string(Path::new(key_dir).join("private_key.pem")) {
-        Ok(s) => s,
-        Err(e) => return serde_json::json!({ "error": format!("read private key: {e}") }),
-    };
-    let key = match SigningKey::from_pkcs8_pem(&pem) {
-        Ok(k) => k,
-        Err(e) => return serde_json::json!({ "error": format!("parse private key: {e}") }),
-    };
-    serde_json::json!({ "signature": URL_SAFE_NO_PAD.encode(key.sign(hash.as_bytes()).to_bytes()), "hash": hash })
-}
-
-pub fn verify(hash: &str, signature: &str, public_key_path: &str) -> serde_json::Value {
-    let pem = match fs::read_to_string(public_key_path) {
-        Ok(s) => s,
-        Err(e) => return serde_json::json!({ "error": format!("read public key: {e}") }),
-    };
-    let key = match VerifyingKey::from_public_key_pem(&pem) {
-        Ok(k) => k,
-        Err(e) => {
-            return serde_json::json!({ "valid": false, "error": format!("parse public key: {e}") })
-        }
-    };
-    // Accept both padded and unpadded base64url (Python uses padding, Rust emits without)
-    let stripped = signature.trim_end_matches('=');
-    let sig_bytes = match URL_SAFE_NO_PAD.decode(stripped) {
-        Ok(b) => b,
-        Err(_) => return serde_json::json!({ "valid": false, "hash": hash }),
-    };
-    let sig = match ed25519_dalek::Signature::from_slice(&sig_bytes) {
-        Ok(s) => s,
-        Err(_) => return serde_json::json!({ "valid": false, "hash": hash }),
-    };
-    serde_json::json!({ "valid": key.verify(hash.as_bytes(), &sig).is_ok(), "hash": hash })
 }
 
 fn do_generate(key_dir: &str) -> serde_json::Value {
@@ -132,9 +96,14 @@ fn do_generate(key_dir: &str) -> serde_json::Value {
     })
 }
 
-/// Write a file with secure permissions atomically.
-/// On Unix, creates with the given mode so there's no window of broader permissions.
-/// Uses create_new to refuse overwriting existing keys.
+pub(crate) fn fingerprint(pem_bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(pem_bytes))[..16].to_string()
+}
+
+pub(crate) fn raw_fingerprint(raw_bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(raw_bytes))[..16].to_string()
+}
+
 #[cfg(unix)]
 fn write_secure(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -157,14 +126,6 @@ fn write_secure(path: &Path, data: &[u8], _mode: u32) -> Result<(), String> {
         .map_err(|e| format!("create {}: {e}", path.display()))?
         .write_all(data)
         .map_err(|e| format!("write {}: {e}", path.display()))
-}
-
-fn fingerprint(pem_bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(pem_bytes))[..16].to_string()
-}
-
-fn raw_fingerprint(raw_bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(raw_bytes))[..16].to_string()
 }
 
 #[cfg(unix)]

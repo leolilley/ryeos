@@ -1,4 +1,4 @@
-"""Tests for lillux envelope open — Rust-side sealed envelope decryption."""
+"""Tests for lillux identity envelope open — Rust-side sealed envelope decryption."""
 
 import base64
 import json
@@ -32,7 +32,7 @@ def _lillux(*args, stdin_data=None):
 def _generate_keypair(tmp_path):
     """Generate a keypair via lillux, return key_dir path."""
     key_dir = str(tmp_path / "keys")
-    output, _ = _lillux("keypair", "generate", "--key-dir", key_dir)
+    output, _ = _lillux("identity", "keypair", "generate", "--key-dir", key_dir)
     assert "fingerprint" in output
     assert "box_pub" in output
     return key_dir, output["box_pub"]
@@ -82,7 +82,7 @@ def _seal(env_map, box_pub_b64):
 
 
 class TestEnvelopeOpen:
-    """Tests for lillux envelope open subcommand."""
+    """Tests for lillux identity envelope open subcommand."""
 
     def test_round_trip(self, keypair):
         """Seal in Python, open in Rust — basic round-trip."""
@@ -91,7 +91,7 @@ class TestEnvelopeOpen:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert code == 0
@@ -103,7 +103,7 @@ class TestEnvelopeOpen:
         sealed = _seal({}, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert code == 0
@@ -116,7 +116,7 @@ class TestEnvelopeOpen:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert code == 0
@@ -144,7 +144,7 @@ class TestEnvelopeSafetyFilter:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert code == 0
@@ -165,7 +165,7 @@ class TestEnvelopeSafetyFilter:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert code == 0
@@ -184,7 +184,7 @@ class TestEnvelopeSafetyFilter:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert code == 0
@@ -197,7 +197,7 @@ class TestEnvelopeSafetyFilter:
 
 
 class TestEnvelopeErrors:
-    """Tests for error cases in lillux envelope open."""
+    """Tests for error cases in lillux identity envelope open."""
 
     def test_wrong_key_fails(self, tmp_path):
         """Opening with wrong key returns error."""
@@ -207,11 +207,11 @@ class TestEnvelopeErrors:
         sealed = _seal({"SECRET": "value"}, box_pub_1)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir_2,
+            "identity", "envelope", "open", "--key-dir", key_dir_2,
             stdin_data=json.dumps(sealed),
         )
         assert "error" in result
-        assert "decryption failed" in result["error"]
+        assert "recipient mismatch" in result["error"]
 
     def test_tampered_ciphertext_fails(self, keypair):
         """Tampered ciphertext fails AEAD authentication."""
@@ -223,7 +223,7 @@ class TestEnvelopeErrors:
         sealed["ciphertext"] = base64.urlsafe_b64encode(tampered).decode().rstrip("=")
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert "error" in result
@@ -232,10 +232,10 @@ class TestEnvelopeErrors:
     def test_invalid_version_fails(self, keypair):
         """Unsupported envelope version returns error."""
         key_dir, _ = keypair
-        envelope = {"version": 99, "enc": "x", "ciphertext": "y", "aad_fields": {"kind": "execution-secrets/v1"}}
+        envelope = {"version": 99, "enc": "x", "ciphertext": "y", "aad_fields": {"kind": "execution-secrets/v1", "recipient": "fp:0000000000000000"}}
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(envelope),
         )
         assert "error" in result
@@ -247,19 +247,19 @@ class TestEnvelopeErrors:
         envelope = {"version": 1}
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(envelope),
         )
         assert "error" in result
-        assert "missing" in result["error"]
+        assert "missing" in result["error"].lower() or "parse" in result["error"].lower()
 
     def test_wrong_kind_fails(self, keypair):
         """Wrong envelope kind returns error."""
         key_dir, _ = keypair
-        envelope = {"version": 1, "enc": "x", "ciphertext": "y", "aad_fields": {"kind": "wrong/v1"}}
+        envelope = {"version": 1, "enc": "x", "ciphertext": "y", "aad_fields": {"kind": "wrong/v1", "recipient": "fp:0000000000000000"}}
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(envelope),
         )
         assert "error" in result
@@ -271,8 +271,8 @@ class TestEnvelopeErrors:
         Path(key_dir).mkdir()
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
-            stdin_data='{"version":1,"enc":"x","ciphertext":"y","aad_fields":{"kind":"execution-secrets/v1"}}',
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data='{"version":1,"enc":"x","ciphertext":"y","aad_fields":{"kind":"execution-secrets/v1","recipient":"fp:0000000000000000"}}',
         )
         assert "error" in result
         assert "box key" in result["error"]
@@ -293,7 +293,7 @@ class TestEnvelopeValidation:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert "error" in result
@@ -306,7 +306,7 @@ class TestEnvelopeValidation:
         sealed = _seal(env_map, box_pub)
 
         result, code = _lillux(
-            "envelope", "open", "--key-dir", key_dir,
+            "identity", "envelope", "open", "--key-dir", key_dir,
             stdin_data=json.dumps(sealed),
         )
         assert "error" in result

@@ -59,7 +59,7 @@ def generate_keypair() -> Tuple[bytes, bytes]:
     """
     tmpdir = tempfile.mkdtemp()
     try:
-        _run(["keypair", "generate", "--key-dir", tmpdir])
+        _run(["identity", "keypair", "generate", "--key-dir", tmpdir])
         private_pem = Path(tmpdir, "private_key.pem").read_bytes()
         public_pem = Path(tmpdir, "public_key.pem").read_bytes()
         return private_pem, public_pem
@@ -75,7 +75,7 @@ def generate_full_keypair() -> Tuple[bytes, bytes, bytes, bytes]:
     """
     tmpdir = tempfile.mkdtemp()
     try:
-        _run(["keypair", "generate", "--key-dir", tmpdir])
+        _run(["identity", "keypair", "generate", "--key-dir", tmpdir])
         private_pem = Path(tmpdir, "private_key.pem").read_bytes()
         public_pem = Path(tmpdir, "public_key.pem").read_bytes()
         box_key = Path(tmpdir, "box_key.pem").read_bytes()
@@ -101,7 +101,7 @@ def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
         key_path.write_bytes(private_key_pem)
         os.chmod(key_path, 0o600)
 
-        result = _run(["sign", "--key-dir", tmpdir, "--hash", content_hash])
+        result = _run(["identity", "sign", "--key-dir", tmpdir, "--hash", content_hash])
         data = json.loads(result.stdout)
         return data["signature"]
     finally:
@@ -126,7 +126,7 @@ def verify_signature(content_hash: str, signature_b64: str, public_key_pem: byte
         os.close(fd)
 
         result = _run([
-            "verify",
+            "identity", "verify",
             "--hash", content_hash,
             "--signature", signature_b64,
             "--public-key", tmpfile,
@@ -155,7 +155,7 @@ def compute_key_fingerprint(public_key_pem: bytes) -> str:
         os.write(fd, public_key_pem)
         os.close(fd)
 
-        result = _run(["keypair", "fingerprint", "--public-key", tmpfile])
+        result = _run(["identity", "keypair", "fingerprint", "--public-key", tmpfile])
         data = json.loads(result.stdout)
         return data["fingerprint"]
     finally:
@@ -178,7 +178,7 @@ def compute_box_fingerprint(box_pub: bytes) -> str:
         os.write(fd, box_pub)
         os.close(fd)
 
-        result = _run(["keypair", "box-fingerprint", "--public-key", tmpfile])
+        result = _run(["identity", "keypair", "box-fingerprint", "--public-key", tmpfile])
         data = json.loads(result.stdout)
         return data["fingerprint"]
     finally:
@@ -297,7 +297,7 @@ def ensure_keypair(key_dir: Path) -> Tuple[bytes, bytes]:
     try:
         return load_keypair(key_dir)
     except FileNotFoundError:
-        _run(["keypair", "generate", "--key-dir", str(key_dir)])
+        _run(["identity", "keypair", "generate", "--key-dir", str(key_dir)])
         return load_keypair(key_dir)
 
 
@@ -315,7 +315,7 @@ def ensure_full_keypair(key_dir: Path) -> Tuple[bytes, bytes, bytes, bytes]:
         box_keys = load_box_keypair(key_dir)
         return ed_keys[0], ed_keys[1], box_keys[0], box_keys[1]
     except FileNotFoundError:
-        _run(["keypair", "generate", "--key-dir", str(key_dir)])
+        _run(["identity", "keypair", "generate", "--key-dir", str(key_dir)])
         ed_keys = load_keypair(key_dir)
         box_keys = load_box_keypair(key_dir)
         return ed_keys[0], ed_keys[1], box_keys[0], box_keys[1]

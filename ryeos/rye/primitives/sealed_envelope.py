@@ -141,7 +141,7 @@ def decrypt_envelope(envelope: dict, box_key_path: Path) -> dict:
 
     key_dir = str(box_key_path.parent)
     proc = subprocess.run(
-        [lillux_bin, "envelope", "open", "--key-dir", key_dir],
+        [lillux_bin, "identity", "envelope", "open", "--key-dir", key_dir],
         input=json.dumps(envelope),
         capture_output=True,
         text=True,
@@ -149,7 +149,7 @@ def decrypt_envelope(envelope: dict, box_key_path: Path) -> dict:
 
     if proc.returncode != 0:
         stderr = proc.stderr.strip() if proc.stderr else "unknown error"
-        raise ValueError(f"lillux envelope open failed: {stderr}")
+        raise ValueError(f"lillux identity envelope open failed: {stderr}")
 
     try:
         result = json.loads(proc.stdout)
