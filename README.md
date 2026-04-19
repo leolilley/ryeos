@@ -4,13 +4,13 @@
 
 > _"In Linux, everything is a file. In RYE, everything is data."_
 
-RYE is a portable operating system for AI. It gives any LLM a persistent, signed workspace — directives, tools, and knowledge — that travels with you across projects, machines, and models. Three MCP tools. One substrate.
+RYE (RYE Your Execution) is a portable operating system for AI. It gives any LLM a persistent, signed workspace that travels with you across projects, machines, and models. Three tools. One substrate.
 
-| Tool      | Purpose                                    |
-| --------- | ------------------------------------------ |
-| `fetch`   | Find items by ID or discover by query      |
-| `execute` | Run a directive or tool                    |
-| `sign`    | Cryptographically sign items               |
+| Tool      | Purpose                               |
+| --------- | ------------------------------------- |
+| `fetch`   | Find items by ID or discover by query |
+| `execute` | Run a directive or tool               |
+| `sign`    | Cryptographically sign items          |
 
 ---
 
@@ -77,15 +77,15 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 
 ## Packages
 
-| Package        | What it provides                                                    |
-| -------------- | ------------------------------------------------------------------- |
-| `lillux`       | Microkernel — subprocess, HTTP, signing, integrity primitives       |
-| `ryeos-engine` | Execution engine — resolver, executor, metadata                     |
-| `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only) |
-| `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions    |
-| `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                  |
-| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three primitives |
-| `ryeos-node` | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
+| Package        | What it provides                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------ |
+| `lillux`       | Microkernel — subprocess, HTTP, signing, integrity primitives                              |
+| `ryeos-engine` | Execution engine — resolver, executor, metadata                                            |
+| `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only)                        |
+| `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions                           |
+| `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                                         |
+| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three primitives                  |
+| `ryeos-node`   | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
 
 > **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
