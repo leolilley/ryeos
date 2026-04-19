@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -311,3 +312,239 @@ class TestEnvelopeValidation:
         )
         assert "error" in result
         assert "too large" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Rust seal tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnvelopeSeal:
+    """Tests for lillux identity envelope seal."""
+
+    def test_seal_round_trip(self, keypair):
+        """Seal in Rust, open in Rust — full round-trip."""
+        key_dir, box_pub = keypair
+        env_map = {"MY_SECRET": "hunter2", "API_KEY": "sk-test-123"}
+
+        # Seal via CLI
+        sealed_result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub", os.path.join(key_dir, "box_pub.pem"),
+            stdin_data=json.dumps(env_map),
+        )
+        assert "error" not in sealed_result
+        assert "version" in sealed_result
+        assert "ciphertext" in sealed_result
+
+        # Open via CLI
+        result, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(sealed_result),
+        )
+        assert result["env"] == env_map
+
+    def test_seal_with_inline_key(self, keypair):
+        """Seal using --box-pub-inline flag."""
+        key_dir, box_pub = keypair
+        env_map = {"SECRET": "value"}
+
+        sealed_result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub-inline", box_pub,
+            stdin_data=json.dumps(env_map),
+        )
+        assert "error" not in sealed_result
+
+        result, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(sealed_result),
+        )
+        assert result["env"] == env_map
+
+    def test_seal_rejects_unsafe_names(self, keypair):
+        """Seal rejects reserved env names."""
+        key_dir, box_pub = keypair
+        env_map = {"PATH": "/usr/bin", "GOOD_VAR": "safe"}
+
+        result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub", os.path.join(key_dir, "box_pub.pem"),
+            stdin_data=json.dumps(env_map),
+        )
+        assert "error" in result
+        assert "unsafe" in result["error"].lower() or "refusing" in result["error"].lower()
+
+    def test_seal_rejects_reserved_prefix(self, keypair):
+        """Seal rejects reserved prefix names."""
+        key_dir, box_pub = keypair
+        env_map = {"AWS_SECRET_KEY": "xxx"}
+
+        result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub", os.path.join(key_dir, "box_pub.pem"),
+            stdin_data=json.dumps(env_map),
+        )
+        assert "error" in result
+
+    def test_seal_rejects_non_string_values(self, keypair):
+        """Seal rejects non-string values in env map."""
+        key_dir, box_pub = keypair
+
+        result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub", os.path.join(key_dir, "box_pub.pem"),
+            stdin_data='{"KEY": 123}',
+        )
+        assert "error" in result
+        assert "string" in result["error"].lower()
+
+    def test_seal_empty_map(self, keypair):
+        """Seal accepts empty env map."""
+        key_dir, box_pub = keypair
+
+        sealed_result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub", os.path.join(key_dir, "box_pub.pem"),
+            stdin_data="{}",
+        )
+        assert "error" not in sealed_result
+
+        result, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(sealed_result),
+        )
+        assert result["env"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Rust seal → Python open interop tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnvelopeSealPythonInterop:
+    """Tests for Rust seal → Python open interoperability."""
+
+    def test_rust_seal_python_open(self, keypair):
+        """Envelopes sealed by Rust can be opened by Python."""
+        key_dir, box_pub = keypair
+        env_map = {"INTEROP_KEY": "rust-to-python", "ANOTHER": "value"}
+
+        # Seal via Rust CLI
+        sealed_result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--box-pub", os.path.join(key_dir, "box_pub.pem"),
+            stdin_data=json.dumps(env_map),
+        )
+        assert "error" not in sealed_result
+
+        # Open via Python
+        mod = ryeos_core_path.get_envelope_mod()
+        box_key = Path(key_dir, "box_key.pem").read_text().strip().encode()
+        decrypted = mod.open_envelope(sealed_result, box_key)
+        assert decrypted == env_map
+
+
+# ---------------------------------------------------------------------------
+# Validate command tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnvelopeValidate:
+    """Tests for lillux identity envelope validate."""
+
+    def test_valid_env_map(self):
+        """Valid env map returns valid=true."""
+        result, _ = _lillux(
+            "identity", "envelope", "validate",
+            stdin_data='{"MY_KEY": "value", "OTHER": "data"}',
+        )
+        assert result["valid"] is True
+        assert result["errors"] == []
+        assert result["unsafe_names"] == []
+
+    def test_unsafe_names_reported(self):
+        """Unsafe names are reported."""
+        result, _ = _lillux(
+            "identity", "envelope", "validate",
+            stdin_data='{"GOOD": "ok", "PATH": "bad", "AWS_KEY": "bad"}',
+        )
+        assert result["valid"] is False
+        assert "PATH" in result["unsafe_names"]
+        assert "AWS_KEY" in result["unsafe_names"]
+        assert result["count"] == 3
+
+    def test_nul_byte_in_value(self):
+        """NUL bytes in values cause errors."""
+        result, _ = _lillux(
+            "identity", "envelope", "validate",
+            stdin_data=json.dumps({"KEY": "val\x00ue"}),
+        )
+        assert result["valid"] is False
+        assert any("NUL" in e for e in result["errors"])
+
+
+# ---------------------------------------------------------------------------
+# Inspect command tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnvelopeInspect:
+    """Tests for lillux identity envelope inspect."""
+
+    def test_inspect_valid_envelope(self, keypair):
+        """Inspect a well-formed sealed envelope."""
+        key_dir, box_pub = keypair
+        sealed = _seal({"KEY": "val"}, box_pub)
+
+        result, _ = _lillux(
+            "identity", "envelope", "inspect",
+            stdin_data=json.dumps(sealed),
+        )
+        assert result["well_formed"] is True
+        assert result["version"] == 1
+        assert result["declared_kind"] == "execution-secrets/v1"
+        assert result["declared_recipient"] is not None
+        assert result["enc_bytes"] == 32
+        assert result["ciphertext_bytes"] > 0
+        assert result["warnings"] == []
+
+    def test_inspect_missing_recipient(self):
+        """Inspect flags missing aad_fields.recipient."""
+        envelope = {
+            "version": 1, "enc": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "ciphertext": "AAAA",
+            "aad_fields": {"kind": "execution-secrets/v1"}
+        }
+        result, _ = _lillux(
+            "identity", "envelope", "inspect",
+            stdin_data=json.dumps(envelope),
+        )
+        assert result["well_formed"] is False
+        assert any("recipient" in w.lower() for w in result["warnings"])
+
+    def test_inspect_invalid_base64_enc(self):
+        """Inspect flags invalid base64 in enc field."""
+        envelope = {
+            "version": 1, "enc": "!!!not-base64!!!",
+            "ciphertext": "AAAA",
+            "aad_fields": {"kind": "execution-secrets/v1", "recipient": "fp:abcd"}
+        }
+        result, _ = _lillux(
+            "identity", "envelope", "inspect",
+            stdin_data=json.dumps(envelope),
+        )
+        assert result["well_formed"] is False
+
+    def test_inspect_recipient_mismatch(self, keypair):
+        """Inspect warns when top-level recipient differs from aad_fields.recipient."""
+        key_dir, box_pub = keypair
+        sealed = _seal({"KEY": "val"}, box_pub)
+        # Tamper top-level recipient
+        sealed["recipient"] = "fp:0000000000000000"
+
+        result, _ = _lillux(
+            "identity", "envelope", "inspect",
+            stdin_data=json.dumps(sealed),
+        )
+        assert any("mismatch" in w.lower() for w in result["warnings"])

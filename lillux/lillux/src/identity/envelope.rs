@@ -226,7 +226,7 @@ fn validate_env_map(env_map: &serde_json::Map<String, serde_json::Value>) -> Vec
 ///
 /// Rejects unsafe env names at seal-time to prevent creating envelopes
 /// that would silently drop keys on open.
-pub fn lib_seal(
+pub fn seal_envelope(
     env_map: &BTreeMap<String, String>,
     recipient_box_pub: &[u8; 32],
 ) -> Result<Envelope, String> {
@@ -278,15 +278,13 @@ pub fn lib_seal(
     };
 
     // AAD: canonical JSON (BTreeMap ensures sorted keys)
-    let aad_sorted: BTreeMap<&str, &str> =
-        [("kind", ENVELOPE_KIND), ("recipient", &recipient_str)]
-            .into_iter()
-            .collect();
+    let aad_sorted: BTreeMap<&str, &str> = [("kind", ENVELOPE_KIND), ("recipient", &recipient_str)]
+        .into_iter()
+        .collect();
     let aad = serde_json::to_vec(&aad_sorted).map_err(|e| format!("serialize AAD: {e}"))?;
 
     // Plaintext: canonical JSON of env map (BTreeMap is already sorted)
-    let plaintext =
-        serde_json::to_vec(&env_map).map_err(|e| format!("serialize env map: {e}"))?;
+    let plaintext = serde_json::to_vec(&env_map).map_err(|e| format!("serialize env map: {e}"))?;
 
     // Encrypt with ChaCha20Poly1305
     let cipher = ChaCha20Poly1305::new(&symmetric_key.into());
@@ -317,7 +315,7 @@ pub fn lib_seal(
 /// Open a sealed envelope using the recipient's X25519 private key.
 ///
 /// Verifies the recipient fingerprint in AAD matches the provided key.
-pub fn lib_open(
+pub fn open_envelope(
     envelope: &Envelope,
     box_private_key: &[u8; 32],
 ) -> Result<OpenResult, String> {
@@ -344,6 +342,15 @@ pub fn lib_open(
             "recipient mismatch: envelope is for {}, but key is {}",
             envelope.aad_fields.recipient, our_fp
         ));
+    }
+
+    if let Some(ref top_recipient) = envelope.recipient {
+        if *top_recipient != envelope.aad_fields.recipient {
+            return Err(format!(
+                "recipient field mismatch: top-level is {}, but aad_fields says {}",
+                top_recipient, envelope.aad_fields.recipient
+            ));
+        }
     }
 
     // Decode ephemeral public key
@@ -394,10 +401,7 @@ pub fn lib_open(
     // Validate
     let errors = validate_env_map(obj);
     if !errors.is_empty() {
-        return Err(format!(
-            "env map validation failed: {}",
-            errors.join("; ")
-        ));
+        return Err(format!("env map validation failed: {}", errors.join("; ")));
     }
 
     // Filter unsafe names
@@ -421,18 +425,38 @@ pub fn lib_open(
 // ---------------------------------------------------------------------------
 
 /// Validate an env map for safety without sealing or decrypting.
-pub fn lib_validate(env_map: &serde_json::Map<String, serde_json::Value>) -> ValidateResult {
-    let errors = validate_env_map(env_map);
+pub fn validate_envelope_env(env_map: &BTreeMap<String, String>) -> ValidateResult {
+    let mut errors = Vec::new();
     let mut unsafe_names = Vec::new();
-
     let mut total_bytes: usize = 0;
+
+    if env_map.len() > MAX_VARIABLE_COUNT {
+        errors.push(format!(
+            "too many variables: {} exceeds limit of {MAX_VARIABLE_COUNT}",
+            env_map.len()
+        ));
+    }
+
     for (name, value) in env_map {
         if !is_safe_secret_name(name) {
             unsafe_names.push(name.clone());
         }
-        if let Some(s) = value.as_str() {
-            total_bytes += name.len() + s.len();
+        if value.contains('\0') {
+            errors.push(format!("variable {name} contains NUL byte"));
         }
+        let val_len = value.len();
+        if val_len > MAX_VALUE_LENGTH {
+            errors.push(format!(
+                "variable {name} value too large: {val_len} bytes exceeds limit of {MAX_VALUE_LENGTH}"
+            ));
+        }
+        total_bytes += name.len() + val_len;
+    }
+
+    if total_bytes > MAX_TOTAL_ENV_BYTES {
+        errors.push(format!(
+            "total env size {total_bytes} bytes exceeds limit of {MAX_TOTAL_ENV_BYTES}"
+        ));
     }
 
     ValidateResult {
@@ -452,8 +476,9 @@ pub fn lib_validate(env_map: &serde_json::Map<String, serde_json::Value>) -> Val
 ///
 /// Fields are prefixed with `declared_` because they are unauthenticated
 /// until a successful `open`.
-pub fn lib_inspect(raw: &serde_json::Value) -> InspectResult {
+pub fn inspect_envelope(raw: &serde_json::Value) -> InspectResult {
     let mut warnings = Vec::new();
+    let mut well_formed_fail = false;
 
     let version = raw.get("version").and_then(|v| v.as_u64());
 
@@ -467,20 +492,30 @@ pub fn lib_inspect(raw: &serde_json::Value) -> InspectResult {
         .and_then(|r| r.as_str())
         .map(String::from);
 
-    let enc_bytes = raw
-        .get("enc")
-        .and_then(|e| e.as_str())
-        .and_then(|s| b64url_decode(s).ok())
-        .map(|b| b.len());
+    let mut enc_bytes = None;
+    if let Some(enc_str) = raw.get("enc").and_then(|e| e.as_str()) {
+        match b64url_decode(enc_str) {
+            Ok(b) => enc_bytes = Some(b.len()),
+            Err(_) => {
+                warnings.push("enc is not valid base64url".to_string());
+                well_formed_fail = true;
+            }
+        }
+    }
 
-    let ciphertext_bytes = raw
-        .get("ciphertext")
-        .and_then(|c| c.as_str())
-        .and_then(|s| b64url_decode(s).ok())
-        .map(|b| b.len());
+    let mut ciphertext_bytes = None;
+    if let Some(ct_str) = raw.get("ciphertext").and_then(|c| c.as_str()) {
+        match b64url_decode(ct_str) {
+            Ok(b) => ciphertext_bytes = Some(b.len()),
+            Err(_) => {
+                warnings.push("ciphertext is not valid base64url".to_string());
+                well_formed_fail = true;
+            }
+        }
+    }
 
     // Check well-formedness
-    let mut well_formed = true;
+    let mut well_formed = !well_formed_fail;
 
     match version {
         Some(1) => {}
@@ -510,12 +545,29 @@ pub fn lib_inspect(raw: &serde_json::Value) -> InspectResult {
         well_formed = false;
     }
 
+    if declared_recipient.is_none() && aad_fields.is_some() {
+        warnings.push("aad_fields missing recipient".to_string());
+        well_formed = false;
+    }
+
     if enc_bytes.is_some() && enc_bytes != Some(32) {
         warnings.push(format!(
             "enc decoded to {} bytes, expected 32",
             enc_bytes.unwrap()
         ));
         well_formed = false;
+    }
+
+    // Check top-level vs AAD recipient mismatch
+    if let Some(ref top_recipient) = raw.get("recipient").and_then(|r| r.as_str()) {
+        if let Some(ref aad_recipient) = declared_recipient {
+            if *top_recipient != aad_recipient.as_str() {
+                warnings.push(format!(
+                    "recipient mismatch: top-level is {}, but aad_fields says {}",
+                    top_recipient, aad_recipient
+                ));
+            }
+        }
     }
 
     InspectResult {
@@ -577,10 +629,9 @@ pub fn cli_open(key_dir: &str) -> serde_json::Value {
         Err(e) => return serde_json::json!({ "error": e }),
     };
 
-    match lib_open(&envelope, &key) {
-        Ok(result) => serde_json::to_value(result).unwrap_or_else(|e| {
-            serde_json::json!({ "error": format!("serialize result: {e}") })
-        }),
+    match open_envelope(&envelope, &key) {
+        Ok(result) => serde_json::to_value(result)
+            .unwrap_or_else(|e| serde_json::json!({ "error": format!("serialize result: {e}") })),
         Err(e) => serde_json::json!({ "error": e }),
     }
 }
@@ -608,9 +659,7 @@ pub fn cli_seal(
             Some(s) => {
                 env_map.insert(k.clone(), s.to_string());
             }
-            None => {
-                return serde_json::json!({ "error": format!("value for {k} is not a string") })
-            }
+            None => return serde_json::json!({ "error": format!("value for {k} is not a string") }),
         }
     }
 
@@ -626,9 +675,7 @@ pub fn cli_seal(
     } else if let Some(inline) = box_pub_inline {
         match b64url_decode(inline) {
             Ok(b) => b,
-            Err(e) => {
-                return serde_json::json!({ "error": format!("decode box_pub_inline: {e}") })
-            }
+            Err(e) => return serde_json::json!({ "error": format!("decode box_pub_inline: {e}") }),
         }
     } else if let Some(doc_path) = identity_doc {
         match resolve_box_pub_from_identity_doc(doc_path) {
@@ -644,10 +691,9 @@ pub fn cli_seal(
         Err(e) => return serde_json::json!({ "error": format!("invalid recipient key: {e}") }),
     };
 
-    match lib_seal(&env_map, &key) {
-        Ok(envelope) => serde_json::to_value(envelope).unwrap_or_else(|e| {
-            serde_json::json!({ "error": format!("serialize envelope: {e}") })
-        }),
+    match seal_envelope(&env_map, &key) {
+        Ok(envelope) => serde_json::to_value(envelope)
+            .unwrap_or_else(|e| serde_json::json!({ "error": format!("serialize envelope: {e}") })),
         Err(e) => serde_json::json!({ "error": e }),
     }
 }
@@ -663,7 +709,17 @@ pub fn cli_validate() -> serde_json::Value {
         None => return serde_json::json!({ "error": "stdin must be a JSON object" }),
     };
 
-    let result = lib_validate(obj);
+    let mut env_map = BTreeMap::new();
+    for (k, v) in obj {
+        match v.as_str() {
+            Some(s) => {
+                env_map.insert(k.clone(), s.to_string());
+            }
+            None => return serde_json::json!({ "error": format!("value for {k} is not a string") }),
+        }
+    }
+
+    let result = validate_envelope_env(&env_map);
     serde_json::to_value(result)
         .unwrap_or_else(|e| serde_json::json!({ "error": format!("serialize result: {e}") }))
 }
@@ -674,7 +730,7 @@ pub fn cli_inspect() -> serde_json::Value {
         Err(e) => return serde_json::json!({ "error": e }),
     };
 
-    let result = lib_inspect(&input);
+    let result = inspect_envelope(&input);
     serde_json::to_value(result)
         .unwrap_or_else(|e| serde_json::json!({ "error": format!("serialize result: {e}") }))
 }
@@ -684,8 +740,7 @@ pub fn cli_inspect() -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 fn resolve_box_pub_from_identity_doc(path: &str) -> Result<Vec<u8>, String> {
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("read identity doc: {e}"))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("read identity doc: {e}"))?;
     let doc: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("parse identity doc: {e}"))?;
 

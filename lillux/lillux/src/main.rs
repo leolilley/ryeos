@@ -47,4 +47,8 @@ fn main() {
     };
 
     println!("{}", result);
+
+    if result.get("error").is_some() {
+        std::process::exit(1);
+    }
 }
