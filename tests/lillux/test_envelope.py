@@ -110,6 +110,17 @@ class TestEnvelopeOpen:
         assert code == 0
         assert result["env"] == {}
 
+    def test_success_returns_zero_exit_code(self, keypair):
+        """Successful open returns exit code 0."""
+        key_dir, box_pub = keypair
+        sealed = _seal({"KEY": "val"}, box_pub)
+        
+        _, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(sealed),
+        )
+        assert code == 0
+
     def test_large_value(self, keypair):
         """Values up to 64KB are accepted."""
         key_dir, box_pub = keypair
@@ -313,6 +324,32 @@ class TestEnvelopeValidation:
         assert "error" in result
         assert "too large" in result["error"]
 
+    def test_top_level_recipient_mismatch_fails(self, keypair):
+        """Opening with tampered top-level recipient is rejected."""
+        key_dir, box_pub = keypair
+        sealed = _seal({"SECRET": "value"}, box_pub)
+        
+        # Tamper the top-level recipient field
+        sealed["recipient"] = "fp:0000000000000000"
+        
+        result, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(sealed),
+        )
+        assert "error" in result
+        assert "mismatch" in result["error"]
+
+    def test_error_returns_nonzero_exit_code(self, keypair):
+        """Error responses return exit code 1."""
+        key_dir, _ = keypair
+        envelope = {"version": 99, "enc": "x", "ciphertext": "y", "aad_fields": {"kind": "execution-secrets/v1", "recipient": "fp:0000000000000000"}}
+        
+        _, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(envelope),
+        )
+        assert code == 1
+
 
 # ---------------------------------------------------------------------------
 # Rust seal tests
@@ -398,6 +435,48 @@ class TestEnvelopeSeal:
         )
         assert "error" in result
         assert "string" in result["error"].lower()
+
+    def test_seal_with_identity_doc(self, keypair, tmp_path):
+        """Seal using --identity-doc flag."""
+        import base64
+        key_dir, box_pub = keypair
+        env_map = {"DOC_SECRET": "via-identity"}
+        
+        # Build a minimal identity document matching the format used by ryeos-node
+        # box_key format: "x25519:" + base64(box_pub_pem_content)
+        box_pub_pem = Path(key_dir, "box_pub.pem").read_text().strip()
+        identity_doc = {
+            "box_key": "x25519:" + base64.b64encode(box_pub_pem.encode()).decode()
+        }
+        doc_path = str(tmp_path / "identity.json")
+        Path(doc_path).write_text(json.dumps(identity_doc))
+        
+        sealed_result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--identity-doc", doc_path,
+            stdin_data=json.dumps(env_map),
+        )
+        assert "error" not in sealed_result
+        
+        result, code = _lillux(
+            "identity", "envelope", "open", "--key-dir", key_dir,
+            stdin_data=json.dumps(sealed_result),
+        )
+        assert result["env"] == env_map
+
+    def test_seal_identity_doc_missing_box_key(self, tmp_path, keypair):
+        """Seal fails with identity doc missing box_key."""
+        key_dir, _ = keypair
+        doc_path = str(tmp_path / "bad_identity.json")
+        Path(doc_path).write_text('{"fingerprint": "abc"}')
+        
+        result, code = _lillux(
+            "identity", "envelope", "seal",
+            "--identity-doc", doc_path,
+            stdin_data='{"KEY": "val"}',
+        )
+        assert "error" in result
+        assert "box_key" in result["error"]
 
     def test_seal_empty_map(self, keypair):
         """Seal accepts empty env map."""

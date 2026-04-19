@@ -539,6 +539,7 @@ pub fn inspect_envelope(raw: &serde_json::Value) -> InspectResult {
     if let Some(ref kind) = declared_kind {
         if kind != ENVELOPE_KIND {
             warnings.push(format!("unexpected kind: {kind}"));
+            well_formed = false;
         }
     } else if aad_fields.is_some() {
         warnings.push("aad_fields missing kind".to_string());
