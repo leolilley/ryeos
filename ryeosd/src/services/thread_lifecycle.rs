@@ -8,19 +8,19 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use rye_engine::canonical_ref::CanonicalRef;
-use rye_engine::contracts::{
-    EffectivePrincipal, EngineContext, ExecutionArtifact,
-    ExecutionCompletion, ExecutionHints, FinalCost, LaunchMode, PlanContext,
-    Principal, ProjectContext, ResolvedItem, ThreadTerminalStatus, TrustClass,
-};
-use rye_engine::engine::Engine;
 use crate::db::{
-    Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord,
-    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
+    Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, ThreadArtifactRecord,
+    ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use crate::kind_profiles::KindProfileRegistry;
 use crate::services::event_store::EventStoreService;
+use rye_engine::canonical_ref::CanonicalRef;
+use rye_engine::contracts::{
+    EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
+    FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem,
+    ThreadTerminalStatus, TrustClass,
+};
+use rye_engine::engine::Engine;
 
 #[derive(Debug, Clone)]
 pub struct ThreadLifecycleService {
@@ -306,7 +306,8 @@ impl ThreadLifecycleService {
         )?;
         self.events.publish_persisted_batch(&persisted);
 
-        let finalized = self.get_thread(thread_id)?
+        let finalized = self
+            .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {thread_id}"))?;
 
         // Handle continuation request from runtime
@@ -318,8 +319,9 @@ impl ThreadLifecycleService {
                 }) {
                     Ok(_continuation) => {
                         // Source thread is now "continued", return updated state
-                        return self.get_thread(thread_id)?
-                            .ok_or_else(|| anyhow!("thread not found after continuation: {thread_id}"));
+                        return self.get_thread(thread_id)?.ok_or_else(|| {
+                            anyhow!("thread not found after continuation: {thread_id}")
+                        });
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -399,10 +401,7 @@ impl ThreadLifecycleService {
 
         let profile = self.kind_profiles().get(&source.kind);
         if !profile.is_some_and(|p| p.supports_continuation) {
-            bail!(
-                "continuation is not supported for kind '{}'",
-                source.kind
-            );
+            bail!("continuation is not supported for kind '{}'", source.kind);
         }
 
         // Create successor thread in the same chain
@@ -431,9 +430,9 @@ impl ThreadLifecycleService {
         )?;
         self.events.publish_persisted_batch(&persisted);
 
-        let successor = self.get_thread(&successor_id)?.ok_or_else(|| {
-            anyhow!("successor thread missing after creation: {successor_id}")
-        })?;
+        let successor = self
+            .get_thread(&successor_id)?
+            .ok_or_else(|| anyhow!("successor thread missing after creation: {successor_id}"))?;
 
         Ok(ThreadContinuationResult {
             source_thread_id: source.thread_id,
@@ -514,8 +513,14 @@ fn artifact_to_record(artifact: &ExecutionArtifact) -> NewArtifactRecord {
 fn cost_to_facets(cost: &FinalCost) -> Vec<(String, String)> {
     let mut facets = vec![
         ("cost.turns".to_string(), cost.turns.to_string()),
-        ("cost.input_tokens".to_string(), cost.input_tokens.to_string()),
-        ("cost.output_tokens".to_string(), cost.output_tokens.to_string()),
+        (
+            "cost.input_tokens".to_string(),
+            cost.input_tokens.to_string(),
+        ),
+        (
+            "cost.output_tokens".to_string(),
+            cost.output_tokens.to_string(),
+        ),
         ("cost.spend".to_string(), cost.spend.to_string()),
     ];
     if let Some(provider) = &cost.provider {
@@ -567,8 +572,8 @@ pub fn resolve_root_execution(
 ) -> Result<ResolvedExecutionRequest> {
     let project_path = project_path.as_ref().to_path_buf();
 
-    let canonical_ref = CanonicalRef::parse(item_ref)
-        .map_err(|e| anyhow!("invalid item ref: {e}"))?;
+    let canonical_ref =
+        CanonicalRef::parse(item_ref).map_err(|e| anyhow!("invalid item ref: {e}"))?;
 
     validate_launch_mode(launch_mode)?;
 
@@ -584,14 +589,29 @@ pub fn resolve_root_execution(
         validate_only,
     };
 
-    let resolved = engine.resolve(&plan_ctx, &canonical_ref)
+    let resolved = engine
+        .resolve(&plan_ctx, &canonical_ref)
         .map_err(|e| anyhow!("resolution failed: {e}"))?;
 
     let thread_kind = map_to_thread_kind(&resolved.kind);
 
-    let executor_ref = resolved.metadata.executor_id.clone()
-        .or_else(|| engine.default_executor_id_for(&plan_ctx, &resolved.kind).ok().flatten())
-        .ok_or_else(|| anyhow!("no executor found for kind '{}' (item: {})", resolved.kind, item_ref))?;
+    let executor_ref = resolved
+        .metadata
+        .executor_id
+        .clone()
+        .or_else(|| {
+            engine
+                .default_executor_id_for(&plan_ctx, &resolved.kind)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no executor found for kind '{}' (item: {})",
+                resolved.kind,
+                item_ref
+            )
+        })?;
 
     Ok(ResolvedExecutionRequest {
         kind: thread_kind,
@@ -619,20 +639,31 @@ pub fn validate_item(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
 ) -> Result<ValidatedItem> {
-    let verified = engine.verify(&resolved.plan_context, resolved.resolved_item.clone())
+    let verified = engine
+        .verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
 
-    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space)
-        .map_err(|(_status, json_body)| {
-            anyhow!("trust policy denied: {}", json_body.0.get("error").and_then(|e| e.as_str()).unwrap_or("unknown"))
-        })?;
+    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space).map_err(
+        |(_status, json_body)| {
+            anyhow!(
+                "trust policy denied: {}",
+                json_body
+                    .0
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+            )
+        },
+    )?;
 
-    let plan = engine.build_plan(
-        &resolved.plan_context,
-        &verified,
-        &resolved.parameters,
-        &resolved.plan_context.execution_hints,
-    ).map_err(|e| anyhow!("plan build failed: {e}"))?;
+    let plan = engine
+        .build_plan(
+            &resolved.plan_context,
+            &verified,
+            &resolved.parameters,
+            &resolved.plan_context.execution_hints,
+        )
+        .map_err(|e| anyhow!("plan build failed: {e}"))?;
 
     Ok(ValidatedItem {
         trust_class: verified.trust_class,
@@ -661,28 +692,52 @@ pub fn spawn_item(
     resolved: &ResolvedExecutionRequest,
     thread_id: &str,
     chain_root_id: &str,
-    extra_runtime_bindings: std::collections::HashMap<String, String>,
+    mut extra_runtime_bindings: std::collections::HashMap<String, String>,
 ) -> Result<SpawnedItem> {
-    let verified = engine.verify(&resolved.plan_context, resolved.resolved_item.clone())
+    if let Ok(socket_path) = std::env::var("RYEOSD_SOCKET_PATH") {
+        extra_runtime_bindings
+            .entry("RYEOSD_SOCKET_PATH".to_string())
+            .or_insert(socket_path);
+    }
+    if let Ok(url) = std::env::var("RYEOSD_URL") {
+        extra_runtime_bindings
+            .entry("RYEOSD_URL".to_string())
+            .or_insert(url);
+    }
+    let verified = engine
+        .verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
 
     // Trust policy gate: reject untrusted items from user/system space
-    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space)
-        .map_err(|(_status, json_body)| {
-            anyhow!("trust policy denied: {}", json_body.0.get("error").and_then(|e| e.as_str()).unwrap_or("unknown"))
-        })?;
+    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space).map_err(
+        |(_status, json_body)| {
+            anyhow!(
+                "trust policy denied: {}",
+                json_body
+                    .0
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+            )
+        },
+    )?;
 
-    let mut plan = engine.build_plan(
-        &resolved.plan_context,
-        &verified,
-        &resolved.parameters,
-        &resolved.plan_context.execution_hints,
-    ).map_err(|e| anyhow!("plan build failed: {e}"))?;
+    let mut plan = engine
+        .build_plan(
+            &resolved.plan_context,
+            &verified,
+            &resolved.parameters,
+            &resolved.plan_context.execution_hints,
+        )
+        .map_err(|e| anyhow!("plan build failed: {e}"))?;
 
     // Inject extra runtime bindings (e.g. vault env vars) into subprocess nodes
     if !extra_runtime_bindings.is_empty() {
         for node in &mut plan.nodes {
-            if let rye_engine::contracts::PlanNode::DispatchSubprocess { runtime_bindings, .. } = node {
+            if let rye_engine::contracts::PlanNode::DispatchSubprocess {
+                runtime_bindings, ..
+            } = node
+            {
                 runtime_bindings.extend(extra_runtime_bindings.clone());
             }
         }
@@ -705,7 +760,8 @@ pub fn spawn_item(
         },
     };
 
-    let spawned = engine.spawn_plan(&engine_ctx, &plan)
+    let spawned = engine
+        .spawn_plan(&engine_ctx, &plan)
         .map_err(|e| anyhow!("spawn failed: {e}"))?;
 
     Ok(SpawnedItem {
@@ -721,5 +777,3 @@ pub fn spawn_item(
 fn map_to_thread_kind(canonical_kind: &str) -> String {
     format!("{canonical_kind}_run")
 }
-
-

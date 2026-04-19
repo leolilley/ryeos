@@ -41,7 +41,10 @@ impl MetadataParserRegistry {
         reg.register("python/ast", Box::new(extract_python));
         reg.register("yaml/yaml", Box::new(extract_yaml));
         reg.register("markdown/xml", Box::new(extract_markdown_xml));
-        reg.register("markdown/frontmatter", Box::new(extract_markdown_frontmatter));
+        reg.register(
+            "markdown/frontmatter",
+            Box::new(extract_markdown_frontmatter),
+        );
         reg
     }
 
@@ -163,7 +166,7 @@ pub fn extract_python(content: &str) -> Result<Value, EngineError> {
 
 /// Parse YAML content and return as `Value`.
 pub fn extract_yaml(content: &str) -> Result<Value, EngineError> {
-    let cleaned = strip_signature_lines(content);
+    let cleaned = lillux::signature::strip_signature_lines(content);
     let val: Value = serde_yaml::from_str(&cleaned)
         .map_err(|e| EngineError::Internal(format!("YAML parse error: {e}")))?;
     Ok(val)
@@ -179,10 +182,7 @@ pub fn extract_markdown_xml(content: &str) -> Result<Value, EngineError> {
 
     let mut map = Map::new();
 
-    if let Some(cap) = Regex::new(r#"version="([^"]+)""#)
-        .unwrap()
-        .captures(&xml)
-    {
+    if let Some(cap) = Regex::new(r#"version="([^"]+)""#).unwrap().captures(&xml) {
         map.insert("version".to_string(), Value::String(cap[1].to_string()));
     }
 
@@ -190,14 +190,20 @@ pub fn extract_markdown_xml(content: &str) -> Result<Value, EngineError> {
         .unwrap()
         .captures(&xml)
     {
-        map.insert("description".to_string(), Value::String(cap[1].trim().to_string()));
+        map.insert(
+            "description".to_string(),
+            Value::String(cap[1].trim().to_string()),
+        );
     }
 
     if let Some(cap) = Regex::new(r"<category>([\s\S]*?)</category>")
         .unwrap()
         .captures(&xml)
     {
-        map.insert("category".to_string(), Value::String(cap[1].trim().to_string()));
+        map.insert(
+            "category".to_string(),
+            Value::String(cap[1].trim().to_string()),
+        );
     }
 
     if let Some(cap) = Regex::new(r#"<directive\s[^>]*name="([^"]+)""#)
@@ -223,14 +229,6 @@ pub fn extract_markdown_frontmatter(content: &str) -> Result<Value, EngineError>
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
-
-fn strip_signature_lines(content: &str) -> String {
-    content
-        .lines()
-        .filter(|line| !line.starts_with("# rye:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 fn extract_fenced_block(content: &str, lang: &str) -> Option<String> {
     let open = format!("```{lang}");
@@ -261,27 +259,82 @@ mod tests {
 
     fn rules_for_python() -> HashMap<String, ExtractionRule> {
         let mut rules = HashMap::new();
-        rules.insert("version".into(), ExtractionRule::Path { key: "__version__".into() });
-        rules.insert("executor_id".into(), ExtractionRule::Path { key: "__executor_id__".into() });
-        rules.insert("description".into(), ExtractionRule::Path { key: "__tool_description__".into() });
-        rules.insert("category".into(), ExtractionRule::Path { key: "__category__".into() });
+        rules.insert(
+            "version".into(),
+            ExtractionRule::Path {
+                key: "__version__".into(),
+            },
+        );
+        rules.insert(
+            "executor_id".into(),
+            ExtractionRule::Path {
+                key: "__executor_id__".into(),
+            },
+        );
+        rules.insert(
+            "description".into(),
+            ExtractionRule::Path {
+                key: "__tool_description__".into(),
+            },
+        );
+        rules.insert(
+            "category".into(),
+            ExtractionRule::Path {
+                key: "__category__".into(),
+            },
+        );
         rules
     }
 
     fn rules_for_yaml() -> HashMap<String, ExtractionRule> {
         let mut rules = HashMap::new();
-        rules.insert("version".into(), ExtractionRule::Path { key: "version".into() });
-        rules.insert("executor_id".into(), ExtractionRule::Path { key: "executor_id".into() });
-        rules.insert("description".into(), ExtractionRule::Path { key: "description".into() });
-        rules.insert("category".into(), ExtractionRule::Path { key: "category".into() });
+        rules.insert(
+            "version".into(),
+            ExtractionRule::Path {
+                key: "version".into(),
+            },
+        );
+        rules.insert(
+            "executor_id".into(),
+            ExtractionRule::Path {
+                key: "executor_id".into(),
+            },
+        );
+        rules.insert(
+            "description".into(),
+            ExtractionRule::Path {
+                key: "description".into(),
+            },
+        );
+        rules.insert(
+            "category".into(),
+            ExtractionRule::Path {
+                key: "category".into(),
+            },
+        );
         rules
     }
 
     fn rules_for_xml() -> HashMap<String, ExtractionRule> {
         let mut rules = HashMap::new();
-        rules.insert("version".into(), ExtractionRule::Path { key: "version".into() });
-        rules.insert("description".into(), ExtractionRule::Path { key: "description".into() });
-        rules.insert("category".into(), ExtractionRule::Path { key: "category".into() });
+        rules.insert(
+            "version".into(),
+            ExtractionRule::Path {
+                key: "version".into(),
+            },
+        );
+        rules.insert(
+            "description".into(),
+            ExtractionRule::Path {
+                key: "description".into(),
+            },
+        );
+        rules.insert(
+            "category".into(),
+            ExtractionRule::Path {
+                key: "category".into(),
+            },
+        );
         rules
     }
 
@@ -295,14 +348,22 @@ mod tests {
         let parsed = registry().extract(src, "python/ast").unwrap();
 
         let mut rules = rules_for_python();
-        rules.insert("author".into(), ExtractionRule::Path { key: "__author__".into() });
+        rules.insert(
+            "author".into(),
+            ExtractionRule::Path {
+                key: "__author__".into(),
+            },
+        );
         let m = apply_extraction_rules(&parsed, &rules, &fake_path("test"));
 
         assert_eq!(m.version.as_deref(), Some("1.0.0"));
         assert_eq!(m.executor_id.as_deref(), Some("test"));
         assert_eq!(m.description.as_deref(), Some("A test tool"));
         assert_eq!(m.category.as_deref(), Some("test/category"));
-        assert_eq!(m.extra.get("author"), Some(&Value::String("someone".into())));
+        assert_eq!(
+            m.extra.get("author"),
+            Some(&Value::String("someone".into()))
+        );
     }
 
     #[test]
@@ -369,7 +430,9 @@ mod tests {
 
     #[test]
     fn parser_not_registered_fails() {
-        let err = registry().extract("anything", "unknown/parser").unwrap_err();
+        let err = registry()
+            .extract("anything", "unknown/parser")
+            .unwrap_err();
         assert!(
             matches!(err, EngineError::ParserNotRegistered { ref parser_id } if parser_id == "unknown/parser"),
             "expected ParserNotRegistered, got: {err:?}"
@@ -393,14 +456,21 @@ mod tests {
         let parsed = reg.extract("version = true", "custom/toml").unwrap();
         let rules = {
             let mut r = HashMap::new();
-            r.insert("version".into(), ExtractionRule::Path { key: "version".into() });
+            r.insert(
+                "version".into(),
+                ExtractionRule::Path {
+                    key: "version".into(),
+                },
+            );
             r
         };
         let m = apply_extraction_rules(&parsed, &rules, &fake_path("test"));
         assert_eq!(m.version.as_deref(), Some("custom"));
 
         // Builtins not available since we used new() not with_builtins()
-        let err = reg.extract("__version__ = \"1.0\"", "python/ast").unwrap_err();
+        let err = reg
+            .extract("__version__ = \"1.0\"", "python/ast")
+            .unwrap_err();
         assert!(matches!(err, EngineError::ParserNotRegistered { .. }));
     }
 
@@ -409,7 +479,8 @@ mod tests {
         let parsed = Value::Object(Map::new());
         let mut rules = HashMap::new();
         rules.insert("name".into(), ExtractionRule::Filename);
-        let m = apply_extraction_rules(&parsed, &rules, &Path::new("/project/.ai/tools/my_tool.py"));
+        let m =
+            apply_extraction_rules(&parsed, &rules, &Path::new("/project/.ai/tools/my_tool.py"));
         assert_eq!(m.extra.get("name"), Some(&Value::String("my_tool".into())));
     }
 
@@ -417,7 +488,12 @@ mod tests {
     fn extraction_rule_constant() {
         let parsed = Value::Object(Map::new());
         let mut rules = HashMap::new();
-        rules.insert("executor_id".into(), ExtractionRule::Constant { value: "@primitive_chain".into() });
+        rules.insert(
+            "executor_id".into(),
+            ExtractionRule::Constant {
+                value: "@primitive_chain".into(),
+            },
+        );
         let m = apply_extraction_rules(&parsed, &rules, &fake_path("test"));
         assert_eq!(m.executor_id.as_deref(), Some("@primitive_chain"));
     }
@@ -428,7 +504,12 @@ mod tests {
         map.insert("__version__".into(), Value::String("2.5.0".into()));
         let parsed = Value::Object(map);
         let mut rules = HashMap::new();
-        rules.insert("version".into(), ExtractionRule::Path { key: "__version__".into() });
+        rules.insert(
+            "version".into(),
+            ExtractionRule::Path {
+                key: "__version__".into(),
+            },
+        );
         let m = apply_extraction_rules(&parsed, &rules, &fake_path("test"));
         assert_eq!(m.version.as_deref(), Some("2.5.0"));
     }

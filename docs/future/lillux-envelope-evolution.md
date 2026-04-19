@@ -54,11 +54,12 @@ This is essentially moving from HPKE Base mode to Auth or AuthPSK mode, or addin
 
 ### 3. Sender Authentication
 
-**When:** If we need to prove *who* sealed an envelope, not just *to whom*.
+**When:** If we need to prove _who_ sealed an envelope, not just _to whom_.
 
 Currently envelopes are anonymous — anyone with the recipient's public key can seal. This is fine for the current use case (client seals secrets for a known node), but doesn't prove sender identity.
 
 Options:
+
 - **HPKE Auth mode** — sender uses their static X25519 key in the DH, providing implicit sender authentication
 - **Sign-then-encrypt** — Ed25519 signature over the plaintext, then sealed. Simpler but adds a signature to every envelope
 - **Signed envelope wrapper** — the outer envelope is signed by the sender's Ed25519 key, inner envelope is the current sealed format
@@ -68,6 +69,7 @@ Options:
 **When:** If secrets need to reach multiple nodes simultaneously (e.g. cluster deployments).
 
 Currently each envelope targets exactly one recipient. Multi-recipient would:
+
 - Generate one ephemeral key and symmetric key
 - Encrypt the symmetric key separately to each recipient's X25519 public key
 - Include multiple `enc` entries (one per recipient)
@@ -81,10 +83,10 @@ This is essentially HPKE's multi-recipient extension or a simplified version of 
 
 Currently validation logic exists in two places:
 
-| Location | Input type | What it checks |
-|---|---|---|
-| `validate_env_map()` (private) | `serde_json::Map` | sizes, NUL bytes, non-string values |
-| `validate_envelope_env()` (public) | `BTreeMap<String, String>` | sizes, NUL bytes, unsafe names |
+| Location                           | Input type                 | What it checks                      |
+| ---------------------------------- | -------------------------- | ----------------------------------- |
+| `validate_env_map()` (private)     | `serde_json::Map`          | sizes, NUL bytes, non-string values |
+| `validate_envelope_env()` (public) | `BTreeMap<String, String>` | sizes, NUL bytes, unsafe names      |
 
 The constants (`MAX_VARIABLE_COUNT`, `MAX_VALUE_LENGTH`, `MAX_TOTAL_ENV_BYTES`, `RESERVED_ENV_NAMES`, `RESERVED_ENV_PREFIXES`) are shared, but the check paths could drift. Additionally, Python's `sealed_envelope.py` has its own copy of these constants.
 
@@ -95,12 +97,14 @@ The constants (`MAX_VARIABLE_COUNT`, `MAX_VALUE_LENGTH`, `MAX_TOTAL_ENV_BYTES`, 
 **When:** As part of the broader Python deprecation effort.
 
 Currently `ryeos/rye/primitives/sealed_envelope.py` contains:
+
 - `seal_secrets()` — Python-native sealing (uses `cryptography` library)
 - `open_envelope()` — Python-native opening (alternative to shelling out to Lillux)
 - `validate_env_map()` — duplicated validation
 - `seal_secrets_for_identity()` — identity-doc-based sealing
 
 All of these now have Rust equivalents in Lillux. The migration path:
+
 1. Route `seal_secrets()` callers through `lillux identity envelope seal`
 2. Route `open_envelope()` callers through `lillux identity envelope open` (already done for server-side via `decrypt_envelope()`)
 3. Remove the `cryptography` library dependency from this path

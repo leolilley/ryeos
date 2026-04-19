@@ -10,8 +10,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::contracts::{ResolvedSourceFormat, SignatureEnvelope};
 use crate::error::EngineError;
 
@@ -114,7 +112,7 @@ impl KindRegistry {
             load_schemas_from_dir(root, &mut schemas, &mut fingerprint_data, false)?;
         }
 
-        let fingerprint = hex_digest(&fingerprint_data);
+        let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);
 
         Ok(Self {
             schemas,
@@ -129,10 +127,7 @@ impl KindRegistry {
     /// This makes overlay semantics simple and deterministic.
     ///
     /// Returns a new registry with the overlay applied.
-    pub fn with_project_overlay(
-        &self,
-        project_kinds_root: &Path,
-    ) -> Result<Self, EngineError> {
+    pub fn with_project_overlay(&self, project_kinds_root: &Path) -> Result<Self, EngineError> {
         if !project_kinds_root.exists() {
             return Ok(self.clone());
         }
@@ -140,11 +135,16 @@ impl KindRegistry {
         let mut schemas = self.schemas.clone();
         let mut fingerprint_data = self.fingerprint.as_bytes().to_vec();
 
-        load_schemas_from_dir(project_kinds_root, &mut schemas, &mut fingerprint_data, true)?;
+        load_schemas_from_dir(
+            project_kinds_root,
+            &mut schemas,
+            &mut fingerprint_data,
+            true,
+        )?;
 
         tracing::debug!(path = %project_kinds_root.display(), "applied project kind overlay");
 
-        let fingerprint = hex_digest(&fingerprint_data);
+        let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);
 
         Ok(Self {
             schemas,
@@ -234,10 +234,7 @@ fn load_schemas_from_dir(
         Ok(d) => d,
         Err(e) => {
             return Err(EngineError::SchemaLoaderError {
-                reason: format!(
-                    "cannot read kinds dir {}: {e}",
-                    kinds_root.display()
-                ),
+                reason: format!("cannot read kinds dir {}: {e}", kinds_root.display()),
             });
         }
     };
@@ -313,7 +310,7 @@ fn parse_kind_schema(path: &Path) -> Result<KindSchema, EngineError> {
     })?;
 
     // Strip signature line if present
-    let clean_content = strip_signature_lines(&content);
+    let clean_content = lillux::signature::strip_signature_lines(&content);
 
     let data: serde_yaml::Value =
         serde_yaml::from_str(&clean_content).map_err(|e| EngineError::SchemaLoaderError {
@@ -381,9 +378,11 @@ fn parse_kind_schema(path: &Path) -> Result<KindSchema, EngineError> {
                 reason: format!("{display}: {entry_label} missing `parser_id`"),
             })?;
 
-        let sig_value = entry.get("signature").ok_or_else(|| EngineError::SchemaLoaderError {
-            reason: format!("{display}: {entry_label} missing `signature`"),
-        })?;
+        let sig_value = entry
+            .get("signature")
+            .ok_or_else(|| EngineError::SchemaLoaderError {
+                reason: format!("{display}: {entry_label} missing `signature`"),
+            })?;
         let signature = parse_signature_format_strict(sig_value, &display)?;
 
         for ext in ext_strs {
@@ -534,9 +533,7 @@ fn parse_extraction_rules(
             }
             other => {
                 return Err(EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "{display}: metadata.rules.{field} unknown from `{other}`"
-                    ),
+                    reason: format!("{display}: metadata.rules.{field} unknown from `{other}`"),
                 });
             }
         };
@@ -545,24 +542,6 @@ fn parse_extraction_rules(
     }
 
     Ok(rules)
-}
-
-fn strip_signature_lines(content: &str) -> String {
-    content
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("# rye:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn hex_digest(data: &[u8]) -> String {
-    let hash = Sha256::digest(data);
-    let mut out = String::with_capacity(64);
-    for byte in hash.iter() {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]
@@ -863,14 +842,21 @@ formats:
         // Tool schema has filename, path×2 rules
         let tool = reg.get("tool").unwrap();
         assert_eq!(tool.extraction_rules.len(), 3);
-        assert_eq!(tool.extraction_rules.get("name"), Some(&ExtractionRule::Filename));
+        assert_eq!(
+            tool.extraction_rules.get("name"),
+            Some(&ExtractionRule::Filename)
+        );
         assert_eq!(
             tool.extraction_rules.get("version"),
-            Some(&ExtractionRule::Path { key: "__version__".into() })
+            Some(&ExtractionRule::Path {
+                key: "__version__".into()
+            })
         );
         assert_eq!(
             tool.extraction_rules.get("executor_id"),
-            Some(&ExtractionRule::Path { key: "__executor_id__".into() })
+            Some(&ExtractionRule::Path {
+                key: "__executor_id__".into()
+            })
         );
 
         // Directive schema has constant + path rules
@@ -878,11 +864,15 @@ formats:
         assert_eq!(dir.extraction_rules.len(), 2);
         assert_eq!(
             dir.extraction_rules.get("executor_id"),
-            Some(&ExtractionRule::Constant { value: "native:directive_orchestrator".into() })
+            Some(&ExtractionRule::Constant {
+                value: "native:directive_orchestrator".into()
+            })
         );
         assert_eq!(
             dir.extraction_rules.get("version"),
-            Some(&ExtractionRule::Path { key: "version".into() })
+            Some(&ExtractionRule::Path {
+                key: "version".into()
+            })
         );
     }
 

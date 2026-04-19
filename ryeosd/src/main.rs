@@ -120,6 +120,9 @@ async fn main() -> Result<()> {
     let uds_listener = UnixListener::bind(&config.uds_path)
         .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
 
+    std::env::set_var("RYEOSD_SOCKET_PATH", &config.uds_path);
+    std::env::set_var("RYEOSD_URL", format!("http://{}", config.bind));
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

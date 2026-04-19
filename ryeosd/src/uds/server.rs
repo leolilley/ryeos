@@ -126,6 +126,10 @@ fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
             request.request_id,
             handle_get_facets(&request.params, state),
         ),
+        "runtime.dispatch_action" => rpc_result(
+            request.request_id,
+            crate::execution::runtime_dispatch::handle(&request.params, state),
+        ),
         other => RpcResponse::err(
             request.request_id,
             "unknown_method",

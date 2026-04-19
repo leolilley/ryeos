@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod project_source;
+pub mod runtime_dispatch;
 pub mod runner;
 pub mod snapshot;
 

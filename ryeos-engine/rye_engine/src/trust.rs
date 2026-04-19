@@ -35,7 +35,6 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::contracts::{
     ResolvedItem, SignatureEnvelope, SignatureHeader, SignerFingerprint, TrustClass, VerifiedItem,
@@ -280,9 +279,7 @@ impl TrustStore {
     /// in the project trust dir, it shadows the same fingerprint in this
     /// store. Keys in this store that don't conflict are preserved.
     pub fn with_project_keys(&self, project_root: &Path) -> Result<Self, EngineError> {
-        let trust_dir = project_root
-            .join(crate::AI_DIR)
-            .join(crate::TRUST_KEYS_DIR);
+        let trust_dir = project_root.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
         if !trust_dir.is_dir() {
             return Ok(self.clone());
         }
@@ -386,12 +383,7 @@ fn load_trusted_key_doc(
         ))
     })?;
 
-    // Strip signature comment lines before TOML parsing
-    let toml_body: String = content
-        .lines()
-        .filter(|line| !line.starts_with("# rye:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let toml_body = lillux::signature::strip_signature_lines(&content);
 
     let parsed: TrustedKeyToml = toml::from_str(&toml_body).map_err(|e| {
         EngineError::Internal(format!(
@@ -659,15 +651,7 @@ pub fn pin_key(
 
 /// Prepend a `# rye:signed:...` line to a TOML document body.
 fn sign_toml_doc(body: &str, signing_key: &ed25519_dalek::SigningKey) -> String {
-    use ed25519_dalek::Signer;
-
-    let content_hash = sha256_hex(body.as_bytes());
-    let signature: Signature = signing_key.sign(content_hash.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
-    let signer_fp = compute_fingerprint(&signing_key.verifying_key());
-    let timestamp = chrono::Utc::now().to_rfc3339();
-
-    format!("# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{signer_fp}\n{body}")
+    lillux::signature::sign_content(body, signing_key, "#", None)
 }
 
 // ── Fingerprint computation ─────────────────────────────────────────
@@ -676,13 +660,7 @@ fn sign_toml_doc(body: &str, signing_key: &ed25519_dalek::SigningKey) -> String 
 ///
 /// This matches the fingerprint computation in `ryeosd/src/identity.rs`.
 pub fn compute_fingerprint(key: &VerifyingKey) -> String {
-    let hash = Sha256::digest(key.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in hash.iter() {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
+    lillux::signature::compute_fingerprint(key)
 }
 
 // ── Content hash after signature line ───────────────────────────────
@@ -696,78 +674,16 @@ pub fn compute_fingerprint(key: &VerifyingKey) -> String {
 /// the byte offset where the content starts (after the signature line's
 /// trailing newline).
 pub fn content_hash_after_signature(content: &str, envelope: &SignatureEnvelope) -> Option<String> {
-    let sig_line_end = find_signature_line_end(content, envelope)?;
-    let after = &content[sig_line_end..];
-    Some(sha256_hex(after.as_bytes()))
+    lillux::signature::content_hash_after_signature(
+        content,
+        &envelope.prefix,
+        envelope.suffix.as_deref(),
+        envelope.after_shebang,
+    )
 }
 
-/// Find the byte offset immediately after the signature line (including
-/// its trailing newline if present).
-///
-/// Respects `after_shebang`: if true, looks at line 2 first, then line 1.
-fn find_signature_line_end(content: &str, envelope: &SignatureEnvelope) -> Option<usize> {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
-        return None;
-    }
-
-    let candidates: Vec<usize> = if envelope.after_shebang {
-        let mut c = Vec::new();
-        if lines.len() > 1 {
-            c.push(1);
-        }
-        c.push(0);
-        c
-    } else {
-        vec![0]
-    };
-
-    for idx in candidates {
-        if is_signature_line(lines[idx], envelope) {
-            // Compute byte offset: sum of all lines up to and including this one
-            // plus their newline bytes
-            let mut offset = 0;
-            for i in 0..=idx {
-                offset += lines[i].len();
-                // Check if there's a newline after this line
-                let pos = offset;
-                if pos < content.len() {
-                    let byte = content.as_bytes()[pos];
-                    if byte == b'\n' {
-                        offset += 1;
-                    } else if byte == b'\r' {
-                        offset += 1;
-                        if offset < content.len() && content.as_bytes()[offset] == b'\n' {
-                            offset += 1;
-                        }
-                    }
-                }
-            }
-            return Some(offset);
-        }
-    }
-
-    None
-}
-
-/// Check whether a line is a signature line for the given envelope.
-fn is_signature_line(line: &str, envelope: &SignatureEnvelope) -> bool {
-    let trimmed = line.trim();
-    let after_prefix = match trimmed.strip_prefix(envelope.prefix.as_str()) {
-        Some(s) => s.trim_start(),
-        None => return false,
-    };
-
-    let payload_area = if let Some(ref suffix) = envelope.suffix {
-        match after_prefix.trim_end().strip_suffix(suffix.as_str()) {
-            Some(s) => s.trim_end(),
-            None => return false,
-        }
-    } else {
-        after_prefix.trim_end()
-    };
-
-    payload_area.starts_with("rye:signed:")
+pub fn strip_signature_lines(content: &str) -> String {
+    lillux::signature::strip_signature_lines(content)
 }
 
 // ── Signature verification ──────────────────────────────────────────
@@ -896,13 +812,7 @@ pub fn verify_resolved_item(
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn sha256_hex(data: &[u8]) -> String {
-    let hash = Sha256::digest(data);
-    let mut out = String::with_capacity(64);
-    for byte in hash.iter() {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
+    lillux::cas::sha256_hex(data)
 }
 
 /// Patch the canonical_ref field into verification errors that were

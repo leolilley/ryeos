@@ -5,8 +5,6 @@
 
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
-
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{ItemSpace, SignatureEnvelope, SignatureHeader};
 use crate::error::EngineError;
@@ -114,47 +112,22 @@ pub fn parse_signature_header(
 }
 
 fn try_parse_signature_line(line: &str, envelope: &SignatureEnvelope) -> Option<SignatureHeader> {
-    let trimmed = line.trim();
-
-    // Strip comment prefix
-    let after_prefix = trimmed.strip_prefix(envelope.prefix.as_str())?;
-    let after_prefix = after_prefix.trim_start();
-
-    // Strip comment suffix if present
-    let payload_area = if let Some(ref suffix) = envelope.suffix {
-        let s = after_prefix.trim_end();
-        s.strip_suffix(suffix.as_str())?.trim_end()
-    } else {
-        after_prefix.trim_end()
-    };
-
-    // Must start with "rye:signed:"
-    let after_marker = payload_area.strip_prefix("rye:signed:")?;
-
-    // Split from the right: the last 3 fields (content_hash, sig_b64, signer_fp)
-    // don't contain colons, but the timestamp may (e.g. ISO 8601).
-    let parts: Vec<&str> = after_marker.rsplitn(4, ':').collect();
-    if parts.len() != 4 || parts.iter().any(|p| p.is_empty()) {
-        return None;
-    }
-    // rsplitn gives fields in reverse order: [signer_fp, sig_b64, content_hash, timestamp]
+    let header = lillux::signature::parse_signature_line(
+        line,
+        &envelope.prefix,
+        envelope.suffix.as_deref(),
+    )?;
     Some(SignatureHeader {
-        timestamp: parts[3].to_owned(),
-        content_hash: parts[2].to_owned(),
-        signature_b64: parts[1].to_owned(),
-        signer_fingerprint: parts[0].to_owned(),
+        timestamp: header.timestamp,
+        content_hash: header.content_hash,
+        signature_b64: header.signature_b64,
+        signer_fingerprint: header.signer_fingerprint,
     })
 }
 
 /// Compute a SHA-256 hex digest of the given content.
 pub fn content_hash(content: &str) -> String {
-    let hash = Sha256::digest(content.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in hash.iter() {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
+    lillux::signature::content_hash(content)
 }
 
 #[cfg(test)]
@@ -316,7 +289,8 @@ mod tests {
 
     #[test]
     fn parse_signature_header_hash_prefix() {
-        let content = "# rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
+        let content =
+            "# rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
         let envelope = SignatureEnvelope {
             prefix: "#".to_owned(),
             suffix: None,
@@ -332,7 +306,8 @@ mod tests {
 
     #[test]
     fn parse_signature_header_slash_prefix() {
-        let content = "// rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nconsole.log('hi')";
+        let content =
+            "// rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nconsole.log('hi')";
         let envelope = SignatureEnvelope {
             prefix: "//".to_owned(),
             suffix: None,
