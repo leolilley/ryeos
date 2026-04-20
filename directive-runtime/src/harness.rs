@@ -15,7 +15,6 @@ pub struct Harness {
     tokens_used: u64,
     spend_used: f64,
     spawns_used: u32,
-    #[allow(dead_code)]
     depth: u32,
 }
 
@@ -141,7 +140,6 @@ impl Harness {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookAction {
     Retry,
@@ -168,13 +166,11 @@ impl HookAction {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RiskPolicy {
     pub patterns: Vec<RiskPattern>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RiskPattern {
     pub pattern: String,

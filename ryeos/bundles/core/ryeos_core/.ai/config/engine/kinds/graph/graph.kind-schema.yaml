@@ -1,6 +1,10 @@
-# rye:signed:2026-04-19T09:49:53Z:c2f84edc92f9d272c52b47e6e50a6fc1091e4f69e7faef693b83ec765411faf3:cfgtO5Fj63uhfcQEZUgcq9RR22D1lElNDyYjfphthzXQ8fLt1lrxg9EEPICc/m2hwJwOdimD/ow2TgP0joBMBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T06:00:54Z:bf52dd3257554b6bc34dfe8f6de9438329f5861b0d6d637165d22168e021d26f:SVqrI8myWF3pKpxorKDkcO6EIDE2-KFX91fc07wZDQvtfAgdsnDEIpuSwEE1ZkO33-y7FFZnHzUwguLIPxk3BQ:4b987fd4e40303ac
+category: "engine/kinds/graph"
+version: "1.0.0"
 location:
   directory: graphs
+execution:
+  default_executor_id: "native:graph-runtime"
 resolution:
   - resolve_graph_entry
   - resolve_provider

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:e9c3b838013d44cb754bd4f0fae2a8cdd77427d93f154209c28c64b19c60c8fe:wouYoewb3vjOxhtAjVBdCsts4zS8xRQ3vHGWydBYqOZbQQN3Ey5pPWEWKV+xsymOgo/H8iKVflw11ncQM4V3Aw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:37:45Z:e9c3b838013d44cb754bd4f0fae2a8cdd77427d93f154209c28c64b19c60c8fe:wouYoewb3vjOxhtAjVBdCsts4zS8xRQ3vHGWydBYqOZbQQN3Ey5pPWEWKV-xsymOgo_H8iKVflw11ncQM4V3Aw:4b987fd4e40303ac
 """Parse a graph run's events and return a clean step summary."""
 
 import argparse

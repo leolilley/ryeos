@@ -142,6 +142,18 @@ pub fn dispatch_runtime_method(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
+    // Validate callback token on ALL runtime.* methods
+    // dispatch_action does its own stronger validation (primary + project_path)
+    if method != "runtime.dispatch_action" {
+        let token = params.get("callback_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing callback_token"))?;
+        let thread_id = params.get("thread_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_id"))?;
+        state.callback_tokens.validate_token_and_thread(token, thread_id)?;
+    }
+
     match method {
         "runtime.dispatch_action" => {
             crate::execution::runtime_dispatch::handle(params, state)

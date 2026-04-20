@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:9b241cfe4eb4bf51c35b43ac02631921441b1fbeb4fc4494639c9a4c24049d17:T1UpZcqkNdowqiOUi+wcvJdyqjB2pyAsnnOMTYGSJFqJaGMHWrDmcxq8MNrsZsUcRhCrxp11uF8nJg4YLqMXDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:37:45Z:9b241cfe4eb4bf51c35b43ac02631921441b1fbeb4fc4494639c9a4c24049d17:T1UpZcqkNdowqiOUi-wcvJdyqjB2pyAsnnOMTYGSJFqJaGMHWrDmcxq8MNrsZsUcRhCrxp11uF8nJg4YLqMXDg:4b987fd4e40303ac
 """Key management tool — generate, inspect, and trust Ed25519 signing keys.
 
 The user's signing identity. Handles keypair generation, fingerprint display,

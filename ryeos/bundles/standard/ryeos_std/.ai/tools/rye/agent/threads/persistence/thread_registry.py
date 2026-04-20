@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:89244afbce1f4e07159091cfafb57e879f9c858b72e7382a23467d84c354777d:3CZiB5zVyX/fAApSyd/P9RTokqdVBSqbHenbyNaffkt6DBxJOGwLD43QBlWwBs5629P+MacABI16WqHjdmN4Cw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:46:18Z:89244afbce1f4e07159091cfafb57e879f9c858b72e7382a23467d84c354777d:3CZiB5zVyX_fAApSyd_P9RTokqdVBSqbHenbyNaffkt6DBxJOGwLD43QBlWwBs5629P-MacABI16WqHjdmN4Cw:4b987fd4e40303ac
 """Thread registry — DELETED as runtime authority in v3.
 
 The daemon (ryeosd) is the sole authority for thread registration,

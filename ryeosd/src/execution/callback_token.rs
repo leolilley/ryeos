@@ -105,6 +105,29 @@ impl CallbackCapabilityStore {
         self.capabilities.lock().unwrap().remove(token);
     }
 
+    /// Validate callback token + thread_id without requiring project_path.
+    /// Used by runtime.* UDS methods that don't carry project_path in params.
+    pub fn validate_token_and_thread(
+        &self,
+        token: &str,
+        thread_id: &str,
+    ) -> Result<CallbackCapability> {
+        let map = self.capabilities.lock().unwrap();
+        let cap = map
+            .get(token)
+            .ok_or_else(|| anyhow::anyhow!("invalid callback capability"))?;
+
+        if Instant::now() > cap.expires_at {
+            bail!("callback capability expired");
+        }
+
+        if cap.thread_id != thread_id {
+            bail!("callback capability does not match thread_id");
+        }
+
+        Ok(cap.clone())
+    }
+
     pub fn invalidate_for_thread(&self, thread_id: &str) {
         let mut map = self.capabilities.lock().unwrap();
         map.retain(|_, cap| cap.thread_id != thread_id);

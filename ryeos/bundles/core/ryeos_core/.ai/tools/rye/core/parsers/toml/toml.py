@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:8febd1a77e329a7ea74a168404f10b5ad6cf99f21f9b5fae752747af6091fc75:GoA8D+KP6ThHEN1rKvGh5odtBsLV1eXoe6sKDJsGcSnN3r2gyOwlf+xdigfjEdR31Ie0waNexjIlXKLACLSpBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:37:46Z:8febd1a77e329a7ea74a168404f10b5ad6cf99f21f9b5fae752747af6091fc75:GoA8D-KP6ThHEN1rKvGh5odtBsLV1eXoe6sKDJsGcSnN3r2gyOwlf-xdigfjEdR31Ie0waNexjIlXKLACLSpBw:4b987fd4e40303ac
 """TOML parser for RYE."""
 
 __version__ = "1.0.0"

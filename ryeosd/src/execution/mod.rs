@@ -7,7 +7,6 @@
 
 pub mod cache;
 pub mod callback_token;
-#[allow(dead_code)]
 pub mod launch;
 pub mod launch_envelope;
 pub mod limits;

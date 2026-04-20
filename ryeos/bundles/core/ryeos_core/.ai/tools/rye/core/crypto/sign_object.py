@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:80a6b8d089dbd02f723fb5b067940481020f55c8719cc2762103244a067d4468:+3fQZxd539bJBn+Ngt78UAJ+f065BtOvUol0Cgko8qb51Zj81lCshsM6PPXMc6mBNOHJLE5QRe/qExi+dnAoBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:37:45Z:80a6b8d089dbd02f723fb5b067940481020f55c8719cc2762103244a067d4468:-3fQZxd539bJBn-Ngt78UAJ-f065BtOvUol0Cgko8qb51Zj81lCshsM6PPXMc6mBNOHJLE5QRe_qExi-dnAoBQ:4b987fd4e40303ac
 """Signed domain object convention for CAS objects.
 
 All domain CAS objects (identity/v1, execution-result/v1, webhook-binding/v1,

@@ -203,8 +203,9 @@ pub struct BootstrapConfig {
     pub tools: Vec<ToolSchema>,
     pub system_prompt: Option<String>,
     pub user_prompt: String,
+    pub context_before: Option<String>,
+    pub context_after: Option<String>,
     pub context_positions: HashMap<String, Vec<String>>,
-    #[allow(dead_code)]
     pub hooks: Vec<rye_runtime::HookDefinition>,
     #[serde(skip)]
     pub risk_policy: Option<crate::harness::RiskPolicy>,
@@ -241,7 +242,6 @@ pub struct ProviderMessage {
     pub tool_call_id: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Delta(String),

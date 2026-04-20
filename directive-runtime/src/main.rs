@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 mod adapter;
@@ -10,7 +10,6 @@ mod callback_client;
 mod continuation;
 mod directive;
 mod dispatcher;
-#[allow(dead_code)]
 mod events;
 mod harness;
 mod launch_envelope;
@@ -123,7 +122,21 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let context_window = bootstrap_output.context_window;
 
     let harness = harness::Harness::new(&envelope.policy, envelope.request.depth);
-    let budget = budget::BudgetTracker::new(&envelope.callback, envelope.policy.hard_limits.spend_usd);
+
+    // Wire SIGTERM → harness cancelled flag so runner can exit cleanly
+    {
+        let cancelled = harness.cancelled_flag();
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .context("failed to install SIGTERM handler")?;
+        tokio::spawn(async move {
+            sigterm.recv().await;
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("received SIGTERM, cancellation requested");
+        });
+    }
+    let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     callback.reserve_budget(envelope.policy.hard_limits.spend_usd).await?;
 
@@ -156,22 +169,66 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     } else {
         let user_prompt = bootstrap_output.config.user_prompt.clone();
         let inputs = envelope.request.inputs.clone();
-        let prompt = if inputs.is_object() && !inputs.as_object().map_or(true, |o| o.is_empty()) {
-            format!(
-                "{}\n\nInputs:\n{}",
-                user_prompt,
-                serde_json::to_string_pretty(&inputs)?
-            )
+
+        // Apply template interpolation with envelope inputs as context
+        let interpolated_prompt = if !inputs.is_null() {
+            rye_runtime::interpolate(&serde_json::json!(user_prompt), &inputs)
+                .map(|v| v.as_str().unwrap_or(&user_prompt).to_string())
+                .unwrap_or(user_prompt)
         } else {
             user_prompt
         };
 
-        let messages = vec![directive::ProviderMessage {
+        let prompt = if inputs.is_object() && !inputs.as_object().map_or(true, |o| o.is_empty()) {
+            format!(
+                "{}\n\nInputs:\n{}",
+                interpolated_prompt,
+                serde_json::to_string_pretty(&inputs)?
+            )
+        } else {
+            interpolated_prompt
+        };
+
+        let mut messages = Vec::new();
+
+        // Context before: injected before user prompt
+        if let Some(ref before) = bootstrap_output.config.context_before {
+            messages.push(directive::ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!(before)),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            messages.push(directive::ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("Understood. I will use this context.")),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        messages.push(directive::ProviderMessage {
             role: "user".to_string(),
             content: Some(json!(prompt)),
             tool_calls: None,
             tool_call_id: None,
-        }];
+        });
+
+        // Context after: injected after user prompt
+        if let Some(ref after) = bootstrap_output.config.context_after {
+            messages.push(directive::ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!(after)),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            messages.push(directive::ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("Noted. I will apply this guidance.")),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
 
         runner::Runner::new(
             messages,

@@ -7,7 +7,6 @@ use crate::directive::ProviderMessage;
 
 pub struct ResumeState {
     pub messages: Vec<ProviderMessage>,
-    #[allow(dead_code)]
     pub turns_completed: u32,
 }
 

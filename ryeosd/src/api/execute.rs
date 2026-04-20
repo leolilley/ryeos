@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::task;
 
+use crate::execution::launch;
 use crate::execution::project_source::{self, ProjectSource};
 use crate::execution::runner::{self, ExecutionParams};
 use crate::policy;
@@ -130,6 +131,39 @@ pub async fn execute(
         )));
     }
 
+    // Check if this resolves to a native runtime binary
+    let runtime_binary = launch::native_runtime_binary(&resolved.executor_ref);
+    if runtime_binary.is_some() {
+        // Reject unsupported modes on native path
+        if matches!(project_source, ProjectSource::PushedHead) {
+            if let Some(ref d) = project_ctx.temp_dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "pushed_head not yet supported for native runtimes" })),
+            ));
+        }
+        if resolved.target_site_id.is_some() {
+            if let Some(ref d) = project_ctx.temp_dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "remote execution not yet supported for native runtimes" })),
+            ));
+        }
+        if request.launch_mode == "detached" {
+            if let Some(ref d) = project_ctx.temp_dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "detached mode not yet supported for native runtimes" })),
+            ));
+        }
+    }
+
     if request.validate_only {
         let engine = state.engine.clone();
         let resolved_clone = resolved.clone();
@@ -180,6 +214,25 @@ pub async fn execute(
         parameters: request.parameters,
         temp_dir: project_ctx.temp_dir,
     };
+
+    // Native runtime path
+    if let Some(binary) = runtime_binary {
+        let result = launch::build_and_launch(
+            &state,
+            &binary,
+            &params.acting_principal,
+            &params.resolved,
+            &params.project_path,
+            &params.parameters,
+            &params.vault_bindings,
+        )
+        .map_err(|err| policy::internal_error(err))?;
+
+        return Ok(Json(json!({
+            "thread": result.thread,
+            "result": result.result,
+        })));
+    }
 
     if request.launch_mode == "detached" {
         let result = runner::run_detached(state.clone(), params)

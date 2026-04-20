@@ -83,10 +83,16 @@ fn resolve_extends_chain(
         ..final_header
     };
 
+    tracing::info!(
+        chain_depth = chain.len(),
+        chain_items = ?chain.iter().map(|h| h.extends.as_deref().unwrap_or("(root)")).collect::<Vec<_>>(),
+        "extends chain resolved"
+    );
+
     Ok(ComposedDirective {
         header: header_with_context,
         body: directive.body.clone(),
-        chain,
+        chain: chain.clone(),
     })
 }
 
@@ -124,19 +130,9 @@ pub fn bootstrap(
 
     let context_positions = composed.header.context.clone().unwrap_or_default();
 
-    let system_prompt = if let Some(items) = context_positions.get("system") {
-        let mut rendered = Vec::new();
-        for item_id in items {
-            if let Ok(resolved) = loader.resolve_item("knowledge", item_id) {
-                if let Ok(verified) = loader.load_verified("knowledge", &resolved.path) {
-                    rendered.push(verified.content);
-                }
-            }
-        }
-        if rendered.is_empty() { None } else { Some(rendered.join("\n\n---\n\n")) }
-    } else {
-        None
-    };
+    let system_prompt = render_context_position(&context_positions, "system", loader);
+    let context_before = render_context_position(&context_positions, "before", loader);
+    let context_after = render_context_position(&context_positions, "after", loader);
 
     let user_prompt = composed.body.clone();
 
@@ -148,6 +144,8 @@ pub fn bootstrap(
             tools,
             system_prompt,
             user_prompt,
+            context_before,
+            context_after,
             context_positions,
             hooks,
             risk_policy,
@@ -156,6 +154,27 @@ pub fn bootstrap(
         model_name,
         context_window,
     })
+}
+
+fn render_context_position(
+    positions: &HashMap<String, Vec<String>>,
+    position: &str,
+    loader: &VerifiedLoader,
+) -> Option<String> {
+    let items = positions.get(position)?;
+    let mut rendered = Vec::new();
+    for item_id in items {
+        if let Ok(resolved) = loader.resolve_item("knowledge", item_id) {
+            if let Ok(verified) = loader.load_verified("knowledge", &resolved.path) {
+                rendered.push(verified.content);
+            }
+        }
+    }
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered.join("\n\n---\n\n"))
+    }
 }
 
 fn resolve_provider(

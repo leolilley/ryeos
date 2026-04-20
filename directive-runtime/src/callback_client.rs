@@ -25,6 +25,12 @@ impl CallbackClient {
         } else {
             None
         };
+        tracing::info!(
+            socket = %callback.socket_path.display(),
+            thread_id = %thread_id,
+            has_uds = callback.socket_path.exists(),
+            "callback client initialized"
+        );
         Self {
             inner,
             socket_path: callback.socket_path.clone(),

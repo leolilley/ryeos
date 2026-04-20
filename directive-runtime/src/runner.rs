@@ -58,7 +58,6 @@ pub struct Runner {
     model_name: String,
     thread_id: String,
     initial_turn: u32,
-    #[allow(dead_code)]
     hooks: Vec<rye_runtime::HookDefinition>,
 }
 
@@ -237,7 +236,11 @@ impl Runner {
                                     },
                                 )
                                 .await;
-                            State::ParsingResponse
+                            if let Some(ref reason) = resp.finish_reason {
+                                tracing::debug!(finish_reason = %reason, "provider response");
+                            }
+                            // Route through Streaming state for event emission
+                            State::Streaming
                         }
                         Err(e) => State::Errored {
                             error: e.to_string(),
@@ -323,8 +326,14 @@ impl Runner {
                 State::ProcessingToolResult { call_id, tool_name, raw_args, pending, index } => {
                     let tool_result_content = match self.dispatcher.resolve(&tool_name, &raw_args) {
                         Ok(dispatch_result) => {
-                            if dispatch_result.is_internal && dispatch_result.tool_name == "directive_return" {
+                            if dispatch_result.is_internal && self.dispatcher.is_directive_return(&dispatch_result.tool_name) {
                                 let outputs = dispatch_result.arguments;
+                                // Publish outputs as artifact
+                                let _ = self.callback.publish_artifact(json!({
+                                    "artifact_type": "directive_outputs",
+                                    "uri": format!("thread://{}/outputs", self.thread_id),
+                                    "content": &outputs,
+                                })).await;
                                 let mut result = self.finalize(json!("directive_return"));
                                 result.outputs = outputs;
                                 let _ = self.callback.finalize_thread("completed").await;
@@ -333,6 +342,9 @@ impl Runner {
                             }
 
                             let primary = "execute";
+                            if !self.dispatcher.validate_allowed_primary(primary) {
+                                tracing::warn!(primary, "dispatch primary not in allowed_primaries");
+                            }
 
                             match self.callback.dispatch_action(rye_runtime::callback::DispatchActionRequest {
                                 thread_id: self.thread_id.clone(),
@@ -375,7 +387,11 @@ impl Runner {
                     if next_index < pending.len() {
                         State::DispatchingTools { pending, index: next_index }
                     } else {
-                        State::CheckingLimits
+                        // All tools processed — fire after_step hook
+                        State::FiringHooks {
+                            event: "after_step".to_string(),
+                            resume_to: Box::new(State::CheckingContinuation),
+                        }
                     }
                 }
 
@@ -422,11 +438,14 @@ impl Runner {
                 }
 
                 State::Continued => {
+                    // Request continuation chain from daemon
+                    let reason = "context limit reached, continuation needed";
+                    let _ = self.callback.request_continuation(reason).await;
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: "continued".to_string(),
                         thread_id: self.thread_id.clone(),
-                        result: Some("context limit reached, continuation needed".to_string()),
+                        result: Some(reason.to_string()),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
                     };
@@ -488,6 +507,15 @@ impl Runner {
             other => other.to_string(),
         };
 
+        tracing::info!(
+            thread_id = %self.thread_id,
+            turns = self.harness.turns_used(),
+            tokens = self.harness.tokens_used(),
+            spend = format!("${:.4}", self.harness.spend_used()),
+            depth = self.harness.depth(),
+            "directive completed"
+        );
+
         RuntimeResult {
             success: true,
             status: "completed".to_string(),
@@ -547,7 +575,7 @@ mod tests {
             vec![],
             None,
             Harness::new(&make_policy(), 0),
-            BudgetTracker::new(&cb, 1.0),
+            BudgetTracker::new(1.0),
             make_callback(),
             200_000,
             provider,
@@ -578,7 +606,7 @@ mod tests {
             vec![],
             None,
             Harness::new(&make_policy(), 0),
-            BudgetTracker::new(&cb, 1.0),
+            BudgetTracker::new(1.0),
             make_callback(),
             200_000,
             provider,
@@ -616,7 +644,7 @@ mod tests {
             vec![],
             Some("You are helpful".to_string()),
             Harness::new(&make_policy(), 0),
-            BudgetTracker::new(&cb, 1.0),
+            BudgetTracker::new(1.0),
             make_callback(),
             200_000,
             provider,

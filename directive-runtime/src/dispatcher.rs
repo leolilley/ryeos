@@ -6,7 +6,6 @@ use crate::directive::{OutputSpec, ToolSchema};
 #[derive(Debug, Clone)]
 pub struct ToolDispatchResult {
     pub tool_name: String,
-    #[allow(dead_code)]
     pub call_id: Option<String>,
     pub arguments: Value,
     pub canonical_ref: String,

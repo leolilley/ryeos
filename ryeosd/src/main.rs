@@ -15,7 +15,6 @@ mod process;
 mod reconcile;
 mod refs;
 mod registry;
-mod resolution;
 mod services;
 mod state;
 mod uds;

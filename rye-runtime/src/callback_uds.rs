@@ -125,7 +125,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         prompt: &str,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "prompt": prompt});
+        let mut params = json!({"thread_id": thread_id, "reason": prompt});
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.request_continuation", params)
@@ -142,9 +142,11 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
     ) -> Result<Value, CallbackError> {
         let mut params = json!({
             "thread_id": thread_id,
-            "event_type": event_type,
-            "payload": payload,
-            "storage_class": storage_class,
+            "event": {
+                "event_type": event_type,
+                "payload": payload,
+                "storage_class": storage_class,
+            }
         });
         self.inject_callback_token(&mut params);
         self.rpc
@@ -206,7 +208,11 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         amount: f64,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "amount": amount});
+        let mut params = json!({
+            "thread_id": thread_id,
+            "budget_parent_id": thread_id,
+            "reserved_spend": amount,
+        });
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.reserve_budget", params)
@@ -219,7 +225,13 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         usage: Value,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "usage": usage});
+        let actual_spend = usage.get("total_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let mut params = json!({
+            "thread_id": thread_id,
+            "actual_spend": actual_spend,
+        });
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.report_budget", params)
@@ -228,7 +240,10 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
     }
 
     async fn release_budget(&self, thread_id: &str) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id});
+        let mut params = json!({
+            "thread_id": thread_id,
+            "status": "completed",
+        });
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.release_budget", params)
@@ -250,7 +265,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         artifact: Value,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "artifact": artifact});
+        let mut params = json!({"thread_id": thread_id});
+        if let Some(obj) = artifact.as_object() {
+            for (k, v) in obj {
+                params[k] = v.clone();
+            }
+        }
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.publish_artifact", params)

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:fa4fffdcadb4c8a350fd37e578e4a3f8613ef3167e928d7a976c45a9bcdeefe4:SHhQgv2y6CaONKcHrDF6VE8L5yA8UZKsCytN4rLTtL73a/ppZT+/SZaEsxm5mg96Mvlmngg0KuFqRa+7+yGRBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:37:45Z:fa4fffdcadb4c8a350fd37e578e4a3f8613ef3167e928d7a976c45a9bcdeefe4:SHhQgv2y6CaONKcHrDF6VE8L5yA8UZKsCytN4rLTtL73a_ppZT-_SZaEsxm5mg96Mvlmngg0KuFqRa-7-yGRBw:4b987fd4e40303ac
 """Template interpolation for ${...} and {input:...} expressions.
 
 Shared runtime library — resolves template expressions against

@@ -20,7 +20,6 @@ struct ActionPayload {
     primary: String,
     item_id: String,
     #[serde(default)]
-    #[allow(dead_code)]
     kind: Option<String>,
     #[serde(default)]
     params: Value,
@@ -49,7 +48,14 @@ pub fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "execute" => handle_execute(params, state),
         "fetch" => handle_fetch(params, state),
         "sign" => handle_sign(params, state),
-        other => anyhow::bail!("unsupported action primary: {other}"),
+        other => {
+            tracing::warn!(
+                primary = other,
+                kind = ?params.action.kind,
+                "unsupported action primary"
+            );
+            anyhow::bail!("unsupported action primary: {other}")
+        }
     }
 }
 

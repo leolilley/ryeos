@@ -14,10 +14,6 @@ pub struct InitOptions {
 }
 
 /// Resolve the user's signing key.
-///
-/// Looks for `~/.ai/config/keys/signing/private_key.pem` (or `$USER_SPACE/.ai/...`).
-/// Returns None if no key exists (daemon may still start without one for
-/// verification-only modes, but signing operations will fail).
 fn resolve_user_key() -> Option<PathBuf> {
     let user_space: PathBuf = std::env::var("USER_SPACE")
         .map(PathBuf::from)
@@ -36,28 +32,11 @@ fn resolve_user_key() -> Option<PathBuf> {
     }
 }
 
-/// Resolve the user's trusted keys directory: `~/.ai/config/keys/trusted/`
-fn user_trusted_dir() -> Option<PathBuf> {
-    let user_space: PathBuf = std::env::var("USER_SPACE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            directories::BaseDirs::new()
-                .map(|d| d.home_dir().to_path_buf())
-                .unwrap_or_default()
-        });
-    let dir = user_space.join(".ai/config/keys/trusted");
-    if dir.exists() {
-        Some(dir)
-    } else {
-        None
-    }
-}
-
 /// One-time idempotent filesystem bootstrap.
 ///
 /// Sets up the daemon's runtime directories (state, db, auth).
 /// Does NOT generate keys — uses the user's existing key from ~/.ai/.
-pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
+pub fn init(config: &Config, _options: &InitOptions) -> Result<()> {
     // 1. Create directory layout
     create_directory_layout(config)?;
 
@@ -77,11 +56,6 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     );
 
     Ok(())
-}
-
-/// Get the user's signing key path. Returns None if no key exists.
-pub fn user_signing_key_path() -> Option<PathBuf> {
-    resolve_user_key()
 }
 
 /// Sign all unsigned items in system bundle roots using the user's signing key.
@@ -275,8 +249,4 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
         tracing::warn!("no user signing key found — signed items will fail to verify");
     }
     Ok(())
-}
-
-fn directories() -> directories::BaseDirs {
-    directories::BaseDirs::new().unwrap()
 }

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:a472ee58b99fc092578be36a5d917691253d359b248d46a64cbb9a5b20293555:JkXc/bmUdxp5mfcflAWbBCWUPRpJmBkG4jF8NNPH7+GVVsCvzfzBO2zPfCZtx/xwl6M62poQpO1hnt/T2HwhBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:46:18Z:a472ee58b99fc092578be36a5d917691253d359b248d46a64cbb9a5b20293555:JkXc_bmUdxp5mfcflAWbBCWUPRpJmBkG4jF8NNPH7-GVVsCvzfzBO2zPfCZtx_xwl6M62poQpO1hnt_T2HwhBw:4b987fd4e40303ac
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/agent/threads/loaders"

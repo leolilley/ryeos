@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:efe4b307371e2077809d8639d6a2bc5e3fccf965dc2e4e45297042b303c51343:IXmnFEKAjfjoskxErBcZ+oE+Wn6N+NvPlYGWLRSh3cJfxrWSh8rl/4HQ0SK1nLhpnHCYfXGpqkzT0bm0ksVCDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:46:18Z:efe4b307371e2077809d8639d6a2bc5e3fccf965dc2e4e45297042b303c51343:IXmnFEKAjfjoskxErBcZ-oE-Wn6N-NvPlYGWLRSh3cJfxrWSh8rl_4HQ0SK1nLhpnHCYfXGpqkzT0bm0ksVCDA:4b987fd4e40303ac
 name: fs
 category: "rye/agent/permissions/capabilities/tools/rye"
 tool_type: "config"
