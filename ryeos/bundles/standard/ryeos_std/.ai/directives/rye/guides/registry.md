@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:fd0b17d9113aaf0ba7a9caa69f3f636ea81cf0292c70b6aa34f251ea5e26f462:ASWUQHsZ1bFAOy8eyA-0zIi0FMrxcEvfbGRIU0eOUMO9aMMxKe_eSB-qwVzmvCoRJIJHc2EMXNSPFrqOoXM2AQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:2a4a29ac724d8f9f6fdb80f035f89522f55ccfac298738f79da68a4d46448cd2:Y6GI4sER/xtTlo/GG5cuDCmw2AIxYa3B1Vo8D5B+o5nE2BwpauVHohgdNCgD1Fza/cdH3mSy3tg2THd4f97tDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Registry
 
 Guide 4 in the Rye OS onboarding sequence. Walks through the registry — pushing, pulling, publishing, searching, and the trust model.
@@ -106,7 +106,6 @@ The registry's public key gets pinned locally — stored at `~/.ai/trusted_keys/
 Pulled items also get a provenance suffix on their signature:
 
 ```
-# rye:signed:TIMESTAMP:HASH:SIG:FP|rye-registry@username
 ```
 
 This tells you exactly who published it. The `|rye-registry@username` suffix is proof the registry verified the author's identity.

@@ -141,6 +141,7 @@ mod tests {
             directory: directory.to_owned(),
             default_executor_id: None,
             extraction_rules: std::collections::HashMap::new(),
+            resolution: Vec::new(),
             extensions: extensions
                 .into_iter()
                 .map(|(ext, parser)| ExtensionSpec {

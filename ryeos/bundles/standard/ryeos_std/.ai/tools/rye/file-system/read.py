@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:f58d2ecfba39313398fcc7c0a4b21e4ef6bcfc33fe413adcc630b2bf14f2f898:xt9mHPmcomfRULf53o_o2sjWQhQ0hGxtO5RMgv2-3Tb9MUreBNJand6pGEYIvwg3o7iswibUli9IJGuU8ZznDg:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:f58d2ecfba39313398fcc7c0a4b21e4ef6bcfc33fe413adcc630b2bf14f2f898:xt9mHPmcomfRULf53o/o2sjWQhQ0hGxtO5RMgv2+3Tb9MUreBNJand6pGEYIvwg3o7iswibUli9IJGuU8ZznDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Read a file with persistent line IDs for stable editing."""
 
 import argparse

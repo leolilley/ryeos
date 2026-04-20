@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:f3489a1fb145940d3ac7ac726f495de5c2e6eb1fb9a1236d72912a4d364c8135:817wQqeGW0RFy1ScB6hQmYvosBjW-Z6uoXyitYt0wj7pa3RA5cxXtkaq82mMp_rBBhs8MGRe-tLEXlwEqdM9Bw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:0fcfb335bca8028a8756ec69f06f13d620426276664809e86f371af4a4fdd9ea:GWV62alQvRcm2Etq/EcqT67btVhpdaxCoDn4RCiZUddJv6aeZFH4gUi6B5AXGqDG652r0aallPzbZmEm6t9NBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Edit Lines
 
 Edit specific lines in a file using line IDs from a prior read.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:f6f98e6fcba3b01e16593e461e908cb821e04cdb3bb07e396593be4afbb03ac8:TsmUjkjU7IPCp0_XybVjY0PAy__EmVPjnZbc2ezaJKZsLX7rXoL20ZC3GwT7Whiek7ZpRnzSbWjVtqwkLn-zBQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:f238434fc926ab65bafc1685b1c6183fac182b1ba8d334c66c9208965e71e22b:5vvSQXJGLAPAmsJNVja9ee4EJwlMYV2RgN85egY0iVDCfQa762NnGV9BV+bXWUwuueGtOhgE92okDTVBF1XyBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # MCP Remove Server
 
 Remove a registered MCP server.

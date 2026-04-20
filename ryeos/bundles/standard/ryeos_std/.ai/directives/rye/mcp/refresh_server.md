@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:49a9d5bbe8f01c6e3eca91a2a3c3179a665b099338f02837a10ab7d5fd76b7af:MvADK92vE0S9ijtPkPKFcrgfqgqRBZ_P29EQeqC7wAizjrVK0xlZ_9rk_yyryelJssGEuLWhMKntBEqw7u4nCw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:c87e975dd213e0a9b3a268f4257849376f467e537a6ee19406a44a89a64b3327:EXQSW2zLjVSTqNpElfl3Db1vR4Y8Xb9VgHgg45bnI/jTfuUx3xRfVErqlRtzPFtuJxCg7lWXA7HxT6acvPqYAQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # MCP Refresh Server
 
 Refresh a registered MCP server's tool discovery.

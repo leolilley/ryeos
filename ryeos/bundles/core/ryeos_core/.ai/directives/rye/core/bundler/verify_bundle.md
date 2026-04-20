@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:50b551e444740d5fe196392d85178f4725ce69e1eed418f267a3ab901380b480:rbJRxMt00axdscGIXyVsLj_jNt5g2FEYQ_B251iPurtPzc4MwARwIvlmy-TXmyYs85XS0cChaDrllDr6qkneCA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:dc847073c8ab725317c6271f7effb865f4a0a4124da401997a71200a35464374:X/2qMG8x1cM3n9BuZ+qNMvKLf1mlcMLQUyAlhVtx77wkvV8vRxLanIihVyscQ6O1Q+vaezrc0JVLtCG/8zg0AQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Verify Bundle
 
 Verify the integrity of an existing bundle.

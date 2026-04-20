@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:15c93321ae30e2bf0d86451cf8b03fa503efea8b90e497293d85c429326fd1ce:ALKudKzpfDej3EQ3rsGAB6Lzo_-lhBMnfTM-t3NIqfzuppoLb8gG7ZGY0RWCE9MLOArdsBvKxceAddtYAH8dDQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:022514069bc2cc8e655881f0b4c8b18e4ec5e86d566378c437c7ba1d88b1697b:nUAnla7HQY9OZg7syhLXEnKrIrt0rQ2L9MKFrDMFIztICh9nPExwrEzsr7liTVvUW3LFO5f9VtNGJY+lpRkACw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: trust-model
@@ -40,7 +40,6 @@ Key directory: mode `0700`. Serialized as PEM (PKCS8 private, SubjectPublicKeyIn
 ### Signature Format
 
 ```
-rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP
 ```
 
 | Field          | Value                                                    |
@@ -54,22 +53,17 @@ rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP
 
 | File Type             | Format                                      |
 | --------------------- | ------------------------------------------- |
-| Markdown (directives) | `<!-- rye:signed:TIMESTAMP:HASH:SIG:FP -->` |
-| Python (tools)        | `# rye:signed:TIMESTAMP:HASH:SIG:FP`        |
-| YAML (tools/configs)  | `# rye:signed:TIMESTAMP:HASH:SIG:FP`        |
 
 ### Registry Provenance Suffix
 
 Registry-signed items append `|rye-registry@{username}`:
 
 ```
-rye:signed:TIMESTAMP:HASH:SIG:FP|rye-registry@leolilley
 ```
 
 For markdown (HTML comment), provenance goes before closing `-->`:
 
 ```html
-<!-- rye:signed:2026-02-14T...:HASH:SIG:FP|rye-registry@leolilley -->
 ```
 
 ### Signing Steps

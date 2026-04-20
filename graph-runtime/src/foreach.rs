@@ -34,7 +34,7 @@ pub async fn run_foreach_sequential(
             .unwrap_or(action.clone());
         let stripped = strip_none_values(&interpolated);
 
-        if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path).await {
+        if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, None).await {
             let unwrapped = crate::dispatch::unwrap_result(&val);
             results.push(unwrapped.clone());
 
@@ -90,7 +90,7 @@ pub async fn run_foreach_parallel(
             let interpolated = rye_runtime::interpolate_action(&action, &item_ctx_val)
                 .unwrap_or(action.clone());
             let stripped = strip_none_values(&interpolated);
-            let val = crate::dispatch::dispatch_action(client.as_ref(), &stripped, &thread_id, &project_path).await;
+            let val = crate::dispatch::dispatch_action(client.as_ref(), &stripped, &thread_id, &project_path, None).await;
             val.map(|v| crate::dispatch::unwrap_result(&v))
         });
         handles.push(handle);

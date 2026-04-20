@@ -14,6 +14,14 @@ pub struct GraphConfig {
     pub nodes: HashMap<String, GraphNode>,
     #[serde(default)]
     pub hooks: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<Value>,
+    #[serde(default)]
+    pub env_requires: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
 }
 
 fn default_max_steps() -> u32 {

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:99ab4c088b38bb26900f8428ac4eb14115556397903ad033405a944208000412:-OyhXqh0uT-SYZXsiiavgcHCKq1mYGqrNhkAnB3faBm3S8hvTsL44Y8JsTKMIC8zHyj5YFYF5rKPugkHaiEUDw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:cd8d2d49c84c12512a3259d49657e7d9e5be26de865f23a45ac39057a4be39f5:sD5hpYSNATdVHyB4JkJ/6hOWcIvIQucLbf6Bm97a5yifSk4PFHST34/Sbd/bXWc+Ol85qrMMBzZBdh3++s0uAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: registry-api
@@ -108,7 +108,6 @@ Ed25519 signed requests and API keys. The `get_current_user` dependency extracts
 ### Server-Side Flow
 
 1. **Namespace verification** — Authenticated user must match namespace
-2. **Strip signature** — `strip_signature(content, item_type)` removes existing `rye:signed:` comment
 3. **Validate content** — Structural validation (metadata fields, format)
 4. **Signature verification** — Verifies the publisher's Ed25519 signature (publisher's signature is sole provenance — no re-signing by the registry)
 5. **CAS storage** — Stores in the content-addressed registry

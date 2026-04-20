@@ -1,7 +1,12 @@
+# rye:signed:2026-04-19T09:49:53Z:68a890feda7c3e67f88e51be049be9df271bcd3deaac73abab2b7301baa95c0d:nOUtdwzHnOfFi602Jwu07TN/UtLXZdf9qZSIfRv0YwR5nlkDiXDvyNWcbMbqYEzr4olnpn86bMDMFwMP0hOgDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 location:
   directory: directives
 execution:
   default_executor_id: "tool:rye/core/executors/directive/directive"
+resolution:
+  - resolve_extends_chain
+  - resolve_provider
+  - preload_tool_schemas
 formats:
   - extensions: [".md"]
     parser_id: markdown/xml

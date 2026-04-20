@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:1b76c0eb78a44a58b863392814d4c1b0d502258048274bd25da5e99efc65429e:QyapEuhMX7va5FrQQwCQTc9RNw9nKgYDvmlHtWOiPjEsdxxO-oqrYGT_mHTxShg2TivnH4Fcme9FSMQcu3IFDA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:c677ed67d0120bab0e0f8cc076a176dab9fb0c72b1a57843a629d40818f50fdf:t1awmliSHlGyVJnt8/EFl5PQWOtIIXagMqoTu7zRha6uRbzDnp5iB03NO6OkqxE7KcgGlnwri3phHl0CN1B2BA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 MCP Connect Tool
 
@@ -118,7 +118,6 @@ def load_server_config(
     # Remove signature line if present
     if content.startswith("#"):
         lines = content.split("\n", 1)
-        if len(lines) > 1 and "rye:signed:" in lines[0]:
             content = lines[1]
 
     data = yaml.safe_load(content)

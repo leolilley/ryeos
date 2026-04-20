@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:57Z:af46136c3f99423307e1e2caed8ec40f45a4b5d8f4e7ff36cab6709ddb806d4e:JSjeNE5NUGr8IIta_NM9687DTd8pr4gjt9Zi2SekDHAmSSoEUlitlRHMo7fnfLjGJHR6bdQ6SsVAUnmrBCJhCw:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:952c207c0c50936a9063b699dbdb044c8b2e84024e4992fb4cc1d84b8cd4ba56:Nihl7iD1hl0Y94E80n1On2tYLBin4RmxWgQvNgwqUwgUDGe66kvUydBS/OnvY+Tmy205Vp4XhUGire04HYcjCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 MCP Manager Tool
 
@@ -52,7 +52,6 @@ def get_mcp_tools_dir(project_path: Path, server_name: str, scope: str = "projec
 def generate_signature_placeholder() -> str:
     """Generate a placeholder signature line (must be re-signed before execution)."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return f"# rye:signed:{timestamp}:placeholder:unsigned:unsigned"
 
 
 def create_server_config(

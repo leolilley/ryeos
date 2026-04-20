@@ -26,5 +26,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "proce
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

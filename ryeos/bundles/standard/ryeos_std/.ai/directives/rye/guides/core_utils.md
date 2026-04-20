@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:2586bd9e6fb357e53e7e2f6e65b01f17a0dbb91e7bae0c3df627ad67f74a3b5d:qKeqMM0iE2Ia2aAge_cf5XIRHdaM0rV9D37xMUiwhLGfcnparqHHjAd9P4H27KRWbl83sRsOp4B7i6r6LadTDw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:1d6f821d652269c6183de8ac878987005bb59bcdfb5aa33b386a3c724ea4ba93:eBz3vbHJFw/5D/dRfE4KazVDXbpttwcnV7D6+JYnX94G6TAD46BLawMedcX8zLaG58d/nZ0j9s5d1DEhKfqgBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Core Utils
 
 Guide 3 in the Rye OS onboarding sequence. Walks through the infrastructure layer — system info, telemetry, bundling, runtimes, parsers, extractors, and sinks.

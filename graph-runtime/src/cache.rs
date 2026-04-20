@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 pub struct NodeCache {
-    cache_dir: PathBuf,
+    pub cache_dir: PathBuf,
 }
 
 impl NodeCache {

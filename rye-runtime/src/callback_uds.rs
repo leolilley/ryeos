@@ -8,12 +8,15 @@ use crate::daemon_rpc::{DaemonRpcClient, RpcError};
 
 pub struct UdsRuntimeClient {
     rpc: DaemonRpcClient,
+    callback_token: String,
 }
 
 impl UdsRuntimeClient {
     pub fn new(socket_path: PathBuf) -> Self {
+        let callback_token = std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default();
         Self {
             rpc: DaemonRpcClient::new(socket_path),
+            callback_token,
         }
     }
 
@@ -37,6 +40,17 @@ impl UdsRuntimeClient {
             other => CallbackError::Transport(other.into()),
         }
     }
+
+    fn inject_callback_token(&self, params: &mut Value) {
+        if let Some(map) = params.as_object_mut() {
+            if !map.contains_key("callback_token") && !self.callback_token.is_empty() {
+                map.insert(
+                    "callback_token".to_string(),
+                    json!(self.callback_token),
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -45,21 +59,20 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         request: DispatchActionRequest,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": request.thread_id,
+            "project_path": request.project_path,
+            "action": {
+                "primary": request.action.primary,
+                "item_id": request.action.item_id,
+                "kind": request.action.kind,
+                "params": request.action.params,
+                "thread": request.action.thread,
+            },
+        });
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "runtime.dispatch_action",
-                json!({
-                    "thread_id": request.thread_id,
-                    "project_path": request.project_path,
-                    "action": {
-                        "primary": request.action.primary,
-                        "item_id": request.action.item_id,
-                        "kind": request.action.kind,
-                        "params": request.action.params,
-                        "thread": request.action.thread,
-                    },
-                }),
-            )
+            .request("runtime.dispatch_action", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -79,8 +92,10 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
     }
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request("threads.mark_running", json!({"thread_id": thread_id}))
+            .request("runtime.mark_running", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -90,11 +105,10 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         status: &str,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "status": status});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "threads.finalize",
-                json!({"thread_id": thread_id, "status": status}),
-            )
+            .request("runtime.finalize_thread", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -111,11 +125,10 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         prompt: &str,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "prompt": prompt});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "threads.request_continuation",
-                json!({"thread_id": thread_id, "prompt": prompt}),
-            )
+            .request("runtime.request_continuation", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -127,16 +140,15 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         payload: Value,
         storage_class: &str,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "event_type": event_type,
+            "payload": payload,
+            "storage_class": storage_class,
+        });
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "events.append",
-                json!({
-                    "thread_id": thread_id,
-                    "event_type": event_type,
-                    "payload": payload,
-                    "storage_class": storage_class,
-                }),
-            )
+            .request("runtime.append_event", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -146,18 +158,19 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         events: Vec<Value>,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "events": events});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "events.append_batch",
-                json!({"thread_id": thread_id, "events": events}),
-            )
+            .request("runtime.append_events", params)
             .await
             .map_err(Self::map_rpc_error)
     }
 
     async fn replay_events(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request("events.replay", json!({"thread_id": thread_id}))
+            .request("runtime.replay_events", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -193,11 +206,10 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         amount: f64,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "amount": amount});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "budgets.reserve",
-                json!({"thread_id": thread_id, "amount": amount}),
-            )
+            .request("runtime.reserve_budget", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -207,25 +219,28 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         usage: Value,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "usage": usage});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "budgets.report",
-                json!({"thread_id": thread_id, "usage": usage}),
-            )
+            .request("runtime.report_budget", params)
             .await
             .map_err(Self::map_rpc_error)
     }
 
     async fn release_budget(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request("budgets.release", json!({"thread_id": thread_id}))
+            .request("runtime.release_budget", params)
             .await
             .map_err(Self::map_rpc_error)
     }
 
     async fn get_budget(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request("budgets.get", json!({"thread_id": thread_id}))
+            .request("runtime.get_budget", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -235,11 +250,10 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         artifact: Value,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "artifact": artifact});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "artifacts.publish",
-                json!({"thread_id": thread_id, "artifact": artifact}),
-            )
+            .request("runtime.publish_artifact", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -249,21 +263,17 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         facets: Value,
     ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "facets": facets});
+        self.inject_callback_token(&mut params);
         self.rpc
-            .request(
-                "threads.set_facets",
-                json!({"thread_id": thread_id, "facets": facets}),
-            )
+            .request("runtime.set_facets", params)
             .await
             .map_err(Self::map_rpc_error)
     }
 
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError> {
         self.rpc
-            .request(
-                "threads.get_facets",
-                json!({"thread_id": thread_id}),
-            )
+            .request("threads.get_facets", json!({"thread_id": thread_id}))
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -276,5 +286,27 @@ mod tests {
     #[test]
     fn from_env_returns_client() {
         let _ = UdsRuntimeClient::from_env();
+    }
+
+    #[test]
+    fn inject_callback_token_adds_token() {
+        let client = UdsRuntimeClient {
+            rpc: crate::daemon_rpc::DaemonRpcClient::new(std::path::PathBuf::from("/tmp/test")),
+            callback_token: "cbt-test123".to_string(),
+        };
+        let mut params = json!({"thread_id": "T-1"});
+        client.inject_callback_token(&mut params);
+        assert_eq!(params["callback_token"], "cbt-test123");
+    }
+
+    #[test]
+    fn inject_callback_token_skips_if_empty() {
+        let client = UdsRuntimeClient {
+            rpc: crate::daemon_rpc::DaemonRpcClient::new(std::path::PathBuf::from("/tmp/test")),
+            callback_token: String::new(),
+        };
+        let mut params = json!({"thread_id": "T-1"});
+        client.inject_callback_token(&mut params);
+        assert!(params.get("callback_token").is_none());
     }
 }

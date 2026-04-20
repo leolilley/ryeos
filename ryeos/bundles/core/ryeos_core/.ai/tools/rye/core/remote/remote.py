@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:1daf160e3e47a5047cc1884bcca2ea512e7777201b9ef951360c74b8847db995:6pe_7m1d1PpZkLbqdebkWbzNzlLqRWJdcnkqSmETPLs8dYfaHC_f5QSqR_H0zi-yE8unYIO3uFjs_WRfwyXSAw:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:c2ff7e3acc5c193fcd8cc9b83c1cdbe04bd0aec9654f81c2d6f23d6f96432f7c:nfFO8HrmB5w3BFegcUrr3wG4YaRqasusHmyHR0aH3LwTghYTuZTjidU13LA9I6Y4LftFOPP/rAi7IAQAL0SqAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 Remote tool — sync and execute against ryeos-node server.
 
@@ -1426,7 +1426,6 @@ async def _push_bundle(project_path: Path, params: Dict) -> Dict:
 
     raw = manifest_path.read_text()
     lines = raw.splitlines(keepends=True)
-    if lines and lines[0].startswith("# rye:signed:"):
         raw = "".join(lines[1:])
     manifest_data = yaml.safe_load(raw)
 

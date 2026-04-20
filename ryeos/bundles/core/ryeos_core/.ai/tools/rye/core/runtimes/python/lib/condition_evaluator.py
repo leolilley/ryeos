@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:36e9f7ef3a834ad70c1ec813ce3f5133ab45d79ff4bd9a08db11deb384810711:9qfsidVj-bv-iabXGEQAn_Asmabei6JGz69jtDlVfb7GEK0ZUl2T1dKXpfKdRsVrZ--tfYdczyWysp6bQwfyAQ:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:36e9f7ef3a834ad70c1ec813ce3f5133ab45d79ff4bd9a08db11deb384810711:9qfsidVj+bv+iabXGEQAn/Asmabei6JGz69jtDlVfb7GEK0ZUl2T1dKXpfKdRsVrZ++tfYdczyWysp6bQwfyAQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Condition evaluator and path resolver.
 
 Shared runtime library — evaluates conditions against documents

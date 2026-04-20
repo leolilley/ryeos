@@ -6,10 +6,16 @@
 //! 3. After execution, diff working dir and fold back changes
 
 pub mod cache;
+pub mod callback_token;
+#[allow(dead_code)]
+pub mod launch;
+pub mod launch_envelope;
+pub mod limits;
 pub mod project_source;
 pub mod runtime_dispatch;
 pub mod runner;
 pub mod snapshot;
+pub mod thread_meta;
 
 use std::collections::HashMap;
 use std::fs;

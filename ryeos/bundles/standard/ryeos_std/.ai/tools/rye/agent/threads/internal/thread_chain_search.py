@@ -1,4 +1,4 @@
-# rye:signed:2026-04-11T01:46:35Z:8d8b156c33a07534ee77f09220272490d57a9a8c63f9ac18fed96041e2c5f8de:w0ByaxustM_3h1UvNlFBnIjDc4K_35C9aofwjCl0lywBqmMD9B8ywrpaWzahC42JFhCo5xVf6lXPcPFV-hpzBg:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:8d8b156c33a07534ee77f09220272490d57a9a8c63f9ac18fed96041e2c5f8de:w0ByaxustM/3h1UvNlFBnIjDc4K/35C9aofwjCl0lywBqmMD9B8ywrpaWzahC42JFhCo5xVf6lXPcPFV+hpzBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # internal/thread_chain_search.py
 __version__ = "1.0.0"
 __tool_type__ = "python"

@@ -55,29 +55,10 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
         }
     }
 
-    // 4. Load kind registry from filesystem
-    let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", rye_engine::AI_DIR, rye_engine::KIND_SCHEMAS_DIR);
-    } else {
-        KindRegistry::load_base(&schema_roots).context("failed to load kind schemas")?
-    };
-
-    if !kinds.is_empty() {
-        tracing::info!(
-            count = kinds.len(),
-            roots = schema_roots.len(),
-            kinds = %kinds.kinds().collect::<Vec<_>>().join(", "),
-            "loaded kind schemas"
-        );
-    }
-
-    // 5. Build executor registry with terminal entries
-    let executors = build_executor_registry();
-
-    // 6. Build metadata parser registry with builtins
-    let parsers = MetadataParserRegistry::with_builtins();
-
-    // 7. Load trust store with three-tier resolution (project > user > system)
+    // 4. Load trust store with three-tier resolution (project > user > system)
+    //    Trust store loads BEFORE kind schemas because kind schema verification
+    //    requires the trust store. Both use raw filesystem scanning (no item
+    //    resolution dependency), so there is no bootstrap cycle.
     let trust_store = match TrustStore::load_three_tier(
         None, // project root not known at daemon startup — resolved per-request
         user_root.as_deref(),
@@ -89,9 +70,31 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
         }
         Err(err) => {
             tracing::error!(error = %err, "failed to load trust store");
-            TrustStore::empty()
+            anyhow::bail!("failed to load trust store: {err}");
         }
     };
+
+    // 5. Load kind registry from filesystem (requires trust store for verification)
+    let kinds = if schema_roots.is_empty() {
+        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", rye_engine::AI_DIR, rye_engine::KIND_SCHEMAS_DIR);
+    } else {
+        KindRegistry::load_base(&schema_roots, &trust_store).context("failed to load kind schemas")?
+    };
+
+    if !kinds.is_empty() {
+        tracing::info!(
+            count = kinds.len(),
+            roots = schema_roots.len(),
+            kinds = %kinds.kinds().collect::<Vec<_>>().join(", "),
+            "loaded kind schemas"
+        );
+    }
+
+    // 6. Build executor registry with terminal entries
+    let executors = build_executor_registry();
+
+    // 7. Build metadata parser registry with builtins
+    let parsers = MetadataParserRegistry::with_builtins();
 
     // 8. Construct engine
     let engine = Engine::new(kinds, executors, parsers, user_root, system_roots)

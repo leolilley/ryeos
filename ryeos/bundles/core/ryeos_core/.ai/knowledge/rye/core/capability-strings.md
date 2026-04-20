@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:590cac0f4379853d514115975efc78d1dafe5f73618206dfbb2953910a9acef9:DaswKg2LEIZoiaogaXhKENYXuEJrCHRKX2n6k8Tdcyksnj1dNj95AgJoBLpCt0eX-t6xpDIK5m64Ed7hvb1cAQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:590cac0f4379853d514115975efc78d1dafe5f73618206dfbb2953910a9acef9:DaswKg2LEIZoiaogaXhKENYXuEJrCHRKX2n6k8Tdcyksnj1dNj95AgJoBLpCt0eX+t6xpDIK5m64Ed7hvb1cAQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 ```yaml
 name: capability-strings
 title: Capability Strings & Permissions

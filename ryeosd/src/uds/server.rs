@@ -126,15 +126,39 @@ fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
             request.request_id,
             handle_get_facets(&request.params, state),
         ),
-        "runtime.dispatch_action" => rpc_result(
-            request.request_id,
-            crate::execution::runtime_dispatch::handle(&request.params, state),
-        ),
+        other if other.starts_with("runtime.") => {
+            rpc_result(request.request_id, dispatch_runtime_method(other, &request.params, state))
+        }
         other => RpcResponse::err(
             request.request_id,
             "unknown_method",
             format!("unknown rpc method: {other}"),
         ),
+    }
+}
+
+pub fn dispatch_runtime_method(
+    method: &str,
+    params: &serde_json::Value,
+    state: &AppState,
+) -> Result<serde_json::Value> {
+    match method {
+        "runtime.dispatch_action" => {
+            crate::execution::runtime_dispatch::handle(params, state)
+        }
+        "runtime.append_event" => handle_append_event(params, state),
+        "runtime.append_events" => handle_append_event_batch(params, state),
+        "runtime.replay_events" => handle_replay_events(params, state),
+        "runtime.reserve_budget" => handle_reserve_budget(params, state),
+        "runtime.report_budget" => handle_report_budget(params, state),
+        "runtime.release_budget" => handle_release_budget(params, state),
+        "runtime.get_budget" => handle_get_budget(params, state),
+        "runtime.finalize_thread" => handle_finalize(params, state),
+        "runtime.mark_running" => handle_mark_running(params, state),
+        "runtime.request_continuation" => handle_request_continuation(params, state),
+        "runtime.publish_artifact" => handle_publish_artifact(params, state),
+        "runtime.set_facets" => handle_set_facets(params, state),
+        other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
 

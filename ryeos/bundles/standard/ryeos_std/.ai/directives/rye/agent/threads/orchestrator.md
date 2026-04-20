@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:8a7cbab48d1d8f84f708cc43a3772673c8bd5f932e6d48e492e5751da2242f17:Rzgb1yICTmFDZrffuIOYRu5Pxm5HJzAWfGW0Yjcya0H2qpizgHZ7r1VB585ztbHsiHaaZSnlDf3kUqi7f0oZDA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:7f21fc2d92b6e47c294530c20d481d46fa8ca5757e913627ac125b65bd8e20cf:Up7gQ89IenJ6c7TqdOPvkU8O6hrl3+ryIfLLkQ0odFwBYI3Za+fMjQm37QK8v39HGO18u3CpdkbO0h5x9cxhBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Orchestrator
 
 Multi-thread orchestration — wait, cancel, status, resume, handoff.

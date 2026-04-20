@@ -8,6 +8,8 @@ pub mod pins;
 pub mod push;
 pub mod refs;
 pub mod registry;
+pub mod runtime_callback;
+pub mod stubs;
 pub mod threads;
 pub mod vault;
 pub mod webhooks;

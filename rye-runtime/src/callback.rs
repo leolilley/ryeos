@@ -123,8 +123,25 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 }
 
 pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
-    Box::new(
-        crate::callback_uds::UdsRuntimeClient::from_env()
-            .expect("UDS client construction failed"),
-    )
+    let socket_path = crate::daemon_rpc::resolve_daemon_socket_path(None);
+    if socket_path.exists() {
+        Box::new(
+            crate::callback_uds::UdsRuntimeClient::new(socket_path),
+        )
+    } else {
+        #[cfg(feature = "http-client")]
+        {
+            Box::new(
+                crate::callback_http::HttpRuntimeClient::from_env()
+                    .expect("no UDS socket and RYEOSD_URL + RYEOSD_CALLBACK_TOKEN not set"),
+            )
+        }
+        #[cfg(not(feature = "http-client"))]
+        {
+            panic!(
+                "UDS socket not found at {} and http-client feature not enabled",
+                socket_path.display()
+            );
+        }
+    }
 }

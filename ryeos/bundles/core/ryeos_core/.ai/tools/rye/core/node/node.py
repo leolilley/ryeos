@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:97d094d2098f53d279e1f0a70976f185cb26847e52b88ee354cd623e08224843:ZTG2adSY0laUbg3OdESf7q9TQKoP0cfTief9kgQApR9qcXRvOuuLDOqaz49lblS0WlZZNsyynNW6EGtDzw3hBA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:f72bdbb1f785dfee11c714e6d2fc19007b185c257e974ca92ec77cc8ecd390fe:mjkDR72sMWB0uwGWEhZTgPyEEqP3vIETtZmU/nyfgmpAC/3EHgs3t124mzoS0RODyWJSc/DXcLVEHXwcMHvoAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Node management tool — init, start, stop, authorize, and configure ryeos-node.
 
 Actions:
@@ -244,7 +244,6 @@ def _authorize(params: Dict, project_path: str) -> Dict:
     sig_b64 = sign_hash(content_hash, node_priv)
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    signed_content = f"# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{node_fp}\n{body}"
 
     authorized_keys_dir.mkdir(parents=True, exist_ok=True)
     key_file = authorized_keys_dir / f"{fp}.toml"

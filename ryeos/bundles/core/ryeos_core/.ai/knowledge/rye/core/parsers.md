@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:54350c06d8dc4d746b59c91f6175d7f461fc8b5ddb65d493e10c78ac68019d63:oVBxVZOrEbXds8EEhQhfODOcoWyL26dNWHdMYh1SZGDOZlifQpbMwvHNQRd1h0IsxzVRP5ZeT85NdDYY8VMCDA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:c9c93a1d6430d6f8fd9a21d85df82f976bb685bec905eaa6b82ecefd0721088d:ZkHb0wd5PjLqe4N9nXWmRm7iMgBLXaxPgIPHqER+P/nr1VD+aE14MwRToOXNCkon5xkz8KAcNVqnfC5lvK18BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: parsers
@@ -78,7 +78,6 @@ Parses Markdown files containing embedded XML metadata in fenced code blocks.
 A `.md` file with this structure:
 
 ```
-Line 1:  <!-- rye:signed:TIMESTAMP:HASH:SIG:FP -->
          # Title
          Description text
          ```xml
@@ -171,7 +170,6 @@ Parses Python files using AST to extract dunder metadata and `CONFIG_SCHEMA`.
 ### Input
 
 ```python
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 
 """Tool docstring."""
 
@@ -264,7 +262,6 @@ Parses JavaScript and TypeScript files using regex to extract `export const` met
 ### Input
 
 ```typescript
-// rye:signed:TIMESTAMP:HASH:SIG:FP
 
 export const __version__ = "1.0.0";
 export const __tool_type__ = "javascript";

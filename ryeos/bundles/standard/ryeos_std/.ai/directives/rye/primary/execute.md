@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:25918551edea0abbc0b701d436fa89363e34a9e144ca48fe20930a3ea8d97a08:qa2T-Pxh7kfzpovkVsgI3UqNyCgvafqISIa75Bs-CQoW7YvVIc-DTwpjptQJdziy9U9buQS4QNa95gU-y3L0DA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:58dc44d716d8fb348c195ab4da701dd60372c86bf72db9ec9a62cfd7446d3d12:cUGNq5QfuJjR/lmmVNnCBSU9Tq7pVhbUeJCrJOhLX329wyDHRKWXOgue6oPGyAPZZEQSlCnsMmaoogBb1vf6Bw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Execute
 
 Execute a directive, tool, or knowledge item by id with optional parameters.

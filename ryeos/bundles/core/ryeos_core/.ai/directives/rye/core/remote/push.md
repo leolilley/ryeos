@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:35784e158b341bb726f161cd3d48a5de4c55d2963823a6a1437f61319ad8891a:Zif3uAMLoomeUtZTbCSvgxCNfJwxeuv8K9TTsR_p5qkW2cZ8os8hvswI2PE3gbAS2uIsiJaffye4-VYE3oYGDg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:d02df143cdcf8376876fdf2754c059887b4ba25dfe9ac25c9f08ca0f7b8cd243:mRFqbKA3nbk7b3nGHW56spdF9U7P+4VUeXDtZqIN45PDtJX9e2b34IflnpfFPelggyzCnauVtkXGtCdXyec9AQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Push to Remote
 
 Sync local project and user state to the remote CAS server.

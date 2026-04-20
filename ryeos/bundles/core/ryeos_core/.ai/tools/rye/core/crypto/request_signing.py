@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:7b77000c34c192cdc881e16b6df7bd6b331ddc6ce245a5486e4469b7fc8202fb:yZ--WKlJfxVPmzg5AbbBsL40raG9sxoi0Xm8qxTkg8ULNkt8d9tHPinPumY4fBXcI0DNfv7_TpTv4IVzz2h4BQ:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:7b77000c34c192cdc881e16b6df7bd6b331ddc6ce245a5486e4469b7fc8202fb:yZ++WKlJfxVPmzg5AbbBsL40raG9sxoi0Xm8qxTkg8ULNkt8d9tHPinPumY4fBXcI0DNfv7/TpTv4IVzz2h4BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Per-request Ed25519 signing for outbound HTTP calls.
 
 Shared utility importable by core bundle tools that make authenticated

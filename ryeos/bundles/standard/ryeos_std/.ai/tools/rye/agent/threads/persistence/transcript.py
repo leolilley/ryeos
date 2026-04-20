@@ -1,4 +1,4 @@
-# rye:signed:2026-04-11T04:03:37Z:44640ec7ccdfe62f03d4ea0519f7739c1dafbffdf96398eec4650c92ed05f738:xZryEjwgHfcTkl7QBa6gf1PiatcM3vgCT-LPRH1mZaFOnXLkSA6biXu5816WMEKsOB91nBLzBcqEDCpJk23cAw:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:44640ec7ccdfe62f03d4ea0519f7739c1dafbffdf96398eec4650c92ed05f738:xZryEjwgHfcTkl7QBa6gf1PiatcM3vgCT+LPRH1mZaFOnXLkSA6biXu5816WMEKsOB91nBLzBcqEDCpJk23cAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Thread history helpers for daemon-backed and file-backed runtimes."""
 
 __version__ = "1.5.0"

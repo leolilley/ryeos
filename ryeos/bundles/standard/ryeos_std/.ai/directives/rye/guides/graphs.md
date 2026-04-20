@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:e01bf80300ac7d614551eb19e0ade1c0f8cdafde41156073133018bc5df2fe28:rMM1bpLpvWXUhSUG98-HinSSUyS-oxXaKnu7jgzTqWuE19OTcqJ4q1DeeNZ3wCMt7bAGHKkki7dmTIc-MSkWCA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:f24b866a229d6353a026e1de7b9b14183dd7a213c54ebea1f3ebec1cee1dce7d:HY9HuT1ZNK5iVyDeYpSkx7anUsUyQcuUdliyU9sUIn1AV+xMr0tm5+BiAth4huBOKILuImc6lvEAJPs6h1xyBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Graphs
 
 Guide 8 in the Rye OS onboarding sequence. Declarative state graphs — nodes, edges, conditions, persistence, and error handling.
@@ -56,7 +56,6 @@ A graph is a tool — it lives in `.ai/tools/` — with `tool_type: state_graph`
 The anatomy of a graph YAML:
 
 ```yaml
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 tool_type: state_graph
 executor_id: rye/core/runtimes/state_graph_runtime
 

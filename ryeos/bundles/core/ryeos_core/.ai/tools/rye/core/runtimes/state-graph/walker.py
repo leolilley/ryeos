@@ -1,4 +1,4 @@
-# rye:signed:2026-04-11T02:05:09Z:f07da231009d0cc72fc82434b89644509e287c4cc6b68da49225d36b7d06eb7f:mJMzRL2DH6Xes5qFeSU2VnGkdmB8DFMPn3-StfntnAk-33hP2ebcMcTbWiVy5ogSIaijvN95Mf7oYyTfyGQJCg:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:510356030ef08edd79adeb48419a5d4a930a526071a6dd2aef4a2d767cf3fe34:mtbJ7BHIZtlWiSHeOIXaN8v/qI8fU/TL99hnylKSknckA3jVYnUElYNQe4Sx90LBgVYOfuFi5dSP3kuGug/sAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -527,7 +527,6 @@ def _load_graph_yaml(graph_path: str) -> Dict:
     content = path.read_text(encoding="utf-8")
     # Strip rye signature lines before parsing YAML
     lines = content.split("\n")
-    clean = [l for l in lines if not l.strip().startswith("# rye:signed:")]
     return yaml.safe_load("\n".join(clean))
 
 

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-11T01:06:04Z:e8fece76658913867b5b33df3a4c24f8a4d610dfdb3266c33c5298bb1e11c2a0:S2Jss5h8LRxjtP9lQudS9qG13N2kJpK-hEcCThIbjHP58m4I9XndsxfoygQ7Iii_cKBnpVFi9SRcmZZavrGiAA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:d3f677af2788be829f21597e4f1b09931cd92dbde71acd74b733b705fa4a5e68:Vl+uglq6Dw9ON0vKESpJ/YMEwQEOBY9YXGc77mhqm6PxetB9yPEM7EfOL9/e6fbVj36QplUV3FKkrxT27jMkAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Checkpoint signing for JSONL fallback transcripts and JSON signing utilities.
 
 In daemon-backed v3 execution, the chain journal is authoritative and
@@ -225,12 +225,10 @@ def sign_json(data: dict) -> dict:
     ed25519_sig = sign_hash(content_hash, private_pem)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    data["_signature"] = f"rye:signed:{ts}:{content_hash}:{ed25519_sig}:{pubkey_fp}"
     return data
 
 
 def _parse_signature_str(sig_str: str) -> Optional[dict]:
-    """Parse a rye:signed:... string into its components.
 
     Reuses the same regex pattern as MetadataManager._SIGNED_FIELDS
     to handle the colon-containing ISO timestamp correctly.
@@ -238,7 +236,6 @@ def _parse_signature_str(sig_str: str) -> Optional[dict]:
     import re
     from rye.utils.metadata_manager import _SIGNED_FIELDS
 
-    m = re.match(r"rye:signed:" + _SIGNED_FIELDS + r"$", sig_str)
     if not m:
         return None
     return {

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:d3d683d5114c9719b7c187ceb207f8e73d647a7aa09107635afe21b896ac3200:WkeHbb5F7Gy719MQFdiCeeJKtPD_hMLzLh8nhyMmKShgSem7jcmjr6_5qfzaz7YOU2WHkVjUt6VKXckJEcNUDQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:9f48e627c2a20c67977b20cdc010e5a1a2eeec12582a47dc938dffc214516f30:TiwzBeMfy85uluRZfJmnM7wj346JU3whSqWDURpdGDSLLnYCvLi3MriIP5KSqdnabVltSCDzsbHACywrmai5Cg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: persistence-and-state
@@ -109,7 +109,6 @@ Append-only JSONL event log. Each line is a JSON object with `timestamp`, `threa
 
 ### Capabilities File (`capabilities.md`)
 
-Signed markdown file written once before the LLM loop starts. Contains the thread's tool definitions in a JSON fenced block and the capabilities tree in a code fence. Signed via `MetadataManager.create_signature` (same `<!-- rye:signed:... -->` format as knowledge entries).
 
 ### Knowledge Entry (`.ai/knowledge/agent/threads/{directive}/{thread_id}.md`)
 

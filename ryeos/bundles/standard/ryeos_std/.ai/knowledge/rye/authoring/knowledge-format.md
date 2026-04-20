@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:77b586cbbe089658dde2eeb9442cac8024e19382b241dc41e77c53467179b2bc:7bw04RuwPrOPqGXHQgG4ZFFAkRwQcFtJmHdf9J1NIa2vl9g5OUjDilt4nouh_zLuH9U7bbanDdWyHnkC-RXNBg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:064aaf8e1c04a0bc55ceff391dcd5b8a0b69ef599f5f5939f862ab0bc0336024:iG7s+imfvh1mPwbjXrbXXwGyAqqneD6C0yff4IqxH6NwR+Xw0z88F2T4SKTjCKfGkUZalsqet2aH/qojF/vBAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: knowledge-format
@@ -51,7 +51,6 @@ Line 1:  Signature comment (added by rye_sign)
 ### Complete Structure
 
 ````markdown
-<!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 
 ```yaml
 name: entry-name
@@ -467,12 +466,10 @@ The `category` determines the directory path within `.ai/knowledge/`. Knowledge 
 Same format as directives and tools:
 
 ```
-<!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 ```
 
 - Line 1 of the file (before frontmatter)
 - Added by `rye_sign` — never written manually
-- Unsigned placeholder: `<!-- rye:signed:TIMESTAMP:placeholder:unsigned:unsigned -->`
 
 ---
 
@@ -494,7 +491,6 @@ Same format as directives and tools:
 ## Complete Example
 
 ````markdown
-<!-- rye:signed:2026-02-18T00:00:00Z:abc123:sig456:keyid789 -->
 
 ```yaml
 name: jwt-token-validation

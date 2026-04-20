@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:7d41f7f3f3b6985cd58a190185ac23fa6a8ac7873b2216732804b798ef8598e4:cnYbTWOOEzo4JYnUMJo54UUX22m6qhlZq4qaxa-ef9O1rHxRkU0qBn05RrdNdxtdSe7Gb2d48g6cXEOBZGN_Bg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:b4ab51865d229a7f3b91a95686b6f4e5eaec2e65b7f7f177c6d93d308f641ef8:5WQYtAtq/5Ji9SDS/03F9nuBTd/O3KwM0ktaLCBOOgUjvNrG61Hj5FUKNua0L2J4IEdopGgf8VFhmG4vqsTOBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 <!-- rye:unsigned -->
 
 ```yaml
@@ -57,7 +57,6 @@ The prompt is built by `_build_prompt()` concatenating these parts with `\n`:
 The LLM does **not** receive:
 
 - Metadata XML (`<metadata>`, `<permissions>`, `<limits>`, `<model>`, `<hooks>`)
-- Signature comments (`<!-- rye:signed:... -->`)
 - Raw XML fences (the ` ```xml ` wrapper)
 - Permission declarations
 - Limit values

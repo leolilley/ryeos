@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:8e063d3e061414ddda6538e097ce89675c1fad610162bb411456829445294a37:hNiE74sEd9pCm_93V75qDV_l-kDK12R3Aoa6hu_Ojivuz3d974BTgr2ZcPXmfG55Y3RR9lHl3sgGsF-PcGvXDg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:03756ea030bc5678971894f2d0a43f7b6744a31e1270dd7e9695274d68736423:eWc/koVG4u7nXgWjg+9eGENnSxgy7gZNAE+KykSZPVpXox2+GOQt1lbcgYSBE0HAb5O13jGRhqUvEvgHlproDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: bundle-format
@@ -180,7 +180,6 @@ The resolver discovers bundles at startup via Python entry points:
 Bundle manifests are signed YAML files:
 
 ```yaml
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 bundle:
   id: rye-core
   version: 1.0.0

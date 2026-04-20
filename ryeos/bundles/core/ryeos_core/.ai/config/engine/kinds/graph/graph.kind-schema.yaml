@@ -1,5 +1,10 @@
+# rye:signed:2026-04-19T09:49:53Z:c2f84edc92f9d272c52b47e6e50a6fc1091e4f69e7faef693b83ec765411faf3:cfgtO5Fj63uhfcQEZUgcq9RR22D1lElNDyYjfphthzXQ8fLt1lrxg9EEPICc/m2hwJwOdimD/ow2TgP0joBMBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 location:
   directory: graphs
+resolution:
+  - resolve_graph_entry
+  - resolve_provider
+  - preload_tool_schemas
 formats:
   - extensions: [".yaml", ".yml"]
     parser_id: yaml/yaml

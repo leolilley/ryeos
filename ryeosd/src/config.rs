@@ -216,7 +216,13 @@ impl Config {
             db_path: state_dir.join("db").join("ryeosd.sqlite3"),
             uds_path: runtime_root.join("ryeosd.sock"),
             state_dir: state_dir.clone(),
-            signing_key_path: state_dir.join("identity").join("node-key.pem"),
+            signing_key_path: env::var_os("RYE_SIGNING_KEY_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    // Look for user's signing key in ~/.ai/
+                    let home = base_dirs.home_dir();
+                    home.join(".ai/config/keys/signing/private_key.pem")
+                }),
             cas_root: state_dir.join("cas"),
             system_data_dir: data_dir,
             bundle_roots: Vec::new(),

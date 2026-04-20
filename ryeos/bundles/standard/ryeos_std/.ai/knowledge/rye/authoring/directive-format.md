@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T10:41:23Z:247916d012e60987e3958994774728639c35d713d7a3a646192c8ae7468ab59c:RZ0y6mvmxCAchU7XgP5kVyl4DzNKX0dCviOtZ9QFqkXzU7JO_y6qYKCxti--WiiFHBUDLNXzrJctKCz6Nme0DA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:9f06c81e5c1b0b99a412ba8ba98f9fa9a0a09c80b9186b61bfe2923d1c37c55e:mrbU/onciLqgEnSjpu+cps5HUSx2i3B2NaoZ5HJiXkUUPn/gCOv0fq4RH3fVJfYJcWGjwncyyksYvWDf6ZIdBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: directive-format
@@ -57,7 +57,6 @@ The XML fence is **not parsed by the LLM** — it reads it as structured text. T
 Line 1 of every signed directive:
 
 ```
-<!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 ```
 
 | Field       | Format              | Example                |
@@ -68,14 +67,12 @@ Line 1 of every signed directive:
 | `KEYID`     | Hex key fingerprint | `440443d0858f0199`     |
 
 - Added by `rye_sign` — never write manually
-- Unsigned placeholder: `<!-- rye:signed:TIMESTAMP:placeholder:unsigned:unsigned -->`
 
 ---
 
 ## Complete File Anatomy
 
 ````markdown
-<!-- rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID -->
 
 # Directive Title
 
@@ -672,7 +669,6 @@ Each criterion should be **verifiable** — not vague ("it works") but specific 
 ## Complete Example
 
 ````markdown
-<!-- rye:signed:2026-02-10T02:00:00Z:placeholder:unsigned:unsigned -->
 
 # Deploy and Test
 

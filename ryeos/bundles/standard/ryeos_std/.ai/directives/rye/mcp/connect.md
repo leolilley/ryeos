@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:0c1b0d05b5f3fb512ae69268df7e5b5ffc65554765375493f3ca13ba7d2eab6d:C7aP-5DNJVM8fgul0Z31tR0xhxrV3o6ub6nbS7QqBNBWEp4cooqfMv65lEmrzCQ1cNOLlvkJZl8aPJjAFZWaAA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:2ccb23a201a0f9e01bd7c95ee882a2be305053079506a7fb019f0e2f83ca27dc:IqT6/ebxpZ4i060vx3ZfMU8y6vZf/NiCvMNcvZHz89Z36l07CyTiz4tSumQbxkC55NhMmy05Glk56CxoTIsWDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # MCP Connect
 
 Execute a tool call on an MCP server via HTTP or stdio transport.

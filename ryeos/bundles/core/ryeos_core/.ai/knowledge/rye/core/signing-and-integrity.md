@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:850da1f8284b622cb995ac4f9dea99ec7e9e47db188a5e3062688df41f035339:AB3WETL8-vNWAIKvJ1WRYM5OYrlkK4fwW-3L4o4k2dwFoMQbzwQvUKFBZQkxHH6Yw3662vmeB8_nNEAcsY93Bg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:47499744b1a75e32a37c89943380f11185043a9002156e6e7dc8aeafc189fca9:HJpwzwMUhihtN+tvnXkDXiB9MyEz1Qr7x0Utc4nAd2hes8C1OT3Hom0GKddyzEqYVusyejN2013IwKlYCAnBAQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: signing-and-integrity
@@ -34,9 +34,6 @@ Signatures are embedded as comments on line 1 of every item file.
 
 | File Type        | Format                                                         |
 | ---------------- | -------------------------------------------------------------- |
-| Python / YAML    | `# rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP`   |
-| JS / TS          | `// rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP`  |
-| Markdown         | `<!-- rye:signed:TIMESTAMP:CONTENT_HASH:ED25519_SIG:PUBKEY_FP -->` |
 
 Formats are data-driven — configured per-extension via the `signature_formats` field in each item type's extractor YAML. The sign tool resolves the correct format by (item_type, extension) lookup.
 
@@ -54,7 +51,6 @@ Formats are data-driven — configured per-extension via the `signature_formats`
 Items published through the registry get a suffix:
 
 ```
-# rye:signed:TIMESTAMP:HASH:SIG:FP|registry@username
 ```
 
 ## Content Hash Computation
@@ -106,7 +102,6 @@ signature = sign_hash(content_hash, private_key_pem)  # → Base64url
 fingerprint = compute_key_fingerprint(public_key_pem)  # → 16 hex chars
 
 # 5. Format signature line
-# → "# rye:signed:2026-02-14T00:27:54Z:{hash}:{sig}:{fp}"
 ```
 
 ## Verification Flow

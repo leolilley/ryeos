@@ -1,4 +1,4 @@
-# rye:signed:2026-04-11T01:10:50Z:b1437fe3d6d2bf76d71d9b2e078a63daf3be71850b1858186bbaacc45829c721:T67Rqy-IPGRLp4svRhh_hqdwi7wbbGXj-H0wpJwUX3Ot48wul5ZxMyjaweSKNh3BMSYJOqw0mG13DbnoLL6uBA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:b1437fe3d6d2bf76d71d9b2e078a63daf3be71850b1858186bbaacc45829c721:T67Rqy+IPGRLp4svRhh/hqdwi7wbbGXj+H0wpJwUX3Ot48wul5ZxMyjaweSKNh3BMSYJOqw0mG13DbnoLL6uBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 http_provider.py: ProviderAdapter for LLM HTTP API calls.
 

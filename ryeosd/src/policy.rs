@@ -15,9 +15,8 @@ pub fn request_principal_id(
     match request.extensions().get::<Principal>() {
         Some(p) => normalize_fingerprint(&p.fingerprint),
         None => {
-            // TODO: auth required — no fallback when no principal present
-            // None => state.identity.principal_id(), // auth disabled fallback
-            panic!("no principal in request and no auth fallback configured");
+            // Auth disabled — use daemon's own identity as principal
+            _state.identity.principal_id()
         }
     }
 }

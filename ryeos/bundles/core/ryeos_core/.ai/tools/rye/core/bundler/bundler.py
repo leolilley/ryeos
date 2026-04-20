@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:b67aed8d5b97d8bcb69ef726ce0ed5f948541602b9c2c0bb7dce129db27c7a66:lnPms7YdF3a6VhkG2fn0GtNZGH5V1zC3a_9gVspA0m44jKt6koLA1BsXbyODaCzU8XWelUYgW51-yr9JguHsDA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:d4ef19e589bd984182ba901e9b3567138be2fd8a08ed68aff31e7f84ece01a7f:fOBizdK49vnJP5InxsuxoajJ3lsBP+VHEg0aanxUwgEayvJAO/bMT9+vtinw+FCOMlaMiw4LTyQLpRwQk7q9Bw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 """
 Bundler tool - create, verify, inspect, and list bundle manifests.
@@ -9,7 +9,6 @@ signatures).  Bundles are NOT a separate ItemType; they are managed entirely
 by this core tool.
 
 Manifest location: .ai/bundles/{bundle_id}/manifest.yaml
-Signature format:  # rye:signed:TIMESTAMP:HASH:SIG:FP  (line 1)
 
 Actions:
   create  - Walk item directories, hash every file, sign and write manifest
@@ -77,7 +76,6 @@ CONFIG_SCHEMA = {
 }
 
 # Signature regex for detecting inline-signed files
-_SIGNED_RE = re.compile(r"(?:<!--|#|//) rye:signed:")
 
 # Kind → directory name (all bundleable types)
 _KIND_DIRS = ItemType.SIGNABLE_KINDS
@@ -226,7 +224,6 @@ def _classify_file(rel_path: str) -> str:
 
 
 def _has_inline_signature(path: Path) -> bool:
-    """Check whether a file has an inline rye:signed: signature."""
     try:
         head = path.read_text(encoding="utf-8", errors="replace")[:512]
         return bool(_SIGNED_RE.search(head))
@@ -354,7 +351,6 @@ def _sign_manifest(content: str) -> str:
     if not trust_store.is_trusted(pubkey_fp):
         trust_store.add_key(public_pem, owner="local", version=__version__)
 
-    sig_line = f"# rye:signed:{timestamp}:{content_hash}:{ed25519_sig}:{pubkey_fp}\n"
     return sig_line + content
 
 
@@ -363,7 +359,6 @@ def _parse_manifest(manifest_path: Path) -> Dict[str, Any]:
     text = manifest_path.read_text(encoding="utf-8")
     # Strip leading signature line(s) before YAML parsing
     lines = text.split("\n")
-    yaml_lines = [l for l in lines if not l.startswith("# rye:signed:")]
     return yaml.safe_load("\n".join(yaml_lines)) or {}
 
 

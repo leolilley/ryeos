@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:12ea6acfb3ef45ab949c4ae90e4d6f788f9107550a6bd00e50f32e0bcbf3b766:IQ4-gEwjUiyTl7wBgLXuCS8FWyk2NMF6dioSf4pYy3aWSY4-fdmZEpFDbp5krkoKlZqiy6JPuckCAi7x-IwUCw:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:12ea6acfb3ef45ab949c4ae90e4d6f788f9107550a6bd00e50f32e0bcbf3b766:IQ4+gEwjUiyTl7wBgLXuCS8FWyk2NMF6dioSf4pYy3aWSY4+fdmZEpFDbp5krkoKlZqiy6JPuckCAi7x+IwUCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Identity management tool — create, show, and export identity documents.
 
 An identity document (identity/v1) is a signed CAS object that binds an

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:e3a4c01b52db8678424464b8d0bda1bea02688e7d8ec42160aef6b0b9fd3cdac:NodgYAUBruVWMXkKC5KdjcX_HMWYodM5YYagL_QmGKvQwRMW4tekmiPdnYJYTs7cMtFsJeOcNKDfJkJS_2cRDw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:ab8cad36cf35efe330dbd168f48e4a2beea7a7b9a3bb3fbb2e4c931142065671:RsDnMfZfAKXG6Tp8PNLi530WHJW0qbkru1FJ8Z6k1Uvq9qfH/1ERbqkKNAfVf9HfY/6WkPkgEno2dgMNAfmoAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: standard-runtimes
@@ -127,7 +127,6 @@ config:
 ### Tool Signature
 
 ```python
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 """Tool description."""
 
 __version__ = "1.0.0"
@@ -320,7 +319,6 @@ Shell scripts receive parameters via stdin and the project path as `$1`:
 
 ```bash
 #!/bin/bash
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 
 project_path="$1"
 params=$(cat)  # Read JSON params from stdin

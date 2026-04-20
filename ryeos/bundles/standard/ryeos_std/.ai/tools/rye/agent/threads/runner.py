@@ -1,4 +1,4 @@
-# rye:signed:2026-04-11T04:03:37Z:5c12d4eb8ae24cc15ab0f6ab7649fccb41fe331561de2afbb9c2638065d60565:CgFnqFK4lSap3Idzp-niX5wc--rsSZAJ6LREhqL-j1DiUnhwHCzx2-QO1H3I0sQ7gn0VcVT-a4HdIpdAWOASBg:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:8ac9d19c149f1271f292c8f9fe0188c4e3c8f9f8a5ad0a61996c06337628d7e5:/GuaKhh7W0ihjU6iVTB/T6/fUYH5YXjzstyh58fK1Y4b618OtetnC/PMiSp27BHacVFzo5y6R/LI+ExyE9CcAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 runner.py: Core LLM loop for thread execution
 
@@ -733,7 +733,6 @@ def _clean_tool_result(result: Any) -> Any:
 def _strip_signature(text: str) -> str:
     """Remove rye signature lines from content."""
     lines = text.split("\n")
-    cleaned = [l for l in lines if not l.strip().startswith(("# rye:signed:", "<!-- rye:signed:"))]
     return "\n".join(cleaned).strip()
 
 

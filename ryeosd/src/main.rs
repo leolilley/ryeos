@@ -5,16 +5,17 @@ mod broker;
 mod cas;
 mod config;
 mod db;
+mod engine_init;
 mod execution;
 mod gc;
 mod identity;
 mod kind_profiles;
-mod engine_init;
 mod policy;
 mod process;
 mod reconcile;
 mod refs;
 mod registry;
+mod resolution;
 mod services;
 mod state;
 mod uds;
@@ -36,6 +37,7 @@ use tracing_subscriber::EnvFilter;
 use crate::broker::{LiveBroker, DEFAULT_BROKER_CAPACITY};
 use crate::cas::CasStore;
 use crate::db::Database;
+use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
 use crate::refs::RefStore;
 use crate::registry::RegistryStore;
@@ -62,13 +64,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
 
-    // Init-if-missing convenience
-    if cli.init_if_missing && !config.signing_key_path.exists() {
+    // Init-if-missing convenience (creates runtime dirs + default config)
+    if cli.init_if_missing && !config.state_dir.exists() {
         bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
     }
 
     // Verify initialization
     bootstrap::verify_initialized(&config)?;
+
+    // Sign any unsigned bundle items using the user's signing key.
+    // Runs on every start so that newly-added bundles get signed on first use.
+    bootstrap::sign_unsigned_items(&config);
 
     process::remove_stale_socket(&config.uds_path)?;
 
@@ -87,6 +93,7 @@ async fn main() -> Result<()> {
     let registry = Arc::new(RegistryStore::new(config.cas_root.clone()));
     let vault = Arc::new(VaultStore::new(config.cas_root.clone()));
     let webhooks = Arc::new(WebhookStore::new(config.cas_root.clone()));
+    let callback_tokens = Arc::new(CallbackCapabilityStore::new());
 
     let state = AppState {
         config: Arc::new(config.clone()),
@@ -103,6 +110,7 @@ async fn main() -> Result<()> {
         registry,
         vault,
         webhooks,
+        callback_tokens,
         started_at: Instant::now(),
         started_at_iso: Utc::now().to_rfc3339(),
     };
@@ -232,6 +240,10 @@ fn build_router(state: AppState) -> Router {
             get(api::events::stream_chain_events),
         )
         .route("/execute", post(api::execute::execute))
+        .route(
+            "/runtime/{method}",
+            post(api::runtime_callback::runtime_callback),
+        )
         .route("/objects/has", post(api::objects::has_objects))
         .route("/objects/put", post(api::objects::put_objects))
         .route("/objects/get", post(api::objects::get_objects))

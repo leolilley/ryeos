@@ -8,8 +8,12 @@ use crate::cache::NodeCache;
 use crate::context;
 use crate::dispatch;
 use crate::edges;
+use crate::env_preflight;
 use crate::foreach;
+use crate::hooks;
+use crate::knowledge;
 use crate::model::*;
+use crate::persistence;
 use crate::permissions;
 use crate::validation::analyze_graph;
 use rye_runtime::callback::RuntimeCallbackAPI;
@@ -107,6 +111,31 @@ impl Walker {
         let mut receipts: Vec<NodeReceipt> = Vec::new();
         let cache = NodeCache::new(&self.graph.graph_id);
 
+        let hook_list: Vec<Value> = self.graph.config.hooks.clone().unwrap_or_default();
+
+        if let Ok(Some(resume)) = crate::resume::load_resume_state(&self.project_path, &graph_run_id) {
+                current = resume.current_node;
+                step = resume.step_count;
+                state = resume.state;
+                tracing::info!(
+                    node = %current,
+                    step,
+                    "resuming graph from checkpoint"
+                );
+            }
+
+        {
+            let hook_ctx = hooks::HookContext {
+                graph_id: &self.graph.graph_id,
+                graph_run_id: &graph_run_id,
+                thread_id: &self.thread_id,
+                step: 0,
+                current_node: &cfg.start,
+                state: &state,
+            };
+            hooks::fire_hook(&hook_list, "graph_started", &hook_ctx);
+        }
+
         while step < cfg.max_steps {
             let node = match cfg.nodes.get(&current) {
                 Some(n) => n,
@@ -149,10 +178,22 @@ impl Walker {
                         "completed_with_errors".to_string()
                     };
 
-                    return GraphResult {
+                    {
+                        let hook_ctx = hooks::HookContext {
+                            graph_id: &self.graph.graph_id,
+                            graph_run_id: &graph_run_id,
+                            thread_id: &self.thread_id,
+                            step,
+                            current_node: &current,
+                            state: &state,
+                        };
+                        hooks::fire_hook(&hook_list, "graph_completed", &hook_ctx);
+                    }
+
+                    let graph_result = GraphResult {
                         success: true,
                         graph_id: self.graph.graph_id.clone(),
-                        graph_run_id,
+                        graph_run_id: graph_run_id.clone(),
                         status,
                         steps: step,
                         state: state.clone(),
@@ -169,6 +210,15 @@ impl Walker {
                         },
                         error: None,
                     };
+
+                    let _ = knowledge::write_knowledge_transcript(
+                        &self.project_path,
+                        &self.graph.graph_id,
+                        &graph_run_id,
+                        &serde_json::to_string(&graph_result).unwrap_or_default(),
+                    );
+
+                    return graph_result;
                 }
 
                 NodeType::Gate => {
@@ -375,6 +425,70 @@ impl Walker {
 
             let stripped_action = strip_none_values(&interpolated_action);
 
+            if let Err(env_err) = env_preflight::check_env_requires(
+                &self.graph.config.env_requires,
+                &node.env_requires,
+            ) {
+                let elapsed = start.elapsed().as_millis() as u64;
+                let err_msg = format!("env preflight failed: {env_err}");
+                if let Some(ref on_err_target) = node.on_error {
+                    receipts.push(NodeReceipt {
+                        node: current.clone(),
+                        step,
+                        result_hash: None,
+                        cache_hit: false,
+                        elapsed_ms: elapsed,
+                        error: Some(err_msg.clone()),
+                    });
+                    step += 1;
+                    current = on_err_target.clone();
+                    continue;
+                }
+                match cfg.on_error {
+                    ErrorMode::Continue => {
+                        suppressed_errors.push(ErrorRecord {
+                            step,
+                            node: current.clone(),
+                            error: err_msg.clone(),
+                        });
+                        receipts.push(NodeReceipt {
+                            node: current.clone(),
+                            step,
+                            result_hash: None,
+                            cache_hit: false,
+                            elapsed_ms: elapsed,
+                            error: Some(err_msg),
+                        });
+                        let next = edges::evaluate_next(node, &state, &inputs);
+                        step += 1;
+                        current = match next {
+                            Some(n) => n,
+                            None => {
+                                return make_terminal(
+                                    &self.graph, &graph_run_id, step, state,
+                                    suppressed_errors, "completed",
+                                );
+                            }
+                        };
+                        continue;
+                    }
+                    ErrorMode::Fail => {
+                        return GraphResult {
+                            success: false,
+                            graph_id: self.graph.graph_id.clone(),
+                            graph_run_id,
+                            status: "error".into(),
+                            steps: step,
+                            state,
+                            result: None,
+                            errors_suppressed: None,
+                            errors: None,
+                            error: Some(err_msg),
+                        };
+                    }
+                }
+            }
+
             let result = if node.is_cacheable() {
                 let cache_key = compute_cache_key(
                     &self.graph.graph_id,
@@ -390,6 +504,7 @@ impl Walker {
                         &stripped_action,
                         &self.thread_id,
                         &self.project_path,
+                        Some(&exec_ctx),
                     ).await;
                     if let Ok(ref val) = res {
                         let unwrapped = dispatch::unwrap_result(val);
@@ -409,6 +524,7 @@ impl Walker {
                     &stripped_action,
                     &self.thread_id,
                     &self.project_path,
+                    Some(&exec_ctx),
                 ).await.ok()
             };
 
@@ -429,6 +545,18 @@ impl Walker {
                             .unwrap_or("dispatch returned error status")
                             .to_string();
                         let error_msg = Some(err_str.clone());
+
+                        {
+                            let hook_ctx = hooks::HookContext {
+                                graph_id: &self.graph.graph_id,
+                                graph_run_id: &graph_run_id,
+                                thread_id: &self.thread_id,
+                                step,
+                                current_node: &current,
+                                state: &state,
+                            };
+                            hooks::fire_hook(&hook_list, "error", &hook_ctx);
+                        }
 
                         if let Some(ref on_err_target) = node.on_error {
                             receipts.push(NodeReceipt {
@@ -512,6 +640,32 @@ impl Walker {
                             error: None,
                         });
 
+                        let _ = persistence::write_node_receipt(
+                            &self.project_path,
+                            &graph_run_id,
+                            receipts.last().unwrap(),
+                        );
+
+                        let _ = persistence::write_checkpoint(
+                            &self.project_path,
+                            &graph_run_id,
+                            &current,
+                            step,
+                            &state,
+                        );
+
+                        {
+                            let hook_ctx = hooks::HookContext {
+                                graph_id: &self.graph.graph_id,
+                                graph_run_id: &graph_run_id,
+                                thread_id: &self.thread_id,
+                                step,
+                                current_node: &current,
+                                state: &state,
+                            };
+                            hooks::fire_hook(&hook_list, "after_step", &hook_ctx);
+                        }
+
                         let next = edges::evaluate_next_with_result(node, &state, &inputs, &unwrapped);
                         step += 1;
                         current = match next {
@@ -593,18 +747,53 @@ impl Walker {
             }
         }
 
-        GraphResult {
+        let status_msg = format!("exceeded max_steps ({})", cfg.max_steps);
+
+        {
+            let hook_ctx = hooks::HookContext {
+                graph_id: &self.graph.graph_id,
+                graph_run_id: &graph_run_id,
+                thread_id: &self.thread_id,
+                step,
+                current_node: "",
+                state: &state,
+            };
+            hooks::fire_hook(&hook_list, "limit", &hook_ctx);
+        }
+
+        let result = GraphResult {
             success: false,
             graph_id: self.graph.graph_id.clone(),
-            graph_run_id,
+            graph_run_id: graph_run_id.clone(),
             status: "max_steps_exceeded".into(),
             steps: step,
-            state,
+            state: state.clone(),
             result: None,
             errors_suppressed: None,
             errors: None,
-            error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
+            error: Some(status_msg),
+        };
+
+        {
+            let hook_ctx = hooks::HookContext {
+                graph_id: &self.graph.graph_id,
+                graph_run_id: &graph_run_id,
+                thread_id: &self.thread_id,
+                step,
+                current_node: "",
+                state: &state,
+            };
+            hooks::fire_hook(&hook_list, "graph_completed", &hook_ctx);
         }
+
+        let _ = knowledge::write_knowledge_transcript(
+            &self.project_path,
+            &self.graph.graph_id,
+            &graph_run_id,
+            &serde_json::to_string(&result).unwrap_or_default(),
+        );
+
+        result
     }
 }
 
@@ -829,5 +1018,79 @@ config:
         let w = make_walker(graph, vec![]);
         let result = w.validate();
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn foreach_sequential_collects_results() {
+        let yaml = r#"
+category: test
+permissions:
+  - rye.execute.*
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: "elem"
+      action: {primary: execute, item_id: "tool:test/echo", params: {value: "${elem}"}}
+      collect: "results"
+      next: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![
+            json!({"data": {"value": "a"}}),
+            json!({"data": {"value": "b"}}),
+            json!({"data": {"value": "c"}}),
+        ]);
+        let result = w.execute(json!({"inject_state": {"items": ["a", "b", "c"]}}), None).await;
+        assert!(result.success);
+        let results = result.state.get("results").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn on_error_continue_mode() {
+        let yaml = r#"
+category: test
+permissions:
+  - rye.execute.*
+config:
+  start: step1
+  on_error: continue
+  nodes:
+    step1:
+      action: {primary: execute, item_id: "tool:test/fail"}
+      next: step2
+    step2:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![
+            json!({"status": "error", "data": {"error": "forced failure"}}),
+        ]);
+        let result = w.execute(json!({}), None).await;
+        assert!(result.success);
+        assert_eq!(result.status, "completed_with_errors");
+        assert_eq!(result.errors_suppressed, Some(1));
+    }
+
+    #[test]
+    fn cache_result_hits_cache_on_second_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = NodeCache {
+            cache_dir: tmp.path().join("cache-test-unique-sequential"),
+        };
+        let action = json!({"primary": "execute", "item_id": "tool:test/echo"});
+        let key = compute_cache_key("cache-test-unique-sequential", "step1", &action);
+
+        assert!(cache.lookup(&key).is_none());
+
+        let val = json!({"status": "ok", "data": {"msg": "cached"}});
+        cache.store(&key, &val);
+        let cached = cache.lookup(&key).unwrap();
+        assert_eq!(cached, val);
     }
 }

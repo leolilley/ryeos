@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:abf27a0616a1539e8e37dc935409a536473bd2230db3f8dd6dc112e54b1fb5ff:kisYftUHVTAfoD_2PfYKkdlDqw_yetUZAc98c9MDxF5CeedlUT1ngcjGNCz6p6iOq2fZst_i41I2hj7EOqe1BQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:23ec5e6072c545bbd3f08e726925fe7c850a3c942792a978dc7a186b8bacebc8:RE08TgbrKtCnSoAiHnGHu0nR0K8g2KoPIYvJ1x7xu5cUEHLPiRmr9U7jt3vIjIpnJjZlZY3bZ5f3Vzrv2J5uBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Continuation Prompt
 
 Generate the seed user message for a continuation thread. Executed by `thread_directive.py` step 3.5 when a thread is handed off or resumed — the rendered body becomes the trailing user message in `resume_messages`.

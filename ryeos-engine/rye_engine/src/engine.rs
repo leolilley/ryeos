@@ -149,7 +149,8 @@ impl Engine {
             crate::contracts::ProjectContext::LocalPath { path } => {
                 let project_kinds_path = path.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR);
                 if project_kinds_path.exists() {
-                    self.kinds.with_project_overlay(&project_kinds_path)
+                    let trust = self.effective_trust_store(ctx)?;
+                    self.kinds.with_project_overlay(&project_kinds_path, &trust)
                 } else {
                     Ok(self.kinds.clone())
                 }
@@ -289,8 +290,50 @@ mod tests {
     use crate::contracts::{
         EffectivePrincipal, ExecutionHints, ItemSpace, Principal, ProjectContext, TrustClass,
     };
-    use crate::trust::TrustedSigner;
+    use crate::trust::{TrustedSigner, TrustStore};
+    use ed25519_dalek::SigningKey;
     use std::fs;
+    use std::path::Path;
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn test_trust_store() -> TrustStore {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+        let fp = crate::trust::compute_fingerprint(&vk);
+        TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: fp,
+            verifying_key: vk,
+            label: None,
+        }])
+    }
+
+    fn sign_schema_yaml(yaml: &str) -> String {
+        lillux::signature::sign_content(yaml, &test_signing_key(), "#", None)
+    }
+
+    const TOOL_SCHEMA_YAML: &str = "\
+location:
+  directory: tools
+formats:
+  - extensions: [\".py\"]
+    parser_id: python/ast
+    signature:
+      prefix: \"#\"
+      after_shebang: true
+";
+
+    fn write_signed_tool_schema(kinds_dir: &Path) {
+        let tool_dir = kinds_dir.join("tool");
+        fs::create_dir_all(&tool_dir).unwrap();
+        fs::write(
+            tool_dir.join("tool.kind-schema.yaml"),
+            sign_schema_yaml(TOOL_SCHEMA_YAML),
+        )
+        .unwrap();
+    }
 
     fn test_engine() -> Engine {
         Engine::new(
@@ -368,32 +411,13 @@ mod tests {
 
     #[test]
     fn resolve_finds_item() {
-        // Set up a temp project with kind schema and an actual tool file
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
 
-        // Write kind schema for "tool" kind
-        let tool_schema_dir = kinds_dir.join("tool");
-        fs::create_dir_all(&tool_schema_dir).unwrap();
-        fs::write(
-            tool_schema_dir.join("tool.kind-schema.yaml"),
-            "\
-location:
-  directory: tools
-formats:
-  - extensions: [\".py\"]
-    parser_id: python/ast
-    signature:
-      prefix: \"#\"
-      after_shebang: true
-",
-        )
-        .unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
-        // Load kind registry
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
-
-        // Write a tool file in the project's .ai/tools/ directory
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
@@ -443,7 +467,6 @@ formats:
         assert!(!resolved.content_hash.is_empty());
     }
 
-    /// Helper: create a properly signed tool file and return its content.
     fn signed_tool_content(
         body: &str,
         signing_key: &ed25519_dalek::SigningKey,
@@ -474,40 +497,21 @@ formats:
     fn resolve_then_verify_trusted() {
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
 
-        // Kind schema
-        let tool_schema_dir = kinds_dir.join("tool");
-        fs::create_dir_all(&tool_schema_dir).unwrap();
-        fs::write(
-            tool_schema_dir.join("tool.kind-schema.yaml"),
-            "\
-location:
-  directory: tools
-formats:
-  - extensions: [\".py\"]
-    parser_id: python/ast
-    signature:
-      prefix: \"#\"
-      after_shebang: true
-",
-        )
-        .unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
-
-        // Generate a key pair
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let verifying_key = signing_key.verifying_key();
         let fp = crate::trust::compute_fingerprint(&verifying_key);
 
-        // Write a properly signed tool file
         let body = "print('hello')\n";
         let content = signed_tool_content(body, &signing_key, &fp);
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(tool_dir.join("hello.py"), &content).unwrap();
 
-        // Build engine with trust store
         let trust_store = TrustStore::from_signers(vec![TrustedSigner {
             fingerprint: fp.clone(),
             verifying_key,
@@ -549,27 +553,11 @@ formats:
     fn resolve_then_verify_unsigned() {
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
 
-        let tool_schema_dir = kinds_dir.join("tool");
-        fs::create_dir_all(&tool_schema_dir).unwrap();
-        fs::write(
-            tool_schema_dir.join("tool.kind-schema.yaml"),
-            "\
-location:
-  directory: tools
-formats:
-  - extensions: [\".py\"]
-    parser_id: python/ast
-    signature:
-      prefix: \"#\"
-      after_shebang: true
-",
-        )
-        .unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
-
-        // Write an unsigned tool file
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(tool_dir.join("hello.py"), "print('hello')\n").unwrap();
@@ -608,27 +596,11 @@ formats:
     fn resolve_then_verify_untrusted_signer() {
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
 
-        let tool_schema_dir = kinds_dir.join("tool");
-        fs::create_dir_all(&tool_schema_dir).unwrap();
-        fs::write(
-            tool_schema_dir.join("tool.kind-schema.yaml"),
-            "\
-location:
-  directory: tools
-formats:
-  - extensions: [\".py\"]
-    parser_id: python/ast
-    signature:
-      prefix: \"#\"
-      after_shebang: true
-",
-        )
-        .unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
-
-        // Generate key pair but DON'T add to trust store
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let fp = crate::trust::compute_fingerprint(&signing_key.verifying_key());
 
@@ -671,38 +643,17 @@ formats:
 
     #[test]
     fn resolve_uses_project_kind_overlay() {
-        // Base registry has tool kind with .py extension
-        // Project overlay replaces tool kind with .rb extension only
-        // A .rb tool file should resolve; a .py file should NOT
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
 
-        // Base kind schema: tool → .py
-        let tool_schema_dir = kinds_dir.join("tool");
-        fs::create_dir_all(&tool_schema_dir).unwrap();
-        fs::write(
-            tool_schema_dir.join("tool.kind-schema.yaml"),
-            "\
-location:
-  directory: tools
-formats:
-  - extensions: [\".py\"]
-    parser_id: python/ast
-    signature:
-      prefix: \"#\"
-      after_shebang: true
-",
-        )
-        .unwrap();
-
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
         // Project overlay: tool → .yaml only
         let overlay_dir = project_dir.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR).join("tool");
         fs::create_dir_all(&overlay_dir).unwrap();
-        fs::write(
-            overlay_dir.join("tool.kind-schema.yaml"),
-            "\
+        let overlay_yaml = "\
 location:
   directory: tools
 formats:
@@ -710,8 +661,10 @@ formats:
     parser_id: yaml/yaml
     signature:
       prefix: \"#\"
-      after_shebang: false
-",
+";
+        fs::write(
+            overlay_dir.join("tool.kind-schema.yaml"),
+            sign_schema_yaml(overlay_yaml),
         )
         .unwrap();
 
@@ -726,7 +679,8 @@ formats:
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
-        );
+        )
+        .with_trust_store(ts);
 
         let ctx = PlanContext {
             requested_by: EffectivePrincipal::Local(Principal {

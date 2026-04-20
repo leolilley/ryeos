@@ -232,3 +232,51 @@ pub fn edge_targets(edge: &EdgeSpec) -> Vec<String> {
 }
 
 use serde_json::Value;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_graph(yaml: &str) -> GraphDefinition {
+        GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap()
+    }
+
+    #[test]
+    fn validate_graph_warns_unreachable_nodes() {
+        let yaml = r#"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      next: done
+    done:
+      node_type: return
+    orphan:
+      node_type: action
+      action: {primary: execute, item_id: "tool:test/echo"}
+"#;
+        let graph = make_graph(yaml);
+        let result = analyze_graph(&graph);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.iter().any(|w| w.contains("orphan") && w.contains("unreachable")));
+    }
+
+    #[test]
+    fn validate_graph_warns_missing_state_assignments() {
+        let yaml = r#"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      assign: {out: "${state.undef_key}"}
+      next: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let result = analyze_graph(&graph);
+        assert!(result.warnings.iter().any(|w| w.contains("undef_key") && w.contains("never assigned")));
+    }
+}

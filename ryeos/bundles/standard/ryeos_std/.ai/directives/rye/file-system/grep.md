@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:aead5d7280c16264e8dcbb486cde7b29a312b89222602120e3b57e7bf45b9391:yg0oSs_E7L79H4i2wwmC4KGpsHlZJ66Nf1kOCc56dt-Y22QehOiHkWDPuBvuKy1mrF8BDVLn3ukcifP2SvU0Ag:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:394587f952f082db3bb9fac38057136a11119f46ff9b622db04a06833704ba87:XnGORGmsNcvDQOWuEmn0UefXiyiH5aJ3StQdFHsfsskU+yD4mv3UT3Yg0fY+NWMoOVqYJVKAKhBw1XqJdvs4BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Grep
 
 Search file contents for a text or regex pattern.

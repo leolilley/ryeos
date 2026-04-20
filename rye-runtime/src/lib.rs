@@ -1,5 +1,7 @@
 pub mod callback;
 pub mod callback_uds;
+#[cfg(feature = "http-client")]
+pub mod callback_http;
 pub mod capability_tokens;
 pub mod condition;
 pub mod daemon_rpc;

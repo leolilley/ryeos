@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:765c9e4c3631c1e76b0383691005d92a25cd9d598fd4e1aec509899901ea2cdd:KvJyYwdODR7juX61e63UZYmcLB0vznmlRlKCMboT2o-rN2EPb2gLIVePTqaPTvKiWltGoojsOwL-LAFeiKKqDw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:d1fefaefe13e7976c329b85135f0169e7667fc939cfd25c9140565fdc8bed707:zZ6Vo8FnjumMobkSlBszwejxRIxXjxbHCzrSvrDlnJCNl8B9DTqKOFO0+lvJXBi5DbEgMjMDEvNnWPg2q7htBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: runtime-authoring
@@ -299,7 +299,6 @@ This schema is informational — actual validation is done at the tool level via
 ## Complete Example: Ruby Runtime
 
 ```yaml
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 version: "1.0.0"
 tool_type: runtime
 executor_id: rye/core/primitives/execute
@@ -358,7 +357,6 @@ config_schema:
 Tools using your custom runtime declare it via `__executor_id__`:
 
 ```ruby
-# rye:signed:TIMESTAMP:HASH:SIG:FP
 """
 Tool description
 """

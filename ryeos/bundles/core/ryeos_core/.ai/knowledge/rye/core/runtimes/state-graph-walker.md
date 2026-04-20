@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:2fb8b0101ef6d5296aa3ecec9a9658ffd812840270cf10b60eb335bf0490ce11:Xmo9d23ObszczIN5CMBAJsb6rH0giFCVzvdC8k4Nrjwg1xPAK4V19XYfvLmD_Amf3CHCnHhd3X_0MlG3x_wcBA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:fa76777a1aa129a27ddd3d34911153582d72d75aefb847599bbe6680ecbd7548:aaNMEBMe4ahSmZVQi8d5BE6uOPobg3bponCmpaA8rbIWL1VaUNf4dvoWzsIwisDvH7FDye3zMgFNKhAtrYGYAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 ```yaml
 name: state-graph-walker
 title: "State Graph Walker"
@@ -30,7 +30,6 @@ The graph walker (`walker.py`, ~1240 lines) is the execution engine behind `stat
 | --- | --- | --- |
 | `run_sync(graph_config, params, project_path)` | Runtime YAML inline `-c` script | Handles `async` fork, then calls `asyncio.run(execute(...))` |
 | `execute(graph_config, params, project_path)` | `run_sync` or direct async call | Main graph traversal loop |
-| `_load_graph_yaml(graph_path)` | Runtime inline script | Strips `# rye:signed:` lines, parses YAML |
 
 ## Execution Loop
 

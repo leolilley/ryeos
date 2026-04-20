@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:2974a20b0a861cd2895b6fc6e7abf0d3b00c4ae64e16fd123f6fda5786b1c014:J0vJq72sTlAILfyr_U_Wa2oE4GQ5MFjA40vYS_Y_QhWGpwSZpl7nl65kgTscHOeLMU5nlkJGGXy2W5VgUG0gAw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:1c9364d4abd36c61825d111c1b4fd2f9f18ebf91d7c339b84a82d962b051876a:lTVW9UybgyrfhB3/Fa9fVKLQ9svWwlsoCnpDyLPEiIks/6Ux7giNcsgtNn02CKyoifbAzrWGXTZK8hwWpGiaCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Create Directive
 
 Create a new directive file with proper metadata, validate, and sign it.

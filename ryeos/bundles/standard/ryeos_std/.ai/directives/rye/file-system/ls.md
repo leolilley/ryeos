@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:a209ef5bac7841ea5c061a6c5202c09389dd2cfee37dd487674a2ee67c834c82:tqSnfHOODKQe5FTTdjT619pTMfkakBTum5NT2oYSQSydOTu1k5PCoiiTdnhEnvhp40BKTG4b2mWCAxwHojf4BA:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:e846e10d831140dbc4a32a772ebe0d1e9ca6351c355e3b7a30c09ab97a2e4caa:2t0oDP+Lp9mSmC4iBEMyi9mcY08VVYB7AAi1aFWRP4yVtC0gU6831vtavskP3k9oYM8QWsV9T3zy2JI8UhLdCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # List Directory
 
 List files and directories at a given path.

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:fd73f3cf1b2d2e4bbfb8ba921796d51b5be98deed7e3c5d1c78f919a60547fc2:M1bcgXja-Y1iwy4kWgXAhakQ97uWQUJrTtFH8G4pVl6T9nn6_LBCvx7ys4k2WSvGxyPl8uW79txBlJxT5HClDQ:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:9b241cfe4eb4bf51c35b43ac02631921441b1fbeb4fc4494639c9a4c24049d17:T1UpZcqkNdowqiOUi+wcvJdyqjB2pyAsnnOMTYGSJFqJaGMHWrDmcxq8MNrsZsUcRhCrxp11uF8nJg4YLqMXDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Key management tool — generate, inspect, and trust Ed25519 signing keys.
 
 The user's signing identity. Handles keypair generation, fingerprint display,
@@ -295,7 +295,6 @@ def _trust(params: Dict[str, Any], project_path: str) -> Dict[str, Any]:
         "space": space,
         "owner": owner,
         "path": str(key_file),
-        "signed": key_file.read_text().startswith("# rye:signed:"),
         "message": f"Key {result_fp} trusted in {space} space (owner: {owner}).",
     }
 

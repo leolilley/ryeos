@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:4c7ee136f4284dc984133751387d3d6f2d0eaefe285fb7f61fae9c483ae8d8a8:rQ9XddA6fJ7LRnk13t3Ajvj3BkFlLHrWGZo0HlPiG335wjbWMmtjdOXY7cUQQp46Pbf8veijTtGRYafjC3GYDA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:4c7ee136f4284dc984133751387d3d6f2d0eaefe285fb7f61fae9c483ae8d8a8:rQ9XddA6fJ7LRnk13t3Ajvj3BkFlLHrWGZo0HlPiG335wjbWMmtjdOXY7cUQQp46Pbf8veijTtGRYafjC3GYDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Client-side status cache for multi-node routing.
 
 In-memory TTL cache for /status responses from ryeos-node servers.

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:b1981a305ce634c0cb7e78d5f82cfd30f9e72b6e3f2e92b0ed96e13e87ae2b9d:eYp88X1mHCih72I5c5TDUuoIRnl2wx_Gjj7b54x8Zk3mqyNo7MyUf8e52GKMrWKFqabUN1yHw6hXMpsrfxdDDg:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:b1981a305ce634c0cb7e78d5f82cfd30f9e72b6e3f2e92b0ed96e13e87ae2b9d:eYp88X1mHCih72I5c5TDUuoIRnl2wx/Gjj7b54x8Zk3mqyNo7MyUf8e52GKMrWKFqabUN1yHw6hXMpsrfxdDDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 ```yaml
 name: spawning-patterns
 title: Spawning Patterns

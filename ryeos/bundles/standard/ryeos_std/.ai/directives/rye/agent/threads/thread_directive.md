@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-10T00:57:19Z:5690976a2346861f377798c2e4429d0df3c92037b20d5ebaab2fd9b8db0da1e8:4rIyQZwiXZtfOFFSuwfoynms66pkRdBEsSToCVOIeEtynXwWkDsga1WItX1ykaZ0ELHtm1EHf41de9YDWBloBQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:5954c25bcf6235e44bf94ecdace11f6eebb6e08ab8b614ce436213cd37002c69:5o9Ei8fsguM8VZPvw6jT76LkUhMnzNxSZtcLa9Cmd7yNMSV7xl3lCbJiw2R+0f+/JclX2fARKcjo2UJRFlgcCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Thread Directive
 
 Execute a directive in a managed thread with an LLM loop.

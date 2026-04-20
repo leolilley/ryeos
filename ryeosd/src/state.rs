@@ -9,6 +9,7 @@ use crate::broker::{LiveBroker, LiveBrokerStatus};
 use crate::cas::CasStore;
 use crate::config::Config;
 use crate::db::Database;
+use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
 use crate::refs::RefStore;
 use crate::registry::RegistryStore;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub registry: Arc<RegistryStore>,
     pub vault: Arc<VaultStore>,
     pub webhooks: Arc<WebhookStore>,
+    pub callback_tokens: Arc<CallbackCapabilityStore>,
     pub started_at: Instant,
     pub started_at_iso: String,
 }

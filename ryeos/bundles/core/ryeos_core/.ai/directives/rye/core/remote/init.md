@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:09:13Z:afda702a3ebc2a3638cfdcfece31b92df42525543fde123768282087f023e909:cutnxK-CGZiYJqP8Wen6VGl2y8hoi4008W7tkZBSyxI5t_QZ2BSzJDyhPwLrNq4NxI4dBe4pyilyDMkU8YrBAw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:dd4cc5763d08424f371bfe3e20409fcfa5ab982b412912f2c3691e0c90f570be:Y2C/h8BpbPvCfty2Tep2XDt8dB2XLHYvBRKXMUGjsBM2ff5UMSqO865EH6/Li0BdvP5nbgUxJODMBV1DU1ULAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # Initialize Remote
 
 First-time remote setup: verify connectivity, pin remote key, sync initial state.

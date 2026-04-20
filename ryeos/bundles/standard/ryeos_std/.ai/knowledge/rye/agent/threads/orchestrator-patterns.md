@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:9bef61ee16b07d3a5b5a5144c340db8d0ced85f470770d687260f9c74ab33e6a:mfpua33LWjiHTo9zDB6MoyZVLVyyTZZw6s1t7ko8zGpVIi1x2ope_14TAKmmwbBJvojHmMzOONPxrzOkOb5wAQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:9bef61ee16b07d3a5b5a5144c340db8d0ced85f470770d687260f9c74ab33e6a:mfpua33LWjiHTo9zDB6MoyZVLVyyTZZw6s1t7ko8zGpVIi1x2ope/14TAKmmwbBJvojHmMzOONPxrzOkOb5wAQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 ```yaml
 name: orchestrator-patterns
 title: Orchestrator Patterns

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-09T00:11:21Z:77ae22d24144737968039654bf8817e816c0a3644d04832b463296d230e6acf3:MDLYDYeK0rNEpWACzwgewBCvVKqM-u9hlC8BqBwkz6N784nXDOmYTfxbKDb10Qe_Ua72AVeb9niEo2bsyjx6CQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-04-19T09:49:53Z:6322ce9fbc2ddb792fb766a0023799e9ba33605a8c87f452c9fe511ce22c1fad:X/oNNspyJNCyvOJj/YcsFL1sFU013E9Fzh+TfqoMtD5OCUwVd31z4UjGnNo+twmXLirxPMg4NzUfU1ptRi9XDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 
 ```yaml
 name: tool-format
@@ -65,7 +65,6 @@ Line 1:  Signature comment (added by rye_sign)
 ### Required Structure
 
 ```python
-# rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 """Brief description of what this tool does."""
 
 __version__ = "1.0.0"
@@ -289,7 +288,6 @@ if __name__ == "__main__":
 ### Standard YAML Tool
 
 ```yaml
-# rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 tool_id: category/tool_name
 tool_type: yaml
 version: "1.0.0"
@@ -314,7 +312,6 @@ config:
 Wraps an external MCP server tool:
 
 ```yaml
-# rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
@@ -342,7 +339,6 @@ input_schema:
 Referenced by MCP tool definitions:
 
 ```yaml
-# rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 tool_type: mcp_server
 executor_id: null
 category: mcp/servers
@@ -580,7 +576,6 @@ metadata:
 
 ```typescript
 // .ai/tools/utility/hello_node.ts
-// rye:signed:TIMESTAMP:HASH:SIGNATURE:KEYID
 
 export const __version__ = "1.0.0";
 export const __tool_type__ = "javascript";

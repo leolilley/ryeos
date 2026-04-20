@@ -1,4 +1,4 @@
-# rye:signed:2026-04-10T08:31:58Z:2c75956c7bb299ac3b3af7dd1c4b8e30d8bb8175dcaa155c1a7ab281b0830d8e:w1FBpnG4Q2cnwUmc4hE3J9kzsLkCgEJqtlNLHU554jBGb64F4QyVCk15KgKJzvyf_3f7HXfmCb7LWe0xFBaYCA:4b987fd4e40303ac
+# rye:signed:2026-04-19T09:49:53Z:2c75956c7bb299ac3b3af7dd1c4b8e30d8bb8175dcaa155c1a7ab281b0830d8e:w1FBpnG4Q2cnwUmc4hE3J9kzsLkCgEJqtlNLHU554jBGb64F4QyVCk15KgKJzvyf/3f7HXfmCb7LWe0xFBaYCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 Node capability scanner — introspects system bundle tools.
 

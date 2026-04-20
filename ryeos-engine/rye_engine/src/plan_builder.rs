@@ -385,9 +385,30 @@ mod tests {
     use crate::canonical_ref::CanonicalRef;
     use crate::contracts::*;
     use crate::executor_registry::SubprocessDispatch;
-    use crate::trust::TrustStore;
+    use crate::trust::{TrustedSigner, TrustStore};
     use crate::AI_DIR;
+    use ed25519_dalek::SigningKey;
     use std::fs;
+    use std::path::Path;
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn test_trust_store() -> TrustStore {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+        let fp = crate::trust::compute_fingerprint(&vk);
+        TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: fp,
+            verifying_key: vk,
+            label: None,
+        }])
+    }
+
+    fn sign_schema_yaml(yaml: &str) -> String {
+        lillux::signature::sign_content(yaml, &test_signing_key(), "#", None)
+    }
 
     fn tempdir() -> PathBuf {
         use std::time::SystemTime;
@@ -404,13 +425,7 @@ mod tests {
         dir
     }
 
-    /// Write a tool kind schema to a kinds dir.
-    fn write_tool_schema(kinds_dir: &PathBuf) {
-        let tool_dir = kinds_dir.join("tool");
-        fs::create_dir_all(&tool_dir).unwrap();
-        fs::write(
-            tool_dir.join("tool.kind-schema.yaml"),
-            "\
+    const TOOL_SCHEMA_YAML: &str = "\
 location:
   directory: tools
 formats:
@@ -426,23 +441,27 @@ metadata:
     executor_id:
       from: path
       key: __executor_id__
-",
+";
+
+    fn write_tool_schema(kinds_dir: &Path) {
+        let tool_dir = kinds_dir.join("tool");
+        fs::create_dir_all(&tool_dir).unwrap();
+        fs::write(
+            tool_dir.join("tool.kind-schema.yaml"),
+            sign_schema_yaml(TOOL_SCHEMA_YAML),
         )
         .unwrap();
     }
 
-    /// Write a directive kind schema to a kinds dir.
-    fn write_directive_schema(kinds_dir: &PathBuf, default_executor: Option<&str>) {
+    fn write_directive_schema(kinds_dir: &Path, default_executor: Option<&str>) {
         let dir_dir = kinds_dir.join("directive");
         fs::create_dir_all(&dir_dir).unwrap();
         let executor_line = match default_executor {
             Some(exec) => format!("\nexecution:\n  default_executor_id: \"{exec}\"\n"),
             None => String::new(),
         };
-        fs::write(
-            dir_dir.join("directive.kind-schema.yaml"),
-            format!(
-                "\
+        let yaml = format!(
+            "\
 location:
   directory: directives{executor_line}
 formats:
@@ -452,7 +471,10 @@ formats:
       prefix: \"<!--\"
       suffix: \"-->\"
 "
-            ),
+        );
+        fs::write(
+            dir_dir.join("directive.kind-schema.yaml"),
+            sign_schema_yaml(&yaml),
         )
         .unwrap();
     }
@@ -511,17 +533,20 @@ formats:
         }
     }
 
+    fn test_ts() -> TrustStore {
+        test_trust_store()
+    }
+
     // ── Direct terminal tests (depth 1, no chain) ───────────────────
 
     #[test]
     fn direct_terminal_executor() {
-        // tool:my_tool → executor_id=@primitive_chain (terminal)
-        // script = root item's source_path
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let mut executors = ExecutorRegistry::new();
         executors.register(
@@ -572,15 +597,12 @@ formats:
                 arguments,
                 ..
             } => {
-                // Direct terminal: script is root item's source_path
                 assert_eq!(script_path, &tool_path);
                 assert_eq!(interpreter.as_deref(), Some("python3"));
                 assert!(environment.contains_key("RYE_ITEM_PATH"));
                 assert!(environment.contains_key("RYE_ITEM_REF"));
-                // Site context
                 assert_eq!(environment.get("RYE_SITE_ID").unwrap(), "site:test");
                 assert_eq!(environment.get("RYE_ORIGIN_SITE_ID").unwrap(), "site:test");
-                // No RYE_EXECUTOR_PATH or chain for direct terminal
                 assert!(!environment.contains_key("RYE_EXECUTOR_PATH"));
                 assert!(!environment.contains_key("RYE_EXECUTOR_CHAIN"));
                 assert_eq!(arguments.len(), 1);
@@ -592,8 +614,9 @@ formats:
     #[test]
     fn no_executor_fails() {
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let executors = ExecutorRegistry::new();
 
@@ -631,10 +654,10 @@ formats:
 
     #[test]
     fn unregistered_non_ref_executor_fails() {
-        // executor_id is not in registry AND not a valid canonical ref
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let executors = ExecutorRegistry::new();
 
@@ -674,16 +697,14 @@ formats:
 
     #[test]
     fn chain_resolution_depth_2() {
-        // directive:init → executor_id=tool:exec/directive (via kind default)
-        //   → resolve tool:exec/directive → its executor_id=@primitive_chain (terminal)
-        //   → script = tool:exec/directive's source_path
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_ts();
 
         write_tool_schema(&kinds_dir);
         write_directive_schema(&kinds_dir, Some("tool:exec/directive"));
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
 
         let mut executors = ExecutorRegistry::new();
@@ -694,7 +715,6 @@ formats:
             },
         );
 
-        // Write the executor tool file in project space
         let tool_dir = project_dir.join(AI_DIR).join("tools").join("exec");
         fs::create_dir_all(&tool_dir).unwrap();
         let executor_script = tool_dir.join("directive.py");
@@ -704,18 +724,16 @@ formats:
         )
         .unwrap();
 
-        // Write the directive file
         let directive_dir = project_dir.join(AI_DIR).join("directives");
         fs::create_dir_all(&directive_dir).unwrap();
         let directive_path = directive_dir.join("init.md");
         fs::write(&directive_path, "# Init directive\n").unwrap();
 
-        // Build the root item (directive)
         let item = make_verified_item(
             "directive:init",
             "directive",
             directive_path.clone(),
-            None, // executor_id comes from kind default
+            None,
             Some(project_dir.clone()),
         );
 
@@ -740,7 +758,6 @@ formats:
         )
         .unwrap();
 
-        // Terminal executor is @primitive_chain
         assert_eq!(plan.root_executor_id, "@primitive_chain");
         assert_eq!(plan.root_ref, "directive:init");
         assert_eq!(plan.item_kind, "directive");
@@ -752,26 +769,21 @@ formats:
                 environment,
                 ..
             } => {
-                // Script is the EXECUTOR TOOL, not the directive
                 assert_eq!(script_path, &executor_script);
                 assert_eq!(interpreter.as_deref(), Some("python3"));
-                // Root item info in env
                 assert_eq!(
                     environment.get("RYE_ITEM_PATH").unwrap(),
                     &directive_path.to_string_lossy().to_string()
                 );
                 assert_eq!(environment.get("RYE_ITEM_KIND").unwrap(), "directive");
                 assert_eq!(environment.get("RYE_ITEM_REF").unwrap(), "directive:init");
-                // Executor path is different from item path
                 assert_eq!(
                     environment.get("RYE_EXECUTOR_PATH").unwrap(),
                     &executor_script.to_string_lossy().to_string()
                 );
-                // Full chain for auditing
                 let chain = environment.get("RYE_EXECUTOR_CHAIN").unwrap();
                 assert!(chain.contains("tool:exec/directive"));
                 assert!(chain.contains("@primitive_chain"));
-                // Site context
                 assert_eq!(environment.get("RYE_SITE_ID").unwrap(), "site:test");
             }
             other => panic!("expected DispatchSubprocess, got: {other:?}"),
@@ -780,14 +792,14 @@ formats:
 
     #[test]
     fn chain_resolution_depth_3() {
-        // directive:init → tool:exec/directive → tool:runtime/base → @primitive_chain
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_ts();
 
         write_tool_schema(&kinds_dir);
         write_directive_schema(&kinds_dir, Some("tool:exec/directive"));
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
 
         let mut executors = ExecutorRegistry::new();
@@ -798,7 +810,6 @@ formats:
             },
         );
 
-        // tool:exec/directive → executor_id=tool:runtime/base
         let tool_dir = project_dir.join(AI_DIR).join("tools").join("exec");
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
@@ -807,7 +818,6 @@ formats:
         )
         .unwrap();
 
-        // tool:runtime/base → executor_id=@primitive_chain (terminal)
         let runtime_dir = project_dir.join(AI_DIR).join("tools").join("runtime");
         fs::create_dir_all(&runtime_dir).unwrap();
         let runtime_script = runtime_dir.join("base.py");
@@ -817,7 +827,6 @@ formats:
         )
         .unwrap();
 
-        // directive file
         let directive_dir = project_dir.join(AI_DIR).join("directives");
         fs::create_dir_all(&directive_dir).unwrap();
         let directive_path = directive_dir.join("init.md");
@@ -856,7 +865,6 @@ formats:
 
         match &plan.nodes[0] {
             PlanNode::DispatchSubprocess { script_path, .. } => {
-                // Script is the LAST resolved tool before terminal
                 assert_eq!(script_path, &runtime_script);
             }
             other => panic!("expected DispatchSubprocess, got: {other:?}"),
@@ -865,12 +873,12 @@ formats:
 
     #[test]
     fn chain_cycle_detected() {
-        // tool:a → executor_id=tool:b → executor_id=tool:a → CYCLE
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let executors = ExecutorRegistry::new();
 
@@ -924,13 +932,13 @@ formats:
 
     #[test]
     fn chain_missing_intermediate_tool() {
-        // directive:init → tool:nonexistent (doesn't exist on disk)
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
         write_directive_schema(&kinds_dir, Some("tool:nonexistent"));
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let executors = ExecutorRegistry::new();
 
@@ -978,8 +986,9 @@ formats:
     #[test]
     fn cache_key_deterministic() {
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let mut executors = ExecutorRegistry::new();
         executors.register(
@@ -1015,8 +1024,9 @@ formats:
     #[test]
     fn cache_key_changes_with_params() {
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let mut executors = ExecutorRegistry::new();
         executors.register(
@@ -1051,8 +1061,9 @@ formats:
     #[test]
     fn subprocess_no_params_no_args() {
         let kinds_dir = tempdir();
+        let ts = test_ts();
         write_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let mut executors = ExecutorRegistry::new();
         executors.register(
@@ -1101,18 +1112,18 @@ formats:
 
     #[test]
     fn chain_tampered_intermediate_fails() {
-        // directive:init → tool:exec/directive (with tampered content hash) → should fail
         use base64::Engine as _;
-        use ed25519_dalek::{Signer, SigningKey};
+        use ed25519_dalek::Signer;
         use sha2::{Digest, Sha256};
 
         let project_dir = tempdir();
         let kinds_dir = tempdir();
+        let ts = test_ts();
 
         write_tool_schema(&kinds_dir);
         write_directive_schema(&kinds_dir, Some("tool:exec/directive"));
 
-        let kinds = KindRegistry::load_base(&[kinds_dir]).unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = MetadataParserRegistry::with_builtins();
         let mut executors = ExecutorRegistry::new();
         executors.register(
@@ -1122,11 +1133,9 @@ formats:
             },
         );
 
-        // Generate signing key
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let fp = crate::trust::compute_fingerprint(&signing_key.verifying_key());
 
-        // Write the executor tool with a VALID signature but then TAMPER the body
         let body = "__executor_id__ = \"@primitive_chain\"\n";
         let body_hash = {
             let h = Sha256::digest(body.as_bytes());
@@ -1139,7 +1148,6 @@ formats:
         };
         let sig = signing_key.sign(body_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
-        // Build signed content, then tamper the body
         let tampered_body = "__executor_id__ = \"@primitive_chain\"\n# INJECTED\n";
         let content = format!(
             "# rye:signed:2026-04-10T00:00:00Z:{body_hash}:{sig_b64}:{fp}\n{tampered_body}"
@@ -1149,7 +1157,6 @@ formats:
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(tool_dir.join("directive.py"), &content).unwrap();
 
-        // Write directive file
         let directive_dir = project_dir.join(AI_DIR).join("directives");
         fs::create_dir_all(&directive_dir).unwrap();
         let directive_path = directive_dir.join("init.md");
