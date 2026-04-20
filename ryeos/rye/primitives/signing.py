@@ -101,7 +101,7 @@ def sign_hash(content_hash: str, private_key_pem: bytes) -> str:
         key_path.write_bytes(private_key_pem)
         os.chmod(key_path, 0o600)
 
-        result = _run(["identity", "sign", "--key-dir", tmpdir, "--hash", content_hash])
+        result = _run(["sign", "--key-dir", tmpdir, "--hash", content_hash])
         data = json.loads(result.stdout)
         return data["signature"]
     finally:
@@ -126,7 +126,7 @@ def verify_signature(content_hash: str, signature_b64: str, public_key_pem: byte
         os.close(fd)
 
         result = _run([
-            "identity", "verify",
+            "verify",
             "--hash", content_hash,
             "--signature", signature_b64,
             "--public-key", tmpfile,
@@ -155,7 +155,7 @@ def compute_key_fingerprint(public_key_pem: bytes) -> str:
         os.write(fd, public_key_pem)
         os.close(fd)
 
-        result = _run(["identity", "keypair", "fingerprint", "--public-key", tmpfile])
+        result = _run(["keypair", "fingerprint", "--public-key", tmpfile])
         data = json.loads(result.stdout)
         return data["fingerprint"]
     finally:
@@ -178,7 +178,7 @@ def compute_box_fingerprint(box_pub: bytes) -> str:
         os.write(fd, box_pub)
         os.close(fd)
 
-        result = _run(["identity", "keypair", "box-fingerprint", "--public-key", tmpfile])
+        result = _run(["keypair", "box-fingerprint", "--public-key", tmpfile])
         data = json.loads(result.stdout)
         return data["fingerprint"]
     finally:

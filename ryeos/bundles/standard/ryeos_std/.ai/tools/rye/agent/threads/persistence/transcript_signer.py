@@ -1,4 +1,4 @@
-# rye:signed:2026-04-19T09:49:53Z:d3f677af2788be829f21597e4f1b09931cd92dbde71acd74b733b705fa4a5e68:Vl+uglq6Dw9ON0vKESpJ/YMEwQEOBY9YXGc77mhqm6PxetB9yPEM7EfOL9/e6fbVj36QplUV3FKkrxT27jMkAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-20T05:51:15Z:5d40c5174ef391525dac957d51c7caa5b584affdab81ce1af9300adaa15cc03a:owlhz-tTHGmJngrS7EfDBTVEq-aU3ByItYpEMs3WNAwJHycv78UCiuBDY0hFD9re66gNePJsNm3yxm48VsBHCA:4b987fd4e40303ac
 """Checkpoint signing for JSONL fallback transcripts and JSON signing utilities.
 
 In daemon-backed v3 execution, the chain journal is authoritative and
@@ -229,6 +229,7 @@ def sign_json(data: dict) -> dict:
 
 
 def _parse_signature_str(sig_str: str) -> Optional[dict]:
+    """Parse a signature string into components.
 
     Reuses the same regex pattern as MetadataManager._SIGNED_FIELDS
     to handle the colon-containing ISO timestamp correctly.
@@ -236,6 +237,8 @@ def _parse_signature_str(sig_str: str) -> Optional[dict]:
     import re
     from rye.utils.metadata_manager import _SIGNED_FIELDS
 
+    pattern = re.compile(r"rye:signed:" + _SIGNED_FIELDS)
+    m = pattern.search(sig_str)
     if not m:
         return None
     return {
