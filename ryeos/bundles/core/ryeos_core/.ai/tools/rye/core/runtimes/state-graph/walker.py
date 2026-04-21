@@ -527,6 +527,7 @@ def _load_graph_yaml(graph_path: str) -> Dict:
     content = path.read_text(encoding="utf-8")
     # Strip rye signature lines before parsing YAML
     lines = content.split("\n")
+    clean = [l for l in lines if not l.startswith("# rye:signed:")]
     return yaml.safe_load("\n".join(clean))
 
 
