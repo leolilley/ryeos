@@ -11,6 +11,7 @@ use crate::db::{Database, NewEventRecord, PersistedEventRecord};
 #[derive(Debug, Clone)]
 pub struct EventStoreService {
     db: Arc<Database>,
+    state_store: Arc<crate::state_store::StateStore>,
     broker: Arc<LiveBroker>,
 }
 
@@ -62,8 +63,12 @@ fn default_replay_limit() -> usize {
 }
 
 impl EventStoreService {
-    pub fn new(db: Arc<Database>, broker: Arc<LiveBroker>) -> Self {
-        Self { db, broker }
+    pub fn new(
+        db: Arc<Database>,
+        state_store: Arc<crate::state_store::StateStore>,
+        broker: Arc<LiveBroker>,
+    ) -> Self {
+        Self { db, state_store, broker }
     }
 
     pub fn append(&self, params: &EventAppendParams) -> Result<PersistedEventRecord> {
@@ -98,8 +103,7 @@ impl EventStoreService {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let persisted = self
-            .db
+        let persisted = self.state_store
             .append_events(&thread.chain_root_id, &thread.thread_id, &events)?;
         self.broker.publish_batch(&persisted);
 

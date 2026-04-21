@@ -25,6 +25,7 @@ use rye_engine::engine::Engine;
 #[derive(Debug, Clone)]
 pub struct ThreadLifecycleService {
     db: Arc<Database>,
+    state_store: Arc<crate::state_store::StateStore>,
     events: Arc<EventStoreService>,
     current_site_id: String,
 }
@@ -162,7 +163,11 @@ fn default_list_limit() -> usize {
 }
 
 impl ThreadLifecycleService {
-    pub fn new(db: Arc<Database>, events: Arc<EventStoreService>) -> Self {
+    pub fn new(
+        db: Arc<Database>,
+        state_store: Arc<crate::state_store::StateStore>,
+        events: Arc<EventStoreService>,
+    ) -> Self {
         let hostname = env::var("HOSTNAME")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -170,6 +175,7 @@ impl ThreadLifecycleService {
 
         Self {
             db,
+            state_store,
             events,
             current_site_id: format!("site:{hostname}"),
         }
@@ -186,23 +192,23 @@ impl ThreadLifecycleService {
     pub fn create_root_thread(&self, request: &ResolvedExecutionRequest) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         let thread_id = new_thread_id();
-        let persisted = self.db.create_thread(
-            &NewThreadRecord {
-                thread_id: thread_id.clone(),
-                chain_root_id: thread_id.clone(),
-                kind: request.kind.clone(),
-                status: "created".to_string(),
-                item_ref: request.item_ref.clone(),
-                executor_ref: request.executor_ref.clone(),
-                launch_mode: request.launch_mode.clone(),
-                current_site_id: request.current_site_id.clone(),
-                origin_site_id: request.origin_site_id.clone(),
-                upstream_thread_id: None,
-                requested_by: request.requested_by.clone(),
-                summary_json: None,
-            },
-            None,
-        )?;
+        let thread_record = NewThreadRecord {
+            thread_id: thread_id.clone(),
+            chain_root_id: thread_id.clone(),
+            kind: request.kind.clone(),
+            status: "created".to_string(),
+            item_ref: request.item_ref.clone(),
+            executor_ref: request.executor_ref.clone(),
+            launch_mode: request.launch_mode.clone(),
+            current_site_id: request.current_site_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            upstream_thread_id: None,
+            requested_by: request.requested_by.clone(),
+            summary_json: None,
+        };
+
+        let persisted = self.state_store.create_thread(&thread_record, None)?;
+
         self.events.publish_persisted_batch(&persisted);
 
         self.get_thread(&thread_id)?
@@ -213,23 +219,23 @@ impl ThreadLifecycleService {
         validate_kind(&params.kind, self.kind_profiles())?;
         validate_launch_mode(&params.launch_mode)?;
 
-        let persisted = self.db.create_thread(
-            &NewThreadRecord {
-                thread_id: params.thread_id.clone(),
-                chain_root_id: params.chain_root_id.clone(),
-                kind: params.kind.clone(),
-                status: "created".to_string(),
-                item_ref: params.item_ref.clone(),
-                executor_ref: params.executor_ref.clone(),
-                launch_mode: params.launch_mode.clone(),
-                current_site_id: params.current_site_id.clone(),
-                origin_site_id: params.origin_site_id.clone(),
-                upstream_thread_id: params.upstream_thread_id.clone(),
-                requested_by: params.requested_by.clone(),
-                summary_json: None,
-            },
-            None,
-        )?;
+        let thread_record = NewThreadRecord {
+            thread_id: params.thread_id.clone(),
+            chain_root_id: params.chain_root_id.clone(),
+            kind: params.kind.clone(),
+            status: "created".to_string(),
+            item_ref: params.item_ref.clone(),
+            executor_ref: params.executor_ref.clone(),
+            launch_mode: params.launch_mode.clone(),
+            current_site_id: params.current_site_id.clone(),
+            origin_site_id: params.origin_site_id.clone(),
+            upstream_thread_id: params.upstream_thread_id.clone(),
+            requested_by: params.requested_by.clone(),
+            summary_json: None,
+        };
+
+        let persisted = self.state_store.create_thread(&thread_record, None)?;
+
         self.events.publish_persisted_batch(&persisted);
 
         self.get_thread(&params.thread_id)?
@@ -244,12 +250,7 @@ impl ThreadLifecycleService {
     }
 
     pub fn attach_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
-        self.db.attach_thread_process(
-            &params.thread_id,
-            params.pid,
-            params.pgid,
-            params.metadata.as_ref(),
-        )?;
+        self.state_store.attach_thread_process(&params.thread_id, params.pid, params.pgid)?;
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
             anyhow!(
                 "thread not found after attach_process: {}",

@@ -10,6 +10,7 @@ use crate::services::event_store::EventStoreService;
 #[derive(Debug, Clone)]
 pub struct BudgetService {
     db: Arc<Database>,
+    state_store: Arc<crate::state_store::StateStore>,
     events: Arc<EventStoreService>,
 }
 
@@ -44,8 +45,12 @@ pub struct BudgetGetParams {
 }
 
 impl BudgetService {
-    pub fn new(db: Arc<Database>, events: Arc<EventStoreService>) -> Self {
-        Self { db, events }
+    pub fn new(
+        db: Arc<Database>,
+        state_store: Arc<crate::state_store::StateStore>,
+        events: Arc<EventStoreService>,
+    ) -> Self {
+        Self { db, state_store, events }
     }
 
     pub fn reserve(&self, params: &BudgetReserveParams) -> Result<BudgetInfo> {

@@ -17,6 +17,7 @@ mod refs;
 mod registry;
 mod services;
 mod state;
+mod state_store;
 mod uds;
 mod vault;
 mod webhooks;
@@ -91,11 +92,29 @@ async fn main() -> Result<()> {
     let identity = NodeIdentity::load(&config.signing_key_path)?;
     let engine = Arc::new(engine_init::build_engine(&config)?);
     let db = Arc::new(db);
+    
+    // Initialize StateStore with CAS backing (Phase 0.5H.3)
+    let state_root = config.state_dir.join(".state");
+    let runtime_db_path = config.db_path.clone();
+    let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
+    
+    let state_store = Arc::new(state_store::StateStore::new(state_root, runtime_db_path, signer)
+        .context("StateStore initialization failed")?);
+    tracing::info!("StateStore initialized successfully");
+    
     let broker = Arc::new(LiveBroker::new(DEFAULT_BROKER_CAPACITY));
-    let events = Arc::new(EventStoreService::new(db.clone(), broker.clone()));
-    let threads = Arc::new(ThreadLifecycleService::new(db.clone(), events.clone()));
-    let commands = Arc::new(CommandService::new(db.clone(), events.clone()));
-    let budgets = Arc::new(BudgetService::new(db.clone(), events.clone()));
+    let events = Arc::new(EventStoreService::new(
+        db.clone(),
+        state_store.clone(),
+        broker.clone(),
+    ));
+    let threads = Arc::new(ThreadLifecycleService::new(
+        db.clone(),
+        state_store.clone(),
+        events.clone(),
+    ));
+    let commands = Arc::new(CommandService::new(db.clone(), state_store.clone(), events.clone()));
+    let budgets = Arc::new(BudgetService::new(db.clone(), state_store.clone(), events.clone()));
     let cas = Arc::new(CasStore::new(config.cas_root.clone()));
     let refs = Arc::new(RefStore::new(config.cas_root.clone()));
     let registry = Arc::new(RegistryStore::new(config.cas_root.clone()));
@@ -103,9 +122,10 @@ async fn main() -> Result<()> {
     let webhooks = Arc::new(WebhookStore::new(config.cas_root.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
 
-    let state = AppState {
+    let app_state = AppState {
         config: Arc::new(config.clone()),
         db,
+        state_store,
         engine: engine.clone(),
         identity: Arc::new(identity),
         threads,
@@ -123,11 +143,11 @@ async fn main() -> Result<()> {
         started_at_iso: Utc::now().to_rfc3339(),
     };
 
-    reconcile::reconcile(&state).await?;
+    reconcile::reconcile(&app_state).await?;
 
-    let app = build_router(state.clone())
+    let app = build_router(app_state.clone())
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            app_state.clone(),
             auth::auth_middleware,
         ));
     let tcp_listener = TcpListener::bind(config.bind)
@@ -146,7 +166,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("failed to set socket permissions on {}", config.uds_path.display()))?;
     }
 
-    let uds_state = Arc::new(state.clone());
+    let uds_state = Arc::new(app_state.clone());
     let uds_task = tokio::spawn(async move { uds::server::serve(uds_listener, uds_state).await });
 
     let shutdown = shutdown_signal();
@@ -162,7 +182,7 @@ async fn main() -> Result<()> {
     }
 
     // Drain running threads on shutdown
-    drain_running_threads(&state);
+    drain_running_threads(&app_state);
 
     if config.uds_path.exists() {
         let _ = std::fs::remove_file(&config.uds_path);

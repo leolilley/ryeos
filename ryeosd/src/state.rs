@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
+use crate::state_store::StateStore;
 use crate::refs::RefStore;
 use crate::registry::RegistryStore;
 use crate::services::budget_service::BudgetService;
@@ -24,6 +25,7 @@ use crate::webhooks::WebhookStore;
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: Arc<Database>,
+    pub state_store: Arc<StateStore>,
     pub engine: Arc<Engine>,
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,
