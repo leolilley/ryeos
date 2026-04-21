@@ -6,20 +6,16 @@ use serde_json::json;
 mod adapter;
 mod bootstrap;
 mod budget;
-mod callback_client;
 mod continuation;
 mod directive;
 mod dispatcher;
-mod events;
 mod harness;
-mod launch_envelope;
 mod parser;
 mod result_guard;
 mod resume;
 mod runner;
-mod verified_loader;
 
-use launch_envelope::{LaunchEnvelope, RuntimeResult, ENVELOPE_VERSION};
+use rye_runtime::envelope::{LaunchEnvelope, RuntimeResult, ENVELOPE_VERSION};
 
 fn main() {
     let result = run_directive();
@@ -96,13 +92,13 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     let parsed = parser::parse_directive(&content, &envelope.target.path)?;
 
-    let verified_loader = verified_loader::VerifiedLoader::new(
+    let verified_loader = rye_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
         envelope.roots.user_root.clone(),
         envelope.roots.system_roots.clone(),
     );
 
-    let callback = callback_client::CallbackClient::new(
+    let callback = rye_runtime::callback_client::CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
         envelope.roots.project_root.to_str().unwrap_or(""),
@@ -121,7 +117,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let model_name = bootstrap_output.model_name.clone();
     let context_window = bootstrap_output.context_window;
 
-    let harness = harness::Harness::new(&envelope.policy, envelope.request.depth);
+    let harness = harness::Harness::new(&envelope.policy, envelope.request.depth, bootstrap_output.config.risk_policy.clone());
 
     // Wire SIGTERM → harness cancelled flag so runner can exit cleanly
     {
@@ -143,7 +139,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let allowed_primaries = envelope.callback.allowed_primaries.clone();
     let hooks = bootstrap_output.config.hooks.clone();
 
-    let callback_for_budget = callback_client::CallbackClient::new(
+    let callback_for_budget = rye_runtime::callback_client::CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
         envelope.roots.project_root.to_str().unwrap_or(""),

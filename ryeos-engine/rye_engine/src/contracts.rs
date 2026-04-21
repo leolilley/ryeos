@@ -122,6 +122,14 @@ pub struct ItemMetadata {
 
 // ── Resolution output ────────────────────────────────────────────────
 
+/// A candidate that was shadowed by a higher-priority match during resolution.
+#[derive(Debug, Clone)]
+pub struct ShadowedCandidate {
+    pub label: String,
+    pub space: ItemSpace,
+    pub path: PathBuf,
+}
+
 /// Result of successful item resolution.
 #[derive(Debug, Clone)]
 pub struct ResolvedItem {
@@ -129,6 +137,10 @@ pub struct ResolvedItem {
     pub kind: String,
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
+    /// Label of the root that won resolution, e.g. "system(node)", "user"
+    pub resolved_from: String,
+    /// Lower-priority candidates that were shadowed by the winner
+    pub shadowed: Vec<ShadowedCandidate>,
     pub materialized_project_root: Option<PathBuf>,
     pub content_hash: String,
     pub signature_header: Option<SignatureHeader>,

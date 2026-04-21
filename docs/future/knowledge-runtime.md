@@ -3,7 +3,17 @@ id: knowledge-runtime
 title: "Knowledge Runtime: Context Composition Engine"
 description: A native Rust runtime for knowledge items — graph-aware context composition, token-budget-aware truncation, structured query, and integrity validation across the knowledge graph.
 category: future
-tags: [rust, runtimes, knowledge, context, composition, graph-traversal, query, search]
+tags:
+  [
+    rust,
+    runtimes,
+    knowledge,
+    context,
+    composition,
+    graph-traversal,
+    query,
+    search,
+  ]
 version: "0.1.0"
 status: planned
 ```
@@ -40,10 +50,10 @@ It does not run LLM loops (directive-runtime) or walk DAGs (graph-runtime). It r
 
 ### Computational Pattern
 
-| Runtime | Pattern | Core Loop |
-|---------|---------|-----------|
-| directive-runtime | Agent loop | Prompt → LLM call → Tool dispatch → Repeat |
-| graph-runtime | DAG walk | Select node → Dispatch → Bind output → Repeat |
+| Runtime               | Pattern                           | Core Loop                                                                |
+| --------------------- | --------------------------------- | ------------------------------------------------------------------------ |
+| directive-runtime     | Agent loop                        | Prompt → LLM call → Tool dispatch → Repeat                               |
+| graph-runtime         | DAG walk                          | Select node → Dispatch → Bind output → Repeat                            |
 | **knowledge-runtime** | **Graph traversal + composition** | **Resolve entry → Traverse edges → Compose block → Budget-fit → Return** |
 
 ---
@@ -374,15 +384,15 @@ composition:
   # compress            — future: summarize low-priority items
 
 traversal:
-  extends_weight: 1.0       # priority multiplier for extends chain
-  references_weight: 0.7    # priority multiplier for lateral references
-  deduplicate: true         # skip items already resolved via another path
+  extends_weight: 1.0 # priority multiplier for extends chain
+  references_weight: 0.7 # priority multiplier for lateral references
+  deduplicate: true # skip items already resolved via another path
 
 rendering:
-  include_headers: true     # wrap each item in a ## header with its title
-  header_level: 2           # markdown heading level for item headers
-  separator: "\n\n---\n\n"  # separator between items
-  include_item_id: true     # include item_id in headers for traceability
+  include_headers: true # wrap each item in a ## header with its title
+  header_level: 2 # markdown heading level for item headers
+  separator: "\n\n---\n\n" # separator between items
+  include_item_id: true # include item_id in headers for traceability
 
 search:
   field_weights:
@@ -440,6 +450,7 @@ No HTTP client — the runtime doesn't call LLM providers. It calls back to the 
 Wait — actually the runtime has filesystem access and does its own resolution and verification (same pattern as directive-runtime per the native-runtimes-spec §C2: "All filesystem reads use signature verification. Runtime does NOT bypass trust checks."). So it reads files directly and verifies signatures using the same trust logic as the engine. It does NOT call back to the daemon for item resolution.
 
 Callback usage is limited to:
+
 - `runtime.append_event` — emit composition events
 - `runtime.finalize_thread` — finalize on completion
 - `runtime.dispatch_action` with primary=execute — only if the runtime needs to invoke a tool (e.g., for future structured extraction via a tool)
@@ -568,15 +579,15 @@ The knowledge runtime skips already-loaded items and fills the budget with new c
 
 The knowledge runtime fires hooks at these events:
 
-| Hook event | When |
-|-----------|------|
-| `knowledge_resolved` | Single item resolved successfully |
-| `knowledge_composed` | Graph composition completed |
-| `knowledge_traversal_skip` | Item skipped (already resolved, dedup) |
-| `knowledge_budget_exceeded` | Items omitted due to token budget |
+| Hook event                    | When                                                     |
+| ----------------------------- | -------------------------------------------------------- |
+| `knowledge_resolved`          | Single item resolved successfully                        |
+| `knowledge_composed`          | Graph composition completed                              |
+| `knowledge_traversal_skip`    | Item skipped (already resolved, dedup)                   |
+| `knowledge_budget_exceeded`   | Items omitted due to token budget                        |
 | `knowledge_integrity_failure` | Signature or trust check failed for an item in the graph |
-| `knowledge_reference_broken` | Referenced item not found in any tier |
-| `knowledge_query_completed` | Search query returned results |
+| `knowledge_reference_broken`  | Referenced item not found in any tier                    |
+| `knowledge_query_completed`   | Search query returned results                            |
 
 These are persisted via `runtime.append_event` and visible in the thread's event stream.
 
@@ -614,6 +625,7 @@ Ship directive-runtime and graph-runtime first. Knowledge stays on the Python ex
 Implement `resolve` operation only. Exact parity with current Python executor behavior. Validates the daemon launch pipeline works for knowledge items via `runtime_binary`. Replaces the Python executor.
 
 **Tests:**
+
 - Three-tier resolution
 - Signature verification
 - Frontmatter stripping
@@ -628,6 +640,7 @@ Implement `resolve` operation only. Exact parity with current Python executor be
 Implement graph traversal, composition, budget fitting. Wire into directive-runtime's context materialization.
 
 **Tests:**
+
 - Traversal follows extends chains with depth limits
 - Traversal follows references laterally
 - Cycle detection prevents infinite loops
@@ -642,6 +655,7 @@ Implement graph traversal, composition, budget fitting. Wire into directive-runt
 Implement search and graph inspection. Wire query into MCP fetch tool's search mode.
 
 **Tests:**
+
 - BM25 search with field weights
 - Tag-based matching
 - Category filtering
@@ -654,6 +668,7 @@ Implement search and graph inspection. Wire query into MCP fetch tool's search m
 Implement subgraph validation. Wire into knowledge signing workflow.
 
 **Tests:**
+
 - Detects broken references
 - Detects unsigned items in subgraph
 - Detects signature mismatches
@@ -689,7 +704,8 @@ Today, a directive author writes:
 
 ```yaml
 context:
-  system: [identity/core, behavior, tool-protocol, environment, directive-instruction]
+  system:
+    [identity/core, behavior, tool-protocol, environment, directive-instruction]
 ```
 
 They have to know the full graph. If `Identity` extends `Environment`, the author still has to list both. If `Behavior` gains a new reference, the author has to update every directive that needs it.

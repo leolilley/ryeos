@@ -114,13 +114,10 @@ pub struct ConditionalEdge {
 
 #[derive(Debug, Clone)]
 pub struct GraphDefinition {
-    #[allow(dead_code)]
     pub version: String,
     pub graph_id: String,
-    #[allow(dead_code)]
     pub file_path: Option<String>,
     pub config: GraphConfig,
-    #[allow(dead_code)]
     pub permissions: Vec<String>,
 }
 

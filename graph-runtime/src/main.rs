@@ -15,11 +15,12 @@ mod walker;
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
-use serde::Deserialize;
 use serde_json::{json, Value};
+
+use rye_runtime::callback_client::CallbackClient;
+use rye_runtime::envelope::{EnvelopeCallback, ENVELOPE_VERSION};
 
 #[derive(Parser)]
 #[command(name = "graph-runtime", about = "Native graph walker for Rye OS")]
@@ -46,53 +47,24 @@ struct Cli {
     pre_registered: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct LaunchEnvelope {
-    #[allow(dead_code)]
-    envelope_version: u32,
-    #[allow(dead_code)]
-    invocation_id: String,
-    thread_id: Option<String>,
-    target: Option<EnvelopeTarget>,
-    roots: Option<EnvelopeRoots>,
-    request: Option<EnvelopeRequest>,
-    #[allow(dead_code)]
-    policy: Option<Value>,
-    #[allow(dead_code)]
-    callback: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EnvelopeTarget {
-    #[allow(dead_code)]
-    item_id: String,
-    #[allow(dead_code)]
-    kind: String,
-    path: String,
-    #[allow(dead_code)]
-    digest: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EnvelopeRoots {
+/// Normalized launch data from either envelope or CLI flags.
+struct ResolvedLaunch {
     project_root: PathBuf,
-    #[allow(dead_code)]
-    user_root: Option<PathBuf>,
-    #[allow(dead_code)]
-    system_roots: Option<Vec<PathBuf>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EnvelopeRequest {
-    inputs: Option<Value>,
-    #[allow(dead_code)]
+    graph_path: PathBuf,
+    thread_id: String,
+    graph_run_id: Option<String>,
+    inputs: Value,
     previous_thread_id: Option<String>,
-    #[allow(dead_code)]
     parent_thread_id: Option<String>,
-    #[allow(dead_code)]
-    parent_capabilities: Option<Vec<String>>,
-    #[allow(dead_code)]
-    depth: Option<u32>,
+    parent_capabilities: Vec<String>,
+    depth: u32,
+    effective_caps: Vec<String>,
+    hard_limits: Value,
+    callback: Option<EnvelopeCallback>,
+    target_digest: Option<String>,
+    user_root: Option<PathBuf>,
+    system_roots: Vec<PathBuf>,
+    invocation_id: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -105,58 +77,64 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let mut stdin_data = String::new();
-    let has_stdin = !atty_check();
-    let envelope: Option<LaunchEnvelope> = if has_stdin {
-        std::io::stdin().read_to_string(&mut stdin_data)?;
-        serde_json::from_str(&stdin_data).ok()
+    let mut stdin_data = Vec::new();
+    std::io::stdin().read_to_end(&mut stdin_data)?;
+    let has_stdin = !stdin_data.is_empty();
+
+    let resolved = if has_stdin {
+        resolve_from_envelope(&stdin_data, &cli)?
     } else {
-        None
+        resolve_from_cli(&cli)?
     };
 
-    let project_path = cli.project_path
-        .or_else(|| envelope.as_ref().and_then(|e| e.roots.as_ref().map(|r| r.project_root.clone())))
-        .ok_or_else(|| anyhow::anyhow!("project-path required (via --project-path or LaunchEnvelope)"))?;
-
-    let graph_path = cli.graph_path
-        .or_else(|| envelope.as_ref().and_then(|e| e.target.as_ref().map(|t| PathBuf::from(&t.path))))
-        .ok_or_else(|| anyhow::anyhow!("graph-path required (via --graph-path or LaunchEnvelope)"))?;
-
-    let thread_id = envelope
-        .as_ref()
-        .and_then(|e| e.thread_id.clone())
-        .unwrap_or(cli.thread_id.clone());
-
-    let raw = std::fs::read_to_string(&graph_path)?;
+    let raw = std::fs::read_to_string(&resolved.graph_path)?;
     let graph = model::GraphDefinition::from_yaml(
         &raw,
-        Some(&graph_path.to_string_lossy()),
+        Some(&resolved.graph_path.to_string_lossy()),
     )?;
 
-    if let Some(ref socket) = cli.daemon_socket {
-        std::env::set_var("RYEOSD_SOCKET_PATH", socket);
-    }
-    if let Some(ref env) = envelope {
-        if let Some(ref cb) = env.callback {
-            if let Some(token) = cb.get("token").and_then(|t| t.as_str()) {
-                std::env::set_var("RYEOSD_CALLBACK_TOKEN", token);
+    tracing::info!(
+        thread_id = %resolved.thread_id,
+        graph_run_id = ?resolved.graph_run_id,
+        target_digest = ?resolved.target_digest,
+        invocation_id = ?resolved.invocation_id,
+        user_root = ?resolved.user_root,
+        system_roots = ?resolved.system_roots,
+        effective_caps = ?resolved.effective_caps,
+        "launch resolved"
+    );
+
+    let callback = match resolved.callback {
+        Some(ref cb) => CallbackClient::new(
+            cb,
+            &resolved.thread_id,
+            resolved.project_root.to_str().unwrap_or(""),
+        ),
+        None => {
+            // CLI mode: construct from env or fallback
+            if let Some(ref socket) = cli.daemon_socket {
+                std::env::set_var("RYEOSD_SOCKET_PATH", socket);
             }
-            if let Some(socket) = cb.get("socket_path").and_then(|s| s.as_str()) {
-                if std::env::var("RYEOSD_SOCKET_PATH").is_err() {
-                    std::env::set_var("RYEOSD_SOCKET_PATH", socket);
-                }
-            }
+            let cb_env = EnvelopeCallback {
+                socket_path: rye_runtime::resolve_daemon_socket_path(None),
+                token: std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default(),
+                allowed_primaries: vec!["execute".to_string(), "fetch".to_string(), "sign".to_string()],
+            };
+            CallbackClient::new(
+                &cb_env,
+                &resolved.thread_id,
+                resolved.project_root.to_str().unwrap_or(""),
+            )
         }
-    }
-    let client = rye_runtime::client_from_env();
+    };
 
     if cli.validate {
         let _rt = tokio::runtime::Runtime::new()?;
         let w = walker::Walker::new(
             graph,
-            project_path.to_string_lossy().to_string(),
-            thread_id,
-            Arc::from(client),
+            resolved.project_root.to_string_lossy().to_string(),
+            resolved.thread_id,
+            callback,
         );
         let result = w.validate();
         println!("{}", serde_json::to_string(&result)?);
@@ -166,26 +144,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let params: Value = envelope
-        .as_ref()
-        .and_then(|e| e.request.as_ref())
-        .map(|r| serde_json::json!({
-            "inputs": r.inputs.clone().unwrap_or(json!({})),
-            "previous_thread_id": r.previous_thread_id,
-            "parent_thread_id": r.parent_thread_id,
-            "parent_capabilities": r.parent_capabilities,
-            "depth": r.depth.unwrap_or(0),
-        }))
-        .unwrap_or_else(|| {
-            if has_stdin {
-                serde_json::from_str(&stdin_data).unwrap_or_default()
-            } else {
-                json!({})
-            }
-        });
+    let mut params = json!({
+        "inputs": resolved.inputs,
+        "previous_thread_id": resolved.previous_thread_id,
+        "parent_thread_id": resolved.parent_thread_id,
+        "parent_capabilities": resolved.parent_capabilities,
+        "depth": resolved.depth,
+        "effective_caps": resolved.effective_caps,
+        "hard_limits": resolved.hard_limits,
+    });
 
     if let Some(ref schema) = graph.config.config_schema {
-        if let Err(err) = validate_inputs_against_schema(&params, schema) {
+        if let Err(err) = normalize_inputs_against_schema(&mut params, schema) {
             let result = model::GraphResult {
                 success: false,
                 graph_id: graph.graph_id.clone(),
@@ -206,35 +176,87 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let w = walker::Walker::new(
         graph,
-        project_path.to_string_lossy().to_string(),
-        thread_id,
-        Arc::from(client),
+        resolved.project_root.to_string_lossy().to_string(),
+        resolved.thread_id,
+        callback,
     );
 
-    let graph_run_id = cli.graph_run_id.or_else(|| {
-        envelope.as_ref().and_then(|e| e.thread_id.clone())
-    });
-
-    let result = rt.block_on(w.execute(params, graph_run_id));
+    let result = rt.block_on(w.execute(params, resolved.graph_run_id));
     println!("{}", serde_json::to_string(&result)?);
 
     Ok(())
 }
 
-fn atty_check() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
+    let envelope: rye_runtime::envelope::LaunchEnvelope = serde_json::from_slice(stdin_data)
+        .map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
+
+    if envelope.envelope_version != ENVELOPE_VERSION {
+        anyhow::bail!(
+            "unsupported envelope version: {} (expected {})",
+            envelope.envelope_version,
+            ENVELOPE_VERSION,
+        );
     }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+
+    let graph_path = cli.graph_path.clone()
+        .unwrap_or_else(|| envelope.roots.project_root.join(&envelope.target.path));
+
+    Ok(ResolvedLaunch {
+        project_root: envelope.roots.project_root.clone(),
+        graph_path,
+        thread_id: envelope.thread_id.clone(),
+        graph_run_id: cli.graph_run_id.clone(),
+        inputs: envelope.request.inputs.clone(),
+        previous_thread_id: envelope.request.previous_thread_id.clone(),
+        parent_thread_id: envelope.request.parent_thread_id.clone(),
+        parent_capabilities: envelope.request.parent_capabilities.unwrap_or_default(),
+        depth: envelope.request.depth,
+        effective_caps: envelope.policy.effective_caps.clone(),
+        hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
+        callback: Some(envelope.callback),
+        target_digest: Some(envelope.target.digest.clone()),
+        user_root: envelope.roots.user_root.clone(),
+        system_roots: envelope.roots.system_roots.clone(),
+        invocation_id: Some(envelope.invocation_id.clone()),
+    })
 }
 
-fn validate_inputs_against_schema(inputs: &Value, schema: &Value) -> anyhow::Result<()> {
+fn resolve_from_cli(cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
+    let project_path = cli.project_path.clone()
+        .ok_or_else(|| anyhow::anyhow!("project-path required via --project-path or envelope"))?;
+    let graph_path = cli.graph_path.clone()
+        .ok_or_else(|| anyhow::anyhow!("graph-path required via --graph-path or envelope"))?;
+
+    Ok(ResolvedLaunch {
+        project_root: project_path,
+        graph_path,
+        thread_id: cli.thread_id.clone(),
+        graph_run_id: cli.graph_run_id.clone(),
+        inputs: json!({}),
+        previous_thread_id: None,
+        parent_thread_id: None,
+        parent_capabilities: vec![],
+        depth: 0,
+        effective_caps: vec![],
+        hard_limits: json!({}),
+        callback: None,
+        target_digest: None,
+        user_root: None,
+        system_roots: vec![],
+        invocation_id: None,
+    })
+}
+
+/// Normalize inputs against a shallow JSON Schema:
+/// 1. Enforce `required` fields
+/// 2. Type-check provided fields against `type`
+/// 3. Apply `default` for absent non-required fields
+fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow::Result<()> {
+    let mut input_obj = params.get("inputs").cloned().unwrap_or(json!({}));
+
+    // 1. Enforce required
     if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
-        let input_obj = inputs.get("inputs").unwrap_or(inputs);
         for field in required {
             if let Some(name) = field.as_str() {
                 if input_obj.get(name).is_none() {
@@ -244,13 +266,55 @@ fn validate_inputs_against_schema(inputs: &Value, schema: &Value) -> anyhow::Res
         }
     }
 
+    // 2 & 3. Type-check provided, apply defaults for absent
     if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-        let input_obj = inputs.get("inputs").unwrap_or(inputs);
-        for (name, _prop_schema) in props {
-            if input_obj.get(name).is_none() {
-                anyhow::bail!("input '{name}' missing and no default application available yet");
+        let inputs = match input_obj.as_object_mut() {
+            Some(obj) => obj,
+            None => {
+                // inputs is not an object — skip property checks
+                return Ok(());
+            }
+        };
+
+        for (name, prop_schema) in props {
+            if let Some(val) = inputs.get(name) {
+                // 2. Type-check provided value
+                if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str()) {
+                    let type_ok = match expected_type {
+                        "string" => val.is_string(),
+                        "number" => val.is_number(),
+                        "integer" => val.is_i64() || val.is_u64(),
+                        "boolean" => val.is_boolean(),
+                        "array" => val.is_array(),
+                        "object" => val.is_object(),
+                        _ => true, // unknown type, pass through
+                    };
+                    if !type_ok {
+                        anyhow::bail!(
+                            "input '{}' expected type '{}', got '{}'",
+                            name,
+                            expected_type,
+                            match val {
+                                Value::Null => "null",
+                                Value::Bool(_) => "boolean",
+                                Value::Number(_) => "number",
+                                Value::String(_) => "string",
+                                Value::Array(_) => "array",
+                                Value::Object(_) => "object",
+                            }
+                        );
+                    }
+                }
+            } else {
+                // 3. Apply default if absent
+                if let Some(default) = prop_schema.get("default") {
+                    inputs.insert(name.clone(), default.clone());
+                }
+                // Absent + no default + not required → ignore
             }
         }
+
+        params["inputs"] = Value::Object(inputs.clone());
     }
 
     Ok(())
@@ -262,7 +326,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn validate_inputs_against_schema_required() {
+    fn normalize_inputs_enforces_required() {
         let schema = json!({
             "required": ["name", "email"],
             "properties": {
@@ -271,14 +335,54 @@ mod tests {
             }
         });
 
-        let result = validate_inputs_against_schema(&json!({"inputs": {"name": "test"}}), &schema);
+        let mut params = json!({"inputs": {"name": "test"}});
+        let result = normalize_inputs_against_schema(&mut params, &schema);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("email"));
 
-        let result = validate_inputs_against_schema(
-            &json!({"inputs": {"name": "test", "email": "a@b.com"}}),
-            &schema,
-        );
-        assert!(result.is_ok());
+        let mut params = json!({"inputs": {"name": "test", "email": "a@b.com"}});
+        assert!(normalize_inputs_against_schema(&mut params, &schema).is_ok());
+    }
+
+    #[test]
+    fn normalize_inputs_applies_defaults() {
+        let schema = json!({
+            "properties": {
+                "name": {"type": "string"},
+                "verbose": {"type": "boolean", "default": false},
+            }
+        });
+
+        let mut params = json!({"inputs": {"name": "test"}});
+        normalize_inputs_against_schema(&mut params, &schema).unwrap();
+        assert_eq!(params["inputs"]["verbose"], false);
+    }
+
+    #[test]
+    fn normalize_inputs_type_checks() {
+        let schema = json!({
+            "properties": {
+                "count": {"type": "integer"},
+            }
+        });
+
+        let mut params = json!({"inputs": {"count": "not a number"}});
+        let result = normalize_inputs_against_schema(&mut params, &schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected type 'integer'"));
+    }
+
+    #[test]
+    fn normalize_inputs_allows_absent_optional() {
+        let schema = json!({
+            "properties": {
+                "name": {"type": "string"},
+                "optional_field": {"type": "string"},
+            }
+        });
+
+        let mut params = json!({"inputs": {"name": "test"}});
+        assert!(normalize_inputs_against_schema(&mut params, &schema).is_ok());
+        assert!(params["inputs"].get("optional_field").is_none());
     }
 }

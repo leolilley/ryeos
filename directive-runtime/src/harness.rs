@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::launch_envelope::{EnvelopePolicy, HardLimits};
+use rye_runtime::envelope::{EnvelopePolicy, HardLimits};
 
 pub struct Harness {
     limits: HardLimits,
@@ -16,10 +16,11 @@ pub struct Harness {
     spend_used: f64,
     spawns_used: u32,
     depth: u32,
+    risk_policy: Option<RiskPolicy>,
 }
 
 impl Harness {
-    pub fn new(policy: &EnvelopePolicy, depth: u32) -> Self {
+    pub fn new(policy: &EnvelopePolicy, depth: u32, risk_policy: Option<RiskPolicy>) -> Self {
         Self {
             limits: policy.hard_limits.clone(),
             effective_caps: policy.effective_caps.clone(),
@@ -30,6 +31,7 @@ impl Harness {
             spend_used: 0.0,
             spawns_used: 0,
             depth,
+            risk_policy,
         }
     }
 
@@ -138,6 +140,17 @@ impl Harness {
     pub fn depth(&self) -> u32 {
         self.depth
     }
+
+    pub fn assess(&self, cap: &str) -> RiskAssessment {
+        self.risk_policy
+            .as_ref()
+            .map(|p| p.assess(cap))
+            .unwrap_or(RiskAssessment {
+                level: "medium".to_string(),
+                requires_ack: false,
+                blocked: false,
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,7 +168,8 @@ impl HookAction {
         if let Some(primary) = action.get("primary").and_then(|v| v.as_str()) {
             match primary {
                 "retry" => HookAction::Retry,
-                "fail" | "abort" => HookAction::Abort,
+                "fail" => HookAction::Fail,
+                "abort" => HookAction::Abort,
                 "suspend" => HookAction::Suspend,
                 "escalate" => HookAction::Escalate,
                 _ => HookAction::Continue,
@@ -224,7 +238,7 @@ mod tests {
             effective_caps: caps,
             hard_limits: limits,
         };
-        Harness::new(&policy, 0)
+        Harness::new(&policy, 0, None)
     }
 
     #[test]
@@ -309,6 +323,10 @@ mod tests {
         );
         assert_eq!(
             HookAction::from_value(&serde_json::json!({"primary": "fail"})),
+            HookAction::Fail
+        );
+        assert_eq!(
+            HookAction::from_value(&serde_json::json!({"primary": "abort"})),
             HookAction::Abort
         );
         assert_eq!(

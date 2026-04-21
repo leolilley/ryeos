@@ -3,13 +3,34 @@ use serde_json::Value;
 use crate::adapter::parse_tool_arguments;
 use crate::directive::{OutputSpec, ToolSchema};
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DispatchKind {
+    Tool,
+    DirectiveChild,
+    GraphChild,
+    Internal,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolDispatchResult {
     pub tool_name: String,
     pub call_id: Option<String>,
     pub arguments: Value,
     pub canonical_ref: String,
-    pub is_internal: bool,
+    pub dispatch_kind: DispatchKind,
+}
+
+fn classify_dispatch(canonical_ref: &str, is_internal: bool) -> DispatchKind {
+    if is_internal {
+        return DispatchKind::Internal;
+    }
+    if canonical_ref.starts_with("directive:") {
+        DispatchKind::DirectiveChild
+    } else if canonical_ref.starts_with("graph:") {
+        DispatchKind::GraphChild
+    } else {
+        DispatchKind::Tool
+    }
 }
 
 pub struct Dispatcher {
@@ -34,11 +55,11 @@ impl Dispatcher {
         }
     }
 
-    pub fn resolve(&self, tool_name: &str, raw_args: &str) -> Result<ToolDispatchResult, String> {
+    pub fn resolve(&self, tool_name: &str, raw_args: &str, call_id: Option<String>) -> Result<ToolDispatchResult, String> {
         let arguments = parse_tool_arguments(raw_args);
 
         if tool_name == "directive_return" {
-            return self.handle_directive_return(&arguments);
+            return self.handle_directive_return(&arguments, call_id);
         }
 
         let (canonical_ref, is_internal) = self
@@ -53,12 +74,14 @@ impl Dispatcher {
             ));
         }
 
+        let dispatch_kind = classify_dispatch(&canonical_ref, is_internal);
+
         Ok(ToolDispatchResult {
             tool_name: tool_name.to_string(),
-            call_id: None,
+            call_id,
             arguments,
             canonical_ref,
-            is_internal,
+            dispatch_kind,
         })
     }
 
@@ -86,7 +109,7 @@ impl Dispatcher {
                 .any(|cap| rye_runtime::cap_matches(cap, required))
     }
 
-    fn handle_directive_return(&self, args: &Value) -> Result<ToolDispatchResult, String> {
+    fn handle_directive_return(&self, args: &Value, call_id: Option<String>) -> Result<ToolDispatchResult, String> {
         if let Some(ref outputs) = self.outputs {
             for output in outputs {
                 if !args.get(&output.name).map_or(false, |v| !v.is_null()) {
@@ -100,10 +123,10 @@ impl Dispatcher {
 
         Ok(ToolDispatchResult {
             tool_name: "directive_return".to_string(),
-            call_id: None,
+            call_id,
             arguments: args.clone(),
             canonical_ref: "directive_return".to_string(),
-            is_internal: true,
+            dispatch_kind: DispatchKind::Internal,
         })
     }
 
@@ -151,16 +174,16 @@ mod tests {
     #[test]
     fn resolve_known_tool() {
         let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
-        let result = d.resolve("read_file", r#"{"path": "/tmp"}"#).unwrap();
+        let result = d.resolve("read_file", r#"{"path": "/tmp"}"#, None).unwrap();
         assert_eq!(result.tool_name, "read_file");
         assert_eq!(result.arguments["path"], "/tmp");
-        assert!(!result.is_internal);
+        assert_eq!(result.dispatch_kind, DispatchKind::Tool);
     }
 
     #[test]
     fn resolve_unknown_tool_fails() {
         let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
-        assert!(d.resolve("nonexistent", "{}").is_err());
+        assert!(d.resolve("nonexistent", "{}", None).is_err());
     }
 
     #[test]
@@ -169,13 +192,20 @@ mod tests {
             vec!["rye.execute.tool.read_file".to_string()],
             None,
         );
-        assert!(d.resolve("write_file", "{}").is_err());
+        assert!(d.resolve("write_file", "{}", None).is_err());
     }
 
     #[test]
     fn resolve_permission_wildcard() {
         let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
-        assert!(d.resolve("write_file", "{}").is_ok());
+        assert!(d.resolve("write_file", "{}", None).is_ok());
+    }
+
+    #[test]
+    fn resolve_passes_call_id() {
+        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
+        let result = d.resolve("read_file", r#"{"path": "/tmp"}"#, Some("call_42".to_string())).unwrap();
+        assert_eq!(result.call_id.as_deref(), Some("call_42"));
     }
 
     #[test]
@@ -187,9 +217,9 @@ mod tests {
         }]);
         let d = make_dispatcher(vec![], outputs);
         let result = d
-            .resolve("directive_return", r#"{"answer": "42"}"#)
+            .resolve("directive_return", r#"{"answer": "42"}"#, None)
             .unwrap();
-        assert!(result.is_internal);
+        assert_eq!(result.dispatch_kind, DispatchKind::Internal);
         assert_eq!(result.arguments["answer"], "42");
     }
 
@@ -202,7 +232,7 @@ mod tests {
         }]);
         let d = make_dispatcher(vec![], outputs);
         assert!(d
-            .resolve("directive_return", r#"{"wrong": "value"}"#)
+            .resolve("directive_return", r#"{"wrong": "value"}"#, None)
             .is_err());
     }
 
@@ -210,16 +240,16 @@ mod tests {
     fn directive_return_no_outputs_declared() {
         let d = make_dispatcher(vec![], None);
         let result = d
-            .resolve("directive_return", r#"{"anything": "goes"}"#)
+            .resolve("directive_return", r#"{"anything": "goes"}"#, None)
             .unwrap();
-        assert!(result.is_internal);
+        assert_eq!(result.dispatch_kind, DispatchKind::Internal);
     }
 
     #[test]
     fn arg_repair_on_invalid_json() {
         let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
         let result = d
-            .resolve("read_file", r#"{path: "/tmp"}"#)
+            .resolve("read_file", r#"{path: "/tmp"}"#, None)
             .unwrap();
         assert!(result.arguments.is_object());
     }
@@ -237,5 +267,13 @@ mod tests {
         assert!(d.validate_allowed_primary("execute"));
         assert!(d.validate_allowed_primary("fetch"));
         assert!(!d.validate_allowed_primary("admin"));
+    }
+
+    #[test]
+    fn classify_dispatch_correct() {
+        assert_eq!(classify_dispatch("tool:read_file", false), DispatchKind::Tool);
+        assert_eq!(classify_dispatch("directive:my/work", false), DispatchKind::DirectiveChild);
+        assert_eq!(classify_dispatch("graph:my/graph", false), DispatchKind::GraphChild);
+        assert_eq!(classify_dispatch("directive_return", true), DispatchKind::Internal);
     }
 }

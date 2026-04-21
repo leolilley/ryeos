@@ -1,5 +1,7 @@
 pub mod callback;
+pub mod callback_client;
 pub mod callback_uds;
+pub mod envelope;
 #[cfg(feature = "http-client")]
 pub mod callback_http;
 pub mod capability_tokens;
@@ -11,6 +13,7 @@ pub mod hooks_loader;
 pub mod interpolation;
 pub mod paths;
 pub mod transcript;
+pub mod verified_loader;
 
 pub use callback::{
     client_from_env, ActionPayload, CallbackError, DispatchActionRequest, RuntimeCallbackAPI,

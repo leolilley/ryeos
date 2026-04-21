@@ -11,7 +11,6 @@ pub struct HookContext<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct HookEvent {
     pub event: String,
     pub graph_id: String,
@@ -43,15 +42,16 @@ pub fn fire_hook(
             continue;
         }
 
-        let context = serde_json::json!({
-            "event": event,
-            "graph_id": ctx.graph_id,
-            "graph_run_id": ctx.graph_run_id,
-            "thread_id": ctx.thread_id,
-            "step": ctx.step,
-            "node": ctx.current_node,
-            "state": ctx.state,
-        });
+        let hook_evt = HookEvent {
+            event: event.to_string(),
+            graph_id: ctx.graph_id.to_string(),
+            graph_run_id: ctx.graph_run_id.to_string(),
+            thread_id: ctx.thread_id.to_string(),
+            step: ctx.step,
+            node: ctx.current_node.to_string(),
+            state: ctx.state.clone(),
+        };
+        let context = serde_json::to_value(&hook_evt).unwrap_or_else(|_| serde_json::json!({}));
 
         let condition = hook.get("condition");
         if let Some(cond) = condition {

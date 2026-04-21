@@ -68,30 +68,26 @@ impl Engine {
             _ => None,
         };
 
-        // Apply project kind-schema overlay
-        let effective_kinds = self.effective_kinds(ctx)?;
-
-        // Validate kind against the (possibly overlaid) registry
-        let kind_schema = effective_kinds.get(&item_ref.kind).ok_or_else(|| {
+        // Kind schemas are system-only — no project overlay
+        let kind_schema = self.kinds.get(&item_ref.kind).ok_or_else(|| {
             EngineError::UnsupportedKind {
                 kind: item_ref.kind.clone(),
             }
         })?;
 
-        // Build resolution roots
+        // Build resolution roots (system-first order)
         let roots = self.resolution_roots(project_root.clone());
 
         tracing::debug!(item_ref = %item_ref, "resolving item");
 
-        // Resolve to file path + space + matched extension
-        let (source_path, source_space, matched_ext) =
-            crate::resolution::resolve_item(&roots, kind_schema, item_ref)?;
+        // Resolve to file path + space + matched extension (with clash diagnostics)
+        let result = crate::resolution::resolve_item_full(&roots, kind_schema, item_ref)?;
 
         // Read file content
-        let content = std::fs::read_to_string(&source_path).map_err(|e| {
+        let content = std::fs::read_to_string(&result.winner_path).map_err(|e| {
             EngineError::Internal(format!(
                 "failed to read {}: {e}",
-                source_path.display()
+                result.winner_path.display()
             ))
         })?;
 
@@ -100,17 +96,18 @@ impl Engine {
 
         // Parse signature header using the matched extension's envelope
         let signature_header = kind_schema
-            .spec_for(&matched_ext)
+            .spec_for(&result.matched_ext)
             .and_then(|spec| {
                 crate::resolution::parse_signature_header(&content, &spec.signature)
             });
 
         // Build ResolvedSourceFormat from the matched extension
         let source_format = kind_schema
-            .resolved_format_for(&matched_ext)
+            .resolved_format_for(&result.matched_ext)
             .ok_or_else(|| {
                 EngineError::Internal(format!(
-                    "matched extension {matched_ext} has no source format in schema"
+                    "matched extension {} has no source format in schema",
+                    result.matched_ext
                 ))
             })?;
 
@@ -119,21 +116,25 @@ impl Engine {
         let metadata = crate::metadata::apply_extraction_rules(
             &parsed,
             &kind_schema.extraction_rules,
-            &source_path,
+            &result.winner_path,
         );
 
         tracing::debug!(
             item_ref = %item_ref,
-            source_path = %source_path.display(),
-            space = %source_space.as_str(),
+            source_path = %result.winner_path.display(),
+            space = %result.winner_space.as_str(),
+            resolved_from = %result.winner_label,
+            shadowed = result.shadowed.len(),
             "resolved item"
         );
 
         Ok(ResolvedItem {
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
-            source_path,
-            source_space,
+            source_path: result.winner_path,
+            source_space: result.winner_space,
+            resolved_from: result.winner_label,
+            shadowed: result.shadowed,
             materialized_project_root: project_root,
             content_hash: hash,
             signature_header,
@@ -142,45 +143,15 @@ impl Engine {
         })
     }
 
-    /// Derive the effective kind registry for a request, applying project
-    /// kind-schema overlay when a project root is available.
-    fn effective_kinds(&self, ctx: &PlanContext) -> Result<KindRegistry, EngineError> {
-        match &ctx.project_context {
-            crate::contracts::ProjectContext::LocalPath { path } => {
-                let project_kinds_path = path.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR);
-                if project_kinds_path.exists() {
-                    let trust = self.effective_trust_store(ctx)?;
-                    self.kinds.with_project_overlay(&project_kinds_path, &trust)
-                } else {
-                    Ok(self.kinds.clone())
-                }
-            }
-            _ => Ok(self.kinds.clone()),
-        }
-    }
-
-    /// Derive an effective trust store for a request, including project-local
-    /// trusted keys when a project root is available in the context.
-    ///
-    /// Merges project-local keys into the startup trust store (which already
-    /// contains user + system keys). Project keys take priority on conflict.
-    fn effective_trust_store(&self, ctx: &PlanContext) -> Result<TrustStore, EngineError> {
-        match &ctx.project_context {
-            crate::contracts::ProjectContext::LocalPath { path } => {
-                self.trust_store.with_project_keys(path)
-            }
-            _ => Ok(self.trust_store.clone()),
-        }
-    }
-
     /// Verify trust and integrity on a resolved item.
+    ///
+    /// Trust store is system + user only — no project widening.
     pub fn verify(
         &self,
-        ctx: &PlanContext,
+        _ctx: &PlanContext,
         item: ResolvedItem,
     ) -> Result<VerifiedItem, EngineError> {
-        let trust_store = self.effective_trust_store(ctx)?;
-        let result = crate::trust::verify_resolved_item(item, &trust_store);
+        let result = crate::trust::verify_resolved_item(item, &self.trust_store);
         if let Ok(ref verified) = result {
             tracing::debug!(
                 item_ref = %verified.resolved.canonical_ref,
@@ -194,6 +165,7 @@ impl Engine {
     /// Build a normalized execution plan from a verified item.
     ///
     /// Checks execution scope on the principal before building.
+    /// Uses system-only kind schemas and system+user trust.
     pub fn build_plan(
         &self,
         ctx: &PlanContext,
@@ -213,20 +185,19 @@ impl Engine {
             _ => None,
         };
         let roots = self.resolution_roots(project_root);
-        let effective_kinds = self.effective_kinds(ctx)?;
-        let trust_store = self.effective_trust_store(ctx)?;
 
+        // Kind schemas and trust are system-only — no overlays
         crate::plan_builder::build_plan(
             item,
             parameters,
             hints,
             ctx,
             &self.executors,
-            &effective_kinds,
+            &self.kinds,
             &self.parsers,
             &roots,
-            effective_kinds.fingerprint(),
-            &trust_store,
+            self.kinds.fingerprint(),
+            &self.trust_store,
         )
     }
 
@@ -255,17 +226,16 @@ impl Engine {
         crate::dispatch::spawn_plan(plan, ctx)
     }
 
-    /// Build resolution roots for a given project root.
+    /// Build resolution roots for a given project root (system-first order).
     pub fn resolution_roots(&self, project_root: Option<PathBuf>) -> ResolutionRoots {
-        ResolutionRoots {
-            project: project_root.map(|p| p.join(AI_DIR)),
-            user: self.user_root.clone().map(|p| p.join(AI_DIR)),
-            system: self
-                .system_roots
-                .iter()
-                .map(|p| p.join(AI_DIR))
-                .collect(),
-        }
+        let system_ai: Vec<PathBuf> = self
+            .system_roots
+            .iter()
+            .map(|p| p.join(AI_DIR))
+            .collect();
+        let user_ai = self.user_root.clone().map(|p| p.join(AI_DIR));
+        let project_ai = project_root.map(|p| p.join(AI_DIR));
+        ResolutionRoots::from_flat(project_ai, user_ai, system_ai)
     }
 
     /// Get the kind registry's cache fingerprint.
@@ -273,14 +243,13 @@ impl Engine {
         self.kinds.fingerprint()
     }
 
-    /// Get the default executor ID for a kind, applying project overlay.
+    /// Get the default executor ID for a kind (system registry only).
     pub fn default_executor_id_for(
         &self,
-        ctx: &PlanContext,
+        _ctx: &PlanContext,
         kind: &str,
     ) -> Result<Option<String>, EngineError> {
-        let effective = self.effective_kinds(ctx)?;
-        Ok(effective.default_executor_id(kind).map(String::from))
+        Ok(self.kinds.default_executor_id(kind).map(String::from))
     }
 }
 
@@ -396,17 +365,16 @@ formats:
     fn resolution_roots_with_project() {
         let engine = test_engine();
         let roots = engine.resolution_roots(Some(PathBuf::from("/workspace/project")));
-        assert_eq!(
-            roots.project,
-            Some(PathBuf::from("/workspace/project/.ai"))
-        );
+        assert!(roots.ordered.iter().any(|r| r.space == ItemSpace::Project));
+        let project_root = roots.ordered.iter().find(|r| r.space == ItemSpace::Project).unwrap();
+        assert_eq!(project_root.ai_root, PathBuf::from("/workspace/project/.ai"));
     }
 
     #[test]
     fn resolution_roots_without_project() {
         let engine = test_engine();
         let roots = engine.resolution_roots(None);
-        assert!(roots.project.is_none());
+        assert!(!roots.ordered.iter().any(|r| r.space == ItemSpace::Project));
     }
 
     #[test]
@@ -642,7 +610,7 @@ formats:
     }
 
     #[test]
-    fn resolve_uses_project_kind_overlay() {
+    fn resolve_ignores_project_kind_overlay() {
         let project_dir = tempdir();
         let kinds_dir = tempdir();
         let ts = test_trust_store();
@@ -650,7 +618,7 @@ formats:
 
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
-        // Project overlay: tool → .yaml only
+        // Project overlay: tool → .yaml only — should be IGNORED
         let overlay_dir = project_dir.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR).join("tool");
         fs::create_dir_all(&overlay_dir).unwrap();
         let overlay_yaml = "\
@@ -668,10 +636,10 @@ formats:
         )
         .unwrap();
 
-        // Write a .yaml tool file (should be found with overlay)
+        // Write a .py tool file (should resolve because system schema has .py)
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
-        fs::write(tool_dir.join("hello.yaml"), "name: hello\n").unwrap();
+        fs::write(tool_dir.join("hello.py"), "print('hello')\n").unwrap();
 
         let engine = Engine::new(
             kinds,
@@ -696,16 +664,63 @@ formats:
             validate_only: false,
         };
 
-        // .yaml file should resolve via overlay
+        // .py file should resolve (system schema, not project overlay)
         let ref_ = CanonicalRef::parse("tool:hello").unwrap();
         let resolved = engine.resolve(&ctx, &ref_).unwrap();
-        assert_eq!(resolved.source_format.extension, ".yaml");
-        assert_eq!(resolved.source_format.parser_id, "yaml/yaml");
+        assert_eq!(resolved.source_format.extension, ".py");
+        assert_eq!(resolved.source_format.parser_id, "python/ast");
+    }
 
-        // .py file should NOT resolve (overlay replaced .py with .yaml)
-        fs::write(tool_dir.join("other.py"), "print('hello')\n").unwrap();
-        let ref_py = CanonicalRef::parse("tool:other").unwrap();
-        let err = engine.resolve(&ctx, &ref_py).unwrap_err();
-        assert!(matches!(err, EngineError::ItemNotFound { .. }));
+    #[test]
+    fn resolve_system_first_with_clash() {
+        let project_dir = tempdir();
+        let system_dir = tempdir();
+        let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
+
+        // Write the same item in both system and project
+        let sys_tool_dir = system_dir.join(AI_DIR).join("tools");
+        fs::create_dir_all(&sys_tool_dir).unwrap();
+        fs::write(sys_tool_dir.join("hello.py"), "# system\nprint('sys')\n").unwrap();
+
+        let proj_tool_dir = project_dir.join(AI_DIR).join("tools");
+        fs::create_dir_all(&proj_tool_dir).unwrap();
+        fs::write(proj_tool_dir.join("hello.py"), "# project\nprint('proj')\n").unwrap();
+
+        let engine = Engine::new(
+            kinds,
+            ExecutorRegistry::new(),
+            MetadataParserRegistry::with_builtins(),
+            None,
+            vec![system_dir],
+        );
+
+        let ctx = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".into(),
+                scopes: vec!["execute".into()],
+            }),
+            project_context: ProjectContext::LocalPath {
+                path: project_dir,
+            },
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            execution_hints: ExecutionHints::default(),
+            validate_only: false,
+        };
+
+        let ref_ = CanonicalRef::parse("tool:hello").unwrap();
+        let resolved = engine.resolve(&ctx, &ref_).unwrap();
+
+        // System wins
+        assert_eq!(resolved.source_space, ItemSpace::System);
+        assert_eq!(resolved.resolved_from, "system(node)");
+
+        // Project is shadowed
+        assert_eq!(resolved.shadowed.len(), 1);
+        assert_eq!(resolved.shadowed[0].space, ItemSpace::Project);
     }
 }

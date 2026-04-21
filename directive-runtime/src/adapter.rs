@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
-use crate::directive::{ProviderConfig, ProviderMessage, ToolCall};
+use crate::directive::{ProviderConfig, ProviderMessage, StreamEvent, ToolCall};
 
 pub struct AdapterResponse {
     pub message: ProviderMessage,
@@ -174,6 +174,36 @@ fn fix_json_string(s: &str) -> String {
     let s = s.replace("\\\"", "\"");
     let s = s.replace("\\n", "\n");
     s
+}
+
+/// Convert a complete AdapterResponse into StreamEvents.
+/// This normalizes the non-streaming path through the same Streaming state.
+pub fn response_to_stream_events(resp: &AdapterResponse) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+
+    if let Some(ref content) = resp.message.content {
+        if let Some(text) = content.as_str() {
+            if !text.is_empty() {
+                events.push(StreamEvent::Delta(text.to_string()));
+            }
+        } else if !content.is_null() {
+            events.push(StreamEvent::Delta(content.to_string()));
+        }
+    }
+
+    if let Some(ref tool_calls) = resp.message.tool_calls {
+        for tc in tool_calls {
+            let args_str = serde_json::to_string(&tc.arguments).unwrap_or_default();
+            events.push(StreamEvent::ToolUse {
+                id: tc.id.clone().unwrap_or_default(),
+                name: tc.name.clone(),
+                arguments: args_str,
+            });
+        }
+    }
+
+    events.push(StreamEvent::Done);
+    events
 }
 
 #[cfg(test)]

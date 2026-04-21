@@ -3,8 +3,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
+use crate::context::ExecutionContext;
 use crate::model::{GraphNode, WalkContext};
-use rye_runtime::callback::RuntimeCallbackAPI;
+use rye_runtime::callback_client::CallbackClient;
 
 pub async fn run_foreach_sequential(
     items: &[Value],
@@ -14,7 +15,8 @@ pub async fn run_foreach_sequential(
     inputs: &Value,
     thread_id: &str,
     project_path: &str,
-    client: &dyn RuntimeCallbackAPI,
+    client: &CallbackClient,
+    exec_ctx: Option<&ExecutionContext>,
 ) -> Vec<Value> {
     let mut results = Vec::new();
     for item in items {
@@ -34,7 +36,7 @@ pub async fn run_foreach_sequential(
             .unwrap_or(action.clone());
         let stripped = strip_none_values(&interpolated);
 
-        if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, None).await {
+        if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx).await {
             let unwrapped = crate::dispatch::unwrap_result(&val);
             results.push(unwrapped.clone());
 
@@ -59,7 +61,8 @@ pub async fn run_foreach_parallel(
     inputs: &Value,
     thread_id: &str,
     project_path: &str,
-    client: Arc<dyn RuntimeCallbackAPI>,
+    client: CallbackClient,
+    exec_ctx: Arc<ExecutionContext>,
 ) -> Vec<Value> {
     let max_conc = node.max_concurrency.unwrap_or(8);
     let sem = Arc::new(Semaphore::new(max_conc));
@@ -84,13 +87,14 @@ pub async fn run_foreach_parallel(
         let client = client.clone();
         let thread_id = thread_id.to_string();
         let project_path = project_path.to_string();
+        let exec_ctx = exec_ctx.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
             let interpolated = rye_runtime::interpolate_action(&action, &item_ctx_val)
                 .unwrap_or(action.clone());
             let stripped = strip_none_values(&interpolated);
-            let val = crate::dispatch::dispatch_action(client.as_ref(), &stripped, &thread_id, &project_path, None).await;
+            let val = crate::dispatch::dispatch_action(&client, &stripped, &thread_id, &project_path, Some(&exec_ctx)).await;
             val.map(|v| crate::dispatch::unwrap_result(&v))
         });
         handles.push(handle);

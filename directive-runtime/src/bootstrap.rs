@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::directive::*;
-use crate::verified_loader::VerifiedLoader;
+use rye_runtime::verified_loader::VerifiedLoader;
 
 pub struct BootstrapOutput {
     pub config: BootstrapConfig,
@@ -16,7 +16,6 @@ pub struct BootstrapOutput {
 struct ComposedDirective {
     header: DirectiveHeader,
     body: String,
-    chain: Vec<DirectiveHeader>,
 }
 
 fn resolve_extends_chain(
@@ -92,7 +91,6 @@ fn resolve_extends_chain(
     Ok(ComposedDirective {
         header: header_with_context,
         body: directive.body.clone(),
-        chain: chain.clone(),
     })
 }
 
@@ -101,7 +99,7 @@ pub fn bootstrap(
     _user_root: Option<&Path>,
     _system_roots: &[PathBuf],
     directive: &ParsedDirective,
-    _envelope_limits: &crate::launch_envelope::HardLimits,
+    _envelope_limits: &rye_runtime::envelope::HardLimits,
     loader: &VerifiedLoader,
 ) -> Result<BootstrapOutput> {
     let composed = resolve_extends_chain(directive, loader)?;

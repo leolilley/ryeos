@@ -2,12 +2,12 @@ use serde_json::{json, Value};
 
 use crate::adapter;
 use crate::budget::BudgetTracker;
-use crate::callback_client::CallbackClient;
+use rye_runtime::callback_client::CallbackClient;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ProviderMessage, ToolSchema};
-use crate::dispatcher::Dispatcher;
-use crate::harness::Harness;
-use crate::launch_envelope::RuntimeResult;
+use crate::directive::{ProviderMessage, StreamEvent, ToolSchema};
+use crate::dispatcher::{DispatchKind, Dispatcher};
+use crate::harness::{HookAction, Harness};
+use rye_runtime::envelope::RuntimeResult;
 use crate::result_guard::ResultGuard;
 use crate::resume::ResumeState;
 
@@ -16,7 +16,11 @@ pub enum State {
     Init,
     CheckingLimits,
     CallingProvider,
-    Streaming,
+    Streaming {
+        events: Vec<StreamEvent>,
+        accumulated_text: String,
+        tool_calls: Vec<crate::directive::ToolCall>,
+    },
     ParsingResponse,
     DispatchingTools {
         pending: Vec<crate::directive::ToolCall>,
@@ -31,6 +35,7 @@ pub enum State {
     },
     FiringHooks {
         event: String,
+        context: Value,
         resume_to: Box<State>,
     },
     CheckingContinuation,
@@ -192,7 +197,7 @@ impl Runner {
                     self.harness.record_turn();
                     turn += 1;
 
-                    let _ = self.callback.append_event("turn_start", json!({"turn": turn})).await;
+                    let _ = self.callback.emit_turn_start(turn).await;
 
                     if self.budget.is_exhausted() {
                         state = State::Errored { error: "budget_exceeded".to_string() };
@@ -224,28 +229,63 @@ impl Runner {
                             self.messages.push(resp.message.clone());
                             let _ = self
                                 .callback
-                                .append_event(
-                                    "turn_complete",
-                                    {
-                                        let mut data = json!({"turn": turn});
-                                        if let Some((input, output)) = resp.usage.map(|u| (u.input_tokens, u.output_tokens)) {
-                                            data["input_tokens"] = json!(input);
-                                            data["output_tokens"] = json!(output);
-                                        }
-                                        data
-                                    },
+                                .emit_turn_complete(
+                                    turn,
+                                    resp.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
                                 )
                                 .await;
                             if let Some(ref reason) = resp.finish_reason {
                                 tracing::debug!(finish_reason = %reason, "provider response");
                             }
-                            // Route through Streaming state for event emission
-                            State::Streaming
+
+                            // Convert response to StreamEvents for unified processing
+                            let events = adapter::response_to_stream_events(&resp);
+                            State::Streaming {
+                                events,
+                                accumulated_text: String::new(),
+                                tool_calls: Vec::new(),
+                            }
                         }
                         Err(e) => State::Errored {
                             error: e.to_string(),
                         },
                     }
+                }
+
+                State::Streaming { mut events, mut accumulated_text, mut tool_calls } => {
+                    let _ = self.callback.append_event("streaming", json!({"turn": turn})).await;
+
+                    // Process StreamEvents
+                    while let Some(event) = events.pop() {
+                        match event {
+                            StreamEvent::Delta(text) => {
+                                accumulated_text.push_str(&text);
+                            }
+                            StreamEvent::ToolUse { id, name, arguments } => {
+                                let args = crate::adapter::parse_tool_arguments(&arguments);
+                                tool_calls.push(crate::directive::ToolCall {
+                                    id: Some(id),
+                                    name,
+                                    arguments: args,
+                                });
+                            }
+                            StreamEvent::Done => {
+                                // Terminal event — stop processing
+                                break;
+                            }
+                        }
+                    }
+
+                    // StreamEvents have been processed into accumulated_text and tool_calls.
+                    // The real message was already pushed in CallingProvider from the
+                    // non-streaming adapter path, so no additional message push needed.
+                    tracing::debug!(
+                        text_len = accumulated_text.len(),
+                        tool_call_count = tool_calls.len(),
+                        "stream events processed"
+                    );
+
+                    State::ParsingResponse
                 }
 
                 State::ParsingResponse => {
@@ -294,13 +334,7 @@ impl Runner {
                         State::CheckingContinuation
                     } else {
                         let tc = &pending[index];
-                        let _ = self.callback.append_event("tool_dispatch", {
-                            let mut data = json!({"tool": tc.name});
-                            if let Some(ref id) = tc.id {
-                                data["call_id"] = json!(id);
-                            }
-                            data
-                        }).await;
+                        let _ = self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref()).await;
 
                         let required_cap = format!("rye.execute.tool.{}", tc.name);
                         if !self.harness.check_permission(&required_cap) {
@@ -324,9 +358,9 @@ impl Runner {
                 }
 
                 State::ProcessingToolResult { call_id, tool_name, raw_args, pending, index } => {
-                    let tool_result_content = match self.dispatcher.resolve(&tool_name, &raw_args) {
+                    let tool_result_content = match self.dispatcher.resolve(&tool_name, &raw_args, Some(call_id.clone())) {
                         Ok(dispatch_result) => {
-                            if dispatch_result.is_internal && self.dispatcher.is_directive_return(&dispatch_result.tool_name) {
+                            if dispatch_result.dispatch_kind == DispatchKind::Internal && self.dispatcher.is_directive_return(&dispatch_result.tool_name) {
                                 let outputs = dispatch_result.arguments;
                                 // Publish outputs as artifact
                                 let _ = self.callback.publish_artifact(json!({
@@ -341,44 +375,71 @@ impl Runner {
                                 return result;
                             }
 
-                            let primary = "execute";
-                            if !self.dispatcher.validate_allowed_primary(primary) {
-                                tracing::warn!(primary, "dispatch primary not in allowed_primaries");
+                            // Record spawn for child executions (directive/graph)
+                            match dispatch_result.dispatch_kind {
+                                DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
+                                    self.harness.record_spawn();
+                                }
+                                DispatchKind::Tool | DispatchKind::Internal => {}
                             }
 
-                            match self.callback.dispatch_action(rye_runtime::callback::DispatchActionRequest {
-                                thread_id: self.thread_id.clone(),
-                                project_path: self.callback.project_path().to_string(),
-                                action: rye_runtime::callback::ActionPayload {
-                                    primary: primary.to_string(),
-                                    item_id: dispatch_result.canonical_ref.clone(),
-                                    kind: Some("tool".to_string()),
-                                    params: dispatch_result.arguments.clone(),
-                                    thread: "inline".to_string(),
-                                },
-                            }).await {
-                                Ok(result_value) => {
-                                    if let Some(s) = result_value.as_str() {
-                                        s.to_string()
-                                    } else {
-                                        serde_json::to_string(&result_value).unwrap_or_else(|_| "{}".to_string())
-                                    }
+                            // Risk assessment before dispatch
+                            let required_cap = format!("rye.execute.tool.{}", dispatch_result.canonical_ref);
+                            let risk = self.harness.assess(&required_cap);
+                            if risk.blocked {
+                                tracing::warn!(
+                                    tool = %dispatch_result.canonical_ref,
+                                    call_id = ?dispatch_result.call_id,
+                                    risk_level = %risk.level,
+                                    requires_ack = risk.requires_ack,
+                                    "tool call blocked by risk policy"
+                                );
+                                let _ = self.callback.append_event("risk_blocked", json!({
+                                    "tool": dispatch_result.canonical_ref,
+                                    "call_id": dispatch_result.call_id,
+                                    "level": risk.level,
+                                    "requires_ack": risk.requires_ack,
+                                })).await;
+                                serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
+                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string())
+                            } else {
+                                let primary = "execute";
+                                if !self.dispatcher.validate_allowed_primary(primary) {
+                                    tracing::warn!(primary, "dispatch primary not in allowed_primaries");
                                 }
-                                Err(e) => {
-                                    serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string())
+
+                                match self.callback.dispatch_action(rye_runtime::callback::DispatchActionRequest {
+                                    thread_id: self.thread_id.clone(),
+                                    project_path: self.callback.project_path().to_string(),
+                                    action: rye_runtime::callback::ActionPayload {
+                                        primary: primary.to_string(),
+                                        item_id: dispatch_result.canonical_ref.clone(),
+                                        kind: Some("tool".to_string()),
+                                        params: dispatch_result.arguments.clone(),
+                                        thread: "inline".to_string(),
+                                    },
+                                }).await {
+                                    Ok(result_value) => {
+                                        // Process raw bytes through ResultGuard
+                                        let raw_bytes = serde_json::to_vec(&result_value)
+                                            .unwrap_or_default();
+                                        let processed_bytes = self.result_guard.process_bytes(&raw_bytes);
+                                        String::from_utf8_lossy(&processed_bytes).to_string()
+                                    }
+                                    Err(e) => {
+                                        serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string())
+                                    }
                                 }
                             }
                         }
                         Err(e) => serde_json::to_string(&json!({"error": e})).unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string()),
                     };
 
-                    let processed = self.result_guard.process(&tool_result_content);
-                    let truncated = processed.len() != tool_result_content.len();
-
-                    let _ = self.callback.append_event("tool_result", json!({"call_id": call_id, "truncated": truncated})).await;
+                    let truncated = tool_result_content.len() != raw_args.len();
+                    let _ = self.callback.emit_tool_result(&call_id, truncated).await;
                     self.messages.push(ProviderMessage {
                         role: "tool".to_string(),
-                        content: Some(json!(processed)),
+                        content: Some(json!(tool_result_content)),
                         tool_calls: None,
                         tool_call_id: Some(call_id),
                     });
@@ -390,21 +451,76 @@ impl Runner {
                         // All tools processed — fire after_step hook
                         State::FiringHooks {
                             event: "after_step".to_string(),
+                            context: json!({"turn": turn}),
                             resume_to: Box::new(State::CheckingContinuation),
                         }
                     }
                 }
 
-                State::FiringHooks { event, resume_to } => {
-                    let _ = self.callback.append_event(&event, json!({})).await;
-                    *resume_to
+                State::FiringHooks { event, context, resume_to } => {
+                    let callback = self.callback.clone();
+                    let thread_id = self.thread_id.clone();
+                    let project_path = self.callback.project_path().to_string();
+
+                    let dispatcher: rye_runtime::hooks_eval::HookDispatcher = Box::new(
+                        move |action, proj| {
+                            let cb = callback.clone();
+                            let tid = thread_id.clone();
+                            Box::pin(async move {
+                                let payload: rye_runtime::callback::ActionPayload =
+                                    serde_json::from_value(action)
+                                    .map_err(|e| rye_runtime::callback::CallbackError::Transport(
+                                        anyhow::anyhow!("invalid hook action: {}", e)
+                                    ))?;
+                                cb.dispatch_action(rye_runtime::callback::DispatchActionRequest {
+                                    thread_id: tid,
+                                    project_path: proj,
+                                    action: payload,
+                                }).await.map_err(|e| rye_runtime::callback::CallbackError::Transport(
+                                    anyhow::anyhow!("{}", e)
+                                ))
+                            })
+                        }
+                    );
+
+                    let hook_result = rye_runtime::hooks_eval::run_hooks(
+                        &event,
+                        &context,
+                        &self.hooks,
+                        &project_path,
+                        &dispatcher,
+                    ).await;
+
+                    let _ = self.callback.append_event(&event, json!({"hook_result": hook_result})).await;
+
+                    match hook_result {
+                        Some(ref val) => {
+                            let action = HookAction::from_value(val);
+                            match action {
+                                HookAction::Retry => State::CallingProvider,
+                                HookAction::Abort | HookAction::Fail => State::Errored {
+                                    error: format!("hook aborted: {}", event),
+                                },
+                                HookAction::Suspend | HookAction::Escalate => {
+                                    tracing::warn!(action = ?action, "unsupported hook action, failing closed");
+                                    State::Errored {
+                                        error: format!("unsupported hook action: {:?}", action),
+                                    }
+                                }
+                                HookAction::Continue => *resume_to,
+                            }
+                        }
+                        None => *resume_to,
+                    }
                 }
 
                 State::CheckingContinuation => {
-                    let cost = self.budget.cost();
+                    let threshold = self.continuation.threshold();
+                    let estimated = self.continuation.estimate_total_tokens(&self.messages, Some(&self.budget.cost()));
+                    tracing::info!(estimated, threshold, "checking continuation");
                     if self
                         .continuation
-                        .should_continue(&self.messages, Some(&cost))
+                        .should_continue(&self.messages, Some(&self.budget.cost()))
                     {
                         State::Continued
                     } else {
@@ -454,7 +570,7 @@ impl Runner {
                 }
 
                 State::Errored { error } => {
-                    let _ = self.callback.append_event("error", json!({"message": &error})).await;
+                    let _ = self.callback.emit_error(&error).await;
                     let _ = self.callback.finalize_thread("failed").await;
                     let runtime_result = RuntimeResult {
                         success: false,
@@ -479,11 +595,6 @@ impl Runner {
                     };
                     guard.finalized = true;
                     return runtime_result;
-                }
-
-                State::Streaming => {
-                    let _ = self.callback.append_event("streaming", json!({"turn": turn})).await;
-                    State::ParsingResponse
                 }
             };
         }
@@ -530,10 +641,10 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::callback_client::CallbackClient;
+    use rye_runtime::callback_client::CallbackClient;
     use crate::directive::PricingConfig;
     use crate::harness::Harness;
-    use crate::launch_envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
+    use rye_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
     use std::path::PathBuf;
 
     fn make_callback_env() -> EnvelopeCallback {
@@ -569,12 +680,11 @@ mod tests {
             extra: Default::default(),
         };
 
-        let cb = make_callback_env();
         let runner = Runner::new(
             vec![],
             vec![],
             None,
-            Harness::new(&make_policy(), 0),
+            Harness::new(&make_policy(), 0, None),
             BudgetTracker::new(1.0),
             make_callback(),
             200_000,
@@ -591,7 +701,6 @@ mod tests {
 
     #[test]
     fn finalize_extracts_string() {
-        let cb = make_callback_env();
         let provider = crate::directive::ProviderConfig {
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
@@ -605,7 +714,7 @@ mod tests {
             vec![],
             vec![],
             None,
-            Harness::new(&make_policy(), 0),
+            Harness::new(&make_policy(), 0, None),
             BudgetTracker::new(1.0),
             make_callback(),
             200_000,
@@ -624,7 +733,6 @@ mod tests {
 
     #[test]
     fn system_prompt_prepended() {
-        let cb = make_callback_env();
         let provider = crate::directive::ProviderConfig {
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
@@ -643,7 +751,7 @@ mod tests {
             }],
             vec![],
             Some("You are helpful".to_string()),
-            Harness::new(&make_policy(), 0),
+            Harness::new(&make_policy(), 0, None),
             BudgetTracker::new(1.0),
             make_callback(),
             200_000,

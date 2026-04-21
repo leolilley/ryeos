@@ -5,50 +5,64 @@ use anyhow::{Context, Result};
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 
 use crate::config::Config;
-
-/// User signing key path: `~/.ai/config/keys/signing/private_key.pem`
-const USER_KEY_REL: &str = ".ai/config/keys/signing/private_key.pem";
+use crate::identity::NodeIdentity;
 
 pub struct InitOptions {
     pub force: bool,
 }
 
-/// Resolve the user's signing key.
-fn resolve_user_key() -> Option<PathBuf> {
-    let user_space: PathBuf = std::env::var("USER_SPACE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            directories::BaseDirs::new()
-                .map(|d| d.home_dir().to_path_buf())
-                .unwrap_or_default()
-        });
-    let key_path = user_space.join(USER_KEY_REL);
-    if key_path.exists() {
-        tracing::info!(path = %key_path.display(), "found user signing key");
-        Some(key_path)
-    } else {
-        tracing::info!(path = %key_path.display(), "no user signing key found");
-        None
-    }
-}
-
 /// One-time idempotent filesystem bootstrap.
 ///
-/// Sets up the daemon's runtime directories (state, db, auth).
-/// Does NOT generate keys — uses the user's existing key from ~/.ai/.
-pub fn init(config: &Config, _options: &InitOptions) -> Result<()> {
+/// Creates the node space layout, generates or loads the signing key,
+/// writes the public identity document, and bootstraps self-trust.
+pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 1. Create directory layout
     create_directory_layout(config)?;
 
-    // 2. Write default config file if missing
+    // 2. Write default config file if missing (or force rewrite)
     let config_path = config.state_dir.join("config.yaml");
-    if !config_path.exists() {
+    if options.force || !config_path.exists() {
         write_default_config(&config_path, config)?;
         tracing::info!(path = %config_path.display(), "wrote default config");
     }
 
     // 3. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
+
+    // 4. Generate or load the user signing key
+    let key_path = &config.signing_key_path;
+    let identity = if options.force && key_path.exists() {
+        // Force: regenerate the signing key
+        tracing::info!(path = %key_path.display(), "regenerating signing key (--force)");
+        fs::remove_file(key_path)
+            .with_context(|| format!("failed to remove old key {}", key_path.display()))?;
+        NodeIdentity::create(key_path)?
+    } else if key_path.exists() {
+        NodeIdentity::load(key_path)?
+    } else {
+        NodeIdentity::create(key_path)?
+    };
+
+    tracing::info!(
+        fingerprint = %identity.fingerprint(),
+        path = %key_path.display(),
+        "signing key ready"
+    );
+
+    // 5. Write public identity document
+    let identity_path = config.state_dir.join("identity").join("public-identity.json");
+    if options.force || !identity_path.exists() {
+        identity.write_public_identity(&identity_path)?;
+        tracing::info!(path = %identity_path.display(), "wrote public identity");
+    }
+
+    // 6. Bootstrap self-trust: write the user's verifying key as a trusted key
+    let user_space = discover_user_root().unwrap_or_else(|| PathBuf::from("/tmp/missing-home"));
+    let trust_dir = user_space.join(".ai").join("config").join("keys").join("trusted");
+    let trust_entry = trust_dir.join(format!("{}.toml", identity.fingerprint()));
+    if options.force || !trust_entry.exists() {
+        write_self_trust(&trust_dir, &trust_entry, identity.verifying_key())?;
+    }
 
     tracing::info!(
         state_dir = %config.state_dir.display(),
@@ -58,21 +72,64 @@ pub fn init(config: &Config, _options: &InitOptions) -> Result<()> {
     Ok(())
 }
 
+/// Write a self-trust TOML entry so the user's own signed items verify.
+fn write_self_trust(
+    trust_dir: &Path,
+    trust_entry: &Path,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+) -> Result<()> {
+    fs::create_dir_all(trust_dir)
+        .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
+
+    let fingerprint = crate::cas::sha256_hex(verifying_key.as_bytes());
+    let pem = ed25519_dalek::pkcs8::EncodePublicKey::to_public_key_pem(verifying_key, Default::default())
+        .context("failed to encode verifying key as PEM")?;
+
+    let toml_content = format!(
+        r#"version = "1.0.0"
+category = "keys/trusted"
+fingerprint = "{fingerprint}"
+owner = "self"
+attestation = ""
+
+[public_key]
+pem = \"\"\"
+{pem}\"\"\"
+"#
+    );
+
+    fs::write(trust_entry, toml_content.trim().as_bytes())
+        .with_context(|| format!("failed to write trust entry {}", trust_entry.display()))?;
+
+    tracing::info!(
+        path = %trust_entry.display(),
+        fingerprint = %fingerprint,
+        "wrote self-trust entry"
+    );
+
+    Ok(())
+}
+
+/// Discover the user-space root (parent of `~/.ai/`).
+fn discover_user_root() -> Option<PathBuf> {
+    std::env::var_os("USER_SPACE")
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+}
+
 /// Sign all unsigned items in system bundle roots using the user's signing key.
 ///
 /// Runs on every daemon start. If no user key exists, logs a warning and
 /// returns (items will fail to verify at load time).
 pub fn sign_unsigned_items(config: &Config) {
-    let key_path = match resolve_user_key() {
-        Some(p) => p,
-        None => {
-            tracing::warn!("no user signing key — cannot sign unsigned items");
-            return;
-        }
-    };
+    let key_path = &config.signing_key_path;
+    if !key_path.exists() {
+        tracing::warn!("no user signing key — cannot sign unsigned items");
+        return;
+    }
 
     let sk = match ed25519_dalek::SigningKey::from_pkcs8_pem(
-        &fs::read_to_string(&key_path).unwrap_or_default(),
+        &fs::read_to_string(key_path).unwrap_or_default(),
     ) {
         Ok(sk) => sk,
         Err(e) => {
@@ -241,11 +298,11 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
     if !state_dir.exists() {
         anyhow::bail!(
             "ryeosd not initialized: state dir missing at {}\n\
-             Run: rye daemon init",
+             Run: rye init",
             state_dir.display()
         );
     }
-    if resolve_user_key().is_none() {
+    if !config.signing_key_path.exists() {
         tracing::warn!("no user signing key found — signed items will fail to verify");
     }
     Ok(())

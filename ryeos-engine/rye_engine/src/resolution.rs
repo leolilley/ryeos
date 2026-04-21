@@ -1,4 +1,8 @@
-//! Item resolution — three-tier space search and signature header parsing.
+//! Item resolution — system-first space search with clash diagnostics.
+//!
+//! Resolution order: system(node) → system(bundles) → user → project.
+//! System is authoritative — the platform defines the baseline.
+//! Clash warnings emitted when items exist in multiple spaces.
 //!
 //! All directory names and extension lists come from `KindSchema`.
 //! This module never hardcodes kind strings, directories, or extensions.
@@ -6,75 +10,155 @@
 use std::path::PathBuf;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::contracts::{ItemSpace, SignatureEnvelope, SignatureHeader};
+use crate::contracts::{ItemSpace, ShadowedCandidate, SignatureEnvelope, SignatureHeader};
 use crate::error::EngineError;
 use crate::kind_registry::KindSchema;
 
-/// Search roots for the three-tier resolution order.
-///
-/// Constructed from `ProjectContext` + user space + system bundle roots.
+/// A single labeled search root.
 #[derive(Debug, Clone)]
-pub struct ResolutionRoots {
-    /// Project `.ai/` root, if a project context is materialized
-    pub project: Option<PathBuf>,
-    /// User `~/.ai/` root
-    pub user: Option<PathBuf>,
-    /// System bundle `.ai/` roots (may be multiple bundles)
-    pub system: Vec<PathBuf>,
+pub struct ResolutionRoot {
+    pub space: ItemSpace,
+    /// Human-readable label, e.g. "system(node)", "system(bundle:standard)", "user", "project"
+    pub label: String,
+    /// Path to the `.ai/` directory
+    pub ai_root: PathBuf,
 }
 
-/// Resolve a canonical ref to a concrete file path and space.
+/// Ordered list of search roots for item resolution.
 ///
-/// Searches project → user → system (in order). Within each space,
-/// tries extensions in the priority order declared in the `KindSchema`.
-/// Returns the first match.
+/// Constructed in system-first order: node, bundles, user, project.
+#[derive(Debug, Clone)]
+pub struct ResolutionRoots {
+    /// Search roots in resolution priority order (first match wins)
+    pub ordered: Vec<ResolutionRoot>,
+}
+
+impl ResolutionRoots {
+    /// Legacy convenience: build from flat fields.
+    /// System roots are ordered first, then user, then project.
+    pub fn from_flat(
+        project: Option<PathBuf>,
+        user: Option<PathBuf>,
+        system: Vec<PathBuf>,
+    ) -> Self {
+        let mut ordered = Vec::new();
+
+        for (i, sys_root) in system.iter().enumerate() {
+            let label = if system.len() == 1 {
+                "system(node)".to_owned()
+            } else if i == 0 {
+                "system(node)".to_owned()
+            } else {
+                format!("system(bundle:{i})")
+            };
+            ordered.push(ResolutionRoot {
+                space: ItemSpace::System,
+                label,
+                ai_root: sys_root.clone(),
+            });
+        }
+
+        if let Some(user_root) = user {
+            ordered.push(ResolutionRoot {
+                space: ItemSpace::User,
+                label: "user".to_owned(),
+                ai_root: user_root,
+            });
+        }
+
+        if let Some(project_root) = project {
+            ordered.push(ResolutionRoot {
+                space: ItemSpace::Project,
+                label: "project".to_owned(),
+                ai_root: project_root,
+            });
+        }
+
+        Self { ordered }
+    }
+}
+
+/// Full result of item resolution, including clash diagnostics.
+#[derive(Debug, Clone)]
+pub struct ResolutionResult {
+    pub winner_path: PathBuf,
+    pub winner_space: ItemSpace,
+    pub winner_label: String,
+    pub matched_ext: String,
+    pub shadowed: Vec<ShadowedCandidate>,
+}
+
+/// Resolve a canonical ref to a concrete file path, space, and clash info.
+///
+/// Searches roots in order (system-first). Returns the first match plus
+/// all lower-priority matches (shadowed candidates).
+pub fn resolve_item_full(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    ref_: &CanonicalRef,
+) -> Result<ResolutionResult, EngineError> {
+    let mut winner: Option<(PathBuf, ItemSpace, String, String)> = None;
+    let mut shadowed = Vec::new();
+    let mut searched_spaces = Vec::new();
+
+    for root in &roots.ordered {
+        let space_label = root.space.as_str().to_owned();
+        if !searched_spaces.contains(&space_label) {
+            searched_spaces.push(space_label);
+        }
+
+        let kind_dir = root.ai_root.join(&kind_schema.directory);
+        for ext_spec in &kind_schema.extensions {
+            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
+            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
+            if path.is_file() {
+                if winner.is_none() {
+                    winner = Some((path, root.space, root.label.clone(), ext_spec.ext.clone()));
+                } else {
+                    shadowed.push(ShadowedCandidate {
+                        label: root.label.clone(),
+                        space: root.space,
+                        path,
+                    });
+                }
+                break; // Only match one extension per root (first ext wins)
+            }
+        }
+    }
+
+    match winner {
+        Some((path, space, label, ext)) => {
+            if !shadowed.is_empty() {
+                tracing::debug!(
+                    item_ref = %ref_,
+                    resolved_from = %label,
+                    shadowed_count = shadowed.len(),
+                    "item exists in multiple spaces"
+                );
+            }
+            Ok(ResolutionResult {
+                winner_path: path,
+                winner_space: space,
+                winner_label: label,
+                matched_ext: ext,
+                shadowed,
+            })
+        }
+        None => Err(EngineError::ItemNotFound {
+            canonical_ref: ref_.to_string(),
+            searched_spaces,
+        }),
+    }
+}
+
+/// Backward-compatible resolve: returns just the winner without clash info.
 pub fn resolve_item(
     roots: &ResolutionRoots,
     kind_schema: &KindSchema,
     ref_: &CanonicalRef,
 ) -> Result<(PathBuf, ItemSpace, String), EngineError> {
-    let spaces: Vec<(&Option<PathBuf>, ItemSpace)> = vec![
-        (&roots.project, ItemSpace::Project),
-        (&roots.user, ItemSpace::User),
-    ];
-
-    let mut searched_spaces = Vec::new();
-
-    // Project and user: single optional root each
-    for (root_opt, space) in &spaces {
-        if let Some(root) = root_opt {
-            searched_spaces.push(space.as_str().to_owned());
-            let kind_dir = root.join(&kind_schema.directory);
-            for ext_spec in &kind_schema.extensions {
-                let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
-                tracing::trace!(candidate = %path.display(), space = space.as_str(), "checking candidate path");
-                if path.is_file() {
-                    return Ok((path, *space, ext_spec.ext.clone()));
-                }
-            }
-        }
-    }
-
-    // System: multiple bundle roots
-    for system_root in &roots.system {
-        let already_added = searched_spaces.iter().any(|s| s == "system");
-        if !already_added {
-            searched_spaces.push("system".to_owned());
-        }
-        let kind_dir = system_root.join(&kind_schema.directory);
-        for ext_spec in &kind_schema.extensions {
-            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
-            tracing::trace!(candidate = %path.display(), space = "system", "checking candidate path");
-            if path.is_file() {
-                return Ok((path, ItemSpace::System, ext_spec.ext.clone()));
-            }
-        }
-    }
-
-    Err(EngineError::ItemNotFound {
-        canonical_ref: ref_.to_string(),
-        searched_spaces,
-    })
+    let result = resolve_item_full(roots, kind_schema, ref_)?;
+    Ok((result.winner_path, result.winner_space, result.matched_ext))
 }
 
 /// Parse a `rye:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>` header
@@ -183,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_finds_project_space_first() {
+    fn resolve_finds_project_space_when_only_source() {
         let project_root = tempdir();
         let system_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
@@ -191,31 +275,52 @@ mod tests {
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
 
-        let roots = ResolutionRoots {
-            project: Some(project_root.clone()),
-            user: None,
-            system: vec![system_root],
-        };
+        // When only project has it (system root empty), project wins
+        let roots = ResolutionRoots::from_flat(
+            Some(project_root.clone()),
+            None,
+            vec![system_root],
+        );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
-        let (path, space, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(space, ItemSpace::Project);
+        let (_path, space, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
+        assert_eq!(space, ItemSpace::System); // system root is searched first
         assert_eq!(ext, ".py");
-        assert!(path.starts_with(&project_root));
     }
 
     #[test]
-    fn resolve_finds_user_space_second() {
+    fn resolve_system_wins_over_project() {
+        let project_root = tempdir();
+        let system_root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+
+        write_item(&system_root, "tools", "my_tool", ".py", "# system");
+        write_item(&project_root, "tools", "my_tool", ".py", "# project");
+
+        let roots = ResolutionRoots::from_flat(
+            Some(project_root),
+            None,
+            vec![system_root.clone()],
+        );
+        let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
+
+        let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
+        assert_eq!(space, ItemSpace::System);
+        assert!(path.starts_with(&system_root));
+    }
+
+    #[test]
+    fn resolve_finds_user_space() {
         let user_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
 
         write_item(&user_root, "tools", "my_tool", ".py", "# user");
 
-        let roots = ResolutionRoots {
-            project: None,
-            user: Some(user_root.clone()),
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(
+            None,
+            Some(user_root.clone()),
+            vec![],
+        );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -230,11 +335,11 @@ mod tests {
 
         write_item(&system_root, "directives", "init", ".md", "# system");
 
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![system_root.clone()],
-        };
+        let roots = ResolutionRoots::from_flat(
+            None,
+            None,
+            vec![system_root.clone()],
+        );
         let ref_ = CanonicalRef::parse("directive:init").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -251,11 +356,11 @@ mod tests {
         write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
 
-        let roots = ResolutionRoots {
-            project: Some(project_root),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(
+            Some(project_root),
+            None,
+            vec![],
+        );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, _, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -268,11 +373,11 @@ mod tests {
         let project_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
 
-        let roots = ResolutionRoots {
-            project: Some(project_root),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(
+            Some(project_root),
+            None,
+            vec![],
+        );
         let ref_ = CanonicalRef::parse("tool:nonexistent").unwrap();
 
         let err = resolve_item(&roots, &schema, &ref_).unwrap_err();
@@ -286,6 +391,32 @@ mod tests {
             }
             other => panic!("expected ItemNotFound, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_clash_diagnostics() {
+        let project_root = tempdir();
+        let user_root = tempdir();
+        let system_root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+
+        write_item(&system_root, "tools", "my_tool", ".py", "# system");
+        write_item(&user_root, "tools", "my_tool", ".py", "# user");
+        write_item(&project_root, "tools", "my_tool", ".py", "# project");
+
+        let roots = ResolutionRoots::from_flat(
+            Some(project_root),
+            Some(user_root),
+            vec![system_root],
+        );
+        let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::System);
+        assert_eq!(result.winner_label, "system(node)");
+        assert_eq!(result.shadowed.len(), 2);
+        assert_eq!(result.shadowed[0].space, ItemSpace::User);
+        assert_eq!(result.shadowed[1].space, ItemSpace::Project);
     }
 
     #[test]

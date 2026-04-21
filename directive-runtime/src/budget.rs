@@ -1,4 +1,4 @@
-use crate::launch_envelope::RuntimeCost;
+use rye_runtime::envelope::RuntimeCost;
 
 pub struct BudgetTracker {
     total_input: u64,
@@ -39,7 +39,6 @@ impl BudgetTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn make_tracker(max_usd: f64) -> BudgetTracker {
         BudgetTracker::new(max_usd)

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use rye_engine::contracts::ItemSpace;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -173,43 +174,32 @@ fn handle_fetch_query(
     let roots = state.engine.resolution_roots(Some(project_path.to_path_buf()));
 
     let search_roots: Vec<(PathBuf, &str)> = match scope {
-        Some("system") => roots.system.iter().map(|r| (r.clone(), "system")).collect(),
-        Some("user") => roots
-            .user
-            .as_ref()
-            .map(|r| (r.clone(), "user"))
-            .into_iter()
+        Some("system") => roots.ordered.iter()
+            .filter(|r| r.space == ItemSpace::System)
+            .map(|r| (r.ai_root.clone(), r.label.as_str()))
             .collect(),
-        Some("project") => roots
-            .project
-            .as_ref()
-            .map(|r| (r.clone(), "project"))
-            .into_iter()
+        Some("user") => roots.ordered.iter()
+            .filter(|r| r.space == ItemSpace::User)
+            .map(|r| (r.ai_root.clone(), r.label.as_str()))
             .collect(),
-        _ => {
-            let mut r = Vec::new();
-            if let Some(ref p) = roots.project {
-                r.push((p.clone(), "project"));
-            }
-            if let Some(ref u) = roots.user {
-                r.push((u.clone(), "user"));
-            }
-            for s in &roots.system {
-                r.push((s.clone(), "system"));
-            }
-            r
-        }
+        Some("project") => roots.ordered.iter()
+            .filter(|r| r.space == ItemSpace::Project)
+            .map(|r| (r.ai_root.clone(), r.label.as_str()))
+            .collect(),
+        _ => roots.ordered.iter()
+            .map(|r| (r.ai_root.clone(), r.label.as_str()))
+            .collect(),
     };
 
     let query_lower = query.to_lowercase();
     let mut matches = Vec::new();
 
     for (root, space) in &search_roots {
-        let ai_dir = root.join(".ai");
-        if !ai_dir.is_dir() {
+        // root is already the .ai/ directory (ai_root from ResolutionRoot)
+        if !root.is_dir() {
             continue;
         }
-        scan_for_query(&ai_dir, &query_lower, space, &mut matches, 0, 10)?;
+        scan_for_query(root, &query_lower, space, &mut matches, 0, 10)?;
     }
 
     Ok(json!({

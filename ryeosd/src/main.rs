@@ -63,6 +63,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
 
+    // --init-only: run bootstrap + sign, then exit
+    if cli.init_only {
+        let force = cli.force;
+        bootstrap::init(&config, &bootstrap::InitOptions { force })?;
+        bootstrap::sign_unsigned_items(&config);
+        tracing::info!("init-only complete, exiting");
+        return Ok(());
+    }
+
     // Init-if-missing convenience (creates runtime dirs + default config)
     if cli.init_if_missing && !config.state_dir.exists() {
         bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;

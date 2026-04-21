@@ -155,10 +155,6 @@ pub fn uds_allowed_primaries() -> Vec<String> {
     ]
 }
 
-pub fn http_allowed_primaries() -> Vec<String> {
-    vec!["execute".to_string()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,7 +298,7 @@ mod tests {
         let cap = store.generate(
             "T-1",
             PathBuf::from("/p"),
-            http_allowed_primaries(),
+            vec!["execute".to_string()],
             Duration::from_secs(300),
         );
         let err = store

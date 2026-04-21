@@ -9,7 +9,6 @@ use ed25519_dalek::VerifyingKey;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
-/// Public key entry from the trust store.
 #[derive(Debug, Clone)]
 pub struct TrustedKey {
     pub fingerprint: String,
@@ -17,15 +16,12 @@ pub struct TrustedKey {
     pub owner: String,
 }
 
-/// Trust store loaded from `.ai/config/keys/trusted/*.toml` across roots.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     keys: HashMap<String, TrustedKey>,
 }
 
 impl TrustStore {
-    /// Load trust store from all roots (system → user → project).
-    /// Later roots can add new keys (no override semantics needed).
     pub fn load_from_roots(
         project_root: &Path,
         user_root: Option<&Path>,
@@ -73,7 +69,6 @@ impl TrustStore {
         Self { keys }
     }
 
-    /// Parse a trust store TOML file. Simple manual parsing — avoids toml dependency.
     fn parse_trusted_key_toml(path: &Path) -> Result<TrustedKey> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("reading trust store entry {}", path.display()))?;
@@ -120,7 +115,6 @@ impl TrustStore {
             .decode(&pem_b64)
             .context("invalid base64 in PEM")?;
 
-        // PKCS#8 Ed25519 public key: 12-byte ASN.1 header + 32-byte key
         if pem_bytes.len() < 44 {
             bail!("PEM too short for Ed25519 public key");
         }
@@ -261,10 +255,8 @@ impl VerifiedLoader {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
 
-        // Strip signature lines to get content
         let content = lillux::signature::strip_signature_lines(&raw);
 
-        // Hash the stripped content
         let hash = {
             let digest = Sha256::digest(content.as_bytes());
             let mut hex = String::with_capacity(64);
@@ -274,11 +266,8 @@ impl VerifiedLoader {
             hex
         };
 
-        // Attempt signature verification
-        // Try to parse signature from the first line using the kind's format
         let (prefix, suffix) = Self::signature_format_for(kind);
         let verified = if let Some(sig_header) = Self::parse_first_signature(&raw, prefix, suffix) {
-            // Verify content hash matches
             if sig_header.content_hash != hash {
                 bail!(
                     "content hash mismatch in {}: signature says {}, computed {}",
@@ -288,7 +277,6 @@ impl VerifiedLoader {
                 );
             }
 
-            // Verify Ed25519 signature against trust store
             if let Some(trusted_key) = self.trust_store.get(&sig_header.signer_fingerprint) {
                 if !lillux::signature::verify_signature(
                     &sig_header.content_hash,
@@ -301,14 +289,12 @@ impl VerifiedLoader {
                         sig_header.signer_fingerprint
                     );
                 }
-                // Signature verified — trusted
                 VerifiedContent {
                     content,
                     hash,
                     path: path.to_path_buf(),
                 }
             } else {
-                // Signed but signer not in trust store — untrusted
                 tracing::warn!(
                     "signed by unknown signer {} — not in trust store: {}",
                     sig_header.signer_fingerprint,
@@ -321,7 +307,6 @@ impl VerifiedLoader {
                 }
             }
         } else {
-            // Unsigned — allow but warn for non-project items
             VerifiedContent {
                 content,
                 hash,
@@ -332,7 +317,6 @@ impl VerifiedLoader {
         Ok(verified)
     }
 
-    /// Get signature prefix/suffix for a kind.
     fn signature_format_for(kind: &str) -> (&'static str, Option<&'static str>) {
         match kind {
             "directive" => ("<!--", Some("-->")),
@@ -343,7 +327,6 @@ impl VerifiedLoader {
         }
     }
 
-    /// Try to parse a signature from the first few lines of content.
     fn parse_first_signature(
         raw: &str,
         prefix: &str,
@@ -353,7 +336,6 @@ impl VerifiedLoader {
             if let Some(header) = lillux::signature::parse_signature_line(line, prefix, suffix) {
                 return Some(header);
             }
-            // Also try bare # prefix for tools in .yaml files etc.
             if prefix != "#" {
                 if let Some(header) = lillux::signature::parse_signature_line(line, "#", None) {
                     return Some(header);
@@ -369,7 +351,6 @@ impl VerifiedLoader {
 
         let mut candidate_paths = Vec::new();
 
-        // Collect in system → user → project order (later overrides)
         for system_root in &self.system_roots {
             let p = system_root.join(&item_path);
             if p.exists() {
@@ -393,7 +374,6 @@ impl VerifiedLoader {
             return None;
         }
 
-        // Single file: return directly
         if candidate_paths.len() == 1 {
             if let Ok(verified) = self.load_verified("config", &candidate_paths[0]) {
                 if let Ok(value) = serde_yaml::from_str::<T>(&verified.content) {
@@ -403,7 +383,6 @@ impl VerifiedLoader {
             return None;
         }
 
-        // Multiple files: deep-merge as YAML Values, then deserialize
         let mut merged = serde_yaml::Value::Null;
         for path in &candidate_paths {
             if let Ok(verified) = self.load_verified("config", path) {
@@ -469,8 +448,6 @@ impl VerifiedLoader {
     }
 }
 
-/// Deep-merge two YAML values. Later values override earlier ones.
-/// For mappings: recursively merge keys. For everything else: later wins.
 fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde_yaml::Value {
     use serde_yaml::Value as Yv;
     match (base, overlay) {
@@ -506,7 +483,6 @@ mod tests {
         let vk_bytes = signing_key.verifying_key().to_bytes();
         let pem_b64 = base64::engine::general_purpose::STANDARD.encode(
             [
-                // PKCS#8 Ed25519 header
                 0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
                 0x03, 0x21, 0x00,
             ]
@@ -753,7 +729,6 @@ pem = """
 
         let body = "# Original\n";
         let signed = sign_md(body, &sk);
-        // Tamper: replace body but keep signature line
         let tampered = signed.replace("# Original", "# Tampered");
         let path = tmp.path().join("tampered.md");
         fs::write(&path, &tampered).unwrap();
@@ -770,14 +745,10 @@ pem = """
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let other_sk = SigningKey::from_bytes(&[99u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        // Trust store has `other_sk`, content signed by `sk`
-        // Then we forge the fingerprint in the sig line to match `other_sk`
         create_trust_store(tmp.path(), &other_sk);
 
         let body = "# Test\n";
-        // Sign with `sk` — fingerprint will be sk's
         let signed = sign_md(body, &sk);
-        // Replace sk's fingerprint with other_sk's fingerprint in the sig line
         let sk_fp = lillux::signature::compute_fingerprint(&sk.verifying_key());
         let other_fp = lillux::signature::compute_fingerprint(&other_sk.verifying_key());
         let forged = signed.replace(&sk_fp, &other_fp);
@@ -795,7 +766,6 @@ pem = """
     fn load_verified_accepts_unknown_signer() {
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        // No trust store — signed but signer unknown
         let body = "# Test\n";
         let signed = sign_md(body, &sk);
         let path = tmp.path().join("unknown_signer.md");

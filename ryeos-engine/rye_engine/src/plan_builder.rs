@@ -493,6 +493,8 @@ formats:
                 kind: kind.to_owned(),
                 source_path,
                 source_space: ItemSpace::Project,
+                resolved_from: "project".to_owned(),
+                shadowed: vec![],
                 materialized_project_root: project_root,
                 content_hash: "abc123".to_owned(),
                 signature_header: None,
@@ -566,11 +568,7 @@ formats:
         );
 
         let ctx = test_plan_context(Some(project_dir));
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(None, None, vec![]);
 
         let plan = build_plan(
             &item,
@@ -629,11 +627,7 @@ formats:
         );
 
         let ctx = test_plan_context(None);
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(None, None, vec![]);
 
         let err = build_plan(
             &item,
@@ -670,11 +664,7 @@ formats:
         );
 
         let ctx = test_plan_context(None);
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(None, None, vec![]);
 
         let err = build_plan(
             &item,
@@ -738,11 +728,7 @@ formats:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots {
-            project: Some(project_dir.join(AI_DIR)),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         let plan = build_plan(
             &item,
@@ -841,11 +827,7 @@ formats:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots {
-            project: Some(project_dir.join(AI_DIR)),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         let plan = build_plan(
             &item,
@@ -904,11 +886,7 @@ formats:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots {
-            project: Some(project_dir.join(AI_DIR)),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         let err = build_plan(
             &item,
@@ -955,11 +933,7 @@ formats:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots {
-            project: Some(project_dir.join(AI_DIR)),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         let err = build_plan(
             &item,
@@ -1007,11 +981,7 @@ formats:
         );
 
         let ctx = test_plan_context(None);
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(None, None, vec![]);
         let params = serde_json::json!({"key": "value"});
         let hints = ExecutionHints::default();
 
@@ -1045,11 +1015,7 @@ formats:
         );
 
         let ctx = test_plan_context(None);
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(None, None, vec![]);
         let hints = ExecutionHints::default();
 
         let plan1 = build_plan(&item, &serde_json::json!({"a": 1}), &hints, &ctx, &executors, &kinds, &parsers, &roots, "fp:test", &TrustStore::empty()).unwrap();
@@ -1082,11 +1048,7 @@ formats:
         );
 
         let ctx = test_plan_context(None);
-        let roots = ResolutionRoots {
-            project: None,
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(None, None, vec![]);
 
         let plan = build_plan(
             &item,
@@ -1171,11 +1133,7 @@ formats:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots {
-            project: Some(project_dir.join(AI_DIR)),
-            user: None,
-            system: vec![],
-        };
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         let err = build_plan(
             &item,

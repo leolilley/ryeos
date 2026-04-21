@@ -12,8 +12,7 @@ pub struct UdsRuntimeClient {
 }
 
 impl UdsRuntimeClient {
-    pub fn new(socket_path: PathBuf) -> Self {
-        let callback_token = std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default();
+    pub fn new(socket_path: PathBuf, callback_token: String) -> Self {
         Self {
             rpc: DaemonRpcClient::new(socket_path),
             callback_token,
@@ -22,7 +21,8 @@ impl UdsRuntimeClient {
 
     pub fn from_env() -> Result<Self, CallbackError> {
         let path = crate::daemon_rpc::resolve_daemon_socket_path(None);
-        Ok(Self::new(path))
+        let token = std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default();
+        Ok(Self::new(path, token))
     }
 
     fn map_rpc_error(err: RpcError) -> CallbackError {
@@ -309,11 +309,20 @@ mod tests {
     }
 
     #[test]
+    fn new_accepts_token() {
+        let client = UdsRuntimeClient::new(
+            std::path::PathBuf::from("/tmp/test"),
+            "my-token".to_string(),
+        );
+        assert_eq!(client.callback_token, "my-token");
+    }
+
+    #[test]
     fn inject_callback_token_adds_token() {
-        let client = UdsRuntimeClient {
-            rpc: crate::daemon_rpc::DaemonRpcClient::new(std::path::PathBuf::from("/tmp/test")),
-            callback_token: "cbt-test123".to_string(),
-        };
+        let client = UdsRuntimeClient::new(
+            std::path::PathBuf::from("/tmp/test"),
+            "cbt-test123".to_string(),
+        );
         let mut params = json!({"thread_id": "T-1"});
         client.inject_callback_token(&mut params);
         assert_eq!(params["callback_token"], "cbt-test123");
@@ -321,10 +330,10 @@ mod tests {
 
     #[test]
     fn inject_callback_token_skips_if_empty() {
-        let client = UdsRuntimeClient {
-            rpc: crate::daemon_rpc::DaemonRpcClient::new(std::path::PathBuf::from("/tmp/test")),
-            callback_token: String::new(),
-        };
+        let client = UdsRuntimeClient::new(
+            std::path::PathBuf::from("/tmp/test"),
+            String::new(),
+        );
         let mut params = json!({"thread_id": "T-1"});
         client.inject_callback_token(&mut params);
         assert!(params.get("callback_token").is_none());

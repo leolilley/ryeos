@@ -16,13 +16,25 @@ use crate::model::*;
 use crate::persistence;
 use crate::permissions;
 use crate::validation::analyze_graph;
-use rye_runtime::callback::RuntimeCallbackAPI;
+use rye_runtime::callback_client::CallbackClient;
 
 pub struct Walker {
     graph: GraphDefinition,
     project_path: String,
     thread_id: String,
-    client: Arc<dyn RuntimeCallbackAPI>,
+    client: CallbackClient,
+}
+
+struct RunGuard {
+    finalized: bool,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if !self.finalized {
+            tracing::warn!("graph RunGuard dropped without finalization");
+        }
+    }
 }
 
 impl Walker {
@@ -30,7 +42,7 @@ impl Walker {
         graph: GraphDefinition,
         project_path: String,
         thread_id: String,
-        client: Arc<dyn RuntimeCallbackAPI>,
+        client: CallbackClient,
     ) -> Self {
         Self {
             graph,
@@ -69,6 +81,15 @@ impl Walker {
         params: Value,
         graph_run_id: Option<String>,
     ) -> GraphResult {
+        tracing::info!(
+            graph_id = %self.graph.graph_id,
+            version = %self.graph.version,
+            file_path = ?self.graph.file_path,
+            "graph loaded"
+        );
+
+        let mut guard = RunGuard { finalized: false };
+
         let graph_run_id = graph_run_id.unwrap_or_else(|| {
             format!("gr-{}", &lillux::cas::sha256_hex(
                 format!("{}{}{}", self.graph.graph_id, chrono::Utc::now().timestamp_millis(), rand::random::<u32>()).as_bytes()
@@ -77,7 +98,7 @@ impl Walker {
 
         let validation = analyze_graph(&self.graph);
         if !validation.errors.is_empty() {
-            return GraphResult {
+            let result = GraphResult {
                 success: false,
                 graph_id: self.graph.graph_id.clone(),
                 graph_run_id,
@@ -89,13 +110,33 @@ impl Walker {
                 errors: None,
                 error: Some(validation.errors.join("; ")),
             };
+            let _ = self.client.finalize_thread("failed").await;
+            guard.finalized = true;
+            return result;
         }
 
-        let exec_ctx = context::resolve_execution_context(
-            &params,
-            std::path::Path::new(&self.project_path),
-            &self.graph.permissions,
+        let exec_ctx = context::execution_context_from_envelope(
+            params.get("parent_thread_id").and_then(|v| v.as_str()).map(String::from),
+            params.get("parent_capabilities").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            }),
+            params.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            vec![], // effective_caps from graph permissions
+            json!({}),
         );
+
+        // Also try the legacy resolution for CLI mode
+        let exec_ctx = if exec_ctx.parent_thread_id.is_none() && exec_ctx.capabilities.is_empty() {
+            context::resolve_execution_context(
+                &params,
+                std::path::Path::new(&self.project_path),
+                &self.graph.permissions,
+            )
+        } else {
+            exec_ctx
+        };
+
+        let _ = self.client.mark_running().await;
 
         let cfg = &self.graph.config;
         let inputs = params.get("inputs").cloned().unwrap_or(json!({}));
@@ -134,13 +175,17 @@ impl Walker {
                 state: &state,
             };
             hooks::fire_hook(&hook_list, "graph_started", &hook_ctx);
+            let _ = self.client.append_event("graph_started", json!({
+                "graph_id": self.graph.graph_id,
+                "graph_run_id": &graph_run_id,
+            })).await;
         }
 
         while step < cfg.max_steps {
             let node = match cfg.nodes.get(&current) {
                 Some(n) => n,
                 None => {
-                    return GraphResult {
+                    let result = GraphResult {
                         success: false,
                         graph_id: self.graph.graph_id.clone(),
                         graph_run_id,
@@ -152,6 +197,9 @@ impl Walker {
                         errors: None,
                         error: Some(format!("node '{current}' not found")),
                     };
+                    let _ = self.client.finalize_thread("failed").await;
+                    guard.finalized = true;
+                    return result;
                 }
             };
 
@@ -188,6 +236,11 @@ impl Walker {
                             state: &state,
                         };
                         hooks::fire_hook(&hook_list, "graph_completed", &hook_ctx);
+                        let _ = self.client.append_event("graph_completed", json!({
+                            "graph_run_id": &graph_run_id,
+                            "status": &status,
+                            "steps": step,
+                        })).await;
                     }
 
                     let graph_result = GraphResult {
@@ -218,6 +271,13 @@ impl Walker {
                         &serde_json::to_string(&graph_result).unwrap_or_default(),
                     );
 
+                    let _ = self.client.publish_artifact(json!({
+                        "artifact_type": "graph_transcript",
+                        "uri": format!("graph://{}/runs/{}", self.graph.graph_id, graph_run_id),
+                    })).await;
+
+                    let _ = self.client.finalize_thread("completed").await;
+                    guard.finalized = true;
                     return graph_result;
                 }
 
@@ -238,10 +298,10 @@ impl Walker {
                     current = match next {
                         Some(n) => n,
                         None => {
-                            return make_terminal(
-                                &self.graph, &graph_run_id, step, state,
-                                suppressed_errors, "completed",
-                            );
+                            return self.make_terminal_finalized(
+                                &graph_run_id, step, state,
+                                suppressed_errors, "completed", &mut guard,
+                            ).await;
                         }
                     };
                     continue;
@@ -280,13 +340,13 @@ impl Walker {
                         foreach::run_foreach_parallel(
                             &items, &var, &node, &state, &inputs,
                             &self.thread_id, &self.project_path,
-                            self.client.clone(),
+                            self.client.clone(), Arc::new(exec_ctx.clone()),
                         ).await
                     } else {
                         foreach::run_foreach_sequential(
                             &items, &var, &node, &mut state, &inputs,
                             &self.thread_id, &self.project_path,
-                            self.client.as_ref(),
+                            &self.client, Some(&exec_ctx),
                         ).await
                     };
 
@@ -305,10 +365,10 @@ impl Walker {
                     current = match next {
                         Some(n) => n,
                         None => {
-                            return make_terminal(
-                                &self.graph, &graph_run_id, step, state,
-                                suppressed_errors, "completed",
-                            );
+                            return self.make_terminal_finalized(
+                                &graph_run_id, step, state,
+                                suppressed_errors, "completed", &mut guard,
+                            ).await;
                         }
                     };
                     continue;
@@ -328,10 +388,10 @@ impl Walker {
                     current = match next {
                         Some(n) => n,
                         None => {
-                            return make_terminal(
-                                &self.graph, &graph_run_id, step, state,
-                                suppressed_errors, "completed",
-                            );
+                            return self.make_terminal_finalized(
+                                &graph_run_id, step, state,
+                                suppressed_errors, "completed", &mut guard,
+                            ).await;
                         }
                     };
                     continue;
@@ -384,30 +444,20 @@ impl Walker {
                         current = match next {
                             Some(n) => n,
                             None => {
-                                return make_terminal(
-                                    &self.graph, &graph_run_id, step, state,
-                                    suppressed_errors, "completed",
-                                );
+                                return self.make_terminal_finalized(
+                                    &graph_run_id, step, state,
+                                    suppressed_errors, "completed", &mut guard,
+                                ).await;
                             }
                         };
                         continue;
                     }
                     ErrorMode::Fail => {
-                        return GraphResult {
-                            success: false,
-                            graph_id: self.graph.graph_id.clone(),
-                            graph_run_id,
-                            status: "error".into(),
-                            steps: step,
-                            state,
-                            result: None,
-                            errors_suppressed: None,
-                            errors: None,
-                            error: Some(format!(
-                                "node '{}' failed: {}",
-                                current, err_msg
-                            )),
-                        };
+                        return self.make_error_finalized(
+                            &graph_run_id, step, state,
+                            &format!("node '{}' failed: {}", current, err_msg),
+                            &mut guard,
+                        ).await;
                     }
                 }
             }
@@ -464,27 +514,19 @@ impl Walker {
                         current = match next {
                             Some(n) => n,
                             None => {
-                                return make_terminal(
-                                    &self.graph, &graph_run_id, step, state,
-                                    suppressed_errors, "completed",
-                                );
+                                return self.make_terminal_finalized(
+                                    &graph_run_id, step, state,
+                                    suppressed_errors, "completed", &mut guard,
+                                ).await;
                             }
                         };
                         continue;
                     }
                     ErrorMode::Fail => {
-                        return GraphResult {
-                            success: false,
-                            graph_id: self.graph.graph_id.clone(),
-                            graph_run_id,
-                            status: "error".into(),
-                            steps: step,
-                            state,
-                            result: None,
-                            errors_suppressed: None,
-                            errors: None,
-                            error: Some(err_msg),
-                        };
+                        return self.make_error_finalized(
+                            &graph_run_id, step, state,
+                            &err_msg, &mut guard,
+                        ).await;
                     }
                 }
             }
@@ -500,7 +542,7 @@ impl Walker {
                     Some(cached)
                 } else {
                     let res = dispatch::dispatch_action(
-                        self.client.as_ref(),
+                        &self.client,
                         &stripped_action,
                         &self.thread_id,
                         &self.project_path,
@@ -520,7 +562,7 @@ impl Walker {
                 }
             } else {
                 dispatch::dispatch_action(
-                    self.client.as_ref(),
+                    &self.client,
                     &stripped_action,
                     &self.thread_id,
                     &self.project_path,
@@ -556,6 +598,11 @@ impl Walker {
                                 state: &state,
                             };
                             hooks::fire_hook(&hook_list, "error", &hook_ctx);
+                            let _ = self.client.append_event("error", json!({
+                                "node": &current,
+                                "step": step,
+                                "error": &err_str,
+                            })).await;
                         }
 
                         if let Some(ref on_err_target) = node.on_error {
@@ -592,29 +639,19 @@ impl Walker {
                                 current = match next {
                                     Some(n) => n,
                                     None => {
-                                        return make_terminal(
-                                            &self.graph, &graph_run_id, step, state,
-                                            suppressed_errors, "completed",
-                                        );
+                                        return self.make_terminal_finalized(
+                                            &graph_run_id, step, state,
+                                            suppressed_errors, "completed", &mut guard,
+                                        ).await;
                                     }
                                 };
                             }
                             ErrorMode::Fail => {
-                                return GraphResult {
-                                    success: false,
-                                    graph_id: self.graph.graph_id.clone(),
-                                    graph_run_id,
-                                    status: "error".into(),
-                                    steps: step,
-                                    state,
-                                    result: None,
-                                    errors_suppressed: None,
-                                    errors: None,
-                                    error: Some(format!(
-                                        "node '{}' failed: {}",
-                                        current, err_str
-                                    )),
-                                };
+                                return self.make_error_finalized(
+                                    &graph_run_id, step, state,
+                                    &format!("node '{}' failed: {}", current, err_str),
+                                    &mut guard,
+                                ).await;
                             }
                         }
                     } else {
@@ -664,6 +701,10 @@ impl Walker {
                                 state: &state,
                             };
                             hooks::fire_hook(&hook_list, "after_step", &hook_ctx);
+                            let _ = self.client.append_event("after_step", json!({
+                                "node": &current,
+                                "step": step,
+                            })).await;
                         }
 
                         let next = edges::evaluate_next_with_result(node, &state, &inputs, &unwrapped);
@@ -671,10 +712,10 @@ impl Walker {
                         current = match next {
                             Some(n) => n,
                             None => {
-                                return make_terminal(
-                                    &self.graph, &graph_run_id, step, state,
-                                    suppressed_errors, "completed",
-                                );
+                                return self.make_terminal_finalized(
+                                    &graph_run_id, step, state,
+                                    suppressed_errors, "completed", &mut guard,
+                                ).await;
                             }
                         };
                     }
@@ -718,29 +759,19 @@ impl Walker {
                             current = match next {
                                 Some(n) => n,
                                 None => {
-                                    return make_terminal(
-                                        &self.graph, &graph_run_id, step, state,
-                                        suppressed_errors, "completed",
-                                    );
+                                    return self.make_terminal_finalized(
+                                        &graph_run_id, step, state,
+                                        suppressed_errors, "completed", &mut guard,
+                                    ).await;
                                 }
                             };
                         }
                         ErrorMode::Fail => {
-                            return GraphResult {
-                                success: false,
-                                graph_id: self.graph.graph_id.clone(),
-                                graph_run_id,
-                                status: "error".into(),
-                                steps: step,
-                                state,
-                                result: None,
-                                errors_suppressed: None,
-                                errors: None,
-                                error: Some(format!(
-                                    "node '{}' failed: {}",
-                                    current, err_str
-                                )),
-                            };
+                            return self.make_error_finalized(
+                                &graph_run_id, step, state,
+                                &format!("node '{}' failed: {}", current, err_str),
+                                &mut guard,
+                            ).await;
                         }
                     }
                 }
@@ -759,6 +790,10 @@ impl Walker {
                 state: &state,
             };
             hooks::fire_hook(&hook_list, "limit", &hook_ctx);
+            let _ = self.client.append_event("limit", json!({
+                "step": step,
+                "max_steps": cfg.max_steps,
+            })).await;
         }
 
         let result = GraphResult {
@@ -793,6 +828,50 @@ impl Walker {
             &serde_json::to_string(&result).unwrap_or_default(),
         );
 
+        let _ = self.client.finalize_thread("failed").await;
+        guard.finalized = true;
+        result
+    }
+
+    /// Terminal path: finalize as completed with proper lifecycle.
+    async fn make_terminal_finalized(
+        &self,
+        graph_run_id: &str,
+        steps: u32,
+        state: Value,
+        suppressed_errors: Vec<ErrorRecord>,
+        base_status: &str,
+        guard: &mut RunGuard,
+    ) -> GraphResult {
+        let result = make_terminal(&self.graph, graph_run_id, steps, state, suppressed_errors, base_status);
+        let _ = self.client.finalize_thread("completed").await;
+        guard.finalized = true;
+        result
+    }
+
+    /// Error path: finalize as failed with proper lifecycle.
+    async fn make_error_finalized(
+        &self,
+        graph_run_id: &str,
+        steps: u32,
+        state: Value,
+        error: &str,
+        guard: &mut RunGuard,
+    ) -> GraphResult {
+        let result = GraphResult {
+            success: false,
+            graph_id: self.graph.graph_id.clone(),
+            graph_run_id: graph_run_id.to_string(),
+            status: "error".into(),
+            steps,
+            state,
+            result: None,
+            errors_suppressed: None,
+            errors: None,
+            error: Some(error.to_string()),
+        };
+        let _ = self.client.finalize_thread("failed").await;
+        guard.finalized = true;
         result
     }
 }
@@ -870,7 +949,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use rye_runtime::callback::{CallbackError, DispatchActionRequest};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     struct MockClient {
         results: Mutex<Vec<Value>>,
@@ -885,7 +964,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl RuntimeCallbackAPI for MockClient {
+    impl rye_runtime::callback::RuntimeCallbackAPI for MockClient {
         async fn dispatch_action(
             &self,
             _request: DispatchActionRequest,
@@ -916,6 +995,11 @@ mod tests {
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
     }
 
+    fn make_callback(results: Vec<Value>) -> CallbackClient {
+        let inner: Arc<dyn rye_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
+        CallbackClient::from_inner(inner, "thread-test", "/tmp/test-project", vec!["*".to_string()])
+    }
+
     fn make_graph(yaml: &str) -> GraphDefinition {
         GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap()
     }
@@ -925,7 +1009,7 @@ mod tests {
             graph,
             "/tmp/test-project".to_string(),
             "thread-test".to_string(),
-            Arc::new(MockClient::new(results)),
+            make_callback(results),
         )
     }
 

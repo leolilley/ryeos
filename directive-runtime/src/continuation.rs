@@ -1,5 +1,5 @@
 use crate::directive::ProviderMessage;
-use crate::launch_envelope::RuntimeCost;
+use rye_runtime::envelope::RuntimeCost;
 
 pub struct ContinuationCheck {
     context_window: u64,

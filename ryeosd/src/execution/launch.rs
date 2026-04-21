@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::callback_token::{compute_ttl, http_allowed_primaries};
+use super::callback_token::{compute_ttl, uds_allowed_primaries};
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, EnvelopeTarget,
     LaunchEnvelope, RuntimeResult, ENVELOPE_VERSION,
@@ -59,29 +59,38 @@ pub fn build_and_launch(
         0,
     );
 
-    // 3. Mint callback capability (HTTP-originated execution uses broader primaries)
+    // 3. Derive effective capabilities from resolved item metadata
+    let effective_caps = derive_effective_caps(&resolved.resolved_item.metadata.extra);
+
+    // 4. Mint callback capability — native runtimes need full primaries (execute + fetch + sign)
     let ttl = compute_ttl(Some(hard_limits.duration_seconds));
     let cap = state.callback_tokens.generate(
         thread_id,
         project_path.to_path_buf(),
-        http_allowed_primaries(),
+        uds_allowed_primaries(),
         ttl,
     );
 
-    // 4. Build envelope
+    // 5. Build envelope
     let engine_roots = state.engine.resolution_roots(Some(project_path.to_path_buf()));
+
+    let user_root = engine_roots.ordered.iter()
+        .find(|r| r.space == rye_engine::contracts::ItemSpace::User)
+        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()));
+
+    let system_roots: Vec<PathBuf> = engine_roots.ordered.iter()
+        .filter(|r| r.space == rye_engine::contracts::ItemSpace::System)
+        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
+        .collect();
+
     let envelope = LaunchEnvelope {
         envelope_version: ENVELOPE_VERSION,
         invocation_id: cap.invocation_id.clone(),
         thread_id: thread_id.clone(),
         roots: EnvelopeRoots {
             project_root: project_path.to_path_buf(),
-            user_root: engine_roots.user.map(|p| {
-                p.parent().map(|pp| pp.to_path_buf()).unwrap_or(p)
-            }),
-            system_roots: engine_roots.system.into_iter().map(|p| {
-                p.parent().map(|pp| pp.to_path_buf()).unwrap_or(p)
-            }).collect(),
+            user_root,
+            system_roots,
         },
         target: EnvelopeTarget {
             item_id: resolved.item_ref.clone(),
@@ -97,7 +106,7 @@ pub fn build_and_launch(
             depth: 0,
         },
         policy: EnvelopePolicy {
-            effective_caps: Vec::new(),
+            effective_caps,
             hard_limits: hard_limits.clone(),
         },
         callback: EnvelopeCallback {
@@ -107,12 +116,12 @@ pub fn build_and_launch(
         },
     };
 
-    // 5. Write thread.json (status = created, pre-execution audit)
+    // 6. Write thread.json (status = created, pre-execution audit)
     let meta = ThreadMeta {
         thread_id: thread_id.clone(),
         status: "created".to_string(),
         item_ref: resolved.item_ref.clone(),
-        capabilities: Vec::new(),
+        capabilities: envelope.policy.effective_caps.clone(),
         limits: serde_json::to_value(&hard_limits)?,
         model: None,
         started_at: chrono::Utc::now().to_rfc3339(),
@@ -125,7 +134,7 @@ pub fn build_and_launch(
         &project_path.to_path_buf(), thread_id, &meta, identity,
     )?;
 
-    // 6. Spawn runtime (env vars + stdin envelope)
+    // 7. Spawn runtime (env vars + stdin envelope)
     let envelope_json = serde_json::to_string(&envelope)?;
     let spawn_result = spawn_runtime(
         runtime_binary, project_path, &envelope_json,
@@ -134,7 +143,7 @@ pub fn build_and_launch(
         thread_id,
     );
 
-    // 7. ALWAYS invalidate callback token (cleanup guard)
+    // 8. ALWAYS invalidate callback token (cleanup guard)
     state.callback_tokens.invalidate(&cap.token);
     state.callback_tokens.invalidate_for_thread(thread_id);
 
@@ -144,7 +153,7 @@ pub fn build_and_launch(
         tracing::debug!(pruned, "cleaned up expired callback capabilities");
     }
 
-    // 8. Handle spawn result
+    // 9. Handle spawn result
     let runtime_result = match spawn_result {
         Ok(result) => result,
         Err(err) => {
@@ -172,7 +181,7 @@ pub fn build_and_launch(
         }
     };
 
-    // 9. Build response from DB thread (runtime already finalized via callback)
+    // 10. Build response from DB thread (runtime already finalized via callback)
     let thread_detail = state.threads.get_thread(thread_id)?
         .unwrap_or(thread);
 
@@ -184,6 +193,23 @@ pub fn build_and_launch(
             "outputs": runtime_result.outputs,
         }),
     })
+}
+
+/// Derive effective capabilities from item metadata.
+///
+/// Reads the `permissions` field from item metadata (set by the directive's
+/// YAML frontmatter). No permissions declared = empty caps (deny all).
+fn derive_effective_caps(metadata_extra: &std::collections::HashMap<String, serde_json::Value>) -> Vec<String> {
+    if let Some(perms) = metadata_extra.get("permissions").and_then(|v| v.as_array()) {
+        perms.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    } else {
+        // No permissions declared = deny all tool dispatch from within the runtime.
+        // The runtime can still execute its own logic, but callback-mediated
+        // actions (execute, fetch, sign) require explicit permission grants.
+        Vec::new()
+    }
 }
 
 fn spawn_runtime(

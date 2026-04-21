@@ -52,6 +52,14 @@ pub struct Cli {
     /// Run init with defaults before starting if not initialized
     #[arg(long)]
     pub init_if_missing: bool,
+
+    /// Run bootstrap init only, then exit (no server)
+    #[arg(long)]
+    pub init_only: bool,
+
+    /// Force overwrite during init
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

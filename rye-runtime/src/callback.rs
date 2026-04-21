@@ -124,9 +124,10 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
 pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
     let socket_path = crate::daemon_rpc::resolve_daemon_socket_path(None);
+    let token = std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default();
     if socket_path.exists() {
         Box::new(
-            crate::callback_uds::UdsRuntimeClient::new(socket_path),
+            crate::callback_uds::UdsRuntimeClient::new(socket_path, token),
         )
     } else {
         #[cfg(feature = "http-client")]
