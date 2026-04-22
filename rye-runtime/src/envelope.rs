@@ -87,7 +87,6 @@ pub struct EnvelopePolicy {
 pub struct EnvelopeCallback {
     pub socket_path: PathBuf,
     pub token: String,
-    pub allowed_primaries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +147,6 @@ mod tests {
             callback: EnvelopeCallback {
                 socket_path: PathBuf::from("/tmp/ryeosd.sock"),
                 token: "cbt-test".to_string(),
-                allowed_primaries: vec!["execute".to_string()],
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();

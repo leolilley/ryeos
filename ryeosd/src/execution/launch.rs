@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::callback_token::{compute_ttl, uds_allowed_primaries};
+use super::callback_token::compute_ttl;
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, EnvelopeTarget,
     LaunchEnvelope, RuntimeResult, ENVELOPE_VERSION,
@@ -62,12 +62,11 @@ pub fn build_and_launch(
     // 3. Derive effective capabilities from resolved item metadata
     let effective_caps = derive_effective_caps(&resolved.resolved_item.metadata.extra);
 
-    // 4. Mint callback capability — native runtimes need full primaries (execute + fetch + sign)
+    // 4. Mint callback capability
     let ttl = compute_ttl(Some(hard_limits.duration_seconds));
     let cap = state.callback_tokens.generate(
         thread_id,
         project_path.to_path_buf(),
-        uds_allowed_primaries(),
         ttl,
     );
 
@@ -112,7 +111,6 @@ pub fn build_and_launch(
         callback: EnvelopeCallback {
             socket_path: state.config.uds_path.clone(),
             token: cap.token.clone(),
-            allowed_primaries: cap.allowed_primaries.clone(),
         },
     };
 
@@ -124,7 +122,7 @@ pub fn build_and_launch(
         capabilities: envelope.policy.effective_caps.clone(),
         limits: serde_json::to_value(&hard_limits)?,
         model: None,
-        started_at: chrono::Utc::now().to_rfc3339(),
+        started_at: lillux::time::iso8601_now(),
         completed_at: None,
         cost: None,
         outputs: None,
@@ -171,7 +169,7 @@ pub fn build_and_launch(
             });
             let failed_meta = ThreadMeta {
                 status: "failed".to_string(),
-                completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                completed_at: Some(lillux::time::iso8601_now()),
                 ..meta
             };
             let _ = super::thread_meta::write_thread_meta(

@@ -8,7 +8,6 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::policy;
 use crate::services::event_store::EventReplayParams;
@@ -153,7 +152,6 @@ fn build_event_stream(
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
     let replay_batch_size = batch_size.max(1);
     let stream = stream! {
-        let mut receiver = events.subscribe();
         let mut last_chain_seq = after_chain_seq.unwrap_or(0);
 
         match emit_indexed_backlog(
@@ -174,68 +172,7 @@ fn build_event_stream(
             }
         }
 
-        loop {
-            match receiver.try_recv() {
-                Ok(event) => {
-                    if matches_stream(&event, &chain_root_id, thread_id.as_deref(), last_chain_seq) {
-                        last_chain_seq = event.chain_seq;
-                        yield Ok(as_sse_event(&event));
-                    }
-                    continue;
-                }
-                Err(TryRecvError::Lagged(_)) => {
-                    match emit_live_catch_up(
-                        &events,
-                        &chain_root_id,
-                        thread_id.as_deref(),
-                        &mut last_chain_seq,
-                        replay_batch_size,
-                    ) {
-                        Ok(caught_up) => {
-                            for event in caught_up {
-                                yield Ok(as_sse_event(&event));
-                            }
-                        }
-                        Err(err) => {
-                            yield Ok(error_event("live_catch_up_failed", err.to_string()));
-                            return;
-                        }
-                    }
-                    continue;
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Closed) => return,
-            }
-
-            match receiver.recv().await {
-                Ok(event) => {
-                    if matches_stream(&event, &chain_root_id, thread_id.as_deref(), last_chain_seq) {
-                        last_chain_seq = event.chain_seq;
-                        yield Ok(as_sse_event(&event));
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    match emit_live_catch_up(
-                        &events,
-                        &chain_root_id,
-                        thread_id.as_deref(),
-                        &mut last_chain_seq,
-                        replay_batch_size,
-                    ) {
-                        Ok(caught_up) => {
-                            for event in caught_up {
-                                yield Ok(as_sse_event(&event));
-                            }
-                        }
-                        Err(err) => {
-                            yield Ok(error_event("live_catch_up_failed", err.to_string()));
-                            return;
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
-        }
+        yield Ok(error_event("live_events_disabled", "Event broadcast not yet re-implemented".to_string()));
     };
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -247,7 +184,7 @@ fn emit_indexed_backlog(
     thread_id: Option<&str>,
     last_chain_seq: &mut i64,
     batch_size: usize,
-) -> anyhow::Result<Vec<crate::db::PersistedEventRecord>> {
+) -> anyhow::Result<Vec<crate::state_store::PersistedEventRecord>> {
     let mut backlog = Vec::new();
 
     loop {
@@ -275,47 +212,7 @@ fn emit_indexed_backlog(
     Ok(backlog)
 }
 
-fn emit_live_catch_up(
-    events: &crate::services::event_store::EventStoreService,
-    chain_root_id: &str,
-    thread_id: Option<&str>,
-    last_chain_seq: &mut i64,
-    batch_size: usize,
-) -> anyhow::Result<Vec<crate::db::PersistedEventRecord>> {
-    let mut catch_up = Vec::new();
-
-    loop {
-        let batch =
-            events.live_catch_up(chain_root_id, thread_id, Some(*last_chain_seq), batch_size)?;
-        if batch.is_empty() {
-            break;
-        }
-        *last_chain_seq = batch
-            .last()
-            .map(|event| event.chain_seq)
-            .unwrap_or(*last_chain_seq);
-        let drained = batch.len() < batch_size;
-        catch_up.extend(batch);
-        if drained {
-            break;
-        }
-    }
-
-    Ok(catch_up)
-}
-
-fn matches_stream(
-    event: &crate::db::PersistedEventRecord,
-    chain_root_id: &str,
-    thread_id: Option<&str>,
-    last_chain_seq: i64,
-) -> bool {
-    event.chain_root_id == chain_root_id
-        && event.chain_seq > last_chain_seq
-        && thread_id.map_or(true, |thread_id| event.thread_id == thread_id)
-}
-
-fn as_sse_event(event: &crate::db::PersistedEventRecord) -> Event {
+fn as_sse_event(event: &crate::state_store::PersistedEventRecord) -> Event {
     match serde_json::to_string(event) {
         Ok(data) => Event::default()
             .id(event.chain_seq.to_string())

@@ -23,10 +23,11 @@ fn test_vectors_dir() -> PathBuf {
 #[test]
 fn golden_thread_event_canonical_json() {
     let vectors_path = test_vectors_dir().join("thread_event_vectors.json");
-    if !vectors_path.exists() {
-        eprintln!("Skipping: test vectors not found at {}", vectors_path.display());
-        return;
-    }
+    assert!(
+        vectors_path.exists(),
+        "Golden test vectors not found at {}. Vectors must be committed to .tmp/test-vectors/",
+        vectors_path.display()
+    );
 
     let data = fs::read_to_string(&vectors_path)
         .expect("failed to read thread_event_vectors.json");
@@ -47,6 +48,20 @@ fn golden_thread_event_canonical_json() {
         let canonical = lillux::canonical_json(object);
         let hash = lillux::sha256_hex(canonical.as_bytes());
 
+        let expected = case["expected_hash"]
+            .as_str()
+            .expect("case must have expected_hash");
+        assert!(
+            !expected.is_empty(),
+            "expected_hash must not be empty in test vector '{}'. Run generate_vectors.",
+            name
+        );
+        assert_eq!(
+            hash, expected,
+            "Hash mismatch in '{}': Rust produced {} but vector expects {}",
+            name, hash, expected
+        );
+
         println!("TestCase: {}", name);
         println!("  Hash: {}", hash);
 
@@ -59,10 +74,11 @@ fn golden_thread_event_canonical_json() {
 #[test]
 fn golden_thread_snapshot_canonical_json() {
     let vectors_path = test_vectors_dir().join("thread_snapshot_vectors.json");
-    if !vectors_path.exists() {
-        eprintln!("Skipping: test vectors not found at {}", vectors_path.display());
-        return;
-    }
+    assert!(
+        vectors_path.exists(),
+        "Golden test vectors not found at {}. Vectors must be committed to .tmp/test-vectors/",
+        vectors_path.display()
+    );
 
     let data = fs::read_to_string(&vectors_path)
         .expect("failed to read thread_snapshot_vectors.json");
@@ -83,6 +99,20 @@ fn golden_thread_snapshot_canonical_json() {
         let canonical = lillux::canonical_json(object);
         let hash = lillux::sha256_hex(canonical.as_bytes());
 
+        let expected = case["expected_hash"]
+            .as_str()
+            .expect("case must have expected_hash");
+        assert!(
+            !expected.is_empty(),
+            "expected_hash must not be empty in test vector '{}'. Run generate_vectors.",
+            name
+        );
+        assert_eq!(
+            hash, expected,
+            "Hash mismatch in '{}': Rust produced {} but vector expects {}",
+            name, hash, expected
+        );
+
         println!("TestCase: {}", name);
         println!("  Hash: {}", hash);
 
@@ -95,10 +125,11 @@ fn golden_thread_snapshot_canonical_json() {
 #[test]
 fn golden_chain_state_canonical_json() {
     let vectors_path = test_vectors_dir().join("chain_state_vectors.json");
-    if !vectors_path.exists() {
-        eprintln!("Skipping: test vectors not found at {}", vectors_path.display());
-        return;
-    }
+    assert!(
+        vectors_path.exists(),
+        "Golden test vectors not found at {}. Vectors must be committed to .tmp/test-vectors/",
+        vectors_path.display()
+    );
 
     let data = fs::read_to_string(&vectors_path)
         .expect("failed to read chain_state_vectors.json");
@@ -118,6 +149,20 @@ fn golden_chain_state_canonical_json() {
         // Serialize to canonical JSON
         let canonical = lillux::canonical_json(object);
         let hash = lillux::sha256_hex(canonical.as_bytes());
+
+        let expected = case["expected_hash"]
+            .as_str()
+            .expect("case must have expected_hash");
+        assert!(
+            !expected.is_empty(),
+            "expected_hash must not be empty in test vector '{}'. Run generate_vectors.",
+            name
+        );
+        assert_eq!(
+            hash, expected,
+            "Hash mismatch in '{}': Rust produced {} but vector expects {}",
+            name, hash, expected
+        );
 
         println!("TestCase: {}", name);
         println!("  Hash: {}", hash);

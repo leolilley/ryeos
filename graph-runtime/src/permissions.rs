@@ -1,8 +1,8 @@
 pub fn check_permission(
     capabilities: &[String],
-    primary: &str,
     item_id: &str,
 ) -> Result<(), String> {
+    let primary = "execute";
     let (kind, bare_id) = parse_canonical_ref(item_id);
 
     if let Some(ref bare) = bare_id {
@@ -58,36 +58,36 @@ mod tests {
     #[test]
     fn exact_capability_grants_access() {
         let caps = vec!["rye.execute.tool.rye.echo".to_string()];
-        assert!(check_permission(&caps, "execute", "tool:rye/echo").is_ok());
+        assert!(check_permission(&caps, "tool:rye/echo").is_ok());
     }
 
     #[test]
     fn wildcard_capability_grants_access() {
         let caps = vec!["rye.execute.*".to_string()];
-        assert!(check_permission(&caps, "execute", "tool:rye/echo").is_ok());
+        assert!(check_permission(&caps, "tool:rye/echo").is_ok());
     }
 
     #[test]
     fn no_capabilities_denies() {
         let caps: Vec<String> = vec![];
-        assert!(check_permission(&caps, "execute", "tool:rye/echo").is_err());
+        assert!(check_permission(&caps, "tool:rye/echo").is_err());
     }
 
     #[test]
     fn internal_thread_tools_always_allowed() {
         let caps: Vec<String> = vec![];
-        assert!(check_permission(&caps, "execute", "tool:rye/agent/threads/internal/list").is_ok());
+        assert!(check_permission(&caps, "tool:rye/agent/threads/internal/list").is_ok());
     }
 
     #[test]
     fn bare_item_id_requires_canonical_ref() {
         let caps = vec!["rye.execute.*".to_string()];
-        assert!(check_permission(&caps, "execute", "rye/echo").is_err());
+        assert!(check_permission(&caps, "rye/echo").is_err());
     }
 
     #[test]
     fn wrong_capability_denies() {
         let caps = vec!["rye.fetch.*".to_string()];
-        assert!(check_permission(&caps, "execute", "tool:rye/echo").is_err());
+        assert!(check_permission(&caps, "tool:rye/echo").is_err());
     }
 }

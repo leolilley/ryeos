@@ -1667,6 +1667,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rye-core-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "lillux",
+ "rye-state",
+ "rye_engine",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rye-state"
 version = "0.1.0"
 dependencies = [
@@ -1674,6 +1696,7 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
+ "libc",
  "lillux",
  "rusqlite",
  "serde",

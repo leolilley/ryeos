@@ -1,3 +1,3 @@
 [workspace]
-members = ["ryeosd", "ryeos-engine/rye_engine", "lillux/lillux", "rye-runtime", "rye-state", "graph-runtime", "directive-runtime"]
+members = ["ryeosd", "ryeos-engine/rye_engine", "lillux/lillux", "rye-runtime", "rye-state", "graph-runtime", "directive-runtime", "rye-core-tools"]
 resolver = "2"

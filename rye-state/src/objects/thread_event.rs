@@ -196,7 +196,7 @@ impl NewEvent {
             thread_seq: self.thread_seq,
             event_type: self.event_type,
             durability: self.durability,
-            ts: chrono::Utc::now().to_rfc3339(),
+            ts: lillux::time::iso8601_now(),
             prev_chain_event_hash: self.prev_chain_event_hash,
             prev_thread_event_hash: self.prev_thread_event_hash,
             payload: self.payload,

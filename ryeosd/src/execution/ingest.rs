@@ -5,8 +5,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::types::ItemSource;
-use super::CasStore;
+use lillux::cas::{sha256_hex, CasStore};
+
+use super::cas_types::ItemSource;
 
 pub struct IngestResult {
     pub blob_hash: String,
@@ -14,10 +15,11 @@ pub struct IngestResult {
     pub integrity: String,
 }
 
-pub fn ingest_item(store: &CasStore, item_ref: &str, file_path: &Path) -> Result<IngestResult> {
+pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<IngestResult> {
+    let cas = CasStore::new(cas_root.to_path_buf());
     let bytes = fs::read(file_path)?;
-    let blob_hash = store.store_blob(&bytes)?;
-    let integrity = super::sha256_hex(&bytes);
+    let blob_hash = cas.store_blob(&bytes)?;
+    let integrity = sha256_hex(&bytes);
 
     let signature_info = parse_signature_info_from_bytes(&bytes);
 
@@ -27,7 +29,7 @@ pub fn ingest_item(store: &CasStore, item_ref: &str, file_path: &Path) -> Result
         integrity: integrity.clone(),
         signature_info,
     };
-    let object_hash = store.store_object(&source.to_json())?;
+    let object_hash = cas.store_object(&source.to_json())?;
 
     Ok(IngestResult {
         blob_hash,
@@ -36,14 +38,15 @@ pub fn ingest_item(store: &CasStore, item_ref: &str, file_path: &Path) -> Result
     })
 }
 
-pub fn ingest_directory(store: &CasStore, base_path: &Path) -> Result<HashMap<String, String>> {
+pub fn ingest_directory(cas_root: &Path, base_path: &Path) -> Result<HashMap<String, String>> {
     let mut items = HashMap::new();
-    ingest_walk(store, base_path, base_path, &mut items)?;
+    ingest_walk(cas_root, base_path, base_path, &mut items)?;
     Ok(items)
 }
 
-pub fn materialize_item(store: &CasStore, object_hash: &str, target_path: &Path) -> Result<()> {
-    let obj = store
+pub fn materialize_item(cas_root: &Path, object_hash: &str, target_path: &Path) -> Result<()> {
+    let cas = CasStore::new(cas_root.to_path_buf());
+    let obj = cas
         .get_object(object_hash)?
         .ok_or_else(|| anyhow::anyhow!("item source object {object_hash} not found"))?;
 
@@ -52,16 +55,16 @@ pub fn materialize_item(store: &CasStore, object_hash: &str, target_path: &Path)
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing content_blob_hash in item source"))?;
 
-    let data = store
+    let data = cas
         .get_blob(blob_hash)?
         .ok_or_else(|| anyhow::anyhow!("blob {blob_hash} not found"))?;
 
-    super::atomic_write(target_path, &data)?;
+    lillux::cas::atomic_write(target_path, &data)?;
     Ok(())
 }
 
 fn ingest_walk(
-    store: &CasStore,
+    cas_root: &Path,
     root: &Path,
     dir: &Path,
     items: &mut HashMap<String, String>,
@@ -84,9 +87,9 @@ fn ingest_walk(
         }
 
         if path.is_dir() {
-            ingest_walk(store, root, &path, items)?;
+            ingest_walk(cas_root, root, &path, items)?;
         } else if path.is_file() {
-            let result = ingest_item(store, &rel, &path)?;
+            let result = ingest_item(cas_root, &rel, &path)?;
             items.insert(rel, result.object_hash);
         }
     }

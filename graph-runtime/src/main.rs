@@ -118,7 +118,6 @@ fn main() -> anyhow::Result<()> {
             let cb_env = EnvelopeCallback {
                 socket_path: rye_runtime::resolve_daemon_socket_path(None),
                 token: std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default(),
-                allowed_primaries: vec!["execute".to_string(), "fetch".to_string(), "sign".to_string()],
             };
             CallbackClient::new(
                 &cb_env,

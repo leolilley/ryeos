@@ -90,7 +90,6 @@ impl Runner {
         provider_config: crate::directive::ProviderConfig,
         model_name: String,
         thread_id: String,
-        allowed_primaries: Vec<String>,
         hooks: Vec<rye_runtime::HookDefinition>,
     ) -> Self {
         let mut initial_messages = Vec::new();
@@ -107,7 +106,7 @@ impl Runner {
         initial_messages.extend(messages);
 
         let effective_caps = harness.effective_caps().to_vec();
-        let dispatcher = Dispatcher::new(tools.clone(), None, effective_caps, allowed_primaries);
+        let dispatcher = Dispatcher::new(tools.clone(), None, effective_caps);
 
         Self {
             messages: initial_messages,
@@ -137,7 +136,6 @@ impl Runner {
         provider_config: crate::directive::ProviderConfig,
         model_name: String,
         thread_id: String,
-        allowed_primaries: Vec<String>,
         hooks: Vec<rye_runtime::HookDefinition>,
     ) -> Self {
         let mut runner = Self::new(
@@ -151,7 +149,6 @@ impl Runner {
             provider_config,
             model_name,
             thread_id,
-            allowed_primaries,
             hooks,
         );
         runner.initial_turn = resume.turns_completed;
@@ -403,16 +400,10 @@ impl Runner {
                                 serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
                                     .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string())
                             } else {
-                                let primary = "execute";
-                                if !self.dispatcher.validate_allowed_primary(primary) {
-                                    tracing::warn!(primary, "dispatch primary not in allowed_primaries");
-                                }
-
                                 match self.callback.dispatch_action(rye_runtime::callback::DispatchActionRequest {
                                     thread_id: self.thread_id.clone(),
                                     project_path: self.callback.project_path().to_string(),
                                     action: rye_runtime::callback::ActionPayload {
-                                        primary: primary.to_string(),
                                         item_id: dispatch_result.canonical_ref.clone(),
                                         kind: Some("tool".to_string()),
                                         params: dispatch_result.arguments.clone(),
@@ -651,7 +642,6 @@ mod tests {
         EnvelopeCallback {
             socket_path: PathBuf::from("/nonexistent/test.sock"),
             token: "test-token".to_string(),
-            allowed_primaries: vec!["execute".to_string()],
         }
     }
 
@@ -691,7 +681,6 @@ mod tests {
             provider,
             "test-model".to_string(),
             "T-test".to_string(),
-            vec!["execute".to_string()],
             vec![],
         );
 
@@ -721,7 +710,6 @@ mod tests {
             provider,
             "test-model".to_string(),
             "T-test".to_string(),
-            vec!["execute".to_string()],
             vec![],
         );
 
@@ -758,7 +746,6 @@ mod tests {
             provider,
             "test-model".to_string(),
             "T-test".to_string(),
-            vec!["execute".to_string()],
             vec![],
         );
 

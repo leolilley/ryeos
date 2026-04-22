@@ -93,21 +93,10 @@ impl RuntimeCallbackAPI for HttpRuntimeClient {
         &self,
         request: DispatchActionRequest,
     ) -> Result<Value, CallbackError> {
-        if request.action.primary != "execute" {
-            return Err(CallbackError::ActionFailed {
-                code: "forbidden".to_string(),
-                message: format!(
-                    "action '{}' is not available over HTTP (execute only)",
-                    request.action.primary
-                ),
-                retryable: false,
-            });
-        }
         self.call(
             "dispatch_action",
             json!({
                 "action": {
-                    "primary": request.action.primary,
                     "item_id": request.action.item_id,
                     "kind": request.action.kind,
                     "params": request.action.params,

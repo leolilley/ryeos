@@ -75,7 +75,7 @@ pub fn resolve_execution_context(
     }
 }
 
-/// Build ExecutionContext from envelope fields (primary path in envelope mode).
+/// Build ExecutionContext from envelope fields (envelope mode).
 pub fn execution_context_from_envelope(
     parent_thread_id: Option<String>,
     parent_capabilities: Option<Vec<String>>,

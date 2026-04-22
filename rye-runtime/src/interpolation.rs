@@ -244,7 +244,6 @@ mod tests {
     #[test]
     fn interpolate_action_only_touches_item_id_and_params() {
         let action = json!({
-            "primary": "execute",
             "item_id": "${tool.id}",
             "params": {"n": "${x}"},
             "other": "${y}"

@@ -5,9 +5,6 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::services::budget_service::{
-    BudgetGetParams, BudgetReleaseParams, BudgetReportParams, BudgetReserveParams,
-};
 use crate::services::command_service::{
     CommandClaimParams, CommandCompleteParams, CommandSubmitParams,
 };
@@ -98,22 +95,6 @@ fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
             request.request_id,
             handle_complete_command(&request.params, state),
         ),
-        "budgets.reserve" => rpc_result(
-            request.request_id,
-            handle_reserve_budget(&request.params, state),
-        ),
-        "budgets.report" => rpc_result(
-            request.request_id,
-            handle_report_budget(&request.params, state),
-        ),
-        "budgets.release" => rpc_result(
-            request.request_id,
-            handle_release_budget(&request.params, state),
-        ),
-        "budgets.get" => rpc_result(
-            request.request_id,
-            handle_get_budget(&request.params, state),
-        ),
         "artifacts.publish" => rpc_result(
             request.request_id,
             handle_publish_artifact(&request.params, state),
@@ -161,10 +142,6 @@ pub fn dispatch_runtime_method(
         "runtime.append_event" => handle_append_event(params, state),
         "runtime.append_events" => handle_append_event_batch(params, state),
         "runtime.replay_events" => handle_replay_events(params, state),
-        "runtime.reserve_budget" => handle_reserve_budget(params, state),
-        "runtime.report_budget" => handle_report_budget(params, state),
-        "runtime.release_budget" => handle_release_budget(params, state),
-        "runtime.get_budget" => handle_get_budget(params, state),
         "runtime.finalize_thread" => handle_finalize(params, state),
         "runtime.mark_running" => handle_mark_running(params, state),
         "runtime.request_continuation" => handle_request_continuation(params, state),
@@ -210,7 +187,7 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
         serde_json::from_value(params.clone()).context("invalid threads.get params")?;
     match state.threads.get_thread(&params.thread_id)? {
         Some(thread) => {
-            let facets = state.db.get_facets(&params.thread_id)?;
+            let facets = state.state_store.get_facets(&params.thread_id)?;
             let facets_map: std::collections::HashMap<&str, &str> =
                 facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             serde_json::to_value(json!({
@@ -313,42 +290,6 @@ fn handle_complete_command(
         .context("failed to encode commands.complete result")
 }
 
-fn handle_reserve_budget(
-    params: &serde_json::Value,
-    state: &AppState,
-) -> Result<serde_json::Value> {
-    let params: BudgetReserveParams =
-        serde_json::from_value(params.clone()).context("invalid budgets.reserve params")?;
-    serde_json::to_value(state.budgets.reserve(&params)?)
-        .context("failed to encode budgets.reserve result")
-}
-
-fn handle_report_budget(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: BudgetReportParams =
-        serde_json::from_value(params.clone()).context("invalid budgets.report params")?;
-    serde_json::to_value(state.budgets.report(&params)?)
-        .context("failed to encode budgets.report result")
-}
-
-fn handle_release_budget(
-    params: &serde_json::Value,
-    state: &AppState,
-) -> Result<serde_json::Value> {
-    let params: BudgetReleaseParams =
-        serde_json::from_value(params.clone()).context("invalid budgets.release params")?;
-    serde_json::to_value(state.budgets.release(&params)?)
-        .context("failed to encode budgets.release result")
-}
-
-fn handle_get_budget(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: BudgetGetParams =
-        serde_json::from_value(params.clone()).context("invalid budgets.get params")?;
-    match state.budgets.get(&params)? {
-        Some(budget) => serde_json::to_value(budget).context("failed to encode budgets.get result"),
-        None => Ok(serde_json::Value::Null),
-    }
-}
-
 fn handle_publish_artifact(
     params: &serde_json::Value,
     state: &AppState,
@@ -371,7 +312,7 @@ fn handle_set_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
         serde_json::from_value(facets_value.clone())
             .context("facets must be a map of string keys to string values")?;
     let facets: Vec<(String, String)> = facets_map.into_iter().collect();
-    state.db.set_facets(thread_id, &facets)?;
+    state.state_store.set_facets(thread_id, &facets)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -380,7 +321,7 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
         .get("thread_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing thread_id"))?;
-    let facets = state.db.get_facets(thread_id)?;
+    let facets = state.state_store.get_facets(thread_id)?;
     let facets_map: std::collections::HashMap<&str, &str> =
         facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     Ok(serde_json::to_value(facets_map).context("failed to encode facets")?)

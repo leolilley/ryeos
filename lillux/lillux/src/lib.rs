@@ -1,4 +1,5 @@
 pub mod cas;
+pub mod crypto;
 pub mod exec;
 pub mod identity;
 pub mod signature;

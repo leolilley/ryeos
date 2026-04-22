@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use chrono::Utc;
-use ed25519_dalek::SigningKey;
+use lillux::crypto::SigningKey;
+use lillux::time::timestamp_millis;
 use serde_json::Value;
 
 use crate::daemon_rpc::ThreadLifecycleClient;
@@ -57,7 +57,7 @@ impl Transcript {
         event_type: &str,
         payload: Value,
     ) -> anyhow::Result<()> {
-        let timestamp = Utc::now().timestamp_millis();
+        let timestamp = timestamp_millis();
         let event = serde_json::json!({
             "event_type": event_type,
             "timestamp": timestamp,
@@ -436,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn render_knowledge_transcript_produces_signed_markdown() {
         let tmp = tempfile::tempdir().unwrap();
-        let sk = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
         let t = Transcript::new("thread-1", tmp.path().to_path_buf(), None)
             .unwrap()
             .with_signing_key(sk);

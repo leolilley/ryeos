@@ -23,7 +23,6 @@ pub struct DispatchActionRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionPayload {
-    pub primary: String,
     pub item_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,

@@ -11,7 +11,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use lillux::crypto::{Signature, Verifier, VerifyingKey};
 use serde_json::json;
 
 use crate::identity::NodeIdentity;
@@ -170,7 +170,7 @@ fn load_authorized_key(
     }
 
     // Verify content hash
-    let actual_hash = crate::cas::sha256_hex(body.as_bytes());
+    let actual_hash = lillux::cas::sha256_hex(body.as_bytes());
     if actual_hash != content_hash {
         bail!("tampered key file");
     }
@@ -297,7 +297,7 @@ fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers
     let audience = state.identity.principal_id();
 
     // Build string-to-sign
-    let body_hash = crate::cas::sha256_hex(body);
+    let body_hash = lillux::cas::sha256_hex(body);
     let canon = canonical_path(uri);
     let string_to_sign = format!(
         "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -308,7 +308,7 @@ fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers
         nonce,
         audience,
     );
-    let content_hash = crate::cas::sha256_hex(string_to_sign.as_bytes());
+    let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
 
     // Verify signature
     let sig_bytes = base64::engine::general_purpose::STANDARD

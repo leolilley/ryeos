@@ -60,7 +60,7 @@ pub fn resolve_project_context(
     state: &AppState,
     source: &ProjectSource,
     project_path: &std::path::Path,
-    principal_id: &str,
+    _principal_id: &str,
     checkout_id: &str,
 ) -> Result<ResolvedProjectContext> {
     let original_path = project_path.to_path_buf();
@@ -75,9 +75,13 @@ pub fn resolve_project_context(
         },
         ProjectSource::PushedHead => {
             let project_str = project_path.to_string_lossy();
-            let project_ref = state
-                .refs_store()
-                .resolve_project_ref(principal_id, &project_str)?
+            let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
+            let cas_root = state.state_store.cas_root()?;
+            let cas = lillux::cas::CasStore::new(cas_root.clone());
+
+            let snap_hash = state
+                .state_store
+                .with_state_db(|db| db.read_project_head(&project_hash))?
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "no pushed HEAD for project '{}' — push first",
@@ -85,12 +89,10 @@ pub fn resolve_project_context(
                     )
                 })?;
 
-            let snap_hash = &project_ref.snapshot_hash;
-            let cas = state.cas_store();
             let snap_obj = cas
-                .get_object(snap_hash)?
+                .get_object(&snap_hash)?
                 .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-            let snapshot = crate::cas::ProjectSnapshot::from_json(&snap_obj)?;
+            let snapshot = super::cas_types::ProjectSnapshot::from_json(&snap_obj)?;
 
             let manifest_hash = &snapshot.project_manifest_hash;
             let exec_dir = state
@@ -101,7 +103,7 @@ pub fn resolve_project_context(
             let cache = crate::execution::cache::MaterializationCache::new(
                 state.config.state_dir.join("cache").join("snapshots"),
             );
-            crate::execution::checkout_project(cas, manifest_hash, &exec_dir, Some(&cache))?;
+            crate::execution::checkout_project(&cas_root, manifest_hash, &exec_dir, Some(&cache))?;
 
             ResolvedProjectContext {
                 effective_path: exec_dir.clone(),

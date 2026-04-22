@@ -136,7 +136,6 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     callback.reserve_budget(envelope.policy.hard_limits.spend_usd).await?;
 
-    let allowed_primaries = envelope.callback.allowed_primaries.clone();
     let hooks = bootstrap_output.config.hooks.clone();
 
     let callback_for_budget = rye_runtime::callback_client::CallbackClient::new(
@@ -159,7 +158,6 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             provider,
             model_name,
             envelope.thread_id.clone(),
-            allowed_primaries,
             hooks,
         )
     } else {
@@ -237,7 +235,6 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             provider,
             model_name,
             envelope.thread_id.clone(),
-            allowed_primaries,
             hooks,
         )
     };

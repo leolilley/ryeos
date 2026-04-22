@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ed25519_dalek::pkcs8::DecodePrivateKey;
+use lillux::crypto::DecodePrivateKey;
 
 use crate::config::Config;
 use crate::identity::NodeIdentity;
@@ -76,13 +76,13 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 fn write_self_trust(
     trust_dir: &Path,
     trust_entry: &Path,
-    verifying_key: &ed25519_dalek::VerifyingKey,
+    verifying_key: &lillux::crypto::VerifyingKey,
 ) -> Result<()> {
     fs::create_dir_all(trust_dir)
         .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
-    let fingerprint = crate::cas::sha256_hex(verifying_key.as_bytes());
-    let pem = ed25519_dalek::pkcs8::EncodePublicKey::to_public_key_pem(verifying_key, Default::default())
+    let fingerprint = lillux::cas::sha256_hex(verifying_key.as_bytes());
+    let pem = lillux::crypto::EncodePublicKey::to_public_key_pem(verifying_key, Default::default())
         .context("failed to encode verifying key as PEM")?;
 
     let toml_content = format!(
@@ -128,7 +128,7 @@ pub fn sign_unsigned_items(config: &Config) {
         return;
     }
 
-    let sk = match ed25519_dalek::SigningKey::from_pkcs8_pem(
+    let sk = match lillux::crypto::SigningKey::from_pkcs8_pem(
         &fs::read_to_string(key_path).unwrap_or_default(),
     ) {
         Ok(sk) => sk,
@@ -160,7 +160,7 @@ pub fn sign_unsigned_items(config: &Config) {
 }
 
 /// Walk a directory and sign any unsigned .kind-schema.yaml files.
-fn walk_and_sign(dir: &Path, sk: &ed25519_dalek::SigningKey, sig_prefix: &str, skipped: &mut u32) -> u32 {
+fn walk_and_sign(dir: &Path, sk: &lillux::crypto::SigningKey, sig_prefix: &str, skipped: &mut u32) -> u32 {
     let mut count = 0u32;
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -195,7 +195,7 @@ fn walk_and_sign(dir: &Path, sk: &ed25519_dalek::SigningKey, sig_prefix: &str, s
 ///
 /// Signs .md, .py, .yaml/.yml files with the appropriate
 /// signature prefix for each type.
-fn walk_and_sign_items(dir: &Path, sk: &ed25519_dalek::SigningKey, skipped: &mut u32) -> u32 {
+fn walk_and_sign_items(dir: &Path, sk: &lillux::crypto::SigningKey, skipped: &mut u32) -> u32 {
     let mut count = 0u32;
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -234,7 +234,7 @@ fn walk_and_sign_items(dir: &Path, sk: &ed25519_dalek::SigningKey, skipped: &mut
 
 /// Sign a file if it's not already signed by the current key.
 /// Returns Ok(true) if signed (or re-signed), Ok(false) if skipped.
-fn sign_file_if_unsigned(path: &Path, sk: &ed25519_dalek::SigningKey, sig_prefix: &str) -> Result<bool> {
+fn sign_file_if_unsigned(path: &Path, sk: &lillux::crypto::SigningKey, sig_prefix: &str) -> Result<bool> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 

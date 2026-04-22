@@ -3,9 +3,8 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
-use chrono::Utc;
-use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use lillux::crypto::{DecodePrivateKey, EncodePrivateKey};
+use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +65,7 @@ impl NodeIdentity {
 
     fn from_signing_key(signing_key: SigningKey) -> Result<Self> {
         let verifying_key = signing_key.verifying_key();
-        let fingerprint = crate::cas::sha256_hex(verifying_key.as_bytes());
+        let fingerprint = lillux::sha256_hex(verifying_key.as_bytes());
         Ok(Self {
             signing_key,
             verifying_key,
@@ -99,7 +98,7 @@ impl NodeIdentity {
     }
 
     fn build_public_identity(&self) -> Result<PublicIdentityDoc> {
-        let created_at = Utc::now().to_rfc3339();
+        let created_at = lillux::time::iso8601_now();
         let principal_id = format!("fp:{}", self.fingerprint);
         let signing_key_str = format!(
             "ed25519:{}",

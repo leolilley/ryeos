@@ -52,6 +52,84 @@ CREATE INDEX IF NOT EXISTS idx_threads_chain_root ON threads(chain_root_id);
 CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
 CREATE INDEX IF NOT EXISTS idx_threads_created_at ON threads(created_at);
 CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at);
+
+-- Events: durable thread events
+CREATE TABLE IF NOT EXISTS events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_root_id TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    thread_seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    durability TEXT NOT NULL CHECK (durability IN ('durable', 'transient')),
+    ts TEXT NOT NULL,
+    prev_chain_event_hash TEXT,
+    prev_thread_event_hash TEXT,
+    payload BLOB NOT NULL,
+    UNIQUE(chain_root_id, chain_seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_chain_root ON events(chain_root_id);
+CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+
+-- Event replay index: track indexed position per thread
+CREATE TABLE IF NOT EXISTS event_replay_index (
+    thread_id TEXT PRIMARY KEY,
+    last_indexed_chain_seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Thread edges: parent -> child relationships
+CREATE TABLE IF NOT EXISTS thread_edges (
+    edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_root_id TEXT NOT NULL,
+    parent_thread_id TEXT NOT NULL,
+    child_thread_id TEXT NOT NULL,
+    spawn_seq INTEGER,
+    spawn_reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_edges_parent ON thread_edges(parent_thread_id);
+CREATE INDEX IF NOT EXISTS idx_edges_child ON thread_edges(child_thread_id);
+
+-- Thread results: final output and status
+CREATE TABLE IF NOT EXISTS thread_results (
+    thread_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result BLOB,
+    error TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_results_chain_root ON thread_results(chain_root_id);
+
+-- Thread artifacts: published outputs
+CREATE TABLE IF NOT EXISTS thread_artifacts (
+    artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_root_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    metadata BLOB,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON thread_artifacts(thread_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_chain_root ON thread_artifacts(chain_root_id);
+
+-- Thread facets: extensible attributes
+CREATE TABLE IF NOT EXISTS thread_facets (
+    facet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value BLOB NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(thread_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 "#;
 
 /// Metadata for a projection entry.
@@ -188,6 +266,135 @@ pub fn project_chain_state(
 
     db.update_projection_meta(&meta)
         .context("failed to update projection metadata")?;
+
+    Ok(())
+}
+
+/// Project a thread event into the events table.
+///
+/// Called when durable events are appended to the chain.
+pub fn project_event(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    event.validate()?;
+
+    let payload = serde_json::to_vec(&event.payload)
+        .context("failed to serialize event payload")?;
+
+    db.connection().execute(
+        "INSERT OR IGNORE INTO events (
+            chain_root_id, chain_seq, thread_id, thread_seq,
+            event_type, durability, ts, prev_chain_event_hash,
+            prev_thread_event_hash, payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &event.chain_root_id,
+            event.chain_seq,
+            &event.thread_id,
+            event.thread_seq,
+            &event.event_type,
+            event.durability.to_string(),
+            &event.ts,
+            &event.prev_chain_event_hash,
+            &event.prev_thread_event_hash,
+            &payload,
+        ],
+    )
+    .context("failed to project event")?;
+
+    Ok(())
+}
+
+/// Project a thread result when the thread finalizes.
+///
+/// Called on thread completion/failure.
+pub fn project_thread_result(
+    db: &ProjectionDb,
+    thread_id: &str,
+    chain_root_id: &str,
+    status: &str,
+    result: Option<&serde_json::Value>,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    let result_blob = result.map(|r| {
+        serde_json::to_vec(r).context("failed to serialize result")
+    }).transpose()?;
+
+    db.connection().execute(
+        "INSERT OR REPLACE INTO thread_results (
+            thread_id, chain_root_id, status, result, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            thread_id,
+            chain_root_id,
+            status,
+            result_blob,
+            error,
+            lillux::time::iso8601_now(),
+        ],
+    )
+    .context("failed to project thread result")?;
+
+    Ok(())
+}
+
+/// Project a thread artifact when published.
+///
+/// Called on artifact publication.
+pub fn project_thread_artifact(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    thread_id: &str,
+    kind: &str,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
+    let metadata_blob = metadata.map(|m| {
+        serde_json::to_vec(m).context("failed to serialize metadata")
+    }).transpose()?;
+
+    db.connection().execute(
+        "INSERT INTO thread_artifacts (
+            chain_root_id, thread_id, kind, metadata, created_at
+        ) VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![
+            chain_root_id,
+            thread_id,
+            kind,
+            metadata_blob,
+            lillux::time::iso8601_now(),
+        ],
+    )
+    .context("failed to project artifact")?;
+
+    Ok(())
+}
+
+/// Project a thread edge (parent-child relationship).
+///
+/// Called when a child thread is spawned.
+pub fn project_thread_edge(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    parent_thread_id: &str,
+    child_thread_id: &str,
+    spawn_seq: Option<i64>,
+    spawn_reason: Option<&str>,
+) -> anyhow::Result<()> {
+    db.connection().execute(
+        "INSERT INTO thread_edges (
+            chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            chain_root_id,
+            parent_thread_id,
+            child_thread_id,
+            spawn_seq,
+            spawn_reason,
+            lillux::time::iso8601_now(),
+        ],
+    )
+    .context("failed to project edge")?;
 
     Ok(())
 }

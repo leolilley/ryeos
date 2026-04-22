@@ -63,7 +63,6 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             "thread_id": request.thread_id,
             "project_path": request.project_path,
             "action": {
-                "primary": request.action.primary,
                 "item_id": request.action.item_id,
                 "kind": request.action.kind,
                 "params": request.action.params,

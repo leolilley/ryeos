@@ -47,7 +47,7 @@ pub async fn get_thread(
                 &caller_scopes,
                 thread.requested_by.as_deref(),
             )?;
-            let facets = state.db.get_facets(&thread_id).map_err(policy::internal_error)?;
+            let facets = state.state_store.get_facets(&thread_id).map_err(policy::internal_error)?;
             let facets_map: std::collections::HashMap<&str, &str> =
                 facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             Ok(Json(json!({

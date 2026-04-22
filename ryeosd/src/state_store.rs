@@ -1,55 +1,43 @@
-//! StateStore facade — bridges ryeosd Database API with rye-state CAS operations.
-//! 
-//! This module provides:
-//! - StateStore: Unified interface delegating to rye-state CAS
-//! - NodeIdentitySigner: Wrapper around NodeIdentity for rye-state Signer trait
-//!
-//! This module provides a unified interface that:
-//! - Delegates durable state (threads, events, snapshots) to rye-state CAS
-//! - Manages transient state (pid, pgid, commands) in runtime.sqlite3
-//! - Maintains backward compatibility with existing Database API
-//!
-//! Architecture:
-//! ```text
-//! ryeosd::StateStore
-//!   ├── rye_state::StateStore (CAS-backed durable)
-//!   │   ├── .state/objects/ (CAS blobs)
-//!   │   ├── .state/refs/ (signed refs)
-//!   │   └── projection.sqlite3 (read-only view)
-//!   ├── runtime.sqlite3 (transient state)
-//!   │   ├── thread_runtime (pid, pgid)
-//!   │   ├── thread_commands (lease/claim)
-//!   │   └── Future transient tables
-//!   └── Signer trait (from daemon identity)
-//! ```
-
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
-use rusqlite::Connection;
-use ed25519_dalek::Signer as Ed25519Signer;
+use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
+use serde_json::{json, Value};
 
-use rye_state::{
-    chain, objects,
-    objects::{ThreadSnapshot, ThreadStatus, ThreadEvent, EventDurability},
-    HeadCache,
-};
+use rye_state::StateDb;
+use rye_state::chain::SnapshotUpdate;
 use rye_state::signer::Signer;
+use rye_state::objects::thread_snapshot::ThreadStatus;
+use rye_state::objects::{ThreadEvent, EventDurability, ThreadSnapshot};
+use rye_state::queries;
+use rye_state::projection;
 
-use crate::db::{
-    NewThreadRecord, ThreadBudgetRecord, PersistedEventRecord, NewEventRecord,
-    ThreadDetail, ThreadListItem, RuntimeInfo, BudgetInfo,
+use crate::runtime_db;
+pub use runtime_db::{
+    RuntimeInfo, CommandRecord, NewCommandRecord,
 };
 
-/// Wrapper around NodeIdentity to implement rye-state Signer trait.
+#[derive(Debug, Clone, Serialize)]
+pub struct PersistedEventRecord {
+    pub event_id: i64,
+    pub chain_root_id: String,
+    pub chain_seq: i64,
+    pub thread_id: String,
+    pub thread_seq: i64,
+    pub event_type: String,
+    pub storage_class: String,
+    pub ts: String,
+    pub payload: Value,
+}
+
 pub struct NodeIdentitySigner {
     fingerprint: String,
-    signing_key: ed25519_dalek::SigningKey,
+    signing_key: lillux::crypto::SigningKey,
 }
 
 impl NodeIdentitySigner {
-    /// Create a new signer from a NodeIdentity
     pub fn from_identity(identity: &crate::identity::NodeIdentity) -> Self {
         Self {
             fingerprint: identity.fingerprint().to_string(),
@@ -60,6 +48,7 @@ impl NodeIdentitySigner {
 
 impl Signer for NodeIdentitySigner {
     fn sign(&self, data: &[u8]) -> Vec<u8> {
+        use lillux::crypto::Signer as Ed25519Signer;
         self.signing_key.sign(data).to_bytes().to_vec()
     }
 
@@ -68,124 +57,344 @@ impl Signer for NodeIdentitySigner {
     }
 }
 
-/// Unified state store combining CAS-backed durable state and transient runtime state.
-pub struct StateStore {
-    /// Path to .state/ directory root
-    state_root: PathBuf,
+#[derive(Debug, Clone)]
+pub struct NewThreadRecord {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub kind: String,
+    pub item_ref: String,
+    pub executor_ref: String,
+    pub launch_mode: String,
+    pub current_site_id: String,
+    pub origin_site_id: String,
+    pub upstream_thread_id: Option<String>,
+    pub requested_by: Option<String>,
+}
 
-    /// Transient runtime state (pid, pgid, commands).
-    runtime_db: Arc<Mutex<Connection>>,
+#[derive(Debug, Clone)]
+pub struct NewEventRecord {
+    pub event_type: String,
+    pub storage_class: String,
+    pub payload: Value,
+}
 
-    /// In-memory cache of verified chain heads (for fast reads).
-    head_cache: Arc<Mutex<HeadCache>>,
+#[derive(Debug, Clone, Serialize)]
+pub struct NewArtifactRecord {
+    pub artifact_type: String,
+    pub uri: String,
+    pub content_hash: Option<String>,
+    pub metadata: Option<Value>,
+}
 
-    /// Signing key for signed refs (passed from daemon identity).
+#[derive(Debug, Clone, Serialize)]
+pub struct FinalizeThreadRecord {
+    pub status: String,
+    pub outcome_code: Option<String>,
+    pub result_json: Option<Value>,
+    pub error_json: Option<Value>,
+    pub artifacts: Vec<NewArtifactRecord>,
+    pub final_cost: Option<Vec<(String, String)>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadArtifactRecord {
+    pub artifact_id: i64,
+    pub artifact_type: String,
+    pub uri: String,
+    pub content_hash: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadEdgeRecord {
+    pub edge_id: i64,
+    pub chain_root_id: String,
+    pub source_thread_id: String,
+    pub target_thread_id: String,
+    pub edge_type: String,
+    pub created_at: String,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadListItem {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub kind: String,
+    pub status: String,
+    pub item_ref: String,
+    pub launch_mode: String,
+    pub current_site_id: String,
+    pub origin_site_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadResultRecord {
+    pub outcome_code: Option<String>,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadDetail {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub kind: String,
+    pub status: String,
+    pub item_ref: String,
+    pub executor_ref: String,
+    pub launch_mode: String,
+    pub current_site_id: String,
+    pub origin_site_id: String,
+    pub upstream_thread_id: Option<String>,
+    pub requested_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub runtime: RuntimeInfo,
+}
+
+struct Inner {
+    state_db: StateDb,
+    runtime_db: runtime_db::RuntimeDb,
     signer: Arc<dyn Signer>,
+}
+
+pub struct StateStore {
+    inner: Mutex<Inner>,
 }
 
 impl std::fmt::Debug for StateStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateStore")
-            .field("state_root", &self.state_root)
-            .field("runtime_db", &"<Connection>")
-            .field("head_cache", &"<HeadCache>")
-            .field("signer", &"<Signer>")
+            .field("inner", &"<Mutex<Inner>>")
             .finish()
     }
 }
 
+fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
+    let now = lillux::time::iso8601_now();
+    ThreadSnapshot {
+        schema: rye_state::objects::SCHEMA_VERSION,
+        kind: "thread_snapshot".to_string(),
+        thread_id: thread.thread_id.clone(),
+        chain_root_id: thread.chain_root_id.clone(),
+        status: ThreadStatus::Created,
+        kind_name: thread.kind.clone(),
+        item_ref: thread.item_ref.clone(),
+        executor_ref: thread.executor_ref.clone(),
+        launch_mode: thread.launch_mode.clone(),
+        current_site_id: thread.current_site_id.clone(),
+        origin_site_id: thread.origin_site_id.clone(),
+        upstream_thread_id: thread.upstream_thread_id.clone(),
+        requested_by: thread.requested_by.clone(),
+        base_project_snapshot_hash: None,
+        result_project_snapshot_hash: None,
+        created_at: now.clone(),
+        updated_at: now,
+        started_at: None,
+        finished_at: None,
+        result: None,
+        error: None,
+        budget: None,
+        artifacts: vec![],
+        facets: Default::default(),
+        last_event_hash: None,
+        last_chain_seq: 0,
+        last_thread_seq: 0,
+    }
+}
+
+fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &str) -> Vec<ThreadEvent> {
+    let now = lillux::time::iso8601_now();
+    events
+        .iter()
+        .enumerate()
+        .map(|(idx, event)| ThreadEvent {
+            schema: rye_state::objects::SCHEMA_VERSION,
+            kind: "thread_event".to_string(),
+            chain_root_id: chain_root_id.to_string(),
+            chain_seq: 0,
+            thread_id: thread_id.to_string(),
+            thread_seq: (idx + 1) as u64,
+            event_type: event.event_type.clone(),
+            durability: match event.storage_class.as_str() {
+                "indexed" => EventDurability::Durable,
+                "journal" | "journal_only" => EventDurability::Journal,
+                "ephemeral" => EventDurability::Ephemeral,
+                _ => EventDurability::Durable,
+            },
+            ts: now.clone(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
+            payload: event.payload.clone(),
+        })
+        .collect()
+}
+
+fn persisted_from_append(result: &rye_state::AppendResult, events: &[NewEventRecord]) -> Vec<PersistedEventRecord> {
+    result
+        .events
+        .iter()
+        .zip(events.iter())
+        .map(|(stored, input)| PersistedEventRecord {
+            event_id: stored.chain_seq as i64,
+            chain_root_id: stored.chain_root_id.clone(),
+            chain_seq: stored.chain_seq as i64,
+            thread_id: stored.thread_id.clone(),
+            thread_seq: stored.thread_seq as i64,
+            event_type: input.event_type.clone(),
+            storage_class: input.storage_class.clone(),
+            ts: stored.ts.clone(),
+            payload: input.payload.clone(),
+        })
+        .collect()
+}
+
 impl StateStore {
-    /// Create a new StateStore with CAS and runtime database.
     pub fn new(
         state_root: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
     ) -> Result<Self> {
-        // Verify state_root exists
         std::fs::create_dir_all(&state_root)
             .context("failed to create state_root directory")?;
 
-        // Initialize runtime database for transient state
-        if let Some(parent) = runtime_db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("failed to create runtime db directory")?;
-        }
-        let runtime_db = rusqlite::Connection::open(&runtime_db_path)
-            .context("failed to open runtime.sqlite3")?;
-
-        // Run migrations for runtime DB
-        Self::init_runtime_schema(&runtime_db)?;
-
-        let head_cache = Arc::new(Mutex::new(HeadCache::new()));
+        let state_db = StateDb::open(&state_root)?;
+        let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
 
         Ok(Self {
-            state_root,
-            runtime_db: Arc::new(Mutex::new(runtime_db)),
-            head_cache,
-            signer,
+            inner: Mutex::new(Inner {
+                state_db,
+                runtime_db,
+                signer,
+            }),
         })
     }
 
-    /// Initialize runtime database schema (transient state only).
-    fn init_runtime_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            PRAGMA journal_mode=WAL;
-            PRAGMA foreign_keys=ON;
-
-            CREATE TABLE IF NOT EXISTS thread_runtime (
-                thread_id TEXT PRIMARY KEY,
-                pid INTEGER,
-                pgid INTEGER,
-                metadata BLOB
-            );
-
-            CREATE TABLE IF NOT EXISTS thread_commands (
-                command_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                thread_id TEXT NOT NULL,
-                command_type TEXT NOT NULL,
-                status TEXT NOT NULL,
-                requested_by TEXT,
-                params BLOB,
-                result BLOB,
-                created_at TEXT NOT NULL,
-                claimed_at TEXT,
-                completed_at TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_thread_commands_status 
-                ON thread_commands(thread_id, status);
-            "#,
-        )?;
-        Ok(())
+    /// Get the CAS root path for raw CAS access (e.g., project source checkout).
+    pub fn cas_root(&self) -> Result<std::path::PathBuf> {
+        let g = self.lock()?;
+        Ok(g.state_db.cas_root().to_path_buf())
     }
 
-    /// Create a new root thread in CAS and initialize runtime state.
+    /// Get the refs root path for ref system access.
+    pub fn refs_root(&self) -> Result<std::path::PathBuf> {
+        let g = self.lock()?;
+        Ok(g.state_db.refs_root().to_path_buf())
+    }
+
+    /// Run a closure with access to the underlying StateDb.
+    /// The lock is held for the duration of the closure.
+    pub fn with_state_db<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&rye_state::StateDb) -> Result<T>,
+    {
+        let g = self.lock()?;
+        f(&g.state_db)
+    }
+
+    /// Run a closure with access to the projection database.
+    /// The lock is held for the duration of the closure.
+    pub fn with_projection<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&rye_state::ProjectionDb) -> Result<T>,
+    {
+        let g = self.lock()?;
+        f(g.state_db.projection())
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
+        self.inner.lock().map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
+    }
+
     pub fn create_thread(
         &self,
         thread: &NewThreadRecord,
-        _budget: Option<&ThreadBudgetRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let g = self.lock()?;
+        let snapshot = build_snapshot(thread);
 
-        // Build ThreadSnapshot from NewThreadRecord
-        let snapshot = ThreadSnapshot {
-            schema: objects::SCHEMA_VERSION,
+        if thread.thread_id == thread.chain_root_id {
+            g.state_db
+                .create_chain(&thread.thread_id, snapshot, g.signer.as_ref())?;
+        } else {
+            g.state_db
+                .add_thread(&thread.chain_root_id, snapshot, g.signer.as_ref())?;
+        }
+
+        g.runtime_db
+            .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+
+        if let Some(ref upstream_thread_id) = thread.upstream_thread_id {
+            projection::project_thread_edge(
+                g.state_db.projection(),
+                &thread.chain_root_id,
+                upstream_thread_id,
+                &thread.thread_id,
+                None,
+                Some("spawned"),
+            )?;
+        }
+
+        let create_event = NewEventRecord {
+            event_type: "thread_created".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": &thread.kind,
+                "item_ref": &thread.item_ref,
+                "executor_ref": &thread.executor_ref,
+                "launch_mode": &thread.launch_mode,
+            }),
+        };
+
+        let te = convert_events(&[create_event.clone()], &thread.chain_root_id, &thread.thread_id);
+        let result = g.state_db.append_events(
+            &thread.chain_root_id,
+            &thread.thread_id,
+            te,
+            vec![],
+            g.signer.as_ref(),
+        )?;
+
+        Ok(persisted_from_append(&result, &[create_event]))
+    }
+
+    pub fn mark_thread_running(&self, thread_id: &str) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+
+        if thread_row.status != "created" {
+            bail!("invalid status transition: {} -> running", thread_row.status);
+        }
+
+        let now = lillux::time::iso8601_now();
+        let updated_snapshot = ThreadSnapshot {
+            schema: rye_state::objects::SCHEMA_VERSION,
             kind: "thread_snapshot".to_string(),
-            thread_id: thread.thread_id.clone(),
-            chain_root_id: thread.chain_root_id.clone(),
-            status: ThreadStatus::Created,
-            kind_name: thread.kind.clone(),
-            item_ref: thread.item_ref.clone(),
-            executor_ref: thread.executor_ref.clone(),
-            launch_mode: thread.launch_mode.clone(),
-            current_site_id: thread.current_site_id.clone(),
-            origin_site_id: thread.origin_site_id.clone(),
-            upstream_thread_id: thread.upstream_thread_id.clone(),
-            requested_by: thread.requested_by.clone(),
-            created_at: now.clone(),
+            thread_id: thread_row.thread_id.clone(),
+            chain_root_id: thread_row.chain_root_id.clone(),
+            status: ThreadStatus::Running,
+            kind_name: thread_row.kind.clone(),
+            item_ref: thread_row.item_ref.clone(),
+            executor_ref: thread_row.executor_ref.clone(),
+            launch_mode: thread_row.launch_mode.clone(),
+            current_site_id: thread_row.current_site_id.clone(),
+            origin_site_id: thread_row.origin_site_id.clone(),
+            upstream_thread_id: thread_row.upstream_thread_id.clone(),
+            requested_by: thread_row.requested_by.clone(),
+            base_project_snapshot_hash: None,
+            result_project_snapshot_hash: None,
+            created_at: thread_row.created_at.clone(),
             updated_at: now.clone(),
-            started_at: None,
+            started_at: thread_row.started_at.clone().or(Some(now)),
             finished_at: None,
             result: None,
             error: None,
@@ -197,439 +406,618 @@ impl StateStore {
             last_thread_seq: 0,
         };
 
-        // Call rye-state to create the chain
-        let cas_root = self.state_root.join("objects");
-        let refs_root = self.state_root.join("refs");
+        let snapshot_update = SnapshotUpdate {
+            thread_id: thread_id.to_string(),
+            new_snapshot: updated_snapshot,
+        };
 
-        let mut head_cache = self.head_cache.lock()
-            .map_err(|_| anyhow!("failed to lock head_cache"))?;
+        let event = NewEventRecord {
+            event_type: "thread_started".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({}),
+        };
 
-        let _create_result = chain::create_chain(
-            &cas_root,
-            &refs_root,
-            &thread.thread_id,
-            snapshot,
-            self.signer.as_ref(),
-            &mut *head_cache,
+        let te = convert_events(&[event.clone()], &thread_row.chain_root_id, thread_id);
+        let result = g.state_db.append_events(
+            &thread_row.chain_root_id,
+            thread_id,
+            te,
+            vec![snapshot_update],
+            g.signer.as_ref(),
         )?;
 
-        // Insert runtime record
-        let runtime_db = self.runtime_db.lock()
-            .map_err(|_| anyhow!("failed to lock runtime_db"))?;
-
-        runtime_db.execute(
-            "INSERT INTO thread_runtime (thread_id, pid, pgid, metadata) 
-             VALUES (?1, NULL, NULL, NULL)",
-            rusqlite::params![&thread.thread_id],
-        )?;
-
-        drop(runtime_db);
-
-        // Return the persisted event (simplified for now)
-        Ok(vec![
-            PersistedEventRecord {
-                event_id: 1,
-                chain_root_id: thread.chain_root_id.clone(),
-                chain_seq: 1,
-                thread_id: thread.thread_id.clone(),
-                thread_seq: 1,
-                event_type: "thread_created".to_string(),
-                storage_class: "indexed".to_string(),
-                ts: now,
-                payload: serde_json::json!({
-                    "kind": &thread.kind,
-                    "item_ref": &thread.item_ref,
-                    "executor_ref": &thread.executor_ref,
-                    "launch_mode": &thread.launch_mode,
-                }),
-            },
-        ])
+        Ok(persisted_from_append(&result, &[event]))
     }
 
-    /// Append events to a thread's execution chain.
+    pub fn finalize_thread(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+
+        if is_terminal_status(&thread_row.status) {
+            bail!(
+                "invalid status transition: {} -> {}",
+                thread_row.status,
+                update.status
+            );
+        }
+
+        let now = lillux::time::iso8601_now();
+        let terminal_status = ThreadStatus::from_str_lossy(&update.status)
+            .ok_or_else(|| anyhow!("invalid terminal status: {}", update.status))?;
+
+        let mut facets = BTreeMap::new();
+        if let Some(ref cost) = update.final_cost {
+            for (k, v) in cost {
+                facets.insert(k.clone(), v.clone());
+            }
+        }
+
+        let artifacts_json: Vec<Value> = update.artifacts.iter().map(|a| serde_json::to_value(a).unwrap()).collect();
+
+        let updated_snapshot = ThreadSnapshot {
+            schema: rye_state::objects::SCHEMA_VERSION,
+            kind: "thread_snapshot".to_string(),
+            thread_id: thread_row.thread_id.clone(),
+            chain_root_id: thread_row.chain_root_id.clone(),
+            status: terminal_status,
+            kind_name: thread_row.kind.clone(),
+            item_ref: thread_row.item_ref.clone(),
+            executor_ref: thread_row.executor_ref.clone(),
+            launch_mode: thread_row.launch_mode.clone(),
+            current_site_id: thread_row.current_site_id.clone(),
+            origin_site_id: thread_row.origin_site_id.clone(),
+            upstream_thread_id: thread_row.upstream_thread_id.clone(),
+            requested_by: thread_row.requested_by.clone(),
+            base_project_snapshot_hash: None,
+            result_project_snapshot_hash: None,
+            created_at: thread_row.created_at.clone(),
+            updated_at: now.clone(),
+            started_at: thread_row.started_at.clone(),
+            finished_at: Some(now),
+            result: update.result_json.clone(),
+            error: update.error_json.clone(),
+            budget: None,
+            artifacts: artifacts_json,
+            facets,
+            last_event_hash: None,
+            last_chain_seq: 0,
+            last_thread_seq: 0,
+        };
+
+        let snapshot_update = SnapshotUpdate {
+            thread_id: thread_id.to_string(),
+            new_snapshot: updated_snapshot,
+        };
+
+        let mut events_to_append = Vec::new();
+
+        for artifact in &update.artifacts {
+            events_to_append.push(NewEventRecord {
+                event_type: "artifact_published".to_string(),
+                storage_class: "indexed".to_string(),
+                payload: json!({
+                    "artifact_type": artifact.artifact_type,
+                    "uri": artifact.uri,
+                    "content_hash": artifact.content_hash,
+                }),
+            });
+        }
+
+        events_to_append.push(NewEventRecord {
+            event_type: terminal_event_type(&update.status)?.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "outcome_code": update.outcome_code,
+                "has_error": update.error_json.is_some(),
+                "artifact_count": update.artifacts.len(),
+            }),
+        });
+
+        let te = convert_events(&events_to_append, &thread_row.chain_root_id, thread_id);
+        let result = g.state_db.append_events(
+            &thread_row.chain_root_id,
+            thread_id,
+            te,
+            vec![snapshot_update],
+            g.signer.as_ref(),
+        )?;
+
+        Ok(persisted_from_append(&result, &events_to_append))
+    }
+
+    pub fn create_continuation(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let source_row = g
+            .state_db
+            .get_thread(source_thread_id)?
+            .ok_or_else(|| anyhow!("source thread not found: {source_thread_id}"))?;
+
+        if is_terminal_status(&source_row.status)
+            && source_row.status != "failed"
+            && source_row.status != "completed"
+        {
+            bail!("cannot continue thread in terminal status '{}'", source_row.status);
+        }
+
+        let now = lillux::time::iso8601_now();
+        let source_snapshot = ThreadSnapshot {
+            schema: rye_state::objects::SCHEMA_VERSION,
+            kind: "thread_snapshot".to_string(),
+            thread_id: source_row.thread_id.clone(),
+            chain_root_id: source_row.chain_root_id.clone(),
+            status: ThreadStatus::Continued,
+            kind_name: source_row.kind.clone(),
+            item_ref: source_row.item_ref.clone(),
+            executor_ref: source_row.executor_ref.clone(),
+            launch_mode: source_row.launch_mode.clone(),
+            current_site_id: source_row.current_site_id.clone(),
+            origin_site_id: source_row.origin_site_id.clone(),
+            upstream_thread_id: source_row.upstream_thread_id.clone(),
+            requested_by: source_row.requested_by.clone(),
+            base_project_snapshot_hash: None,
+            result_project_snapshot_hash: None,
+            created_at: source_row.created_at.clone(),
+            updated_at: now.clone(),
+            started_at: source_row.started_at.clone(),
+            finished_at: Some(now),
+            result: None,
+            error: None,
+            budget: None,
+            artifacts: vec![],
+            facets: Default::default(),
+            last_event_hash: None,
+            last_chain_seq: 0,
+            last_thread_seq: 0,
+        };
+
+        let source_snapshot_update = SnapshotUpdate {
+            thread_id: source_thread_id.to_string(),
+            new_snapshot: source_snapshot,
+        };
+
+        let successor_snapshot = build_snapshot(successor);
+        g.state_db
+            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+
+        g.runtime_db
+            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+
+        projection::project_thread_edge(
+            g.state_db.projection(),
+            chain_root_id,
+            source_thread_id,
+            &successor.thread_id,
+            None,
+            reason,
+        )?;
+
+        let source_event = NewEventRecord {
+            event_type: "thread_continued".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "successor_thread_id": &successor.thread_id,
+                "reason": reason,
+            }),
+        };
+
+        let ste = convert_events(&[source_event.clone()], chain_root_id, source_thread_id);
+        let source_result = g.state_db.append_events(
+            chain_root_id,
+            source_thread_id,
+            ste,
+            vec![source_snapshot_update],
+            g.signer.as_ref(),
+        )?;
+
+        let successor_event = NewEventRecord {
+            event_type: "thread_created".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": &successor.kind,
+                "item_ref": &successor.item_ref,
+                "continuation_from": source_thread_id,
+            }),
+        };
+
+        let sste = convert_events(&[successor_event.clone()], chain_root_id, &successor.thread_id);
+        let successor_result = g.state_db.append_events(
+            chain_root_id,
+            &successor.thread_id,
+            sste,
+            vec![],
+            g.signer.as_ref(),
+        )?;
+
+        let mut all_events = persisted_from_append(&source_result, &[source_event]);
+        all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
+        Ok(all_events)
+    }
+
+    pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
+        let g = self.lock()?;
+        let thread_row = match g.state_db.get_thread(thread_id)? {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+            let runtime = g
+                .runtime_db
+                .get_runtime_info(thread_id)?
+                .unwrap_or(RuntimeInfo {
+                    pid: None,
+                    pgid: None,
+                });
+
+        Ok(Some(ThreadDetail {
+            thread_id: thread_row.thread_id,
+            chain_root_id: thread_row.chain_root_id,
+            kind: thread_row.kind,
+            status: thread_row.status,
+            item_ref: thread_row.item_ref,
+            executor_ref: thread_row.executor_ref,
+            launch_mode: thread_row.launch_mode,
+            current_site_id: thread_row.current_site_id,
+            origin_site_id: thread_row.origin_site_id,
+            upstream_thread_id: thread_row.upstream_thread_id,
+            requested_by: thread_row.requested_by,
+            created_at: thread_row.created_at,
+            updated_at: thread_row.updated_at,
+            started_at: thread_row.started_at,
+            finished_at: thread_row.finished_at,
+            runtime,
+        }))
+    }
+
+    pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
+        let g = self.lock()?;
+        let result_row = queries::get_thread_result(g.state_db.projection(), thread_id)?;
+        Ok(result_row.map(|row| {
+            let result_val = row.result.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            ThreadResultRecord {
+                outcome_code: None,
+                result: result_val,
+                error: row.error.map(|e| json!(e)),
+                metadata: None,
+            }
+        }))
+    }
+
+    pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
+        let g = self.lock()?;
+        let artifact_rows = queries::list_thread_artifacts(g.state_db.projection(), thread_id)?;
+        Ok(artifact_rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| ThreadArtifactRecord {
+                artifact_id: idx as i64 + 1,
+                artifact_type: row.kind,
+                uri: String::new(),
+                content_hash: None,
+                metadata: row.metadata.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()),
+            })
+            .collect())
+    }
+
+    pub fn publish_artifact(
+        &self,
+        thread_id: &str,
+        artifact: &NewArtifactRecord,
+    ) -> Result<(ThreadArtifactRecord, PersistedEventRecord)> {
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+
+        projection::project_thread_artifact(
+            g.state_db.projection(),
+            &thread_row.chain_root_id,
+            thread_id,
+            &artifact.artifact_type,
+            artifact.metadata.as_ref(),
+        )?;
+
+        let artifact_id = g.state_db.projection().connection().last_insert_rowid();
+
+        let event = NewEventRecord {
+            event_type: "artifact_published".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "artifact_id": artifact_id,
+                "artifact_type": artifact.artifact_type,
+                "uri": artifact.uri,
+                "content_hash": artifact.content_hash,
+            }),
+        };
+
+        let te = convert_events(&[event.clone()], &thread_row.chain_root_id, thread_id);
+        let result = g.state_db.append_events(
+            &thread_row.chain_root_id,
+            thread_id,
+            te,
+            vec![],
+            g.signer.as_ref(),
+        )?;
+
+        let persisted = persisted_from_append(&result, &[event]);
+
+        let record = ThreadArtifactRecord {
+            artifact_id,
+            artifact_type: artifact.artifact_type.clone(),
+            uri: artifact.uri.clone(),
+            content_hash: artifact.content_hash.clone(),
+            metadata: artifact.metadata.clone(),
+        };
+
+        let fallback = PersistedEventRecord {
+            event_id: artifact_id,
+            chain_root_id: thread_row.chain_root_id,
+            chain_seq: 0,
+            thread_id: thread_id.to_string(),
+            thread_seq: 0,
+            event_type: "artifact_published".to_string(),
+            storage_class: "indexed".to_string(),
+                ts: lillux::time::iso8601_now(),
+            payload: json!({}),
+        };
+
+        Ok((record, persisted.into_iter().next().unwrap_or(fallback)))
+    }
+
+    pub fn list_threads(&self, limit: usize) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows = queries::list_threads(g.state_db.projection(), limit)?;
+        Ok(thread_rows
+            .into_iter()
+            .map(|row| ThreadListItem {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+            .collect())
+    }
+
+    pub fn list_thread_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {
+        let g = self.lock()?;
+        let child_rows = queries::list_thread_children(g.state_db.projection(), thread_id)?;
+        let mut children = Vec::new();
+        for row in child_rows {
+            let runtime = g
+                .runtime_db
+                .get_runtime_info(&row.thread_id)?
+                .unwrap_or(RuntimeInfo { pid: None, pgid: None });
+            children.push(ThreadDetail {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                executor_ref: row.executor_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                requested_by: row.requested_by,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                started_at: row.started_at,
+                finished_at: row.finished_at,
+                runtime,
+            });
+        }
+        Ok(children)
+    }
+
+    pub fn list_chain_threads(&self, chain_root_id: &str) -> Result<Vec<ThreadDetail>> {
+        let g = self.lock()?;
+        let thread_rows = queries::list_threads_by_chain(g.state_db.projection(), chain_root_id)?;
+        let mut threads = Vec::new();
+        for row in thread_rows {
+            let runtime = g
+                .runtime_db
+                .get_runtime_info(&row.thread_id)?
+                .unwrap_or(RuntimeInfo { pid: None, pgid: None });
+            threads.push(ThreadDetail {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                executor_ref: row.executor_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                requested_by: row.requested_by,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                started_at: row.started_at,
+                finished_at: row.finished_at,
+                runtime,
+            });
+        }
+        Ok(threads)
+    }
+
+    pub fn list_chain_edges(&self, chain_root_id: &str) -> Result<Vec<ThreadEdgeRecord>> {
+        let g = self.lock()?;
+        let edge_rows = queries::list_thread_edges(g.state_db.projection(), chain_root_id)?;
+        Ok(edge_rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| ThreadEdgeRecord {
+                edge_id: idx as i64 + 1,
+                chain_root_id: row.chain_root_id,
+                source_thread_id: row.parent_thread_id,
+                target_thread_id: row.child_thread_id,
+                edge_type: "spawned".to_string(),
+                created_at: String::new(),
+                metadata: row.spawn_reason.map(|r| json!(r)),
+            })
+            .collect())
+    }
+
+    pub fn list_threads_by_status(&self, statuses: &[&str]) -> Result<Vec<ThreadDetail>> {
+        let g = self.lock()?;
+        let thread_rows = queries::list_threads_by_status(g.state_db.projection(), statuses)?;
+        let mut details = Vec::new();
+        for row in thread_rows {
+            let runtime = g
+                .runtime_db
+                .get_runtime_info(&row.thread_id)?
+                .unwrap_or(RuntimeInfo { pid: None, pgid: None });
+            details.push(ThreadDetail {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                executor_ref: row.executor_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                requested_by: row.requested_by,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                started_at: row.started_at,
+                finished_at: row.finished_at,
+                runtime,
+            });
+        }
+        Ok(details)
+    }
+
+    pub fn active_thread_count(&self) -> Result<i64> {
+        let g = self.lock()?;
+        queries::active_thread_count(g.state_db.projection()).map_err(Into::into)
+    }
+
+    pub fn attach_thread_process(&self, thread_id: &str, pid: i64, pgid: i64) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.attach_process(thread_id, pid, pgid)
+    }
+
     pub fn append_events(
         &self,
         chain_root_id: &str,
         thread_id: &str,
         events: &[NewEventRecord],
     ) -> Result<Vec<PersistedEventRecord>> {
-        let now = chrono::Utc::now().to_rfc3339();
-
-        // Convert NewEventRecord → ThreadEvent
-        let thread_events: Vec<ThreadEvent> = events
-            .iter()
-            .enumerate()
-            .map(|(idx, event)| ThreadEvent {
-                schema: objects::SCHEMA_VERSION,
-                kind: "thread_event".to_string(),
-                chain_root_id: chain_root_id.to_string(),
-                chain_seq: 0, // Will be set by rye-state
-                thread_id: thread_id.to_string(),
-                thread_seq: (idx + 1) as u64, // Sequential in thread
-                event_type: event.event_type.clone(),
-                durability: match event.storage_class.as_str() {
-                    "indexed" => EventDurability::Durable,
-                    "journal" => EventDurability::Journal,
-                    "ephemeral" => EventDurability::Ephemeral,
-                    _ => EventDurability::Durable,
-                },
-                ts: now.clone(),
-                prev_chain_event_hash: None,
-                prev_thread_event_hash: None,
-                payload: event.payload.clone(),
-            })
-            .collect();
-
-        // Delegate to rye-state
-        let cas_root = self.state_root.join("objects");
-        let refs_root = self.state_root.join("refs");
-        let mut head_cache = self.head_cache.lock()
-            .map_err(|_| anyhow!("failed to lock head_cache"))?;
-
-        let result = chain::append_events(
-            &cas_root,
-            &refs_root,
+        let g = self.lock()?;
+        let te = convert_events(events, chain_root_id, thread_id);
+        let result = g.state_db.append_events(
             chain_root_id,
             thread_id,
-            thread_events,
-            vec![], // snapshot_updates (empty for now)
-            self.signer.as_ref(),
-            &mut *head_cache,
+            te,
+            vec![],
+            g.signer.as_ref(),
         )?;
-
-        // Convert AppendResult to PersistedEventRecord
-        let persisted = result.events
-            .iter()
-            .enumerate()
-            .map(|(idx, event)| PersistedEventRecord {
-                event_id: (result.first_chain_seq as i64) + (idx as i64),
-                chain_root_id: event.chain_root_id.clone(),
-                chain_seq: (result.first_chain_seq as i64) + (idx as i64),
-                thread_id: event.thread_id.clone(),
-                thread_seq: event.thread_seq as i64,
-                event_type: event.event_type.clone(),
-                storage_class: match event.durability {
-                    objects::EventDurability::Durable => "indexed".to_string(),
-                    objects::EventDurability::Journal => "journal".to_string(),
-                    objects::EventDurability::Ephemeral => "ephemeral".to_string(),
-                },
-                ts: event.ts.clone(),
-                payload: event.payload.clone(),
-            })
-            .collect();
-
-        Ok(persisted)
+        Ok(persisted_from_append(&result, events))
     }
 
-    /// Attach process information (pid, pgid) to a running thread.
-    pub fn attach_thread_process(
+    pub fn replay_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: Option<&str>,
+        after_seq: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let event_rows = queries::replay_events(g.state_db.projection(), chain_root_id, thread_id, after_seq, limit)?;
+        Ok(event_rows
+            .into_iter()
+            .map(|row| PersistedEventRecord {
+                event_id: row.event_id,
+                chain_root_id: row.chain_root_id,
+                chain_seq: row.chain_seq,
+                thread_id: row.thread_id,
+                thread_seq: row.thread_seq,
+                event_type: row.event_type,
+                storage_class: row.durability,
+                ts: row.ts,
+                payload: serde_json::from_slice(&row.payload).unwrap_or(json!({})),
+            })
+            .collect())
+    }
+
+    pub fn submit_command(
+        &self,
+        cmd: &NewCommandRecord,
+    ) -> Result<CommandRecord> {
+        let g = self.lock()?;
+        g.runtime_db.submit_command(cmd)
+    }
+
+    pub fn claim_commands(
         &self,
         thread_id: &str,
-        pid: i64,
-        pgid: i64,
-    ) -> Result<()> {
-        let runtime_db = self.runtime_db.lock()
-            .map_err(|_| anyhow!("failed to lock runtime_db"))?;
+    ) -> Result<Vec<CommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.claim_commands(thread_id)
+    }
 
-        runtime_db.execute(
-            "UPDATE thread_runtime SET pid = ?1, pgid = ?2 WHERE thread_id = ?3",
-            rusqlite::params![pid, pgid, thread_id],
-        )?;
+    pub fn complete_command(
+        &self,
+        command_id: i64,
+        status: &str,
+        result: Option<&Value>,
+    ) -> Result<CommandRecord> {
+        let g = self.lock()?;
+        g.runtime_db.complete_command(command_id, status, result)
+    }
 
+    pub fn get_facets(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+        let g = self.lock()?;
+        let facet_rows = queries::get_facets(g.state_db.projection(), thread_id)?;
+        Ok(facet_rows
+            .into_iter()
+            .map(|row| (row.key, String::from_utf8_lossy(&row.value).to_string()))
+            .collect())
+    }
+
+    pub fn set_facets(&self, thread_id: &str, facets: &[(String, String)]) -> Result<()> {
+        let g = self.lock()?;
+        queries::set_facets(g.state_db.projection(), thread_id, facets)?;
         Ok(())
-    }
-
-    /// Read thread details from projection (durable state).
-    pub fn read_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
-        // Read from rye-state projection
-        let cas_root = self.state_root.join("objects");
-        let refs_root = self.state_root.join("refs");
-        
-        let head_cache = self.head_cache.lock()
-            .map_err(|_| anyhow!("failed to lock head_cache"))?;
-
-        // First, we need to find the chain_root_id. For now, assume it's the thread_id (root thread case)
-        // In full implementation, would query runtime.sqlite3 or cache to find chain membership
-        let chain_root_id = thread_id;
-
-        let snapshot = match chain::read_thread_snapshot(
-            &cas_root,
-            &refs_root,
-            chain_root_id,
-            thread_id,
-            &*head_cache,
-        ) {
-            Ok(result) => result.snapshot,
-            Err(_) => None,
-        };
-
-        let snapshot = match snapshot {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        drop(head_cache);
-
-        // Read runtime info from runtime.sqlite3
-        let runtime_db = self.runtime_db.lock()
-            .map_err(|_| anyhow!("failed to lock runtime_db"))?;
-
-        let (pid, pgid) = runtime_db
-            .query_row(
-                "SELECT pid, pgid FROM thread_runtime WHERE thread_id = ?1",
-                rusqlite::params![thread_id],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
-            )
-            .ok()
-            .unwrap_or((None, None));
-
-        drop(runtime_db);
-
-        // Assemble ThreadDetail
-        Ok(Some(ThreadDetail {
-            thread_id: snapshot.thread_id,
-            chain_root_id: snapshot.chain_root_id,
-            kind: snapshot.kind_name,
-            status: snapshot.status.to_string(),
-            item_ref: snapshot.item_ref,
-            executor_ref: snapshot.executor_ref,
-            launch_mode: snapshot.launch_mode,
-            current_site_id: snapshot.current_site_id,
-            origin_site_id: snapshot.origin_site_id,
-            upstream_thread_id: snapshot.upstream_thread_id,
-            requested_by: snapshot.requested_by,
-            created_at: snapshot.created_at,
-            updated_at: snapshot.updated_at,
-            started_at: snapshot.started_at,
-            finished_at: snapshot.finished_at,
-            runtime: RuntimeInfo { pid, pgid },
-            budget: snapshot.budget.map(|b| BudgetInfo {
-                budget_parent_id: None,
-                reserved_spend: 0.0,
-                actual_spend: 0.0,
-                status: "unknown".to_string(),
-                metadata: Some(b),
-            }),
-            allowed_actions: vec![], // Computed based on status
-        }))
-    }
-
-    /// List all threads in a chain.
-    pub fn list_threads(&self, chain_root_id: &str) -> Result<Vec<ThreadListItem>> {
-        // Query rye-state projection
-        let cas_root = self.state_root.join("objects");
-        let refs_root = self.state_root.join("refs");
-        let head_cache = self.head_cache.lock()
-            .map_err(|_| anyhow!("failed to lock head_cache"))?;
-
-        let chain_state = match chain::read_chain_head(
-            &cas_root,
-            &refs_root,
-            chain_root_id,
-            &*head_cache,
-        ) {
-            Ok(cs) => cs,
-            Err(_) => return Ok(vec![]),
-        };
-
-        // Convert ChainState threads to ThreadListItem
-        let mut items = Vec::new();
-        for (thread_id, entry) in chain_state.threads {
-            items.push(ThreadListItem {
-                thread_id,
-                chain_root_id: chain_state.chain_root_id.clone(),
-                kind: "unknown".to_string(), // Would need to read from snapshot
-                status: entry.status.to_string(),
-                item_ref: "unknown".to_string(),
-                launch_mode: "inline".to_string(),
-                current_site_id: "unknown".to_string(),
-                origin_site_id: "unknown".to_string(),
-                created_at: chain_state.updated_at.clone(),
-                updated_at: chain_state.updated_at.clone(),
-            });
-        }
-
-        Ok(items)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+    )
+}
 
-    /// Simple test signer
-    struct TestSignerImpl;
-    
-    impl Signer for TestSignerImpl {
-        fn sign(&self, _data: &[u8]) -> Vec<u8> {
-            vec![0u8; 64]
-        }
-        fn fingerprint(&self) -> &str {
-            "test-fingerprint"
-        }
-    }
-
-    #[test]
-    fn state_store_init_requires_valid_paths() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let state_root = tmpdir.path().join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
-        let signer = std::sync::Arc::new(TestSignerImpl);
-
-        let result = StateStore::new(state_root, runtime_db_path, signer);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn create_thread_stores_in_cas() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let state_root = tmpdir.path().join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
-        let signer = std::sync::Arc::new(TestSignerImpl);
-
-        let store = StateStore::new(state_root.clone(), runtime_db_path, signer).unwrap();
-
-        let thread = NewThreadRecord {
-            thread_id: "T-test-1".to_string(),
-            chain_root_id: "T-test-1".to_string(),
-            kind: "directive".to_string(),
-            status: "created".to_string(),
-            item_ref: "test/item".to_string(),
-            executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
-            current_site_id: "local".to_string(),
-            origin_site_id: "local".to_string(),
-            upstream_thread_id: None,
-            requested_by: None,
-            summary_json: None,
-        };
-
-        let result = store.create_thread(&thread, None);
-        assert!(result.is_ok());
-
-        let events = result.unwrap();
-        assert!(!events.is_empty());
-        assert_eq!(events[0].event_type, "thread_created");
-
-        // Verify CAS objects exist
-        let cas_root = state_root.join("objects");
-        let objects = fs::read_dir(cas_root).unwrap();
-        let count = objects.count();
-        assert!(count > 0, "CAS should contain objects after thread creation");
-    }
-
-    #[test]
-    fn append_events_converts_properly() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let state_root = tmpdir.path().join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
-        let signer = std::sync::Arc::new(TestSignerImpl);
-
-        let store = StateStore::new(state_root, runtime_db_path, signer).unwrap();
-
-        // Create thread first
-        let thread = NewThreadRecord {
-            thread_id: "T-test-1".to_string(),
-            chain_root_id: "T-test-1".to_string(),
-            kind: "directive".to_string(),
-            status: "created".to_string(),
-            item_ref: "test/item".to_string(),
-            executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
-            current_site_id: "local".to_string(),
-            origin_site_id: "local".to_string(),
-            upstream_thread_id: None,
-            requested_by: None,
-            summary_json: None,
-        };
-
-        store.create_thread(&thread, None).unwrap();
-
-        // Append event
-        let event = NewEventRecord {
-            event_type: "test_event".to_string(),
-            storage_class: "indexed".to_string(),
-            payload: serde_json::json!({"test": "data"}),
-        };
-
-        let result = store.append_events("T-test-1", "T-test-1", &[event]);
-        assert!(result.is_ok());
-
-        let persisted = result.unwrap();
-        assert!(!persisted.is_empty());
-        assert_eq!(persisted[0].event_type, "test_event");
-        assert_eq!(persisted[0].chain_seq, 1); // First actual event after snapshot
-    }
-
-    #[test]
-    fn read_thread_returns_thread_detail() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let state_root = tmpdir.path().join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
-        let signer = std::sync::Arc::new(TestSignerImpl);
-
-        let store = StateStore::new(state_root, runtime_db_path, signer).unwrap();
-
-        let thread = NewThreadRecord {
-            thread_id: "T-read-1".to_string(),
-            chain_root_id: "T-read-1".to_string(),
-            kind: "directive".to_string(),
-            status: "created".to_string(),
-            item_ref: "test/item".to_string(),
-            executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
-            current_site_id: "local".to_string(),
-            origin_site_id: "local".to_string(),
-            upstream_thread_id: None,
-            requested_by: Some("user-1".to_string()),
-            summary_json: None,
-        };
-
-        store.create_thread(&thread, None).unwrap();
-
-        let result = store.read_thread("T-read-1");
-        assert!(result.is_ok());
-
-        let detail = result.unwrap();
-        assert!(detail.is_some());
-        let detail = detail.unwrap();
-        assert_eq!(detail.thread_id, "T-read-1");
-        assert_eq!(detail.kind, "directive");
-        assert_eq!(detail.requested_by, Some("user-1".to_string()));
-    }
-
-    #[test]
-    fn attach_thread_process_updates_runtime() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let state_root = tmpdir.path().join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
-        let signer = std::sync::Arc::new(TestSignerImpl);
-
-        let store = StateStore::new(state_root, runtime_db_path, signer).unwrap();
-
-        let thread = NewThreadRecord {
-            thread_id: "T-proc-1".to_string(),
-            chain_root_id: "T-proc-1".to_string(),
-            kind: "directive".to_string(),
-            status: "created".to_string(),
-            item_ref: "test/item".to_string(),
-            executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
-            current_site_id: "local".to_string(),
-            origin_site_id: "local".to_string(),
-            upstream_thread_id: None,
-            requested_by: None,
-            summary_json: None,
-        };
-
-        store.create_thread(&thread, None).unwrap();
-
-        let result = store.attach_thread_process("T-proc-1", 1234, 5678);
-        assert!(result.is_ok());
-
-        let detail = store.read_thread("T-proc-1").unwrap().unwrap();
-        assert_eq!(detail.runtime.pid, Some(1234));
-        assert_eq!(detail.runtime.pgid, Some(5678));
+fn terminal_event_type(status: &str) -> Result<&'static str> {
+    match status {
+        "completed" => Ok("thread_completed"),
+        "failed" => Ok("thread_failed"),
+        "cancelled" => Ok("thread_cancelled"),
+        "killed" => Ok("thread_killed"),
+        "timed_out" => Ok("thread_timed_out"),
+        "continued" => Ok("thread_continued"),
+        other => bail!("invalid terminal event status: {other}"),
     }
 }

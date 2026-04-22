@@ -11,7 +11,6 @@ pub struct CallbackCapability {
     pub invocation_id: String,
     pub thread_id: String,
     pub project_path: PathBuf,
-    pub allowed_primaries: Vec<String>,
     pub expires_at: Instant,
 }
 
@@ -30,15 +29,14 @@ impl CallbackCapabilityStore {
         &self,
         thread_id: &str,
         project_path: PathBuf,
-        allowed_primaries: Vec<String>,
         ttl: Duration,
     ) -> CallbackCapability {
         let random_bytes: [u8; 32] = rand::random();
-        let hex = crate::cas::sha256_hex(&random_bytes);
+        let hex = lillux::cas::sha256_hex(&random_bytes);
         let token = format!("cbt-{hex}");
 
         let inv_bytes: [u8; 16] = rand::random();
-        let inv_hex = crate::cas::sha256_hex(&inv_bytes);
+        let inv_hex = lillux::cas::sha256_hex(&inv_bytes);
         let invocation_id = format!("inv-{}", &inv_hex[..12]);
 
         let cap = CallbackCapability {
@@ -46,7 +44,6 @@ impl CallbackCapabilityStore {
             invocation_id,
             thread_id: thread_id.to_string(),
             project_path,
-            allowed_primaries,
             expires_at: Instant::now() + ttl,
         };
 
@@ -81,24 +78,6 @@ impl CallbackCapabilityStore {
         }
 
         Ok(cap.clone())
-    }
-
-    pub fn validate_primary(
-        &self,
-        token: &str,
-        thread_id: &str,
-        project_path: &std::path::Path,
-        primary: &str,
-    ) -> Result<CallbackCapability> {
-        let cap = self.validate(token, thread_id, project_path)?;
-        if !cap.allowed_primaries.contains(&primary.to_string()) {
-            bail!(
-                "capability does not allow primary '{}' (allowed: {:?})",
-                primary,
-                cap.allowed_primaries
-            );
-        }
-        Ok(cap)
     }
 
     pub fn invalidate(&self, token: &str) {
@@ -147,14 +126,6 @@ pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
     Duration::from_secs(secs.min(3600))
 }
 
-pub fn uds_allowed_primaries() -> Vec<String> {
-    vec![
-        "execute".to_string(),
-        "fetch".to_string(),
-        "sign".to_string(),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,7 +136,6 @@ mod tests {
         let cap = store.generate(
             "T-test123",
             PathBuf::from("/project"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         assert!(cap.token.starts_with("cbt-"));
@@ -193,7 +163,6 @@ mod tests {
         let cap = store.generate(
             "T-test",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         store.invalidate(&cap.token);
@@ -208,13 +177,11 @@ mod tests {
         let cap1 = store.generate(
             "T-1",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         let cap2 = store.generate(
             "T-2",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         store.invalidate_for_thread("T-1");
@@ -232,7 +199,6 @@ mod tests {
         let cap = store.generate(
             "T-test",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(0),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -248,7 +214,6 @@ mod tests {
         let cap = store.generate(
             "T-1",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         let err = store
@@ -263,7 +228,6 @@ mod tests {
         let cap = store.generate(
             "T-1",
             PathBuf::from("/project-a"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         let err = store
@@ -273,54 +237,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_primary_allows_permitted() {
-        let store = CallbackCapabilityStore::new();
-        let cap = store.generate(
-            "T-1",
-            PathBuf::from("/p"),
-            uds_allowed_primaries(),
-            Duration::from_secs(300),
-        );
-        store
-            .validate_primary(&cap.token, "T-1", PathBuf::from("/p").as_path(), "execute")
-            .unwrap();
-        store
-            .validate_primary(&cap.token, "T-1", PathBuf::from("/p").as_path(), "fetch")
-            .unwrap();
-        store
-            .validate_primary(&cap.token, "T-1", PathBuf::from("/p").as_path(), "sign")
-            .unwrap();
-    }
-
-    #[test]
-    fn validate_primary_rejects_disallowed() {
-        let store = CallbackCapabilityStore::new();
-        let cap = store.generate(
-            "T-1",
-            PathBuf::from("/p"),
-            vec!["execute".to_string()],
-            Duration::from_secs(300),
-        );
-        let err = store
-            .validate_primary(&cap.token, "T-1", PathBuf::from("/p").as_path(), "fetch")
-            .unwrap_err();
-        assert!(err.to_string().contains("does not allow primary 'fetch'"));
-    }
-
-    #[test]
     fn prune_expired_removes_stale() {
         let store = CallbackCapabilityStore::new();
         store.generate(
             "T-1",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(0),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         store.generate(
             "T-2",
             PathBuf::from("/p"),
-            uds_allowed_primaries(),
             Duration::from_secs(300),
         );
         let pruned = store.prune_expired();

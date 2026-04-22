@@ -129,7 +129,7 @@ mod tests {
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
             hooks_dir.join("hooks.yaml"),
-            "hooks:\n  - id: inject\n    event: thread_started\n    action: {primary: fetch}\n",
+            "hooks:\n  - id: inject\n    event: thread_started\n    action: {item_id: \"tool:rye/core/fetch\"}\n",
         )
         .unwrap();
         let loader = HooksLoader::new(sys_path, None);

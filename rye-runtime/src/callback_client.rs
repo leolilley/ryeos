@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::callback::RuntimeCallbackAPI;
@@ -10,7 +10,6 @@ pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
     project_path: String,
-    allowed_primaries: Vec<String>,
 }
 
 impl CallbackClient {
@@ -19,13 +18,11 @@ impl CallbackClient {
         inner: Arc<dyn RuntimeCallbackAPI>,
         thread_id: &str,
         project_path: &str,
-        allowed_primaries: Vec<String>,
     ) -> Self {
         Self {
             inner: Some(inner),
             thread_id: thread_id.to_string(),
             project_path: project_path.to_string(),
-            allowed_primaries,
         }
     }
 }
@@ -36,7 +33,6 @@ impl Clone for CallbackClient {
             inner: self.inner.clone(),
             thread_id: self.thread_id.clone(),
             project_path: self.project_path.clone(),
-            allowed_primaries: self.allowed_primaries.clone(),
         }
     }
 }
@@ -63,7 +59,6 @@ impl CallbackClient {
             inner,
             thread_id: thread_id.to_string(),
             project_path: project_path.to_string(),
-            allowed_primaries: callback.allowed_primaries.clone(),
         }
     }
 
@@ -79,12 +74,6 @@ impl CallbackClient {
         &self,
         req: crate::callback::DispatchActionRequest,
     ) -> Result<Value> {
-        let primary = &req.action.primary;
-        let allowed = &self.allowed_primaries;
-        if !allowed.is_empty() && !allowed.contains(&"*".to_string()) && !allowed.contains(primary)
-        {
-            bail!("disallowed primary: {}", primary);
-        }
         match &self.inner {
             Some(client) => Ok(client.dispatch_action(req).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?),
@@ -242,46 +231,24 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn make_callback(allowed_primaries: Vec<String>) -> EnvelopeCallback {
+    fn make_callback() -> EnvelopeCallback {
         EnvelopeCallback {
             socket_path: PathBuf::from("/nonexistent/test.sock"),
             token: "test-token".to_string(),
-            allowed_primaries,
         }
     }
 
-    fn make_client(allowed_primaries: Vec<String>) -> CallbackClient {
-        CallbackClient::new(&make_callback(allowed_primaries), "T-test", "/project")
+    fn make_client() -> CallbackClient {
+        CallbackClient::new(&make_callback(), "T-test", "/project")
     }
 
     #[tokio::test]
-    async fn dispatch_action_with_disallowed_primary_rejected() {
-        let client = make_client(vec!["execute".to_string()]);
+    async fn dispatch_action_succeeds_when_disconnected() {
+        let client = make_client();
         let req = DispatchActionRequest {
             thread_id: "T-test".to_string(),
             project_path: "/project".to_string(),
             action: ActionPayload {
-                primary: "sign".to_string(),
-                item_id: "my/item".to_string(),
-                kind: None,
-                params: json!({}),
-                thread: "inline".to_string(),
-            },
-        };
-        let result = client.dispatch_action(req).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("disallowed primary: sign"), "{}", err);
-    }
-
-    #[tokio::test]
-    async fn dispatch_action_with_allowed_primary_succeeds_when_disconnected() {
-        let client = make_client(vec!["execute".to_string()]);
-        let req = DispatchActionRequest {
-            thread_id: "T-test".to_string(),
-            project_path: "/project".to_string(),
-            action: ActionPayload {
-                primary: "execute".to_string(),
                 item_id: "my/tool".to_string(),
                 kind: None,
                 params: json!({}),
@@ -295,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_event_noop_when_disconnected() {
-        let client = make_client(vec!["execute".to_string()]);
+        let client = make_client();
         client
             .append_event("turn_start", json!({"turn": 1}))
             .await
@@ -304,13 +271,13 @@ mod tests {
 
     #[tokio::test]
     async fn mark_running_noop_when_disconnected() {
-        let client = make_client(vec!["execute".to_string()]);
+        let client = make_client();
         client.mark_running().await.unwrap();
     }
 
     #[tokio::test]
     async fn all_methods_noop_when_disconnected() {
-        let client = make_client(vec!["*".to_string()]);
+        let client = make_client();
 
         client.reserve_budget(1.0).await.unwrap();
         client.report_budget(json!({"tokens": 100})).await.unwrap();
@@ -324,72 +291,54 @@ mod tests {
         assert_eq!(cont, Value::Null);
     }
 
-    #[tokio::test]
-    async fn wildcard_primary_allowed() {
-        let client = make_client(vec!["*".to_string()]);
-        let req = DispatchActionRequest {
-            thread_id: "T-test".to_string(),
-            project_path: "/project".to_string(),
-            action: ActionPayload {
-                primary: "anything_goes".to_string(),
-                item_id: "x/y".to_string(),
-                kind: None,
-                params: json!({}),
-                thread: "inline".to_string(),
-            },
-        };
-        assert!(client.dispatch_action(req).await.is_ok());
-    }
-
     #[test]
     fn thread_id_and_project_path_accessors() {
-        let client = make_client(vec![]);
+        let client = make_client();
         assert_eq!(client.thread_id(), "T-test");
         assert_eq!(client.project_path(), "/project");
     }
 
     #[test]
     fn clone_preserves_fields() {
-        let client = make_client(vec!["execute".to_string()]);
+        let client = make_client();
         let cloned = client.clone();
         assert_eq!(cloned.thread_id(), "T-test");
         assert_eq!(cloned.project_path(), "/project");
-        assert_eq!(cloned.allowed_primaries, vec!["execute"]);
     }
 
     #[tokio::test]
     async fn emit_turn_start_noop_when_disconnected() {
-        let client = make_client(vec![]);
+        let client = make_client();
         client.emit_turn_start(1).await.unwrap();
     }
 
     #[tokio::test]
     async fn emit_tool_dispatch_with_call_id() {
-        let client = make_client(vec![]);
+        let client = make_client();
         client.emit_tool_dispatch("read_file", Some("call_123")).await.unwrap();
     }
 
     #[tokio::test]
     async fn emit_turn_complete_with_tokens() {
-        let client = make_client(vec![]);
+        let client = make_client();
         client.emit_turn_complete(1, Some((100, 50))).await.unwrap();
     }
 
     #[tokio::test]
     async fn emit_tool_result_noop_when_disconnected() {
-        let client = make_client(vec![]);
+        let client = make_client();
         client.emit_tool_result("call_1", false).await.unwrap();
     }
 
     #[tokio::test]
     async fn emit_error_noop_when_disconnected() {
-        let client = make_client(vec![]);
+        let client = make_client();
         client.emit_error("something broke").await.unwrap();
     }
 
     #[tokio::test]
     async fn emit_thread_continued_noop_when_disconnected() {
-        let client = make_client(vec![]);
+        let client = make_client();
         client.emit_thread_continued("T-prev").await.unwrap();
     }
 }

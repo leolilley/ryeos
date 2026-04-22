@@ -3,16 +3,12 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::broadcast;
 
-use crate::broker::LiveBroker;
-use crate::db::{Database, NewEventRecord, PersistedEventRecord};
+use crate::state_store::{NewEventRecord, PersistedEventRecord, StateStore};
 
 #[derive(Debug, Clone)]
 pub struct EventStoreService {
-    db: Arc<Database>,
-    state_store: Arc<crate::state_store::StateStore>,
-    broker: Arc<LiveBroker>,
+    state_store: Arc<StateStore>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,11 +60,9 @@ fn default_replay_limit() -> usize {
 
 impl EventStoreService {
     pub fn new(
-        db: Arc<Database>,
-        state_store: Arc<crate::state_store::StateStore>,
-        broker: Arc<LiveBroker>,
+        state_store: Arc<StateStore>,
     ) -> Self {
-        Self { db, state_store, broker }
+        Self { state_store }
     }
 
     pub fn append(&self, params: &EventAppendParams) -> Result<PersistedEventRecord> {
@@ -85,7 +79,7 @@ impl EventStoreService {
 
     pub fn append_batch(&self, params: &EventAppendBatchParams) -> Result<EventAppendBatchResult> {
         let thread = self
-            .db
+            .state_store
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
 
@@ -105,7 +99,6 @@ impl EventStoreService {
 
         let persisted = self.state_store
             .append_events(&thread.chain_root_id, &thread.thread_id, &events)?;
-        self.broker.publish_batch(&persisted);
 
         Ok(EventAppendBatchResult { persisted })
     }
@@ -115,7 +108,7 @@ impl EventStoreService {
             (Some(chain_root_id), thread_id) => (chain_root_id.clone(), thread_id.clone()),
             (None, Some(thread_id)) => {
                 let thread = self
-                    .db
+                    .state_store
                     .get_thread(thread_id)?
                     .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
                 (thread.chain_root_id, Some(thread_id.clone()))
@@ -123,7 +116,7 @@ impl EventStoreService {
             (None, None) => bail!("events.replay requires chain_root_id or thread_id"),
         };
 
-        let events = self.db.replay_events(
+        let events = self.state_store.replay_events(
             &chain_root_id,
             thread_id.as_deref(),
             params.after_chain_seq,
@@ -139,25 +132,6 @@ impl EventStoreService {
             events,
             next_cursor,
         })
-    }
-
-    pub fn live_catch_up(
-        &self,
-        chain_root_id: &str,
-        thread_id: Option<&str>,
-        after_chain_seq: Option<i64>,
-        limit: usize,
-    ) -> Result<Vec<PersistedEventRecord>> {
-        self.db
-            .list_events(chain_root_id, thread_id, after_chain_seq, limit)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<PersistedEventRecord> {
-        self.broker.subscribe()
-    }
-
-    pub fn publish_persisted_batch(&self, events: &[PersistedEventRecord]) {
-        self.broker.publish_batch(events)
     }
 }
 
@@ -178,9 +152,6 @@ fn validate_event_type(event_type: &str) -> Result<()> {
         | "command_submitted"
         | "command_claimed"
         | "command_completed"
-        | "budget_reserved"
-        | "budget_reported"
-        | "budget_released"
         | "stream_opened"
         | "token_delta"
         | "stream_snapshot"

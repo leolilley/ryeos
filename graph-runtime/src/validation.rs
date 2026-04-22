@@ -254,7 +254,7 @@ config:
       node_type: return
     orphan:
       node_type: action
-      action: {primary: execute, item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo"}
 "#;
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);

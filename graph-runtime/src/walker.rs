@@ -398,16 +398,12 @@ impl Walker {
                 }
             };
 
-            let primary = action.get("primary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("execute");
             let item_id = action.get("item_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
             if let Err(err_msg) = permissions::check_permission(
                 &exec_ctx.capabilities,
-                primary,
                 item_id,
             ) {
                 let elapsed = start.elapsed().as_millis() as u64;
@@ -997,7 +993,7 @@ mod tests {
 
     fn make_callback(results: Vec<Value>) -> CallbackClient {
         let inner: Arc<dyn rye_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
-        CallbackClient::from_inner(inner, "thread-test", "/tmp/test-project", vec!["*".to_string()])
+        CallbackClient::from_inner(inner, "thread-test", "/tmp/test-project")
     }
 
     fn make_graph(yaml: &str) -> GraphDefinition {
@@ -1023,7 +1019,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {primary: execute, item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", params: {msg: hello}}
       assign: {echo_result: "${result}"}
       next: done
     done:
@@ -1073,7 +1069,7 @@ config:
   max_steps: 3
   nodes:
     loop:
-      action: {primary: execute, item_id: "tool:test/noop"}
+      action: {item_id: "tool:test/noop"}
       next: loop
 "#;
         let graph = make_graph(yaml);
@@ -1096,7 +1092,7 @@ config:
   start: nonexistent
   nodes:
     step1:
-      action: {primary: execute, item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo"}
 "#;
         let graph = make_graph(yaml);
         let w = make_walker(graph, vec![]);
@@ -1117,7 +1113,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: "elem"
-      action: {primary: execute, item_id: "tool:test/echo", params: {value: "${elem}"}}
+      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
       collect: "results"
       next: done
     done:
@@ -1146,7 +1142,7 @@ config:
   on_error: continue
   nodes:
     step1:
-      action: {primary: execute, item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail"}
       next: step2
     step2:
       node_type: return
@@ -1167,7 +1163,7 @@ config:
         let cache = NodeCache {
             cache_dir: tmp.path().join("cache-test-unique-sequential"),
         };
-        let action = json!({"primary": "execute", "item_id": "tool:test/echo"});
+        let action = json!({"item_id": "tool:test/echo"});
         let key = compute_cache_key("cache-test-unique-sequential", "step1", &action);
 
         assert!(cache.lookup(&key).is_none());

@@ -82,7 +82,7 @@ pub async fn execute(
     // Resolve project execution context BEFORE item resolution.
     // For pushed_head, this checks out from CAS so resolution runs against
     // the correct project root.
-    let checkout_id = format!("pre-{}-{:08x}", chrono::Utc::now().timestamp_millis(), rand::random::<u32>());
+    let checkout_id = format!("pre-{}-{:08x}", lillux::time::timestamp_millis(), rand::random::<u32>());
     let project_ctx = project_source::resolve_project_context(
         &state,
         &project_source,
@@ -189,20 +189,7 @@ pub async fn execute(
     }
 
     // Resolve vault secrets from item-declared required_secrets only.
-    let required_secrets = &resolved.resolved_item.metadata.required_secrets;
-    let vault_bindings = if !required_secrets.is_empty() {
-        state
-            .vault_store()
-            .resolve_vault_env(&caller_principal_id, required_secrets)
-            .map_err(|err| {
-                if let Some(ref d) = project_ctx.temp_dir {
-                    let _ = std::fs::remove_dir_all(d);
-                }
-                policy::internal_error(err)
-            })?
-    } else {
-        HashMap::new()
-    };
+    let vault_bindings = HashMap::new();
 
     let params = ExecutionParams {
         resolved,

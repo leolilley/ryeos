@@ -7,11 +7,38 @@ use crate::state::AppState;
 
 /// Reconcile daemon state after restart.
 ///
-/// Finds threads left in non-terminal status whose processes are dead,
-/// and marks them failed. This handles the case where the daemon or
-/// a worker process crashed mid-execution.
+/// Three phases:
+/// 1. Catch up projection from CAS (repair any projection drift)
+/// 2. Rebuild thread locators if needed
+/// 3. Find threads left in non-terminal status whose processes are dead,
+///    and mark them failed.
 pub async fn reconcile(state: &AppState) -> Result<()> {
-    let running_threads = state.db.list_threads_by_status(&["created", "running"])?;
+    // Phase 1: Catch up projection from CAS
+    let cas_root = state.state_store.cas_root()?;
+    let refs_root = state.state_store.refs_root()?;
+
+    state.state_store.with_projection(|projection| {
+        let catch_up = rye_state::rebuild::catch_up_projection(
+            projection,
+            &cas_root,
+            &refs_root,
+        )?;
+
+        if catch_up.chains_updated > 0 {
+            tracing::info!(
+                chains_checked = catch_up.chains_checked,
+                chains_updated = catch_up.chains_updated,
+                threads_restored = catch_up.threads_restored,
+                events_projected = catch_up.events_projected,
+                "projection caught up from CAS"
+            );
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })?;
+
+    // Phase 2: Orphan thread cleanup
+    let running_threads = state.state_store.list_threads_by_status(&["created", "running"])?;
 
     if running_threads.is_empty() {
         tracing::debug!("no orphaned threads");

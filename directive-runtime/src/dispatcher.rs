@@ -37,7 +37,6 @@ pub struct Dispatcher {
     tools: Vec<ToolSchema>,
     outputs: Option<Vec<OutputSpec>>,
     effective_caps: Vec<String>,
-    allowed_primaries: Vec<String>,
 }
 
 impl Dispatcher {
@@ -45,13 +44,11 @@ impl Dispatcher {
         tools: Vec<ToolSchema>,
         outputs: Option<Vec<OutputSpec>>,
         effective_caps: Vec<String>,
-        allowed_primaries: Vec<String>,
     ) -> Self {
         Self {
             tools,
             outputs,
             effective_caps,
-            allowed_primaries,
         }
     }
 
@@ -133,12 +130,6 @@ impl Dispatcher {
     pub fn is_directive_return(&self, tool_name: &str) -> bool {
         tool_name == "directive_return"
     }
-
-    pub fn validate_allowed_primary(&self, primary: &str) -> bool {
-        self.allowed_primaries
-            .iter()
-            .any(|p| p == primary || p == "*")
-    }
 }
 
 #[cfg(test)]
@@ -167,7 +158,6 @@ mod tests {
             tools,
             outputs,
             caps,
-            vec!["execute".to_string(), "fetch".to_string()],
         )
     }
 
@@ -259,14 +249,6 @@ mod tests {
         let d = make_dispatcher(vec![], None);
         assert!(d.is_directive_return("directive_return"));
         assert!(!d.is_directive_return("read_file"));
-    }
-
-    #[test]
-    fn validate_allowed_primary() {
-        let d = make_dispatcher(vec![], None);
-        assert!(d.validate_allowed_primary("execute"));
-        assert!(d.validate_allowed_primary("fetch"));
-        assert!(!d.validate_allowed_primary("admin"));
     }
 
     #[test]

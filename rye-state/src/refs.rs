@@ -18,7 +18,7 @@
 
 use anyhow::{anyhow, Context};
 use base64::Engine as _;
-use ed25519_dalek::Verifier;
+use lillux::crypto::Verifier;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -177,8 +177,8 @@ pub fn verify_signed_ref(signed_ref: &SignedRef, verifying_keys: &TrustStore) ->
         .decode(&signed_ref.signature)
         .context("failed to decode signature")?;
 
-    // Convert to ed25519_dalek::Signature
-    let signature = ed25519_dalek::Signature::from_slice(&sig_bytes)
+    // Convert to Signature
+    let signature = lillux::crypto::Signature::from_slice(&sig_bytes)
         .map_err(|e| anyhow!("failed to parse signature: {}", e))?;
 
     // Verify
@@ -190,7 +190,61 @@ pub fn verify_signed_ref(signed_ref: &SignedRef, verifying_keys: &TrustStore) ->
 }
 
 /// Trust store — map of fingerprint → public key.
-pub type TrustStore = std::collections::HashMap<String, ed25519_dalek::VerifyingKey>;
+pub type TrustStore = std::collections::HashMap<String, lillux::crypto::VerifyingKey>;
+
+/// Write a project head ref. The project_hash should be derived from the project path
+/// (similar to how chain_root_id identifies chains).
+pub fn write_project_head_ref(
+    refs_root: &Path,
+    project_hash: &str,
+    project_snapshot_hash: &str,
+    signer: &dyn Signer,
+) -> anyhow::Result<()> {
+    let ref_path = format!("projects/{}", project_hash);
+    let signed_ref = SignedRef::new(
+        ref_path.clone(),
+        project_snapshot_hash.to_string(),
+        lillux::time::iso8601_now(),
+        signer.fingerprint().to_string(),
+    );
+    let path = refs_root.join(&ref_path).join("head");
+    write_signed_ref(&path, signed_ref, signer)
+}
+
+/// Read a project head ref. Returns the target hash (project snapshot hash).
+pub fn read_project_head_ref(
+    refs_root: &Path,
+    project_hash: &str,
+) -> anyhow::Result<Option<String>> {
+    let head_path = refs_root.join(format!("projects/{}", project_hash)).join("head");
+    if !head_path.exists() {
+        return Ok(None);
+    }
+    let signed_ref = read_signed_ref(&head_path)?;
+    Ok(Some(signed_ref.target_hash))
+}
+
+/// Advance a project head ref (CAS-first, with conflict detection).
+/// The `current_hash` must match the current head, or it fails.
+/// This is the project equivalent of advancing a chain head.
+pub fn advance_project_head_ref(
+    refs_root: &Path,
+    project_hash: &str,
+    new_snapshot_hash: &str,
+    signer: &dyn Signer,
+) -> anyhow::Result<()> {
+    let current = read_project_head_ref(refs_root, project_hash)?
+        .ok_or_else(|| anyhow!("no project head ref for project {}", project_hash))?;
+
+    if current != new_snapshot_hash {
+        anyhow::bail!(
+            "project head conflict for project {}: expected {}, got {}",
+            project_hash, current, new_snapshot_hash
+        );
+    }
+
+    write_project_head_ref(refs_root, project_hash, new_snapshot_hash, signer)
+}
 
 #[cfg(test)]
 mod tests {

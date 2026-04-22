@@ -22,7 +22,7 @@ impl MaterializationCache {
     }
 
     /// Check if a manifest hash is already cached.
-    pub fn has(&self, manifest_hash: &str) -> bool {
+    pub fn _has(&self, manifest_hash: &str) -> bool {
         self.cache_dir(manifest_hash).is_dir()
     }
 
@@ -50,7 +50,7 @@ impl MaterializationCache {
     }
 
     /// Evict a cache entry.
-    pub fn evict(&self, manifest_hash: &str) -> Result<bool> {
+    pub fn _evict(&self, manifest_hash: &str) -> Result<bool> {
         let dir = self.cache_dir(manifest_hash);
         if dir.is_dir() {
             fs::remove_dir_all(&dir)?;
@@ -61,7 +61,7 @@ impl MaterializationCache {
     }
 
     /// List all cached manifest hashes.
-    pub fn list(&self) -> Result<Vec<String>> {
+    pub fn _list(&self) -> Result<Vec<String>> {
         if !self.cache_root.is_dir() {
             return Ok(Vec::new());
         }

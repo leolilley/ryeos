@@ -165,8 +165,8 @@ pub enum HookAction {
 
 impl HookAction {
     pub fn from_value(action: &Value) -> Self {
-        if let Some(primary) = action.get("primary").and_then(|v| v.as_str()) {
-            match primary {
+        if let Some(action_type) = action.get("action").and_then(|v| v.as_str()) {
+            match action_type {
                 "retry" => HookAction::Retry,
                 "fail" => HookAction::Fail,
                 "abort" => HookAction::Abort,
@@ -318,19 +318,19 @@ mod tests {
     #[test]
     fn hook_action_from_value() {
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"primary": "retry"})),
+            HookAction::from_value(&serde_json::json!({"action": "retry"})),
             HookAction::Retry
         );
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"primary": "fail"})),
+            HookAction::from_value(&serde_json::json!({"action": "fail"})),
             HookAction::Fail
         );
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"primary": "abort"})),
+            HookAction::from_value(&serde_json::json!({"action": "abort"})),
             HookAction::Abort
         );
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"primary": "unknown"})),
+            HookAction::from_value(&serde_json::json!({"action": "unknown"})),
             HookAction::Continue
         );
     }

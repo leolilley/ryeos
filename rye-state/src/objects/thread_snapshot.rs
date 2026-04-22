@@ -124,6 +124,16 @@ pub struct ThreadSnapshot {
     pub upstream_thread_id: Option<String>,
     /// Who requested the execution (e.g. "user:alice").
     pub requested_by: Option<String>,
+    /// The project snapshot hash at the start of execution.
+    /// Set when execution begins against a specific project state.
+    /// Immutable for this thread. Null for non-CS executions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_project_snapshot_hash: Option<String>,
+    /// The project snapshot hash after fold-back.
+    /// Set on finalization if the working directory changed.
+    /// Null if no changes or not applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_project_snapshot_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -244,6 +254,8 @@ pub struct ThreadSnapshotBuilder {
     origin_site_id: String,
     upstream_thread_id: Option<String>,
     requested_by: Option<String>,
+    base_project_snapshot_hash: Option<String>,
+    result_project_snapshot_hash: Option<String>,
     created_at: String,
     updated_at: String,
     started_at: Option<String>,
@@ -267,7 +279,7 @@ impl ThreadSnapshotBuilder {
         item_ref: impl Into<String>,
         executor_ref: impl Into<String>,
     ) -> Self {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = lillux::time::iso8601_now();
         Self {
             thread_id: thread_id.into(),
             chain_root_id: chain_root_id.into(),
@@ -280,6 +292,8 @@ impl ThreadSnapshotBuilder {
             origin_site_id: "site:host".to_string(),
             upstream_thread_id: None,
             requested_by: None,
+            base_project_snapshot_hash: None,
+            result_project_snapshot_hash: None,
             created_at: now.clone(),
             updated_at: now,
             started_at: None,
@@ -322,6 +336,16 @@ impl ThreadSnapshotBuilder {
 
     pub fn requested_by(mut self, who: Option<String>) -> Self {
         self.requested_by = who;
+        self
+    }
+
+    pub fn base_project_snapshot_hash(mut self, hash: impl Into<String>) -> Self {
+        self.base_project_snapshot_hash = Some(hash.into());
+        self
+    }
+
+    pub fn result_project_snapshot_hash(mut self, hash: impl Into<String>) -> Self {
+        self.result_project_snapshot_hash = Some(hash.into());
         self
     }
 
@@ -401,6 +425,8 @@ impl ThreadSnapshotBuilder {
             origin_site_id: self.origin_site_id,
             upstream_thread_id: self.upstream_thread_id,
             requested_by: self.requested_by,
+            base_project_snapshot_hash: self.base_project_snapshot_hash,
+            result_project_snapshot_hash: self.result_project_snapshot_hash,
             created_at: self.created_at,
             updated_at: self.updated_at,
             started_at: self.started_at,

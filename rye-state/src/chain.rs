@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context};
 
 use crate::objects::{ChainState, ChainThreadEntry, ThreadEvent, ThreadSnapshot};
 use crate::signer::Signer;
-use crate::{refs, HeadCache, SignedRef};
+use crate::{refs, CachedHead, HeadCache, SignedRef};
 
 pub use self::types::*;
 
@@ -67,9 +67,10 @@ pub struct ChainLock {
 }
 
 impl ChainLock {
-    /// Acquire exclusive lock for a chain.
+    /// Acquire exclusive lock for a chain using flock.
     ///
     /// Creates a lock file under `state_root/objects/refs/generic/chains/<chain_root_id>/lock`
+    /// and acquires an exclusive file lock via flock(2).
     pub fn acquire(refs_root: &Path, chain_root_id: &str) -> anyhow::Result<Self> {
         let lock_path = refs_root
             .join("generic/chains")
@@ -85,6 +86,19 @@ impl ChainLock {
             .write(true)
             .open(&lock_path)
             .context("failed to open lock file")?;
+
+        // Acquire exclusive flock on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+            if ret != 0 {
+                anyhow::bail!(
+                    "flock failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
 
         Ok(ChainLock {
             lock_file,
@@ -133,8 +147,9 @@ pub fn create_chain(
     let snapshot_value = initial_snapshot.to_value();
     let snapshot_json = lillux::canonical_json(&snapshot_value);
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
     lillux::atomic_write(
-        &cas_root.join("objects").join(&snapshot_hash),
+        &snapshot_path,
         snapshot_json.as_bytes(),
     )
     .context("failed to store initial snapshot in CAS")?;
@@ -158,7 +173,7 @@ pub fn create_chain(
         prev_chain_state_hash: None,
         last_event_hash: None,
         last_chain_seq: 0,
-        updated_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: lillux::time::iso8601_now(),
         threads,
     };
 
@@ -167,8 +182,9 @@ pub fn create_chain(
     let chain_state_value = chain_state.to_value();
     let chain_state_json = lillux::canonical_json(&chain_state_value);
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
+    let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     lillux::atomic_write(
-        &cas_root.join("objects").join(&chain_state_hash),
+        &chain_state_path,
         chain_state_json.as_bytes(),
     )
     .context("failed to store initial chain_state in CAS")?;
@@ -276,8 +292,9 @@ pub fn append_events(
         let event_value = event.to_value();
         let event_json = lillux::canonical_json(&event_value);
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
+        let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
         lillux::atomic_write(
-            &cas_root.join("objects").join(&event_hash),
+            &event_path,
             event_json.as_bytes(),
         )
         .context("failed to store event in CAS")?;
@@ -305,8 +322,9 @@ pub fn append_events(
         let snapshot_json = lillux::canonical_json(&snapshot_value);
         let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
 
+        let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
         lillux::atomic_write(
-            &cas_root.join("objects").join(&snapshot_hash),
+            &snapshot_path,
             snapshot_json.as_bytes(),
         )
         .context("failed to store snapshot in CAS")?;
@@ -334,8 +352,8 @@ pub fn append_events(
             lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes()),
         ),
         last_event_hash,
-        last_chain_seq: thread_seq - 1,
-        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_chain_seq: first_chain_seq - 1,
+        updated_at: lillux::time::iso8601_now(),
         threads: new_threads,
     };
 
@@ -344,8 +362,9 @@ pub fn append_events(
     let chain_state_value = new_chain_state.to_value();
     let chain_state_json = lillux::canonical_json(&chain_state_value);
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
+    let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     lillux::atomic_write(
-        &cas_root.join("objects").join(&chain_state_hash),
+        &chain_state_path,
         chain_state_json.as_bytes(),
     )
     .context("failed to store new chain_state in CAS")?;
@@ -379,6 +398,121 @@ pub fn append_events(
     })
 }
 
+/// Add a new thread to an existing chain.
+///
+/// Stores the thread's initial snapshot in CAS and updates the chain_state
+/// to include the new thread entry. Used when spawning child threads.
+pub fn add_thread_to_chain(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_root_id: &str,
+    new_snapshot: ThreadSnapshot,
+    signer: &dyn Signer,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<CreateResult> {
+    // Validate
+    new_snapshot.validate()?;
+    if new_snapshot.chain_root_id != chain_root_id {
+        anyhow::bail!(
+            "snapshot chain_root_id mismatch: expected {}, got {}",
+            chain_root_id,
+            new_snapshot.chain_root_id
+        );
+    }
+    if new_snapshot.thread_id == chain_root_id {
+        anyhow::bail!(
+            "use create_chain() for root threads, not add_thread_to_chain()"
+        );
+    }
+
+    // Acquire lock
+    let _lock = ChainLock::acquire(refs_root, chain_root_id)?;
+
+    // Read current chain head
+    let current_chain_state = read_chain_head(cas_root, refs_root, chain_root_id, head_cache)
+        .context("failed to read current chain head")?;
+
+    // Verify thread doesn't already exist
+    if current_chain_state.threads.contains_key(&new_snapshot.thread_id) {
+        anyhow::bail!(
+            "thread {} already exists in chain {}",
+            new_snapshot.thread_id,
+            chain_root_id
+        );
+    }
+
+    // Store snapshot in CAS
+    let snapshot_value = new_snapshot.to_value();
+    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+    lillux::atomic_write(&snapshot_path, snapshot_json.as_bytes())
+        .context("failed to store child snapshot in CAS")?;
+
+    // Build new chain_state with the additional thread
+    let mut new_threads = current_chain_state.threads.clone();
+    new_threads.insert(
+        new_snapshot.thread_id.clone(),
+        ChainThreadEntry {
+            snapshot_hash: snapshot_hash.clone(),
+            last_event_hash: None,
+            last_thread_seq: 0,
+            status: new_snapshot.status,
+        },
+    );
+
+    let prev_hash = lillux::sha256_hex(
+        lillux::canonical_json(&current_chain_state.to_value()).as_bytes()
+    );
+
+    let new_chain_state = ChainState {
+        schema: 1,
+        kind: "chain_state".to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        prev_chain_state_hash: Some(prev_hash),
+        last_event_hash: current_chain_state.last_event_hash.clone(),
+        last_chain_seq: current_chain_state.last_chain_seq,
+        updated_at: lillux::time::iso8601_now(),
+        threads: new_threads,
+    };
+
+    // Store new chain_state in CAS
+    new_chain_state.validate()?;
+    let chain_state_value = new_chain_state.to_value();
+    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
+    let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
+    lillux::atomic_write(&chain_state_path, chain_state_json.as_bytes())
+        .context("failed to store updated chain_state in CAS")?;
+
+    // Write signed head ref
+    let signed_ref = SignedRef::new(
+        format!("chains/{}/head", chain_root_id),
+        chain_state_hash.clone(),
+        new_chain_state.updated_at.clone(),
+        signer.fingerprint().to_string(),
+    );
+
+    let ref_path = refs_root
+        .join("generic/chains")
+        .join(chain_root_id)
+        .join("head");
+    refs::write_signed_ref(&ref_path, signed_ref, signer)
+        .context("failed to write signed head ref")?;
+
+    // Update head cache
+    head_cache.insert(
+        chain_root_id.to_string(),
+        crate::CachedHead::new(chain_state_hash.clone(), new_chain_state),
+    );
+
+    Ok(CreateResult {
+        chain_state_hash,
+        snapshot_hash,
+        events: vec![],
+    })
+}
+
 /// Read the current chain head.
 ///
 /// First tries the in-memory head cache. If not found, reads and verifies
@@ -387,7 +521,7 @@ pub fn read_chain_head(
     cas_root: &Path,
     refs_root: &Path,
     chain_root_id: &str,
-    head_cache: &HeadCache,
+    head_cache: &mut HeadCache,
 ) -> anyhow::Result<ChainState> {
     // Try cache first
     if let Some(cached_head) = head_cache.get(chain_root_id) {
@@ -408,9 +542,7 @@ pub fn read_chain_head(
         .context("failed to read signed ref")?;
 
     // Load chain_state from CAS
-    let cas_path = cas_root
-        .join("objects")
-        .join(&signed_ref.target_hash);
+    let cas_path = lillux::shard_path(cas_root, "objects", &signed_ref.target_hash, ".json");
     let chain_state_json = std::fs::read_to_string(&cas_path)
         .context("failed to read chain_state from CAS")?;
 
@@ -418,6 +550,15 @@ pub fn read_chain_head(
         serde_json::from_str(&chain_state_json).context("failed to parse chain_state")?;
 
     chain_state.validate()?;
+
+    // Populate cache before returning
+    let chain_state_hash = lillux::sha256_hex(
+        lillux::canonical_json(&chain_state.to_value()).as_bytes()
+    );
+    head_cache.insert(
+        chain_root_id.to_string(),
+        CachedHead::new(chain_state_hash, chain_state.clone()),
+    );
 
     Ok(chain_state)
 }
@@ -430,7 +571,7 @@ pub fn read_thread_snapshot(
     refs_root: &Path,
     chain_root_id: &str,
     thread_id: &str,
-    head_cache: &HeadCache,
+    head_cache: &mut HeadCache,
 ) -> anyhow::Result<ReadSnapshotResult> {
     let chain_state =
         read_chain_head(cas_root, refs_root, chain_root_id, head_cache)?;
@@ -450,9 +591,7 @@ pub fn read_thread_snapshot(
     };
 
     // Load snapshot from CAS
-    let cas_path = cas_root
-        .join("objects")
-        .join(&thread_entry.snapshot_hash);
+    let cas_path = lillux::shard_path(cas_root, "objects", &thread_entry.snapshot_hash, ".json");
     let snapshot_json = std::fs::read_to_string(&cas_path)
         .context("failed to read snapshot from CAS")?;
 
@@ -538,11 +677,11 @@ mod tests {
         .unwrap();
 
         // Verify snapshot object exists in CAS
-        let snapshot_path = cas_root.join("objects").join(&result.snapshot_hash);
+        let snapshot_path = lillux::shard_path(&cas_root, "objects", &result.snapshot_hash, ".json");
         assert!(snapshot_path.exists());
 
         // Verify chain_state object exists in CAS
-        let chain_state_path = cas_root.join("objects").join(&result.chain_state_hash);
+        let chain_state_path = lillux::shard_path(&cas_root, "objects", &result.chain_state_hash, ".json");
         assert!(chain_state_path.exists());
     }
 
@@ -672,7 +811,7 @@ mod tests {
         .unwrap();
 
         // Verify new chain_state exists in CAS
-        let chain_state_path = cas_root.join("objects").join(&result.chain_state_hash);
+        let chain_state_path = lillux::shard_path(&cas_root, "objects", &result.chain_state_hash, ".json");
         assert!(chain_state_path.exists());
     }
 
@@ -697,7 +836,7 @@ mod tests {
         .unwrap();
 
         // Read head (should hit cache)
-        let head = read_chain_head(&cas_root, &refs_root, "T-root", &head_cache).unwrap();
+        let head = read_chain_head(&cas_root, &refs_root, "T-root", &mut head_cache).unwrap();
         assert_eq!(head.chain_root_id, "T-root");
         assert_eq!(head.last_chain_seq, 0);
     }
@@ -728,7 +867,7 @@ mod tests {
             &refs_root,
             "T-root",
             "T-root",
-            &head_cache,
+            &mut head_cache,
         )
         .unwrap();
 
@@ -763,7 +902,7 @@ mod tests {
             &refs_root,
             "T-root",
             "T-missing",
-            &head_cache,
+            &mut head_cache,
         )
         .unwrap();
 
@@ -864,6 +1003,120 @@ mod tests {
             "T-root",
             vec![event],
             vec![],
+            &signer,
+            &mut head_cache,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_thread_to_chain_succeeds() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("state");
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let mut head_cache = HeadCache::new();
+
+        // Create root chain
+        let root_snapshot = make_test_snapshot("T-root");
+        create_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            root_snapshot,
+            &signer,
+            &mut head_cache,
+        )
+        .unwrap();
+
+        // Add child thread
+        use crate::objects::thread_snapshot::ThreadSnapshotBuilder;
+        let child_snapshot = ThreadSnapshotBuilder::new(
+            "T-child",
+            "T-root",
+            "tool",
+            "test/child",
+            "native:tool-runtime",
+        )
+        .build();
+
+        let result = add_thread_to_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            child_snapshot,
+            &signer,
+            &mut head_cache,
+        );
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(!result.snapshot_hash.is_empty());
+        assert!(!result.chain_state_hash.is_empty());
+    }
+
+    #[test]
+    fn add_thread_to_chain_rejects_duplicate_thread() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("state");
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let mut head_cache = HeadCache::new();
+
+        // Create root chain
+        let root_snapshot = make_test_snapshot("T-root");
+        create_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            root_snapshot,
+            &signer,
+            &mut head_cache,
+        )
+        .unwrap();
+
+        // Try to add root thread again
+        let duplicate_snapshot = make_test_snapshot("T-root");
+        let result = add_thread_to_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            duplicate_snapshot,
+            &signer,
+            &mut head_cache,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_thread_to_chain_rejects_root_thread() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("state");
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let mut head_cache = HeadCache::new();
+
+        // Create root chain
+        let root_snapshot = make_test_snapshot("T-root");
+        create_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            root_snapshot,
+            &signer,
+            &mut head_cache,
+        )
+        .unwrap();
+
+        // Try to add a root thread (thread_id == chain_root_id)
+        let root_snapshot = make_test_snapshot("T-root");
+        let result = add_thread_to_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            root_snapshot,
             &signer,
             &mut head_cache,
         );

@@ -4,14 +4,15 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::db::{CommandRecord, Database, NewCommandRecord};
+use crate::kind_profiles::KindProfileRegistry;
+use crate::state_store::{CommandRecord, NewCommandRecord, StateStore};
 use crate::services::event_store::EventStoreService;
 
 #[derive(Debug, Clone)]
 pub struct CommandService {
-    db: Arc<Database>,
-    state_store: Arc<crate::state_store::StateStore>,
-    events: Arc<EventStoreService>,
+    state_store: Arc<StateStore>,
+    kind_profiles: Arc<KindProfileRegistry>,
+    _events: Arc<EventStoreService>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,25 +47,27 @@ pub struct CommandCompleteParams {
 
 impl CommandService {
     pub fn new(
-        db: Arc<Database>,
-        state_store: Arc<crate::state_store::StateStore>,
-        events: Arc<EventStoreService>,
+        state_store: Arc<StateStore>,
+        kind_profiles: Arc<KindProfileRegistry>,
+        _events: Arc<EventStoreService>,
     ) -> Self {
-        Self { db, state_store, events }
+        Self { state_store, kind_profiles, _events: _events }
     }
 
     pub fn submit(&self, params: &CommandSubmitParams) -> Result<CommandRecord> {
         validate_command_type(&params.command_type)?;
 
         let thread = self
-            .db
+            .state_store
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
-        if !thread
-            .allowed_actions
-            .iter()
-            .any(|action| action == &params.command_type)
-        {
+
+        let allowed = self.kind_profiles.allowed_actions(
+            &thread.kind,
+            &thread.status,
+            thread.runtime.pgid.is_some(),
+        );
+        if !allowed.iter().any(|action| action == &params.command_type) {
             bail!(
                 "command {} is not allowed for thread {} in status {}",
                 params.command_type,
@@ -73,20 +76,18 @@ impl CommandService {
             );
         }
 
-        let (command, persisted) = self.db.submit_command(&NewCommandRecord {
+        let command = self.state_store.submit_command(&NewCommandRecord {
             thread_id: params.thread_id.clone(),
             command_type: params.command_type.clone(),
             requested_by: params.requested_by.clone(),
             params: params.params.clone(),
         })?;
-        self.events.publish_persisted_batch(&persisted);
         Ok(command)
     }
 
     pub fn claim(&self, params: &CommandClaimParams) -> Result<CommandClaimResult> {
         let _timeout_ms = params.timeout_ms.unwrap_or(0);
-        let (commands, persisted) = self.db.claim_commands(&params.thread_id)?;
-        self.events.publish_persisted_batch(&persisted);
+        let commands = self.state_store.claim_commands(&params.thread_id)?;
         Ok(CommandClaimResult { commands })
     }
 
@@ -96,10 +97,9 @@ impl CommandService {
             other => bail!("invalid command completion status: {other}"),
         }
 
-        let (command, persisted) =
-            self.db
+        let command =
+            self.state_store
                 .complete_command(params.command_id, &params.status, params.result.as_ref())?;
-        self.events.publish_persisted_batch(&persisted);
         Ok(command)
     }
 }

@@ -282,7 +282,7 @@ impl ChainStateBuilder {
             last_chain_seq: self.last_chain_seq,
             updated_at: self
                 .updated_at
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+                .unwrap_or_else(|| lillux::time::iso8601_now()),
             threads: self.threads,
         }
     }

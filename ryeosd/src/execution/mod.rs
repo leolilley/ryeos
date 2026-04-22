@@ -1,19 +1,19 @@
 //! Execution lifecycle: checkout, execute, fold-back.
 //!
 //! Manages the CAS-backed execution flow:
-//! 1. Create `ExecutionSnapshot` before execution
-//! 2. Checkout project from CAS to working directory
-//! 3. After execution, diff working dir and fold back changes
+//! 1. Checkout project from CAS to working directory
+//! 2. After execution, diff working dir and fold back changes
 
 pub mod cache;
 pub mod callback_token;
+pub mod cas_types;
+pub mod ingest;
 pub mod launch;
 pub mod launch_envelope;
 pub mod limits;
 pub mod project_source;
 pub mod runtime_dispatch;
 pub mod runner;
-pub mod snapshot;
 pub mod thread_meta;
 
 use std::collections::HashMap;
@@ -22,8 +22,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::cas::{self, CasStore, SourceManifest};
-use crate::refs::RefStore;
+use lillux::cas::{CasStore, sha256_hex};
+use rye_state::signer::Signer;
+use self::cas_types::SourceManifest;
 
 use self::cache::MaterializationCache;
 
@@ -38,11 +39,13 @@ use self::cache::MaterializationCache;
 ///
 /// Returns the target directory path.
 pub fn checkout_project(
-    cas: &CasStore,
+    cas_root: &Path,
     manifest_hash: &str,
     target_dir: &Path,
     mat_cache: Option<&MaterializationCache>,
 ) -> Result<PathBuf> {
+    let cas = CasStore::new(cas_root.to_path_buf());
+
     // Layer 1: Check snapshot cache
     if let Some(cache) = mat_cache {
         if cache.is_complete(manifest_hash) {
@@ -80,7 +83,7 @@ pub fn checkout_project(
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        cas::materialize_item(cas, object_hash, &target_path)?;
+        self::ingest::materialize_item(cas_root, object_hash, &target_path)?;
     }
 
     // Layer 2: Atomic cache promotion (staging → final cache dir)
@@ -125,10 +128,12 @@ pub fn checkout_project(
 /// Returns the new manifest hash if there were changes, or None if
 /// the working directory is unchanged.
 pub fn fold_back_outputs(
-    cas: &CasStore,
+    cas_root: &Path,
     working_dir: &Path,
     pre_manifest_hash: &str,
 ) -> Result<Option<String>> {
+    let cas = CasStore::new(cas_root.to_path_buf());
+
     // Load pre-execution manifest
     let pre_manifest_obj = cas
         .get_object(pre_manifest_hash)?
@@ -150,7 +155,7 @@ pub fn fold_back_outputs(
     let mut new_items: HashMap<String, String> = pre_manifest.item_source_hashes.clone();
     let mut changed = false;
 
-    walk_and_diff(cas, working_dir, working_dir, &pre_integrity, &mut new_items, &mut changed)?;
+    walk_and_diff(cas_root, working_dir, working_dir, &pre_integrity, &mut new_items, &mut changed)?;
 
     // Detect deletions: entries in pre-manifest but missing from working dir
     for rel_path in pre_manifest.item_source_hashes.keys() {
@@ -183,15 +188,16 @@ pub fn fold_back_outputs(
 /// `current_snapshot_hash` must be the current HEAD snapshot hash (not a manifest hash).
 /// Returns the new snapshot hash on success, or an error if the ref has moved.
 pub fn advance_after_foldback(
-    cas: &CasStore,
-    refs: &RefStore,
-    principal_fp: &str,
-    project_path: &str,
+    cas_root: &Path,
+    refs_root: &Path,
+    signer: &dyn Signer,
+    project_path_hash: &str,
     new_manifest_hash: &str,
     current_snapshot_hash: &str,
 ) -> Result<String> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let snapshot = crate::cas::ProjectSnapshot {
+    let cas = CasStore::new(cas_root.to_path_buf());
+    let now = lillux::time::iso8601_now();
+    let snapshot = self::cas_types::ProjectSnapshot {
         project_manifest_hash: new_manifest_hash.to_string(),
         user_manifest_hash: None,
         parent_hashes: vec![current_snapshot_hash.to_string()],
@@ -200,16 +206,12 @@ pub fn advance_after_foldback(
     };
     let new_snapshot_hash = cas.store_object(&snapshot.to_json())?;
 
-    let advanced = refs.advance_project_ref(
-        principal_fp,
-        project_path,
+    rye_state::refs::write_project_head_ref(
+        refs_root,
+        project_path_hash,
         &new_snapshot_hash,
-        Some(current_snapshot_hash),
+        signer,
     )?;
-
-    if !advanced {
-        anyhow::bail!("fold-back conflict: HEAD moved during execution");
-    }
 
     Ok(new_snapshot_hash)
 }
@@ -217,7 +219,7 @@ pub fn advance_after_foldback(
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn walk_and_diff(
-    cas: &CasStore,
+    cas_root: &Path,
     root: &Path,
     dir: &Path,
     pre_integrity: &HashMap<String, String>,
@@ -238,10 +240,10 @@ fn walk_and_diff(
         }
 
         if path.is_dir() {
-            walk_and_diff(cas, root, &path, pre_integrity, items, changed)?;
+            walk_and_diff(cas_root, root, &path, pre_integrity, items, changed)?;
         } else if path.is_file() {
             let bytes = fs::read(&path)?;
-            let integrity = cas::sha256_hex(&bytes);
+            let integrity = sha256_hex(&bytes);
 
             // Check if file is new or changed
             match pre_integrity.get(&rel) {
@@ -250,7 +252,7 @@ fn walk_and_diff(
                 }
                 _ => {
                     // New or changed — ingest into items (canonical format).
-                    let result: cas::IngestResult = cas::ingest_item(cas, &rel, &path)?;
+                    let result: self::ingest::IngestResult = self::ingest::ingest_item(cas_root, &rel, &path)?;
                     tracing::trace!(
                         rel_path = %rel,
                         blob_hash = %result.blob_hash,

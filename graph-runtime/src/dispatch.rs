@@ -22,9 +22,6 @@ pub async fn dispatch_action(
         }
     }
 
-    let primary = action.get("primary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("execute");
     let item_id = action.get("item_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -36,7 +33,6 @@ pub async fn dispatch_action(
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
         action: rye_runtime::callback::ActionPayload {
-            primary: primary.to_string(),
             item_id: item_id.to_string(),
             kind,
             params,
@@ -168,7 +164,7 @@ mod tests {
 
     fn make_mock_client(results: Vec<Value>) -> CallbackClient {
         let inner: Arc<dyn rye_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
-        CallbackClient::from_inner(inner, "T-test", "/project", vec!["*".to_string()])
+        CallbackClient::from_inner(inner, "T-test", "/project")
     }
 
     struct MockClient {
@@ -223,7 +219,7 @@ mod tests {
 
     #[test]
     fn inject_parent_context_into_params() {
-        let mut action = json!({"primary": "execute", "item_id": "directive:test", "params": {}});
+        let mut action = json!({"item_id": "directive:test", "params": {}});
         let ctx = ExecutionContext {
             parent_thread_id: Some("T-parent".to_string()),
             capabilities: vec!["rye.execute.*".to_string()],
@@ -239,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn follow_continuation_respects_max_depth() {
         let client = make_mock_client(vec![json!({"data": {"continuation_id": "cont-1"}})]);
-        let action = json!({"primary": "execute", "item_id": "tool:test/deep"});
+        let action = json!({"item_id": "tool:test/deep"});
         let result = dispatch_action(&client, &action, "t-1", "/tmp/test", None).await.unwrap();
         assert!(result.get("data").and_then(|d| d.get("continuation_id")).is_some());
     }

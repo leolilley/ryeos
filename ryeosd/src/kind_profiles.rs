@@ -110,4 +110,32 @@ impl KindProfileRegistry {
     pub fn is_root_executable(&self, kind: &str) -> bool {
         self.profiles.get(kind).is_some_and(|p| p.root_executable)
     }
+
+    /// Derive the list of allowed actions for a thread based on kind profile, status, and process state.
+    pub fn allowed_actions(&self, kind: &str, status: &str, has_process: bool) -> Vec<String> {
+        let Some(profile) = self.get(kind) else {
+            return Vec::new();
+        };
+
+        match status {
+            "created" | "running" => {
+                let mut actions = vec!["cancel".to_string()];
+                if has_process {
+                    actions.push("kill".to_string());
+                }
+                if profile.supports_interrupt {
+                    actions.push("interrupt".to_string());
+                }
+                actions
+            }
+            "completed" | "failed" | "cancelled" | "killed" | "timed_out" => {
+                if profile.supports_continuation {
+                    vec!["continue".to_string()]
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
 }

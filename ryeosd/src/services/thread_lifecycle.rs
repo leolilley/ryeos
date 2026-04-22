@@ -8,8 +8,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::db::{
-    Database, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, ThreadArtifactRecord,
+use crate::state_store::{
+    StateStore, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, ThreadArtifactRecord,
     ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use crate::kind_profiles::KindProfileRegistry;
@@ -24,9 +24,9 @@ use rye_engine::engine::Engine;
 
 #[derive(Debug, Clone)]
 pub struct ThreadLifecycleService {
-    db: Arc<Database>,
-    state_store: Arc<crate::state_store::StateStore>,
-    events: Arc<EventStoreService>,
+    state_store: Arc<StateStore>,
+    kind_profiles: Arc<KindProfileRegistry>,
+    _events: Arc<EventStoreService>,
     current_site_id: String,
 }
 
@@ -164,9 +164,9 @@ fn default_list_limit() -> usize {
 
 impl ThreadLifecycleService {
     pub fn new(
-        db: Arc<Database>,
-        state_store: Arc<crate::state_store::StateStore>,
-        events: Arc<EventStoreService>,
+        state_store: Arc<StateStore>,
+        kind_profiles: Arc<KindProfileRegistry>,
+        _events: Arc<EventStoreService>,
     ) -> Self {
         let hostname = env::var("HOSTNAME")
             .ok()
@@ -174,15 +174,15 @@ impl ThreadLifecycleService {
             .unwrap_or_else(|| "localhost".to_string());
 
         Self {
-            db,
             state_store,
-            events,
+            kind_profiles,
+            _events: _events,
             current_site_id: format!("site:{hostname}"),
         }
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
-        self.db.kind_profiles()
+        &self.kind_profiles
     }
 
     pub fn site_id(&self) -> &str {
@@ -196,7 +196,6 @@ impl ThreadLifecycleService {
             thread_id: thread_id.clone(),
             chain_root_id: thread_id.clone(),
             kind: request.kind.clone(),
-            status: "created".to_string(),
             item_ref: request.item_ref.clone(),
             executor_ref: request.executor_ref.clone(),
             launch_mode: request.launch_mode.clone(),
@@ -204,12 +203,9 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
-            summary_json: None,
         };
 
-        let persisted = self.state_store.create_thread(&thread_record, None)?;
-
-        self.events.publish_persisted_batch(&persisted);
+        let _persisted = self.state_store.create_thread(&thread_record)?;
 
         self.get_thread(&thread_id)?
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
@@ -223,7 +219,6 @@ impl ThreadLifecycleService {
             thread_id: params.thread_id.clone(),
             chain_root_id: params.chain_root_id.clone(),
             kind: params.kind.clone(),
-            status: "created".to_string(),
             item_ref: params.item_ref.clone(),
             executor_ref: params.executor_ref.clone(),
             launch_mode: params.launch_mode.clone(),
@@ -231,20 +226,16 @@ impl ThreadLifecycleService {
             origin_site_id: params.origin_site_id.clone(),
             upstream_thread_id: params.upstream_thread_id.clone(),
             requested_by: params.requested_by.clone(),
-            summary_json: None,
         };
 
-        let persisted = self.state_store.create_thread(&thread_record, None)?;
-
-        self.events.publish_persisted_batch(&persisted);
+        let _persisted = self.state_store.create_thread(&thread_record)?;
 
         self.get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("created thread missing from database: {}", params.thread_id))
     }
 
     pub fn mark_running(&self, thread_id: &str) -> Result<ThreadDetail> {
-        let persisted = self.db.mark_thread_running(thread_id)?;
-        self.events.publish_persisted_batch(&persisted);
+        let _persisted = self.state_store.mark_thread_running(thread_id)?;
         self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found after mark_running: {thread_id}"))
     }
@@ -279,33 +270,21 @@ impl ThreadLifecycleService {
             })
         });
 
-        let persisted = self.db.finalize_thread(
+        let _persisted = self.state_store.finalize_thread(
             thread_id,
             &FinalizeThreadRecord {
                 status: terminal_status.to_string(),
                 outcome_code,
                 result_json: completion.result.clone(),
                 error_json: completion.error.clone(),
-                metadata: completion.metadata.clone(),
                 artifacts: completion
                     .artifacts
                     .iter()
                     .map(artifact_to_record)
                     .collect(),
                 final_cost: completion.final_cost.as_ref().map(cost_to_facets),
-                actual_spend: completion.final_cost.as_ref().map(|c| c.spend),
-                summary_json: completion
-                    .result
-                    .as_ref()
-                    .map(|result| json!({ "result": result })),
-                budget_status: Some("released".to_string()),
-                budget_metadata: completion
-                    .continuation_request
-                    .as_ref()
-                    .map(|cr| json!({ "continuation_request": { "reason": cr.reason } })),
             },
         )?;
-        self.events.publish_persisted_batch(&persisted);
 
         let finalized = self
             .get_thread(thread_id)?
@@ -340,43 +319,37 @@ impl ThreadLifecycleService {
     }
 
     pub fn finalize_thread(&self, params: &ThreadFinalizeParams) -> Result<ThreadDetail> {
-        let persisted = self.db.finalize_thread(
+        let _persisted = self.state_store.finalize_thread(
             &params.thread_id,
             &FinalizeThreadRecord {
                 status: normalize_terminal_status(&params.status)?.to_string(),
                 outcome_code: params.outcome_code.clone(),
                 result_json: params.result.clone(),
                 error_json: params.error.clone(),
-                metadata: params.metadata.clone(),
                 artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
                 final_cost: params.final_cost.as_ref().map(cost_to_facets),
-                actual_spend: params.final_cost.as_ref().map(|c| c.spend),
-                summary_json: params.summary_json.clone(),
-                budget_status: Some("released".to_string()),
-                budget_metadata: None,
             },
         )?;
-        self.events.publish_persisted_batch(&persisted);
 
         self.get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
     }
 
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
-        self.db.get_thread(thread_id)
+        self.state_store.get_thread(thread_id)
     }
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
-        self.db.get_thread_result(thread_id)
+        self.state_store.get_thread_result(thread_id)
     }
 
     pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
-        self.db.list_thread_artifacts(thread_id)
+        self.state_store.list_thread_artifacts(thread_id)
     }
 
     pub fn build_execute_result(&self, thread_id: &str) -> Result<Option<ExecuteResponseResult>> {
-        let result = self.db.get_thread_result(thread_id)?;
-        let artifacts = self.db.list_thread_artifacts(thread_id)?;
+        let result = self.state_store.get_thread_result(thread_id)?;
+        let artifacts = self.state_store.list_thread_artifacts(thread_id)?;
         Ok(result.map(|result| ExecuteResponseResult {
             outcome_code: result.outcome_code,
             result: result.result,
@@ -411,7 +384,6 @@ impl ThreadLifecycleService {
             thread_id: successor_id.clone(),
             chain_root_id: source.chain_root_id.clone(),
             kind: source.kind.clone(),
-            status: "created".to_string(),
             item_ref: source.item_ref.clone(),
             executor_ref: source.executor_ref.clone(),
             launch_mode: source.launch_mode.clone(),
@@ -419,17 +391,15 @@ impl ThreadLifecycleService {
             origin_site_id: source.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: source.requested_by.clone(),
-            summary_json: None,
         };
 
         // Create successor, write continued edge, finalize source — all in one transaction
-        let persisted = self.db.create_continuation(
+        let _persisted = self.state_store.create_continuation(
             &successor_record,
             &source.thread_id,
             &source.chain_root_id,
             params.reason.as_deref(),
         )?;
-        self.events.publish_persisted_batch(&persisted);
 
         let successor = self
             .get_thread(&successor_id)?
@@ -444,7 +414,7 @@ impl ThreadLifecycleService {
     }
 
     pub fn publish_artifact(&self, params: &ArtifactPublishParams) -> Result<ThreadArtifactRecord> {
-        let (artifact, persisted) = self.db.publish_artifact(
+        let (artifact, _persisted) = self.state_store.publish_artifact(
             &params.thread_id,
             &NewArtifactRecord {
                 artifact_type: params.artifact_type.clone(),
@@ -453,19 +423,18 @@ impl ThreadLifecycleService {
                 metadata: params.metadata.clone(),
             },
         )?;
-        self.events.publish_persisted_batch(&persisted);
         Ok(artifact)
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {
         Ok(json!({
-            "threads": self.db.list_threads(limit)?,
+            "threads": self.state_store.list_threads(limit)?,
             "next_cursor": null,
         }))
     }
 
     pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {
-        self.db.list_thread_children(thread_id)
+        self.state_store.list_thread_children(thread_id)
     }
 
     pub fn get_chain(&self, thread_id: &str) -> Result<Option<ThreadChainResult>> {
@@ -474,8 +443,8 @@ impl ThreadLifecycleService {
         };
 
         Ok(Some(ThreadChainResult {
-            threads: self.db.list_chain_threads(&thread.chain_root_id)?,
-            edges: self.db.list_chain_edges(&thread.chain_root_id)?,
+            threads: self.state_store.list_chain_threads(&thread.chain_root_id)?,
+            edges: self.state_store.list_chain_edges(&thread.chain_root_id)?,
         }))
     }
 }
@@ -644,19 +613,6 @@ pub fn validate_item(
         .verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
 
-    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space).map_err(
-        |(_status, json_body)| {
-            anyhow!(
-                "trust policy denied: {}",
-                json_body
-                    .0
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("unknown")
-            )
-        },
-    )?;
-
     let plan = engine
         .build_plan(
             &resolved.plan_context,
@@ -708,20 +664,6 @@ pub fn spawn_item(
     let verified = engine
         .verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
-
-    // Trust policy gate: reject untrusted items from user/system space
-    crate::policy::enforce_trust(verified.trust_class, verified.resolved.source_space).map_err(
-        |(_status, json_body)| {
-            anyhow!(
-                "trust policy denied: {}",
-                json_body
-                    .0
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("unknown")
-            )
-        },
-    )?;
 
     let mut plan = engine
         .build_plan(

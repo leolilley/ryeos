@@ -1,13 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
-use ed25519_dalek::VerifyingKey;
+use lillux::crypto::VerifyingKey;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]
 pub struct TrustedKey {
@@ -257,14 +255,7 @@ impl VerifiedLoader {
 
         let content = lillux::signature::strip_signature_lines(&raw);
 
-        let hash = {
-            let digest = Sha256::digest(content.as_bytes());
-            let mut hex = String::with_capacity(64);
-            for byte in digest.iter() {
-                let _ = write!(&mut hex, "{byte:02x}");
-            }
-            hex
-        };
+        let hash = lillux::sha256_hex(content.as_bytes());
 
         let (prefix, suffix) = Self::signature_format_for(kind);
         let verified = if let Some(sig_header) = Self::parse_first_signature(&raw, prefix, suffix) {
@@ -468,7 +459,7 @@ fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use lillux::crypto::SigningKey;
     use std::fs;
 
     fn create_file(dir: &Path, relative: &str, content: &str) -> PathBuf {

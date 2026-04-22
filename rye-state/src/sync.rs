@@ -1,6 +1,9 @@
 //! Object sync protocol (Rust port).
 //!
-//! TODO(Phase 0.5F): Implement sync protocol.
+//! TODO: Implement cross-node sync protocol. See architecture doc
+//! for protocol design (attestation/chain/permission model, object
+//! discovery, bulk export/import). This is a stub with type definitions
+//! only; implementation can come later.
 //!
 /// A single entry in a sync payload.
 #[derive(Debug, Clone)]

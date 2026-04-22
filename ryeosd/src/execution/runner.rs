@@ -1,12 +1,12 @@
 //! Unified execution runner.
 //!
 //! Both `/execute` and inbound webhooks use this to run the full
-//! execution lifecycle: epoch → CAS context → snapshot → spawn →
+//! execution lifecycle: CAS context → snapshot → spawn →
 //! fold-back → finalize → cleanup.
 //!
 //! The `ExecutionGuard` struct tracks all state and ensures cleanup
-//! on every exit path (epoch completion, temp dir removal, thread
-//! finalization on pre-spawn failures).
+//! on every exit path (temp dir removal, thread finalization on
+//! pre-spawn failures).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,8 +17,7 @@ use tokio::task;
 
 use rye_engine::contracts::ExecutionCompletion;
 
-use crate::db::ThreadDetail;
-use crate::execution::snapshot::{ExecutionSnapshot, RuntimeOutputsBundle};
+use crate::state_store::ThreadDetail;
 use crate::services::thread_lifecycle::{
     self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
@@ -31,6 +30,7 @@ pub struct ExecutionParams {
     pub project_path: PathBuf,
     pub vault_bindings: HashMap<String, String>,
     pub snapshot_hash: Option<String>,
+    #[allow(dead_code)]
     pub item_ref: String,
     pub parameters: Value,
     /// Pre-checked-out CAS temp dir (from ResolvedProjectContext).
@@ -45,10 +45,8 @@ pub struct ExecutionParams {
 struct ExecutionGuard {
     state: AppState,
     thread_id: Option<String>,
-    epoch_id: Option<String>,
     temp_dir: Option<PathBuf>,
     thread_finalized: bool,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ExecutionGuard {
@@ -56,46 +54,8 @@ impl ExecutionGuard {
         Self {
             state,
             thread_id: None,
-            epoch_id: None,
             temp_dir: None,
             thread_finalized: false,
-            heartbeat: None,
-        }
-    }
-
-    /// Register a GC writer epoch.
-    fn register_epoch(&mut self) {
-        self.epoch_id = crate::gc::epochs::register_epoch(
-            &self.state.config.cas_root,
-            self.state.identity.fingerprint(),
-            Vec::new(),
-        )
-        .ok();
-    }
-
-    /// Add root hashes to the registered epoch so sweep marks them reachable.
-    fn update_epoch_roots(&self, hashes: Vec<String>) {
-        if let Some(ref eid) = self.epoch_id {
-            let _ = crate::gc::epochs::update_epoch_roots(
-                &self.state.config.cas_root,
-                eid,
-                hashes,
-            );
-        }
-    }
-
-    /// Start a periodic heartbeat to keep the epoch alive during long-running executions.
-    fn start_epoch_heartbeat(&mut self) {
-        if let Some(ref epoch_id) = self.epoch_id {
-            let cas_root = self.state.config.cas_root.clone();
-            let eid = epoch_id.clone();
-            self.heartbeat = Some(tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-                loop {
-                    interval.tick().await;
-                    let _ = crate::gc::epochs::touch_epoch(&cas_root, &eid);
-                }
-            }));
         }
     }
 
@@ -135,14 +95,8 @@ impl ExecutionGuard {
         self.thread_finalized = true;
     }
 
-    /// Perform all cleanup: abort heartbeat, complete epoch, remove temp dir.
+    /// Perform all cleanup: remove temp dir.
     fn cleanup(&mut self) {
-        if let Some(h) = self.heartbeat.take() {
-            h.abort();
-        }
-        if let Some(ref eid) = self.epoch_id {
-            let _ = crate::gc::epochs::complete_epoch(&self.state.config.cas_root, eid);
-        }
         if let Some(ref d) = self.temp_dir {
             if d.exists() {
                 let _ = std::fs::remove_dir_all(d);
@@ -153,13 +107,11 @@ impl ExecutionGuard {
     /// Consume into parts for moving into tokio::spawn.
     fn into_detached_parts(
         mut self,
-    ) -> (AppState, Option<String>, Option<String>, Option<PathBuf>, Option<tokio::task::JoinHandle<()>>) {
+    ) -> (AppState, Option<String>, Option<PathBuf>) {
         let state = self.state.clone();
         let thread_id = self.thread_id.take();
-        let epoch_id = self.epoch_id.take();
         let temp_dir = self.temp_dir.take();
-        let heartbeat = self.heartbeat.take();
-        (state, thread_id, epoch_id, temp_dir, heartbeat)
+        (state, thread_id, temp_dir)
     }
 }
 
@@ -185,11 +137,12 @@ fn prepare_cas_context(
     // If we have a pre-checked-out dir from ResolvedProjectContext,
     // reuse it instead of doing a second checkout.
     if let (Some(snap_hash), Some(checkout_dir)) = (snapshot_hash, pre_checkout_dir) {
-        let cas = state.cas_store();
+        let cas_root = state.state_store.cas_root()?;
+        let cas = lillux::cas::CasStore::new(cas_root);
         let snap_obj = cas
             .get_object(snap_hash)?
             .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-        let snapshot = crate::cas::ProjectSnapshot::from_json(&snap_obj)?;
+        let snapshot = super::cas_types::ProjectSnapshot::from_json(&snap_obj)?;
         let manifest_hash = snapshot.project_manifest_hash.clone();
         guard.track_temp_dir(checkout_dir.clone());
         return Ok((checkout_dir.clone(), Some(manifest_hash), Some(snap_hash.clone())));
@@ -200,9 +153,10 @@ fn prepare_cas_context(
     }
 
     // Live FS — ingest working dir, no checkout
-    let cas = state.cas_store();
-    let items = crate::cas::ingest_directory(cas, project_path)?;
-    let manifest = crate::cas::SourceManifest { item_source_hashes: items };
+    let cas_root = state.state_store.cas_root()?;
+    let items = super::ingest::ingest_directory(&cas_root, project_path)?;
+    let manifest = super::cas_types::SourceManifest { item_source_hashes: items };
+    let cas = lillux::cas::CasStore::new(cas_root);
     let manifest_hash = cas.store_object(&manifest.to_json())?;
 
     Ok((project_path.to_path_buf(), Some(manifest_hash), None))
@@ -217,70 +171,57 @@ fn checkout_from_snapshot(
     thread_id: &str,
     guard: &mut ExecutionGuard,
 ) -> Result<(PathBuf, Option<String>, Option<String>)> {
-    let cas = state.cas_store();
+    let cas_root = state.state_store.cas_root()?;
+    let cas = lillux::cas::CasStore::new(cas_root.clone());
     let snap_obj = cas
         .get_object(snap_hash)?
         .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-    let snapshot = crate::cas::ProjectSnapshot::from_json(&snap_obj)?;
+    let snapshot = super::cas_types::ProjectSnapshot::from_json(&snap_obj)?;
 
     let manifest_hash = snapshot.project_manifest_hash.clone();
     let exec_dir = state.config.state_dir.join("executions").join(thread_id);
     let cache = crate::execution::cache::MaterializationCache::new(
         state.config.state_dir.join("cache").join("snapshots"),
     );
-    crate::execution::checkout_project(cas, &manifest_hash, &exec_dir, Some(&cache))?;
+    crate::execution::checkout_project(&cas_root, &manifest_hash, &exec_dir, Some(&cache))?;
 
     guard.track_temp_dir(exec_dir.clone());
     Ok((exec_dir, Some(manifest_hash), Some(snap_hash.to_string())))
 }
 
-/// Store an ExecutionSnapshot in CAS and write a generic ref for the thread.
-fn store_execution_snapshot(
-    state: &AppState,
-    thread_id: &str,
-    item_ref: &str,
-    pre_manifest_hash: &Option<String>,
-    parameters: &Value,
-) {
-    let Some(manifest_hash) = pre_manifest_hash else {
-        return;
-    };
-    let cas = state.cas_store();
-    let snapshot = ExecutionSnapshot {
-        thread_id: thread_id.to_string(),
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
-        item_ref: item_ref.to_string(),
-        parameters: Some(parameters.clone()),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    if let Ok(hash) = snapshot.store(cas) {
-        let _ = state
-            .refs_store()
-            .write_ref(&format!("threads/{thread_id}/execution_snapshot"), &hash);
-    }
-}
-
-/// Post-execution: fold back outputs, store RuntimeOutputsBundle, advance HEAD.
+/// Post-execution: fold back outputs and advance HEAD.
 fn post_execution_foldback(
     state: &AppState,
-    thread_id: &str,
-    acting_principal: &str,
+    _thread_id: &str,
+    _acting_principal: &str,
     pre_manifest_hash: &Option<String>,
     base_snapshot_hash: &Option<String>,
     project_path: &std::path::Path,
     execution_dir: Option<&std::path::Path>,
-    completion: &ExecutionCompletion,
+    _completion: &ExecutionCompletion,
 ) {
     let Some(manifest_hash) = pre_manifest_hash else {
         return;
     };
-    let cas = state.cas_store();
+    let cas_root = match state.state_store.cas_root() {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to get cas_root");
+            return;
+        }
+    };
+    let refs_root = match state.state_store.refs_root() {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to get refs_root");
+            return;
+        }
+    };
     let working_dir = execution_dir.unwrap_or(project_path);
 
     // Fold back changes
     let output_manifest_hash =
-        match crate::execution::fold_back_outputs(cas, working_dir, manifest_hash) {
+        match crate::execution::fold_back_outputs(&cas_root, working_dir, manifest_hash) {
             Ok(hash) => hash,
             Err(err) => {
                 tracing::warn!(error = %err, "fold-back failed");
@@ -292,11 +233,13 @@ fn post_execution_foldback(
     if let Some(ref new_manifest_hash) = output_manifest_hash {
         if let Some(ref snap_hash) = base_snapshot_hash {
             let project_str = project_path.to_string_lossy();
+            let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
+            let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
             match crate::execution::advance_after_foldback(
-                cas,
-                state.refs_store(),
-                acting_principal,
-                &project_str,
+                &cas_root,
+                &refs_root,
+                &signer,
+                &project_hash,
                 new_manifest_hash,
                 snap_hash,
             ) {
@@ -308,30 +251,6 @@ fn post_execution_foldback(
         } else {
             tracing::debug!("skipping HEAD advance: no base snapshot hash");
         }
-    }
-
-    // Get the execution_snapshot_hash for the bundle
-    let exec_snap_hash = state
-        .refs_store()
-        .read_ref(&format!("threads/{thread_id}/execution_snapshot"))
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-
-    // Store RuntimeOutputsBundle
-    let status_str = format!("{:?}", completion.status).to_lowercase();
-    let bundle = RuntimeOutputsBundle {
-        thread_id: thread_id.to_string(),
-        execution_snapshot_hash: exec_snap_hash,
-        output_manifest_hash,
-        artifacts: Vec::new(),
-        status: status_str,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    if let Ok(hash) = bundle.store(cas) {
-        let _ = state
-            .refs_store()
-            .write_ref(&format!("threads/{thread_id}/runtime_outputs"), &hash);
     }
 }
 
@@ -377,7 +296,7 @@ pub struct DetachedResult {
 
 /// Run an execution inline (blocking until completion).
 ///
-/// Handles the full lifecycle: epoch, CAS context, snapshot, spawn,
+/// Handles the full lifecycle: CAS context, snapshot, spawn,
 /// fold-back, finalize, cleanup. On any error, the thread is finalized
 /// as failed and all resources are cleaned up.
 pub async fn run_inline(
@@ -389,7 +308,6 @@ pub async fn run_inline(
     if let Some(ref d) = params.temp_dir {
         guard.track_temp_dir(d.clone());
     }
-    guard.register_epoch();
 
     // Create and track thread
     let created = state
@@ -412,37 +330,6 @@ pub async fn run_inline(
                 return Err(err);
             }
         };
-
-    // Store ExecutionSnapshot
-    store_execution_snapshot(
-        &state,
-        &running.thread_id,
-        &params.item_ref,
-        &pre_manifest_hash,
-        &params.parameters,
-    );
-
-    // Register known hashes as epoch roots so GC sweep protects them
-    {
-        let mut epoch_roots = Vec::new();
-        if let Some(ref h) = pre_manifest_hash {
-            epoch_roots.push(h.clone());
-        }
-        if let Some(ref h) = base_snapshot_hash {
-            epoch_roots.push(h.clone());
-        }
-        if let Some(ref h) = state
-            .refs_store()
-            .read_ref(&format!("threads/{}/execution_snapshot", running.thread_id))
-            .ok()
-            .flatten()
-        {
-            epoch_roots.push(h.clone());
-        }
-        guard.update_epoch_roots(epoch_roots);
-    }
-
-    guard.start_epoch_heartbeat();
 
     // Update project context if CAS checkout changed the path
     if effective_path != params.project_path {
@@ -535,7 +422,7 @@ pub async fn run_inline(
 /// Launch a detached execution (returns immediately, runs in background).
 ///
 /// Handles the full lifecycle in a background tokio task with the same
-/// guarantees as inline: epoch, CAS context, snapshot, spawn, fold-back,
+/// guarantees as inline: CAS context, snapshot, spawn, fold-back,
 /// finalize, cleanup.
 pub async fn run_detached(
     state: AppState,
@@ -546,7 +433,6 @@ pub async fn run_detached(
     if let Some(ref d) = params.temp_dir {
         guard.track_temp_dir(d.clone());
     }
-    guard.register_epoch();
 
     // Create and track thread
     let created = state
@@ -570,37 +456,6 @@ pub async fn run_detached(
             }
         };
 
-    // Store ExecutionSnapshot
-    store_execution_snapshot(
-        &state,
-        &running.thread_id,
-        &params.item_ref,
-        &pre_manifest_hash,
-        &params.parameters,
-    );
-
-    // Register known hashes as epoch roots so GC sweep protects them
-    {
-        let mut epoch_roots = Vec::new();
-        if let Some(ref h) = pre_manifest_hash {
-            epoch_roots.push(h.clone());
-        }
-        if let Some(ref h) = base_snapshot_hash {
-            epoch_roots.push(h.clone());
-        }
-        if let Some(ref h) = state
-            .refs_store()
-            .read_ref(&format!("threads/{}/execution_snapshot", running.thread_id))
-            .ok()
-            .flatten()
-        {
-            epoch_roots.push(h.clone());
-        }
-        guard.update_epoch_roots(epoch_roots);
-    }
-
-    guard.start_epoch_heartbeat();
-
     // Update project context if CAS checkout changed the path
     if effective_path != params.project_path {
         params.resolved.plan_context.project_context =
@@ -611,7 +466,7 @@ pub async fn run_detached(
     let running_thread_id = running.thread_id.clone();
 
     // Move guard parts into the background task
-    let (bg_state, _bg_thread_id, bg_epoch_id, bg_temp_dir, bg_heartbeat) = guard.into_detached_parts();
+    let (bg_state, _bg_thread_id, bg_temp_dir) = guard.into_detached_parts();
     let bg_thread_id = running.thread_id.clone();
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
@@ -675,12 +530,6 @@ pub async fn run_detached(
         }
 
         // Always cleanup in detached path
-        if let Some(h) = bg_heartbeat {
-            h.abort();
-        }
-        if let Some(ref eid) = bg_epoch_id {
-            let _ = crate::gc::epochs::complete_epoch(&bg_state.config.cas_root, eid);
-        }
         if let Some(ref d) = bg_temp_dir {
             if d.exists() {
                 let _ = std::fs::remove_dir_all(d);

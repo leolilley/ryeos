@@ -23,7 +23,7 @@ pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{
     resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
 };
-pub use ed25519_dalek::SigningKey;
+pub use lillux::crypto::SigningKey;
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{merge_hooks, run_hooks, HookDispatcher};
 pub use hooks_loader::{HookDefinition, HooksLoader};

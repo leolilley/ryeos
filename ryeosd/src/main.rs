@@ -1,26 +1,19 @@
 mod api;
 mod auth;
 mod bootstrap;
-mod broker;
-mod cas;
 mod config;
-mod db;
 mod engine_init;
 mod execution;
-mod gc;
 mod identity;
 mod kind_profiles;
 mod policy;
 mod process;
 mod reconcile;
-mod refs;
-mod registry;
+mod runtime_db;
 mod services;
 mod state;
 mod state_store;
 mod uds;
-mod vault;
-mod webhooks;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,26 +21,17 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use axum::routing::{get, post};
 use axum::{serve, Router};
-use chrono::Utc;
 use clap::Parser;
 use config::{Cli, Config};
 use tokio::net::{TcpListener, UnixListener};
 use tracing_subscriber::EnvFilter;
 
-use crate::broker::{LiveBroker, DEFAULT_BROKER_CAPACITY};
-use crate::cas::CasStore;
-use crate::db::Database;
 use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
-use crate::refs::RefStore;
-use crate::registry::RegistryStore;
-use crate::services::budget_service::BudgetService;
 use crate::services::command_service::CommandService;
 use crate::services::event_store::EventStoreService;
 use crate::services::thread_lifecycle::ThreadLifecycleService;
 use crate::state::AppState;
-use crate::vault::VaultStore;
-use crate::webhooks::WebhookStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,10 +72,8 @@ async fn main() -> Result<()> {
     process::remove_stale_socket(&config.uds_path)?;
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
-    let db = Database::new(&config.db_path, kind_profiles)?;
     let identity = NodeIdentity::load(&config.signing_key_path)?;
     let engine = Arc::new(engine_init::build_engine(&config)?);
-    let db = Arc::new(db);
     
     // Initialize StateStore with CAS backing (Phase 0.5H.3)
     let state_root = config.state_dir.join(".state");
@@ -102,45 +84,28 @@ async fn main() -> Result<()> {
         .context("StateStore initialization failed")?);
     tracing::info!("StateStore initialized successfully");
     
-    let broker = Arc::new(LiveBroker::new(DEFAULT_BROKER_CAPACITY));
     let events = Arc::new(EventStoreService::new(
-        db.clone(),
         state_store.clone(),
-        broker.clone(),
     ));
     let threads = Arc::new(ThreadLifecycleService::new(
-        db.clone(),
         state_store.clone(),
+        kind_profiles.clone(),
         events.clone(),
     ));
-    let commands = Arc::new(CommandService::new(db.clone(), state_store.clone(), events.clone()));
-    let budgets = Arc::new(BudgetService::new(db.clone(), state_store.clone(), events.clone()));
-    let cas = Arc::new(CasStore::new(config.cas_root.clone()));
-    let refs = Arc::new(RefStore::new(config.cas_root.clone()));
-    let registry = Arc::new(RegistryStore::new(config.cas_root.clone()));
-    let vault = Arc::new(VaultStore::new(config.cas_root.clone()));
-    let webhooks = Arc::new(WebhookStore::new(config.cas_root.clone()));
+    let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
 
     let app_state = AppState {
         config: Arc::new(config.clone()),
-        db,
         state_store,
         engine: engine.clone(),
         identity: Arc::new(identity),
         threads,
         events,
-        broker,
         commands,
-        budgets,
-        cas,
-        refs,
-        registry,
-        vault,
-        webhooks,
         callback_tokens,
         started_at: Instant::now(),
-        started_at_iso: Utc::now().to_rfc3339(),
+        started_at_iso: lillux::time::iso8601_now(),
     };
 
     reconcile::reconcile(&app_state).await?;
@@ -192,7 +157,7 @@ async fn main() -> Result<()> {
 }
 
 fn drain_running_threads(state: &AppState) {
-    let threads = match state.db.list_threads_by_status(&["running"]) {
+    let threads = match state.state_store.list_threads_by_status(&["running"]) {
         Ok(threads) => threads,
         Err(err) => {
             tracing::warn!(error = %err, "failed to list running threads during shutdown");
@@ -272,52 +237,6 @@ fn build_router(state: AppState) -> Router {
             "/runtime/{method}",
             post(api::runtime_callback::runtime_callback),
         )
-        .route("/objects/has", post(api::objects::has_objects))
-        .route("/objects/put", post(api::objects::put_objects))
-        .route("/objects/get", post(api::objects::get_objects))
-        .route("/gc", post(api::gc::run_gc))
-        .route("/push", post(api::push::push))
-        .route("/project-head", get(api::push::get_project_head))
-        .route("/push/user-space", post(api::push::push_user_space))
-        .route("/user-space", get(api::push::get_user_space))
-        .route("/registry/publish", post(api::registry::publish))
-        .route("/registry/search", get(api::registry::search))
-        .route("/registry/items/:kind/:item_id", get(api::registry::get_item))
-        .route(
-            "/registry/items/:kind/:item_id/versions/:version",
-            get(api::registry::get_version),
-        )
-        .route(
-            "/registry/namespaces/claim",
-            post(api::registry::claim_namespace),
-        )
-        .route(
-            "/registry/identity",
-            post(api::registry::register_identity),
-        )
-        .route(
-            "/registry/identity/:fingerprint",
-            get(api::registry::lookup_identity),
-        )
-        .route("/vault/set", post(api::vault::vault_set))
-        .route("/vault/get", post(api::vault::vault_get))
-        .route("/vault/list", get(api::vault::vault_list))
-        .route("/vault/delete", post(api::vault::vault_delete))
-        .route(
-            "/webhook-bindings",
-            get(api::webhooks::list_webhooks).post(api::webhooks::create_webhook),
-        )
-        .route(
-            "/webhook-bindings/:hook_id",
-            axum::routing::delete(api::webhooks::revoke_webhook),
-        )
-        .route(
-            "/webhooks/inbound/:hook_id",
-            post(api::webhooks::inbound_webhook),
-        )
-        .route("/refs/pins", get(api::pins::list_pins).post(api::pins::write_pin))
-        .route("/refs/pins/:name", axum::routing::delete(api::pins::delete_pin))
-        .route("/refs/generic/*ref_path", get(api::refs::get_ref).put(api::refs::put_ref))
         .with_state(state)
 }
 
