@@ -2889,7 +2889,7 @@ def run_sync(graph_config: Dict, params: Dict, project_path: str) -> Dict:
             spawn_thread(
                 registry=registry,
                 thread_id=graph_run_id,
-                directive=graph_id,
+                item_id=graph_id,
                 cmd=cmd,
                 log_dir=log_dir,
                 input_data=params_json,
