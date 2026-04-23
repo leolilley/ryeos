@@ -936,9 +936,10 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     except Exception:
         logger.debug("Failed to resolve local execution config", exc_info=True)
 
-    # 5. Execute on remote (longer timeout for execution)
+    # 5. Execute on remote
     from remote_config import get_project_path
 
+    is_async = params.get("async", False)
     proj_name = get_project_path(project_path)
     exec_body = {
         "project_path": proj_name,
@@ -946,12 +947,17 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
         "parameters": exec_params,
         "thread": thread,
     }
+    if is_async:
+        exec_body["async"] = True
     if secret_envelope:
         exec_body["secret_envelope"] = secret_envelope
     vault_keys = params.get("vault_keys")
     if vault_keys:
         exec_body["vault_keys"] = vault_keys
-    exec_resp = await client.post("/execute", exec_body, timeout=300)
+
+    # Async: short timeout (server returns immediately), sync: long timeout
+    exec_timeout = 30 if is_async else 300
+    exec_resp = await client.post("/execute", exec_body, timeout=exec_timeout)
 
     if not exec_resp["success"]:
         err = exec_resp.get("error") or exec_resp.get("body") or f"HTTP {exec_resp.get('status_code')}"
@@ -960,6 +966,17 @@ async def _execute(project_path: Path, params: Dict) -> Dict:
     exec_body = exec_resp["body"]
     if isinstance(exec_body, str):
         exec_body = json.loads(exec_body)
+
+    # If async, return immediately with thread_id — no pull/materialize
+    if is_async:
+        return {
+            "status": exec_body.get("status", "accepted"),
+            "thread_id": exec_body.get("thread_id"),
+            "async": True,
+            "message": exec_body.get("message"),
+            "objects_pushed": push_result.get("objects_synced", 0),
+            "success": True,
+        }
 
     # 6. Pull execution outputs (CAS objects + runtime output blobs)
     snapshot_hash = exec_body.get("execution_snapshot_hash")

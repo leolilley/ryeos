@@ -1245,6 +1245,7 @@ async def resolve_execution(
         thread=thread,
         secret_envelope=body.get("secret_envelope"),
         vault_keys=validated_vault_keys,
+        fire_and_forget=bool(body.get("async", False)),
     )
 
 
@@ -1253,6 +1254,38 @@ async def execute(
     resolved: ResolvedExecution = Depends(resolve_execution),
     settings: Settings = Depends(get_settings),
 ):
+    if resolved.fire_and_forget:
+        # Generate thread_id early so we can return it immediately
+        item_slug = resolved.item_id.replace("/", "-")
+        thread_id = f"rye-remote-{item_slug}-{int(__import__('time').time() * 1000)}"
+
+        async def _bg_execute():
+            try:
+                await _execute_from_head(
+                    principal=resolved.principal,
+                    settings=settings,
+                    project_path=resolved.project_path,
+                    item_id=resolved.item_id,
+                    parameters=resolved.parameters,
+                    thread=resolved.thread,
+                    secret_envelope=resolved.secret_envelope,
+                    vault_keys=resolved.vault_keys,
+                    thread_id_override=thread_id,
+                )
+            except Exception:
+                logger.error(
+                    "Async execution failed for %s (%s)",
+                    thread_id, resolved.item_id, exc_info=True,
+                )
+
+        asyncio.create_task(_bg_execute())
+        return {
+            "status": "accepted",
+            "thread_id": thread_id,
+            "async": True,
+            "message": f"Execution started in background. Poll /threads/{thread_id} for status.",
+        }
+
     return await _execute_from_head(
         principal=resolved.principal,
         settings=settings,
@@ -1280,6 +1313,7 @@ async def _execute_from_head(
     thread: str | None,
     secret_envelope: dict | None = None,
     vault_keys: list[str] | None = None,
+    thread_id_override: str | None = None,
 ):
     """Execute from project HEAD — isolated mutable checkout with fold-back."""
     ref = _resolve_project_ref_or_404(settings, principal, project_path)
@@ -1304,7 +1338,7 @@ async def _execute_from_head(
     root = _principal_cas_root(principal, settings)
     cache = settings.cache_root(principal.fingerprint)
     exec_root = settings.exec_root(principal.fingerprint)
-    thread_id = f"rye-remote-{item_id.replace('/', '-')}-{int(__import__('time').time() * 1000)}"
+    thread_id = thread_id_override or f"rye-remote-{item_id.replace('/', '-')}-{int(__import__('time').time() * 1000)}"
     exec_space: Path | None = None
 
     # Derive project_manifest_hash from snapshot for registration

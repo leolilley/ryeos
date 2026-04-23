@@ -312,3 +312,4 @@ class ResolvedExecution:
     thread: str | None
     secret_envelope: dict | None = None
     vault_keys: list[str] | None = None
+    fire_and_forget: bool = False
