@@ -76,7 +76,7 @@ async fn dispatch_maintenance_gc(request: RpcRequest, state: &AppState) -> RpcRe
     }
 }
 
-fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
+pub(crate) fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     match request.method.as_str() {
         "system.health" => RpcResponse::ok(request.request_id, json!({ "status": "ok" })),
         "system.status" => match serde_json::to_value(state.status()) {
@@ -136,6 +136,10 @@ fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
         "threads.get_facets" => rpc_result(
             request.request_id,
             handle_get_facets(&request.params, state),
+        ),
+        "identity.public_key" => rpc_result(
+            request.request_id,
+            handle_public_key(state),
         ),
         other if other.starts_with("runtime.") => {
             rpc_result(request.request_id, dispatch_runtime_method(other, &request.params, state))
@@ -347,6 +351,16 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
     Ok(serde_json::to_value(facets_map).context("failed to encode facets")?)
 }
 
+fn handle_public_key(state: &AppState) -> Result<serde_json::Value> {
+    let identity_path = state
+        .config
+        .state_dir
+        .join("identity")
+        .join("public-identity.json");
+    let doc = crate::identity::NodeIdentity::load_public_identity(&identity_path)?;
+    serde_json::to_value(doc).context("failed to encode public identity")
+}
+
 fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {
     match result {
         Ok(value) => RpcResponse::ok(request_id, value),
@@ -388,3 +402,321 @@ async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
         .context("failed to write rpc frame body")?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::execution::callback_token::CallbackCapabilityStore;
+    use crate::identity::NodeIdentity;
+    use crate::kind_profiles::KindProfileRegistry;
+    use crate::services::command_service::CommandService;
+    use crate::services::event_store::EventStoreService;
+    use crate::services::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
+    use crate::state::AppState;
+    use crate::state_store::StateStore;
+    use crate::uds::protocol::RpcError;
+    use crate::write_barrier::WriteBarrier;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    /// Build a minimal AppState for UDS dispatch tests.
+    fn setup_app_state() -> (TempDir, AppState) {
+        let tmpdir = TempDir::new().unwrap();
+        let state_root = tmpdir.path().join(".state");
+        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+        let key_path = tmpdir.path().join("identity").join("node-key.pem");
+        let config = Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            db_path: runtime_db_path.clone(),
+            uds_path: tmpdir.path().join("test.sock"),
+            state_dir: tmpdir.path().to_path_buf(),
+            signing_key_path: key_path.clone(),
+            system_data_dir: tmpdir.path().join("system"),
+            bundle_roots: Vec::new(),
+            require_auth: false,
+            authorized_keys_dir: tmpdir.path().join("auth"),
+        };
+
+        let identity = NodeIdentity::create(&key_path).unwrap();
+        identity.write_public_identity(
+            &tmpdir.path().join("identity").join("public-identity.json"),
+        ).unwrap();
+
+        let signer = Arc::new(
+            crate::state_store::NodeIdentitySigner::from_identity(&identity),
+        );
+        let write_barrier = WriteBarrier::new();
+        let state_store = Arc::new(
+            StateStore::new(state_root, runtime_db_path, signer, write_barrier).unwrap(),
+        );
+        let kind_profiles = Arc::new(KindProfileRegistry::load_defaults());
+        let events = Arc::new(EventStoreService::new(state_store.clone()));
+        let threads = Arc::new(ThreadLifecycleService::new(
+            state_store.clone(),
+            kind_profiles.clone(),
+            events.clone(),
+        ));
+        let commands = Arc::new(CommandService::new(
+            state_store.clone(),
+            kind_profiles,
+            events.clone(),
+        ));
+
+        let engine = ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::executor_registry::ExecutorRegistry::new(),
+            ryeos_engine::metadata::MetadataParserRegistry::new(),
+            None,
+            Vec::new(),
+        );
+
+        let state = AppState {
+            config: Arc::new(config),
+            state_store,
+            engine: Arc::new(engine),
+            identity: Arc::new(identity),
+            threads,
+            events,
+            commands,
+            callback_tokens: Arc::new(CallbackCapabilityStore::new()),
+            write_barrier: Arc::new(WriteBarrier::new()),
+            started_at: Instant::now(),
+            started_at_iso: lillux::time::iso8601_now(),
+        };
+
+        (tmpdir, state)
+    }
+
+    fn make_create_params(thread_id: &str, chain_root_id: &str) -> ThreadCreateParams {
+        ThreadCreateParams {
+            thread_id: thread_id.to_string(),
+            chain_root_id: chain_root_id.to_string(),
+            kind: "directive_run".to_string(),
+            item_ref: "test/directive".to_string(),
+            executor_ref: "test/executor".to_string(),
+            launch_mode: "inline".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("user:test".to_string()),
+        }
+    }
+
+    fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
+        RpcRequest {
+            request_id: 1,
+            method: method.to_string(),
+            params,
+        }
+    }
+
+    fn rpc_ok(resp: &RpcResponse) -> &serde_json::Value {
+        resp.result.as_ref().expect("expected ok result")
+    }
+
+    fn rpc_err(resp: &RpcResponse) -> &RpcError {
+        resp.error.as_ref().expect("expected error")
+    }
+
+    // ── system methods ──────────────────────────────────────────────
+
+    #[test]
+    fn system_health_returns_ok() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("system.health", json!({})), &state);
+        assert!(resp.error.is_none());
+        assert_eq!(rpc_ok(&resp)["status"], "ok");
+    }
+
+    #[test]
+    fn system_status_returns_status_object() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("system.status", json!({})), &state);
+        assert!(resp.error.is_none());
+        let result = rpc_ok(&resp);
+        assert!(result.get("version").is_some());
+        assert!(result.get("uptime_seconds").is_some());
+        assert!(result.get("bind").is_some());
+    }
+
+    #[test]
+    fn unknown_method_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("nonexistent.method", json!({})), &state);
+        let err = rpc_err(&resp);
+        assert_eq!(err.code, "unknown_method");
+    }
+
+    // ── identity methods ────────────────────────────────────────────
+
+    #[test]
+    fn identity_public_key_returns_key() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("identity.public_key", json!({})), &state);
+        assert!(resp.error.is_none(), "expected ok, got error: {:?}", resp.error);
+        let result = rpc_ok(&resp);
+        assert_eq!(result["kind"], "identity/v1");
+        assert!(result.get("principal_id").is_some());
+        assert!(result.get("signing_key").is_some());
+    }
+
+    // ── thread lifecycle methods ────────────────────────────────────
+
+    #[test]
+    fn threads_create_and_get_roundtrip() {
+        let (_tmp, state) = setup_app_state();
+        let params = make_create_params("T-1", "T-1");
+
+        let create_resp = dispatch(
+            rpc("threads.create", serde_json::to_value(&params).unwrap()),
+            &state,
+        );
+        assert!(create_resp.error.is_none(), "create failed: {:?}", create_resp.error);
+
+        let get_resp = dispatch(rpc("threads.get", json!({ "thread_id": "T-1" })), &state);
+        assert!(get_resp.error.is_none(), "get failed: {:?}", get_resp.error);
+        let result = rpc_ok(&get_resp);
+        assert_eq!(result["thread"]["thread_id"], "T-1");
+        assert_eq!(result["thread"]["kind"], "directive_run");
+    }
+
+    #[test]
+    fn threads_get_missing_returns_null() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("threads.get", json!({ "thread_id": "NONEXISTENT" })), &state);
+        assert!(resp.error.is_none());
+        assert_eq!(*rpc_ok(&resp), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn threads_list_returns_threads() {
+        let (_tmp, state) = setup_app_state();
+
+        state.threads.create_thread(&make_create_params("T-list-1", "T-list-1")).unwrap();
+        state.threads.create_thread(&make_create_params("T-list-2", "T-list-2")).unwrap();
+
+        let resp = dispatch(rpc("threads.list", json!({ "limit": 10 })), &state);
+        assert!(resp.error.is_none());
+        let result = rpc_ok(&resp);
+        let threads = result["threads"].as_array().unwrap();
+        assert!(threads.len() >= 2);
+    }
+
+    #[test]
+    fn threads_chain_requires_existing_thread() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("threads.chain", json!({ "thread_id": "NONEXISTENT" })), &state);
+        assert!(resp.error.is_none());
+        assert_eq!(*rpc_ok(&resp), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn threads_children_empty_for_root() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-root", "T-root")).unwrap();
+
+        let resp = dispatch(
+            rpc("threads.children", json!({ "thread_id": "T-root" })),
+            &state,
+        );
+        assert!(resp.error.is_none());
+        let result = rpc_ok(&resp);
+        assert_eq!(result["children"], json!([]));
+    }
+
+    // ── thread finalize and events ──────────────────────────────────
+
+    #[test]
+    fn events_replay_after_thread_lifecycle() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-events-1", "T-events-1")).unwrap();
+
+        let finalize_resp = dispatch(
+            rpc("threads.finalize", json!({
+                "thread_id": "T-events-1",
+                "status": "completed",
+                "outcome_code": "test",
+            })),
+            &state,
+        );
+        assert!(finalize_resp.error.is_none(), "finalize failed: {:?}", finalize_resp.error);
+
+        let replay_resp = dispatch(
+            rpc("events.replay", json!({ "thread_id": "T-events-1", "limit": 10 })),
+            &state,
+        );
+        assert!(replay_resp.error.is_none(), "replay failed: {:?}", replay_resp.error);
+        let result = rpc_ok(&replay_resp);
+        let events = result["events"].as_array().unwrap();
+        assert!(events.len() >= 2, "expected >= 2 events, got {}", events.len());
+        let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+        assert!(types.contains(&"thread_created"));
+        assert!(types.contains(&"thread_completed"));
+    }
+
+    // ── command methods ────────────────────────────────────────────
+
+    #[test]
+    fn commands_submit_and_claim() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-cmd-1", "T-cmd-1")).unwrap();
+
+        // Mark running first — cancel is only allowed on running threads
+        let _ = dispatch(
+            rpc("threads.mark_running", json!({ "thread_id": "T-cmd-1" })),
+            &state,
+        );
+
+        let submit_resp = dispatch(
+            rpc("commands.submit", json!({
+                "thread_id": "T-cmd-1",
+                "command_type": "cancel",
+            })),
+            &state,
+        );
+        assert!(submit_resp.error.is_none(), "submit failed: {:?}", submit_resp.error);
+        let submitted = rpc_ok(&submit_resp);
+        assert_eq!(submitted["command_type"], "cancel");
+
+        let claim_resp = dispatch(
+            rpc("commands.claim", json!({ "thread_id": "T-cmd-1" })),
+            &state,
+        );
+        assert!(claim_resp.error.is_none(), "claim failed: {:?}", claim_resp.error);
+        let claimed = rpc_ok(&claim_resp);
+        let commands = claimed["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["command_type"], "cancel");
+    }
+
+    // ── error handling ──────────────────────────────────────────────
+
+    #[test]
+    fn threads_create_missing_fields_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("threads.create", json!({ "thread_id": "T-Bad" })), &state);
+        assert!(resp.error.is_some());
+        assert_eq!(rpc_err(&resp).code, "request_failed");
+    }
+
+    #[test]
+    fn events_replay_missing_thread_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(
+            rpc("events.replay", json!({ "thread_id": "NONEXISTENT" })),
+            &state,
+        );
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn threads_get_facets_missing_thread_id_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("threads.get_facets", json!({})), &state);
+        assert!(resp.error.is_some());
+        assert_eq!(rpc_err(&resp).code, "request_failed");
+    }
+}
+

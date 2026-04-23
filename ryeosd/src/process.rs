@@ -24,6 +24,7 @@ pub fn daemon_pgid() -> i64 {
 
 /// Return true if the given PGID matches the daemon's own process group.
 /// Killing such a PGID would kill the daemon itself.
+#[allow(dead_code)]
 pub fn is_daemon_pgid(pgid: i64) -> bool {
     pgid == daemon_pgid()
 }

@@ -63,6 +63,7 @@ pub fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
 
 /// Check that the caller owns a thread (or has wildcard scope).
 /// A principal owns a thread if they created it (requested_by matches).
+#[allow(dead_code)]
 pub fn check_thread_access(
     caller_principal: &str,
     caller_scopes: &[String],

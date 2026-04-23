@@ -228,40 +228,7 @@ fn drain_running_threads(state: &AppState) {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(api::health::health))
-        .route("/status", get(api::health::status))
-        .route("/public-key", get(api::health::public_key))
-        .route("/threads", get(api::threads::list_threads))
-        .route("/threads/:thread_id", get(api::threads::get_thread))
-        .route(
-            "/threads/:thread_id/children",
-            get(api::threads::list_children),
-        )
-        .route("/threads/:thread_id/chain", get(api::threads::get_chain))
-        .route(
-            "/threads/:thread_id/commands",
-            post(api::commands::submit_command),
-        )
-        .route(
-            "/threads/:thread_id/events",
-            get(api::events::get_thread_events),
-        )
-        .route(
-            "/threads/:thread_id/events/stream",
-            get(api::events::stream_thread_events),
-        )
-        .route(
-            "/chains/:chain_root_id/events",
-            get(api::events::get_chain_events),
-        )
-        .route(
-            "/chains/:chain_root_id/events/stream",
-            get(api::events::stream_chain_events),
-        )
         .route("/execute", post(api::execute::execute))
-        .route(
-            "/runtime/{method}",
-            post(api::runtime_callback::runtime_callback),
-        )
         .with_state(state)
 }
 
