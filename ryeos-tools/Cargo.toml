@@ -1,0 +1,62 @@
+[package]
+name = "ryeos-tools"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ryeos_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rye-status"
+path = "src/bin/status.rs"
+
+[[bin]]
+name = "rye-verify"
+path = "src/bin/verify.rs"
+
+[[bin]]
+name = "rye-fetch"
+path = "src/bin/fetch.rs"
+
+[[bin]]
+name = "rye-sign"
+path = "src/bin/sign.rs"
+
+[[bin]]
+name = "rye-gc"
+path = "src/bin/gc.rs"
+
+[[bin]]
+name = "rye-rebuild"
+path = "src/bin/rebuild.rs"
+
+[[bin]]
+name = "rye-bundle"
+path = "src/bin/bundle.rs"
+
+[dependencies]
+ anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+sha2 = "0.10"
+serde_yaml = "0.9"
+rmp-serde = "1"
+
+# Engine + state
+ryeos-engine = { path = "../ryeos-engine" }
+ryeos-state = { path = "../ryeos-state" }
+
+# Required for verify
+lillux = { path = "../lillux" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []

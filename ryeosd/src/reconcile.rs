@@ -18,7 +18,7 @@ pub async fn reconcile(state: &AppState) -> Result<()> {
     let refs_root = state.state_store.refs_root()?;
 
     state.state_store.with_projection(|projection| {
-        let catch_up = rye_state::rebuild::catch_up_projection(
+        let catch_up = ryeos_state::rebuild::catch_up_projection(
             projection,
             &cas_root,
             &refs_root,

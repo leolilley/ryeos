@@ -74,11 +74,11 @@ pub fn build_and_launch(
     let engine_roots = state.engine.resolution_roots(Some(project_path.to_path_buf()));
 
     let user_root = engine_roots.ordered.iter()
-        .find(|r| r.space == rye_engine::contracts::ItemSpace::User)
+        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
         .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()));
 
     let system_roots: Vec<PathBuf> = engine_roots.ordered.iter()
-        .filter(|r| r.space == rye_engine::contracts::ItemSpace::System)
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
         .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
         .collect();
 

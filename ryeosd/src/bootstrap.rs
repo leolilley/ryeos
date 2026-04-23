@@ -144,13 +144,13 @@ pub fn sign_unsigned_items(config: &Config) {
 
     for root in &all_roots {
         // Sign kind schemas
-        let kinds_dir = root.join(rye_engine::AI_DIR).join("config").join("engine").join("kinds");
+        let kinds_dir = root.join(ryeos_engine::AI_DIR).join("config").join("engine").join("kinds");
         if kinds_dir.is_dir() {
             signed += walk_and_sign(&kinds_dir, &sk, "#", &mut skipped);
         }
 
         // Sign bundle items (directives, tools, knowledge, configs)
-        let ai_dir = root.join(rye_engine::AI_DIR);
+        let ai_dir = root.join(ryeos_engine::AI_DIR);
         if ai_dir.is_dir() {
             signed += walk_and_sign_items(&ai_dir, &sk, &mut skipped);
         }
@@ -270,10 +270,13 @@ fn sign_file_if_unsigned(path: &Path, sk: &lillux::crypto::SigningKey, sig_prefi
 }
 
 fn create_directory_layout(config: &Config) -> Result<()> {
+    // Canonical paths — one CAS root under .state/objects
+    let state_root = config.state_dir.join(".state");
     let dirs = [
         config.state_dir.join("auth").join("authorized_keys"),
         config.state_dir.join("db"),
-        config.cas_root.clone(),
+        state_root.join("objects"),
+        state_root.join("refs"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)

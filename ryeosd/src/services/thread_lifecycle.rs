@@ -14,13 +14,13 @@ use crate::state_store::{
 };
 use crate::kind_profiles::KindProfileRegistry;
 use crate::services::event_store::EventStoreService;
-use rye_engine::canonical_ref::CanonicalRef;
-use rye_engine::contracts::{
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
     FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem,
     ThreadTerminalStatus, TrustClass,
 };
-use rye_engine::engine::Engine;
+use ryeos_engine::engine::Engine;
 
 #[derive(Debug, Clone)]
 pub struct ThreadLifecycleService {
@@ -235,7 +235,7 @@ impl ThreadLifecycleService {
     }
 
     pub fn mark_running(&self, thread_id: &str) -> Result<ThreadDetail> {
-        let _persisted = self.state_store.mark_thread_running(thread_id)?;
+        let _persisted = self.state_store.mark_thread_running(thread_id, None)?;
         self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found after mark_running: {thread_id}"))
     }
@@ -632,7 +632,7 @@ pub fn validate_item(
 pub struct SpawnedItem {
     pub pid: u32,
     pub pgid: i64,
-    spawned: rye_engine::dispatch::SpawnedExecution,
+    spawned: ryeos_engine::dispatch::SpawnedExecution,
 }
 
 impl SpawnedItem {
@@ -677,7 +677,7 @@ pub fn spawn_item(
     // Inject extra runtime bindings (e.g. vault env vars) into subprocess nodes
     if !extra_runtime_bindings.is_empty() {
         for node in &mut plan.nodes {
-            if let rye_engine::contracts::PlanNode::DispatchSubprocess {
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess {
                 runtime_bindings, ..
             } = node
             {

@@ -36,9 +36,43 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
         };
 
         let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
-        let response = dispatch(request, &state);
+
+        // maintenance.gc requires async dispatch (run_maintenance_gc is async)
+        let response = if request.method == "maintenance.gc" {
+            dispatch_maintenance_gc(request, &state).await
+        } else {
+            dispatch(request, &state)
+        };
+
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;
+    }
+}
+
+/// Async handler for `maintenance.gc` RPC method.
+///
+/// Routes through the daemon's maintenance GC flow:
+/// lock → quiesce write barrier → GC → resume.
+async fn dispatch_maintenance_gc(request: RpcRequest, state: &AppState) -> RpcResponse {
+    use ryeos_state::gc::GcParams;
+
+    let params: GcParams = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(err) => {
+            return RpcResponse::err(
+                request.request_id,
+                "invalid_params",
+                format!("invalid maintenance.gc params: {}", err),
+            );
+        }
+    };
+
+    match crate::maintenance::run_maintenance_gc(state, &params).await {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(value) => RpcResponse::ok(request.request_id, value),
+            Err(err) => RpcResponse::err(request.request_id, "encode_failed", err.to_string()),
+        },
+        Err(err) => RpcResponse::err(request.request_id, "gc_failed", err.to_string()),
     }
 }
 
@@ -99,10 +133,6 @@ fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
             request.request_id,
             handle_publish_artifact(&request.params, state),
         ),
-        "threads.set_facets" => rpc_result(
-            request.request_id,
-            handle_set_facets(&request.params, state),
-        ),
         "threads.get_facets" => rpc_result(
             request.request_id,
             handle_get_facets(&request.params, state),
@@ -146,7 +176,13 @@ pub fn dispatch_runtime_method(
         "runtime.mark_running" => handle_mark_running(params, state),
         "runtime.request_continuation" => handle_request_continuation(params, state),
         "runtime.publish_artifact" => handle_publish_artifact(params, state),
-        "runtime.set_facets" => handle_set_facets(params, state),
+        "runtime.get_facets" => handle_get_facets(params, state),
+        "runtime.get_thread" => handle_get(params, state),
+        "runtime.submit_command" => handle_submit_command(params, state),
+        "runtime.claim_commands" => handle_claim_commands(params, state),
+        "runtime.complete_command" => handle_complete_command(params, state),
+        "runtime.get_thread_events" => handle_replay_events(params, state),
+        "runtime.attach_process" => handle_attach_process(params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -298,22 +334,6 @@ fn handle_publish_artifact(
         serde_json::from_value(params.clone()).context("invalid artifacts.publish params")?;
     let artifact = state.threads.publish_artifact(&params)?;
     serde_json::to_value(artifact).context("failed to encode artifacts.publish result")
-}
-
-fn handle_set_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let thread_id = params
-        .get("thread_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("missing thread_id"))?;
-    let facets_value = params
-        .get("facets")
-        .ok_or_else(|| anyhow::anyhow!("missing facets"))?;
-    let facets_map: std::collections::HashMap<String, String> =
-        serde_json::from_value(facets_value.clone())
-            .context("facets must be a map of string keys to string values")?;
-    let facets: Vec<(String, String)> = facets_map.into_iter().collect();
-    state.state_store.set_facets(thread_id, &facets)?;
-    Ok(json!({ "ok": true }))
 }
 
 fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {

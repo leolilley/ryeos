@@ -6,15 +6,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use rye_state::StateDb;
-use rye_state::chain::SnapshotUpdate;
-use rye_state::signer::Signer;
-use rye_state::objects::thread_snapshot::ThreadStatus;
-use rye_state::objects::{ThreadEvent, EventDurability, ThreadSnapshot};
-use rye_state::queries;
-use rye_state::projection;
+use ryeos_state::StateDb;
+use ryeos_state::chain::SnapshotUpdate;
+use ryeos_state::signer::Signer;
+use ryeos_state::objects::thread_snapshot::ThreadStatus;
+use ryeos_state::objects::ThreadSnapshot;
+use ryeos_state::queries;
 
 use crate::runtime_db;
+use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{
     RuntimeInfo, CommandRecord, NewCommandRecord,
 };
@@ -162,6 +162,7 @@ struct Inner {
     state_db: StateDb,
     runtime_db: runtime_db::RuntimeDb,
     signer: Arc<dyn Signer>,
+    write_barrier: WriteBarrier,
 }
 
 pub struct StateStore {
@@ -179,7 +180,7 @@ impl std::fmt::Debug for StateStore {
 fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
     let now = lillux::time::iso8601_now();
     ThreadSnapshot {
-        schema: rye_state::objects::SCHEMA_VERSION,
+        schema: ryeos_state::objects::SCHEMA_VERSION,
         kind: "thread_snapshot".to_string(),
         thread_id: thread.thread_id.clone(),
         chain_root_id: thread.chain_root_id.clone(),
@@ -209,13 +210,13 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
     }
 }
 
-fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &str) -> Vec<ThreadEvent> {
+fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &str) -> Vec<ryeos_state::objects::ThreadEvent> {
     let now = lillux::time::iso8601_now();
     events
         .iter()
         .enumerate()
-        .map(|(idx, event)| ThreadEvent {
-            schema: rye_state::objects::SCHEMA_VERSION,
+        .map(|(idx, event)| ryeos_state::objects::ThreadEvent {
+            schema: ryeos_state::objects::SCHEMA_VERSION,
             kind: "thread_event".to_string(),
             chain_root_id: chain_root_id.to_string(),
             chain_seq: 0,
@@ -223,10 +224,10 @@ fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &st
             thread_seq: (idx + 1) as u64,
             event_type: event.event_type.clone(),
             durability: match event.storage_class.as_str() {
-                "indexed" => EventDurability::Durable,
-                "journal" | "journal_only" => EventDurability::Journal,
-                "ephemeral" => EventDurability::Ephemeral,
-                _ => EventDurability::Durable,
+                "indexed" => ryeos_state::objects::EventDurability::Durable,
+                "journal" | "journal_only" => ryeos_state::objects::EventDurability::Journal,
+                "ephemeral" => ryeos_state::objects::EventDurability::Ephemeral,
+                _ => ryeos_state::objects::EventDurability::Durable,
             },
             ts: now.clone(),
             prev_chain_event_hash: None,
@@ -236,7 +237,7 @@ fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &st
         .collect()
 }
 
-fn persisted_from_append(result: &rye_state::AppendResult, events: &[NewEventRecord]) -> Vec<PersistedEventRecord> {
+fn persisted_from_append(result: &ryeos_state::chain::AppendResult, events: &[NewEventRecord]) -> Vec<PersistedEventRecord> {
     result
         .events
         .iter()
@@ -260,6 +261,7 @@ impl StateStore {
         state_root: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
     ) -> Result<Self> {
         std::fs::create_dir_all(&state_root)
             .context("failed to create state_root directory")?;
@@ -272,11 +274,12 @@ impl StateStore {
                 state_db,
                 runtime_db,
                 signer,
+                write_barrier,
             }),
         })
     }
 
-    /// Get the CAS root path for raw CAS access (e.g., project source checkout).
+    /// Get the CAS root path for raw CAS access.
     pub fn cas_root(&self) -> Result<std::path::PathBuf> {
         let g = self.lock()?;
         Ok(g.state_db.cas_root().to_path_buf())
@@ -289,20 +292,18 @@ impl StateStore {
     }
 
     /// Run a closure with access to the underlying StateDb.
-    /// The lock is held for the duration of the closure.
     pub fn with_state_db<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&rye_state::StateDb) -> Result<T>,
+        F: FnOnce(&StateDb) -> Result<T>,
     {
         let g = self.lock()?;
         f(&g.state_db)
     }
 
     /// Run a closure with access to the projection database.
-    /// The lock is held for the duration of the closure.
     pub fn with_projection<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&rye_state::ProjectionDb) -> Result<T>,
+        F: FnOnce(&ryeos_state::ProjectionDb) -> Result<T>,
     {
         let g = self.lock()?;
         f(g.state_db.projection())
@@ -312,10 +313,19 @@ impl StateStore {
         self.inner.lock().map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
     }
 
+    /// Acquire a write permit from the write barrier.
+    /// Fails if the daemon is quiescing for GC.
+    fn acquire_write_permit(&self) -> Result<WritePermit> {
+        let g = self.lock()?;
+        g.write_barrier.try_acquire()
+            .map_err(|e| anyhow!("cannot acquire write permit: {e}"))
+    }
+
     pub fn create_thread(
         &self,
         thread: &NewThreadRecord,
     ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let snapshot = build_snapshot(thread);
 
@@ -330,16 +340,8 @@ impl StateStore {
         g.runtime_db
             .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
 
-        if let Some(ref upstream_thread_id) = thread.upstream_thread_id {
-            projection::project_thread_edge(
-                g.state_db.projection(),
-                &thread.chain_root_id,
-                upstream_thread_id,
-                &thread.thread_id,
-                None,
-                Some("spawned"),
-            )?;
-        }
+        // Edge is derived from snapshot's upstream_thread_id during
+        // project_thread_snapshot (see projection.rs). No direct write needed.
 
         let create_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -364,7 +366,12 @@ impl StateStore {
         Ok(persisted_from_append(&result, &[create_event]))
     }
 
-    pub fn mark_thread_running(&self, thread_id: &str) -> Result<Vec<PersistedEventRecord>> {
+    pub fn mark_thread_running(
+        &self,
+        thread_id: &str,
+        base_project_snapshot_hash: Option<&str>,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
             .state_db
@@ -372,12 +379,15 @@ impl StateStore {
             .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
 
         if thread_row.status != "created" {
-            bail!("invalid status transition: {} -> running", thread_row.status);
+            bail!(
+                "invalid status transition: {} -> running",
+                thread_row.status
+            );
         }
 
         let now = lillux::time::iso8601_now();
         let updated_snapshot = ThreadSnapshot {
-            schema: rye_state::objects::SCHEMA_VERSION,
+            schema: ryeos_state::objects::SCHEMA_VERSION,
             kind: "thread_snapshot".to_string(),
             thread_id: thread_row.thread_id.clone(),
             chain_root_id: thread_row.chain_root_id.clone(),
@@ -390,11 +400,11 @@ impl StateStore {
             origin_site_id: thread_row.origin_site_id.clone(),
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
-            base_project_snapshot_hash: None,
+            base_project_snapshot_hash: base_project_snapshot_hash.map(String::from),
             result_project_snapshot_hash: None,
             created_at: thread_row.created_at.clone(),
             updated_at: now.clone(),
-            started_at: thread_row.started_at.clone().or(Some(now)),
+            started_at: Some(now.clone()),
             finished_at: None,
             result: None,
             error: None,
@@ -434,6 +444,7 @@ impl StateStore {
         thread_id: &str,
         update: &FinalizeThreadRecord,
     ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
             .state_db
@@ -462,7 +473,7 @@ impl StateStore {
         let artifacts_json: Vec<Value> = update.artifacts.iter().map(|a| serde_json::to_value(a).unwrap()).collect();
 
         let updated_snapshot = ThreadSnapshot {
-            schema: rye_state::objects::SCHEMA_VERSION,
+            schema: ryeos_state::objects::SCHEMA_VERSION,
             kind: "thread_snapshot".to_string(),
             thread_id: thread_row.thread_id.clone(),
             chain_root_id: thread_row.chain_root_id.clone(),
@@ -539,6 +550,7 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
             .state_db
@@ -554,7 +566,7 @@ impl StateStore {
 
         let now = lillux::time::iso8601_now();
         let source_snapshot = ThreadSnapshot {
-            schema: rye_state::objects::SCHEMA_VERSION,
+            schema: ryeos_state::objects::SCHEMA_VERSION,
             kind: "thread_snapshot".to_string(),
             thread_id: source_row.thread_id.clone(),
             chain_root_id: source_row.chain_root_id.clone(),
@@ -588,21 +600,20 @@ impl StateStore {
             new_snapshot: source_snapshot,
         };
 
-        let successor_snapshot = build_snapshot(successor);
+        // Ensure successor has upstream_thread_id set to source for edge derivation
+        let mut successor_with_upstream = successor.clone();
+        if successor_with_upstream.upstream_thread_id.is_none() {
+            successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
+        }
+        let successor_snapshot = build_snapshot(&successor_with_upstream);
         g.state_db
             .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
 
         g.runtime_db
             .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
 
-        projection::project_thread_edge(
-            g.state_db.projection(),
-            chain_root_id,
-            source_thread_id,
-            &successor.thread_id,
-            None,
-            reason,
-        )?;
+        // Edge is derived from successor snapshot's upstream_thread_id during
+        // projection (see project_thread_snapshot in rye-state). No direct write needed.
 
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
@@ -716,30 +727,24 @@ impl StateStore {
         thread_id: &str,
         artifact: &NewArtifactRecord,
     ) -> Result<(ThreadArtifactRecord, PersistedEventRecord)> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
             .state_db
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
 
-        projection::project_thread_artifact(
-            g.state_db.projection(),
-            &thread_row.chain_root_id,
-            thread_id,
-            &artifact.artifact_type,
-            artifact.metadata.as_ref(),
-        )?;
-
-        let artifact_id = g.state_db.projection().connection().last_insert_rowid();
+        // Artifact projection is derived from the artifact_published event
+        // during project_event (see projection.rs). No direct write needed.
 
         let event = NewEventRecord {
             event_type: "artifact_published".to_string(),
             storage_class: "indexed".to_string(),
             payload: json!({
-                "artifact_id": artifact_id,
                 "artifact_type": artifact.artifact_type,
                 "uri": artifact.uri,
                 "content_hash": artifact.content_hash,
+                "metadata": artifact.metadata,
             }),
         };
 
@@ -754,6 +759,10 @@ impl StateStore {
 
         let persisted = persisted_from_append(&result, &[event]);
 
+        let artifact_id = persisted.first()
+            .map(|p| p.event_id)
+            .unwrap_or(0);
+
         let record = ThreadArtifactRecord {
             artifact_id,
             artifact_type: artifact.artifact_type.clone(),
@@ -763,14 +772,14 @@ impl StateStore {
         };
 
         let fallback = PersistedEventRecord {
-            event_id: artifact_id,
+            event_id: 0,
             chain_root_id: thread_row.chain_root_id,
             chain_seq: 0,
             thread_id: thread_id.to_string(),
             thread_seq: 0,
             event_type: "artifact_published".to_string(),
             storage_class: "indexed".to_string(),
-                ts: lillux::time::iso8601_now(),
+            ts: lillux::time::iso8601_now(),
             payload: json!({}),
         };
 
@@ -924,6 +933,7 @@ impl StateStore {
         thread_id: &str,
         events: &[NewEventRecord],
     ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let te = convert_events(events, chain_root_id, thread_id);
         let result = g.state_db.append_events(
@@ -994,12 +1004,6 @@ impl StateStore {
             .into_iter()
             .map(|row| (row.key, String::from_utf8_lossy(&row.value).to_string()))
             .collect())
-    }
-
-    pub fn set_facets(&self, thread_id: &str, facets: &[(String, String)]) -> Result<()> {
-        let g = self.lock()?;
-        queries::set_facets(g.state_db.projection(), thread_id, facets)?;
-        Ok(())
     }
 }
 

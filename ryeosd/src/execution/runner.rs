@@ -15,7 +15,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use tokio::task;
 
-use rye_engine::contracts::ExecutionCompletion;
+use ryeos_engine::contracts::ExecutionCompletion;
 
 use crate::state_store::ThreadDetail;
 use crate::services::thread_lifecycle::{
@@ -142,7 +142,7 @@ fn prepare_cas_context(
         let snap_obj = cas
             .get_object(snap_hash)?
             .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-        let snapshot = super::cas_types::ProjectSnapshot::from_json(&snap_obj)?;
+        let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
         let manifest_hash = snapshot.project_manifest_hash.clone();
         guard.track_temp_dir(checkout_dir.clone());
         return Ok((checkout_dir.clone(), Some(manifest_hash), Some(snap_hash.clone())));
@@ -153,11 +153,13 @@ fn prepare_cas_context(
     }
 
     // Live FS — ingest working dir, no checkout
+    let _permit = state.write_barrier.try_acquire()
+        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit for ingest: {e}"))?;
     let cas_root = state.state_store.cas_root()?;
     let items = super::ingest::ingest_directory(&cas_root, project_path)?;
-    let manifest = super::cas_types::SourceManifest { item_source_hashes: items };
+    let manifest = ryeos_state::objects::SourceManifest { item_source_hashes: items };
     let cas = lillux::cas::CasStore::new(cas_root);
-    let manifest_hash = cas.store_object(&manifest.to_json())?;
+    let manifest_hash = cas.store_object(&manifest.to_value())?;
 
     Ok((project_path.to_path_buf(), Some(manifest_hash), None))
 }
@@ -176,7 +178,7 @@ fn checkout_from_snapshot(
     let snap_obj = cas
         .get_object(snap_hash)?
         .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-    let snapshot = super::cas_types::ProjectSnapshot::from_json(&snap_obj)?;
+    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
 
     let manifest_hash = snapshot.project_manifest_hash.clone();
     let exec_dir = state.config.state_dir.join("executions").join(thread_id);
@@ -218,6 +220,15 @@ fn post_execution_foldback(
         }
     };
     let working_dir = execution_dir.unwrap_or(project_path);
+
+    // Acquire write barrier for CAS mutations (fold-back + head advance)
+    let _permit = match state.write_barrier.try_acquire() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot acquire CAS write permit for fold-back, skipping");
+            return;
+        }
+    };
 
     // Fold back changes
     let output_manifest_hash =
@@ -334,7 +345,7 @@ pub async fn run_inline(
     // Update project context if CAS checkout changed the path
     if effective_path != params.project_path {
         params.resolved.plan_context.project_context =
-            rye_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
+            ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
 
     // Spawn
@@ -459,7 +470,7 @@ pub async fn run_detached(
     // Update project context if CAS checkout changed the path
     if effective_path != params.project_path {
         params.resolved.plan_context.project_context =
-            rye_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
+            ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
 
     // Capture thread details before moving guard

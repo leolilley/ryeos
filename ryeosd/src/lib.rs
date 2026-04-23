@@ -5,3 +5,4 @@ pub mod runtime_db;
 pub mod state_store;
 pub mod identity;
 pub mod services;
+pub mod write_barrier;

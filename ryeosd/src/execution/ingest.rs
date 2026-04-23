@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use lillux::cas::{sha256_hex, CasStore};
 
-use super::cas_types::ItemSource;
+use ryeos_state::objects::ItemSource;
 
 pub struct IngestResult {
     pub blob_hash: String,
@@ -29,7 +29,7 @@ pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<
         integrity: integrity.clone(),
         signature_info,
     };
-    let object_hash = cas.store_object(&source.to_json())?;
+    let object_hash = cas.store_object(&source.to_value())?;
 
     Ok(IngestResult {
         blob_hash,

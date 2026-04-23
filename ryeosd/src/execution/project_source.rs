@@ -92,7 +92,7 @@ pub fn resolve_project_context(
             let snap_obj = cas
                 .get_object(&snap_hash)?
                 .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-            let snapshot = super::cas_types::ProjectSnapshot::from_json(&snap_obj)?;
+            let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
 
             let manifest_hash = &snapshot.project_manifest_hash;
             let exec_dir = state

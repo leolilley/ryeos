@@ -6,7 +6,6 @@
 
 pub mod cache;
 pub mod callback_token;
-pub mod cas_types;
 pub mod ingest;
 pub mod launch;
 pub mod launch_envelope;
@@ -23,8 +22,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use lillux::cas::{CasStore, sha256_hex};
-use rye_state::signer::Signer;
-use self::cas_types::SourceManifest;
+use ryeos_state::signer::Signer;
+use ryeos_state::objects::SourceManifest;
 
 use self::cache::MaterializationCache;
 
@@ -61,7 +60,7 @@ pub fn checkout_project(
         .get_object(manifest_hash)?
         .ok_or_else(|| anyhow::anyhow!("manifest {manifest_hash} not found"))?;
 
-    let manifest = SourceManifest::from_json(&manifest_obj)?;
+    let manifest = SourceManifest::from_value(&manifest_obj)?;
 
     // Determine materialization target: stage into cache if available, else direct
     let materialize_dir = if let Some(cache) = mat_cache {
@@ -138,7 +137,7 @@ pub fn fold_back_outputs(
     let pre_manifest_obj = cas
         .get_object(pre_manifest_hash)?
         .ok_or_else(|| anyhow::anyhow!("pre-manifest {pre_manifest_hash} not found"))?;
-    let pre_manifest = SourceManifest::from_json(&pre_manifest_obj)?;
+    let pre_manifest = SourceManifest::from_value(&pre_manifest_obj)?;
 
     // Build pre-execution integrity map: rel_path → integrity hash
     let mut pre_integrity: HashMap<String, String> = HashMap::new();
@@ -172,7 +171,7 @@ pub fn fold_back_outputs(
 
     // Create new manifest
     let new_manifest = SourceManifest { item_source_hashes: new_items };
-    let new_hash = cas.store_object(&new_manifest.to_json())?;
+    let new_hash = cas.store_object(&new_manifest.to_value())?;
 
     tracing::debug!(
         old_hash = pre_manifest_hash,
@@ -197,16 +196,16 @@ pub fn advance_after_foldback(
 ) -> Result<String> {
     let cas = CasStore::new(cas_root.to_path_buf());
     let now = lillux::time::iso8601_now();
-    let snapshot = self::cas_types::ProjectSnapshot {
+    let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: new_manifest_hash.to_string(),
         user_manifest_hash: None,
         parent_hashes: vec![current_snapshot_hash.to_string()],
         created_at: now,
         source: "fold-back".to_string(),
     };
-    let new_snapshot_hash = cas.store_object(&snapshot.to_json())?;
+    let new_snapshot_hash = cas.store_object(&snapshot.to_value())?;
 
-    rye_state::refs::write_project_head_ref(
+    ryeos_state::refs::write_project_head_ref(
         refs_root,
         project_path_hash,
         &new_snapshot_hash,

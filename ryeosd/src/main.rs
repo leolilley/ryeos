@@ -6,6 +6,7 @@ mod engine_init;
 mod execution;
 mod identity;
 mod kind_profiles;
+mod maintenance;
 mod policy;
 mod process;
 mod reconcile;
@@ -14,6 +15,7 @@ mod services;
 mod state;
 mod state_store;
 mod uds;
+mod write_barrier;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -80,7 +82,9 @@ async fn main() -> Result<()> {
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     
-    let state_store = Arc::new(state_store::StateStore::new(state_root, runtime_db_path, signer)
+    let write_barrier = crate::write_barrier::WriteBarrier::new();
+    
+    let state_store = Arc::new(state_store::StateStore::new(state_root, runtime_db_path, signer, write_barrier.clone())
         .context("StateStore initialization failed")?);
     tracing::info!("StateStore initialized successfully");
     
@@ -104,6 +108,7 @@ async fn main() -> Result<()> {
         events,
         commands,
         callback_tokens,
+        write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
     };
@@ -123,6 +128,23 @@ async fn main() -> Result<()> {
 
     std::env::set_var("RYEOSD_SOCKET_PATH", &config.uds_path);
     std::env::set_var("RYEOSD_URL", format!("http://{}", config.bind));
+
+    // Write daemon.json so tools can discover the daemon.
+    // This is the discovery contract — fail if we can't write it.
+    let daemon_info = serde_json::json!({
+        "pid": std::process::id(),
+        "socket": config.uds_path.display().to_string(),
+        "started_at": lillux::time::iso8601_now(),
+    });
+    let daemon_json_path = config.state_dir.join("daemon.json");
+    std::fs::write(
+        &daemon_json_path,
+        serde_json::to_string_pretty(&daemon_info)?,
+    )
+    .with_context(|| format!(
+        "failed to write daemon.json at {} — tools cannot discover the daemon without it",
+        daemon_json_path.display()
+    ))?;
 
     #[cfg(unix)]
     {
@@ -148,6 +170,9 @@ async fn main() -> Result<()> {
 
     // Drain running threads on shutdown
     drain_running_threads(&app_state);
+
+    // Cleanup daemon.json
+    let _ = std::fs::remove_file(&daemon_json_path);
 
     if config.uds_path.exists() {
         let _ = std::fs::remove_file(&config.uds_path);

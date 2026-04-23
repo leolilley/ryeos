@@ -1,6 +1,6 @@
 //! Engine initialization for ryeosd.
 //!
-//! Constructs a `rye_engine::engine::Engine` at daemon startup using
+//! Constructs a `ryeos_engine::engine::Engine` at daemon startup using
 //! the daemon's config-driven system data directory and user space.
 //! The engine crate is kind-agnostic — all kind definitions come from
 //! `*.kind-schema.yaml` files found under `{AI_DIR}/config/engine/kinds/`.
@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use directories::BaseDirs;
 
-use rye_engine::engine::Engine;
-use rye_engine::executor_registry::{ExecutorRegistry, SubprocessDispatch};
-use rye_engine::kind_registry::KindRegistry;
-use rye_engine::metadata::MetadataParserRegistry;
-use rye_engine::trust::TrustStore;
+use ryeos_engine::engine::Engine;
+use ryeos_engine::executor_registry::{ExecutorRegistry, SubprocessDispatch};
+use ryeos_engine::kind_registry::KindRegistry;
+use ryeos_engine::metadata::MetadataParserRegistry;
+use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
 
@@ -42,14 +42,14 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
     let mut schema_roots = Vec::new();
 
     for root in &system_roots {
-        let kinds_dir = root.join(rye_engine::AI_DIR).join(rye_engine::KIND_SCHEMAS_DIR);
+        let kinds_dir = root.join(ryeos_engine::AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
         if kinds_dir.is_dir() {
             schema_roots.push(kinds_dir);
         }
     }
 
     if let Some(ref ur) = user_root {
-        let user_kinds = ur.join(rye_engine::AI_DIR).join(rye_engine::KIND_SCHEMAS_DIR);
+        let user_kinds = ur.join(ryeos_engine::AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
         if user_kinds.is_dir() {
             schema_roots.push(user_kinds);
         }
@@ -76,7 +76,7 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
 
     // 5. Load kind registry from filesystem (requires trust store for verification)
     let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", rye_engine::AI_DIR, rye_engine::KIND_SCHEMAS_DIR);
+        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
     } else {
         KindRegistry::load_base(&schema_roots, &trust_store).context("failed to load kind schemas")?
     };

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use rye_engine::engine::Engine;
+use ryeos_engine::engine::Engine;
 
 use crate::config::Config;
 use crate::execution::callback_token::CallbackCapabilityStore;
@@ -12,6 +12,7 @@ use crate::state_store::StateStore;
 use crate::services::command_service::CommandService;
 use crate::services::event_store::EventStoreService;
 use crate::services::thread_lifecycle::ThreadLifecycleService;
+use crate::write_barrier::WriteBarrier;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +24,7 @@ pub struct AppState {
     pub events: Arc<EventStoreService>,
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
+    pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,
 }

@@ -34,9 +34,6 @@ pub struct Cli {
     pub uds_path: Option<PathBuf>,
 
     #[arg(long)]
-    pub cas_root: Option<PathBuf>,
-
-    #[arg(long)]
     pub system_data_dir: Option<PathBuf>,
 
     /// Additional bundle roots (ordered, first match wins for kind schema conflicts)
@@ -69,7 +66,6 @@ pub struct Config {
     pub uds_path: PathBuf,
     pub state_dir: PathBuf,
     pub signing_key_path: PathBuf,
-    pub cas_root: PathBuf,
     pub system_data_dir: PathBuf,
     /// Additional bundle roots beyond system_data_dir (ordered, first match wins).
     pub bundle_roots: Vec<PathBuf>,
@@ -84,7 +80,6 @@ struct PartialConfig {
     uds_path: Option<PathBuf>,
     state_dir: Option<PathBuf>,
     signing_key_path: Option<PathBuf>,
-    cas_root: Option<PathBuf>,
     system_data_dir: Option<PathBuf>,
     #[serde(default)]
     bundle_roots: Vec<PathBuf>,
@@ -140,11 +135,6 @@ impl Config {
                 .as_ref()
                 .and_then(|cfg| cfg.signing_key_path.clone())
                 .unwrap_or_else(|| state_dir.join("identity").join("node-key.pem")),
-            cas_root: cli
-                .cas_root
-                .clone()
-                .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.cas_root.clone()))
-                .unwrap_or_else(|| state_dir.join("cas")),
             system_data_dir: env::var_os("RYE_SYSTEM_SPACE")
                 .map(PathBuf::from)
                 .or_else(|| cli.system_data_dir.clone())
@@ -231,7 +221,6 @@ impl Config {
                     let home = base_dirs.home_dir();
                     home.join(".ai/config/keys/signing/private_key.pem")
                 }),
-            cas_root: state_dir.join("cas"),
             system_data_dir: data_dir,
             bundle_roots: Vec::new(),
             require_auth: false,
