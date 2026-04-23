@@ -1196,6 +1196,7 @@ async def resolve_execution(
             thread=body.get("thread") or "inline",
             secret_envelope=binding.get("secret_envelope"),
             vault_keys=binding.get("vault_keys") or None,
+            fire_and_forget=bool(body.get("async", False)),
         )
 
     # Signed-request path — caller controls everything
