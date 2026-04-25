@@ -100,7 +100,7 @@ impl RuntimeDb {
     #[tracing::instrument(
         name = "state:thread_attach",
         skip(self, launch_metadata),
-        fields(thread_id, pid, pgid)
+        fields(thread_id = %thread_id, pid = pid, pgid = pgid)
     )]
     pub fn attach_process(
         &self,
@@ -206,7 +206,7 @@ impl RuntimeDb {
     #[tracing::instrument(
         name = "state:resume_attempts_bump",
         skip(self),
-        fields(thread_id, attempt = tracing::field::Empty)
+        fields(thread_id = %thread_id, attempt = tracing::field::Empty)
     )]
     pub fn bump_resume_attempts(&self, thread_id: &str) -> Result<u32> {
         let updated = self.conn.execute(

@@ -94,6 +94,7 @@ fn build_engine_against_bundle() -> Engine {
 
 #[test]
 fn daemon_executes_python_hello_world_end_to_end() {
+    ryeos_tracing::test::prime_callsites();
     let engine = build_engine_against_bundle();
     let project_dir = synth_project_with_hello();
 
@@ -194,3 +195,99 @@ fn daemon_executes_python_hello_world_end_to_end() {
         "expected 'hello world' in captured stdout, got {stdout_text:?}"
     );
 }
+
+/// Trace-capture test: the engine's resolve → verify → build_plan
+/// path produces a structured `engine:*` span tree, and the runtime
+/// handler pipeline running inside `build_plan` emits per-handler
+/// spans (`engine:env_config`, `engine:config_resolve`, etc.) under it.
+///
+/// Sibling test [`daemon_executes_python_hello_world_end_to_end`]
+/// exercises the same engine code paths without a capture subscriber;
+/// without [`prime_callsites`] this test would flake when run in
+/// parallel because callsite interest would cache as `Interest::never`
+/// before the per-thread capture subscriber gets installed.
+#[test]
+fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
+    ryeos_tracing::test::prime_callsites();
+    let engine = build_engine_against_bundle();
+    let project_dir = synth_project_with_hello();
+
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test".into(),
+            scopes: vec!["execute".into()],
+        }),
+        project_context: ProjectContext::LocalPath {
+            path: project_dir.clone(),
+        },
+        current_site_id: "site:test".into(),
+        origin_site_id: "site:test".into(),
+        execution_hints: ExecutionHints::default(),
+        validate_only: false,
+    };
+    let item = CanonicalRef::parse("tool:hello").expect("canonical ref parses");
+
+    let (_, spans) = ryeos_tracing::test::capture_traces(|| {
+        let resolved = engine.resolve(&plan_ctx, &item).expect("resolve");
+        let verified = engine.verify(&plan_ctx, resolved).expect("verify");
+        let _plan = engine
+            .build_plan(
+                &plan_ctx,
+                &verified,
+                &serde_json::Value::Null,
+                &plan_ctx.execution_hints,
+            )
+            .expect("build_plan");
+    });
+
+    let _ = fs::remove_dir_all(&project_dir);
+
+    fn collect_names(s: &ryeos_tracing::test::RecordedSpan, out: &mut Vec<String>) {
+        out.push(s.name.clone());
+        for c in &s.children {
+            collect_names(c, out);
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    for s in &spans {
+        collect_names(s, &mut names);
+    }
+
+    let resolve_span = ryeos_tracing::test::find_span(&spans, "engine:resolve_ref")
+        .unwrap_or_else(|| panic!("expected engine:resolve_ref in {:?}", names));
+    assert_eq!(
+        resolve_span.field("ref"),
+        Some("tool:hello"),
+        "engine:resolve_ref should carry the original ref field"
+    );
+
+    let verify_span = ryeos_tracing::test::find_span(&spans, "engine:verify_item")
+        .unwrap_or_else(|| panic!("expected engine:verify_item in {:?}", names));
+    assert!(
+        verify_span.field("canonical_ref").is_some(),
+        "engine:verify_item should carry canonical_ref"
+    );
+
+    let build_plan_span = ryeos_tracing::test::find_span(&spans, "engine:build_plan")
+        .unwrap_or_else(|| panic!("expected engine:build_plan in {:?}", names));
+    assert!(
+        build_plan_span.field("canonical_ref").is_some(),
+        "engine:build_plan should carry canonical_ref"
+    );
+
+    // The python script chain declares config_resolve + env_config +
+    // verify_deps + config (runtime_config). At least one per-handler
+    // span must appear as a descendant of build_plan.
+    let handler_present = ryeos_tracing::test::find_span(&spans, "engine:env_config")
+        .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:config_resolve"))
+        .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:runtime_config"))
+        .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:verify_deps"))
+        .is_some();
+    assert!(
+        handler_present,
+        "expected at least one engine:* handler span; got {:?}",
+        names
+    );
+}
+
+

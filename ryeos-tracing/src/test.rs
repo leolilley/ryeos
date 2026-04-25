@@ -321,6 +321,49 @@ impl tracing::field::Visit for EventFieldRecorder<'_> {
     }
 }
 
+// ── Callsite-interest priming ───────────────────────────────────────────
+
+/// Install a no-op global subscriber once per process so that
+/// `tracing` callsites first-hit on a thread with NO dispatcher do
+/// not get cached as `Interest::Never`.
+///
+/// # Why this exists
+///
+/// `tracing` caches per-callsite interest globally based on which
+/// dispatchers have been queried. When a callsite is hit on a thread
+/// with no per-thread dispatcher and no global subscriber, only the
+/// implicit `NoSubscriber` is queried — it returns `Interest::never`,
+/// and the cache is sealed. A later [`capture_traces`] on a *different*
+/// thread will install a per-thread subscriber, but the callsite cache
+/// is unaware and silently skips dispatch.
+///
+/// This shows up in integration-test binaries that mix tests using
+/// `capture_traces` with tests that exercise the same code paths
+/// without it. Symptom: spans show up reliably when the capturing
+/// test is run alone, but disappear when run in parallel with sibling
+/// tests.
+///
+/// # Usage
+///
+/// Call `prime_callsites()` from EVERY test in the binary that
+/// touches the same span callsites — both the capturing tests and
+/// the sibling tests that exercise the same code without capturing.
+/// The function uses [`std::sync::Once`] internally and is cheap to
+/// call repeatedly.
+pub fn prime_callsites() {
+    use std::sync::Once;
+    use tracing::subscriber::set_global_default;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Registry;
+    static PRIMED: Once = Once::new();
+    PRIMED.call_once(|| {
+        let subscriber = Registry::default().with(
+            tracing_subscriber::fmt::layer().with_writer(std::io::sink),
+        );
+        let _ = set_global_default(subscriber);
+    });
+}
+
 // ── Public capture entry points ─────────────────────────────────────────
 
 /// Run a closure with a capture subscriber installed on the current thread,
