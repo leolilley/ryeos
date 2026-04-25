@@ -713,6 +713,20 @@ pub async fn run_detached(
 /// `mark_running` after attach so `drain_running_threads` (which
 /// only queries `["running"]`) can reach the live child on shutdown.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    name = "thread:dispatch",
+    skip(
+        bg_state, bg_chain_root_id, bg_resolved, bg_engine, bg_vault,
+        bg_acting_principal, bg_pre_manifest_hash, bg_base_snapshot_hash,
+        bg_project_path, bg_temp_dir, bg_state_root, prior_status_for_mark_running
+    ),
+    fields(
+        thread_id = %bg_thread_id,
+        item_ref = %bg_resolved.item_ref,
+        is_resume,
+        prior_status = tracing::field::Empty,
+    )
+)]
 async fn dispatch_detached_bg_task(
     bg_state: AppState,
     bg_thread_id: String,
@@ -729,6 +743,9 @@ async fn dispatch_detached_bg_task(
     is_resume: bool,
     prior_status_for_mark_running: Option<String>,
 ) {
+    if let Some(ref s) = prior_status_for_mark_running {
+        tracing::Span::current().record("prior_status", &s.as_str());
+    }
     let log_phase = if is_resume { "resume" } else { "detached" };
     let attach_outcome_code = if is_resume {
         "resume_attach_failed"
@@ -997,6 +1014,16 @@ pub fn execution_params_from_resume_context(
 /// Resume promises *bounded* duplicates after crash, NOT exactly-once
 /// semantics. See `docs/future/RESUME-ADVANCED-PATH.md`
 /// (Evolution 2 — supervisor side-car) for the trade-off discussion.
+#[tracing::instrument(
+    name = "thread:resume",
+    skip(state, params),
+    fields(
+        thread_id = %thread_id,
+        chain_root_id = %chain_root_id,
+        item_ref = %params.resolved.item_ref,
+        prior_status = %prior_status,
+    )
+)]
 pub async fn run_existing_detached(
     state: AppState,
     thread_id: String,

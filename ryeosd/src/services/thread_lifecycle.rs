@@ -728,6 +728,17 @@ impl SpawnedItem {
 /// daemon can persist it for the resume path. When `is_resume = true`,
 /// `RYE_RESUME=1` is also injected so replay-aware tools can branch
 /// on cold-start vs. resume.
+#[tracing::instrument(
+    name = "thread:spawn",
+    skip(engine, resolved, extra_runtime_bindings, thread_state_dir, original_snapshot_hash),
+    fields(
+        thread_id,
+        chain_root_id,
+        item_ref = %resolved.item_ref,
+        is_resume,
+        snapshot_pinned = original_snapshot_hash.is_some(),
+    )
+)]
 pub fn spawn_item(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,

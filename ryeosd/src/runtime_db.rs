@@ -97,6 +97,11 @@ impl RuntimeDb {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "state:thread_attach",
+        skip(self, launch_metadata),
+        fields(thread_id, pid, pgid)
+    )]
     pub fn attach_process(
         &self,
         thread_id: &str,
@@ -198,6 +203,11 @@ impl RuntimeDb {
     /// thread and return the post-increment value. Used by
     /// `reconcile.rs` BEFORE re-spawning so a crash mid-resume does
     /// not grant an infinite retry loop.
+    #[tracing::instrument(
+        name = "state:resume_attempts_bump",
+        skip(self),
+        fields(thread_id, attempt = tracing::field::Empty)
+    )]
     pub fn bump_resume_attempts(&self, thread_id: &str) -> Result<u32> {
         let updated = self.conn.execute(
             "UPDATE thread_runtime
