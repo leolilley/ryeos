@@ -292,20 +292,40 @@ pub struct MaterializationRequirement {
     pub ref_string: String,
 }
 
+/// Normalized subprocess specification — the single source of truth for
+/// what to spawn. Compiled from the executor chain's runtime config by
+/// the plan builder. The dispatch layer just runs this struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubprocessSpec {
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub stdin_data: Option<String>,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_timeout_secs() -> u64 {
+    300
+}
+
 /// A node in the execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "node_type", rename_all = "snake_case")]
 pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
-        script_path: PathBuf,
-        interpreter: Option<String>,
-        working_directory: Option<PathBuf>,
-        environment: HashMap<String, String>,
-        arguments: Vec<String>,
-        /// Daemon-injected env vars declared by the engine, filled at execution time.
+        /// The fully resolved subprocess specification.
+        spec: SubprocessSpec,
+        /// Audit: the root item's source path.
         #[serde(default)]
-        runtime_bindings: HashMap<String, String>,
+        tool_path: Option<PathBuf>,
+        /// Audit: executor IDs traversed during chain resolution.
+        #[serde(default)]
+        executor_chain: Vec<String>,
     },
     SpawnChild {
         id: PlanNodeId,

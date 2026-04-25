@@ -17,22 +17,22 @@
 
 ### 1.2 What We Have
 
-| Metric | Value |
-|---|---|
-| `tracing` dependency | 7 of 8 crates (all except `lillux`) |
+| Metric                          | Value                                                                        |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| `tracing` dependency            | 7 of 8 crates (all except `lillux`)                                          |
 | `tracing-subscriber` dependency | 4 crates (ryeosd, ryeos-graph-runtime, ryeos-directive-runtime, ryeos-tools) |
-| Total tracing macro calls | 119 (`info!` 50, `debug!` 31, `warn!` 24, `error!` 11, `trace!` 3) |
-| Other logging frameworks | None — tracing is the sole framework |
+| Total tracing macro calls       | 119 (`info!` 50, `debug!` 31, `warn!` 24, `error!` 11, `trace!` 3)           |
+| Other logging frameworks        | None — tracing is the sole framework                                         |
 
 ### 1.3 What We're Missing
 
-| Gap | Severity | Impact |
-|---|---|---|
-| Zero `#[tracing::instrument]` annotations | **Critical** | No structured spans anywhere. All 119 calls are bare events with no parent-child hierarchy. Impossible to correlate events across the execution path of a single directive or thread. |
-| `trace!` nearly empty (3 calls) | **High** | Finest-grained debug level is essentially dead. No way to trace hot loops, interpolation, signature verification, or other low-level operations without modifying code. |
-| No shared subscriber configuration | **High** | Each binary initializes its own subscriber independently. No unified filter config, no structured output format, no way for users to control verbosity. |
-| 5 of 7 `rye-tools` binaries have no tracing | **Medium** | `rye-status`, `rye-verify`, `rye-sign`, `rye-rebuild`, `rye-bundle` are silent. When a CLI tool misbehaves, there's nothing to look at. |
-| `ryeos-tools` lib has 1 test | **Low** | Testing gap, not tracing gap, but relevant — hard to verify tracing works if the test harness is thin. |
+| Gap                                         | Severity     | Impact                                                                                                                                                                                |
+| ------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Zero `#[tracing::instrument]` annotations   | **Critical** | No structured spans anywhere. All 119 calls are bare events with no parent-child hierarchy. Impossible to correlate events across the execution path of a single directive or thread. |
+| `trace!` nearly empty (3 calls)             | **High**     | Finest-grained debug level is essentially dead. No way to trace hot loops, interpolation, signature verification, or other low-level operations without modifying code.               |
+| No shared subscriber configuration          | **High**     | Each binary initializes its own subscriber independently. No unified filter config, no structured output format, no way for users to control verbosity.                               |
+| 5 of 7 `rye-tools` binaries have no tracing | **Medium**   | `rye-status`, `rye-verify`, `rye-sign`, `rye-rebuild`, `rye-bundle` are silent. When a CLI tool misbehaves, there's nothing to look at.                                               |
+| `ryeos-tools` lib has 1 test                | **Low**      | Testing gap, not tracing gap, but relevant — hard to verify tracing works if the test harness is thin.                                                                                |
 
 ### 1.4 Per-Crate Distribution
 
@@ -120,7 +120,7 @@ session                                                    ← top-level binary 
 
 ### 2.3 How This Works
 
-Once `#[tracing::instrument]` is on the hot-path functions, every event emitted inside them automatically inherits the span context. The existing 119 `info!`/`debug!`/`warn!`/`error!` calls become *enriched* — they gain directive_id, thread_id, tool_name without any changes to the event calls themselves.
+Once `#[tracing::instrument]` is on the hot-path functions, every event emitted inside them automatically inherits the span context. The existing 119 `info!`/`debug!`/`warn!`/`error!` calls become _enriched_ — they gain directive_id, thread_id, tool_name without any changes to the event calls themselves.
 
 This is why instrument annotations are Tier 1: they multiply the value of every existing tracing call at zero marginal cost per event.
 
@@ -130,14 +130,14 @@ This is why instrument annotations are Tier 1: they multiply the value of every 
 - **Use `snake_case`** for all field names (Rust convention, matches tracing ecosystem).
 - **Standard fields per span type:**
 
-| Span Type | Required Fields |
-|---|---|
-| `directive::*` | `directive_id` |
-| `thread::*` | `thread_id`, optionally `parent_thread_id` |
-| `tool::*` | `tool_name` |
-| `graph::*` | `node_id`, `node_type` |
-| `state::*` | `key` or `artifact_type` |
-| `provider::*` | `adapter_type`, `model` |
+| Span Type      | Required Fields                            |
+| -------------- | ------------------------------------------ |
+| `directive::*` | `directive_id`                             |
+| `thread::*`    | `thread_id`, optionally `parent_thread_id` |
+| `tool::*`      | `tool_name`                                |
+| `graph::*`     | `node_id`, `node_type`                     |
+| `state::*`     | `key` or `artifact_type`                   |
+| `provider::*`  | `adapter_type`, `model`                    |
 
 - **`elapsed_ms`** on spans that represent measurable work (tool:execute, provider:request, graph:step).
 - **`skip(self)`** on all `#[tracing::instrument]` annotations — never log the entire struct.
@@ -199,6 +199,7 @@ pub fn init_subscriber(config: SubscriberConfig) { ... }
 ```
 
 Key design decisions:
+
 - **`RUST_LOG`** as the primary filter mechanism — standard Rust ecosystem convention.
 - **`RYE_TRACE_JSON`** env var toggle for structured output — useful for log aggregation.
 - Each binary calls `init_subscriber()` early in `main()`.
@@ -285,65 +286,65 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 ### 4.1 Tier 1: Critical Path (est. 25-30 annotations)
 
-These are the functions on the execution hot path. Adding instrument here enriches *all* downstream events.
+These are the functions on the execution hot path. Adding instrument here enriches _all_ downstream events.
 
 **Priority order — do these first:**
 
 #### `ryeosd` — Execution Runner & Bootstrap
 
-| File | Function | Span Name | Notes |
-|---|---|---|---|
-| `execution/runner.rs` | `run_thread_loop` | `thread:execute` | The core LLM loop — highest value single annotation |
-| `execution/runner.rs` | `invoke_tool` | `tool:execute` | Tool invocation boundary |
-| `execution/runner.rs` | `resolve_tool` | `tool:resolve` | Tool lookup from disk |
-| `execution/mod.rs` | `execute_directive` | `directive:execute` | Top-level directive entry |
-| `bootstrap.rs` | `bootstrap` | `engine:lifecycle` | Startup sequence |
-| `engine_init.rs` | `init_engine` | `engine:lifecycle` | Engine initialization |
-| `reconcile.rs` | `reconcile_state` | `state:reconcile` | State reconciliation loop |
+| File                  | Function            | Span Name           | Notes                                               |
+| --------------------- | ------------------- | ------------------- | --------------------------------------------------- |
+| `execution/runner.rs` | `run_thread_loop`   | `thread:execute`    | The core LLM loop — highest value single annotation |
+| `execution/runner.rs` | `invoke_tool`       | `tool:execute`      | Tool invocation boundary                            |
+| `execution/runner.rs` | `resolve_tool`      | `tool:resolve`      | Tool lookup from disk                               |
+| `execution/mod.rs`    | `execute_directive` | `directive:execute` | Top-level directive entry                           |
+| `bootstrap.rs`        | `bootstrap`         | `engine:lifecycle`  | Startup sequence                                    |
+| `engine_init.rs`      | `init_engine`       | `engine:lifecycle`  | Engine initialization                               |
+| `reconcile.rs`        | `reconcile_state`   | `state:reconcile`   | State reconciliation loop                           |
 
 #### `ryeos-directive-runtime` — Provider Adapter Boundary
 
-| File | Function | Span Name | Notes |
-|---|---|---|---|
-| `dispatcher.rs` | `dispatch` | `directive:execute` | Directive dispatch entry |
-| `provider_adapter/http.rs` | `send_request` (impl) | `provider:request` | HTTP adapter — highest-value trait impl |
-| `provider_adapter/streaming.rs` | `stream_response` (impl) | `provider:request` | Streaming adapter |
-| `provider_adapter/messages.rs` | `build_messages` (impl) | `provider:build_messages` | Message construction |
+| File                            | Function                 | Span Name                 | Notes                                   |
+| ------------------------------- | ------------------------ | ------------------------- | --------------------------------------- |
+| `dispatcher.rs`                 | `dispatch`               | `directive:execute`       | Directive dispatch entry                |
+| `provider_adapter/http.rs`      | `send_request` (impl)    | `provider:request`        | HTTP adapter — highest-value trait impl |
+| `provider_adapter/streaming.rs` | `stream_response` (impl) | `provider:request`        | Streaming adapter                       |
+| `provider_adapter/messages.rs`  | `build_messages` (impl)  | `provider:build_messages` | Message construction                    |
 
 #### `ryeos-graph-runtime` — Graph Execution
 
-| File | Function | Span Name | Notes |
-|---|---|---|---|
-| `dispatch.rs` | `dispatch_node` | `graph:step` | Single graph node execution |
-| `hooks.rs` | `run_hook` | `graph:hook` | Hook execution within a step |
-| `main.rs` | `run_graph` | `graph:execute` | Top-level graph entry |
+| File          | Function        | Span Name       | Notes                        |
+| ------------- | --------------- | --------------- | ---------------------------- |
+| `dispatch.rs` | `dispatch_node` | `graph:step`    | Single graph node execution  |
+| `hooks.rs`    | `run_hook`      | `graph:hook`    | Hook execution within a step |
+| `main.rs`     | `run_graph`     | `graph:execute` | Top-level graph entry        |
 
 #### `ryeos-state` — State Operations
 
-| File | Function | Span Name | Notes |
-|---|---|---|---|
-| `chain_state.rs` | `apply_event` | `state:apply` | Event application to chain |
-| `chain.rs` | `append` | `state:append` | Chain append operation |
+| File             | Function      | Span Name      | Notes                      |
+| ---------------- | ------------- | -------------- | -------------------------- |
+| `chain_state.rs` | `apply_event` | `state:apply`  | Event application to chain |
+| `chain.rs`       | `append`      | `state:append` | Chain append operation     |
 
 ### 4.2 Tier 2: State & CLI Tools (est. 30-40 annotations)
 
 #### `ryeos-state` — Deeper Instrumentation
 
-| File | Function | Span Name |
-|---|---|---|
-| `head_cache.rs` | `get` / `invalidate` | `state:cache_get` / `state:cache_invalidate` |
-| `thread_snapshot.rs` | `snapshot` / `restore` | `state:snapshot` / `state:restore` |
-| `thread_event.rs` | `record` | `state:record_event` |
-| `artifact.rs` | `store` / `load` | `state:artifact_store` / `state:artifact_load` |
+| File                 | Function               | Span Name                                      |
+| -------------------- | ---------------------- | ---------------------------------------------- |
+| `head_cache.rs`      | `get` / `invalidate`   | `state:cache_get` / `state:cache_invalidate`   |
+| `thread_snapshot.rs` | `snapshot` / `restore` | `state:snapshot` / `state:restore`             |
+| `thread_event.rs`    | `record`               | `state:record_event`                           |
+| `artifact.rs`        | `store` / `load`       | `state:artifact_store` / `state:artifact_load` |
 
 #### `ryeos-engine` — Lifecycle & Trust
 
-| File | Function | Span Name |
-|---|---|---|
-| `lifecycle.rs` | `start` / `stop` / `reload` | `engine:lifecycle` |
-| `trust.rs` | `verify_signature` / `check_trust_chain` | `engine:trust_verify` |
-| `canonical_ref.rs` | `resolve` | `engine:resolve_ref` |
-| `kind_registry.rs` | `register` / `lookup` | `engine:registry_op` |
+| File               | Function                                 | Span Name             |
+| ------------------ | ---------------------------------------- | --------------------- |
+| `lifecycle.rs`     | `start` / `stop` / `reload`              | `engine:lifecycle`    |
+| `trust.rs`         | `verify_signature` / `check_trust_chain` | `engine:trust_verify` |
+| `canonical_ref.rs` | `resolve`                                | `engine:resolve_ref`  |
+| `kind_registry.rs` | `register` / `lookup`                    | `engine:registry_op`  |
 
 #### `ryeos-tools` — CLI Binary Instrumentation
 
@@ -358,15 +359,15 @@ fn main() {
 
 Plus instrument on the primary work function in each:
 
-| Binary | Function to Instrument | Span Name |
-|---|---|---|
-| `rye-fetch` | `fetch_item` | `tool:fetch` |
-| `rye-sign` | `sign_item` | `tool:sign` |
-| `rye-verify` | `verify_item` | `tool:verify` |
-| `rye-status` | `show_status` | `tool:status` |
-| `rye-gc` | `collect_garbage` | `tool:gc` |
-| `rye-rebuild` | `rebuild_state` | `tool:rebuild` |
-| `rye-bundle` | `bundle_items` | `tool:bundle` |
+| Binary        | Function to Instrument | Span Name      |
+| ------------- | ---------------------- | -------------- |
+| `rye-fetch`   | `fetch_item`           | `tool:fetch`   |
+| `rye-sign`    | `sign_item`            | `tool:sign`    |
+| `rye-verify`  | `verify_item`          | `tool:verify`  |
+| `rye-status`  | `show_status`          | `tool:status`  |
+| `rye-gc`      | `collect_garbage`      | `tool:gc`      |
+| `rye-rebuild` | `rebuild_state`        | `tool:rebuild` |
+| `rye-bundle`  | `bundle_items`         | `tool:bundle`  |
 
 ### 4.3 Tier 3: Deep Observability — `trace!` Fill (est. 40-50 calls)
 
@@ -374,37 +375,37 @@ The `trace!` level should be the "turn it on only when debugging something speci
 
 #### `ryeos-runtime`
 
-| File | Where to Add `trace!` | What to Log |
-|---|---|---|
-| `verified_loader.rs` | Every file load attempt | path, hash_result, trust_level |
-| `capability_tokens.rs` | Token creation + validation | token_id, capabilities, valid |
-| `interpolation.rs` | Each interpolation step | template, result |
-| `condition.rs` | Condition evaluation | expression, result |
-| `paths.rs` | Path resolution steps | input, resolved, source |
+| File                   | Where to Add `trace!`       | What to Log                    |
+| ---------------------- | --------------------------- | ------------------------------ |
+| `verified_loader.rs`   | Every file load attempt     | path, hash_result, trust_level |
+| `capability_tokens.rs` | Token creation + validation | token_id, capabilities, valid  |
+| `interpolation.rs`     | Each interpolation step     | template, result               |
+| `condition.rs`         | Condition evaluation        | expression, result             |
+| `paths.rs`             | Path resolution steps       | input, resolved, source        |
 
 #### `ryeos-engine`
 
-| File | Where to Add `trace!` | What to Log |
-|---|---|---|
-| `trust.rs` | Each signature verification step | key_id, verified, error |
-| `canonical_ref.rs` | Ref resolution path | ref, intermediate, final |
-| `kind_registry.rs` | Registry lookup misses | requested, available |
+| File               | Where to Add `trace!`            | What to Log              |
+| ------------------ | -------------------------------- | ------------------------ |
+| `trust.rs`         | Each signature verification step | key_id, verified, error  |
+| `canonical_ref.rs` | Ref resolution path              | ref, intermediate, final |
+| `kind_registry.rs` | Registry lookup misses           | requested, available     |
 
 #### `ryeos-state`
 
-| File | Where to Add `trace!` | What to Log |
-|---|---|---|
-| `chain.rs` | Each link traversal | index, hash |
-| `head_cache.rs` | Cache hit/miss | key, hit |
+| File            | Where to Add `trace!`    | What to Log              |
+| --------------- | ------------------------ | ------------------------ |
+| `chain.rs`      | Each link traversal      | index, hash              |
+| `head_cache.rs` | Cache hit/miss           | key, hit                 |
 | `projection.rs` | Projection rebuild steps | from_version, to_version |
 
 #### `ryeosd`
 
-| File | Where to Add `trace!` | What to Log |
-|---|---|---|
-| `execution/runner.rs` | Each LLM response chunk (if streaming) | chunk_index, delta_length |
-| `execution/runner.rs` | Token counting | input_tokens, output_tokens |
-| `write_barrier.rs` | Barrier check | thread_id, allowed |
+| File                  | Where to Add `trace!`                  | What to Log                 |
+| --------------------- | -------------------------------------- | --------------------------- |
+| `execution/runner.rs` | Each LLM response chunk (if streaming) | chunk_index, delta_length   |
+| `execution/runner.rs` | Token counting                         | input_tokens, output_tokens |
+| `write_barrier.rs`    | Barrier check                          | thread_id, allowed          |
 
 #### Target: 50+ `trace!` calls distributed across these files.
 
@@ -528,15 +529,15 @@ Add a CI check that fails if any crate in the workspace has zero `#[tracing::ins
 
 ### 7.1 By the Numbers
 
-| Metric | Before | After (Target) |
-|---|---|---|
-| `#[tracing::instrument]` | 0 | 80-100 |
-| `trace!` calls | 3 | 50+ |
-| Crates with no tracing | 1 (`lillux` — intentional) | 1 (same) |
-| Binaries with subscriber init | 4 of 11 | 11 of 11 |
-| Trace-capture tests | 0 | 15-20 |
-| Unified subscriber config | No | Yes |
-| Structured JSON output | No | Yes (`RYE_TRACE_JSON=1`) |
+| Metric                        | Before                     | After (Target)           |
+| ----------------------------- | -------------------------- | ------------------------ |
+| `#[tracing::instrument]`      | 0                          | 80-100                   |
+| `trace!` calls                | 3                          | 50+                      |
+| Crates with no tracing        | 1 (`lillux` — intentional) | 1 (same)                 |
+| Binaries with subscriber init | 4 of 11                    | 11 of 11                 |
+| Trace-capture tests           | 0                          | 15-20                    |
+| Unified subscriber config     | No                         | Yes                      |
+| Structured JSON output        | No                         | Yes (`RYE_TRACE_JSON=1`) |
 
 ### 7.2 Developer Experience Improvements
 
@@ -547,6 +548,7 @@ Add a CI check that fails if any crate in the workspace has zero `#[tracing::ins
 ### 7.3 Production Observability
 
 With `RYE_TRACE_JSON=1` and log aggregation (future: OTel export):
+
 - **P99 latency breakdown:** Which step in directive execution is slow?
 - **Error correlation:** Which tool failures correlate with which provider?
 - **State mutation audit:** Full trace of every chain append, projection rebuild, artifact store.
@@ -602,11 +604,11 @@ RUST_LOG=debug rye-verify --path .ai/
 
 ## Appendix C: What This Document Does NOT Cover
 
-| Topic | Why Excluded | When to Address |
-|---|---|---|
-| Benchmarks (Criterion) | Different concern, different cadence | Separate roadmap doc |
-| OpenTelemetry export | Infrastructure dependency, premature optimization | Phase 2 observability (post-instrumentation) |
-| Custom subscriber implementation | `tracing-subscriber` covers current needs | Only if OTel or custom routing required |
-| `log` compatibility facade | Project is pure tracing — no migration needed | Never, unless external deps require it |
-| Distributed tracing (cross-process) | Single-process architecture currently | If daemon splitting occurs |
-| `tracing-chrome` / flame graphs | Nice-to-have profiling tool | After instrumentation is complete |
+| Topic                               | Why Excluded                                      | When to Address                              |
+| ----------------------------------- | ------------------------------------------------- | -------------------------------------------- |
+| Benchmarks (Criterion)              | Different concern, different cadence              | Separate roadmap doc                         |
+| OpenTelemetry export                | Infrastructure dependency, premature optimization | Phase 2 observability (post-instrumentation) |
+| Custom subscriber implementation    | `tracing-subscriber` covers current needs         | Only if OTel or custom routing required      |
+| `log` compatibility facade          | Project is pure tracing — no migration needed     | Never, unless external deps require it       |
+| Distributed tracing (cross-process) | Single-process architecture currently             | If daemon splitting occurs                   |
+| `tracing-chrome` / flame graphs     | Nice-to-have profiling tool                       | After instrumentation is complete            |

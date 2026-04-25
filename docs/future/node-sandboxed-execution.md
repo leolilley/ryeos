@@ -79,9 +79,31 @@ Lillux gains sandbox enforcement as part of Execute. `lillux exec` learns to acc
 
 After further analysis, the approach shifts from implementing sandboxing primitives directly in Lillux to integrating with existing sandbox solutions as **registered capabilities**. This aligns with RYE's data-driven philosophy and follows the same pattern as model providers, runtimes, and other external systems.
 
+### Relationship to Runtime Config Processing
+
+The engine's `SubprocessSpec` (see `.tmp/RUNTIME-CONFIG-PROCESSING-v2.md`) is the
+composition boundary. Both language runtimes and sandbox wrappers produce the same
+struct:
+
+1. **Chain resolution** compiles a runtime descriptor into a `SubprocessSpec`
+   (cmd, args, env, stdin_data, cwd, timeout_secs)
+2. **Sandbox wrapping** transforms a `SubprocessSpec` → `SubprocessSpec` by
+   prepending the sandbox engine command and its arguments
+3. **Dispatch** receives the final spec and hands it to Lillux — doesn't know
+   whether sandboxing was applied
+
+```
+chain resolution → SubprocessSpec → sandbox_wrap(spec, config) → SubprocessSpec → dispatch
+```
+
+The sandbox wrapper is **not** part of the executor chain. It's applied after chain
+resolution, at the spec level. This is why the engine enforces "one runtime descriptor
+per chain" — sandbox composition is a different mechanism that operates on the compiled
+output, not on the chain walk.
+
 ### The Integration Model
 
-Instead of Lillux learning cgroups, namespaces, and seccomp directly, it delegates to **sandbox engines** — existing, battle-tested solutions like nsjail, Firecracker, bubblewrap, or Docker. The sandbox becomes a runtime descriptor, configured via YAML and invoked through a standard interface.
+Instead of Lillux learning cgroups, namespaces, and seccomp directly, it delegates to **sandbox engines** — existing, battle-tested solutions like nsjail, Firecracker, bubblewrap, or Docker. The sandbox becomes a configuration object, loaded from YAML and applied as a spec wrapper.
 
 ```yaml
 # .ai/config/sandbox/nsjail.yaml
@@ -109,6 +131,39 @@ profiles:
     args: ["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/"]
     capabilities: [user_namespaces]
 ```
+
+### Sandbox as SubprocessSpec Wrapper
+
+The sandbox engine config compiles into a wrapper function over the inner spec:
+
+```rust
+/// Wrap an inner SubprocessSpec with sandbox invocation.
+/// Same struct in, same struct out.
+fn sandbox_wrap(
+    inner: SubprocessSpec,
+    sandbox: &SandboxConfig,
+    profile: &SandboxProfile,
+) -> Result<SubprocessSpec, EngineError> {
+    let mut args = sandbox.invocation_args(profile)?;
+
+    // Replace {cmd} with inner.cmd, append inner.args
+    // Replace {cwd} with inner.cwd
+    args = expand_sandbox_templates(&args, &inner)?;
+
+    Ok(SubprocessSpec {
+        cmd: sandbox.binary.clone(),
+        args,
+        cwd: inner.cwd,  // sandbox may override
+        env: filter_env(&inner.env, &sandbox.env_passthrough),
+        stdin_data: inner.stdin_data,
+        timeout_secs: inner.timeout_secs,
+    })
+}
+```
+
+The invocation template tokens (`{cmd}`, `{cwd}`, `{profile_config}`) are sandbox-specific
+and separate from the runtime config template vocabulary (`{tool_path}`, `{rye_python}`, etc.).
+Both use the same closed-vocabulary, fail-on-unknown approach.
 
 ### Node Attestation with Sandbox Engines
 
@@ -289,8 +344,6 @@ Agents with real-world consequences (trading, infrastructure, communications) ne
 
 - FreeBSD jail integration
 - OpenBSD pledge/unveil integration
-  opencode -s ses_29e142adfffeLujQ6ifQISICCG
-  ple
 - tinygrad AM driver on FreeBSD
 - PCIe passthrough for GPU isolation
 

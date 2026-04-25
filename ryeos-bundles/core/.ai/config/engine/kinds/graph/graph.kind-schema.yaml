@@ -1,0 +1,33 @@
+# rye:signed:2026-04-23T22:48:09Z:bf52dd3257554b6bc34dfe8f6de9438329f5861b0d6d637165d22168e021d26f:SVqrI8myWF3pKpxorKDkcO6EIDE2+KFX91fc07wZDQvtfAgdsnDEIpuSwEE1ZkO33+y7FFZnHzUwguLIPxk3BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/graph"
+version: "1.0.0"
+location:
+  directory: graphs
+execution:
+  aliases:
+    "@graph": "tool:rye/graph-runtime/runtime"
+  resolution:
+  - resolve_graph_entry
+  - resolve_provider
+  - preload_tool_schemas
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser_id: yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+    executor_id:
+      from: path
+      key: executor_id

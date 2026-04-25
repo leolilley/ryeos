@@ -491,11 +491,11 @@ mod tests {
         rules.insert(
             "executor_id".into(),
             ExtractionRule::Constant {
-                value: "@primitive_chain".into(),
+                value: "@subprocess".into(),
             },
         );
         let m = apply_extraction_rules(&parsed, &rules, &fake_path("test"));
-        assert_eq!(m.executor_id.as_deref(), Some("@primitive_chain"));
+        assert_eq!(m.executor_id.as_deref(), Some("@subprocess"));
     }
 
     #[test]

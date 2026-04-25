@@ -4,7 +4,6 @@ pub mod delegation;
 pub mod dispatch;
 pub mod engine;
 pub mod error;
-pub mod executor_registry;
 pub mod kind_registry;
 pub mod lifecycle;
 pub mod metadata;

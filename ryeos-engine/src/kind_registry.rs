@@ -51,8 +51,10 @@ pub enum ExtractionRule {
 pub struct KindSchema {
     /// The `.ai/` subdirectory name, e.g. `"tools"`, `"directives"`
     pub directory: String,
-    /// Default executor ID when item metadata does not declare one
-    pub default_executor_id: Option<String>,
+    /// Executor aliases declared by this kind. Maps `@`-prefixed
+    /// shorthand names to canonical refs. e.g. `"@subprocess"` →
+    /// `"tool:rye/core/subprocess/execute"`.
+    pub aliases: HashMap<String, String>,
     /// Ordered extension specs — extension priority during resolution
     /// is the order declared in the schema
     pub extensions: Vec<ExtensionSpec>,
@@ -81,6 +83,17 @@ impl KindSchema {
             parser_id: spec.parser_id.clone(),
             signature: spec.signature.clone(),
         })
+    }
+
+    /// Resolve an `@`-prefixed alias to a canonical ref.
+    /// Returns `None` if the alias is not declared in this kind's schema.
+    pub fn resolve_alias(&self, alias: &str) -> Option<&str> {
+        self.aliases.get(alias).map(|s| s.as_str())
+    }
+
+    /// Whether this kind is executable (has an `execution` block).
+    pub fn is_executable(&self) -> bool {
+        !self.aliases.is_empty()
     }
 }
 
@@ -187,13 +200,6 @@ impl KindRegistry {
     /// Get the directory name for a kind.
     pub fn directory(&self, kind: &str) -> Option<&str> {
         self.schemas.get(kind).map(|s| s.directory.as_str())
-    }
-
-    /// Get the default executor ID for a kind.
-    pub fn default_executor_id(&self, kind: &str) -> Option<&str> {
-        self.schemas
-            .get(kind)
-            .and_then(|s| s.default_executor_id.as_deref())
     }
 
     /// Get the ordered extension specs for a kind.
@@ -445,11 +451,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             reason: format!("{display}: missing required field `location.directory`"),
         })?;
 
-    let default_executor_id = data
-        .get("execution")
-        .and_then(|v| v.get("default_executor_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+    let aliases = parse_execution_aliases(&data, display);
 
     let resolution: Vec<String> = data
         .get("resolution")
@@ -524,7 +526,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
 
     Ok(KindSchema {
         directory,
-        default_executor_id,
+        aliases,
         extensions,
         extraction_rules,
         resolution,
@@ -670,6 +672,33 @@ fn parse_extraction_rules(
     Ok(rules)
 }
 
+/// Parse the `execution.aliases` block from a kind schema.
+///
+/// Maps `@`-prefixed shorthand names to canonical refs.
+/// If no `execution` block exists, returns empty HashMap (kind is not executable).
+fn parse_execution_aliases(
+    data: &serde_yaml::Value,
+    _display: &str,
+) -> HashMap<String, String> {
+    let execution = match data.get("execution") {
+        Some(v) => v,
+        None => return HashMap::new(),
+    };
+
+    let aliases_mapping = match execution.get("aliases").and_then(|v| v.as_mapping()) {
+        Some(m) => m,
+        None => return HashMap::new(),
+    };
+
+    let mut aliases = HashMap::new();
+    for (k, v) in aliases_mapping {
+        if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+            aliases.insert(key.to_owned(), val.to_owned());
+        }
+    }
+    aliases
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,7 +745,8 @@ metadata:
 location:
   directory: directives
 execution:
-  default_executor_id: \"native:directive_orchestrator\"
+  aliases:
+    \"@directive\": \"tool:rye/directive-runtime/runtime\"
 formats:
   - extensions: [\".md\"]
     parser_id: markdown/xml
@@ -794,7 +824,7 @@ formats:
         // Tool schema
         let tool = reg.get("tool").unwrap();
         assert_eq!(tool.directory, "tools");
-        assert!(tool.default_executor_id.is_none());
+        assert!(tool.aliases.is_empty());
         let tool_exts = tool.extension_strs();
         assert!(tool_exts.contains(&".py"));
         assert!(tool_exts.contains(&".ts"));
@@ -804,8 +834,8 @@ formats:
         let dir = reg.get("directive").unwrap();
         assert_eq!(dir.directory, "directives");
         assert_eq!(
-            dir.default_executor_id.as_deref(),
-            Some("native:directive_orchestrator")
+            dir.aliases.get("@directive").map(|s| s.as_str()),
+            Some("tool:rye/directive-runtime/runtime")
         );
         assert_eq!(dir.extension_strs(), vec![".md"]);
 
@@ -841,10 +871,13 @@ formats:
         assert_eq!(reg.directory("tool"), Some("tools"));
         assert_eq!(reg.directory("directive"), Some("directives"));
         assert_eq!(
-            reg.default_executor_id("directive"),
-            Some("native:directive_orchestrator")
+            reg.get("directive").unwrap().resolve_alias("@directive"),
+            Some("tool:rye/directive-runtime/runtime")
         );
-        assert_eq!(reg.default_executor_id("tool"), None);
+        assert_eq!(
+            reg.get("tool").unwrap().resolve_alias("@subprocess"),
+            None
+        );
 
         assert!(reg.contains("tool"));
         assert!(!reg.contains("nonexistent"));

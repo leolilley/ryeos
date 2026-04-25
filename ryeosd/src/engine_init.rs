@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use directories::BaseDirs;
 
 use ryeos_engine::engine::Engine;
-use ryeos_engine::executor_registry::{ExecutorRegistry, SubprocessDispatch};
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::metadata::MetadataParserRegistry;
 use ryeos_engine::trust::TrustStore;
@@ -22,7 +21,7 @@ use crate::config::Config;
 ///
 /// Scans the config-provided system data directory and user space for kind
 /// schema files, loads the trust store from the daemon's trusted keys
-/// directory, and registers the terminal executor entries.
+/// directory.
 pub fn build_engine(config: &Config) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
     for root in &config.bundle_roots {
@@ -90,50 +89,14 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
         );
     }
 
-    // 6. Build executor registry with terminal entries
-    let executors = build_executor_registry();
-
-    // 7. Build metadata parser registry with builtins
+    // 6. Build metadata parser registry with builtins
     let parsers = MetadataParserRegistry::with_builtins();
 
-    // 8. Construct engine
-    let engine = Engine::new(kinds, executors, parsers, user_root, system_roots)
+    // 7. Construct engine
+    let engine = Engine::new(kinds, parsers, user_root, system_roots)
         .with_trust_store(trust_store);
 
     Ok(engine)
-}
-
-/// Build the executor registry with terminal subprocess dispatchers.
-///
-/// `@primitive_chain` is the terminal executor that tools resolve to.
-/// It uses the script's own shebang/extension to determine the interpreter.
-fn build_executor_registry() -> ExecutorRegistry {
-    let mut reg = ExecutorRegistry::new();
-
-    // Terminal subprocess dispatch — no interpreter override, uses shebang
-    reg.register("@primitive_chain", SubprocessDispatch { interpreter: None });
-
-    // Common interpreter-specific terminals
-    reg.register(
-        "@python3",
-        SubprocessDispatch {
-            interpreter: Some("python3".into()),
-        },
-    );
-    reg.register(
-        "@node",
-        SubprocessDispatch {
-            interpreter: Some("node".into()),
-        },
-    );
-    reg.register(
-        "@bash",
-        SubprocessDispatch {
-            interpreter: Some("bash".into()),
-        },
-    );
-
-    reg
 }
 
 /// Discover the user-space root (parent of `~/.ai/`).

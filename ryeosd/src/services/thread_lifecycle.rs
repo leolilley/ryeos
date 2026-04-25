@@ -569,16 +569,9 @@ pub fn resolve_root_execution(
         .metadata
         .executor_id
         .clone()
-        .or_else(|| {
-            engine
-                .default_executor_id_for(&plan_ctx, &resolved.kind)
-                .ok()
-                .flatten()
-        })
         .ok_or_else(|| {
             anyhow!(
-                "no executor found for kind '{}' (item: {})",
-                resolved.kind,
+                "item {} does not declare an executor_id",
                 item_ref
             )
         })?;
@@ -677,11 +670,9 @@ pub fn spawn_item(
     // Inject extra runtime bindings (e.g. vault env vars) into subprocess nodes
     if !extra_runtime_bindings.is_empty() {
         for node in &mut plan.nodes {
-            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess {
-                runtime_bindings, ..
-            } = node
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
             {
-                runtime_bindings.extend(extra_runtime_bindings.clone());
+                spec.env.extend(extra_runtime_bindings.clone());
             }
         }
     }

@@ -8,7 +8,6 @@ use crate::contracts::{
     VerifiedItem,
 };
 use crate::error::EngineError;
-use crate::executor_registry::ExecutorRegistry;
 use crate::kind_registry::KindRegistry;
 use crate::metadata::MetadataParserRegistry;
 use crate::resolution::ResolutionRoots;
@@ -17,13 +16,12 @@ use crate::AI_DIR;
 
 /// Concrete native engine.
 ///
-/// Holds the kind registry, executor registry, and metadata parser
-/// registry. Exposes the four pipeline methods directly — no trait
-/// boundary, no dyn dispatch at the seam. The seam is the data contracts.
+/// Holds the kind registry and metadata parser registry. Exposes the
+/// four pipeline methods directly — no trait boundary, no dyn dispatch
+/// at the seam. The seam is the data contracts.
 #[derive(Debug)]
 pub struct Engine {
     pub kinds: KindRegistry,
-    pub executors: ExecutorRegistry,
     pub parsers: MetadataParserRegistry,
     pub trust_store: TrustStore,
 
@@ -36,14 +34,12 @@ pub struct Engine {
 impl Engine {
     pub fn new(
         kinds: KindRegistry,
-        executors: ExecutorRegistry,
         parsers: MetadataParserRegistry,
         user_root: Option<PathBuf>,
         system_roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             kinds,
-            executors,
             parsers,
             trust_store: TrustStore::empty(),
             user_root,
@@ -192,7 +188,6 @@ impl Engine {
             parameters,
             hints,
             ctx,
-            &self.executors,
             &self.kinds,
             &self.parsers,
             &roots,
@@ -241,15 +236,6 @@ impl Engine {
     /// Get the kind registry's cache fingerprint.
     pub fn registry_fingerprint(&self) -> &str {
         self.kinds.fingerprint()
-    }
-
-    /// Get the default executor ID for a kind (system registry only).
-    pub fn default_executor_id_for(
-        &self,
-        _ctx: &PlanContext,
-        kind: &str,
-    ) -> Result<Option<String>, EngineError> {
-        Ok(self.kinds.default_executor_id(kind).map(String::from))
     }
 }
 
@@ -307,7 +293,6 @@ formats:
     fn test_engine() -> Engine {
         Engine::new(
             KindRegistry::empty(),
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
@@ -396,7 +381,6 @@ formats:
 
         let engine = Engine::new(
             kinds,
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
@@ -488,7 +472,6 @@ formats:
 
         let engine = Engine::new(
             kinds,
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
@@ -532,7 +515,6 @@ formats:
 
         let engine = Engine::new(
             kinds,
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
@@ -581,7 +563,6 @@ formats:
         // Engine with EMPTY trust store
         let engine = Engine::new(
             kinds,
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
@@ -643,7 +624,6 @@ formats:
 
         let engine = Engine::new(
             kinds,
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![],
@@ -692,7 +672,6 @@ formats:
 
         let engine = Engine::new(
             kinds,
-            ExecutorRegistry::new(),
             MetadataParserRegistry::with_builtins(),
             None,
             vec![system_dir],

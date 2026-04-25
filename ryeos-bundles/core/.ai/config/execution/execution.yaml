@@ -1,0 +1,17 @@
+# Execution config — system defaults
+# Override per-user: ~/.ai/config/execution/execution.yaml
+# Override per-project: .ai/config/execution/execution.yaml
+category: "execution"
+version: "1.0.0"
+schema_version: "1.0.0"
+
+# Defaults applied to all tool executions
+defaults:
+  timeout: 300
+  max_steps: 100
+  max_concurrency: 10
+
+# Per-tool overrides (key = tool item_id)
+# tools:
+#   "my/scraper/tool":
+#     timeout: 600

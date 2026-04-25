@@ -3,11 +3,16 @@
 //! The engine interprets plan nodes and delegates subprocess management
 //! to Lillux. All OS-level process mechanics (setsid, process groups,
 //! cross-platform handling, timeout enforcement) are Lillux's responsibility.
+//!
+//! The dispatch layer consumes `SubprocessSpec` from the plan builder —
+//! a fully resolved, template-expanded spawn description. No interpreter
+//! branching or script_path construction happens here.
 
 use serde_json::Value;
 
 use crate::contracts::{
-    EngineContext, ExecutionCompletion, ExecutionPlan, PlanNode, ThreadTerminalStatus,
+    EngineContext, ExecutionCompletion, ExecutionPlan, PlanNode, SubprocessSpec,
+    ThreadTerminalStatus,
 };
 use crate::error::EngineError;
 
@@ -20,29 +25,13 @@ pub fn execute_plan(
 
     for node in &plan.nodes {
         match node {
-            PlanNode::DispatchSubprocess {
-                script_path,
-                interpreter,
-                working_directory,
-                environment,
-                arguments,
-                runtime_bindings,
-                ..
-            } => {
-                tracing::info!(script_path = %script_path.display(), "launching subprocess");
+            PlanNode::DispatchSubprocess { spec, .. } => {
+                tracing::info!(cmd = %spec.cmd, "launching subprocess");
                 let start = std::time::Instant::now();
-                let completion = dispatch_subprocess(
-                    script_path,
-                    interpreter.as_deref(),
-                    working_directory.as_ref().and_then(|p| p.to_str()),
-                    environment,
-                    arguments,
-                    runtime_bindings,
-                    ctx,
-                )?;
+                let completion = dispatch_subprocess(spec, ctx)?;
                 let elapsed = start.elapsed();
                 tracing::debug!(
-                    script_path = %script_path.display(),
+                    cmd = %spec.cmd,
                     status = ?completion.status,
                     duration_ms = elapsed.as_millis() as u64,
                     "subprocess completed"
@@ -82,52 +71,40 @@ pub fn execute_plan(
 }
 
 /// Dispatch a subprocess plan node via Lillux.
+///
+/// Converts a `SubprocessSpec` into a `lillux::SubprocessRequest`,
+/// injecting daemon context bindings (RYE_THREAD_ID, RYE_CHAIN_ROOT_ID).
 fn dispatch_subprocess(
-    script_path: &std::path::Path,
-    interpreter: Option<&str>,
-    working_directory: Option<&str>,
-    environment: &std::collections::HashMap<String, String>,
-    arguments: &[String],
-    runtime_bindings: &std::collections::HashMap<String, String>,
+    spec: &SubprocessSpec,
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let script = script_path.to_str().ok_or_else(|| EngineError::ExecutionFailed {
-        reason: format!("script path is not valid UTF-8: {}", script_path.display()),
-    })?;
+    let request = spec_to_request(spec, ctx)?;
+    let result = lillux::run(request);
+    Ok(translate_result(result))
+}
 
-    // Build the command: interpreter + script, or just script
-    let (cmd, mut args) = match interpreter {
-        Some(interp) => (interp.to_owned(), vec![script.to_owned()]),
-        None => (script.to_owned(), Vec::new()),
-    };
-    args.extend_from_slice(arguments);
-
-    // Merge environment: plan env + runtime bindings + context
-    let mut envs: Vec<(String, String)> = environment
-        .iter()
+/// Convert a `SubprocessSpec` + daemon context into a `lillux::SubprocessRequest`.
+fn spec_to_request(
+    spec: &SubprocessSpec,
+    ctx: &EngineContext,
+) -> Result<lillux::SubprocessRequest, EngineError> {
+    // Build env: spec.env + daemon context bindings
+    let mut envs: Vec<(String, String)> = spec.env.iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Runtime bindings from plan (daemon-injected)
-    for (k, v) in runtime_bindings {
-        envs.push((k.clone(), v.clone()));
-    }
-
-    // Context bindings
+    // Daemon context bindings (always injected, override any spec values)
     envs.push(("RYE_THREAD_ID".to_owned(), ctx.thread_id.clone()));
     envs.push(("RYE_CHAIN_ROOT_ID".to_owned(), ctx.chain_root_id.clone()));
 
-    let request = lillux::SubprocessRequest {
-        cmd,
-        args,
-        cwd: working_directory.map(String::from),
+    Ok(lillux::SubprocessRequest {
+        cmd: spec.cmd.clone(),
+        args: spec.args.clone(),
+        cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
-        stdin_data: None,
-        timeout: 300.0,
-    };
-
-    let result = lillux::run(request);
-    Ok(translate_result(result))
+        stdin_data: spec.stdin_data.clone(),
+        timeout: spec.timeout_secs as f64,
+    })
 }
 
 /// Translate a Lillux SubprocessResult into an ExecutionCompletion.
@@ -213,24 +190,8 @@ pub fn spawn_plan(
 ) -> Result<SpawnedExecution, EngineError> {
     for node in &plan.nodes {
         match node {
-            PlanNode::DispatchSubprocess {
-                script_path,
-                interpreter,
-                working_directory,
-                environment,
-                arguments,
-                runtime_bindings,
-                ..
-            } => {
-                return spawn_subprocess(
-                    script_path,
-                    interpreter.as_deref(),
-                    working_directory.as_ref().and_then(|p| p.to_str()),
-                    environment,
-                    arguments,
-                    runtime_bindings,
-                    ctx,
-                );
+            PlanNode::DispatchSubprocess { spec, .. } => {
+                return spawn_subprocess(spec, ctx);
             }
             PlanNode::SpawnChild { child_ref, .. } => {
                 return Err(EngineError::Internal(format!(
@@ -248,42 +209,10 @@ pub fn spawn_plan(
 }
 
 fn spawn_subprocess(
-    script_path: &std::path::Path,
-    interpreter: Option<&str>,
-    working_directory: Option<&str>,
-    environment: &std::collections::HashMap<String, String>,
-    arguments: &[String],
-    runtime_bindings: &std::collections::HashMap<String, String>,
+    spec: &SubprocessSpec,
     ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    let script = script_path.to_str().ok_or_else(|| EngineError::ExecutionFailed {
-        reason: format!("script path is not valid UTF-8: {}", script_path.display()),
-    })?;
-
-    let (cmd, mut args) = match interpreter {
-        Some(interp) => (interp.to_owned(), vec![script.to_owned()]),
-        None => (script.to_owned(), Vec::new()),
-    };
-    args.extend_from_slice(arguments);
-
-    let mut envs: Vec<(String, String)> = environment
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    for (k, v) in runtime_bindings {
-        envs.push((k.clone(), v.clone()));
-    }
-    envs.push(("RYE_THREAD_ID".to_owned(), ctx.thread_id.clone()));
-    envs.push(("RYE_CHAIN_ROOT_ID".to_owned(), ctx.chain_root_id.clone()));
-
-    let request = lillux::SubprocessRequest {
-        cmd,
-        args,
-        cwd: working_directory.map(String::from),
-        envs,
-        stdin_data: None,
-        timeout: 300.0,
-    };
+    let request = spec_to_request(spec, ctx)?;
 
     match lillux::spawn(request) {
         Ok(running) => {
@@ -359,12 +288,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                script_path: PathBuf::from("/bin/echo"),
-                interpreter: None,
-                working_directory: None,
-                environment: HashMap::new(),
-                arguments: vec!["hello world".into()],
-                runtime_bindings: HashMap::new(),
+                spec: SubprocessSpec {
+                    cmd: "/bin/echo".into(),
+                    args: vec!["hello world".into()],
+                    cwd: None,
+                    env: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
             },
             PlanNode::Complete {
                 id: PlanNodeId("complete:test".into()),
@@ -378,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_with_interpreter() {
+    fn dispatch_with_cmd_python() {
         let dir = tempdir();
         let script = dir.join("test.py");
         fs::write(&script, "import json; print(json.dumps({'status': 'ok'}))\n").unwrap();
@@ -386,12 +319,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                script_path: script,
-                interpreter: Some("python3".into()),
-                working_directory: Some(dir),
-                environment: HashMap::new(),
-                arguments: Vec::new(),
-                runtime_bindings: HashMap::new(),
+                spec: SubprocessSpec {
+                    cmd: "python3".into(),
+                    args: vec![script.to_string_lossy().to_string()],
+                    cwd: Some(dir),
+                    env: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
             },
             PlanNode::Complete {
                 id: PlanNodeId("complete:test".into()),
@@ -410,12 +347,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                script_path: PathBuf::from("/bin/false"),
-                interpreter: None,
-                working_directory: None,
-                environment: HashMap::new(),
-                arguments: Vec::new(),
-                runtime_bindings: HashMap::new(),
+                spec: SubprocessSpec {
+                    cmd: "/bin/false".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
             },
             PlanNode::Complete {
                 id: PlanNodeId("complete:test".into()),
@@ -444,12 +385,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                script_path: script,
-                interpreter: Some("python3".into()),
-                working_directory: Some(dir),
-                environment: env,
-                arguments: Vec::new(),
-                runtime_bindings: HashMap::new(),
+                spec: SubprocessSpec {
+                    cmd: "python3".into(),
+                    args: vec![script.to_string_lossy().to_string()],
+                    cwd: Some(dir),
+                    env,
+                    stdin_data: None,
+                    timeout_secs: 300,
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
             },
             PlanNode::Complete {
                 id: PlanNodeId("complete:test".into()),
@@ -469,12 +414,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                script_path: PathBuf::from("/nonexistent/binary"),
-                interpreter: None,
-                working_directory: None,
-                environment: HashMap::new(),
-                arguments: Vec::new(),
-                runtime_bindings: HashMap::new(),
+                spec: SubprocessSpec {
+                    cmd: "/nonexistent/binary".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
             },
             PlanNode::Complete {
                 id: PlanNodeId("complete:test".into()),
@@ -497,5 +446,25 @@ mod tests {
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Completed);
         assert!(completion.result.is_none());
+    }
+
+    #[test]
+    fn spec_to_request_injects_context_bindings() {
+        let spec = SubprocessSpec {
+            cmd: "/bin/echo".into(),
+            args: vec!["hello".into()],
+            cwd: None,
+            env: HashMap::new(),
+            stdin_data: None,
+            timeout_secs: 60,
+        };
+        let ctx = test_engine_context();
+        let request = spec_to_request(&spec, &ctx).unwrap();
+        assert_eq!(request.cmd, "/bin/echo");
+        assert_eq!(request.timeout, 60.0);
+        // Context bindings must be present
+        let env_map: HashMap<String, String> = request.envs.into_iter().collect();
+        assert_eq!(env_map.get("RYE_THREAD_ID").unwrap(), "thread:test");
+        assert_eq!(env_map.get("RYE_CHAIN_ROOT_ID").unwrap(), "chain:test");
     }
 }

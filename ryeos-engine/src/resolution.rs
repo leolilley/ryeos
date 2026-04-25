@@ -223,7 +223,7 @@ mod tests {
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
         KindSchema {
             directory: directory.to_owned(),
-            default_executor_id: None,
+            aliases: std::collections::HashMap::new(),
             extraction_rules: std::collections::HashMap::new(),
             resolution: Vec::new(),
             extensions: extensions
