@@ -218,6 +218,13 @@ pub fn project_thread_snapshot(
     chain_root_id: &str,
 ) -> anyhow::Result<()> {
     snapshot.validate()?;
+    tracing::trace!(
+        thread_id = %snapshot.thread_id,
+        chain_root_id = %chain_root_id,
+        status = %snapshot.status,
+        upstream = ?snapshot.upstream_thread_id,
+        "project thread snapshot"
+    );
 
     db.connection().execute(
         "INSERT OR REPLACE INTO threads (
@@ -283,6 +290,12 @@ pub fn project_chain_state(
     chain_state_hash: &str,
 ) -> anyhow::Result<()> {
     chain_state.validate()?;
+    tracing::trace!(
+        chain_root_id = %chain_state.chain_root_id,
+        chain_state_hash = %chain_state_hash,
+        thread_count = chain_state.threads.len(),
+        "project chain state"
+    );
 
     // Update projection metadata
     let meta = ProjectionMeta {
@@ -379,6 +392,13 @@ pub fn project_thread_edge(
     spawn_seq: Option<i64>,
     spawn_reason: Option<&str>,
 ) -> anyhow::Result<()> {
+    tracing::trace!(
+        chain_root_id = %chain_root_id,
+        parent_thread_id = %parent_thread_id,
+        child_thread_id = %child_thread_id,
+        spawn_reason = spawn_reason.unwrap_or(""),
+        "project thread edge"
+    );
     db.connection().execute(
         "INSERT INTO thread_edges (
             chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason, created_at

@@ -26,7 +26,8 @@ pub struct WritePermit {
 
 impl Drop for WritePermit {
     fn drop(&mut self) {
-        self.barrier.active_writers.fetch_sub(1, Ordering::SeqCst);
+        let prior = self.barrier.active_writers.fetch_sub(1, Ordering::SeqCst);
+        tracing::trace!(active_writers_after = prior - 1, "write permit released");
         // Wake anyone waiting for writers to drain
         self.barrier.notify.notify_one();
     }
@@ -77,6 +78,7 @@ impl WriteBarrier {
                 })
             }
             QUIESCING | QUIESCED => {
+                tracing::trace!(state = state, "write permit denied — barrier quiescing/quiesced");
                 bail!("write barrier is quiescing/quiesced, cannot acquire write permit");
             }
             _ => bail!("write barrier in unknown state: {state}"),

@@ -526,6 +526,7 @@ pub fn add_thread_to_chain(
         crate::CachedHead::new(chain_state_hash.clone(), new_chain_state),
     );
 
+    tracing::trace!(chain_root_id = %chain_root_id, thread_id = %new_snapshot.thread_id, snapshot_hash = %snapshot_hash, "thread added to chain");
     Ok(CreateResult {
         chain_state_hash,
         snapshot_hash,
@@ -545,6 +546,7 @@ pub fn read_chain_head(
 ) -> anyhow::Result<ChainState> {
     // Try cache first
     if let Some(cached_head) = head_cache.get(chain_root_id) {
+        tracing::trace!(chain_root_id = %chain_root_id, source = "cache", "chain head read");
         return Ok(cached_head.chain_state.clone());
     }
 
@@ -557,6 +559,7 @@ pub fn read_chain_head(
     if !ref_path.exists() {
         anyhow::bail!("signed ref not found for chain {}", chain_root_id);
     }
+    tracing::trace!(chain_root_id = %chain_root_id, source = "cas", "chain head read (cache miss)");
 
     let signed_ref = refs::read_signed_ref(&ref_path)
         .context("failed to read signed ref")?;

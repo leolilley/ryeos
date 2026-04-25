@@ -755,6 +755,7 @@ pub fn verify_item_signature(
                     reason: "Ed25519 signature verification failed".into(),
                 })?;
 
+            tracing::trace!(fingerprint = %fingerprint, trust_class = "trusted", "signature verified");
             Ok((
                 TrustClass::Trusted,
                 Some(SignerFingerprint(fingerprint.clone())),
@@ -764,6 +765,7 @@ pub fn verify_item_signature(
             // Signer not in trust store — we can't verify the signature
             // cryptographically, but the content hash check passed.
             // Mark as Untrusted.
+            tracing::trace!(fingerprint = %fingerprint, trust_class = "untrusted", "signer not in trust store");
             Ok((
                 TrustClass::Untrusted,
                 Some(SignerFingerprint(fingerprint.clone())),

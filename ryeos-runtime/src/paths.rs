@@ -22,11 +22,15 @@ pub fn safe_rel_path(id: &str) -> anyhow::Result<PathBuf> {
 
 pub fn thread_state_dir(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {
     let rel = safe_rel_path(thread_id)?;
-    Ok(project_root.join(AI_DIR).join(STATE_THREADS_REL).join(rel))
+    let resolved = project_root.join(AI_DIR).join(STATE_THREADS_REL).join(rel);
+    tracing::trace!(thread_id = %thread_id, resolved = %resolved.display(), "resolved thread state dir");
+    Ok(resolved)
 }
 
 pub fn thread_transcript_path(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(thread_state_dir(project_root, thread_id)?.join("transcript.jsonl"))
+    let resolved = thread_state_dir(project_root, thread_id)?.join("transcript.jsonl");
+    tracing::trace!(thread_id = %thread_id, resolved = %resolved.display(), "resolved thread transcript path");
+    Ok(resolved)
 }
 
 pub fn thread_knowledge_path(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {
@@ -41,6 +45,7 @@ pub fn thread_knowledge_path(project_root: &Path, thread_id: &str) -> anyhow::Re
         .to_string_lossy()
         .to_string();
     path.set_file_name(format!("{file_name}.md"));
+    tracing::trace!(thread_id = %thread_id, resolved = %path.display(), "resolved thread knowledge path");
     Ok(path)
 }
 

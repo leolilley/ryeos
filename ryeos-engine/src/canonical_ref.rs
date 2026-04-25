@@ -181,6 +181,7 @@ impl fmt::Display for CanonicalRef {
 }
 
 fn parse_suffix(full_input: &str, suffix_str: &str) -> Result<RefSuffix, EngineError> {
+    tracing::trace!(suffix = %suffix_str, "parsing canonical ref suffix");
     if let Some(rest) = suffix_str.strip_prefix("cap:") {
         let parts: Vec<&str> = rest.splitn(3, ':').collect();
         if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {

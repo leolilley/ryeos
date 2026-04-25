@@ -377,7 +377,11 @@ impl KindRegistry {
 
     /// Get the full schema for a kind.
     pub fn get(&self, kind: &str) -> Option<&KindSchema> {
-        self.schemas.get(kind)
+        let found = self.schemas.get(kind);
+        if found.is_none() {
+            tracing::trace!(kind = %kind, registered = self.schemas.len(), "kind registry miss");
+        }
+        found
     }
 
     /// Check whether a kind is registered.
@@ -402,12 +406,16 @@ impl KindRegistry {
 
     /// Look up the `ExtensionSpec` for a specific kind + extension pair.
     pub fn spec_for(&self, kind: &str, ext: &str) -> Option<&ExtensionSpec> {
-        self.schemas.get(kind)?.spec_for(ext)
+        let found = self.schemas.get(kind)?.spec_for(ext);
+        tracing::trace!(kind = %kind, ext = %ext, hit = found.is_some(), "kind registry spec_for");
+        found
     }
 
     /// Build a `ResolvedSourceFormat` from a matched kind + extension.
     pub fn resolved_format_for(&self, kind: &str, ext: &str) -> Option<ResolvedSourceFormat> {
-        self.schemas.get(kind)?.resolved_format_for(ext)
+        let found = self.schemas.get(kind)?.resolved_format_for(ext);
+        tracing::trace!(kind = %kind, ext = %ext, hit = found.is_some(), "kind registry resolved_format_for");
+        found
     }
 
     /// Cache-key fingerprint. Changes when kind schema config changes.

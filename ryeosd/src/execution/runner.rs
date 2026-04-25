@@ -924,6 +924,15 @@ fn fail_thread_static(state: &AppState, thread_id: &str, outcome_code: &str) {
 /// `ProjectContext::SnapshotHash`), so the resumed plan matches the
 /// project version captured at the original spawn — not the current
 /// working-dir head. See `docs/future/RESUME-ADVANCED-PATH.md`.
+#[tracing::instrument(
+    name = "thread:resume_params",
+    skip(state, resume),
+    fields(
+        item_ref = %resume.item_ref,
+        kind = %resume.kind,
+        snapshot_pinned = resume.original_snapshot_hash.is_some(),
+    )
+)]
 pub fn execution_params_from_resume_context(
     state: &AppState,
     resume: &ResumeContext,

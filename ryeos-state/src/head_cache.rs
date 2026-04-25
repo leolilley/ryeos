@@ -55,7 +55,9 @@ impl HeadCache {
 
     /// Get just the chain state hash for a cached chain.
     pub fn get_hash(&self, chain_root_id: &str) -> Option<&str> {
-        self.heads.get(chain_root_id).map(|h| h.chain_state_hash.as_str())
+        let found = self.heads.get(chain_root_id).map(|h| h.chain_state_hash.as_str());
+        tracing::trace!(chain_root_id = %chain_root_id, hit = found.is_some(), "head cache hash lookup");
+        found
     }
 
     /// Check if a chain_root_id is in the cache.
@@ -65,7 +67,9 @@ impl HeadCache {
 
     /// Update (insert or replace) a cached head.
     pub fn update(&mut self, chain_root_id: impl Into<String>, cached: CachedHead) {
-        self.heads.insert(chain_root_id.into(), cached);
+        let key = chain_root_id.into();
+        tracing::trace!(chain_root_id = %key, hash = %cached.chain_state_hash, "head cache update");
+        self.heads.insert(key, cached);
     }
 
     /// Insert a new cached head. Returns `false` if already present.
@@ -83,12 +87,16 @@ impl HeadCache {
 
     /// Invalidate (remove) a cached head. Returns the removed entry if present.
     pub fn invalidate(&mut self, chain_root_id: &str) -> Option<CachedHead> {
-        self.heads.remove(chain_root_id)
+        let removed = self.heads.remove(chain_root_id);
+        tracing::trace!(chain_root_id = %chain_root_id, was_present = removed.is_some(), "head cache invalidate");
+        removed
     }
 
     /// Clear all cached heads.
     pub fn clear(&mut self) {
+        let prior_len = self.heads.len();
         self.heads.clear();
+        tracing::trace!(prior_len = prior_len, "head cache cleared");
     }
 
     /// Number of cached chain heads.

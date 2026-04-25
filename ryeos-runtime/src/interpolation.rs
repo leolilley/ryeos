@@ -85,17 +85,26 @@ fn resolve_expression(expr: &str, context: &Value) -> Option<Value> {
     let fallbacks: Vec<&str> = path_part.split("||").map(|s| s.trim()).collect();
 
     let mut resolved: Option<Value> = None;
+    let mut matched_fallback: Option<&str> = None;
     for fallback in &fallbacks {
         let val = resolve_path(context, fallback);
         if let Some(v) = val {
             if !v.is_null() {
                 resolved = Some(v.clone());
+                matched_fallback = Some(fallback);
                 break;
             }
         }
     }
 
-    let resolved = resolved?;
+    let resolved = match resolved {
+        Some(v) => v,
+        None => {
+            tracing::trace!(expr = %expr, "expression unresolved (no fallback matched)");
+            return None;
+        }
+    };
+    tracing::trace!(expr = %expr, matched = matched_fallback.unwrap_or(""), pipe_count = pipes.len(), "expression resolved");
 
     apply_pipes(resolved, &pipes)
 }
