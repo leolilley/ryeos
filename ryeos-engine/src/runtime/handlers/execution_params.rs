@@ -68,6 +68,14 @@ impl RuntimeHandler for ExecutionParamsHandler {
         crate::runtime::HandlerCardinality::All
     }
 
+    #[tracing::instrument(
+        name = "engine:execution_params",
+        skip(self, block, ctx),
+        fields(
+            item_ref = %ctx.chain[ctx.current_index].resolved_ref,
+            chain_index = ctx.current_index,
+        )
+    )]
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         let intermediate = &ctx.chain[ctx.current_index];
         let _ = parse_execution_params(block, &intermediate.source_path)?;

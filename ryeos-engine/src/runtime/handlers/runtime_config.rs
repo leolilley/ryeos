@@ -52,6 +52,14 @@ impl RuntimeHandler for RuntimeConfigHandler {
         crate::runtime::HandlerCardinality::Singleton
     }
 
+    #[tracing::instrument(
+        name = "engine:runtime_config",
+        skip(self, block, ctx),
+        fields(
+            item_ref = %ctx.chain[ctx.current_index].resolved_ref,
+            chain_index = ctx.current_index,
+        )
+    )]
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         // Singleton: a previous chain element already wrote to spec
         // overrides ⇒ collision.

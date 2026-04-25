@@ -321,6 +321,16 @@ impl StateStore {
             .map_err(|e| anyhow!("cannot acquire write permit: {e}"))
     }
 
+    #[tracing::instrument(
+        name = "state:create_thread",
+        skip(self, thread),
+        fields(
+            thread_id = %thread.thread_id,
+            chain_root_id = %thread.chain_root_id,
+            kind = %thread.kind,
+            item_ref = %thread.item_ref,
+        )
+    )]
     pub fn create_thread(
         &self,
         thread: &NewThreadRecord,
@@ -366,6 +376,11 @@ impl StateStore {
         Ok(persisted_from_append(&result, &[create_event]))
     }
 
+    #[tracing::instrument(
+        name = "state:mark_thread_running",
+        skip(self),
+        fields(thread_id = %thread_id)
+    )]
     pub fn mark_thread_running(
         &self,
         thread_id: &str,
@@ -439,6 +454,11 @@ impl StateStore {
         Ok(persisted_from_append(&result, &[event]))
     }
 
+    #[tracing::instrument(
+        name = "state:finalize_thread",
+        skip(self, update),
+        fields(thread_id = %thread_id, status = %update.status)
+    )]
     pub fn finalize_thread(
         &self,
         thread_id: &str,
@@ -543,6 +563,15 @@ impl StateStore {
         Ok(persisted_from_append(&result, &events_to_append))
     }
 
+    #[tracing::instrument(
+        name = "state:create_continuation",
+        skip(self, successor),
+        fields(
+            thread_id = %successor.thread_id,
+            chain_root_id = %chain_root_id,
+            source_thread_id = %source_thread_id,
+        )
+    )]
     pub fn create_continuation(
         &self,
         successor: &NewThreadRecord,
@@ -719,6 +748,11 @@ impl StateStore {
             .collect())
     }
 
+    #[tracing::instrument(
+        name = "state:publish_artifact",
+        skip(self, artifact),
+        fields(thread_id = %thread_id, artifact_type = %artifact.artifact_type)
+    )]
     pub fn publish_artifact(
         &self,
         thread_id: &str,
@@ -919,6 +953,11 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection()).map_err(Into::into)
     }
 
+    #[tracing::instrument(
+        name = "state:attach_thread_process",
+        skip(self, launch_metadata),
+        fields(thread_id = %thread_id, pid = pid, pgid = pgid)
+    )]
     pub fn attach_thread_process(
         &self,
         thread_id: &str,
@@ -944,6 +983,15 @@ impl StateStore {
         g.runtime_db.bump_resume_attempts(thread_id)
     }
 
+    #[tracing::instrument(
+        name = "state:append_events",
+        skip(self, events),
+        fields(
+            thread_id = %thread_id,
+            chain_root_id = %chain_root_id,
+            event_count = events.len(),
+        )
+    )]
     pub fn append_events(
         &self,
         chain_root_id: &str,

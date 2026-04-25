@@ -122,6 +122,14 @@ impl RuntimeHandler for EnvConfigHandler {
         KEY
     }
 
+    #[tracing::instrument(
+        name = "engine:env_config",
+        skip(self, block, ctx),
+        fields(
+            item_ref = %ctx.chain[ctx.current_index].resolved_ref,
+            chain_index = ctx.current_index,
+        )
+    )]
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         let intermediate = &ctx.chain[ctx.current_index];
         let env_config: EnvConfig =
