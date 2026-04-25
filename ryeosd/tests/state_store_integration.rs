@@ -93,7 +93,12 @@ mod integration_tests {
         store.create_thread(&thread).expect("create_thread should succeed");
 
         store
-            .attach_thread_process("T-proc-1", 12345, 67890)
+            .attach_thread_process(
+                "T-proc-1",
+                12345,
+                67890,
+                &ryeosd::launch_metadata::RuntimeLaunchMetadata::default(),
+            )
             .expect("attach_thread_process should succeed");
     }
 

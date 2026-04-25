@@ -295,6 +295,7 @@ mod tests {
                     env: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
+                    execution: Default::default(),
                 },
                 tool_path: None,
                 executor_chain: Vec::new(),
@@ -326,6 +327,7 @@ mod tests {
                     env: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
+                    execution: Default::default(),
                 },
                 tool_path: None,
                 executor_chain: Vec::new(),
@@ -354,6 +356,7 @@ mod tests {
                     env: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
+                    execution: Default::default(),
                 },
                 tool_path: None,
                 executor_chain: Vec::new(),
@@ -392,6 +395,7 @@ mod tests {
                     env,
                     stdin_data: None,
                     timeout_secs: 300,
+                    execution: Default::default(),
                 },
                 tool_path: None,
                 executor_chain: Vec::new(),
@@ -421,6 +425,7 @@ mod tests {
                     env: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
+                    execution: Default::default(),
                 },
                 tool_path: None,
                 executor_chain: Vec::new(),
@@ -457,6 +462,7 @@ mod tests {
             env: HashMap::new(),
             stdin_data: None,
             timeout_secs: 60,
+            execution: Default::default(),
         };
         let ctx = test_engine_context();
         let request = spec_to_request(&spec, &ctx).unwrap();

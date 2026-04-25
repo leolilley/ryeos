@@ -66,6 +66,11 @@ pub struct ThreadAttachProcessParams {
     pub pgid: i64,
     #[serde(default)]
     pub metadata: Option<Value>,
+    /// Spawn-time metadata persisted alongside pid/pgid (cancellation
+    /// policy, checkpoint dir, etc.). Defaults to empty so wire
+    /// callers (UDS) that don't set it use the daemon defaults.
+    #[serde(default)]
+    pub launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,7 +246,12 @@ impl ThreadLifecycleService {
     }
 
     pub fn attach_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
-        self.state_store.attach_thread_process(&params.thread_id, params.pid, params.pgid)?;
+        self.state_store.attach_thread_process(
+            &params.thread_id,
+            params.pid,
+            params.pgid,
+            &params.launch_metadata,
+        )?;
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
             anyhow!(
                 "thread not found after attach_process: {}",
@@ -625,6 +635,11 @@ pub fn validate_item(
 pub struct SpawnedItem {
     pub pid: u32,
     pub pgid: i64,
+    /// Spawn-time metadata derived from the engine `SubprocessSpec`
+    /// (e.g. `native_async` cancellation policy). Persisted alongside
+    /// pid/pgid so the daemon shutdown / cancel paths can route
+    /// termination without re-loading the spec.
+    pub launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata,
     spawned: ryeos_engine::dispatch::SpawnedExecution,
 }
 
@@ -637,12 +652,24 @@ impl SpawnedItem {
 
 /// Run the engine pipeline: verify → build_plan → spawn.
 /// Returns a handle with pid/pgid that the daemon can persist before calling wait().
+///
+/// If `thread_state_dir` is supplied AND the resolved spec declares
+/// `native_resume`, the daemon-side checkpoint directory
+/// (`<thread_state_dir>/checkpoints/`) is created and injected as
+/// `RYE_CHECKPOINT_DIR` into the subprocess env. The path is also
+/// captured in `SpawnedItem.launch_metadata.checkpoint_dir` so the
+/// daemon can persist it for the resume path. When `is_resume = true`,
+/// `RYE_RESUME=1` is also injected so replay-aware tools can branch
+/// on cold-start vs. resume.
 pub fn spawn_item(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
     thread_id: &str,
     chain_root_id: &str,
     mut extra_runtime_bindings: std::collections::HashMap<String, String>,
+    thread_state_dir: Option<&std::path::Path>,
+    is_resume: bool,
+    original_snapshot_hash: Option<&str>,
 ) -> Result<SpawnedItem> {
     if let Ok(socket_path) = std::env::var("RYEOSD_SOCKET_PATH") {
         extra_runtime_bindings
@@ -677,6 +704,39 @@ pub fn spawn_item(
         }
     }
 
+    // Allocate the per-thread checkpoint directory and inject
+    // RYE_CHECKPOINT_DIR / RYE_RESUME into the subprocess env when the
+    // spec declares `native_resume`. This is intentionally done at
+    // spawn time rather than in the engine handler because the path
+    // depends on the daemon-owned `<thread_state_dir>`. See
+    // `RuntimeLaunchMetadata::checkpoint_dir`.
+    let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
+    if let Some(state_dir) = thread_state_dir {
+        for node in &mut plan.nodes {
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
+            {
+                if spec.execution.native_resume.is_some() {
+                    let ckpt = state_dir.join("checkpoints");
+                    std::fs::create_dir_all(&ckpt).map_err(|e| {
+                        anyhow!(
+                            "failed to create checkpoint dir {}: {e}",
+                            ckpt.display()
+                        )
+                    })?;
+                    spec.env.insert(
+                        "RYE_CHECKPOINT_DIR".to_string(),
+                        ckpt.display().to_string(),
+                    );
+                    if is_resume {
+                        spec.env.insert("RYE_RESUME".to_string(), "1".to_string());
+                    }
+                    allocated_checkpoint_dir = Some(ckpt);
+                    break; // first DispatchSubprocess wins, mirrors FirstWins
+                }
+            }
+        }
+    }
+
     let engine_ctx = EngineContext {
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
@@ -694,6 +754,51 @@ pub fn spawn_item(
         },
     };
 
+    // Derive spawn-time launch metadata from the first DispatchSubprocess
+    // node before handing the plan off to the engine. The engine remains
+    // canonical for engine-known data (in `SubprocessSpec`); this snapshots
+    // the daemon-relevant slice so shutdown/cancel can route without
+    // re-loading the spec.
+    let mut launch_metadata = plan
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => Some(
+                crate::launch_metadata::RuntimeLaunchMetadata::from_spec(spec),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(ckpt) = allocated_checkpoint_dir {
+        launch_metadata = launch_metadata.with_checkpoint_dir(ckpt);
+    }
+    // Capture resume context iff this thread declared native_resume.
+    // `reconcile.rs` reads it on daemon restart to re-spawn the thread
+    // under the same `thread_id` with `RYE_RESUME=1`.
+    //
+    // **Pinned-snapshot policy:** copy the full original
+    // `PlanContext.project_context` AND the runner-allocated
+    // `original_snapshot_hash` (if any). On resume, the reconciler
+    // prefers a `ProjectContext::SnapshotHash { hash }` form when
+    // `original_snapshot_hash` is `Some`, so resume runs against the
+    // exact project version captured at spawn time, not the current
+    // working-dir head. See `docs/future/RESUME-ADVANCED-PATH.md`.
+    if launch_metadata.native_resume.is_some() {
+        launch_metadata = launch_metadata.with_resume_context(
+            crate::launch_metadata::ResumeContext {
+                kind: resolved.kind.clone(),
+                item_ref: resolved.item_ref.clone(),
+                launch_mode: resolved.launch_mode.clone(),
+                parameters: resolved.parameters.clone(),
+                project_context: resolved.plan_context.project_context.clone(),
+                original_snapshot_hash: original_snapshot_hash.map(str::to_string),
+                current_site_id: resolved.plan_context.current_site_id.clone(),
+                origin_site_id: resolved.plan_context.origin_site_id.clone(),
+                requested_by: resolved.plan_context.requested_by.clone(),
+                execution_hints: resolved.plan_context.execution_hints.clone(),
+            },
+        );
+    }
     let spawned = engine
         .spawn_plan(&engine_ctx, &plan)
         .map_err(|e| anyhow!("spawn failed: {e}"))?;
@@ -701,6 +806,7 @@ pub fn spawn_item(
     Ok(SpawnedItem {
         pid: spawned.pid,
         pgid: spawned.pgid,
+        launch_metadata,
         spawned,
     })
 }

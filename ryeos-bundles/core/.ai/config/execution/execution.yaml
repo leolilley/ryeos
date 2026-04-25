@@ -10,8 +10,17 @@ defaults:
   timeout: 300
   max_steps: 100
   max_concurrency: 10
+  # Cancellation policy applied when the daemon kills a running tool.
+  # Read by `NativeAsyncHandler` when the tool declares
+  # `native_async: true`. Tools that supply the rich form
+  # (`native_async: { cancel_mode, graceful_shutdown_secs }`) override
+  # these per-tool. Modes: "graceful" (SIGTERM, wait, SIGKILL) | "hard"
+  # (SIGKILL immediately).
+  cancellation_mode: "graceful"
+  cancellation_grace_secs: 5
 
 # Per-tool overrides (key = tool item_id)
 # tools:
 #   "my/scraper/tool":
 #     timeout: 600
+#     cancellation_grace_secs: 30

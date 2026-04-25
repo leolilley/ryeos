@@ -1,0 +1,14 @@
+# rye:signed:2026-04-25T06:09:31Z:ee87817ccbc0949ea02792f35e4a1d309c84d443dcf4842d5f61e91f0dfae7fb:0JhmIUyXLy5HrBA1+PYaBYEKl6Eh3CmInbyWAZDTbDxMhBWkwVEyncf+EblmKy+bRH6Xs1mqSnBh4UVNGgBBCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+category: "engine/parsers/python"
+description: "Python dunder metadata parser: extracts __name__ = \"value\" assignments"
+executor_id: "native:parser_regex_kv"
+parser_api_version: 1
+parser_config:
+  patterns:
+    - regex: '(?m)^(__\w+__)\s*=\s*"([^"]+)"'
+      key_group: 1
+      value_group: 2
+output_schema:
+  root_type: mapping
+  required: {}

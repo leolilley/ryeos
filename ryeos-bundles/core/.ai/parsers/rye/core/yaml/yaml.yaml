@@ -1,0 +1,11 @@
+# rye:signed:2026-04-25T06:09:31Z:6738419a967148a5994f64653cdc61a5d945928c5c4d82493551e73d66c80dbb:cse+/2w4A0XNZmbSMBvQBcp5SeIGEUJv1EJUptTW5E/Eytca2ZzpT+qEex7i9ZLSwWr3ZkKyX3WT4phdZToCCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+category: "engine/parsers/yaml"
+description: "YAML document parser: parses entire file as a YAML mapping"
+executor_id: "native:parser_yaml_document"
+parser_api_version: 1
+parser_config:
+  require_mapping: true
+output_schema:
+  root_type: mapping
+  required: {}

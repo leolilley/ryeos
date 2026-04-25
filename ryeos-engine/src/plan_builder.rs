@@ -10,25 +10,24 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{
     ExecutionHints, ExecutionPlan, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
-    SubprocessSpec, TrustClass, VerifiedItem,
+    TrustClass, VerifiedItem,
 };
 use crate::error::EngineError;
-use crate::kind_registry::KindRegistry;
-use crate::metadata::MetadataParserRegistry;
 use crate::item_resolution::ResolutionRoots;
+use crate::kind_registry::KindRegistry;
+use crate::parsers::ParserDispatcher;
+use crate::runtime::{
+    compile_with_handlers, ChainIntermediate, RuntimeHandlerRegistry,
+};
 use crate::trust::TrustStore;
 
 /// Maximum executor chain depth before we assume a cycle or misconfiguration.
 const MAX_CHAIN_DEPTH: usize = 16;
-
-/// Reserved env key prefix — runtime configs may not override daemon-injected bindings.
-const RESERVED_ENV_PREFIX: &str = "RYE_";
 
 // ── Chain data types ─────────────────────────────────────────────────────
 
@@ -41,137 +40,6 @@ struct ChainTerminal {
     verified_chain: Vec<(String, TrustClass)>,
     chain_content_hashes: Vec<String>,
     intermediates: Vec<ChainIntermediate>,
-}
-
-/// One resolved hop in the executor chain.
-struct ChainIntermediate {
-    executor_id: String,
-    resolved_ref: String,
-    kind: String,
-    source_path: PathBuf,
-    parsed: serde_json::Value,
-}
-
-// ── Runtime config deserialization ───────────────────────────────────────
-
-/// Execution config extracted from a tool with a `config` block.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RuntimeConfig {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    input_data: Option<String>,
-    #[serde(default = "default_timeout_secs")]
-    timeout_secs: u64,
-    #[serde(default)]
-    env: HashMap<String, String>,
-}
-
-fn default_timeout_secs() -> u64 {
-    300
-}
-
-/// Interpreter resolution config from a tool with an `env_config` block.
-#[derive(Debug, Clone, Deserialize)]
-struct EnvConfig {
-    #[serde(default)]
-    interpreter: Option<InterpreterConfig>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InterpreterConfig {
-    binary: String,
-    #[serde(default)]
-    candidates: Vec<String>,
-    #[serde(default)]
-    search_paths: Vec<String>,
-    var: Option<String>,
-}
-
-// ── Template expansion ──────────────────────────────────────────────────
-
-struct TemplateContext {
-    tool_path: PathBuf,
-    project_path: Option<PathBuf>,
-    params_json: String,
-    interpreter: Option<String>,
-}
-
-fn expand_template(
-    template: &str,
-    ctx: &TemplateContext,
-) -> Result<String, EngineError> {
-    // Extract all {token} placeholders
-    let mut result = template.to_string();
-    let mut start = 0;
-    while let Some(open) = result[start..].find('{') {
-        let abs_open = start + open;
-        let Some(close) = result[abs_open..].find('}') else {
-            break;
-        };
-        let abs_close = abs_open + close;
-        let token = &result[abs_open + 1..abs_close];
-
-        let value = match token {
-            "tool_path" => ctx.tool_path.to_string_lossy().to_string(),
-            "project_path" => ctx.project_path.as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .ok_or_else(|| EngineError::TemplateMissingContext {
-                    token: "project_path".into(),
-                })?,
-            "params_json" => ctx.params_json.clone(),
-            "interpreter" => ctx.interpreter.clone()
-                .ok_or_else(|| EngineError::TemplateMissingContext {
-                    token: "interpreter".into(),
-                })?,
-            _ => return Err(EngineError::UnknownTemplateToken {
-                token: token.to_string(),
-            }),
-        };
-        result.replace_range(abs_open..abs_close + 1, &value);
-        // Move past the replacement
-        start = abs_open + value.len();
-    }
-    if result.is_empty() {
-        return Err(EngineError::ExpandedEmpty {
-            template: template.to_string(),
-        });
-    }
-    Ok(result)
-}
-
-// ── Interpreter resolution ──────────────────────────────────────────────
-
-fn resolve_interpreter(
-    config: &InterpreterConfig,
-    project_root: Option<&PathBuf>,
-) -> Result<String, EngineError> {
-    // 1. Check env var override
-    if let Some(var) = &config.var {
-        if let Ok(val) = std::env::var(var) {
-            return Ok(val);
-        }
-    }
-    // 2. Search project-local paths for binary/candidates
-    if let Some(root) = project_root {
-        let binaries = std::iter::once(&config.binary)
-            .chain(config.candidates.iter());
-        for search_path in &config.search_paths {
-            for binary in binaries.clone() {
-                let candidate = root.join(search_path).join(binary);
-                if candidate.exists() {
-                    return Ok(candidate.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-    Err(EngineError::RuntimeBinaryNotFound {
-        binary: config.binary.clone(),
-    })
 }
 
 // ── Chain walker ────────────────────────────────────────────────────────
@@ -189,7 +57,7 @@ fn resolve_executor_chain(
     root_source_path: &PathBuf,
     root_kind: &str,
     kinds: &KindRegistry,
-    parsers: &MetadataParserRegistry,
+    parsers: &ParserDispatcher,
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
 ) -> Result<ChainTerminal, EngineError> {
@@ -303,8 +171,13 @@ fn resolve_executor_chain(
         let content_hash = crate::item_resolution::content_hash(&content);
         chain_content_hashes.push(content_hash);
 
-        let parsed = parsers.extract(&content, &source_format.parser_id)?;
-        let metadata = crate::metadata::apply_extraction_rules(
+        let parsed = parsers.dispatch(
+            &source_format.parser,
+            &content,
+            Some(&source_path),
+            &source_format.signature,
+        )?;
+        let metadata = crate::kind_registry::apply_extraction_rules(
             &parsed,
             &kind_schema.extraction_rules,
             &source_path,
@@ -336,127 +209,66 @@ fn resolve_executor_chain(
     })
 }
 
-// ── Spec compilation ────────────────────────────────────────────────────
+// ── Runtime registry construction ───────────────────────────────────────
 
-/// Compile the chain intermediates into a SubprocessSpec.
-///
-/// Scans intermediates for runtime config and env config, resolves
-/// interpreter, expands templates.
-fn compile_subprocess_spec(
-    terminal: &ChainTerminal,
-    project_root: Option<&PathBuf>,
-    params: &serde_json::Value,
-    plan_env: &HashMap<String, String>,
-) -> Result<SubprocessSpec, EngineError> {
-    let mut runtime_config: Option<RuntimeConfig> = None;
-    let mut env_config: Option<EnvConfig> = None;
+/// Build the per-request `RuntimeHandlerRegistry` from the kind
+/// schema's `runtime.handlers` declaration. Each declared handler key
+/// must be backed by a registered builtin; an unknown key is a hard
+/// `SchemaLoaderError`.
+fn build_runtime_registry(
+    spec: &crate::kind_registry::RuntimeSpec,
+) -> Result<RuntimeHandlerRegistry, EngineError> {
+    use std::sync::Arc;
 
-    for intermediate in &terminal.intermediates {
-        tracing::debug!(
-            executor_id = %intermediate.executor_id,
-            resolved_ref = %intermediate.resolved_ref,
-            path = %intermediate.source_path.display(),
-            "scanning intermediate for runtime config"
-        );
-        if let Some(config) = intermediate.parsed.get("config") {
-            if runtime_config.is_some() {
-                return Err(EngineError::MultipleRuntimeConfigs {
-                    chain: terminal.chain.clone(),
+    let mut registry = RuntimeHandlerRegistry::new();
+    for decl in &spec.handlers {
+        match decl.type_.as_str() {
+            crate::runtime::handlers::runtime_config::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::runtime_config::RuntimeConfigHandler,
+                ));
+            }
+            crate::runtime::handlers::env_config::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::env_config::EnvConfigHandler,
+                ));
+            }
+            crate::runtime::handlers::config_resolve::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::config_resolve::ConfigResolveHandler,
+                ));
+            }
+            crate::runtime::handlers::verify_deps::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::verify_deps::VerifyDepsHandler,
+                ));
+            }
+            crate::runtime::handlers::execution_params::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::execution_params::ExecutionParamsHandler,
+                ));
+            }
+            crate::runtime::handlers::native_async::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::native_async::NativeAsyncHandler,
+                ));
+            }
+            crate::runtime::handlers::native_resume::KEY => {
+                registry.register(Arc::new(
+                    crate::runtime::handlers::native_resume::NativeResumeHandler,
+                ));
+            }
+            other => {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "kind schema declares runtime handler `{other}` which is not \
+                         registered in the engine's RuntimeHandlerRegistry"
+                    ),
                 });
             }
-            runtime_config = Some(serde_json::from_value(config.clone())
-                .map_err(|e| EngineError::InvalidRuntimeConfig {
-                    path: intermediate.source_path.display().to_string(),
-                    reason: format!("{e}"),
-                })?);
-        }
-        if let Some(ec) = intermediate.parsed.get("env_config") {
-            env_config = Some(serde_json::from_value(ec.clone())
-                .map_err(|e| EngineError::InvalidRuntimeConfig {
-                    path: intermediate.source_path.display().to_string(),
-                    reason: format!("invalid env_config: {e}"),
-                })?);
         }
     }
-
-    let config = runtime_config.ok_or_else(|| EngineError::NoRuntimeConfig {
-        chain: terminal.chain.clone(),
-    })?;
-
-    // Resolve interpreter from env_config
-    let interpreter = env_config
-        .as_ref()
-        .and_then(|ec| ec.interpreter.as_ref())
-        .map(|ic| resolve_interpreter(ic, project_root))
-        .transpose()?;
-
-    let params_json = if params.is_null() { "".to_string() } else { params.to_string() };
-
-    let tmpl_ctx = TemplateContext {
-        tool_path: terminal.root_source_path.clone(),
-        project_path: project_root.cloned(),
-        params_json,
-        interpreter: interpreter.clone(),
-    };
-
-    // Expand command
-    let cmd = expand_template(&config.command, &tmpl_ctx)?;
-
-    // Expand args
-    let args: Result<Vec<String>, EngineError> = config.args.iter()
-        .map(|a| expand_template(a, &tmpl_ctx))
-        .collect();
-    let args = args?;
-
-    // Expand input_data
-    let stdin_data = config.input_data
-        .as_deref()
-        .map(|t| expand_template(t, &tmpl_ctx))
-        .transpose()?;
-
-    // Build env: plan env + env_config.env + config.env
-    let mut env: HashMap<String, String> = plan_env.clone();
-
-    // Merge env_config.env
-    if let Some(ref ec) = env_config {
-        for (k, v) in &ec.env {
-            if k.starts_with(RESERVED_ENV_PREFIX) {
-                return Err(EngineError::ReservedEnvKey { key: k.clone() });
-            }
-            let expanded = expand_template(v, &tmpl_ctx)?;
-            env.insert(k.clone(), expanded);
-        }
-    }
-
-    // Merge config.env
-    for (k, v) in &config.env {
-        if k.starts_with(RESERVED_ENV_PREFIX) {
-            return Err(EngineError::ReservedEnvKey { key: k.clone() });
-        }
-        let expanded = expand_template(v, &tmpl_ctx)?;
-        env.insert(k.clone(), expanded);
-    }
-
-    // Inject interpreter path as env var if resolved
-    if let Some(ref interp) = interpreter {
-        // The interpreter config may declare a var name — use it if present
-        if let Some(ref ec) = env_config {
-            if let Some(ref ic) = ec.interpreter {
-                if let Some(ref var) = ic.var {
-                    env.insert(var.clone(), interp.clone());
-                }
-            }
-        }
-    }
-
-    Ok(SubprocessSpec {
-        cmd,
-        args,
-        cwd: project_root.map(|p| p.clone()),
-        env,
-        stdin_data,
-        timeout_secs: config.timeout_secs,
-    })
+    Ok(registry)
 }
 
 // ── Plan builder ────────────────────────────────────────────────────────
@@ -475,7 +287,7 @@ pub fn build_plan(
     hints: &ExecutionHints,
     ctx: &PlanContext,
     kinds: &KindRegistry,
-    parsers: &MetadataParserRegistry,
+    parsers: &ParserDispatcher,
     roots: &ResolutionRoots,
     registry_fingerprint: &str,
     trust_store: &TrustStore,
@@ -492,6 +304,35 @@ pub fn build_plan(
             item_ref: canonical_ref.clone(),
         })?
         .to_owned();
+
+    // Step 1a: Caller-param validation against the user tool's
+    // `config_schema`, if it declares one. Runs BEFORE chain
+    // resolution so a bad input fails loud without spinning up the
+    // executor pipeline. Wrapper / runtime YAMLs further down the
+    // chain may declare their own `config_schema` for documentation
+    // — those describe internal contracts, not the caller-facing
+    // interface, and are deliberately ignored here. See
+    // `runtime/config_schema.rs` for the rationale.
+    {
+        let content =
+            std::fs::read_to_string(&resolved.source_path).map_err(|e| {
+                EngineError::Internal(format!(
+                    "failed to read tool source for schema validation {}: {e}",
+                    resolved.source_path.display()
+                ))
+            })?;
+        let tool_block = parsers.dispatch(
+            &resolved.source_format.parser,
+            &content,
+            Some(&resolved.source_path),
+            &resolved.source_format.signature,
+        )?;
+        crate::runtime::config_schema::validate_caller_params(
+            &tool_block,
+            parameters,
+            &canonical_ref,
+        )?;
+    }
 
     // Step 2: Follow the executor chain to a terminal
     let terminal = resolve_executor_chain(
@@ -529,16 +370,42 @@ pub fn build_plan(
     plan_env.insert("RYE_SITE_ID".to_owned(), ctx.current_site_id.clone());
     plan_env.insert("RYE_ORIGIN_SITE_ID".to_owned(), ctx.origin_site_id.clone());
 
-    // Step 4: Compile intermediates into SubprocessSpec
+    // Step 4: Compile intermediates into SubprocessSpec via the
+    // runtime-handler registry. The root item's kind schema declares
+    // (a) which handlers claim which top-level YAML blocks and
+    // (b) which keys are deliberately ignored (metadata, header).
     let project_root = match &ctx.project_context {
         crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
         _ => None,
     };
-    let spec = compile_subprocess_spec(
-        &terminal,
-        project_root.as_ref(),
+    let root_kind_schema = kinds.get(&resolved.kind).ok_or_else(|| {
+        EngineError::UnsupportedKind {
+            kind: resolved.kind.clone(),
+        }
+    })?;
+    let runtime_spec = root_kind_schema.runtime().ok_or_else(|| {
+        EngineError::SchemaLoaderError {
+            reason: format!(
+                "kind `{}` has no `runtime` block in its kind schema — \
+                 cannot dispatch runtime handlers for executable items",
+                resolved.kind,
+            ),
+        }
+    })?;
+    let registry = build_runtime_registry(runtime_spec)?;
+    let spec = compile_with_handlers(
+        &terminal.intermediates,
+        &terminal.root_source_path,
+        &terminal.chain,
+        &runtime_spec.ignored_keys,
+        &registry,
         parameters,
         &plan_env,
+        project_root.as_ref(),
+        parsers,
+        kinds,
+        trust_store,
+        roots,
     )?;
 
     // Step 5: Build plan node
@@ -664,7 +531,12 @@ mod tests {
     }
 
     fn sign_yaml(yaml: &str) -> String {
-        lillux::signature::sign_content(yaml, &test_signing_key(), "#", None)
+        let yaml_owned = if yaml.contains("composed_value_contract") {
+            yaml.to_string()
+        } else {
+            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: rye/core/identity\n") } }
+        };
+        lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
 
     const TOOL_SCHEMA_YAML: &str = "\
@@ -675,14 +547,31 @@ execution:
     \"@subprocess\": \"tool:rye/core/subprocess/execute\"
 formats:
   - extensions: [\".py\"]
-    parser_id: python/ast
+    parser: parser:rye/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
   - extensions: [\".yaml\", \".yml\"]
-    parser_id: yaml/yaml
+    parser: parser:rye/core/yaml/yaml
     signature:
       prefix: \"#\"
+runtime:
+  handlers:
+    - type: config
+    - type: env_config
+  ignored_keys:
+    - version
+    - tool_type
+    - category
+    - description
+    - __executor_id__
+    - __version__
+    - __tool_description__
+    - __category__
+    - __tool_type__
+    - required_secrets
+    - name
+    - executor_id
 metadata:
   rules:
     executor_id:
@@ -722,7 +611,7 @@ metadata:
             signature_header: None,
             source_format: ResolvedSourceFormat {
                 extension: ".py".to_string(),
-                parser_id: "python/ast".to_string(),
+                parser: "parser:rye/core/python/ast".to_string(),
                 signature: SignatureEnvelope {
                     prefix: "#".to_string(),
                     suffix: None,
@@ -825,7 +714,7 @@ config:
         write_tool_schema(&kinds_dir);
 
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
-        let parsers = MetadataParserRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
         // Write chain: tool → @subprocess (alias → tool:rye/core/subprocess/execute, null terminal with config)
         let _term = write_terminal_with_config(&project_dir, "rye/core/subprocess/execute");
@@ -874,7 +763,7 @@ config:
         write_tool_schema(&kinds_dir);
 
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
-        let parsers = MetadataParserRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
         write_chain_tool(&project_dir, "a", Some("tool:b"));
         write_chain_tool(&project_dir, "b", Some("tool:a"));
@@ -924,7 +813,7 @@ config:
         // Verify the alias is loaded
         let tool_schema = kinds.get("tool").unwrap();
         assert_eq!(
-            tool_schema.resolve_alias("@subprocess"),
+            tool_schema.execution.as_ref().and_then(|e| e.aliases.get("@subprocess")).map(|s| s.as_str()),
             Some("tool:rye/core/subprocess/execute")
         );
         assert!(tool_schema.is_executable());
@@ -940,7 +829,7 @@ config:
         write_tool_schema(&kinds_dir);
 
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
-        let parsers = MetadataParserRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
         // Tool points to @nonexistent alias
         let tool_path = write_chain_tool(&project_dir, "my_tool", Some("@nonexistent"));
@@ -988,7 +877,7 @@ config:
         let ts = test_ts();
         write_tool_schema(&kinds_dir);
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
-        let parsers = MetadataParserRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
         let item = make_verified_item(
             "tool:my_tool",
@@ -1017,110 +906,63 @@ config:
         assert!(matches!(err, EngineError::MissingExecutorId { .. }));
     }
 
-    // ── Test: template expansion ────────────────────────────────────────
+    // ── Tests for template/interpreter primitives now live in the
+    // `crate::runtime` module (handlers + helpers were moved there).
+    // The plan_builder tests below cover the integrated path through
+    // `compile_with_handlers`.
 
-    #[test]
-    fn template_expansion_basic() {
-        let ctx = TemplateContext {
-            tool_path: PathBuf::from("/path/to/echo.py"),
-            project_path: Some(PathBuf::from("/project")),
-            params_json: r#"{"message":"hi"}"#.to_string(),
-            interpreter: Some("python3".to_string()),
-        };
-        assert_eq!(expand_template("{tool_path}", &ctx).unwrap(), "/path/to/echo.py");
-        assert_eq!(expand_template("{interpreter}", &ctx).unwrap(), "python3");
-        assert_eq!(expand_template("{params_json}", &ctx).unwrap(), r#"{"message":"hi"}"#);
-        assert_eq!(expand_template("{project_path}", &ctx).unwrap(), "/project");
+    use crate::runtime::{compile_with_handlers, ChainIntermediate as RChainIntermediate, RuntimeHandlerRegistry};
+
+    fn empty_roots() -> ResolutionRoots {
+        ResolutionRoots::from_flat(None, None, vec![])
     }
 
-    #[test]
-    fn template_unknown_token_errors() {
-        let ctx = TemplateContext {
-            tool_path: PathBuf::from("/t.py"),
-            project_path: None,
-            params_json: String::new(),
-            interpreter: None,
-        };
-        let err = expand_template("{unknown_thing}", &ctx).unwrap_err();
-        assert!(matches!(err, EngineError::UnknownTemplateToken { .. }));
+    fn empty_kinds() -> KindRegistry {
+        KindRegistry::empty()
     }
 
-    #[test]
-    fn template_missing_context_errors() {
-        let ctx = TemplateContext {
-            tool_path: PathBuf::from("/t.py"),
-            project_path: None,
-            params_json: String::new(),
-            interpreter: None,
-        };
-        let err = expand_template("{project_path}", &ctx).unwrap_err();
-        assert!(matches!(err, EngineError::TemplateMissingContext { .. }));
-    }
-
-    // ── Test: interpreter resolution ────────────────────────────────────
-
-    #[test]
-    fn interpreter_from_env_var() {
-        std::env::set_var("RYE_TEST_PYTHON", "/custom/python3");
-        let config = InterpreterConfig {
-            binary: "python3".into(),
-            candidates: vec![],
-            search_paths: vec![],
-            var: Some("RYE_TEST_PYTHON".into()),
-        };
-        let result = resolve_interpreter(&config, None).unwrap();
-        assert_eq!(result, "/custom/python3");
-        std::env::remove_var("RYE_TEST_PYTHON");
-    }
-
-    #[test]
-    fn interpreter_from_search_path() {
-        let project_dir = tempdir();
-        let venv_bin = project_dir.join(".venv").join("bin");
-        fs::create_dir_all(&venv_bin).unwrap();
-        fs::write(venv_bin.join("python3"), "#!/bin/bash\necho python").unwrap();
-
-        let config = InterpreterConfig {
-            binary: "python3".into(),
-            candidates: vec![],
-            search_paths: vec![".venv/bin".into()],
-            var: Some("RYE_PYTHON".into()),
-        };
-        let result = resolve_interpreter(&config, Some(&project_dir)).unwrap();
-        assert!(result.contains(".venv/bin/python3"));
-    }
-
-    #[test]
-    fn interpreter_not_found_errors() {
-        let config = InterpreterConfig {
-            binary: "nonexistent_interp".into(),
-            candidates: vec![],
-            search_paths: vec![],
-            var: None,
-        };
-        let err = resolve_interpreter(&config, None).unwrap_err();
-        assert!(matches!(err, EngineError::RuntimeBinaryNotFound { .. }));
+    fn ignored() -> Vec<String> {
+        vec![
+            "version".into(),
+            "tool_type".into(),
+            "category".into(),
+            "description".into(),
+            "__executor_id__".into(),
+            "executor_id".into(),
+        ]
     }
 
     // ── Test: no runtime config errors ──────────────────────────────────
 
     #[test]
     fn no_runtime_config_errors() {
-        let intermediates = vec![ChainIntermediate {
+        let intermediates = vec![RChainIntermediate {
             executor_id: "test".into(),
             resolved_ref: "tool:test".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/test.py"),
-            parsed: json!({}), // no "config" key
+            parsed: json!({}),
         }];
-        let terminal = ChainTerminal {
-            root_source_path: PathBuf::from("/test.py"),
-            chain: vec!["test".into()],
-            verified_chain: vec![],
-            chain_content_hashes: vec![],
-            intermediates,
-        };
-        let err = compile_subprocess_spec(&terminal, None, &json!(null), &HashMap::new()).unwrap_err();
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = empty_kinds();
+        let ts = TrustStore::empty();
+        let roots = empty_roots();
+        let err = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/test.py"),
+            &["test".into()],
+            &ignored(),
+            &registry,
+            &json!(null),
+            &HashMap::new(),
+            None,
+            &parsers,
+            &kinds,
+            &ts,
+            &roots,
+        )
+        .unwrap_err();
         assert!(matches!(err, EngineError::NoRuntimeConfig { .. }));
     }
 
@@ -1134,14 +976,14 @@ config:
             "timeout_secs": 300
         });
         let intermediates = vec![
-            ChainIntermediate {
+            RChainIntermediate {
                 executor_id: "a".into(),
                 resolved_ref: "tool:a".into(),
                 kind: "tool".into(),
                 source_path: PathBuf::from("/a.yaml"),
                 parsed: json!({ "config": config_block }),
             },
-            ChainIntermediate {
+            RChainIntermediate {
                 executor_id: "b".into(),
                 resolved_ref: "tool:b".into(),
                 kind: "tool".into(),
@@ -1149,15 +991,35 @@ config:
                 parsed: json!({ "config": config_block }),
             },
         ];
-        let terminal = ChainTerminal {
-            root_source_path: PathBuf::from("/test.py"),
-            chain: vec!["a".into(), "b".into()],
-            verified_chain: vec![],
-            chain_content_hashes: vec![],
-            intermediates,
-        };
-        let err = compile_subprocess_spec(&terminal, None, &json!(null), &HashMap::new()).unwrap_err();
-        assert!(matches!(err, EngineError::MultipleRuntimeConfigs { .. }));
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = empty_kinds();
+        let ts = TrustStore::empty();
+        let roots = empty_roots();
+        let err = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/test.py"),
+            &["a".into(), "b".into()],
+            &ignored(),
+            &registry,
+            &json!(null),
+            &HashMap::new(),
+            None,
+            &parsers,
+            &kinds,
+            &ts,
+            &roots,
+        )
+        .unwrap_err();
+        // Cardinality::Singleton on RuntimeConfigHandler catches this
+        // BEFORE dispatch — so we now see DuplicateSingletonBlock
+        // instead of the older MultipleRuntimeConfigs (which is now
+        // a defense-in-depth check inside the handler that would only
+        // fire if cardinality enforcement was bypassed).
+        assert!(
+            matches!(err, EngineError::DuplicateSingletonBlock { ref key, .. } if key == "config"),
+            "expected DuplicateSingletonBlock for `config`, got: {err:?}"
+        );
     }
 
     // ── Test: reserved env key rejected ─────────────────────────────────
@@ -1170,21 +1032,33 @@ config:
             "timeout_secs": 10,
             "env": { "RYE_THREAD_ID": "evil" }
         });
-        let intermediates = vec![ChainIntermediate {
+        let intermediates = vec![RChainIntermediate {
             executor_id: "test".into(),
             resolved_ref: "tool:test".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/test.yaml"),
             parsed: json!({ "config": config_block }),
         }];
-        let terminal = ChainTerminal {
-            root_source_path: PathBuf::from("/test.py"),
-            chain: vec!["test".into()],
-            verified_chain: vec![],
-            chain_content_hashes: vec![],
-            intermediates,
-        };
-        let err = compile_subprocess_spec(&terminal, None, &json!(null), &HashMap::new()).unwrap_err();
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = empty_kinds();
+        let ts = TrustStore::empty();
+        let roots = empty_roots();
+        let err = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/test.py"),
+            &["test".into()],
+            &ignored(),
+            &registry,
+            &json!(null),
+            &HashMap::new(),
+            None,
+            &parsers,
+            &kinds,
+            &ts,
+            &roots,
+        )
+        .unwrap_err();
         assert!(matches!(err, EngineError::ReservedEnvKey { .. }));
     }
 
@@ -1199,32 +1073,80 @@ config:
             "timeout_secs": 60,
             "env": { "PYTHONUNBUFFERED": "1" }
         });
-        let intermediates = vec![ChainIntermediate {
+        let intermediates = vec![RChainIntermediate {
             executor_id: "runtime".into(),
             resolved_ref: "tool:runtime".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/runtime.yaml"),
             parsed: json!({ "config": config_block }),
         }];
-        let terminal = ChainTerminal {
-            root_source_path: PathBuf::from("/project/.ai/tools/echo.py"),
-            chain: vec!["runtime".into()],
-            verified_chain: vec![],
-            chain_content_hashes: vec![],
-            intermediates,
-        };
-        let spec = compile_subprocess_spec(
-            &terminal,
-            Some(&PathBuf::from("/project")),
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = empty_kinds();
+        let ts = TrustStore::empty();
+        let roots = empty_roots();
+        let project = PathBuf::from("/project");
+        let spec = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/project/.ai/tools/echo.py"),
+            &["runtime".into()],
+            &ignored(),
+            &registry,
             &json!({"message": "hello"}),
             &HashMap::new(),
-        ).unwrap();
+            Some(&project),
+            &parsers,
+            &kinds,
+            &ts,
+            &roots,
+        )
+        .unwrap();
 
         assert_eq!(spec.cmd, "python3");
         assert_eq!(spec.args, vec!["/project/.ai/tools/echo.py", "--project-path", "/project"]);
         assert_eq!(spec.stdin_data, Some(r#"{"message":"hello"}"#.to_string()));
         assert_eq!(spec.timeout_secs, 60);
         assert_eq!(spec.env.get("PYTHONUNBUFFERED").unwrap(), "1");
+    }
+
+    // ── Test: unknown runtime block fails loud ───────────────────────────
+
+    #[test]
+    fn unknown_runtime_block_fails_loud() {
+        let intermediates = vec![RChainIntermediate {
+            executor_id: "test".into(),
+            resolved_ref: "tool:test".into(),
+            kind: "tool".into(),
+            source_path: PathBuf::from("/test.yaml"),
+            parsed: json!({
+                "config": {"command": "/bin/true", "timeout_secs": 1},
+                "totally_made_up_block_xyz": {"enabled": true}
+            }),
+        }];
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = empty_kinds();
+        let ts = TrustStore::empty();
+        let roots = empty_roots();
+        let err = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/t.py"),
+            &["test".into()],
+            &ignored(),
+            &registry,
+            &json!(null),
+            &HashMap::new(),
+            None,
+            &parsers,
+            &kinds,
+            &ts,
+            &roots,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EngineError::UnknownRuntimeBlock { ref key, .. } if key == "totally_made_up_block_xyz"),
+            "expected UnknownRuntimeBlock for `totally_made_up_block_xyz`, got: {err:?}",
+        );
     }
 
     // ── Test: content hash mismatch detected on chain hop ────────────────
@@ -1246,7 +1168,7 @@ config:
         write_tool_schema(&kinds_dir);
 
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
-        let parsers = MetadataParserRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
         // Write a chain hop tool with a valid signature, then tamper it.
         // The root tool points to tool:runtimes/python/script as executor.
@@ -1346,7 +1268,7 @@ config:
         write_tool_schema(&kinds_dir);
 
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
-        let parsers = MetadataParserRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
         // 1. Create a fake python binary in project/.venv/bin/
         let venv_bin = project_dir.join(".venv").join("bin");
@@ -1370,6 +1292,7 @@ tool_type: runtime
 category: rye/core/runtimes/python
 env_config:
   interpreter:
+    type: local_binary
     binary: python3
     candidates: [python3]
     search_paths: [".venv/bin"]

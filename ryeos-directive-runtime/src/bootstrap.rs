@@ -1,10 +1,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 
 use crate::directive::*;
+use ryeos_engine::resolution::KindComposedView;
 use ryeos_runtime::verified_loader::VerifiedLoader;
+
+/// Conventional `derive_as` name on the directive kind's
+/// `composer_config` for the post-header body. The runtime reads
+/// `view.derived[DERIVED_BODY]` rather than naming any underlying
+/// parser field — adding a new directive-style kind = adding a new
+/// kind schema YAML, no runtime change.
+const DERIVED_BODY: &str = "body";
+
+/// Conventional `derive_as` name on the directive kind's
+/// `composer_config` for the merged `Map<String, Vec<String>>`
+/// context positions.
+const DERIVED_COMPOSED_CONTEXT: &str = "composed_context";
 
 pub struct BootstrapOutput {
     pub config: BootstrapConfig,
@@ -13,104 +26,34 @@ pub struct BootstrapOutput {
     pub context_window: u64,
 }
 
-struct ComposedDirective {
-    header: DirectiveHeader,
-    body: String,
-}
-
-fn resolve_extends_chain(
-    directive: &ParsedDirective,
-    loader: &VerifiedLoader,
-) -> Result<ComposedDirective> {
-    let mut chain = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut current_header = directive.header.clone();
-    let mut max_depth = 8;
-
-    while let Some(ref extends) = current_header.extends {
-        if max_depth == 0 {
-            bail!("extends chain exceeds depth limit of 8");
-        }
-        if !visited.insert(extends.clone()) {
-            bail!("cycle detected in extends chain: {}", extends);
-        }
-
-        let resolved = loader.resolve_item("directive", extends)?;
-        let verified = loader.load_verified("directive", &resolved.path)?;
-        let parent = crate::parser::parse_directive(&verified.content, &resolved.path.to_string_lossy())?;
-
-        chain.push(parent.header.clone());
-        current_header = parent.header;
-        max_depth -= 1;
-    }
-
-    chain.reverse();
-
-    let final_header = if directive.header.permissions.is_none() {
-        let mut header = directive.header.clone();
-        for parent_header in &chain {
-            if parent_header.permissions.is_some() {
-                header.permissions = parent_header.permissions.clone();
-                break;
-            }
-        }
-        header
-    } else {
-        directive.header.clone()
-    };
-
-    let mut composed_context = HashMap::new();
-    for parent_header in &chain {
-        if let Some(ref ctx) = parent_header.context {
-            for (pos, items) in ctx {
-                composed_context.entry(pos.clone())
-                    .or_insert_with(Vec::new)
-                    .extend(items.clone());
-            }
-        }
-    }
-    if let Some(ref ctx) = directive.header.context {
-        for (pos, items) in ctx {
-            composed_context.entry(pos.clone())
-                .or_insert_with(Vec::new)
-                .extend(items.clone());
-        }
-    }
-
-    let header_with_context = DirectiveHeader {
-        context: Some(composed_context),
-        ..final_header
-    };
-
-    tracing::info!(
-        chain_depth = chain.len(),
-        chain_items = ?chain.iter().map(|h| h.extends.as_deref().unwrap_or("(root)")).collect::<Vec<_>>(),
-        "extends chain resolved"
-    );
-
-    Ok(ComposedDirective {
-        header: header_with_context,
-        body: directive.body.clone(),
-    })
-}
-
 pub fn bootstrap(
     _project_root: &Path,
     _user_root: Option<&Path>,
     _system_roots: &[PathBuf],
-    directive: &ParsedDirective,
+    composed_view: &KindComposedView,
     _envelope_limits: &ryeos_runtime::envelope::HardLimits,
     loader: &VerifiedLoader,
 ) -> Result<BootstrapOutput> {
-    let composed = resolve_extends_chain(directive, loader)?;
+    // The runtime no longer composes — the daemon-side composer has
+    // already produced the effective header (in `composed`), the
+    // body and context positions (in `derived`), and any
+    // launcher-side caps (in `policy_facts`). The runtime fails loud
+    // if the daemon shipped a view missing the derived shapes the
+    // directive kind's `composer_config` is supposed to populate.
+    let header = parse_effective_header(composed_view)?;
 
     let execution = loader.load_config::<ExecutionConfig>("execution").unwrap_or_default();
     let model_routing = loader.load_config::<ModelRoutingConfig>("model_routing");
-    let provider = resolve_provider(&composed.header, &model_routing, loader)?;
-    let (model_name, context_window) = resolve_model(&composed.header, &model_routing);
+    let provider = resolve_provider(&header, &model_routing, loader)?;
+    let (model_name, context_window) = resolve_model(&header, &model_routing);
 
-    let tools = scan_tools(loader);
-    let hooks = load_hooks(loader);
+    // Strict tool / hook loading: any unparseable tool YAML or
+    // unreadable hook config is a hard error. Silent drops here meant
+    // a malformed tool would simply vanish from the runtime's tool
+    // list, leaving the user wondering why a declared tool wasn't
+    // available.
+    let tools = scan_tools(loader)?;
+    let hooks = load_hooks(loader)?;
 
     let risk_policy: Option<crate::harness::RiskPolicy> = loader
         .load_config::<serde_yaml::Value>("capability_risk")
@@ -126,13 +69,27 @@ pub fn bootstrap(
             Some(crate::harness::RiskPolicy { patterns: risk_patterns })
         });
 
-    let context_positions = composed.header.context.clone().unwrap_or_default();
+    let context_positions: HashMap<String, Vec<String>> =
+        composed_view.derived_string_seq_map(DERIVED_COMPOSED_CONTEXT);
 
-    let system_prompt = render_context_position(&context_positions, "system", loader);
-    let context_before = render_context_position(&context_positions, "before", loader);
-    let context_after = render_context_position(&context_positions, "after", loader);
+    // Strict context rendering: any declared knowledge item that fails
+    // to resolve / verify / load is a hard error. The previous code
+    // silently dropped unresolvable items and emitted a partial prompt,
+    // which masked typo'd refs and missing knowledge files.
+    let system_prompt = render_context_position(&context_positions, "system", loader)?;
+    let context_before = render_context_position(&context_positions, "before", loader)?;
+    let context_after = render_context_position(&context_positions, "after", loader)?;
 
-    let user_prompt = composed.body.clone();
+    let user_prompt = composed_view
+        .derived_string(DERIVED_BODY)
+        .ok_or_else(|| {
+            anyhow!(
+                "directive runtime: composed view missing derived `{DERIVED_BODY}` — \
+                 the directive kind schema's composer_config must declare a field rule \
+                 with `derive_as: {DERIVED_BODY}`"
+            )
+        })?
+        .to_string();
 
     Ok(BootstrapOutput {
         config: BootstrapConfig {
@@ -154,24 +111,46 @@ pub fn bootstrap(
     })
 }
 
+/// Deserialize the engine-supplied effective header back into the
+/// runtime's typed `DirectiveHeader`. The engine ships JSON because it
+/// doesn't (and shouldn't) know every directive header field; the
+/// runtime owns the typed view of fields it actually consumes
+/// (model, hooks, etc.).
+fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
+    serde_json::from_value(view.composed.clone()).map_err(|e| {
+        anyhow!("deserialize composed view into DirectiveHeader: {e}")
+    })
+}
+
 fn render_context_position(
     positions: &HashMap<String, Vec<String>>,
     position: &str,
     loader: &VerifiedLoader,
-) -> Option<String> {
-    let items = positions.get(position)?;
-    let mut rendered = Vec::new();
+) -> Result<Option<String>> {
+    let Some(items) = positions.get(position) else {
+        return Ok(None);
+    };
+    let mut rendered = Vec::with_capacity(items.len());
     for item_id in items {
-        if let Ok(resolved) = loader.resolve_item("knowledge", item_id) {
-            if let Ok(verified) = loader.load_verified("knowledge", &resolved.path) {
-                rendered.push(verified.content);
-            }
-        }
+        let resolved = loader.resolve_item("knowledge", item_id).map_err(|e| {
+            anyhow::anyhow!(
+                "context[{position}]: cannot resolve knowledge `{item_id}`: {e}"
+            )
+        })?;
+        let verified = loader
+            .load_verified("knowledge", &resolved.path)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "context[{position}]: cannot load knowledge `{item_id}` at {}: {e}",
+                    resolved.path.display()
+                )
+            })?;
+        rendered.push(verified.content);
     }
     if rendered.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(rendered.join("\n\n---\n\n"))
+        Ok(Some(rendered.join("\n\n---\n\n")))
     }
 }
 
@@ -231,60 +210,125 @@ fn resolve_model(
     (format!("anthropic/claude-sonnet-4-20250514"), 200_000)
 }
 
-fn scan_tools(loader: &VerifiedLoader) -> Vec<ToolSchema> {
+fn scan_tools(loader: &VerifiedLoader) -> Result<Vec<ToolSchema>> {
     let mut tools = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    if let Ok(items) = loader.scan_kind("tool") {
-        for item in &items {
-            let name = item.name.clone();
-            if name.is_empty() || seen.contains(&name) {
-                continue;
-            }
-            if let Ok(verified) = loader.load_verified("tool", &item.path) {
-                if let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&verified.content) {
-                    seen.insert(name.clone());
-                    let rel = item.path.strip_prefix(&item.root).unwrap_or(&item.path);
-                    let schema_val = doc.get("input_schema").or_else(|| doc.get("parameters"));
-                    let input_schema = schema_val.and_then(|v| serde_json::to_value(v).ok());
-                    tools.push(ToolSchema {
-                        name: name.clone(),
-                        item_id: format!("tool:{}", rel.display()),
-                        description: doc.get("description").and_then(|v| v.as_str()).map(String::from),
-                        input_schema,
-                    });
-                }
-            }
+    let items = loader
+        .scan_kind("tool")
+        .map_err(|e| anyhow::anyhow!("scan_tools: cannot enumerate kind `tool`: {e}"))?;
+
+    for item in &items {
+        let name = item.name.clone();
+        if name.is_empty() {
+            return Err(anyhow::anyhow!(
+                "scan_tools: tool at {} has empty `name`",
+                item.path.display()
+            ));
         }
+        if seen.contains(&name) {
+            // First-write-wins (shadowing project > user > system) is
+            // intentional — silently ignoring later duplicates is the
+            // correct precedence behaviour, not a "drop". Continue.
+            continue;
+        }
+        let verified = loader.load_verified("tool", &item.path).map_err(|e| {
+            anyhow::anyhow!("scan_tools: load `{name}` at {}: {e}", item.path.display())
+        })?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&verified.content).map_err(|e| {
+            anyhow::anyhow!(
+                "scan_tools: parse YAML for `{name}` at {}: {e}",
+                item.path.display()
+            )
+        })?;
+        seen.insert(name.clone());
+        let rel = item.path.strip_prefix(&item.root).unwrap_or(&item.path);
+        let schema_val = doc.get("input_schema").or_else(|| doc.get("parameters"));
+        let input_schema = match schema_val {
+            None => None,
+            Some(v) => Some(serde_json::to_value(v).map_err(|e| {
+                anyhow::anyhow!("scan_tools: schema for `{name}` not JSON-able: {e}")
+            })?),
+        };
+        tools.push(ToolSchema {
+            name: name.clone(),
+            item_id: format!("tool:{}", rel.display()),
+            description: doc.get("description").and_then(|v| v.as_str()).map(String::from),
+            input_schema,
+        });
     }
 
-    tools
+    Ok(tools)
 }
 
-fn load_hooks(loader: &VerifiedLoader) -> Vec<ryeos_runtime::HookDefinition> {
+fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefinition>> {
     let mut hooks = Vec::new();
 
-    if let Ok(items) = loader.scan_kind("config") {
-        let hook_files = ["hook_conditions"];
-        for hook_name in &hook_files {
-            let resolved = items.iter().find(|i| i.name == *hook_name);
-            if let Some(item) = resolved {
-                if let Ok(verified) = loader.load_verified("config", &item.path) {
-                    if let Ok(config) = serde_yaml::from_str::<serde_yaml::Value>(&verified.content) {
-                        if let Some(hooks_arr) = config.get("builtin_hooks").and_then(|v| v.as_sequence()) {
-                            for h in hooks_arr {
-                                if let Ok(hook) = serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone()) {
-                                    hooks.push(hook);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // `hook_conditions` config is optional — its absence is fine. But
+    // *any* parse / verification failure is a hard error: silently
+    // dropping a malformed hooks file masked critical safety policy.
+    let items = loader
+        .scan_kind("config")
+        .map_err(|e| anyhow::anyhow!("load_hooks: cannot enumerate kind `config`: {e}"))?;
+
+    let hook_files = ["hook_conditions"];
+    for hook_name in &hook_files {
+        let Some(item) = items.iter().find(|i| i.name == *hook_name) else {
+            continue;
+        };
+        let verified = loader.load_verified("config", &item.path).map_err(|e| {
+            anyhow::anyhow!(
+                "load_hooks: cannot load `{hook_name}` at {}: {e}",
+                item.path.display()
+            )
+        })?;
+        let config: serde_yaml::Value =
+            serde_yaml::from_str(&verified.content).map_err(|e| {
+                anyhow::anyhow!(
+                    "load_hooks: parse YAML for `{hook_name}` at {}: {e}",
+                    item.path.display()
+                )
+            })?;
+        // `builtin_hooks` is optional, but if present it MUST be a YAML
+        // sequence. The previous `.and_then(as_sequence)` silently
+        // skipped a malformed file — masking critical safety policy.
+        let hooks_value = match config.get("builtin_hooks") {
+            None | Some(serde_yaml::Value::Null) => continue,
+            Some(v) => v,
+        };
+        let hooks_arr = hooks_value.as_sequence().ok_or_else(|| {
+            anyhow::anyhow!(
+                "load_hooks: `builtin_hooks` in `{hook_name}` at {} must be a YAML sequence, \
+                 got {}",
+                item.path.display(),
+                yaml_kind(hooks_value)
+            )
+        })?;
+        for (idx, h) in hooks_arr.iter().enumerate() {
+            let hook = serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone())
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "load_hooks: malformed hook[{idx}] in `{hook_name}` at {}: {e}",
+                        item.path.display()
+                    )
+                })?;
+            hooks.push(hook);
         }
     }
 
-    hooks
+    Ok(hooks)
+}
+
+fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged",
+    }
 }
 
 #[cfg(test)]
@@ -293,33 +337,27 @@ mod tests {
 
     #[test]
     fn resolve_model_from_directive_name() {
-        let directive = ParsedDirective {
-            header: DirectiveHeader {
-                model: Some(ModelSpec {
-                    tier: None,
-                    provider: None,
-                    name: Some("gpt-4".to_string()),
-                }),
-                ..Default::default()
-            },
-            body: String::new(),
+        let header = DirectiveHeader {
+            model: Some(ModelSpec {
+                tier: None,
+                provider: None,
+                name: Some("gpt-4".to_string()),
+            }),
+            ..Default::default()
         };
-        let (name, _) = resolve_model(&directive.header, &None);
+        let (name, _) = resolve_model(&header, &None);
         assert_eq!(name, "gpt-4");
     }
 
     #[test]
     fn resolve_model_from_routing() {
-        let directive = ParsedDirective {
-            header: DirectiveHeader {
-                model: Some(ModelSpec {
-                    tier: Some("fast".to_string()),
-                    provider: None,
-                    name: None,
-                }),
-                ..Default::default()
-            },
-            body: String::new(),
+        let header = DirectiveHeader {
+            model: Some(ModelSpec {
+                tier: Some("fast".to_string()),
+                provider: None,
+                name: None,
+            }),
+            ..Default::default()
         };
         let routing = ModelRoutingConfig {
             tiers: {
@@ -332,18 +370,15 @@ mod tests {
                 m
             },
         };
-        let (name, ctx) = resolve_model(&directive.header, &Some(routing));
+        let (name, ctx) = resolve_model(&header, &Some(routing));
         assert_eq!(name, "openai/gpt-4o-mini");
         assert_eq!(ctx, 128_000);
     }
 
     #[test]
     fn resolve_model_default() {
-        let directive = ParsedDirective {
-            header: DirectiveHeader::default(),
-            body: String::new(),
-        };
-        let (name, _) = resolve_model(&directive.header, &None);
+        let header = DirectiveHeader::default();
+        let (name, _) = resolve_model(&header, &None);
         assert!(name.contains("anthropic"));
     }
 }

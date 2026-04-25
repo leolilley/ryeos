@@ -74,10 +74,9 @@ fn handle_execute(params: DispatchActionParams, state: &AppState) -> Result<Valu
     let exec_params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: caller_principal_id,
-        project_path: project_path.clone(),
+        project_path: Some(project_path.clone()),
         vault_bindings,
         snapshot_hash: None,
-        item_ref: params.action.item_id,
         parameters: params.action.params,
         temp_dir: None,
     };

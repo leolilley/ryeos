@@ -60,9 +60,12 @@ fn main() -> Result<()> {
     // Determine signature envelope based on file extension
     let (sig_prefix, sig_suffix) = determine_envelope(&args.input)?;
 
-    // Sign the content with inline comment signature
+    // Strip any existing signature lines first — re-signing replaces, never appends.
+    let body = lillux::signature::strip_signature_lines(&content);
+
+    // Sign the content with inline comment signature.
     let signed_content = lillux::signature::sign_content(
-        &content,
+        &body,
         &signing_key,
         &sig_prefix,
         sig_suffix.as_deref(),
@@ -105,15 +108,18 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Determine signature envelope (prefix/suffix) based on file extension
+/// Determine signature envelope (prefix/suffix) based on file extension.
+///
+/// Returns the comment marker only — `lillux::signature::sign_content`
+/// inserts the `rye:signed:` payload itself.
 fn determine_envelope(path: &PathBuf) -> Result<(String, Option<String>)> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("yaml") | Some("yml") => Ok(("# rye:signed".to_string(), None)),
-        Some("json") => Ok(("// rye:signed".to_string(), None)),
-        Some("md") | Some("markdown") => Ok(("<!-- rye:signed".to_string(), Some("-->".to_string()))),
-        Some("py") => Ok(("# rye:signed".to_string(), None)),
-        Some("rs") => Ok(("// rye:signed".to_string(), None)),
-        Some("ts") | Some("js") => Ok(("// rye:signed".to_string(), None)),
+        Some("yaml") | Some("yml") => Ok(("#".to_string(), None)),
+        Some("json") => Ok(("//".to_string(), None)),
+        Some("md") | Some("markdown") => Ok(("<!--".to_string(), Some("-->".to_string()))),
+        Some("py") => Ok(("#".to_string(), None)),
+        Some("rs") => Ok(("//".to_string(), None)),
+        Some("ts") | Some("js") => Ok(("//".to_string(), None)),
         Some(ext) => bail!(
             "unsupported file type: .{}. Supported: yaml, json, md, py, rs, ts, js",
             ext

@@ -59,27 +59,4 @@ pub fn internal_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
     )
 }
 
-// ── Thread ownership ─────────────────────────────────────────────────
 
-/// Check that the caller owns a thread (or has wildcard scope).
-/// A principal owns a thread if they created it (requested_by matches).
-#[allow(dead_code)]
-pub fn check_thread_access(
-    caller_principal: &str,
-    caller_scopes: &[String],
-    thread_requested_by: Option<&str>,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    if caller_scopes.iter().any(|s| s == "*") {
-        return Ok(());
-    }
-    if caller_scopes.iter().any(|s| s == "threads.admin") {
-        return Ok(());
-    }
-    match thread_requested_by {
-        Some(owner) if owner == caller_principal => Ok(()),
-        _ => Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "access denied: not thread owner" })),
-        )),
-    }
-}

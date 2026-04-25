@@ -1,0 +1,14 @@
+# rye:signed:2026-04-25T06:09:31Z:f171a39a6b96ad4fdc6038d64e679f65d26da2ccac662bbbd0f878fc5aaecc48:bQqjPHMkf1WiheQEecYBvjPIqx3U5Rqh9DPw6WGyBEohL7Law2YDUsb/9Y8n4+XwH3T0Q2xqAh5zdS5ZwcBQCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+category: "engine/parsers/javascript"
+description: "JavaScript/TypeScript dunder metadata parser: extracts const __name__ = \"value\" declarations"
+executor_id: "native:parser_regex_kv"
+parser_api_version: 1
+parser_config:
+  patterns:
+    - regex: '(?m)^const\s+(__\w+__)\s*=\s*"([^"]+)"'
+      key_group: 1
+      value_group: 2
+output_schema:
+  root_type: mapping
+  required: {}

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T22:48:09Z:bf52dd3257554b6bc34dfe8f6de9438329f5861b0d6d637165d22168e021d26f:SVqrI8myWF3pKpxorKDkcO6EIDE2+KFX91fc07wZDQvtfAgdsnDEIpuSwEE1ZkO33+y7FFZnHzUwguLIPxk3BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-25T06:47:55Z:58a1568372da7c5a7c860ec66425db4c35fe099c38e09bd7ec14b7e72577315a:OusnKeE/p4K3BPtIdWOSiastIGIBcCnguaeiXfnXr4fJpIyYc8S5WjNMDyBdYjnmjiOoZr6yAT/rXjNU6meTDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -7,14 +7,19 @@ execution:
   aliases:
     "@graph": "tool:rye/graph-runtime/runtime"
   resolution:
-  - resolve_graph_entry
-  - resolve_provider
-  - preload_tool_schemas
+    - step: resolve_extends_chain
 formats:
   - extensions: [".yaml", ".yml"]
-    parser_id: yaml/yaml
+    parser: parser:rye/core/yaml/yaml
     signature:
       prefix: "#"
+# Empty until graph schema stabilizes — graph-walker enforces fields
+# at consumer layer for now.
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
 metadata:
   rules:
     name:

@@ -1,5 +1,6 @@
 pub mod callback;
 pub mod callback_client;
+pub mod checkpoint;
 pub mod callback_uds;
 pub mod envelope;
 pub mod capability_tokens;
@@ -10,12 +11,14 @@ pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod interpolation;
 pub mod paths;
+pub mod progress;
 pub mod transcript;
 pub mod verified_loader;
 
 pub use callback::{
     client_from_env, ActionPayload, CallbackError, DispatchActionRequest, RuntimeCallbackAPI,
 };
+pub use checkpoint::CheckpointWriter;
 pub use capability_tokens::{cap_matches, check_capability, expand_capabilities};
 pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{
@@ -29,4 +32,5 @@ pub use interpolation::{interpolate, interpolate_action};
 pub use paths::{
     safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,
 };
+pub use progress::{ProgressEvent, StatusEvent};
 pub use transcript::{KnowledgeRenderOptions, Transcript};

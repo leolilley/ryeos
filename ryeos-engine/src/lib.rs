@@ -1,4 +1,5 @@
 pub mod canonical_ref;
+pub mod composers;
 pub mod contracts;
 pub mod delegation;
 pub mod dispatch;
@@ -7,9 +8,11 @@ pub mod error;
 pub mod item_resolution;
 pub mod kind_registry;
 pub mod lifecycle;
-pub mod metadata;
+pub mod parsers;
+pub mod boot_validation;
 pub mod plan_builder;
 pub mod resolution;
+pub mod runtime;
 pub mod scope;
 pub mod trust;
 

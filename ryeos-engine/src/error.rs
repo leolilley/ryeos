@@ -133,8 +133,26 @@ pub enum EngineError {
     #[error("template requires {{{token}}} but no {token} available")]
     TemplateMissingContext { token: String },
 
-    #[error("template expanded to empty string: {template:?}")]
-    ExpandedEmpty { template: String },
+    #[error("unknown runtime block `{key}` on kind `{kind}` at {source_path:?} \
+             (no handler registered and not in the kind schema's `runtime.ignored_keys`)")]
+    UnknownRuntimeBlock {
+        key: String,
+        kind: String,
+        source_path: PathBuf,
+    },
+
+    #[error("runtime block `{key}` is declared as Singleton but appears on \
+             multiple chain elements: {paths:?}")]
+    DuplicateSingletonBlock {
+        key: String,
+        paths: Vec<PathBuf>,
+    },
+
+    #[error("parameter validation failed for `{tool}`:\n  - {}", errors.join("\n  - "))]
+    ParameterValidationFailed {
+        tool: String,
+        errors: Vec<String>,
+    },
 
     #[error("runtime binary not found: {binary}")]
     RuntimeBinaryNotFound { binary: String },

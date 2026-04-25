@@ -16,10 +16,107 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::contracts::{ResolvedSourceFormat, SignatureEnvelope};
+use serde_json::Value;
+
+use crate::contracts::{ItemMetadata, ResolvedSourceFormat, SignatureEnvelope, ValueShape};
 use crate::error::EngineError;
 use crate::trust::TrustStore;
 use crate::resolution::decl::ResolutionStepDecl;
+
+/// Apply extraction rules to a parser-produced `Value`, populating an
+/// `ItemMetadata`. Lives in `kind_registry` because the rules ARE part
+/// of the kind schema; it's no longer in `metadata.rs` (deleted).
+pub fn apply_extraction_rules(
+    parsed: &Value,
+    rules: &HashMap<String, ExtractionRule>,
+    file_path: &Path,
+) -> ItemMetadata {
+    let mut metadata = ItemMetadata::default();
+
+    for (field, rule) in rules {
+        let result = match rule {
+            ExtractionRule::Filename => RuleResult::String(
+                file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_owned()),
+            ),
+            ExtractionRule::Constant { value } => RuleResult::String(Some(value.clone())),
+            ExtractionRule::Path { key } => {
+                RuleResult::String(extract_string_from_value(parsed, key))
+            }
+            ExtractionRule::PathStringSeq { key } => {
+                RuleResult::StringSeq(extract_string_seq_from_value(parsed, key))
+            }
+        };
+
+        assign_extracted_field(&mut metadata, field, result);
+    }
+
+    metadata
+}
+
+/// Result of a single extraction rule. A rule produces either a
+/// scalar string (most metadata fields) or a sequence of strings
+/// (e.g. `required_secrets`). Field-name → typed-slot routing is done
+/// downstream in `assign_extracted_field`, NOT inside the per-rule
+/// arms, so adding a new typed metadata slot doesn't fork the rule
+/// dispatcher.
+enum RuleResult {
+    String(Option<String>),
+    StringSeq(Vec<String>),
+}
+
+/// Route an extracted value into the typed `ItemMetadata` slot named
+/// by `field`, or fall back to `extra` for unknown names. Routing
+/// rejects a type mismatch (e.g. a `path_string_seq` rule pointed at
+/// `version`) by silently dropping the value rather than corrupting
+/// the typed slot — boot validation already proves the contract
+/// shape, so a runtime mismatch here is a misconfigured kind YAML
+/// and the loader sees the missing typed value.
+fn assign_extracted_field(metadata: &mut ItemMetadata, field: &str, result: RuleResult) {
+    match (field, result) {
+        ("executor_id", RuleResult::String(Some(v))) => metadata.executor_id = Some(v),
+        ("version", RuleResult::String(Some(v))) => metadata.version = Some(v),
+        ("description", RuleResult::String(Some(v))) => metadata.description = Some(v),
+        ("category", RuleResult::String(Some(v))) => metadata.category = Some(v),
+        ("required_secrets", RuleResult::StringSeq(seq)) => {
+            metadata.required_secrets = seq;
+        }
+        (other, RuleResult::String(Some(v))) => {
+            metadata.extra.insert(other.to_string(), Value::String(v));
+        }
+        (other, RuleResult::StringSeq(seq)) => {
+            metadata.extra.insert(
+                other.to_string(),
+                Value::Array(seq.into_iter().map(Value::String).collect()),
+            );
+        }
+        (_, RuleResult::String(None)) => {}
+    }
+}
+
+fn extract_string_seq_from_value(parsed: &Value, key: &str) -> Vec<String> {
+    parsed
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extract_string_from_value(parsed: &Value, key: &str) -> Option<String> {
+    let val = parsed.get(key)?;
+    match val {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
 
 /// A single extension entry within a `KindSchema`.
 ///
@@ -29,8 +126,10 @@ use crate::resolution::decl::ResolutionStepDecl;
 pub struct ExtensionSpec {
     /// File extension including the dot, e.g. `".py"`, `".md"`
     pub ext: String,
-    /// Parser ID for lightweight metadata extraction, e.g. `"python/ast"`
-    pub parser_id: String,
+    /// Canonical parser tool ref, e.g.
+    /// `"parser:rye/core/python/ast"`. The boot validator
+    /// guarantees this resolves through `ParserRegistry`.
+    pub parser: String,
     /// Signature embedding envelope for this file type
     pub signature: SignatureEnvelope,
 }
@@ -42,13 +141,46 @@ pub enum ExtractionRule {
     Filename,
     /// Use a constant value
     Constant { value: String },
-    /// Extract from a key path in the parsed document
+    /// Extract a scalar string from a key path in the parsed document
     Path { key: String },
+    /// Extract a `Vec<String>` from a key path in the parsed document.
+    /// The value at the path must be an array; non-string entries are
+    /// dropped silently. Used for typed-list metadata fields like
+    /// `required_secrets` so engine code does NOT special-case
+    /// specific field names.
+    PathStringSeq { key: String },
+}
+
+/// Runtime-handler configuration for a kind. Declares which top-level
+/// YAML blocks on items of this kind are claimed by which runtime
+/// handler (`runtime.handlers`), and which keys the engine
+/// deliberately ignores during runtime-block dispatch
+/// (`runtime.ignored_keys`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeHandlerDecl {
+    /// Handler key — must match a `RuntimeHandler::key()` string
+    /// registered in the `RuntimeHandlerRegistry`.
+    #[serde(rename = "type")]
+    pub type_: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSpec {
+    #[serde(default)]
+    pub handlers: Vec<RuntimeHandlerDecl>,
+    /// Top-level keys present on items that are deliberately not
+    /// runtime blocks (metadata, header fields, etc.). Engine skips
+    /// these during runtime-handler dispatch.
+    #[serde(default)]
+    pub ignored_keys: Vec<String>,
 }
 
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionSchema {
     /// Shorthand resolution for @ refs in this kind's chains.
     /// Aliases compose recursively (capped by alias_max_depth).
@@ -80,6 +212,35 @@ pub struct KindSchema {
     /// Execution configuration (resolution pipeline + aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
+    /// Declared shape contract on the parsed `Value` that the parser
+    /// must produce for this kind's composer. REQUIRED on every
+    /// kind schema. Kinds with no field-level constraint at boot
+    /// must declare an explicit empty contract
+    /// (`root_type: mapping, required: {}`) — absence is no longer a
+    /// silent default but a deliberate, reviewed declaration.
+    /// The boot validator runs `is_satisfied_by` against each
+    /// extension parser's `output_schema` and aggregates ALL
+    /// violations.
+    pub composed_value_contract: ValueShape,
+    /// Native composer handler ID this kind binds to (e.g.
+    /// `"rye/core/extends_chain"`, `"rye/core/identity"`). REQUIRED
+    /// on every kind schema — there is no silent "no composer" path.
+    /// The boot validator guarantees this resolves through
+    /// `NativeComposerHandlerRegistry`; `ComposerRegistry::from_kinds`
+    /// uses this to bind kind→composer data-drivenly.
+    pub composer: String,
+    /// Opaque-to-the-engine composer-config blob, mirroring how
+    /// `ParserDescriptor::parser_config` is opaque to the parser
+    /// dispatcher. The kind's composer handler validates and consumes
+    /// it. REQUIRED at the schema layer but defaults to `Value::Null`
+    /// when the YAML omits the block — composers that take no config
+    /// (e.g. `IdentityComposer`) accept Null.
+    pub composer_config: Value,
+    /// Runtime-handler dispatch declaration (which YAML blocks on
+    /// items of this kind are runtime blocks, plus the ignore list).
+    /// `None` for kinds whose items are never compiled into a
+    /// `SubprocessSpec` (e.g. config kinds).
+    pub runtime: Option<RuntimeSpec>,
 }
 
 impl KindSchema {
@@ -97,7 +258,7 @@ impl KindSchema {
     pub fn resolved_format_for(&self, ext: &str) -> Option<ResolvedSourceFormat> {
         self.spec_for(ext).map(|spec| ResolvedSourceFormat {
             extension: spec.ext.clone(),
-            parser_id: spec.parser_id.clone(),
+            parser: spec.parser.clone(),
             signature: spec.signature.clone(),
         })
     }
@@ -111,6 +272,11 @@ impl KindSchema {
     /// Whether this kind is executable (has an `execution` block).
     pub fn is_executable(&self) -> bool {
         self.execution.is_some()
+    }
+
+    /// Get the runtime-handler dispatch spec for this kind.
+    pub fn runtime(&self) -> Option<&RuntimeSpec> {
+        self.runtime.as_ref()
     }
 }
 
@@ -143,6 +309,11 @@ impl KindRegistry {
     /// Uses raw filesystem scanning — no item resolution dependency.
     /// Every kind schema must be signed and verified against the trust store.
     /// Unsigned or tampered schemas cause the entire load to fail.
+    ///
+    /// Precedence aligns with `ParserRegistry::load_base`: the base
+    /// layer is the unique source of kind schemas across user + system
+    /// roots, and `with_project_overlay` is the only sanctioned
+    /// override path for per-project customization.
     pub fn load_base(
         search_roots: &[PathBuf],
         trust_store: &TrustStore,
@@ -505,12 +676,12 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             });
         }
 
-        let parser_id = entry
-            .get("parser_id")
+        let parser = entry
+            .get("parser")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned())
             .ok_or_else(|| EngineError::SchemaLoaderError {
-                reason: format!("{display}: {entry_label} missing `parser_id`"),
+                reason: format!("{display}: {entry_label} missing `parser`"),
             })?;
 
         let sig_value = entry
@@ -523,7 +694,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         for ext in ext_strs {
             extensions.push(ExtensionSpec {
                 ext,
-                parser_id: parser_id.clone(),
+                parser: parser.clone(),
                 signature: signature.clone(),
             });
         }
@@ -531,12 +702,71 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
 
     let extraction_rules = parse_extraction_rules(&data, display)?;
 
+    let composed_value_contract = match data.get("composed_value_contract") {
+        Some(v) if !v.is_null() => serde_yaml::from_value::<ValueShape>(v.clone()).map_err(
+            |e| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid `composed_value_contract`: {e}"),
+            },
+        )?,
+        _ => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: missing required field `composed_value_contract` \
+                    (declare `root_type: mapping, required: {{}}` for kinds with no \
+                    boot-level shape constraint — absence is not a silent default)"
+                ),
+            });
+        }
+    };
+
+    let composer = data
+        .get("composer")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: kind schema missing required field `composer` \
+                 (declare a native composer handler ID, e.g. \
+                 `composer: rye/core/identity` for kinds with no \
+                 composition, or `composer: rye/core/extends_chain`)"
+            ),
+        })?;
+
+    // `composer_config` is opaque to the engine — composer handlers
+    // own validation. Absence ⇒ Value::Null (handlers like
+    // `IdentityComposer` explicitly accept Null).
+    let composer_config = match data.get("composer_config") {
+        Some(v) => yaml_to_json(v.clone()).map_err(|e| EngineError::SchemaLoaderError {
+            reason: format!("{display}: invalid `composer_config`: {e}"),
+        })?,
+        None => Value::Null,
+    };
+
+    let runtime = match data.get("runtime") {
+        Some(v) if !v.is_null() => Some(
+            serde_yaml::from_value::<RuntimeSpec>(v.clone()).map_err(|e| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `runtime` block: {e}"),
+                }
+            })?,
+        ),
+        _ => None,
+    };
+
     Ok(KindSchema {
         directory,
         extensions,
         extraction_rules,
         execution,
+        composed_value_contract,
+        composer,
+        composer_config,
+        runtime,
     })
+}
+
+fn yaml_to_json(value: serde_yaml::Value) -> Result<Value, String> {
+    serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
 fn parse_signature_format_strict(
@@ -665,6 +895,23 @@ fn parse_extraction_rules(
                     })?;
                 ExtractionRule::Path { key }
             }
+            "path_string_seq" => {
+                let key = rule_map
+                    .iter()
+                    .find_map(|(rk, rv)| {
+                        if rk.as_str() == Some("key") {
+                            rv.as_str().map(|s| s.to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} from=path_string_seq requires `key`"
+                        ),
+                    })?;
+                ExtractionRule::PathStringSeq { key }
+            }
             other => {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!("{display}: metadata.rules.{field} unknown from `{other}`"),
@@ -747,20 +994,20 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser_id: python/ast
+    parser: parser:rye/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
   - extensions: [\".yaml\", \".yml\"]
-    parser_id: yaml/yaml
+    parser: parser:rye/core/yaml/yaml
     signature:
       prefix: \"#\"
   - extensions: [\".js\", \".ts\"]
-    parser_id: javascript/javascript
+    parser: parser:rye/core/javascript/javascript
     signature:
       prefix: \"//\"
   - extensions: [\".sh\"]
-    parser_id: python/ast
+    parser: parser:rye/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -784,7 +1031,7 @@ execution:
     \"@directive\": \"tool:rye/directive-runtime/runtime\"
 formats:
   - extensions: [\".md\"]
-    parser_id: markdown/xml
+    parser: parser:rye/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -801,13 +1048,14 @@ metadata:
     const SCHEMA_WITH_RESOLUTION: &str = "\
 location:
   directory: directives
-resolution:
-  - resolve_extends_chain
-  - resolve_provider
-  - preload_tool_schemas
+execution:
+  aliases: {}
+  resolution:
+    - step: resolve_extends_chain
+    - step: resolve_references
 formats:
   - extensions: [\".md\"]
-    parser_id: markdown/xml
+    parser: parser:rye/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -830,7 +1078,20 @@ formats:
     fn sign_and_write_schema(dir: &Path, kind_name: &str, yaml: &str, sk: &SigningKey) {
         let kind_dir = dir.join(kind_name);
         fs::create_dir_all(&kind_dir).unwrap();
-        let signed = lillux::signature::sign_content(yaml, sk, "#", None);
+        // Inject the now-mandatory composed_value_contract for tests
+        // that only care about other fields. Tests that explicitly
+        // exercise contract presence/absence include their own block.
+        let yaml = if yaml.contains("composed_value_contract") {
+            yaml.to_string()
+        } else {
+            format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n")
+        };
+        let yaml = if yaml.contains("composer:") {
+            yaml
+        } else {
+            format!("{yaml}composer: rye/core/identity\n")
+        };
+        let signed = lillux::signature::sign_content(&yaml, sk, "#", None);
         fs::write(
             kind_dir.join(format!("{kind_name}.kind-schema.yaml")),
             signed,
@@ -859,7 +1120,7 @@ formats:
         // Tool schema
         let tool = reg.get("tool").unwrap();
         assert_eq!(tool.directory, "tools");
-        assert!(tool.aliases.is_empty());
+        assert!(tool.execution.as_ref().map_or(true, |e| e.aliases.is_empty()));
         let tool_exts = tool.extension_strs();
         assert!(tool_exts.contains(&".py"));
         assert!(tool_exts.contains(&".ts"));
@@ -869,22 +1130,22 @@ formats:
         let dir = reg.get("directive").unwrap();
         assert_eq!(dir.directory, "directives");
         assert_eq!(
-            dir.aliases.get("@directive").map(|s| s.as_str()),
+            dir.execution.as_ref().and_then(|e| e.aliases.get("@directive")).map(|s| s.as_str()),
             Some("tool:rye/directive-runtime/runtime")
         );
         assert_eq!(dir.extension_strs(), vec![".md"]);
 
         // Parser lookups
         let py_spec = reg.spec_for("tool", ".py").unwrap();
-        assert_eq!(py_spec.parser_id, "python/ast");
+        assert_eq!(py_spec.parser, "parser:rye/core/python/ast");
 
         let ts_spec = reg.spec_for("tool", ".ts").unwrap();
-        assert_eq!(ts_spec.parser_id, "javascript/javascript");
+        assert_eq!(ts_spec.parser, "parser:rye/core/javascript/javascript");
         assert_eq!(ts_spec.signature.prefix, "//");
         assert!(!ts_spec.signature.after_shebang);
 
         let md_spec = reg.spec_for("directive", ".md").unwrap();
-        assert_eq!(md_spec.parser_id, "markdown/xml");
+        assert_eq!(md_spec.parser, "parser:rye/core/markdown/directive");
         assert_eq!(md_spec.signature.prefix, "<!--");
         assert_eq!(md_spec.signature.suffix.as_deref(), Some("-->"));
 
@@ -906,11 +1167,11 @@ formats:
         assert_eq!(reg.directory("tool"), Some("tools"));
         assert_eq!(reg.directory("directive"), Some("directives"));
         assert_eq!(
-            reg.get("directive").unwrap().resolve_alias("@directive"),
+            reg.get("directive").unwrap().execution.as_ref().and_then(|e| e.aliases.get("@directive")).map(|s| s.as_str()),
             Some("tool:rye/directive-runtime/runtime")
         );
         assert_eq!(
-            reg.get("tool").unwrap().resolve_alias("@subprocess"),
+            reg.get("tool").unwrap().execution.as_ref().and_then(|e| e.aliases.get("@subprocess")).map(|s| s.as_str()),
             None
         );
 
@@ -939,7 +1200,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".rb\"]
-    parser_id: ruby/ruby
+    parser: parser:rye/core/ruby/ruby
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -967,7 +1228,7 @@ formats:
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let fmt = reg.resolved_format_for("tool", ".py").unwrap();
         assert_eq!(fmt.extension, ".py");
-        assert_eq!(fmt.parser_id, "python/ast");
+        assert_eq!(fmt.parser, "parser:rye/core/python/ast");
         assert_eq!(fmt.signature.prefix, "#");
         assert!(fmt.signature.after_shebang);
 
@@ -993,7 +1254,7 @@ formats:
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
             tool_dir.join("tool.kind-schema.yaml"),
-            "location:\n  directory: tools\nformats:\n  - extensions: [\".py\"]\n    parser_id: python/ast\n    signature:\n      prefix: \"#\"\n",
+            "location:\n  directory: tools\nformats:\n  - extensions: [\".py\"]\n    parser: parser:rye/core/python/ast\n    signature:\n      prefix: \"#\"\n",
         )
         .unwrap();
 
@@ -1089,7 +1350,7 @@ formats:
         let yaml = "\
 formats:
   - extensions: [\".py\"]
-    parser_id: python/ast
+    parser: parser:rye/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -1122,7 +1383,7 @@ location:
     }
 
     #[test]
-    fn reject_missing_parser_id() {
+    fn reject_missing_parser() {
         let tmp = tempdir();
         let sk = test_signing_key();
         let ts = test_trust_store(&sk);
@@ -1139,8 +1400,8 @@ formats:
 
         let err = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
         assert!(
-            matches!(err, EngineError::SchemaLoaderError { ref reason } if reason.contains("parser_id")),
-            "expected parser_id error, got: {err:?}"
+            matches!(err, EngineError::SchemaLoaderError { ref reason } if reason.contains("parser")),
+            "expected parser error, got: {err:?}"
         );
     }
 
@@ -1154,7 +1415,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser_id: python/ast
+    parser: parser:rye/core/python/ast
 ";
         sign_and_write_schema(&tmp, "tool", yaml, &sk);
 
@@ -1222,7 +1483,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser_id: python/ast
+    parser: parser:rye/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -1244,12 +1505,8 @@ formats:
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let dir = reg.get("directive").unwrap();
         assert_eq!(
-            dir.resolution,
-            vec![
-                "resolve_extends_chain",
-                "resolve_provider",
-                "preload_tool_schemas",
-            ]
+            dir.execution.as_ref().map(|e| e.resolution.len()),
+            Some(2)
         );
     }
 
@@ -1262,7 +1519,7 @@ formats:
 
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let tool = reg.get("tool").unwrap();
-        assert!(tool.resolution.is_empty());
+        assert!(tool.execution.as_ref().map_or(true, |e| e.resolution.is_empty()));
     }
 
     #[test]
@@ -1275,16 +1532,18 @@ formats:
 
         let base = KindRegistry::load_base(&[system], &ts).unwrap();
         let dir = base.get("directive").unwrap();
-        assert_eq!(dir.resolution.len(), 3);
+        assert_eq!(dir.execution.as_ref().map(|e| e.resolution.len()), Some(2));
 
         // Project overlay replaces with empty resolution
         let project = tempdir();
         let no_res = "\
 location:
   directory: directives
+execution:
+  aliases: {}
 formats:
   - extensions: [\".md\"]
-    parser_id: markdown/xml
+    parser: parser:rye/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -1293,7 +1552,7 @@ formats:
 
         let overlaid = base.with_project_overlay(&project, &ts).unwrap();
         let dir = overlaid.get("directive").unwrap();
-        assert!(dir.resolution.is_empty());
+        assert!(dir.execution.as_ref().map_or(true, |e| e.resolution.is_empty()));
     }
 
     #[test]

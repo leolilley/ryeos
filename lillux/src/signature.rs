@@ -87,6 +87,35 @@ pub fn strip_signature_lines(content: &str) -> String {
     }
 }
 
+/// Envelope-aware variant of [`strip_signature_lines`].
+///
+/// Only strips signature lines whose comment envelope matches the
+/// supplied `prefix` (and `suffix`, when present). Lines containing the
+/// `rye:signed:` marker but wrapped in a *different* envelope (e.g. a
+/// `# rye:signed:...` comment in the body of a markdown file whose
+/// envelope is `<!-- ... -->`) are left intact.
+///
+/// This is the version every parser dispatcher should use: each kind
+/// declares its own envelope, and only that envelope's signature line
+/// is part of the bootstrap layer to strip before parsing.
+pub fn strip_signature_lines_with_envelope(
+    content: &str,
+    prefix: &str,
+    suffix: Option<&str>,
+) -> String {
+    let has_trailing_newline = content.ends_with('\n');
+    let result: String = content
+        .lines()
+        .filter(|line| !is_signature_line(line, prefix, suffix))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if has_trailing_newline && !result.is_empty() {
+        format!("{result}\n")
+    } else {
+        result
+    }
+}
+
 pub fn verify_signature(
     content_hash: &str,
     signature_b64: &str,

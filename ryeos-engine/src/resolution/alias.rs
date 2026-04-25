@@ -33,28 +33,31 @@ impl AliasResolver {
         let mut depth = 0;
 
         loop {
-            expansion.push(current.clone());
             if !seen.insert(current.clone()) {
-                // Cycle detected.
+                // Cycle detected — include the offending hop in the report
+                // so the chain reads like ["@a", "@b", "@a"].
+                expansion.push(current.clone());
                 return Err(ResolutionError::AliasCycle {
-                    expansion: expansion.clone(),
+                    expansion,
                 });
             }
-
-            if depth >= self.max_depth {
-                return Err(ResolutionError::AliasMaxDepthExceeded {
-                    alias: id.to_string(),
-                    expansion: expansion.clone(),
-                });
-            }
+            expansion.push(current.clone());
 
             if !current.starts_with('@') {
                 // Resolved to a non-alias; we're done.
                 let alias_hop = AliasHop {
                     expansion,
-                    depth: depth + 1,
+                    depth,
                 };
                 return Ok((current, Some(alias_hop)));
+            }
+
+            // Check depth before next step.
+            if depth >= self.max_depth {
+                return Err(ResolutionError::AliasMaxDepthExceeded {
+                    alias: id.to_string(),
+                    expansion: expansion.clone(),
+                });
             }
 
             // Look up the next alias.
@@ -122,7 +125,7 @@ mod tests {
         let resolver = AliasResolver::new(aliases, 8);
 
         let err = resolver.resolve("@a", "directive").unwrap_err();
-        matches!(err, ResolutionError::AliasCycle { .. });
+        assert!(matches!(err, ResolutionError::AliasCycle { .. }));
     }
 
     #[test]
@@ -133,13 +136,13 @@ mod tests {
         let resolver = AliasResolver::new(aliases, 1); // Max depth 1
 
         let err = resolver.resolve("@a", "directive").unwrap_err();
-        matches!(err, ResolutionError::AliasMaxDepthExceeded { .. });
+        assert!(matches!(err, ResolutionError::AliasMaxDepthExceeded { .. }));
     }
 
     #[test]
     fn unknown_alias() {
         let resolver = AliasResolver::new(HashMap::new(), 8);
         let err = resolver.resolve("@unknown", "directive").unwrap_err();
-        matches!(err, ResolutionError::UnknownAlias { .. });
+        assert!(matches!(err, ResolutionError::UnknownAlias { .. }));
     }
 }

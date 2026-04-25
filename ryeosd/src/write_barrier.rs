@@ -127,14 +127,14 @@ impl WriteBarrier {
         tracing::info!("write barrier resumed normal operation");
     }
 
-    /// Check if currently quiesced (for diagnostics).
-    #[allow(dead_code)]
+    /// Check if currently quiesced (test-only diagnostic).
+    #[cfg(test)]
     pub fn is_quiesced(&self) -> bool {
         self.inner.state.load(Ordering::SeqCst) == QUIESCED
     }
 
-    /// Get the number of active writers (for diagnostics).
-    #[allow(dead_code)]
+    /// Get the number of active writers (test-only diagnostic).
+    #[cfg(test)]
     pub fn active_writers(&self) -> u32 {
         self.inner.active_writers.load(Ordering::SeqCst)
     }

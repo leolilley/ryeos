@@ -1,5 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:c8af911b6ccf89fc7eca0c26916dc9663f5d351684b4e5d22752a0a5a77b8f2d:yMTIlmNQG15a5I0Qc0cQ6sOyt9VrVphHM8NEELe3pKcYVGtI90W3zv/vf5r8Kw8VGURGMKKIHMVAaiwLJ/IgCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
-# rye:unsigned
+# rye:signed:2026-04-25T09:50:28Z:635525ca54816229adfe1851285f7bb79e775293977a88378cd54e924be154e2:FGcMOMy1nhB8pfRmDxX5lijk4xvoyV0tdSl24owO09L8E1Aoq6/zqcEZaImGlCisYcNxh6A/4tYj+1kaBqwmDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 version: "1.0.0"
 tool_type: runtime
 __executor_id__: "@subprocess"
@@ -13,24 +12,17 @@ env_config:
     candidates: [python3]
     search_paths: [".venv/bin", ".venv/Scripts"]
     var: RYE_PYTHON
-    fallback: python3
+    path_candidates: [python3]
   env:
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "${RYE_PYTHON}"
-
-anchor:
-  enabled: true
-  mode: auto
-  markers_any: ["__init__.py", "pyproject.toml"]
-  root: tool_dir
-  lib: lib
+    PROJECT_VENV_PYTHON: "{interpreter}"
   env_paths:
     PYTHONPATH:
-      prepend: ["{anchor_path}", "{runtime_lib}"]
+      prepend: ["{tool_dir}", "{runtime_dir}/lib"]
 
 verify_deps:
   enabled: true
-  scope: anchor
+  scope: tool_dir
   recursive: true
   extensions: [".py", ".yaml", ".yml", ".json"]
   exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]

@@ -223,14 +223,17 @@ mod tests {
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
         KindSchema {
             directory: directory.to_owned(),
-            aliases: std::collections::HashMap::new(),
             extraction_rules: std::collections::HashMap::new(),
-            resolution: Vec::new(),
+            execution: Some(crate::kind_registry::ExecutionSchema {
+                aliases: std::collections::HashMap::new(),
+                alias_max_depth: 8,
+                resolution: Vec::new(),
+            }),
             extensions: extensions
                 .into_iter()
                 .map(|(ext, parser)| ExtensionSpec {
                     ext: ext.to_owned(),
-                    parser_id: parser.to_owned(),
+                    parser: parser.to_owned(),
                     signature: SignatureEnvelope {
                         prefix: "#".to_owned(),
                         suffix: None,
@@ -238,6 +241,10 @@ mod tests {
                     },
                 })
                 .collect(),
+            composed_value_contract: crate::contracts::ValueShape::any_mapping(),
+            composer: "rye/core/identity".to_owned(),
+            composer_config: serde_json::Value::Null,
+            runtime: None,
         }
     }
 

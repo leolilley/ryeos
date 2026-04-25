@@ -1,14 +1,13 @@
-# rye:signed:2026-04-20T06:00:54Z:bf52dd3257554b6bc34dfe8f6de9438329f5861b0d6d637165d22168e021d26f:SVqrI8myWF3pKpxorKDkcO6EIDE2-KFX91fc07wZDQvtfAgdsnDEIpuSwEE1ZkO33-y7FFZnHzUwguLIPxk3BQ:4b987fd4e40303ac
+# rye:signed:2026-04-25T00:55:15Z:90e6c8bc7e02db1e9bda2bbaf9e1887e10e696abe2eb0b6fefd1245148ae5618:e6zG3pMfyZRHPL65shtXpLUSwvy6tuA0ZwmPeCihzWrTHCtb0l614jXEpowKwP4h8cbwDxmxkoFJDkr8iTbtBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
   directory: graphs
 execution:
-  default_executor_id: "native:graph-runtime"
-resolution:
-  - resolve_graph_entry
-  - resolve_provider
-  - preload_tool_schemas
+  aliases:
+    "@graph": "tool:rye/graph-runtime/runtime"
+  resolution:
+    - step: resolve_extends_chain
 formats:
   - extensions: [".yaml", ".yml"]
     parser_id: yaml/yaml

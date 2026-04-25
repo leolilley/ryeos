@@ -1,0 +1,12 @@
+version = "1.0.0"
+category = "keys/trusted"
+fingerprint = "8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb"
+owner = "self"
+attestation = ""
+
+[public_key]
+pem = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAgc0X8VKJuKzFh/aSw/XeYEdp3keIqncwu9ySd81Y69g=
+-----END PUBLIC KEY-----
+"""

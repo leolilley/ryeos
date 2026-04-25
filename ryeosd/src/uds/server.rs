@@ -466,7 +466,10 @@ mod tests {
 
         let engine = ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
-            ryeos_engine::metadata::MetadataParserRegistry::new(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                ryeos_engine::parsers::NativeParserHandlerRegistry::with_builtins(),
+            ),
             None,
             Vec::new(),
         );

@@ -54,11 +54,11 @@ It does not run LLM loops (directive-runtime), walk DAGs (graph-runtime), or tra
 
 ### Computational Pattern
 
-| Runtime               | Pattern                           | Core Loop                                                                |
-| --------------------- | --------------------------------- | ------------------------------------------------------------------------ |
-| directive-runtime     | Agent loop                        | Prompt → LLM call → Tool dispatch → Repeat                               |
-| graph-runtime         | DAG walk                          | Select node → Dispatch → Bind output → Repeat                            |
-| **knowledge-runtime** | **Composition + budget fitting**  | **Receive resolved graph → Order → Fit budget → Emit composed block**    |
+| Runtime               | Pattern                          | Core Loop                                                             |
+| --------------------- | -------------------------------- | --------------------------------------------------------------------- |
+| directive-runtime     | Agent loop                       | Prompt → LLM call → Tool dispatch → Repeat                            |
+| graph-runtime         | DAG walk                         | Select node → Dispatch → Bind output → Repeat                         |
+| **knowledge-runtime** | **Composition + budget fitting** | **Receive resolved graph → Order → Fit budget → Emit composed block** |
 
 Graph traversal happens upstream in the daemon (`resolve_extends_chain`, `resolve_references` resolution steps). The runtime is purely a composer.
 
@@ -689,6 +689,7 @@ Implement search and graph inspection. Wire query into MCP fetch tool's search m
 Implement subgraph validation. Wire into knowledge signing workflow.
 
 **Note:** Cycle detection is the daemon's resolution pipeline responsibility. The validate operation focuses on:
+
 - Broken references (referenced items don't exist)
 - Unsigned items in subgraph
 - Signature mismatches
@@ -701,6 +702,27 @@ Implement subgraph validation. Wire into knowledge signing workflow.
 - Detects signature mismatches
 - Reports staleness based on validated timestamp
 - Respects depth limit during validation
+
+### Phase 5 (future) — Snapshot Hooks for Epoch Commits
+
+The knowledge runtime is the natural producer of a deterministic graph snapshot. The [Epoch Commits](epoch-commits.md) design uses this to build a signed hash chain over knowledge graph state — closing the trust loop at the *graph* level, not just the item level.
+
+This phase adds two pure-function operations consumed by `tool:rye/knowledge/epoch/*`:
+
+- `snapshot` — emit a `GraphSnapshot { items: [(item_id, content_hash)], edges: [(from, to, kind)] }` over the currently resolved graph (or a subgraph at a given root).
+- `graph_root` — compute the canonical Merkle root of a `GraphSnapshot` per the spec in `epoch-commits.md` §6.
+
+The runtime stays stateless. Epoch commit objects, chain head, retention pinning, and signing all live outside the runtime in the `epoch/*` tools. The runtime contributes only the deterministic computation of *what the graph is right now*.
+
+**Why it belongs to the knowledge runtime:** the graph is already materialised here for composition. Adding snapshot + graph_root reuses the same resolution path, guaranteeing that every commit pins exactly the graph the runtime would have composed at that moment. Computing it elsewhere would risk divergence.
+
+**Tests:**
+
+- Two snapshot calls on an unchanged graph produce byte-identical outputs
+- graph_root is deterministic across runtime restarts and platforms
+- Snapshot reflects three-tier resolution exactly as compose does
+
+Identity note: the runtime is a system binary and has no signing identity of its own. The snapshot is an unsigned data structure; signing is the caller's job. Per Ryeos's "agent = signing key" premise, only the calling agent's key can produce a valid epoch commit over the snapshot. See [epoch-commits.md](epoch-commits.md) §1.
 
 ---
 
