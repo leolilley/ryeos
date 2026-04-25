@@ -68,12 +68,7 @@ struct ResolvedLaunch {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("graph_runtime=info")),
-        )
-        .init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_graph_runtime());
 
     let cli = Cli::parse();
 

@@ -34,6 +34,7 @@ pub fn interpolate(template: &Value, context: &Value) -> anyhow::Result<Value> {
 }
 
 fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> {
+    tracing::trace!(template = %template, "interpolating template");
     if let Some(caps) = WHOLE_EXPR_RE.captures(template) {
         let expr = &caps[1];
         let resolved = resolve_expression(expr, context);

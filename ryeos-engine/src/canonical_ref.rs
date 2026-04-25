@@ -149,11 +149,13 @@ impl CanonicalRef {
             }
         }
 
-        Ok(Self {
+        let parsed = Self {
             kind: kind_str.to_owned(),
             bare_id,
             suffix,
-        })
+        };
+        tracing::trace!(input = %input, kind = %parsed.kind, id = %parsed.bare_id, "parsed canonical ref");
+        Ok(parsed)
     }
 }
 

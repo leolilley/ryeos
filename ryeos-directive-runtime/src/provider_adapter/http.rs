@@ -20,6 +20,14 @@ pub struct TokenUsage {
     pub output_tokens: u64,
 }
 
+#[tracing::instrument(
+    name = "provider:request",
+    skip(client, messages, tools),
+    fields(
+        adapter_type = "http",
+        model = %model,
+    )
+)]
 pub async fn call_provider(
     client: &reqwest::Client,
     provider: &ProviderConfig,

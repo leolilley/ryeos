@@ -36,7 +36,7 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ryeos-tracing = { path = "../ryeos-tracing" }
 
 [dev-dependencies]
 tempfile = "3"

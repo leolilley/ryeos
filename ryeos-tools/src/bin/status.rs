@@ -25,7 +25,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
     let args = Args::parse();
     let state_root = args.state_dir.or_else(|| get_state_root().ok())
@@ -51,6 +51,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(name = "tool:status", skip(state_root))]
 fn gather_status(state_root: &std::path::Path) -> Result<StatusReport> {
     let cas_root = state_root.join(".state/objects");
     let chains_count = count_chains(state_root).unwrap_or(0);

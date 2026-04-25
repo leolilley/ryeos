@@ -42,6 +42,7 @@ pub fn expand_capabilities(caps: &[String]) -> BTreeSet<String> {
     }
 
     for cap in to_add {
+        tracing::trace!(raw = %"*", expanded = %cap, "expanded capability");
         expanded.insert(cap);
     }
     expanded
@@ -49,6 +50,7 @@ pub fn expand_capabilities(caps: &[String]) -> BTreeSet<String> {
 
 pub fn check_capability(granted_caps: &[String], required_cap: &str) -> bool {
     let expanded = expand_capabilities(granted_caps);
+    tracing::trace!(required = %required_cap, granted = ?expanded, "checking capability");
     expanded.iter().any(|g| cap_matches(g, required_cap))
 }
 

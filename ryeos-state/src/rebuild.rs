@@ -34,6 +34,7 @@ pub struct CatchUpReport {
 ///
 /// Walks every signed chain head and projects all thread snapshots
 /// and durable events into the projection database.
+#[tracing::instrument(name = "state:rebuild", skip(projection, cas_root, refs_root))]
 pub fn rebuild_projection(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -120,6 +121,7 @@ pub fn rebuild_projection(
 
 /// Incremental catch-up: find chains where projection is behind CAS
 /// and project the delta.
+#[tracing::instrument(name = "state:catch_up", skip(projection, cas_root, refs_root))]
 pub fn catch_up_projection(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -514,6 +516,7 @@ fn walk_and_project_events_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_tracing::test as trace_test;
 
     fn make_hash(suffix: &str) -> String {
         format!("{:064}", suffix.as_bytes().iter().fold(0u64, |a, &b| a.wrapping_add(b as u64)))
@@ -886,5 +889,40 @@ mod tests {
         assert_eq!(report.chains_rebuilt, 0);
         assert_eq!(report.threads_restored, 0);
         assert_eq!(report.events_projected, 0);
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn rebuild_projection_emits_span() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("cas");
+        let refs_root = tempdir.path().join("refs");
+        let proj_path = tempdir.path().join("projection.db");
+        let proj = ProjectionDb::open(&proj_path).unwrap();
+
+        // Empty rebuild — still should emit the span
+        let (_, spans) = trace_test::capture_traces(|| {
+            let _ = rebuild_projection(&proj, &cas_root, &refs_root);
+        });
+
+        let span = trace_test::find_span(&spans, "state:rebuild");
+        assert!(span.is_some(), "expected state:rebuild span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn catch_up_projection_emits_span() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("cas");
+        let refs_root = tempdir.path().join("refs");
+        let proj_path = tempdir.path().join("projection.db");
+        let proj = ProjectionDb::open(&proj_path).unwrap();
+
+        let (_, spans) = trace_test::capture_traces(|| {
+            let _ = catch_up_projection(&proj, &cas_root, &refs_root);
+        });
+
+        let span = trace_test::find_span(&spans, "state:catch_up");
+        assert!(span.is_some(), "expected state:catch_up span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
     }
 }

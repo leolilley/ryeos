@@ -219,6 +219,7 @@ impl VerifiedLoader {
         let item_path = PathBuf::from(format!("{subdir}{bare_id}.md"));
 
         if self.project_root.join(&item_path).exists() {
+            tracing::trace!(ref_path = %item_id, space = %"project", "resolved item location");
             return Ok(ResolvedPath {
                 path: self.project_root.join(&item_path),
                 root: self.project_root.clone(),
@@ -228,6 +229,7 @@ impl VerifiedLoader {
 
         if let Some(ref user_root) = self.user_root {
             if user_root.join(&item_path).exists() {
+                tracing::trace!(ref_path = %item_id, space = %"user", "resolved item location");
                 return Ok(ResolvedPath {
                     path: user_root.join(&item_path),
                     root: user_root.clone(),
@@ -238,6 +240,7 @@ impl VerifiedLoader {
 
         for system_root in &self.system_roots {
             if system_root.join(&item_path).exists() {
+                tracing::trace!(ref_path = %item_id, space = %"system", "resolved item location");
                 return Ok(ResolvedPath {
                     path: system_root.join(&item_path),
                     root: system_root.clone(),
@@ -256,6 +259,7 @@ impl VerifiedLoader {
         let content = lillux::signature::strip_signature_lines(&raw);
 
         let hash = lillux::sha256_hex(content.as_bytes());
+        tracing::trace!(path = %path.display(), hash = %hash, "computed content hash for verification");
 
         let (prefix, suffix) = Self::signature_format_for(kind);
         let verified = if let Some(sig_header) = Self::parse_first_signature(&raw, prefix, suffix) {

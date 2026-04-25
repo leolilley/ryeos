@@ -76,9 +76,12 @@ struct FetchReport {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
     let args = Args::parse();
+
+    let span = tracing::info_span!("tool:fetch", item_ref = %args.item_ref);
+    let _enter = span.enter();
 
     // Parse the canonical ref
     let canonical_ref = CanonicalRef::parse(&args.item_ref)

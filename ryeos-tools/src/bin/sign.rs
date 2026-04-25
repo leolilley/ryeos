@@ -33,9 +33,12 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
     let args = Args::parse();
+
+    let span = tracing::info_span!("tool:sign", input = %args.input.display());
+    let _enter = span.enter();
 
     // Read input file
     let content = fs::read_to_string(&args.input)

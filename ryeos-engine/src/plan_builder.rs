@@ -202,6 +202,11 @@ fn resolve_executor_chain(
 /// 3. Emits the DispatchSubprocess plan node
 /// 4. Computes a cache key
 /// 5. Declares capabilities
+#[tracing::instrument(
+    name = "engine:build_plan",
+    skip(item, parameters, hints, ctx, executors, kinds, parsers, roots, trust_store),
+    fields(canonical_ref = %item.resolved.canonical_ref)
+)]
 pub fn build_plan(
     item: &VerifiedItem,
     parameters: &serde_json::Value,

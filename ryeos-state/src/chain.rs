@@ -123,6 +123,11 @@ impl ChainLock {
 /// 3. Store both in CAS
 /// 4. Write signed head ref
 /// 5. Update head cache
+#[tracing::instrument(
+    name = "state:chain_create",
+    skip(cas_root, refs_root, initial_snapshot, signer, head_cache),
+    fields(chain_root_id = %chain_root_id)
+)]
 pub fn create_chain(
     cas_root: &Path,
     refs_root: &Path,
@@ -204,6 +209,8 @@ pub fn create_chain(
     refs::write_signed_ref(&ref_path, signed_ref, signer)
         .context("failed to write signed head ref")?;
 
+    tracing::trace!(chain_root_id = %chain_root_id, head_hash = %chain_state_hash, "chain created and head ref written");
+
     // Update head cache
     head_cache.insert(
         chain_root_id.to_string(),
@@ -229,6 +236,15 @@ pub fn create_chain(
 /// 7. Store chain_state in CAS
 /// 8. Write signed head ref
 /// 9. Update head cache
+#[tracing::instrument(
+    name = "state:chain_append",
+    skip(cas_root, refs_root, events, snapshot_updates, signer, head_cache),
+    fields(
+        chain_root_id = %chain_root_id,
+        thread_id = %thread_id,
+        event_count = events.len(),
+    )
+)]
 pub fn append_events(
     cas_root: &Path,
     refs_root: &Path,
@@ -385,6 +401,8 @@ pub fn append_events(
         .join("head");
     refs::write_signed_ref(&ref_path, signed_ref, signer)
         .context("failed to write signed head ref")?;
+
+    tracing::trace!(chain_root_id = %chain_root_id, new_chain_seq = new_chain_state.last_chain_seq, events_appended = stored_events.len(), "events appended to chain");
 
     // Update head cache
     head_cache.insert(
@@ -612,6 +630,7 @@ pub fn read_thread_snapshot(
 mod tests {
     use super::*;
     use crate::signer::TestSigner;
+    use ryeos_tracing::test;
 
     fn make_test_snapshot(thread_id: &str) -> ThreadSnapshot {
         use crate::objects::thread_snapshot::ThreadSnapshotBuilder;
@@ -1124,5 +1143,58 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn create_chain_emits_span() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("state");
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let mut head_cache = HeadCache::new();
+        let snapshot = make_test_snapshot("T-trace");
+
+        let (_, spans) = test::capture_traces(|| {
+            let _ = create_chain(&cas_root, &refs_root, "T-trace", snapshot, &signer, &mut head_cache);
+        });
+
+        let span = test::find_span(&spans, "state:chain_create");
+        assert!(span.is_some(), "expected state:chain_create span, got: {:?}", spans.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("chain_root_id"), Some("T-trace"));
+    }
+
+    #[test]
+    fn append_events_emits_span() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("state");
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let mut head_cache = HeadCache::new();
+
+        let snapshot = make_test_snapshot("T-trace2");
+        create_chain(&cas_root, &refs_root, "T-trace2", snapshot, &signer, &mut head_cache).unwrap();
+
+        let event = make_test_event("T-trace2", "T-trace2");
+        let (_, spans) = test::capture_traces(|| {
+            let _ = append_events(&cas_root, &refs_root, "T-trace2", "T-trace2", vec![event], vec![], &signer, &mut head_cache);
+        });
+
+        let span = test::find_span(&spans, "state:chain_append");
+        assert!(span.is_some(), "expected state:chain_append span, got: {:?}", spans.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("chain_root_id"), Some("T-trace2"));
+        assert_eq!(field_val("thread_id"), Some("T-trace2"));
+        assert_eq!(field_val("event_count"), Some("1"));
     }
 }

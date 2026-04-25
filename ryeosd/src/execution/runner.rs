@@ -145,11 +145,14 @@ fn prepare_cas_context(
         let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
         let manifest_hash = snapshot.project_manifest_hash.clone();
         guard.track_temp_dir(checkout_dir.clone());
+        tracing::trace!(thread_id = %thread_id, effective_path = %checkout_dir.display(), "CAS context prepared");
         return Ok((checkout_dir.clone(), Some(manifest_hash), Some(snap_hash.clone())));
     }
 
     if let Some(snap_hash) = snapshot_hash {
-        return checkout_from_snapshot(state, snap_hash, thread_id, guard);
+        let result = checkout_from_snapshot(state, snap_hash, thread_id, guard)?;
+        tracing::trace!(thread_id = %thread_id, effective_path = %result.0.display(), "CAS context prepared");
+        return Ok(result);
     }
 
     // Live FS — ingest working dir, no checkout
@@ -310,6 +313,14 @@ pub struct DetachedResult {
 /// Handles the full lifecycle: CAS context, snapshot, spawn,
 /// fold-back, finalize, cleanup. On any error, the thread is finalized
 /// as failed and all resources are cleaned up.
+#[tracing::instrument(
+    name = "thread:execute",
+    skip(state, params),
+    fields(
+        thread_id = tracing::field::Empty,
+        item_ref = %params.resolved.item_ref,
+    )
+)]
 pub async fn run_inline(
     state: AppState,
     mut params: ExecutionParams,
@@ -330,6 +341,7 @@ pub async fn run_inline(
         .mark_running(&created.thread_id)
         .map_err(|e| { guard.fail_thread("create_failed"); guard.cleanup(); e })?;
     guard.track_thread(&running.thread_id);
+    tracing::Span::current().record("thread_id", &running.thread_id.as_str());
 
     // Prepare CAS context — if this fails, finalize thread as failed
     let (effective_path, pre_manifest_hash, base_snapshot_hash) =
@@ -435,6 +447,14 @@ pub async fn run_inline(
 /// Handles the full lifecycle in a background tokio task with the same
 /// guarantees as inline: CAS context, snapshot, spawn, fold-back,
 /// finalize, cleanup.
+#[tracing::instrument(
+    name = "thread:execute",
+    skip(state, params),
+    fields(
+        thread_id = tracing::field::Empty,
+        item_ref = %params.resolved.item_ref,
+    )
+)]
 pub async fn run_detached(
     state: AppState,
     mut params: ExecutionParams,
@@ -455,6 +475,7 @@ pub async fn run_detached(
         .mark_running(&created.thread_id)
         .map_err(|e| { guard.fail_thread("create_failed"); guard.cleanup(); e })?;
     guard.track_thread(&running.thread_id);
+    tracing::Span::current().record("thread_id", &running.thread_id.as_str());
 
     // Prepare CAS context
     let (effective_path, pre_manifest_hash, base_snapshot_hash) =

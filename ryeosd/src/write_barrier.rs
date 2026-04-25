@@ -71,6 +71,7 @@ impl WriteBarrier {
                     self.inner.active_writers.fetch_sub(1, Ordering::SeqCst);
                     bail!("write barrier is quiescing/quiesced, cannot acquire write permit");
                 }
+                tracing::trace!("write permit acquired");
                 Ok(WritePermit {
                     barrier: self.inner.clone(),
                 })

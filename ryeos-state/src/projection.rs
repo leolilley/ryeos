@@ -302,6 +302,15 @@ pub fn project_chain_state(
 /// Called when durable events are appended to the chain. For
 /// `artifact_published` events, also derives an artifact row from
 /// the event payload.
+#[tracing::instrument(
+    level = "debug",
+    name = "state:project_event",
+    skip(db, event),
+    fields(
+        thread_id = %event.thread_id,
+        event_type = %event.event_type,
+    )
+)]
 pub fn project_event(
     db: &ProjectionDb,
     event: &crate::ThreadEvent,
@@ -394,6 +403,7 @@ mod tests {
     use crate::objects::thread_snapshot::ThreadSnapshotBuilder;
     use crate::objects::{ChainState, ChainThreadEntry, ThreadStatus};
     use std::collections::BTreeMap;
+    use ryeos_tracing::test as trace_test;
 
     #[test]
     fn open_creates_projection_db() {
@@ -500,5 +510,33 @@ mod tests {
         let meta = db.get_projection_meta("T-root").unwrap();
         assert!(meta.is_some());
         assert_eq!(meta.unwrap().indexed_chain_state_hash, hash);
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn project_event_emits_span() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        use crate::objects::thread_event::NewEvent;
+        let event = NewEvent::new("T-trace", "T-trace", "test_event")
+            .payload(serde_json::json!({"key": "value"}))
+            .build();
+
+        let (_, spans) = trace_test::capture_traces(|| {
+            let _ = project_event(&db, &event);
+        });
+
+        let span = trace_test::find_span(&spans, "state:project_event");
+        assert!(span.is_some(), "expected state:project_event span, got: {:?}", spans.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("thread_id"), Some("T-trace"));
+        assert_eq!(field_val("event_type"), Some("test_event"));
     }
 }

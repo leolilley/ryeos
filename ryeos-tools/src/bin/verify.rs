@@ -63,7 +63,7 @@ struct ProjectSummary {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
     let args = Args::parse();
     let state_root = args.state_dir.or_else(|| get_state_root().ok())
@@ -110,6 +110,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(name = "tool:verify", skip(state_root))]
 fn verify_all(state_root: &PathBuf) -> Result<AllVerifyReport> {
     let cas_root = state_root.join("objects");
     let refs_root = state_root.join("refs");

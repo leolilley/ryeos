@@ -33,5 +33,6 @@ enum BundleCommand {
 }
 
 fn main() -> Result<()> {
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
     anyhow::bail!("rye-bundle is not yet implemented")
 }

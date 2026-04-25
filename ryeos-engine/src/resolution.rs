@@ -92,6 +92,12 @@ pub struct ResolutionResult {
 ///
 /// Searches roots in order (system-first). Returns the first match plus
 /// all lower-priority matches (shadowed candidates).
+#[tracing::instrument(
+    level = "debug",
+    name = "engine:resolve_ref",
+    skip(roots, kind_schema),
+    fields(ref = %ref_)
+)]
 pub fn resolve_item_full(
     roots: &ResolutionRoots,
     kind_schema: &KindSchema,
@@ -219,6 +225,7 @@ mod tests {
     use super::*;
     use crate::kind_registry::ExtensionSpec;
     use std::fs;
+    use ryeos_tracing::test as trace_test;
 
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
         KindSchema {
@@ -485,5 +492,35 @@ mod tests {
         assert_eq!(header.content_hash, "abc123");
         assert_eq!(header.signature_b64, "sigB64data");
         assert_eq!(header.signer_fingerprint, "fp_signer");
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn resolve_item_full_emits_span() {
+        let project_root = tempdir();
+        let system_root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        write_item(&project_root, "tools", "trace_tool", ".py", "# content");
+
+        let roots = ResolutionRoots::from_flat(
+            Some(project_root.clone()),
+            None,
+            vec![system_root],
+        );
+        let ref_ = CanonicalRef::parse("tool:trace_tool").unwrap();
+
+        let (_, spans) = trace_test::capture_traces(|| {
+            let _ = resolve_item_full(&roots, &schema, &ref_);
+        });
+
+        let span = trace_test::find_span(&spans, "engine:resolve_ref");
+        assert!(span.is_some(), "expected engine:resolve_ref span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("ref"), Some("tool:trace_tool"));
     }
 }

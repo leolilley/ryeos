@@ -54,6 +54,15 @@ impl CommandService {
         Self { state_store, kind_profiles, _events: _events }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "command:submit",
+        skip(self, params),
+        fields(
+            thread_id = %params.thread_id,
+            command_type = %params.command_type,
+        )
+    )]
     pub fn submit(&self, params: &CommandSubmitParams) -> Result<CommandRecord> {
         validate_command_type(&params.command_type)?;
 
@@ -85,12 +94,27 @@ impl CommandService {
         Ok(command)
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "command:claim",
+        skip(self, params),
+        fields(thread_id = %params.thread_id)
+    )]
     pub fn claim(&self, params: &CommandClaimParams) -> Result<CommandClaimResult> {
         let _timeout_ms = params.timeout_ms.unwrap_or(0);
         let commands = self.state_store.claim_commands(&params.thread_id)?;
         Ok(CommandClaimResult { commands })
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "command:complete",
+        skip(self, params),
+        fields(
+            command_id = params.command_id,
+            status = %params.status,
+        )
+    )]
     pub fn complete(&self, params: &CommandCompleteParams) -> Result<CommandRecord> {
         match params.status.as_str() {
             "completed" | "rejected" => {}

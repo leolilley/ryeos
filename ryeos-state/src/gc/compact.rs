@@ -57,6 +57,11 @@ pub struct CompactionResult {
 /// 3. Apply retention policy (keep N newest per category + HEAD always)
 /// 4. Rewrite in topological order (parents before children)
 /// 5. If HEAD's hash changed: advance the project head ref
+#[tracing::instrument(
+    name = "state:compact",
+    skip(cas_root, refs_root, signer, policy),
+    fields(dry_run = dry_run)
+)]
 pub fn compact_projects(
     cas_root: &Path,
     refs_root: &Path,

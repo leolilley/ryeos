@@ -12,6 +12,7 @@ use crate::state::AppState;
 /// 2. Rebuild thread locators if needed
 /// 3. Find threads left in non-terminal status whose processes are dead,
 ///    and mark them failed.
+#[tracing::instrument(name = "state:reconcile", skip(state))]
 pub async fn reconcile(state: &AppState) -> Result<()> {
     // Phase 1: Catch up projection from CAS
     let cas_root = state.state_store.cas_root()?;

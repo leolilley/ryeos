@@ -1,0 +1,16 @@
+[package]
+name = "ryeos-tracing"
+version = "0.1.0"
+edition = "2021"
+description = "Shared tracing infrastructure for Rye OS workspace"
+license = "MIT"
+
+[features]
+default = []
+test-harness = []
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+[dev-dependencies]

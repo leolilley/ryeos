@@ -77,6 +77,15 @@ impl EventStoreService {
             .ok_or_else(|| anyhow::anyhow!("append returned no persisted event"))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "event:append_batch",
+        skip(self, params),
+        fields(
+            thread_id = %params.thread_id,
+            count = params.events.len(),
+        )
+    )]
     pub fn append_batch(&self, params: &EventAppendBatchParams) -> Result<EventAppendBatchResult> {
         let thread = self
             .state_store
@@ -103,6 +112,16 @@ impl EventStoreService {
         Ok(EventAppendBatchResult { persisted })
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "event:replay",
+        skip(self, params),
+        fields(
+            thread_id = ?params.thread_id,
+            chain_root_id = ?params.chain_root_id,
+            limit = params.limit,
+        )
+    )]
     pub fn replay(&self, params: &EventReplayParams) -> Result<EventReplayResult> {
         let (chain_root_id, thread_id) = match (&params.chain_root_id, &params.thread_id) {
             (Some(chain_root_id), thread_id) => (chain_root_id.clone(), thread_id.clone()),

@@ -76,6 +76,14 @@ impl Walker {
         }
     }
 
+    #[tracing::instrument(
+        name = "graph:execute",
+        skip(self, params),
+        fields(
+            graph_id = %self.graph.graph_id,
+            thread_id = %self.thread_id,
+        )
+    )]
     pub async fn execute(
         &self,
         params: Value,

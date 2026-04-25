@@ -189,6 +189,16 @@ impl ThreadLifecycleService {
         &self.current_site_id
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:create_root",
+        skip(self, request),
+        fields(
+            kind = %request.kind,
+            launch_mode = %request.launch_mode,
+            item_ref = %request.item_ref,
+        )
+    )]
     pub fn create_root_thread(&self, request: &ResolvedExecutionRequest) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         let thread_id = new_thread_id();
@@ -211,6 +221,17 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:create",
+        skip(self, params),
+        fields(
+            thread_id = %params.thread_id,
+            chain_root_id = %params.chain_root_id,
+            kind = %params.kind,
+            launch_mode = %params.launch_mode,
+        )
+    )]
     pub fn create_thread(&self, params: &ThreadCreateParams) -> Result<ThreadDetail> {
         validate_kind(&params.kind, self.kind_profiles())?;
         validate_launch_mode(&params.launch_mode)?;
@@ -234,12 +255,28 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("created thread missing from database: {}", params.thread_id))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:mark_running",
+        skip_all,
+        fields(thread_id = %thread_id)
+    )]
     pub fn mark_running(&self, thread_id: &str) -> Result<ThreadDetail> {
         let _persisted = self.state_store.mark_thread_running(thread_id, None)?;
         self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found after mark_running: {thread_id}"))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:attach_process",
+        skip(self, params),
+        fields(
+            thread_id = %params.thread_id,
+            pid = params.pid,
+            pgid = params.pgid,
+        )
+    )]
     pub fn attach_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
         self.state_store.attach_thread_process(&params.thread_id, params.pid, params.pgid)?;
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
@@ -250,6 +287,12 @@ impl ThreadLifecycleService {
         })
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:finalize_from_completion",
+        skip_all,
+        fields(thread_id = %thread_id)
+    )]
     pub fn finalize_from_completion(
         &self,
         thread_id: &str,
@@ -318,6 +361,15 @@ impl ThreadLifecycleService {
         Ok(finalized)
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:finalize",
+        skip(self, params),
+        fields(
+            thread_id = %params.thread_id,
+            status = %params.status,
+        )
+    )]
     pub fn finalize_thread(&self, params: &ThreadFinalizeParams) -> Result<ThreadDetail> {
         let _persisted = self.state_store.finalize_thread(
             &params.thread_id,
@@ -358,6 +410,12 @@ impl ThreadLifecycleService {
         }))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:request_continuation",
+        skip(self, params),
+        fields(thread_id = %params.thread_id)
+    )]
     pub fn request_continuation(
         &self,
         params: &ThreadContinuationParams,
@@ -413,6 +471,15 @@ impl ThreadLifecycleService {
         })
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "artifact:publish",
+        skip(self, params),
+        fields(
+            thread_id = %params.thread_id,
+            artifact_type = %params.artifact_type,
+        )
+    )]
     pub fn publish_artifact(&self, params: &ArtifactPublishParams) -> Result<ThreadArtifactRecord> {
         let (artifact, _persisted) = self.state_store.publish_artifact(
             &params.thread_id,

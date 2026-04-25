@@ -16,3 +16,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+ryeos-tracing = { path = "../ryeos-tracing", features = ["test-harness"] }

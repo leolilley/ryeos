@@ -4,6 +4,14 @@ use ryeos_runtime::callback_client::CallbackClient;
 
 use crate::context::ExecutionContext;
 
+#[tracing::instrument(
+    name = "tool:execute",
+    skip(client, action, exec_ctx),
+    fields(
+        thread_id = %thread_id,
+        tool_name = tracing::field::Empty,
+    )
+)]
 pub async fn dispatch_action(
     client: &CallbackClient,
     action: &Value,
@@ -25,6 +33,7 @@ pub async fn dispatch_action(
     let item_id = action.get("item_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    tracing::Span::current().record("tool_name", item_id);
     let kind = action.get("kind").and_then(|v| v.as_str()).map(String::from);
     let params = action.get("params").cloned().unwrap_or(json!({}));
     let thread = action.get("thread").and_then(|v| v.as_str()).unwrap_or("inline");

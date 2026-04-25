@@ -21,6 +21,16 @@ pub struct HookEvent {
     pub state: Value,
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "graph:hook",
+    skip(hooks, ctx),
+    fields(
+        event = %event,
+        node = %ctx.current_node,
+        step = ctx.step,
+    )
+)]
 pub fn fire_hook(
     hooks: &[Value],
     event: &str,
@@ -68,6 +78,7 @@ pub fn fire_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_tracing::test as trace_test;
 
     #[test]
     fn fire_hook_matches_event() {
@@ -140,5 +151,37 @@ mod tests {
         };
         assert_eq!(fire_hook(&hooks, "after_step", &ctx).len(), 1);
         assert!(fire_hook(&hooks, "error", &ctx).is_empty());
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn fire_hook_emits_span() {
+        let hooks = vec![serde_json::json!({
+            "event": "after_step",
+        })];
+        let ctx = HookContext {
+            graph_id: "test",
+            graph_run_id: "gr-trace",
+            thread_id: "T-trace",
+            step: 3,
+            current_node: "n-trace",
+            state: &serde_json::json!({}),
+        };
+
+        let (_, spans) = trace_test::capture_traces(|| {
+            fire_hook(&hooks, "after_step", &ctx);
+        });
+
+        let span = trace_test::find_span(&spans, "graph:hook");
+        assert!(span.is_some(), "expected graph:hook span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("event"), Some("after_step"));
+        assert_eq!(field_val("node"), Some("n-trace"));
+        assert_eq!(field_val("step"), Some("3"));
     }
 }

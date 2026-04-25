@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::directive::StreamEvent;
 
+#[tracing::instrument(level = "debug", name = "provider:parse_sse", skip(data), fields(byte_len = data.len()))]
 pub fn parse_sse_events(data: &str, mode: Option<&str>) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
     let mut events = Vec::new();
@@ -259,6 +260,7 @@ fn parse_complete_chunks(parsed: &Value, events: &mut Vec<StreamEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_tracing::test as trace_test;
 
     #[test]
     fn sse_event_typed_anthropic() {
@@ -407,5 +409,19 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
         let events = split_sse_events(data);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1, r#"{"a":1}"#);
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_sse_events_emits_span() {
+        let data = r#"data: {"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}
+"#;
+        let (_, spans) = trace_test::capture_traces(|| {
+            parse_sse_events(data, Some("complete_chunks"));
+        });
+
+        let span = trace_test::find_span(&spans, "provider:parse_sse");
+        assert!(span.is_some(), "expected provider:parse_sse span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
     }
 }

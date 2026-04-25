@@ -19,9 +19,13 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
     let args = Args::parse();
+
+    let span = tracing::info_span!("tool:rebuild");
+    let _enter = span.enter();
+
     let state_root = args.state_dir.or_else(|| get_state_root().ok())
         .context("RYE_STATE not set and --state-dir not provided")?;
 

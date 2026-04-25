@@ -48,7 +48,9 @@ impl HeadCache {
 
     /// Get a cached head by chain_root_id.
     pub fn get(&self, chain_root_id: &str) -> Option<&CachedHead> {
-        self.heads.get(chain_root_id)
+        let found = self.heads.get(chain_root_id);
+        tracing::trace!(chain_root_id = %chain_root_id, hit = found.is_some(), "head cache lookup");
+        found
     }
 
     /// Get just the chain state hash for a cached chain.
@@ -72,8 +74,10 @@ impl HeadCache {
         chain_root_id: impl Into<String>,
         cached: CachedHead,
     ) -> bool {
+        let chain_root_id_as_str = chain_root_id.into();
+        tracing::trace!(chain_root_id = %chain_root_id_as_str, hash = %cached.chain_state_hash, "head cache insert");
         self.heads
-            .insert(chain_root_id.into(), cached)
+            .insert(chain_root_id_as_str, cached)
             .is_none()
     }
 

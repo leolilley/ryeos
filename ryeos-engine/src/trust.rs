@@ -697,6 +697,11 @@ pub fn strip_signature_lines(content: &str) -> String {
 ///
 /// The signature is over the content_hash hex string (as bytes), matching
 /// the pattern in `ryeosd/src/auth.rs` and `ryeosd/src/identity.rs`.
+#[tracing::instrument(
+    name = "engine:trust_verify",
+    skip(content, trust_store),
+    fields(signer = ?header.signer_fingerprint)
+)]
 pub fn verify_item_signature(
     content: &str,
     header: &SignatureHeader,
@@ -710,6 +715,8 @@ pub fn verify_item_signature(
             reason: "could not locate signature line in content".into(),
         }
     })?;
+
+    tracing::trace!(actual_hash = %actual_hash, header_hash = %header.content_hash, "comparing content hashes");
 
     // Step 2: Compare content hashes
     if actual_hash != header.content_hash {
@@ -767,6 +774,11 @@ pub fn verify_item_signature(
 
 /// Full item verification: takes a ResolvedItem, reads its content,
 /// and produces a VerifiedItem.
+#[tracing::instrument(
+    name = "engine:verify_item",
+    skip(item, trust_store),
+    fields(canonical_ref = %item.canonical_ref)
+)]
 pub fn verify_resolved_item(
     item: ResolvedItem,
     trust_store: &TrustStore,

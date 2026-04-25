@@ -26,7 +26,6 @@ use axum::{serve, Router};
 use clap::Parser;
 use config::{Cli, Config};
 use tokio::net::{TcpListener, UnixListener};
-use tracing_subscriber::EnvFilter;
 
 use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
@@ -37,15 +36,7 @@ use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("ryeosd=info,rye_engine=info")),
-        )
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_file(false)
-        .init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon());
 
     let cli = Cli::parse();
     let config = Config::load(&cli)?;

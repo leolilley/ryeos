@@ -52,6 +52,7 @@ impl Dispatcher {
         }
     }
 
+    #[tracing::instrument(name = "tool:resolve", skip(self, raw_args), fields(tool_name = %tool_name))]
     pub fn resolve(&self, tool_name: &str, raw_args: &str, call_id: Option<String>) -> Result<ToolDispatchResult, String> {
         let arguments = parse_tool_arguments(raw_args);
 
@@ -135,6 +136,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_tracing::test as trace_test;
 
     fn make_dispatcher(
         caps: Vec<String>,
@@ -257,5 +259,24 @@ mod tests {
         assert_eq!(classify_dispatch("directive:my/work", false), DispatchKind::DirectiveChild);
         assert_eq!(classify_dispatch("graph:my/graph", false), DispatchKind::GraphChild);
         assert_eq!(classify_dispatch("directive_return", true), DispatchKind::Internal);
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn resolve_emits_span() {
+        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
+        let (_, spans) = trace_test::capture_traces(|| {
+            let _ = d.resolve("read_file", r#"{"path": "/tmp"}"#, None);
+        });
+
+        let span = trace_test::find_span(&spans, "tool:resolve");
+        assert!(span.is_some(), "expected tool:resolve span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("tool_name"), Some("read_file"));
     }
 }

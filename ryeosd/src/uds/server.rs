@@ -37,6 +37,22 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
 
         let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
 
+        let span = tracing::debug_span!(
+            "uds:request",
+            method = %request.method,
+            request_id = %request.request_id,
+            thread_id = tracing::field::Empty,
+        );
+        // Opportunistically record thread_id when present in params.
+        if let Some(tid) = request
+            .params
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+        {
+            span.record("thread_id", tid);
+        }
+        let _enter = span.enter();
+
         // maintenance.gc requires async dispatch (run_maintenance_gc is async)
         let response = if request.method == "maintenance.gc" {
             dispatch_maintenance_gc(request, &state).await

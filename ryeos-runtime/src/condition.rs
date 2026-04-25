@@ -28,6 +28,7 @@ pub fn resolve_path<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
 }
 
 pub fn apply_operator(actual: Option<&Value>, op: &str, expected: &Value) -> anyhow::Result<bool> {
+    tracing::trace!(operator = %op, "evaluating condition");
     let actual_val = actual.unwrap_or(&Value::Null);
     match op {
         "eq" => Ok(actual_val == expected),

@@ -15,7 +15,9 @@ pub fn safe_rel_path(id: &str) -> anyhow::Result<PathBuf> {
     if parts.is_empty() {
         anyhow::bail!("empty id");
     }
-    Ok(parts.iter().fold(PathBuf::new(), |acc, p| acc.join(p)))
+    let result = parts.iter().fold(PathBuf::new(), |acc, p| acc.join(p));
+    tracing::trace!(input = %id, "validated safe relative path");
+    Ok(result)
 }
 
 pub fn thread_state_dir(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {

@@ -23,6 +23,7 @@ use crate::config::Config;
 /// Scans the config-provided system data directory and user space for kind
 /// schema files, loads the trust store from the daemon's trusted keys
 /// directory, and registers the terminal executor entries.
+#[tracing::instrument(name = "engine:lifecycle", skip(config), fields(event = "build_engine"))]
 pub fn build_engine(config: &Config) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
     for root in &config.bundle_roots {

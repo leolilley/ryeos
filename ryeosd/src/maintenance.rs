@@ -33,6 +33,14 @@ const DEFAULT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Returns the GC result on success. If quiesce times out, returns an error
 /// without running GC. The write barrier is always resumed on error paths.
+#[tracing::instrument(
+    name = "maintenance:gc",
+    skip(state, params),
+    fields(
+        dry_run = params.dry_run,
+        compact = params.compact,
+    )
+)]
 pub async fn run_maintenance_gc(
     state: &AppState,
     params: &GcParams,

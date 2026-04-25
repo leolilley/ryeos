@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::directive::{MessageSchemas, ProviderMessage, ToolCall};
 
+#[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas), fields(count = messages.len()))]
 pub fn convert_messages(
     messages: &[ProviderMessage],
     schemas: &Option<MessageSchemas>,
@@ -333,6 +334,7 @@ fn parse_response_with_schemas(
 mod tests {
     use super::*;
     use crate::directive::{MessageSchemas, ProviderMessage, SystemMessageConfig, ToolResultConfig};
+    use ryeos_tracing::test as trace_test;
 
     fn sample_messages() -> Vec<ProviderMessage> {
         vec![
@@ -575,5 +577,24 @@ mod tests {
         let parsed = convert_response_message(&resp, &Some(schemas));
         assert_eq!(parsed.role, "assistant");
         assert_eq!(parsed.content.unwrap(), "Hi!");
+    }
+
+    // ── Trace-capture tests ──────────────────────────────────────
+
+    #[test]
+    fn convert_messages_emits_span() {
+        let msgs = sample_messages();
+        let (_, spans) = trace_test::capture_traces(|| {
+            convert_messages(&msgs, &None);
+        });
+
+        let span = trace_test::find_span(&spans, "provider:build_messages");
+        assert!(span.is_some(), "expected provider:build_messages span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+
+        let span = span.unwrap();
+        let field_val = |name: &str| -> Option<&str> {
+            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field_val("count"), Some(&msgs.len().to_string()));
     }
 }

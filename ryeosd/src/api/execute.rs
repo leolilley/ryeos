@@ -42,6 +42,17 @@ pub async fn execute(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let span = tracing::debug_span!(
+        "http:execute",
+        method = %request.method(),
+        path = %request.uri().path(),
+        item_ref = tracing::field::Empty,
+        launch_mode = tracing::field::Empty,
+        validate_only = tracing::field::Empty,
+        thread_id = tracing::field::Empty,
+    );
+    let _enter = span.enter();
+
     let caller_principal_id = policy::request_principal_id(&request, &state);
     let caller_scopes = policy::request_scopes(&request);
     policy::require_scope(&caller_scopes, "execute")?;
@@ -55,6 +66,10 @@ pub async fn execute(
         ))?;
     let request: ExecuteRequest = serde_json::from_slice(&body_bytes)
         .map_err(|err| invalid_request(err.into()))?;
+
+    span.record("item_ref", request.item_ref.as_str());
+    span.record("launch_mode", request.launch_mode.as_str());
+    span.record("validate_only", request.validate_only);
 
     let site_id = state.threads.site_id();
     let project_source = request.project_source.clone().unwrap_or_default();
@@ -215,6 +230,10 @@ pub async fn execute(
         )
         .map_err(|err| policy::internal_error(err))?;
 
+        if let Some(tid) = result.thread.get("thread_id").and_then(|v| v.as_str()) {
+            span.record("thread_id", tid);
+        }
+
         return Ok(Json(json!({
             "thread": result.thread,
             "result": result.result,
@@ -226,6 +245,8 @@ pub async fn execute(
             .await
             .map_err(|err| policy::internal_error(err.into()))?;
 
+        span.record("thread_id", result.running_thread.thread_id.as_str());
+
         return Ok(Json(json!({
             "thread": result.running_thread,
             "detached": true,
@@ -236,6 +257,8 @@ pub async fn execute(
     let result = runner::run_inline(state.clone(), params)
         .await
         .map_err(|err| policy::internal_error(err.into()))?;
+
+    span.record("thread_id", result.finalized_thread.thread_id.as_str());
 
     Ok(Json(json!({
         "thread": result.finalized_thread,

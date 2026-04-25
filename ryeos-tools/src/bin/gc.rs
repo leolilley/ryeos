@@ -71,7 +71,7 @@ struct GcReport {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
     let args = Args::parse();
     let state_root = args.state_dir.clone().or_else(|| get_state_root().ok())
@@ -157,6 +157,7 @@ fn main() -> Result<()> {
 }
 
 /// Run GC directly (daemon not running path).
+#[tracing::instrument(name = "tool:gc", skip(state_root, args, params), fields(dry_run = args.dry_run))]
 fn run_gc_direct(
     state_root: &std::path::Path,
     args: &Args,

@@ -7,6 +7,7 @@ use lillux::crypto::DecodePrivateKey;
 use crate::config::Config;
 use crate::identity::NodeIdentity;
 
+#[derive(Debug)]
 pub struct InitOptions {
     pub force: bool,
 }
@@ -15,6 +16,7 @@ pub struct InitOptions {
 ///
 /// Creates the node space layout, generates or loads the signing key,
 /// writes the public identity document, and bootstraps self-trust.
+#[tracing::instrument(name = "engine:lifecycle", skip(config), fields(event = "bootstrap"))]
 pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 1. Create directory layout
     create_directory_layout(config)?;

@@ -19,6 +19,8 @@ mod runner;
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, ENVELOPE_VERSION};
 
 fn main() {
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_directive_runtime());
+
     let result = run_directive();
     let exit_code = match &result {
         Ok(_) => 0,
