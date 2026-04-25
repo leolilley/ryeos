@@ -24,6 +24,8 @@ status: planned
 
 > **Prerequisite:** [Native Runtimes](native-runtimes.md) — the daemon launch pipeline, callback capability system, and `runtime_binary` dispatch must be in place.
 
+> **Prerequisite:** Resolution Pipeline (`.tmp/RESOLUTION-PIPELINE.md`) — graph traversal (`extends`, `references`) is performed by the daemon's resolution pipeline, not by the runtime itself. The knowledge runtime receives pre-resolved DAGs in the LaunchEnvelope and only handles composition, budget fitting, and ordering.
+
 ---
 
 ## The Problem
@@ -40,21 +42,25 @@ The graph structure defined in frontmatter is **never traversed at runtime**. Ea
 
 Meanwhile, directive-runtime and graph-runtime are full native binaries with LLM loops and DAG walkers. Knowledge — the system's context backbone — gets a Python script that reads a file.
 
+The deeper problem is that `resolve_extends_chain` exists in three separate implementations (Python `thread_directive.py`, Rust `directive-runtime/bootstrap.rs`, Python hooks). A naive knowledge-runtime would be the fourth. The Resolution Pipeline (`.tmp/RESOLUTION-PIPELINE.md`) collapses all four into one daemon-side dispatcher.
+
 ---
 
 ## What the Knowledge Runtime Is
 
 A standalone Rust binary (`knowledge-runtime`), spawned by the daemon via `lillux exec`, that serves as the system's **context composition engine**.
 
-It does not run LLM loops (directive-runtime) or walk DAGs (graph-runtime). It resolves, traverses, composes, and delivers context from the knowledge graph to consumers.
+It does not run LLM loops (directive-runtime), walk DAGs (graph-runtime), or traverse the knowledge graph (the daemon's resolution pipeline does that). It receives a **pre-resolved knowledge graph** in the LaunchEnvelope and composes, budget-fits, and delivers context blocks.
 
 ### Computational Pattern
 
-| Runtime               | Pattern                           | Core Loop                                                                |
-| --------------------- | --------------------------------- | ------------------------------------------------------------------------ |
-| directive-runtime     | Agent loop                        | Prompt → LLM call → Tool dispatch → Repeat                               |
-| graph-runtime         | DAG walk                          | Select node → Dispatch → Bind output → Repeat                            |
-| **knowledge-runtime** | **Graph traversal + composition** | **Resolve entry → Traverse edges → Compose block → Budget-fit → Return** |
+| Runtime               | Pattern                          | Core Loop                                                             |
+| --------------------- | -------------------------------- | --------------------------------------------------------------------- |
+| directive-runtime     | Agent loop                       | Prompt → LLM call → Tool dispatch → Repeat                            |
+| graph-runtime         | DAG walk                         | Select node → Dispatch → Bind output → Repeat                         |
+| **knowledge-runtime** | **Composition + budget fitting** | **Receive resolved graph → Order → Fit budget → Emit composed block** |
+
+Graph traversal happens upstream in the daemon (`resolve_extends_chain`, `resolve_references` resolution steps). The runtime is purely a composer.
 
 ---
 
@@ -66,20 +72,24 @@ It does not run LLM loops (directive-runtime) or walk DAGs (graph-runtime). It r
 ryeosd
   │ resolve knowledge:rye/agent/core/Identity
   │ verify signature + trust
-  │ extract kind schema → runtime_binary: "knowledge-runtime"
+  │ extract kind schema → execution.aliases, execution.resolution
+  │ run resolution pipeline:
+  │   - resolve_extends_chain (walks extends DAG, detects cycles)
+  │   - resolve_references (walks references laterally)
   │ compute effective limits (shallow — no LLM token spend)
   │ mint callback capability
   │ write thread.json
+  │ build LaunchEnvelope with envelope.resolution = { ordered_refs, edges, ... }
   │ spawn knowledge-runtime via lillux exec
   │
-  ▼ stdin: LaunchEnvelope
+  ▼ stdin: LaunchEnvelope (with pre-resolved graph)
 knowledge-runtime
   │ read config from .ai/config/rye-runtime/
-  │ resolve entry knowledge item from target.path
-  │ verify integrity
-  │ traverse knowledge graph (extends, references) per config
-  │ compose context block within token budget
-  │ emit events (resolved, traversed, omitted)
+  │ load entry item + all items in envelope.resolution.ordered_refs
+  │ verify integrity of every loaded item
+  │ compose context block from ordered refs within token budget
+  │ apply position-specific ordering rules
+  │ emit events (composed, budget_exceeded, integrity_failure)
   │ write result to stdout
   │
   ▼ stdout: result JSON
@@ -88,7 +98,7 @@ ryeosd
   │ return result to caller
 ```
 
-The daemon does not branch on `"knowledge"`. It reads `runtime_binary` from the kind schema and spawns that binary. Same code path for all kinds.
+The daemon does not branch on `"knowledge"`. It reads `execution.aliases["@knowledge"]` from the kind schema and resolves the runtime tool. Same code path for all kinds.
 
 ### Kind Schema
 
@@ -97,7 +107,13 @@ The daemon does not branch on `"knowledge"`. It reads `runtime_binary` from the 
 location:
   directory: knowledge
 execution:
-  runtime_binary: "knowledge-runtime"
+  aliases:
+    "@knowledge": "tool:rye/core/executors/knowledge/knowledge"
+  resolution:
+    - step: resolve_extends_chain
+      params: { field: "extends", max_depth: 8 }
+    - step: resolve_references
+      params: { field: "references", max_depth: 3 }
 formats:
   - extensions: [".md"]
     parser_id: markdown/frontmatter
@@ -115,7 +131,7 @@ metadata:
     category: { from: path, key: category }
 ```
 
-No `default_executor_id`. No native adapter registration. One binary, all operations.
+The `execution.resolution` block tells the daemon what preprocessing the kind needs. The runtime tool itself is referenced via `@knowledge` alias. No `default_executor_id`, no native adapter registration. The runtime receives pre-resolved data and never traverses the graph itself.
 
 ---
 
@@ -622,7 +638,9 @@ Ship directive-runtime and graph-runtime first. Knowledge stays on the Python ex
 
 ### Phase 1 — knowledge-runtime with resolve
 
-Implement `resolve` operation only. Exact parity with current Python executor behavior. Validates the daemon launch pipeline works for knowledge items via `runtime_binary`. Replaces the Python executor.
+Implement `resolve` operation only. Exact parity with current Python executor behavior. Validates the daemon launch pipeline works for knowledge items via the `@knowledge` alias. Replaces the Python executor.
+
+**No resolution pipeline dependency** — `resolve` operates on a single item, no graph traversal needed.
 
 **Tests:**
 
@@ -637,35 +655,45 @@ Implement `resolve` operation only. Exact parity with current Python executor be
 
 ### Phase 2 — compose Operation
 
-Implement graph traversal, composition, budget fitting. Wire into directive-runtime's context materialization.
+**Depends on Resolution Pipeline** (`.tmp/RESOLUTION-PIPELINE.md`) being shipped. The daemon must dispatch `resolve_extends_chain` and `resolve_references` steps before spawning the runtime, and the LaunchEnvelope must carry `envelope.resolution` with the pre-resolved DAG.
+
+Implement composition, budget fitting, and ordering. The runtime consumes `envelope.resolution.ordered_refs` and `envelope.resolution.edges` — no traversal logic in the runtime itself. Wire into directive-runtime's context materialization.
 
 **Tests:**
 
-- Traversal follows extends chains with depth limits
-- Traversal follows references laterally
-- Cycle detection prevents infinite loops
-- Deduplication works across multiple paths to same item
+- Loads all items in `envelope.resolution.ordered_refs`
+- Verifies integrity of each loaded item
+- Ordering: extends chain before primary before references (per ordered_refs)
 - Budget truncation omits lowest-priority items
 - Composition metadata accurately reports resolved/omitted
-- Ordering: extends chain before primary before references
 - exclude_items parameter skips already-loaded items
+- Missing items in ordered_refs → hard error (resolution should have caught it)
+- Cycle detection NOT in this runtime — verified by daemon resolution pipeline tests
 
 ### Phase 3 — query and graph Operations
 
 Implement search and graph inspection. Wire query into MCP fetch tool's search mode.
+
+**Note:** `graph` operation can return `envelope.resolution.edges` directly when called for the resolved root item — no additional traversal needed. For arbitrary roots, the runtime requests resolution from the daemon via callback (or the daemon dispatches resolution per request).
 
 **Tests:**
 
 - BM25 search with field weights
 - Tag-based matching
 - Category filtering
-- Graph traversal returns correct edges
-- Graph handles missing references gracefully
-- Depth limiting on graph output
+- Graph operation returns daemon-resolved edges
+- Depth limiting (passed through to resolution pipeline)
 
 ### Phase 4 — validate Operation
 
 Implement subgraph validation. Wire into knowledge signing workflow.
+
+**Note:** Cycle detection is the daemon's resolution pipeline responsibility. The validate operation focuses on:
+
+- Broken references (referenced items don't exist)
+- Unsigned items in subgraph
+- Signature mismatches
+- Staleness vs validated timestamp
 
 **Tests:**
 
@@ -674,6 +702,27 @@ Implement subgraph validation. Wire into knowledge signing workflow.
 - Detects signature mismatches
 - Reports staleness based on validated timestamp
 - Respects depth limit during validation
+
+### Phase 5 (future) — Snapshot Hooks for Epoch Commits
+
+The knowledge runtime is the natural producer of a deterministic graph snapshot. The [Epoch Commits](epoch-commits.md) design uses this to build a signed hash chain over knowledge graph state — closing the trust loop at the *graph* level, not just the item level.
+
+This phase adds two pure-function operations consumed by `tool:rye/knowledge/epoch/*`:
+
+- `snapshot` — emit a `GraphSnapshot { items: [(item_id, content_hash)], edges: [(from, to, kind)] }` over the currently resolved graph (or a subgraph at a given root).
+- `graph_root` — compute the canonical Merkle root of a `GraphSnapshot` per the spec in `epoch-commits.md` §6.
+
+The runtime stays stateless. Epoch commit objects, chain head, retention pinning, and signing all live outside the runtime in the `epoch/*` tools. The runtime contributes only the deterministic computation of *what the graph is right now*.
+
+**Why it belongs to the knowledge runtime:** the graph is already materialised here for composition. Adding snapshot + graph_root reuses the same resolution path, guaranteeing that every commit pins exactly the graph the runtime would have composed at that moment. Computing it elsewhere would risk divergence.
+
+**Tests:**
+
+- Two snapshot calls on an unchanged graph produce byte-identical outputs
+- graph_root is deterministic across runtime restarts and platforms
+- Snapshot reflects three-tier resolution exactly as compose does
+
+Identity note: the runtime is a system binary and has no signing identity of its own. The snapshot is an unsigned data structure; signing is the caller's job. Per Ryeos's "agent = signing key" premise, only the calling agent's key can produce a valid epoch commit over the snapshot. See [epoch-commits.md](epoch-commits.md) §1.
 
 ---
 

@@ -1,20 +1,33 @@
 use std::path::PathBuf;
 
+use ryeos_engine::resolution::ResolutionOutput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const ENVELOPE_VERSION: u32 = 1;
-
+/// Envelope shipped from daemon to runtime over stdin.
+///
+/// `EnvelopeTarget` has been deleted: the daemon used to embed a second
+/// snapshot of the root item (path + digest) computed from
+/// `resolved.resolved_item`, while `resolution.root` shipped a *third*
+/// snapshot loaded inside `run_resolution_pipeline`. They could disagree,
+/// and the runtime would have no way to tell which to trust. Now there
+/// is exactly one root snapshot — `resolution.root` — and every consumer
+/// reads `path` / `digest` / `kind` / `item_id` from there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchEnvelope {
-    pub envelope_version: u32,
     pub invocation_id: String,
     pub thread_id: String,
     pub roots: EnvelopeRoots,
-    pub target: EnvelopeTarget,
     pub request: EnvelopeRequest,
     pub policy: EnvelopePolicy,
     pub callback: EnvelopeCallback,
+    /// Pre-resolved extends/references DAGs and per-step outputs, plus
+    /// the verified root payload itself. Always present — empty
+    /// `ResolutionOutput.ancestors` if the kind has no extends step,
+    /// never `null`. Runtimes consume this directly instead of
+    /// re-walking the chain themselves *or* re-reading the root from
+    /// disk.
+    pub resolution: ResolutionOutput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,14 +36,6 @@ pub struct EnvelopeRoots {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_root: Option<PathBuf>,
     pub system_roots: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvelopeTarget {
-    pub item_id: String,
-    pub kind: String,
-    pub path: String,
-    pub digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,19 +124,12 @@ mod tests {
     #[test]
     fn envelope_round_trip() {
         let envelope = LaunchEnvelope {
-            envelope_version: ENVELOPE_VERSION,
             invocation_id: "inv-abc".to_string(),
             thread_id: "T-test".to_string(),
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 user_root: None,
                 system_roots: vec![],
-            },
-            target: EnvelopeTarget {
-                item_id: "directive:my/agent".to_string(),
-                kind: "directive".to_string(),
-                path: ".ai/directives/my/agent.directive.md".to_string(),
-                digest: "sha256:abc".to_string(),
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
@@ -148,11 +146,38 @@ mod tests {
                 socket_path: PathBuf::from("/tmp/ryeosd.sock"),
                 token: "cbt-test".to_string(),
             },
+            resolution: ResolutionOutput {
+                root: ryeos_engine::resolution::ResolvedAncestor {
+                    requested_id: "directive:my/agent".to_string(),
+                    resolved_ref: "directive:my/agent".to_string(),
+                    source_path: PathBuf::from("/project/.ai/directives/my/agent.directive.md"),
+                    trust_class: ryeos_engine::resolution::TrustClass::Unsigned,
+                    alias_resolution: None,
+                    added_by: ryeos_engine::resolution::ResolutionStepName::PipelineInit,
+                    raw_content: String::new(),
+                    raw_content_digest:
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                },
+                ancestors: vec![],
+                references_edges: vec![],
+                step_outputs: std::collections::HashMap::new(),
+                executor_trust_class: ryeos_engine::resolution::TrustClass::Unsigned,
+                composed: ryeos_engine::resolution::KindComposedView::identity(
+                    serde_json::json!({}),
+                ),
+            },
         };
         let json = serde_json::to_string(&envelope).unwrap();
         let parsed: LaunchEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.thread_id, "T-test");
-        assert_eq!(parsed.envelope_version, ENVELOPE_VERSION);
+        assert!(parsed.resolution.ancestors.is_empty());
+        assert_eq!(
+            parsed.resolution.executor_trust_class,
+            ryeos_engine::resolution::TrustClass::Unsigned
+        );
+        assert!(parsed.resolution.composed.derived.is_empty());
+        assert!(parsed.resolution.composed.policy_facts.is_empty());
     }
 
     #[test]

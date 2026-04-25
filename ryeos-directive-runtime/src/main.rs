@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::json;
 
 mod adapter;
@@ -11,12 +11,11 @@ mod directive;
 mod dispatcher;
 mod harness;
 mod knowledge;
-mod parser;
 mod result_guard;
 mod resume;
 mod runner;
 
-use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, ENVELOPE_VERSION};
+use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
 
 fn main() {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_directive_runtime());
@@ -66,35 +65,14 @@ fn run_directive() -> Result<RuntimeResult> {
 }
 
 async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
-    if envelope.envelope_version != ENVELOPE_VERSION {
-        bail!(
-            "unsupported envelope version: {} (expected {})",
-            envelope.envelope_version,
-            ENVELOPE_VERSION
-        );
-    }
-
     let project_root = envelope.roots.project_root.clone();
     let user_root = envelope.roots.user_root.clone();
     let system_roots = envelope.roots.system_roots.clone();
 
-    let directive_path = project_root.join(&envelope.target.path);
-    if !directive_path.exists() {
-        bail!("directive file not found: {}", directive_path.display());
-    }
-
-    let content = std::fs::read_to_string(&directive_path)?;
-
-    use sha2::{Digest, Sha256};
-    let computed = format!("{:x}", Sha256::digest(content.as_bytes()));
-    if let Some(expected) = envelope.target.digest.strip_prefix("sha256:") {
-        if computed != expected {
-            bail!("target digest mismatch: expected {}, got {}", expected, computed);
-        }
-    }
-
-    let parsed = parser::parse_directive(&content, &envelope.target.path)?;
-
+    // The runtime no longer parses the directive body or walks extends.
+    // The daemon-side `ExtendsChainComposer` has already produced
+    // `envelope.resolution.composed = KindComposedView::ExtendsChain(...)`
+    // — we hand that view straight into bootstrap.
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
         envelope.roots.user_root.clone(),
@@ -111,7 +89,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &project_root,
         user_root.as_deref(),
         &system_roots,
-        &parsed,
+        &envelope.resolution.composed,
         &envelope.policy.hard_limits,
         &verified_loader,
     )?;
@@ -239,7 +217,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let _ = crate::knowledge::write_thread_transcript(
         &project_root,
         &envelope.thread_id,
-        &envelope.target.path,
+        &envelope.resolution.root.source_path.to_string_lossy(),
         runner_inst.messages(),
     );
     let _ = crate::knowledge::write_capabilities(

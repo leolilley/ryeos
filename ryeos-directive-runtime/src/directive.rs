@@ -70,12 +70,6 @@ pub struct OutputSpec {
     pub r#type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ParsedDirective {
-    pub header: DirectiveHeader,
-    pub body: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSchema {
     pub name: String,

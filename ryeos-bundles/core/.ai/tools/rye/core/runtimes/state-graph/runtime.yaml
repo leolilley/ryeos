@@ -1,0 +1,56 @@
+# rye:signed:2026-04-25T09:50:28Z:ccd948b714bd7c9c81fab323e912a0230d6f4530f1f6a5c3ffa57a9182264220:Fx6etk4JJ22snWhCCSLyWAY2JYp8TL45k8vb9hhc3XO7xlRiG+t71jVnjhPZ46kVhHqKzsbwHPvaT6hj4v45AA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+tool_type: runtime
+__executor_id__: "@subprocess"
+category: rye/core/runtimes/state-graph
+description: "State graph runtime — walks graph YAML tools, dispatching RYE for each node"
+execution_owner: callee
+native_async: true
+native_resume: true
+
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONUNBUFFERED: "1"
+    PROJECT_VENV_PYTHON: "${RYE_PYTHON}"
+  env_paths:
+    PYTHONPATH:
+      prepend: ["{tool_dir}", "{runtime_dir}", "{runtime_dir}/../python/lib"]
+
+verify_deps:
+  enabled: true
+  scope: tool_dir
+  recursive: true
+  extensions: [".py", ".yaml", ".yml", ".json"]
+  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
+
+execution_params:
+  - max_steps
+  - max_concurrency
+
+config:
+  command: "{interpreter}"
+  args:
+    - "-c"
+    - |
+      import sys,json,os.path
+      from walker import _load_graph_yaml, run_sync
+      graph=_load_graph_yaml(sys.argv[1])
+      graph["_file_path"]=sys.argv[1]
+      graph["_item_id"]=graph.get("category","")+"/"+os.path.splitext(os.path.basename(sys.argv[1]))[0]
+      r=run_sync(graph,json.loads(sys.argv[2]),sys.argv[3])
+      print(json.dumps(r,default=str))
+    - "{tool_path}"
+    - "{params_json}"
+    - "{project_path}"
+  timeout_secs: 600

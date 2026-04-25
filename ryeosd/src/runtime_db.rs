@@ -5,10 +5,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize)]
+use crate::launch_metadata::{RuntimeLaunchMetadata, LAUNCH_METADATA_SCHEMA_VERSION};
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeInfo {
     pub pid: Option<i64>,
     pub pgid: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_metadata: Option<RuntimeLaunchMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,7 +46,9 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     chain_root_id TEXT NOT NULL,
     pid INTEGER,
     pgid INTEGER,
-    metadata BLOB
+    metadata BLOB,
+    launch_metadata TEXT,
+    resume_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
@@ -84,35 +90,125 @@ impl RuntimeDb {
 
     pub fn insert_thread_runtime(&self, thread_id: &str, chain_root_id: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO thread_runtime (thread_id, chain_root_id, pid, pgid, metadata)
-             VALUES (?1, ?2, NULL, NULL, NULL)",
+            "INSERT INTO thread_runtime (thread_id, chain_root_id, pid, pgid, metadata, launch_metadata)
+             VALUES (?1, ?2, NULL, NULL, NULL, NULL)",
             params![thread_id, chain_root_id],
         )?;
         Ok(())
     }
 
-    pub fn attach_process(&self, thread_id: &str, pid: i64, pgid: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
-            params![thread_id, pid, pgid],
+    pub fn attach_process(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        let lm_json = serde_json::to_string(launch_metadata)
+            .context("failed to encode launch_metadata")?;
+        let updated = self.conn.execute(
+            "UPDATE thread_runtime
+                SET pid = ?2, pgid = ?3, launch_metadata = ?4
+              WHERE thread_id = ?1",
+            params![thread_id, pid, pgid, lm_json],
         )?;
+        if updated == 0 {
+            bail!("thread_runtime row missing for thread_id: {thread_id}");
+        }
         Ok(())
     }
 
     pub fn get_runtime_info(&self, thread_id: &str) -> Result<Option<RuntimeInfo>> {
-        self.conn
+        // Decode loudly outside the rusqlite mapper so we can log the
+        // thread_id and raw payload on schema drift. A silent `.ok()`
+        // here would disable cancellation routing, resume eligibility
+        // and the checkpoint dir on a single corrupt row.
+        let raw = self
+            .conn
             .query_row(
-                "SELECT pid, pgid FROM thread_runtime WHERE thread_id = ?1",
+                "SELECT pid, pgid, launch_metadata FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
-                    Ok(RuntimeInfo {
-                        pid: row.get(0)?,
-                        pgid: row.get(1)?,
-                    })
+                    let pid: Option<i64> = row.get(0)?;
+                    let pgid: Option<i64> = row.get(1)?;
+                    let lm_text: Option<String> = row.get(2)?;
+                    Ok((pid, pgid, lm_text))
                 },
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        let Some((pid, pgid, lm_text)) = raw else {
+            return Ok(None);
+        };
+        let launch_metadata = match lm_text.as_deref() {
+            None => None,
+            Some(s) => match serde_json::from_str::<RuntimeLaunchMetadata>(s) {
+                Ok(m) => {
+                    if m.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            persisted_schema_version = m.schema_version,
+                            expected_schema_version = LAUNCH_METADATA_SCHEMA_VERSION,
+                            payload_len = s.len(),
+                            "launch_metadata schema_version mismatch; treating as None — \
+                             resume eligibility and cancellation routing disabled \
+                             for this thread until the row is rewritten"
+                        );
+                        None
+                    } else {
+                        Some(m)
+                    }
+                }
+                Err(err) => {
+                    // Do NOT log raw payload — ResumeContext.parameters
+                    // can contain user/tool params that may include secrets.
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        error = %err,
+                        payload_len = s.len(),
+                        "failed to decode launch_metadata; treating as None — \
+                         resume eligibility and cancellation routing disabled \
+                         for this thread until the row is rewritten"
+                    );
+                    None
+                }
+            },
+        };
+        Ok(Some(RuntimeInfo {
+            pid,
+            pgid,
+            launch_metadata,
+        }))
+    }
+
+    /// Read the auto-resume attempt counter for a thread. Missing row
+    /// (or DB rows with no counter persisted) ⇒ 0.
+    pub fn get_resume_attempts(&self, thread_id: &str) -> Result<u32> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT resume_attempts FROM thread_runtime WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(n.unwrap_or(0).max(0) as u32)
+    }
+
+    /// Atomically increment the auto-resume attempt counter for a
+    /// thread and return the post-increment value. Used by
+    /// `reconcile.rs` BEFORE re-spawning so a crash mid-resume does
+    /// not grant an infinite retry loop.
+    pub fn bump_resume_attempts(&self, thread_id: &str) -> Result<u32> {
+        let updated = self.conn.execute(
+            "UPDATE thread_runtime
+                SET resume_attempts = resume_attempts + 1
+              WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        if updated == 0 {
+            bail!("thread_runtime row missing for thread_id: {thread_id}");
+        }
+        self.get_resume_attempts(thread_id)
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
@@ -243,4 +339,149 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
                 Box::new(err),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::launch_metadata::RuntimeLaunchMetadata;
+    use ryeos_engine::contracts::CancellationMode;
+    use tempfile::TempDir;
+
+    fn fresh_db() -> (TempDir, RuntimeDb) {
+        let tmp = TempDir::new().unwrap();
+        let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
+        (tmp, db)
+    }
+
+    #[test]
+    fn attach_and_read_launch_metadata_roundtrip() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let lm = RuntimeLaunchMetadata {
+            cancellation_mode: Some(CancellationMode::Graceful { grace_secs: 9 }),
+            ..Default::default()
+        };
+        db.attach_process("t1", 1234, 5678, &lm).unwrap();
+
+        let info = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(info.pid, Some(1234));
+        assert_eq!(info.pgid, Some(5678));
+        let back = info.launch_metadata.expect("launch_metadata");
+        assert_eq!(back.cancellation_mode, lm.cancellation_mode);
+    }
+
+    #[test]
+    fn attach_with_hard_cancellation_roundtrip() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let lm = RuntimeLaunchMetadata {
+            cancellation_mode: Some(CancellationMode::Hard),
+            ..Default::default()
+        };
+        db.attach_process("t1", 1, 2, &lm).unwrap();
+        let info = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(
+            info.launch_metadata.unwrap().cancellation_mode,
+            Some(CancellationMode::Hard)
+        );
+    }
+
+    #[test]
+    fn open_is_idempotent() {
+        let (tmp, _db) = fresh_db();
+        let path = tmp.path().join("runtime.db");
+        let _ = RuntimeDb::open(&path).unwrap();
+        let _ = RuntimeDb::open(&path).unwrap();
+    }
+
+    #[test]
+    fn null_launch_metadata_yields_none() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        db.conn
+            .execute(
+                "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
+                params!["t1", 7i64, 8i64],
+            )
+            .unwrap();
+        let info = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(info.pid, Some(7));
+        assert_eq!(info.pgid, Some(8));
+        assert!(info.launch_metadata.is_none());
+    }
+
+    #[test]
+    fn garbage_launch_metadata_decodes_to_none_without_panic() {
+        // Schema drift / corruption must surface as None (with a warn
+        // log emitted) rather than panicking or silently dropping the
+        // entire row.
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        db.conn
+            .execute(
+                "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4
+                 WHERE thread_id = ?1",
+                params!["t1", 1i64, 2i64, "{not valid json"],
+            )
+            .unwrap();
+        let info = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(info.pid, Some(1));
+        assert!(info.launch_metadata.is_none());
+    }
+
+    #[test]
+    fn resume_attempts_default_zero_and_bump_increments() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 2);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 2);
+    }
+
+    #[test]
+    fn resume_attempts_bump_unknown_thread_errors() {
+        let (_tmp, db) = fresh_db();
+        let err = db.bump_resume_attempts("missing").unwrap_err();
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn resume_attempts_unknown_thread_reads_zero() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(db.get_resume_attempts("nope").unwrap(), 0);
+    }
+
+    #[test]
+    fn attach_process_unknown_thread_errors() {
+        // Strict-update: attach must fail loudly when no row exists,
+        // so the runner can kill the live child rather than orphaning it.
+        let (_tmp, db) = fresh_db();
+        let lm = RuntimeLaunchMetadata::default();
+        let err = db
+            .attach_process("missing", 1, 2, &lm)
+            .expect_err("attach on missing row must error");
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn schema_version_mismatch_yields_none_with_warn() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        // Persist a payload that decodes successfully but carries a
+        // future schema_version. get_runtime_info must drop the
+        // metadata to avoid acting on an unknown shape.
+        let payload = serde_json::json!({ "schema_version": 999 }).to_string();
+        db.conn
+            .execute(
+                "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4
+                 WHERE thread_id = ?1",
+                params!["t1", 1i64, 2i64, payload],
+            )
+            .unwrap();
+        let info = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(info.pid, Some(1));
+        assert!(info.launch_metadata.is_none());
+    }
 }

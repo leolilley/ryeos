@@ -6,6 +6,7 @@ mod engine_init;
 mod execution;
 mod identity;
 mod kind_profiles;
+mod launch_metadata;
 mod maintenance;
 mod policy;
 mod process;
@@ -68,7 +69,6 @@ async fn main() -> Result<()> {
     let identity = NodeIdentity::load(&config.signing_key_path)?;
     let engine = Arc::new(engine_init::build_engine(&config)?);
     
-    // Initialize StateStore with CAS backing (Phase 0.5H.3)
     let state_root = config.state_dir.join(".state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
@@ -104,7 +104,12 @@ async fn main() -> Result<()> {
         started_at_iso: lillux::time::iso8601_now(),
     };
 
-    reconcile::reconcile(&app_state).await?;
+    // Reconcile threads from the previous run BEFORE binding listeners,
+    // but DO NOT dispatch the resume intents yet — a resumed subprocess
+    // making its first daemon callback before the UDS / HTTP server is
+    // bound would fail. We collect intents here and dispatch them
+    // below, after the listeners are accepting connections.
+    let resume_intents = reconcile::reconcile(&app_state).await?;
 
     let app = build_router(app_state.clone())
         .layer(axum::middleware::from_fn_with_state(
@@ -147,12 +152,89 @@ async fn main() -> Result<()> {
     let uds_state = Arc::new(app_state.clone());
     let uds_task = tokio::spawn(async move { uds::server::serve(uds_listener, uds_state).await });
 
+    // HTTP server is started BEFORE dispatching resume intents.
+    // A resumed subprocess that prefers RYEOSD_URL over
+    // RYEOSD_SOCKET_PATH would otherwise hit a cold server when it
+    // makes its first callback. Spawning the serve future here, then
+    // selecting on it below, ensures the accept loop is live before
+    // any reconciler-spawned child can start.
     let shutdown = shutdown_signal();
-    let http = serve(tcp_listener, app).with_graceful_shutdown(shutdown);
+    let http_task = tokio::spawn(async move {
+        serve(tcp_listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+    });
+
+    // Listeners are bound and BOTH the UDS accept loop and HTTP
+    // accept loop are running. Now dispatch the resume intents
+    // collected by `reconcile`. These run as in-runtime tokio tasks
+    // (NOT daemon-detached) so that shutdown's
+    // `drain_running_threads` covers them. Failures finalize the
+    // thread immediately so it never sits in a non-terminal state
+    // until the next daemon restart.
+    for intent in resume_intents {
+        let st = app_state.clone();
+        let threads = app_state.threads.clone();
+        tokio::spawn(async move {
+            let params = match crate::execution::runner::execution_params_from_resume_context(
+                &st,
+                &intent.resume_context,
+            ) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::error!(
+                        thread_id = %intent.thread_id,
+                        error = %err,
+                        "resume: failed to build ExecutionParams from ResumeContext — finalizing"
+                    );
+                    if let Err(fin_err) = threads.finalize_thread(
+                        &crate::services::thread_lifecycle::ThreadFinalizeParams {
+                            thread_id: intent.thread_id.clone(),
+                            status: "failed".to_string(),
+                            outcome_code: Some("resume_rebuild_failed".to_string()),
+                            result: None,
+                            error: Some(serde_json::json!({
+                                "code": "resume_rebuild_failed",
+                                "message": err.to_string(),
+                            })),
+                            metadata: None,
+                            artifacts: Vec::new(),
+                            final_cost: None,
+                            summary_json: None,
+                        },
+                    ) {
+                        tracing::warn!(
+                            thread_id = %intent.thread_id,
+                            error = %fin_err,
+                            "resume: finalize after rebuild failure also failed"
+                        );
+                    }
+                    return;
+                }
+            };
+            if let Err(err) = crate::execution::runner::run_existing_detached(
+                st,
+                intent.thread_id.clone(),
+                intent.chain_root_id,
+                params,
+                intent.prior_status,
+            )
+            .await
+            {
+                tracing::error!(
+                    thread_id = %intent.thread_id,
+                    error = %err,
+                    "resume: dispatch failed"
+                );
+            }
+        });
+    }
 
     tokio::select! {
-        result = http => {
-            result.context("http server exited unexpectedly")?;
+        result = http_task => {
+            result
+                .context("http task join failed")?
+                .context("http server exited unexpectedly")?;
         }
         result = uds_task => {
             result.context("uds task join failed")??;
@@ -170,6 +252,32 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the cancellation policy for a thread to a concrete daemon action.
+///
+/// - `Some(CancellationMode::Hard)` → SIGKILL only (no SIGTERM).
+/// - `Some(CancellationMode::Graceful { grace_secs })` → SIGTERM, wait
+///   `grace_secs`, then SIGKILL.
+/// - `None` → default 3s graceful (used when a tool did not declare
+///   `native_async`).
+fn resolve_shutdown_action(
+    mode: Option<ryeos_engine::contracts::CancellationMode>,
+) -> ShutdownAction {
+    use ryeos_engine::contracts::CancellationMode;
+    match mode {
+        Some(CancellationMode::Hard) => ShutdownAction::Hard,
+        Some(CancellationMode::Graceful { grace_secs }) => {
+            ShutdownAction::Graceful(std::time::Duration::from_secs(grace_secs))
+        }
+        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownAction {
+    Hard,
+    Graceful(std::time::Duration),
 }
 
 fn drain_running_threads(state: &AppState) {
@@ -199,12 +307,23 @@ fn drain_running_threads(state: &AppState) {
                 );
                 continue;
             }
+            let action = resolve_shutdown_action(
+                thread.runtime.launch_metadata.as_ref().and_then(
+                    |lm| lm.cancellation_mode,
+                ),
+            );
             tracing::info!(
                 pgid,
                 thread_id = %thread.thread_id,
+                action = ?action,
                 "killing process group"
             );
-            let result = process::kill_process_group(pgid, std::time::Duration::from_secs(3));
+            let result = match action {
+                ShutdownAction::Hard => process::hard_kill_process_group(pgid),
+                ShutdownAction::Graceful(grace) => {
+                    process::kill_process_group(pgid, grace)
+                }
+            };
             if !result.success {
                 tracing::warn!(
                     pgid,
@@ -243,5 +362,46 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod shutdown_mapping_tests {
+    use super::{resolve_shutdown_action, ShutdownAction};
+    use ryeos_engine::contracts::CancellationMode;
+    use std::time::Duration;
+
+    #[test]
+    fn hard_mode_maps_to_hard_kill() {
+        assert_eq!(
+            resolve_shutdown_action(Some(CancellationMode::Hard)),
+            ShutdownAction::Hard
+        );
+    }
+
+    #[test]
+    fn graceful_mode_uses_declared_grace() {
+        assert_eq!(
+            resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 11 })),
+            ShutdownAction::Graceful(Duration::from_secs(11))
+        );
+    }
+
+    #[test]
+    fn no_mode_falls_back_to_three_second_default() {
+        assert_eq!(
+            resolve_shutdown_action(None),
+            ShutdownAction::Graceful(Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn graceful_zero_is_preserved() {
+        // Graceful{0} is distinct from Hard — we still attempt SIGTERM
+        // first via the poll loop, just with a zero-length grace.
+        assert_eq!(
+            resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 0 })),
+            ShutdownAction::Graceful(Duration::from_secs(0))
+        );
     }
 }

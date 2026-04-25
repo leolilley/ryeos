@@ -205,6 +205,38 @@ impl CallbackClient {
             serde_json::json!({"previous_thread_id": previous_id}),
         ).await
     }
+
+    // ── native_async streaming contract ─────────────────────────────
+    //
+    // The following helpers form the Phase 5.2 standard streaming
+    // event contract. Tools that declare `runtime.handlers.native_async`
+    // (bool shorthand or rich form) are expected to emit `progress`
+    // / `status` events during long-running phases and may publish
+    // intermediate artifacts via `publish_artifact`. The engine does
+    // not enforce or interpret these — `native_async` signals intent
+    // only. Tools without `native_async` may still call these (no-op
+    // when no callback socket is present), but consumers should not
+    // rely on receiving them.
+
+    /// Emit a typed progress event.
+    ///
+    /// `phase` is a short identifier; `message` is human-readable;
+    /// `percent` is 0.0–100.0 when meaningful or `None` for
+    /// indeterminate progress. See [`crate::progress::ProgressEvent`].
+    pub async fn emit_progress(&self, payload: crate::progress::ProgressEvent) -> Result<()> {
+        let value = serde_json::to_value(&payload)
+            .map_err(|e| anyhow::anyhow!("encode ProgressEvent: {e}"))?;
+        self.append_event("progress", value).await
+    }
+
+    /// Emit a typed status / lifecycle transition event.
+    ///
+    /// See [`crate::progress::StatusEvent`].
+    pub async fn emit_status(&self, payload: crate::progress::StatusEvent) -> Result<()> {
+        let value = serde_json::to_value(&payload)
+            .map_err(|e| anyhow::anyhow!("encode StatusEvent: {e}"))?;
+        self.append_event("status", value).await
+    }
 }
 
 #[cfg(test)]
@@ -334,5 +366,26 @@ mod tests {
         let client = make_client();
         let result = client.get_facets().await.unwrap();
         assert_eq!(result, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn emit_progress_noop_when_disconnected() {
+        let client = make_client();
+        client
+            .emit_progress(
+                crate::progress::ProgressEvent::new("download", "fetching")
+                    .with_percent(10.0),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn emit_status_noop_when_disconnected() {
+        let client = make_client();
+        client
+            .emit_status(crate::progress::StatusEvent::new("ready"))
+            .await
+            .unwrap();
     }
 }

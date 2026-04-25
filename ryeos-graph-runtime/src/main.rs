@@ -20,7 +20,7 @@ use clap::Parser;
 use serde_json::{json, Value};
 
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::envelope::{EnvelopeCallback, ENVELOPE_VERSION};
+use ryeos_runtime::envelope::EnvelopeCallback;
 
 #[derive(Parser)]
 #[command(name = "graph-runtime", about = "Native graph walker for Rye OS")]
@@ -185,16 +185,11 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     let envelope: ryeos_runtime::envelope::LaunchEnvelope = serde_json::from_slice(stdin_data)
         .map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
 
-    if envelope.envelope_version != ENVELOPE_VERSION {
-        anyhow::bail!(
-            "unsupported envelope version: {} (expected {})",
-            envelope.envelope_version,
-            ENVELOPE_VERSION,
-        );
-    }
-
+    // Root path comes from `resolution.root.source_path` (already an
+    // absolute, daemon-verified path). EnvelopeTarget is gone — there is
+    // exactly one root snapshot in the envelope.
     let graph_path = cli.graph_path.clone()
-        .unwrap_or_else(|| envelope.roots.project_root.join(&envelope.target.path));
+        .unwrap_or_else(|| envelope.resolution.root.source_path.clone());
 
     Ok(ResolvedLaunch {
         project_root: envelope.roots.project_root.clone(),
@@ -209,7 +204,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         effective_caps: envelope.policy.effective_caps.clone(),
         hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
         callback: Some(envelope.callback),
-        target_digest: Some(envelope.target.digest.clone()),
+        target_digest: Some(envelope.resolution.root.raw_content_digest.clone()),
         user_root: envelope.roots.user_root.clone(),
         system_roots: envelope.roots.system_roots.clone(),
         invocation_id: Some(envelope.invocation_id.clone()),

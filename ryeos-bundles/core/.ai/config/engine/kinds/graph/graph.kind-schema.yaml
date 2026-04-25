@@ -1,0 +1,38 @@
+# rye:signed:2026-04-25T06:47:55Z:58a1568372da7c5a7c860ec66425db4c35fe099c38e09bd7ec14b7e72577315a:OusnKeE/p4K3BPtIdWOSiastIGIBcCnguaeiXfnXr4fJpIyYc8S5WjNMDyBdYjnmjiOoZr6yAT/rXjNU6meTDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/graph"
+version: "1.0.0"
+location:
+  directory: graphs
+execution:
+  aliases:
+    "@graph": "tool:rye/graph-runtime/runtime"
+  resolution:
+    - step: resolve_extends_chain
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Empty until graph schema stabilizes — graph-walker enforces fields
+# at consumer layer for now.
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+    executor_id:
+      from: path
+      key: executor_id

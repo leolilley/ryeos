@@ -1,0 +1,32 @@
+# rye:signed:2026-04-25T07:51:06Z:a94dd156610d8bc6e06c3ab6173f209592370d90726a4a59c716edea92249fed:MWt3kTvRNL0+RspN13Kl0z/k/zLBp88NllHF18VLYONUh74hdvMfbZCATNqAx/RfHuB/aJXsXv58TcGbQ3TxAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+tool_type: subprocess
+__executor_id__: null
+category: rye/core/subprocess
+description: "Subprocess execute - run commands with configurable arguments (terminal node)"
+
+config_schema:
+  type: object
+  properties:
+    command:
+      type: string
+      description: Command to execute
+    args:
+      type: array
+      items:
+        type: string
+      description: Command arguments
+    cwd:
+      type: string
+      description: Working directory
+    env:
+      type: object
+      description: Environment variables
+    timeout_secs:
+      type: integer
+      default: 300
+      description: Timeout in seconds
+    input_data:
+      type: string
+      description: Data to pipe to stdin
+  required: [command]

@@ -209,22 +209,26 @@ pub async fn execute(
     let params = ExecutionParams {
         resolved,
         acting_principal: caller_principal_id,
-        project_path: project_ctx.original_path,
+        project_path: Some(project_ctx.original_path),
         vault_bindings,
         snapshot_hash: project_ctx.snapshot_hash,
-        item_ref: request.item_ref,
         parameters: request.parameters,
         temp_dir: project_ctx.temp_dir,
     };
 
     // Native runtime path
     if let Some(binary) = runtime_binary {
+        let project_path = params.project_path.as_ref().ok_or_else(|| {
+            policy::internal_error(anyhow::anyhow!(
+                "native runtime launch requires a project_path"
+            ))
+        })?;
         let result = launch::build_and_launch(
             &state,
             &binary,
             &params.acting_principal,
             &params.resolved,
-            &params.project_path,
+            project_path,
             &params.parameters,
             &params.vault_bindings,
         )

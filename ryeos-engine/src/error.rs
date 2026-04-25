@@ -115,6 +115,60 @@ pub enum EngineError {
     #[error("cycle detected during planning: {cycle:?}")]
     CycleDetected { cycle: Vec<String> },
 
+    #[error("executor chain exceeded max depth {max_depth}; chain: {chain:?}")]
+    ChainTooDeep { max_depth: usize, chain: Vec<String> },
+
+    #[error("invalid runtime config in {path}: {reason}")]
+    InvalidRuntimeConfig { path: String, reason: String },
+
+    #[error("multiple runtime configs in chain: {chain:?}")]
+    MultipleRuntimeConfigs { chain: Vec<String> },
+
+    #[error("no runtime config found in executor chain: {chain:?}")]
+    NoRuntimeConfig { chain: Vec<String> },
+
+    #[error("unknown template token: {{{token}}}")]
+    UnknownTemplateToken { token: String },
+
+    #[error("template requires {{{token}}} but no {token} available")]
+    TemplateMissingContext { token: String },
+
+    #[error("unknown runtime block `{key}` on kind `{kind}` at {source_path:?} \
+             (no handler registered and not in the kind schema's `runtime.ignored_keys`)")]
+    UnknownRuntimeBlock {
+        key: String,
+        kind: String,
+        source_path: PathBuf,
+    },
+
+    #[error("runtime block `{key}` is declared as Singleton but appears on \
+             multiple chain elements: {paths:?}")]
+    DuplicateSingletonBlock {
+        key: String,
+        paths: Vec<PathBuf>,
+    },
+
+    #[error("parameter validation failed for `{tool}`:\n  - {}", errors.join("\n  - "))]
+    ParameterValidationFailed {
+        tool: String,
+        errors: Vec<String>,
+    },
+
+    #[error("runtime binary not found: {binary}")]
+    RuntimeBinaryNotFound { binary: String },
+
+    #[error("runtime config uses reserved env key: {key}")]
+    ReservedEnvKey { key: String },
+
+    #[error("unknown executor alias `{alias}` for kind `{kind}`")]
+    UnknownAlias { alias: String, kind: String },
+
+    #[error("item `{item_ref}` does not declare an executor_id")]
+    MissingExecutorId { item_ref: String },
+
+    #[error("kind `{kind}` is not executable (no execution block in kind schema)")]
+    KindNotExecutable { kind: String },
+
     // ── Execution ────────────────────────────────────────────────────
 
     #[error("execution failed: {reason}")]

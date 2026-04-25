@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use directories::BaseDirs;
 
+use ryeos_engine::boot_validation::validate_boot;
+use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
 use ryeos_engine::engine::Engine;
-use ryeos_engine::executor_registry::{ExecutorRegistry, SubprocessDispatch};
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::metadata::MetadataParserRegistry;
+use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
@@ -22,7 +23,7 @@ use crate::config::Config;
 ///
 /// Scans the config-provided system data directory and user space for kind
 /// schema files, loads the trust store from the daemon's trusted keys
-/// directory, and registers the terminal executor entries.
+/// directory.
 #[tracing::instrument(name = "engine:lifecycle", skip(config), fields(event = "build_engine"))]
 pub fn build_engine(config: &Config) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
@@ -91,50 +92,62 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
         );
     }
 
-    // 6. Build executor registry with terminal entries
-    let executors = build_executor_registry();
+    // 6. Load parser tool descriptors using the same search roots as
+    //    the kind schemas (system roots + optional user root).
+    let mut parser_search_roots: Vec<PathBuf> = system_roots.clone();
+    if let Some(ref ur) = user_root {
+        parser_search_roots.push(ur.clone());
+    }
+    let (parser_tools, parser_duplicates) =
+        ParserRegistry::load_base(&parser_search_roots, &trust_store, &kinds)
+            .context("failed to load parser tool descriptors")?;
+    tracing::info!(
+        count = parser_tools.len(),
+        duplicates = parser_duplicates.len(),
+        "loaded parser tool descriptors"
+    );
 
-    // 7. Build metadata parser registry with builtins
-    let parsers = MetadataParserRegistry::with_builtins();
+    // 7. Build native parser handler registry
+    let native_handlers = NativeParserHandlerRegistry::with_builtins();
 
-    // 8. Construct engine
-    let engine = Engine::new(kinds, executors, parsers, user_root, system_roots)
-        .with_trust_store(trust_store);
+    // 8. Build native composer handler registry, then derive the
+    //    per-kind composer registry data-drivenly from the loaded
+    //    kind schemas (each schema declares its `composer:` handler
+    //    ID; the engine never names a kind in Rust).
+    let native_composers = NativeComposerHandlerRegistry::with_builtins();
+    let composers = ComposerRegistry::from_kinds(&kinds, &native_composers)
+        .context("failed to derive composer registry from kind schemas")?;
+
+    // 9. Cross-registry boot validation: every parser ref a kind extension
+    //    cites must resolve to a known descriptor + handler + valid config,
+    //    every kind's declared composer handler ID must resolve, and every
+    //    registered composer must point at a known kind. Collect ALL
+    //    issues, then bail with a single block listing them.
+    if let Err(issues) = validate_boot(
+        &kinds,
+        &parser_tools,
+        &native_handlers,
+        &native_composers,
+        &composers,
+        &parser_duplicates,
+    ) {
+        let mut msg = String::from("boot validation failed:\n");
+        for issue in &issues {
+            msg.push_str(&format!("  - {issue:?}\n"));
+        }
+        anyhow::bail!("{msg}");
+    }
+
+    // 10. Build parser dispatcher and construct the engine, persisting
+    //     the SAME `composers` instance used by boot validation. The
+    //     launcher reads the registry back off the engine — there is
+    //     no second construction site that could drift.
+    let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
+    let engine = Engine::new(kinds, parser_dispatcher, user_root, system_roots)
+        .with_trust_store(trust_store)
+        .with_composers(composers);
 
     Ok(engine)
-}
-
-/// Build the executor registry with terminal subprocess dispatchers.
-///
-/// `@primitive_chain` is the terminal executor that tools resolve to.
-/// It uses the script's own shebang/extension to determine the interpreter.
-fn build_executor_registry() -> ExecutorRegistry {
-    let mut reg = ExecutorRegistry::new();
-
-    // Terminal subprocess dispatch — no interpreter override, uses shebang
-    reg.register("@primitive_chain", SubprocessDispatch { interpreter: None });
-
-    // Common interpreter-specific terminals
-    reg.register(
-        "@python3",
-        SubprocessDispatch {
-            interpreter: Some("python3".into()),
-        },
-    );
-    reg.register(
-        "@node",
-        SubprocessDispatch {
-            interpreter: Some("node".into()),
-        },
-    );
-    reg.register(
-        "@bash",
-        SubprocessDispatch {
-            interpreter: Some("bash".into()),
-        },
-    );
-
-    reg
 }
 
 /// Discover the user-space root (parent of `~/.ai/`).

@@ -13,9 +13,8 @@ use ryeos_engine::{
     canonical_ref::CanonicalRef,
     contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext},
     engine::Engine,
-    executor_registry::ExecutorRegistry,
     kind_registry::KindRegistry,
-    metadata::MetadataParserRegistry,
+    parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry},
     trust::TrustStore,
     AI_DIR, KIND_SCHEMAS_DIR,
 };
@@ -272,12 +271,20 @@ fn build_engine(user_root: Option<PathBuf>, system_roots: Vec<PathBuf>) -> Resul
             .context("failed to load kind schemas")?
     };
 
-    // Build executor registry and parser registry
-    let executors = ExecutorRegistry::new();
-    let parsers = MetadataParserRegistry::with_builtins();
+    // Build parser dispatcher: load parser tool descriptors from the same
+    // search roots used for kind schemas (system roots + optional user root).
+    let mut parser_search_roots: Vec<PathBuf> = system_roots.clone();
+    if let Some(ref ur) = user_root {
+        parser_search_roots.push(ur.clone());
+    }
+    let (parser_tools, _parser_duplicates) =
+        ParserRegistry::load_base(&parser_search_roots, &trust_store, &kinds)
+            .context("failed to load parser tool descriptors")?;
+    let native_handlers = NativeParserHandlerRegistry::with_builtins();
+    let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
 
     // Construct engine with trust store
-    let engine = Engine::new(kinds, executors, parsers, user_root, system_roots)
+    let engine = Engine::new(kinds, parser_dispatcher, user_root, system_roots)
         .with_trust_store(trust_store);
 
     Ok(engine)

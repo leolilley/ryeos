@@ -12,6 +12,599 @@ use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 
+// ── Wiring contract: ValueShape ──────────────────────────────────────
+
+/// Declared shape contract for a parsed `serde_json::Value` flowing
+/// across a wiring seam (parser → composer today; route → item later).
+/// Subset/superset comparable at boot — keep it small.
+///
+/// Not JSON Schema. Just enough for what we need today and trivially
+/// extensible later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ValueShape {
+    /// Top-level type. `mapping` is the only non-trivial case today.
+    pub root_type: ShapeType,
+    /// Required fields (only meaningful when root_type == Mapping).
+    pub required: std::collections::BTreeMap<String, FieldType>,
+    /// Optional fields the producer MAY emit. Documented but not
+    /// enforced in subset check — extra fields are always allowed.
+    pub optional: std::collections::BTreeMap<String, FieldType>,
+}
+
+/// On-the-wire form for `ValueShape`. Used purely for deserialization:
+/// `deny_unknown_fields` so a typo doesn't silently widen the shape,
+/// then `try_from` runs structural validation (no fields on non-mapping
+/// roots, no empty unions) before producing the public type.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValueShapeRaw {
+    #[serde(default = "ValueShape::default_root_type")]
+    root_type: ShapeType,
+    #[serde(default)]
+    required: std::collections::BTreeMap<String, FieldType>,
+    #[serde(default)]
+    optional: std::collections::BTreeMap<String, FieldType>,
+}
+
+impl<'de> Deserialize<'de> for ValueShape {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = ValueShapeRaw::deserialize(deserializer)?;
+        if raw.root_type != ShapeType::Mapping && !raw.required.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "`required` is only meaningful when root_type == mapping (got {:?})",
+                raw.root_type
+            )));
+        }
+        if raw.root_type != ShapeType::Mapping && !raw.optional.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "`optional` is only meaningful when root_type == mapping (got {:?})",
+                raw.root_type
+            )));
+        }
+        for (name, ft) in raw.required.iter().chain(raw.optional.iter()) {
+            if let FieldType::Union(ps) = ft {
+                if ps.is_empty() {
+                    return Err(serde::de::Error::custom(format!(
+                        "field `{name}`: empty union is not a valid type"
+                    )));
+                }
+            }
+        }
+        Ok(ValueShape {
+            root_type: raw.root_type,
+            required: raw.required,
+            optional: raw.optional,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeType {
+    Mapping,
+    Sequence,
+    Scalar,
+    Any,
+}
+
+/// Per-field type. Use a Vec to allow union types (`[string, "null"]`).
+/// `Any` permits anything. Keep it tiny.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FieldType {
+    Single(PrimType),
+    Union(Vec<PrimType>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimType {
+    String,
+    Integer,
+    Boolean,
+    Mapping,
+    Sequence,
+    Null,
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContractViolation {
+    RootTypeMismatch {
+        needed: ShapeType,
+        produced: ShapeType,
+    },
+    MissingRequiredField {
+        name: String,
+        needed: FieldType,
+        /// Set when the producer declared this field but only as
+        /// `optional`. A required consumer demand is NOT satisfied
+        /// by an optional producer emission — the producer MAY skip
+        /// the field, so the consumer can't rely on it. The hint
+        /// helps authors fix the producer side fast.
+        produced_as_optional: Option<FieldType>,
+    },
+    FieldTypeMismatch {
+        name: String,
+        needed: FieldType,
+        produced: FieldType,
+    },
+}
+
+impl ValueShape {
+    fn default_root_type() -> ShapeType {
+        ShapeType::Mapping
+    }
+
+    /// Explicit empty-mapping contract. Use when a kind or parser
+    /// genuinely makes no field-level claims at boot but must still
+    /// declare its shape so absence is a deliberate, reviewed choice.
+    pub fn any_mapping() -> Self {
+        Self {
+            root_type: ShapeType::Mapping,
+            required: std::collections::BTreeMap::new(),
+            optional: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Check that this shape (the CONSUMER's needs) is satisfiable by
+    /// `producer`. Returns ALL violations — empty Vec means compatible.
+    ///
+    /// Subset semantics: producer may emit MORE fields (extras OK).
+    ///
+    /// `Any` is asymmetric:
+    ///   * **Consumer Any** accepts anything from the producer — the
+    ///     consumer is opting out of constraints on this position.
+    ///   * **Producer Any** does NOT satisfy a specific consumer
+    ///     demand. Producer-side `Any` means "I make no claim about
+    ///     what I emit"; a consumer that asks for `string` cannot
+    ///     trust that, so the wiring is unsound and we report it.
+    pub fn is_satisfied_by(&self, producer: &ValueShape) -> Vec<ContractViolation> {
+        let mut violations = Vec::new();
+
+        // Consumer Any: accepts any producer; no field checks.
+        if self.root_type == ShapeType::Any {
+            return violations;
+        }
+        if self.root_type != producer.root_type {
+            // Producer Any against a specific consumer is a real
+            // mismatch — producer makes no guarantee about its root.
+            violations.push(ContractViolation::RootTypeMismatch {
+                needed: self.root_type,
+                produced: producer.root_type,
+            });
+            // Don't bail: keep aggregating field-level violations so
+            // authors see the full picture in one shot. If producer
+            // root is non-mapping, its required/optional maps are
+            // empty (deserializer enforces this), so the loop below
+            // naturally reports every required field as missing.
+        }
+
+        // Field-level checks only meaningful for mappings.
+        for (name, needed) in &self.required {
+            // ONLY producer.required satisfies consumer.required.
+            // A field present only as producer.optional means the
+            // producer MAY omit it, so the consumer can't rely on it.
+            match producer.required.get(name) {
+                Some(p) => {
+                    if !field_type_covers(needed, p) {
+                        violations.push(ContractViolation::FieldTypeMismatch {
+                            name: name.clone(),
+                            needed: needed.clone(),
+                            produced: p.clone(),
+                        });
+                    }
+                }
+                None => {
+                    let produced_as_optional = producer.optional.get(name).cloned();
+                    violations.push(ContractViolation::MissingRequiredField {
+                        name: name.clone(),
+                        needed: needed.clone(),
+                        produced_as_optional,
+                    });
+                }
+            }
+        }
+
+        violations
+    }
+}
+
+/// True iff every primitive the producer might emit is acceptable to
+/// the consumer.
+///
+/// Asymmetric `Any`:
+///   * Consumer set containing `Any` → accepts everything (consumer
+///     opted out of typing this field).
+///   * Producer `Any` against a specific consumer set → rejected. The
+///     producer makes no claim, so a consumer demanding `string` (or
+///     `string|null`) can't trust the wiring.
+fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
+    let consumer_set: Vec<PrimType> = match consumer {
+        FieldType::Single(p) => vec![*p],
+        FieldType::Union(ps) => ps.clone(),
+    };
+    let producer_set: Vec<PrimType> = match producer {
+        FieldType::Single(p) => vec![*p],
+        FieldType::Union(ps) => ps.clone(),
+    };
+    if consumer_set.iter().any(|p| *p == PrimType::Any) {
+        return true;
+    }
+    // Every producer possibility (including `Any`) must be a member
+    // of the consumer's accepted set. `Any` is never a member of a
+    // specific set, so producer `Any` here is a hard fail.
+    producer_set.iter().all(|p| consumer_set.contains(p))
+}
+
+#[cfg(test)]
+mod value_shape_tests {
+    use super::*;
+
+    fn shape_mapping(
+        required: &[(&str, FieldType)],
+        optional: &[(&str, FieldType)],
+    ) -> ValueShape {
+        ValueShape {
+            root_type: ShapeType::Mapping,
+            required: required
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            optional: optional
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn identical_shapes_pass() {
+        let a = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let b = a.clone();
+        assert!(a.is_satisfied_by(&b).is_empty());
+    }
+
+    #[test]
+    fn missing_required_field_detected() {
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer = shape_mapping(&[], &[]);
+        let v = consumer.is_satisfied_by(&producer);
+        assert_eq!(v.len(), 1);
+        assert!(matches!(
+            v[0],
+            ContractViolation::MissingRequiredField { ref name, .. } if name == "body"
+        ));
+    }
+
+    #[test]
+    fn required_consumer_NOT_satisfied_by_optional_producer() {
+        // A required consumer demand cannot be satisfied by an
+        // optional producer emission: the producer is allowed to
+        // skip the field entirely. Reported as MissingRequiredField
+        // with a hint that it was found as optional.
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer = shape_mapping(&[], &[("body", FieldType::Single(PrimType::String))]);
+        let v = consumer.is_satisfied_by(&producer);
+        assert_eq!(v.len(), 1, "expected one missing-required violation, got {v:?}");
+        match &v[0] {
+            ContractViolation::MissingRequiredField {
+                name,
+                produced_as_optional,
+                ..
+            } => {
+                assert_eq!(name, "body");
+                assert_eq!(
+                    produced_as_optional,
+                    &Some(FieldType::Single(PrimType::String)),
+                    "hint should indicate the producer declared the field as optional"
+                );
+            }
+            other => panic!("expected MissingRequiredField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn required_consumer_satisfied_by_required_producer() {
+        // Sanity: identical required-on-both is fine. Used to be the
+        // misleading "required satisfied by optional" test.
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        assert!(consumer.is_satisfied_by(&producer).is_empty());
+    }
+
+    #[test]
+    fn missing_required_with_no_optional_hint() {
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer = shape_mapping(&[], &[]);
+        let v = consumer.is_satisfied_by(&producer);
+        assert_eq!(v.len(), 1);
+        match &v[0] {
+            ContractViolation::MissingRequiredField {
+                name,
+                produced_as_optional,
+                ..
+            } => {
+                assert_eq!(name, "body");
+                assert_eq!(produced_as_optional, &None);
+            }
+            other => panic!("expected MissingRequiredField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn type_mismatch_detected() {
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer = shape_mapping(&[("body", FieldType::Single(PrimType::Integer))], &[]);
+        let v = consumer.is_satisfied_by(&producer);
+        assert_eq!(v.len(), 1);
+        assert!(matches!(v[0], ContractViolation::FieldTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn consumer_any_accepts_any_producer() {
+        // Consumer Any at root: no constraints, anything is fine.
+        let consumer_root_any = ValueShape {
+            root_type: ShapeType::Any,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        let producer_mapping = shape_mapping(
+            &[("body", FieldType::Single(PrimType::String))],
+            &[],
+        );
+        let producer_seq = ValueShape {
+            root_type: ShapeType::Sequence,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        let producer_root_any = ValueShape {
+            root_type: ShapeType::Any,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        assert!(consumer_root_any.is_satisfied_by(&producer_mapping).is_empty());
+        assert!(consumer_root_any.is_satisfied_by(&producer_seq).is_empty());
+        assert!(consumer_root_any.is_satisfied_by(&producer_root_any).is_empty());
+
+        // Consumer field-level Any: accepts any producer field type.
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::Any))], &[]);
+        let producer_str = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer_int = shape_mapping(&[("body", FieldType::Single(PrimType::Integer))], &[]);
+        let producer_any = shape_mapping(&[("body", FieldType::Single(PrimType::Any))], &[]);
+        assert!(consumer.is_satisfied_by(&producer_str).is_empty());
+        assert!(consumer.is_satisfied_by(&producer_int).is_empty());
+        assert!(consumer.is_satisfied_by(&producer_any).is_empty());
+    }
+
+    #[test]
+    fn producer_any_does_not_satisfy_specific_consumer() {
+        // Specific consumer + producer Any at root → RootTypeMismatch.
+        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let producer_root_any = ValueShape {
+            root_type: ShapeType::Any,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        let v = consumer.is_satisfied_by(&producer_root_any);
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                ContractViolation::RootTypeMismatch { needed: ShapeType::Mapping, produced: ShapeType::Any }
+            )),
+            "producer ShapeType::Any must NOT satisfy a Mapping consumer; got {v:?}"
+        );
+
+        // Specific consumer field + producer Any field → FieldTypeMismatch.
+        let producer = shape_mapping(&[("body", FieldType::Single(PrimType::Any))], &[]);
+        let v = consumer.is_satisfied_by(&producer);
+        assert_eq!(v.len(), 1);
+        assert!(
+            matches!(v[0], ContractViolation::FieldTypeMismatch { .. }),
+            "producer PrimType::Any must NOT satisfy a String consumer; got {v:?}"
+        );
+
+        // Producer Any inside a union also rejected by specific consumer.
+        let producer_union_any = shape_mapping(
+            &[("body", FieldType::Union(vec![PrimType::String, PrimType::Any]))],
+            &[],
+        );
+        let v = consumer.is_satisfied_by(&producer_union_any);
+        assert!(
+            v.iter().any(|x| matches!(x, ContractViolation::FieldTypeMismatch { .. })),
+            "producer union containing Any must be rejected; got {v:?}"
+        );
+    }
+
+    #[test]
+    fn union_consumer_accepts_member_producer() {
+        let consumer = shape_mapping(
+            &[(
+                "extends",
+                FieldType::Union(vec![PrimType::String, PrimType::Null]),
+            )],
+            &[],
+        );
+        let producer_string =
+            shape_mapping(&[("extends", FieldType::Single(PrimType::String))], &[]);
+        let producer_null = shape_mapping(&[("extends", FieldType::Single(PrimType::Null))], &[]);
+        let producer_int = shape_mapping(&[("extends", FieldType::Single(PrimType::Integer))], &[]);
+        assert!(consumer.is_satisfied_by(&producer_string).is_empty());
+        assert!(consumer.is_satisfied_by(&producer_null).is_empty());
+        assert!(!consumer.is_satisfied_by(&producer_int).is_empty());
+    }
+
+    #[test]
+    fn union_producer_subset_of_union_consumer() {
+        let consumer = shape_mapping(
+            &[(
+                "x",
+                FieldType::Union(vec![PrimType::String, PrimType::Null]),
+            )],
+            &[],
+        );
+        let producer = shape_mapping(
+            &[(
+                "x",
+                FieldType::Union(vec![PrimType::String, PrimType::Null]),
+            )],
+            &[],
+        );
+        assert!(consumer.is_satisfied_by(&producer).is_empty());
+
+        // Producer might emit Integer too — not in consumer's set.
+        let producer_wider = shape_mapping(
+            &[(
+                "x",
+                FieldType::Union(vec![PrimType::String, PrimType::Null, PrimType::Integer]),
+            )],
+            &[],
+        );
+        assert!(!consumer.is_satisfied_by(&producer_wider).is_empty());
+    }
+
+    #[test]
+    fn root_type_mismatch_detected() {
+        let consumer = ValueShape {
+            root_type: ShapeType::Mapping,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        let producer = ValueShape {
+            root_type: ShapeType::Sequence,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        let v = consumer.is_satisfied_by(&producer);
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, ContractViolation::RootTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn all_violations_returned_not_bailing_on_first() {
+        let consumer = shape_mapping(
+            &[
+                ("a", FieldType::Single(PrimType::String)),
+                ("b", FieldType::Single(PrimType::String)),
+                ("c", FieldType::Single(PrimType::String)),
+            ],
+            &[],
+        );
+        let producer = ValueShape {
+            root_type: ShapeType::Sequence,
+            required: Default::default(),
+            optional: Default::default(),
+        };
+        let v = consumer.is_satisfied_by(&producer);
+        // 1 root mismatch + 3 missing fields
+        assert_eq!(v.len(), 4, "got: {v:?}");
+    }
+
+    // ── Strictness hardening: deserialization rejects nonsense ───────
+
+    #[test]
+    fn deserialize_rejects_unknown_fields() {
+        // `deny_unknown_fields` on the wire form: a typo like
+        // `requierd` must blow up loudly instead of silently widening
+        // the contract to accept anything.
+        let yaml = "\
+root_type: mapping
+requierd:
+  body: string
+";
+        let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("unknown field"),
+            "expected unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_required_on_non_mapping_root() {
+        let yaml = "\
+root_type: sequence
+required:
+  body: string
+";
+        let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("`required` is only meaningful when root_type == mapping"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_optional_on_non_mapping_root() {
+        let yaml = "\
+root_type: scalar
+optional:
+  body: string
+";
+        let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("`optional` is only meaningful when root_type == mapping"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_union() {
+        let yaml = "\
+root_type: mapping
+required:
+  body: []
+";
+        let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("empty union"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_union_in_optional() {
+        let yaml = "\
+root_type: mapping
+optional:
+  extends: []
+";
+        let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("empty union"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_accepts_well_formed_shape() {
+        // Sanity: the live bundle's directive contract round-trips
+        // through the strict deserializer cleanly.
+        let yaml = "\
+root_type: mapping
+required:
+  body: string
+optional:
+  extends: [string, \"null\"]
+  permissions: mapping
+  context: mapping
+";
+        let shape: ValueShape = serde_yaml::from_str(yaml).expect("well-formed shape parses");
+        assert_eq!(shape.root_type, ShapeType::Mapping);
+        assert_eq!(
+            shape.required.get("body").unwrap(),
+            &FieldType::Single(PrimType::String)
+        );
+        assert_eq!(
+            shape.optional.get("extends").unwrap(),
+            &FieldType::Union(vec![PrimType::String, PrimType::Null])
+        );
+    }
+}
+
 // ── Signature envelope ───────────────────────────────────────────────
 
 /// How a `rye:signed:...` payload is embedded in a source file.
@@ -36,8 +629,10 @@ pub struct SignatureEnvelope {
 pub struct ResolvedSourceFormat {
     /// The matched file extension, e.g. `".py"`, `".md"`
     pub extension: String,
-    /// Parser ID for lightweight metadata extraction, e.g. `"python/ast"`
-    pub parser_id: String,
+    /// Canonical parser tool ref, e.g.
+    /// `"parser:rye/core/python/ast"`. The `ParserDispatcher`
+    /// resolves this through `ParserRegistry`.
+    pub parser: String,
     /// Signature embedding envelope for this file type
     pub signature: SignatureEnvelope,
 }
@@ -292,20 +887,110 @@ pub struct MaterializationRequirement {
     pub ref_string: String,
 }
 
+/// Normalized subprocess specification — the single source of truth for
+/// what to spawn. Compiled from the executor chain's runtime config by
+/// the plan builder. The dispatch layer just runs this struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubprocessSpec {
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub stdin_data: Option<String>,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Per-tool execution policy populated by `DecorateSpec`-phase
+    /// runtime handlers (`native_async`, future `native_resume`,
+    /// `execution_owner`). Default = empty → preserves baseline
+    /// behavior for tools that declare none of these.
+    #[serde(default)]
+    pub execution: ExecutionDecorations,
+}
+
+/// Typed bag of `DecorateSpec`-phase outputs. Each field is `Option`
+/// so absence ⇒ "preserve current default". Future decorate handlers
+/// add siblings here without breaking the top-level spec shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionDecorations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_async: Option<NativeAsyncSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_resume: Option<NativeResumeSpec>,
+}
+
+/// Resume policy declared by the `native_resume` runtime handler.
+/// Presence in the spec ⇒ the tool is replay-aware: the daemon will
+/// allocate a per-thread checkpoint dir, inject `RYE_CHECKPOINT_DIR`
+/// at spawn time, and on daemon restart attempt automatic resume up
+/// to `max_auto_resume_attempts` times before marking the thread
+/// failed. The tool is responsible for writing checkpoints into the
+/// supplied directory and for being idempotent / replay-safe on
+/// startup (`RYE_RESUME=1` is injected on resume spawns).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeResumeSpec {
+    /// Hint to the tool for how often to checkpoint. Engine and daemon
+    /// do not enforce this — purely advisory.
+    pub checkpoint_interval_secs: u64,
+    /// Hard ceiling on automatic resume attempts after daemon restart.
+    /// `1` (default) = single retry. `0` = never auto-resume (still
+    /// declares replay-awareness for manual resume tooling).
+    pub max_auto_resume_attempts: u32,
+}
+
+impl Default for NativeResumeSpec {
+    fn default() -> Self {
+        Self {
+            checkpoint_interval_secs: 30,
+            max_auto_resume_attempts: 1,
+        }
+    }
+}
+
+/// Cancellation + streaming policy declared by the `native_async`
+/// runtime handler. Presence in the spec ⇒ this tool drives its own
+/// event stream (the runner injects `RYE_NATIVE_ASYNC=1`) and the
+/// daemon cancellation routes through `cancellation_mode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeAsyncSpec {
+    pub cancellation_mode: CancellationMode,
+}
+
+/// How the runner terminates the subprocess on cancellation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationMode {
+    /// SIGKILL the process group immediately.
+    Hard,
+    /// SIGTERM, wait `grace_secs`, then SIGKILL.
+    Graceful { grace_secs: u64 },
+}
+
+impl Default for CancellationMode {
+    fn default() -> Self {
+        CancellationMode::Graceful { grace_secs: 5 }
+    }
+}
+
+fn default_timeout_secs() -> u64 {
+    300
+}
+
 /// A node in the execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "node_type", rename_all = "snake_case")]
 pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
-        script_path: PathBuf,
-        interpreter: Option<String>,
-        working_directory: Option<PathBuf>,
-        environment: HashMap<String, String>,
-        arguments: Vec<String>,
-        /// Daemon-injected env vars declared by the engine, filled at execution time.
+        /// The fully resolved subprocess specification.
+        spec: SubprocessSpec,
+        /// Audit: the root item's source path.
         #[serde(default)]
-        runtime_bindings: HashMap<String, String>,
+        tool_path: Option<PathBuf>,
+        /// Audit: executor IDs traversed during chain resolution.
+        #[serde(default)]
+        executor_chain: Vec<String>,
     },
     SpawnChild {
         id: PlanNodeId,

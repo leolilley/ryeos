@@ -1429,7 +1429,7 @@ pem = "ed25519:{key_b64}"
         let content = build_signed_content(body, &sk, &fp, &envelope);
 
         // Parse the header from the content
-        let header = crate::resolution::parse_signature_header(&content, &envelope).unwrap();
+        let header = crate::item_resolution::parse_signature_header(&content, &envelope).unwrap();
 
         let store = TrustStore::from_signers(vec![TrustedSigner {
             fingerprint: fp.clone(),
@@ -1450,7 +1450,7 @@ pem = "ed25519:{key_b64}"
         let envelope = hash_prefix_envelope();
         let content = build_signed_content(body, &sk, &fp, &envelope);
 
-        let header = crate::resolution::parse_signature_header(&content, &envelope).unwrap();
+        let header = crate::item_resolution::parse_signature_header(&content, &envelope).unwrap();
 
         // Empty trust store — signer not trusted
         let store = TrustStore::empty();
@@ -1471,7 +1471,7 @@ pem = "ed25519:{key_b64}"
         // Tamper with the body
         content.push_str("# injected malicious code\n");
 
-        let header = crate::resolution::parse_signature_header(&content, &envelope).unwrap();
+        let header = crate::item_resolution::parse_signature_header(&content, &envelope).unwrap();
 
         let store = TrustStore::from_signers(vec![TrustedSigner {
             fingerprint: fp,
@@ -1494,7 +1494,7 @@ pem = "ed25519:{key_b64}"
         let envelope = hash_prefix_envelope();
         let content = build_signed_content(body, &sk, &fp, &envelope);
 
-        let header = crate::resolution::parse_signature_header(&content, &envelope).unwrap();
+        let header = crate::item_resolution::parse_signature_header(&content, &envelope).unwrap();
 
         // Trust store has the fingerprint but mapped to a DIFFERENT key
         let store = TrustStore::from_signers(vec![TrustedSigner {
@@ -1517,7 +1517,7 @@ pem = "ed25519:{key_b64}"
         let envelope = html_envelope();
         let content = build_signed_content(body, &sk, &fp, &envelope);
 
-        let header = crate::resolution::parse_signature_header(&content, &envelope).unwrap();
+        let header = crate::item_resolution::parse_signature_header(&content, &envelope).unwrap();
 
         let store = TrustStore::from_signers(vec![TrustedSigner {
             fingerprint: fp.clone(),
@@ -1538,7 +1538,7 @@ pem = "ed25519:{key_b64}"
         let content = build_signed_content_with_shebang(body, &sk, &fp, "#!/usr/bin/env python3");
 
         let envelope = shebang_envelope();
-        let header = crate::resolution::parse_signature_header(&content, &envelope).unwrap();
+        let header = crate::item_resolution::parse_signature_header(&content, &envelope).unwrap();
 
         let store = TrustStore::from_signers(vec![TrustedSigner {
             fingerprint: fp.clone(),

@@ -1,0 +1,15 @@
+# rye:signed:2026-04-25T06:09:31Z:971c80cde333e7f505e2760b2ea5a117d65955f5d2e2e5a6b87a0cffc30954fa:YEcIIh6YIb5YgkBOiN7QG9X67b0xUbEI1TyFkLNLB79A6ds656c4bs+y57jGQf2WwJI8sG0s9mXlHMOVNJ6BAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+category: "engine/parsers/markdown"
+description: "Frontmatter parser: extracts optional YAML fenced block from markdown knowledge"
+executor_id: "native:parser_yaml_header_document"
+parser_api_version: 1
+parser_config:
+  require_header: false
+  body_field: null
+  forms:
+    - kind: fenced_block
+      language: yaml
+output_schema:
+  root_type: mapping
+  required: {}

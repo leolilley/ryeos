@@ -1,0 +1,32 @@
+# rye:signed:2026-04-23T23:06:25Z:bed27ed6d9ae9dfd128039cfb763cbe314f3a595687f5e904deeeed6c3e554d0:O4Tcz8ESUUQtSG7OkhHyr0blNtb2NBZesQ9kwI4wFQxqybc+gefcgvkXdyyYlpawl95K5r9k3JMZ8NAwur+0Dg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:unsigned
+version: "1.0.0"
+tool_type: runtime
+__executor_id__: "@subprocess"
+category: rye/core/runtimes/bash
+description: "Bash runtime - executes shell commands directly"
+
+env_config:
+  env:
+    PATH: "${PATH}"
+
+config_resolve:
+  path: "execution/execution.yaml"
+  mode: "deep_merge"
+
+config:
+  command: "/bin/bash"
+  args:
+    - "-c"
+    - "{command}"
+    - "{tool_path}"
+    - "{project_path}"
+  input_data: "{params_json}"
+  timeout_secs: 300
+
+config_schema:
+  type: object
+  properties:
+    command:
+      type: string
+      description: Shell command to execute

@@ -1,14 +1,13 @@
-# rye:signed:2026-04-20T06:00:53Z:6712f25daede6b85480eff59f3ed2bc5f9e0711bca1ed0c5116201986dabefbc:UtZPsCq0MIiaI-9SnQJ1IRUcSVpVSCHHjYNLoxMacvfGmvFWYLaRg4UDr9V58syAyHpUMykilRboLTfVzBWACA:4b987fd4e40303ac
+# rye:signed:2026-04-25T00:55:15Z:70f4db7a9d8aa2f6a4fba4430ffd620eb91ddd864fc34648ff2a07bb7dafa2df:ZQxpKhxPt6AEVgD9syoiuvh5OfeDt+uGw4U9+iHMfvH/fnKUvGUlbJOqz8mdXjSwb0H+RwynBqQ1tTB1pQbODA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
   directory: directives
 execution:
-  default_executor_id: "native:directive-runtime"
-resolution:
-  - resolve_extends_chain
-  - resolve_provider
-  - preload_tool_schemas
+  aliases:
+    "@directive": "tool:rye/directive-runtime/runtime"
+  resolution:
+    - step: resolve_extends_chain
 formats:
   - extensions: [".md"]
     parser_id: markdown/xml

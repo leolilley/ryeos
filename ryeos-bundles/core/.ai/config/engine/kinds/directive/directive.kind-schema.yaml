@@ -1,0 +1,59 @@
+# rye:signed:2026-04-25T07:42:35Z:2f00dc2375f5ba420ffbfd5981b353f31ad1cce5b4819e61f6e3224e467effd4:bVXoLn+qJFrZrKUVfAvVUDOtg+qJqe/QcinroHNc+xg6aQS75L1aVSRuM8wnWWcmG45cXsBHEUEUk/RaJjaCAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/directive"
+version: "1.0.0"
+location:
+  directory: directives
+execution:
+  aliases:
+    "@directive": "tool:rye/directive-runtime/runtime"
+  resolution:
+    - step: resolve_extends_chain
+formats:
+  - extensions: [".md"]
+    parser: parser:rye/core/markdown/directive
+    signature:
+      prefix: "<!--"
+      suffix: "-->"
+composer: rye/core/extends_chain
+composer_config:
+  extends_field: extends
+  fields:
+    - name: body
+      strategy: root_verbatim
+      required: true
+      expect_value_type: string
+      derive_as: body
+    - name: permissions
+      strategy: inherit_from_topmost
+      expect_value_type: mapping
+    - name: context
+      strategy: dict_merge_string_seq_root_last
+      expect_value_type: mapping
+      derive_as: composed_context
+      derived_dict_string_seq: true
+  policy_facts:
+    - name: effective_caps
+      path: [permissions, execute]
+      expect: array_of_strings
+composed_value_contract:
+  root_type: mapping
+  required:
+    body: string
+  optional:
+    extends: [string, "null"]
+    permissions: mapping
+    context: mapping
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category

@@ -667,10 +667,7 @@ impl StateStore {
             let runtime = g
                 .runtime_db
                 .get_runtime_info(thread_id)?
-                .unwrap_or(RuntimeInfo {
-                    pid: None,
-                    pgid: None,
-                });
+                .unwrap_or_default();
 
         Ok(Some(ThreadDetail {
             thread_id: thread_row.thread_id,
@@ -814,7 +811,7 @@ impl StateStore {
             let runtime = g
                 .runtime_db
                 .get_runtime_info(&row.thread_id)?
-                .unwrap_or(RuntimeInfo { pid: None, pgid: None });
+                .unwrap_or_default();
             children.push(ThreadDetail {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -845,7 +842,7 @@ impl StateStore {
             let runtime = g
                 .runtime_db
                 .get_runtime_info(&row.thread_id)?
-                .unwrap_or(RuntimeInfo { pid: None, pgid: None });
+                .unwrap_or_default();
             threads.push(ThreadDetail {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -894,7 +891,7 @@ impl StateStore {
             let runtime = g
                 .runtime_db
                 .get_runtime_info(&row.thread_id)?
-                .unwrap_or(RuntimeInfo { pid: None, pgid: None });
+                .unwrap_or_default();
             details.push(ThreadDetail {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -922,9 +919,29 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection()).map_err(Into::into)
     }
 
-    pub fn attach_thread_process(&self, thread_id: &str, pid: i64, pgid: i64) -> Result<()> {
+    pub fn attach_thread_process(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db.attach_process(thread_id, pid, pgid)
+        g.runtime_db
+            .attach_process(thread_id, pid, pgid, launch_metadata)
+    }
+
+    /// Read the auto-resume attempt counter for a thread.
+    pub fn get_resume_attempts(&self, thread_id: &str) -> Result<u32> {
+        let g = self.lock()?;
+        g.runtime_db.get_resume_attempts(thread_id)
+    }
+
+    /// Atomically bump the auto-resume counter and return the
+    /// post-increment value.
+    pub fn bump_resume_attempts(&self, thread_id: &str) -> Result<u32> {
+        let g = self.lock()?;
+        g.runtime_db.bump_resume_attempts(thread_id)
     }
 
     pub fn append_events(

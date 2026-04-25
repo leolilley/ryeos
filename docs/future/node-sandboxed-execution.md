@@ -79,9 +79,31 @@ Lillux gains sandbox enforcement as part of Execute. `lillux exec` learns to acc
 
 After further analysis, the approach shifts from implementing sandboxing primitives directly in Lillux to integrating with existing sandbox solutions as **registered capabilities**. This aligns with RYE's data-driven philosophy and follows the same pattern as model providers, runtimes, and other external systems.
 
+### Relationship to Runtime Config Processing
+
+The engine's `SubprocessSpec` (see `.tmp/RUNTIME-CONFIG-PROCESSING-v2.md`) is the
+composition boundary. Both language runtimes and sandbox wrappers produce the same
+struct:
+
+1. **Chain resolution** compiles a runtime descriptor into a `SubprocessSpec`
+   (cmd, args, env, stdin_data, cwd, timeout_secs)
+2. **Sandbox wrapping** transforms a `SubprocessSpec` → `SubprocessSpec` by
+   prepending the sandbox engine command and its arguments
+3. **Dispatch** receives the final spec and hands it to Lillux — doesn't know
+   whether sandboxing was applied
+
+```
+chain resolution → SubprocessSpec → sandbox_wrap(spec, config) → SubprocessSpec → dispatch
+```
+
+The sandbox wrapper is **not** part of the executor chain. It's applied after chain
+resolution, at the spec level. This is why the engine enforces "one runtime descriptor
+per chain" — sandbox composition is a different mechanism that operates on the compiled
+output, not on the chain walk.
+
 ### The Integration Model
 
-Instead of Lillux learning cgroups, namespaces, and seccomp directly, it delegates to **sandbox engines** — existing, battle-tested solutions like nsjail, Firecracker, bubblewrap, or Docker. The sandbox becomes a runtime descriptor, configured via YAML and invoked through a standard interface.
+Instead of Lillux learning cgroups, namespaces, and seccomp directly, it delegates to **sandbox engines** — existing, battle-tested solutions like nsjail, Firecracker, bubblewrap, or Docker. The sandbox becomes a configuration object, loaded from YAML and applied as a spec wrapper.
 
 ```yaml
 # .ai/config/sandbox/nsjail.yaml
@@ -109,6 +131,39 @@ profiles:
     args: ["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/"]
     capabilities: [user_namespaces]
 ```
+
+### Sandbox as SubprocessSpec Wrapper
+
+The sandbox engine config compiles into a wrapper function over the inner spec:
+
+```rust
+/// Wrap an inner SubprocessSpec with sandbox invocation.
+/// Same struct in, same struct out.
+fn sandbox_wrap(
+    inner: SubprocessSpec,
+    sandbox: &SandboxConfig,
+    profile: &SandboxProfile,
+) -> Result<SubprocessSpec, EngineError> {
+    let mut args = sandbox.invocation_args(profile)?;
+
+    // Replace {cmd} with inner.cmd, append inner.args
+    // Replace {cwd} with inner.cwd
+    args = expand_sandbox_templates(&args, &inner)?;
+
+    Ok(SubprocessSpec {
+        cmd: sandbox.binary.clone(),
+        args,
+        cwd: inner.cwd,  // sandbox may override
+        env: filter_env(&inner.env, &sandbox.env_passthrough),
+        stdin_data: inner.stdin_data,
+        timeout_secs: inner.timeout_secs,
+    })
+}
+```
+
+The invocation template tokens (`{cmd}`, `{cwd}`, `{profile_config}`) are sandbox-specific
+and separate from the runtime config template vocabulary (`{tool_path}`, `{rye_python}`, etc.).
+Both use the same closed-vocabulary, fail-on-unknown approach.
 
 ### Node Attestation with Sandbox Engines
 
@@ -289,8 +344,6 @@ Agents with real-world consequences (trading, infrastructure, communications) ne
 
 - FreeBSD jail integration
 - OpenBSD pledge/unveil integration
-  opencode -s ses_29e142adfffeLujQ6ifQISICCG
-  ple
 - tinygrad AM driver on FreeBSD
 - PCIe passthrough for GPU isolation
 
@@ -313,3 +366,106 @@ Agents with real-world consequences (trading, infrastructure, communications) ne
 **Practical deployment**: Linux nodes handle throughput-sensitive workloads, BSD nodes handle trust-sensitive workloads. The architecture supports both.
 
 The result is a sandboxing model that's more principled than custom implementation, more honest than container-based solutions, and more verifiable than proprietary stacks — while remaining practical for production deployment.
+
+---
+
+## Appendix: Deferred Execution-Surface Handlers
+
+Two YAML-declared handlers were considered during the runtime-handlers
+completion work and explicitly **deferred / dropped** because they
+conflict with the subprocess-as-execution-surface invariant. Capturing
+them here so the rationale survives.
+
+### `unix_identity` — OS-level privilege dropping
+
+**Status:** future, gated on this document's Phase 1+ landing.
+
+**Schema (proposed):**
+
+```yaml
+unix_identity:
+  user: appuser
+  group: appgroup
+  enforcement: required # or best_effort
+```
+
+**Effect:** Daemon `setuid`/`setgid` before `execve`. If `required`
+and the daemon isn't privileged → hard error. If `best_effort` and
+not privileged → log + continue.
+
+**Why deferred to here, not the daemon completion plan:** privilege
+dropping in isolation is a foot-gun. Without the broader sandboxing
+story (capabilities, mount/network/pid namespaces, attested
+environment), `setuid` alone gives the operator a false sense of
+isolation — a different uid still shares the kernel, the filesystem,
+and any ambient capabilities the daemon has. The right home is
+inside the layered security stack this document describes, where
+identity dropping composes with namespace isolation, attested
+hardware, and the node's declared capability surface. Shipping
+`unix_identity` first would create a "we have sandboxing" claim
+RYE cannot honestly back.
+
+**Concrete prerequisite before implementing:** the node must
+declare a verifiable capability ("this node can drop privileges to
+N declared roles, with these resource limits") that Lillux can
+gate spawn on. Without that, `enforcement: required` is just
+runtime sugar over `unshare`/`chroot` boilerplate every operator
+would re-invent.
+
+### `execution_owner: engine | callee` — REJECTED, not deferred
+
+**Status:** considered and explicitly rejected for MVP and
+post-MVP.
+
+**Schema (proposed):**
+
+```yaml
+execution_owner: engine # or callee
+```
+
+**Effect:** would have routed execution either through a forked
+subprocess (callee, today's path) or directly inside the daemon's
+address space (engine).
+
+**Why rejected outright (not deferred):**
+
+The Rust daemon's architecture treats every executable item as
+something that compiles to a `SubprocessSpec` and runs in its own
+process. Phase 5 (`native_async` cancellation) and Phase 6
+(`native_resume` checkpointing + restart-survives respawn) both
+assume that invariant — the engine owns plan-time correctness, the
+subprocess owns execution-time state, and the daemon connects
+them through the OS. Re-introducing an `engine` execution owner
+would split the world:
+
+| Concern             | `callee` (subprocess)                | `engine` (in-daemon)                                            |
+| ------------------- | ------------------------------------ | --------------------------------------------------------------- |
+| Cancellation        | `native_async` SIGTERM/SIGKILL       | Cooperative; no SIGKILL escape; can wedge the daemon            |
+| Resume after crash  | `native_resume` + checkpoint dir     | Lost with the daemon — no recovery surface                      |
+| Permissions         | Vault env, `unix_identity` (future)  | Inherits daemon's full ambient authority                        |
+| Resource limits     | Per-process rlimits, cgroups         | Shared with daemon — one bad item OOMs the whole node           |
+| Failure isolation   | Crash kills one thread               | Panic in handler kills daemon → all threads                     |
+| Observability       | pid/pgid/exit code/foldback          | Just an in-process error                                        |
+
+Every future handler would have to answer "does this apply when
+`execution_owner == engine`?" and the honest answer is almost
+always "no, that's why I wrote it for subprocesses." The Python
+codebase's `execution_owner: engine` was a side-effect of the
+engine and daemon being the same process — the Rust split made
+that obsolete. Importing it back imports a Python-era hack into a
+cleaner architecture.
+
+**Concrete cases that look like they want `engine` but don't:**
+
+| Looks like                                         | Actual answer                                                                                            |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| "Read-only metadata items"                         | Daemon HTTP API surface — no execution kind needed                                                       |
+| "Validate without spawning"                        | `PlanContext.validate_only` — already implemented                                                        |
+| "Cheap built-ins, subprocess overhead"             | Batch into one subprocess. The 40-100ms startup is per batch, not per call                               |
+| "Orchestrator directives that just glue children"  | The orchestrator MUST be a subprocess so a daemon crash doesn't take its child state down unrecoverably |
+| "Composite multi-step workflows"                   | `ryeos-graph-runtime` — already a subprocess executor                                                    |
+
+**Reconsider only if** a workload appears that genuinely cannot be
+expressed as a subprocess with subprocess semantics — and in that
+case, a new dedicated handler with first-class Phase 5/6 coverage
+is the right answer, not a generic engine/callee toggle.
