@@ -21,7 +21,7 @@ use crate::contracts::{
 use crate::error::EngineError;
 use crate::kind_registry::KindRegistry;
 use crate::metadata::MetadataParserRegistry;
-use crate::resolution::ResolutionRoots;
+use crate::item_resolution::ResolutionRoots;
 use crate::trust::TrustStore;
 
 /// Maximum executor chain depth before we assume a cycle or misconfiguration.
@@ -229,12 +229,17 @@ fn resolve_executor_chain(
                     kind: kind_for_alias.to_string(),
                 }
             })?;
-            kind_schema.resolve_alias(&current_id).ok_or_else(|| {
+            let execution = kind_schema.execution().ok_or_else(|| {
+                EngineError::KindNotExecutable {
+                    kind: kind_for_alias.to_string(),
+                }
+            })?;
+            execution.aliases.get(&current_id).ok_or_else(|| {
                 EngineError::UnknownAlias {
                     alias: current_id.clone(),
                     kind: kind_for_alias.to_string(),
                 }
-            })?.to_owned()
+            })?.clone()
         } else {
             current_id.clone()
         };
@@ -255,7 +260,7 @@ fn resolve_executor_chain(
         })?;
 
         let (source_path, _space, matched_ext) =
-            crate::resolution::resolve_item(roots, kind_schema, &ref_)?;
+            crate::item_resolution::resolve_item(roots, kind_schema, &ref_)?;
 
         let content = std::fs::read_to_string(&source_path).map_err(|e| {
             EngineError::Internal(format!(
@@ -273,7 +278,7 @@ fn resolve_executor_chain(
             })?;
 
         // Verify trust/integrity of this chain hop
-        let sig_header = crate::resolution::parse_signature_header(&content, &source_format.signature);
+        let sig_header = crate::item_resolution::parse_signature_header(&content, &source_format.signature);
         let trust_class = match &sig_header {
             Some(header) => {
                 if let Some(actual_hash) = crate::trust::content_hash_after_signature(&content, &source_format.signature) {
@@ -295,7 +300,7 @@ fn resolve_executor_chain(
         };
         verified_chain.push((current_id.clone(), trust_class));
 
-        let content_hash = crate::resolution::content_hash(&content);
+        let content_hash = crate::item_resolution::content_hash(&content);
         chain_content_hashes.push(content_hash);
 
         let parsed = parsers.extract(&content, &source_format.parser_id)?;

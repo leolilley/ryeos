@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::contracts::{ResolvedSourceFormat, SignatureEnvelope};
 use crate::error::EngineError;
 use crate::trust::TrustStore;
+use crate::resolution::decl::ResolutionStepDecl;
 
 /// A single extension entry within a `KindSchema`.
 ///
@@ -45,24 +46,40 @@ pub enum ExtractionRule {
     Path { key: String },
 }
 
+/// Execution configuration for a kind (resolution pipeline + aliases).
+/// Only kinds with an execution block can be executed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionSchema {
+    /// Shorthand resolution for @ refs in this kind's chains.
+    /// Aliases compose recursively (capped by alias_max_depth).
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
+    /// Hard cap for recursive alias expansion (default 8).
+    #[serde(default = "default_alias_depth")]
+    pub alias_max_depth: usize,
+    /// Ordered preprocessing pipeline run before dispatch.
+    #[serde(default)]
+    pub resolution: Vec<ResolutionStepDecl>,
+}
+
+fn default_alias_depth() -> usize {
+    8
+}
+
 /// Complete schema for a single item kind, loaded from a kind schema
 /// YAML. One struct per kind — no parallel maps, no split state.
 #[derive(Debug, Clone)]
 pub struct KindSchema {
     /// The `.ai/` subdirectory name, e.g. `"tools"`, `"directives"`
     pub directory: String,
-    /// Executor aliases declared by this kind. Maps `@`-prefixed
-    /// shorthand names to canonical refs. e.g. `"@subprocess"` →
-    /// `"tool:rye/core/subprocess/execute"`.
-    pub aliases: HashMap<String, String>,
     /// Ordered extension specs — extension priority during resolution
     /// is the order declared in the schema
     pub extensions: Vec<ExtensionSpec>,
     /// Data-driven extraction rules: output field name → rule
     pub extraction_rules: HashMap<String, ExtractionRule>,
-    /// Resolver names for the daemon resolution pipeline.
-    /// Empty list = no daemon-side resolution (direct execution).
-    pub resolution: Vec<String>,
+    /// Execution configuration (resolution pipeline + aliases).
+    /// `None` if this kind is not executable (e.g., config kind).
+    pub execution: Option<ExecutionSchema>,
 }
 
 impl KindSchema {
@@ -85,15 +102,15 @@ impl KindSchema {
         })
     }
 
-    /// Resolve an `@`-prefixed alias to a canonical ref.
-    /// Returns `None` if the alias is not declared in this kind's schema.
-    pub fn resolve_alias(&self, alias: &str) -> Option<&str> {
-        self.aliases.get(alias).map(|s| s.as_str())
+    /// Get the execution schema (aliases + resolution pipeline).
+    /// Returns `None` if this kind is not executable.
+    pub fn execution(&self) -> Option<&ExecutionSchema> {
+        self.execution.as_ref()
     }
 
     /// Whether this kind is executable (has an `execution` block).
     pub fn is_executable(&self) -> bool {
-        !self.aliases.is_empty()
+        self.execution.is_some()
     }
 }
 
@@ -451,17 +468,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             reason: format!("{display}: missing required field `location.directory`"),
         })?;
 
-    let aliases = parse_execution_aliases(&data, display);
-
-    let resolution: Vec<String> = data
-        .get("resolution")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let execution = parse_execution_schema(&data, display)?;
 
     let formats_seq = data
         .get("formats")
@@ -526,10 +533,9 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
 
     Ok(KindSchema {
         directory,
-        aliases,
         extensions,
         extraction_rules,
-        resolution,
+        execution,
     })
 }
 
@@ -676,27 +682,56 @@ fn parse_extraction_rules(
 ///
 /// Maps `@`-prefixed shorthand names to canonical refs.
 /// If no `execution` block exists, returns empty HashMap (kind is not executable).
-fn parse_execution_aliases(
+fn parse_execution_schema(
     data: &serde_yaml::Value,
-    _display: &str,
-) -> HashMap<String, String> {
-    let execution = match data.get("execution") {
+    display: &str,
+) -> Result<Option<ExecutionSchema>, EngineError> {
+    let execution_value = match data.get("execution") {
         Some(v) => v,
-        None => return HashMap::new(),
+        None => return Ok(None),
     };
 
-    let aliases_mapping = match execution.get("aliases").and_then(|v| v.as_mapping()) {
-        Some(m) => m,
-        None => return HashMap::new(),
-    };
+    let _ = execution_value
+        .as_mapping()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: `execution` must be a mapping"),
+        })?;
 
     let mut aliases = HashMap::new();
-    for (k, v) in aliases_mapping {
-        if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-            aliases.insert(key.to_owned(), val.to_owned());
+    if let Some(aliases_value) = execution_value.get("aliases") {
+        if let Some(aliases_mapping) = aliases_value.as_mapping() {
+            for (k, v) in aliases_mapping {
+                if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+                    aliases.insert(key.to_owned(), val.to_owned());
+                }
+            }
         }
     }
-    aliases
+
+    let alias_max_depth = execution_value
+        .get("alias_max_depth")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(8);
+
+    let mut resolution = Vec::new();
+    if let Some(res_value) = execution_value.get("resolution") {
+        if let Some(res_seq) = res_value.as_sequence() {
+            for item in res_seq {
+                let step: ResolutionStepDecl = serde_yaml::from_value(item.clone())
+                    .map_err(|e| EngineError::SchemaLoaderError {
+                        reason: format!("{display}: invalid resolution step: {e}"),
+                    })?;
+                resolution.push(step);
+            }
+        }
+    }
+
+    Ok(Some(ExecutionSchema {
+        aliases,
+        alias_max_depth,
+        resolution,
+    }))
 }
 
 #[cfg(test)]

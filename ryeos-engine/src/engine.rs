@@ -10,7 +10,7 @@ use crate::contracts::{
 use crate::error::EngineError;
 use crate::kind_registry::KindRegistry;
 use crate::metadata::MetadataParserRegistry;
-use crate::resolution::ResolutionRoots;
+use crate::item_resolution::ResolutionRoots;
 use crate::trust::TrustStore;
 use crate::AI_DIR;
 
@@ -77,7 +77,7 @@ impl Engine {
         tracing::debug!(item_ref = %item_ref, "resolving item");
 
         // Resolve to file path + space + matched extension (with clash diagnostics)
-        let result = crate::resolution::resolve_item_full(&roots, kind_schema, item_ref)?;
+        let result = crate::item_resolution::resolve_item_full(&roots, kind_schema, item_ref)?;
 
         // Read file content
         let content = std::fs::read_to_string(&result.winner_path).map_err(|e| {
@@ -88,13 +88,13 @@ impl Engine {
         })?;
 
         // Compute content hash
-        let hash = crate::resolution::content_hash(&content);
+        let hash = crate::item_resolution::content_hash(&content);
 
         // Parse signature header using the matched extension's envelope
         let signature_header = kind_schema
             .spec_for(&result.matched_ext)
             .and_then(|spec| {
-                crate::resolution::parse_signature_header(&content, &spec.signature)
+                crate::item_resolution::parse_signature_header(&content, &spec.signature)
             });
 
         // Build ResolvedSourceFormat from the matched extension
