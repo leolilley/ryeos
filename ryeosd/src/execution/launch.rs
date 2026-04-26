@@ -16,22 +16,21 @@ use crate::services::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalize
 use crate::state::AppState;
 
 /// Host triple for native executor resolution.
-/// Follows rustc target-triple convention: `ARCH-VENDOR-OS`.
+///
+/// Returns the rustc target triple this daemon was compiled for (e.g.
+/// `x86_64-unknown-linux-gnu`), as captured at build time by `ryeosd/build.rs`
+/// from Cargo's `TARGET` environment variable. This is identical to
+/// `rustc -vV | grep ^host:` for a native build, which is the convention the
+/// build-bundle pipeline uses when writing `bin/<triple>/<name>` into bundle
+/// manifests (see `ryeos-tools/tests/build_bundle_smoke.rs` and
+/// `ryeos-bundles/standard/.ai/bin/<triple>/`).
+///
+/// Using the compile-time `TARGET` (as opposed to a hand-built
+/// `ARCH-VENDOR-OS` string) guarantees the daemon's lookup key matches the
+/// path the bundle was built for — including the ABI segment (`gnu`, `musl`,
+/// `msvc`) that hand-coding would otherwise omit.
 fn host_triple() -> String {
-    format!(
-        "{}-{}-{}",
-        std::env::consts::ARCH,
-        if cfg!(target_os = "linux") {
-            "unknown"
-        } else if cfg!(target_os = "macos") {
-            "apple"
-        } else if cfg!(target_os = "windows") {
-            "pc"
-        } else {
-            "unknown"
-        },
-        std::env::consts::OS
-    )
+    env!("RYEOSD_HOST_TRIPLE").to_string()
 }
 
 /// Ref path under `.ai/` that stores the system bundle manifest hash.
@@ -212,13 +211,6 @@ pub(crate) fn derive_effective_caps(
     composed: &ryeos_engine::resolution::KindComposedView,
 ) -> Vec<String> {
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
-}
-
-/// Check if an executor ref is a native executor (starts with `native:`).
-pub fn is_native_executor(executor_ref: &str) -> bool {
-    executor_ref
-        .strip_prefix("native:")
-        .is_some_and(|s| !s.is_empty())
 }
 
 pub fn build_and_launch(
@@ -513,20 +505,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_native_executor_detects_native_prefix() {
-        assert!(is_native_executor("native:directive-runtime"));
-        assert!(is_native_executor("native:graph-runtime"));
-    }
+    fn host_triple_matches_rustc_host() {
+        // The bundle build pipeline writes binaries under
+        // `bin/<triple>/<name>` where `<triple>` is `rustc -vV | grep ^host:`
+        // (see `ryeos-tools/tests/build_bundle_smoke.rs::host_triple`). The
+        // daemon's `host_triple()` MUST produce the same string or
+        // materialization will silently fail to find the binary.
+        let output = std::process::Command::new("rustc")
+            .args(["-vV"])
+            .output()
+            .expect("rustc -vV");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let rustc_host = stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("host:"))
+            .expect("rustc -vV must report host:")
+            .trim()
+            .to_string();
 
-    #[test]
-    fn is_native_executor_rejects_empty() {
-        assert!(!is_native_executor("native:"));
-    }
+        assert_eq!(
+            host_triple(),
+            rustc_host,
+            "daemon host_triple() must match `rustc -vV | grep ^host:` so that \
+             bundle binaries written at `bin/<triple>/<name>` resolve. If this \
+             fails, check ryeosd/build.rs forwards Cargo's TARGET env var.",
+        );
 
-    #[test]
-    fn is_native_executor_rejects_non_native() {
-        assert!(!is_native_executor("tool:rye/core/bash/bash"));
-        assert!(!is_native_executor("inline"));
+        // Format sanity: rustc host triples have either 3 segments (e.g.
+        // x86_64-apple-darwin) or 4 (e.g. x86_64-unknown-linux-gnu). The
+        // V5.1 bug produced 3-segment Linux triples missing the ABI.
+        let segs = host_triple().split('-').count();
+        assert!(
+            (3..=4).contains(&segs),
+            "host_triple() {:?} should have 3 or 4 dash-separated segments, got {}",
+            host_triple(),
+            segs,
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                segs, 4,
+                "linux rustc triples include an ABI segment (gnu/musl); got {:?}",
+                host_triple(),
+            );
+        }
     }
 
     use ryeos_engine::resolution::{KindComposedView, TrustClass};

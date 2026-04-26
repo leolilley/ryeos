@@ -57,7 +57,6 @@ __version__ = "1.0.0"
 __executor_id__ = "tool:rye/core/runtimes/python/script"
 __category__ = "test/demo"
 __tool_description__ = "Hello world demo"
-__tool_type__ = "python"
 
 import sys
 print("hello world")

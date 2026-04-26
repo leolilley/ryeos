@@ -235,6 +235,8 @@ mod tests {
                 aliases: std::collections::HashMap::new(),
                 alias_max_depth: 8,
                 resolution: Vec::new(),
+                terminator: None,
+                thread_profile: None,
             }),
             extensions: extensions
                 .into_iter()

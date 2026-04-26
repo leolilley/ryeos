@@ -1,0 +1,48 @@
+# rye:signed:2026-04-26T10:33:20Z:6ffc4b55936b15d64e8dc158cf2d8c31a82560702dd6195185b3df2bd6288cd6:J1cMQsUrZmLHH5umIKKTA2AW29iRZI6PqQhxfatVDPmlI2JNYU3E3LBCYeRsKCXcTyyE19rLAsLwBGVADol9Ag==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/runtime"
+version: "1.0.0"
+location:
+  directory: runtimes
+execution:
+  terminator: native_runtime_spawn
+  thread_profile: runtime_run
+  resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Identity composer — runtime items are loaded as-is.
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+    version:
+      from: path
+      key: version
+    category:
+      from: path
+      key: category
+    description:
+      from: path
+      key: description
+    serves:
+      from: path
+      key: serves
+    default:
+      from: path
+      key: default
+    binary_ref:
+      from: path
+      key: binary_ref
+    abi_version:
+      from: path
+      key: abi_version
+    required_caps:
+      from: path_string_seq
+      key: required_caps

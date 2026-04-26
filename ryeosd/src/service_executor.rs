@@ -80,6 +80,39 @@ pub struct ServiceExecutionResult {
     pub audit_thread_id: String,
 }
 
+/// Resolve and verify any item ref (kind-agnostic).
+///
+/// Steps:
+/// 1. Parse the ref string into a `CanonicalRef`.
+/// 2. Resolve through the engine.
+/// 3. Verify trust chain (signature + content hash).
+///
+/// Error wording is keyed off `ref_kind_label`: `None` produces neutral
+/// "ref '<...>' ..." messages; `Some("service")` produces the original
+/// service-flavored "service '<...>' ..." wording so existing pin tests
+/// and callers see no diff.
+pub fn resolve_and_verify(
+    engine: &Arc<ryeos_engine::engine::Engine>,
+    plan_ctx: &ryeos_engine::contracts::PlanContext,
+    item_ref: &str,
+    ref_kind_label: Option<&str>,
+) -> Result<ryeos_engine::contracts::VerifiedItem> {
+    use ryeos_engine::canonical_ref::CanonicalRef;
+
+    let label = ref_kind_label.unwrap_or("ref");
+
+    let canonical = CanonicalRef::parse(item_ref)
+        .map_err(|e| anyhow::anyhow!("invalid {label} ref '{item_ref}': {e}"))?;
+
+    let resolved = engine.resolve(plan_ctx, &canonical)
+        .map_err(|e| anyhow::anyhow!("{label} '{item_ref}' failed to resolve: {e}"))?;
+
+    let verified = engine.verify(plan_ctx, resolved)
+        .map_err(|e| anyhow::anyhow!("{label} '{item_ref}' failed verification: {e}"))?;
+
+    Ok(verified)
+}
+
 /// Execute a service with failure-capturing audit.
 ///
 /// Steps (same in both live and standalone modes):
@@ -98,19 +131,24 @@ pub async fn execute_service(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<ServiceExecutionResult> {
-    use ryeos_engine::canonical_ref::CanonicalRef;
+    let verified = resolve_and_verify(&ctx.engine, &ctx.plan_ctx, service_ref, Some("service"))?;
+    execute_service_verified(verified, service_ref, params, mode, ctx, state).await
+}
 
-    // 1. Parse and resolve
-    let canonical = CanonicalRef::parse(service_ref)
-        .map_err(|e| anyhow::anyhow!("invalid service ref '{service_ref}': {e}"))?;
-
-    let resolved = ctx.engine.resolve(&ctx.plan_ctx, &canonical)
-        .map_err(|e| anyhow::anyhow!("service '{service_ref}' failed to resolve: {e}"))?;
-
-    // 2. Verify trust chain
-    let verified = ctx.engine.verify(&ctx.plan_ctx, resolved)
-        .map_err(|e| anyhow::anyhow!("service '{service_ref}' failed verification: {e}"))?;
-
+/// Execute a service given an already-verified item.
+///
+/// This is the post-resolve/verify portion of `execute_service`: availability
+/// check, cap enforcement, audit record creation, handler dispatch, audit
+/// finalization. Split out so future kind-agnostic dispatch can reuse the
+/// resolve+verify step independently.
+pub async fn execute_service_verified(
+    verified: ryeos_engine::contracts::VerifiedItem,
+    service_ref: &str,
+    params: Value,
+    mode: ExecutionMode,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<ServiceExecutionResult> {
     let trust_class = verified.trust_class;
 
     // 3. Extract endpoint + required_caps
@@ -191,38 +229,38 @@ pub async fn execute_service(
 
     // 7b. Finalize audit with success or failure
     if audit_ok {
-    match &dispatch_result {
-        Ok(value) => {
-            let _ = state.threads.finalize_thread(
-                &crate::services::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: audit_thread_id.clone(),
-                    status: "completed".to_string(),
-                    outcome_code: Some("success".to_string()),
-                    result: Some(value.clone()),
-                    error: None,
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-            );
+        match &dispatch_result {
+            Ok(value) => {
+                let _ = state.threads.finalize_thread(
+                    &crate::services::thread_lifecycle::ThreadFinalizeParams {
+                        thread_id: audit_thread_id.clone(),
+                        status: "completed".to_string(),
+                        outcome_code: Some("success".to_string()),
+                        result: Some(value.clone()),
+                        error: None,
+                        metadata: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        summary_json: None,
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = state.threads.finalize_thread(
+                    &crate::services::thread_lifecycle::ThreadFinalizeParams {
+                        thread_id: audit_thread_id.clone(),
+                        status: "failed".to_string(),
+                        outcome_code: Some("handler_error".to_string()),
+                        result: None,
+                        error: Some(serde_json::json!({ "error": e.to_string() })),
+                        metadata: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        summary_json: None,
+                    },
+                );
+            }
         }
-        Err(e) => {
-            let _ = state.threads.finalize_thread(
-                &crate::services::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: audit_thread_id.clone(),
-                    status: "failed".to_string(),
-                    outcome_code: Some("handler_error".to_string()),
-                    result: None,
-                    error: Some(serde_json::json!({ "error": e.to_string() })),
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-            );
-        }
-    }
     }
 
     // 7c. Standalone NDJSON audit (only in Standalone mode, not projection-backed)

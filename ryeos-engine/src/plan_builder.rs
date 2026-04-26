@@ -566,14 +566,12 @@ runtime:
     - type: env_config
   ignored_keys:
     - version
-    - tool_type
     - category
     - description
     - __executor_id__
     - __version__
     - __tool_description__
     - __category__
-    - __tool_type__
     - required_secrets
     - name
     - executor_id
@@ -682,7 +680,6 @@ metadata:
         fs::create_dir_all(&d).unwrap();
         let file_path = d.join(format!("{}.yaml", parts.last().unwrap()));
         let content = "\
-tool_type: subprocess
 executor_id: null
 config:
   command: /bin/sh
@@ -704,7 +701,7 @@ config:
         }
         fs::create_dir_all(&d).unwrap();
         let file_path = d.join(format!("{}.yaml", parts.last().unwrap()));
-        let content = "tool_type: subprocess\nexecutor_id: null\n";
+        let content = "executor_id: null\n";
         fs::write(&file_path, content).unwrap();
         file_path
     }
@@ -929,7 +926,6 @@ config:
     fn ignored() -> Vec<String> {
         vec![
             "version".into(),
-            "tool_type".into(),
             "category".into(),
             "description".into(),
             "__executor_id__".into(),
@@ -1181,7 +1177,7 @@ config:
         fs::create_dir_all(&runtime_dir).unwrap();
 
         // Sign the runtime YAML
-        let body = "tool_type: runtime\nexecutor_id: \"@subprocess\"\n";
+        let body = "executor_id: \"@subprocess\"\n";
         let hash: String = {
             let h = sha2::Sha256::digest(body.as_bytes());
             let mut out = String::with_capacity(64);
@@ -1293,7 +1289,6 @@ config:
         fs::create_dir_all(&runtime_dir).unwrap();
 
         let runtime_content = format!(r#"__executor_id__: "@subprocess"
-tool_type: runtime
 category: rye/core/runtimes/python
 env_config:
   interpreter:
@@ -1326,7 +1321,6 @@ config:
         fs::create_dir_all(&terminal_dir).unwrap();
         let terminal_content = "\
 __executor_id__: null\n\
-tool_type: subprocess\n\
 category: rye/core/subprocess\n";
         fs::write(terminal_dir.join("execute.yaml"), &terminal_content).unwrap();
 

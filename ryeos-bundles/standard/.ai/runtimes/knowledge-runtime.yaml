@@ -1,0 +1,9 @@
+# rye:signed:2026-04-26T09:30:26Z:ad0846e9261fec87d8671aac74b5f5ccb54c8b3e05d66188bdf561087198344d:3C9Mj3FVkVffCPgMWbDmglQNls9IlzvGLb6OPvRrB/aq5W0LlxDys3R78Dr31uN8rGxF+sE9TzL31g+lXoteCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: runtime
+serves: knowledge
+default: true
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime
+abi_version: "v1"
+required_caps:
+  - runtime.execute
+description: "Knowledge interpretation runtime — V5.3 stub, V5.4 lights up"

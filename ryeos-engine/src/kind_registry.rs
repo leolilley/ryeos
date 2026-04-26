@@ -177,6 +177,96 @@ pub struct RuntimeSpec {
     pub ignored_keys: Vec<String>,
 }
 
+/// How a kind terminates dispatch. Three variants only — adding a fourth
+/// is a real architectural change requiring its own design (see
+/// docs/future/resolution-pipeline-advanced.md "Cut from V5.3").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "terminator", rename_all = "snake_case")]
+pub enum TerminatorSpec {
+    /// External executable; spawn subprocess, capture stdout/stderr/exit.
+    Subprocess,
+    /// Daemon-owned in-process handler; lookup by endpoint in named registry.
+    InProcessHandler { registry: HandlerRegistryKind },
+    /// Native runtime; materialize binary, spawn with LaunchEnvelope, await RuntimeResult.
+    NativeRuntimeSpawn,
+}
+
+/// Closed enum of named in-process handler registries. Single variant in V5.3
+/// — additional registries (parsers, composers) are deferred per
+/// docs/future/resolution-pipeline-advanced.md.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HandlerRegistryKind {
+    Services,
+}
+
+/// Schema-derived dispatch capability bits per terminator. The table
+/// is fixed per V5.2 behavior (not a per-kind-YAML knob in V5.3) — it
+/// reproduces the inline rejection branches that V5.2 carried in
+/// `ryeosd/src/api/execute.rs` for the `is_native_executor` path,
+/// re-keyed by terminator so the new schema-driven dispatch core
+/// (`ryeosd/src/dispatch.rs`) can consult one place.
+///
+/// V5.3 Task 0b moves this from per-call inline checks in
+/// `api/execute.rs` (deleted) into `dispatch::dispatch_*` callers,
+/// which pass the request shape (launch_mode / target_site_id /
+/// project_source kind) down to the terminator gate. The pin tests in
+/// `ryeosd/tests/dispatch_pin.rs` lock the exact 400/409 wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchCapabilities {
+    /// May the terminator be invoked when the request's project source
+    /// is `pushed_head` (a CAS HEAD checkout)? V5.2 behavior: native
+    /// runtime spawn says no; subprocess + in-process handlers say yes.
+    pub allows_pushed_head: bool,
+    /// May the terminator be invoked with `target_site_id` set
+    /// (remote-execution intent)? V5.2 behavior: native runtime spawn
+    /// says no; subprocess + in-process handlers say yes.
+    pub allows_target_site: bool,
+    /// May the terminator be invoked with `launch_mode == "detached"`?
+    /// V5.2 behavior: native runtime spawn says no; subprocess +
+    /// in-process handlers say yes.
+    pub allows_detached: bool,
+}
+
+/// V5.2 source-line provenance for the table values:
+///
+/// * `Subprocess` — V5.2 tool/directive path runs via
+///   `runner::run_inline` / `runner::run_detached`; today it gates
+///   nothing of these three at dispatch time, so all three bits are
+///   `true`.
+/// * `InProcessHandler { Services }` — V5.2 `service:` branch in
+///   `ryeosd/src/api/execute.rs` likewise rejected none of these
+///   three; preserved verbatim as `true / true / true`.
+/// * `NativeRuntimeSpawn` — V5.2 inline rejections lived around lines
+///   271–291 of `ryeosd/src/api/execute.rs` (deleted by Task 0b):
+///     * `pushed_head` → 400 "pushed_head not yet supported for native runtimes"
+///     * `target_site_id` → 400 "remote execution not yet supported for native runtimes"
+///     * `launch_mode == "detached"` → 400 "detached mode not yet supported for native runtimes"
+///   All three bits therefore `false`. Pin tests
+///   `pin_native_runtime_with_detached`,
+///   `pin_native_runtime_with_target_site_id` and
+///   `pin_native_runtime_with_pushed_head` lock the exact wording
+///   under the new `runtime:` shape.
+pub fn capabilities_for(terminator: &TerminatorSpec) -> DispatchCapabilities {
+    match terminator {
+        TerminatorSpec::Subprocess => DispatchCapabilities {
+            allows_pushed_head: true,
+            allows_target_site: true,
+            allows_detached: true,
+        },
+        TerminatorSpec::InProcessHandler { .. } => DispatchCapabilities {
+            allows_pushed_head: true,
+            allows_target_site: true,
+            allows_detached: true,
+        },
+        TerminatorSpec::NativeRuntimeSpawn => DispatchCapabilities {
+            allows_pushed_head: false,
+            allows_target_site: false,
+            allows_detached: false,
+        },
+    }
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -192,6 +282,26 @@ pub struct ExecutionSchema {
     /// Ordered preprocessing pipeline run before dispatch.
     #[serde(default)]
     pub resolution: Vec<ResolutionStepDecl>,
+    /// How this kind terminates dispatch. Optional ONLY because a kind
+    /// may instead dispatch by alias chain (the `aliases` field above):
+    /// the dispatch loop walks aliases until it reaches a kind that
+    /// declares a `terminator`. Exactly one of {terminator, aliases-with-
+    /// terminating-target} must be reachable from any executable kind;
+    /// neither present (or an unresolvable alias chain) means the kind is
+    /// NOT root-executable and `/execute` returns 501.
+    ///
+    /// There is NO silent fallback to a legacy dispatch path. If a kind
+    /// declares `execution:` with neither a terminator nor aliases, that
+    /// is a schema error caught at load time (0a.3 wires this).
+    #[serde(default, skip)]
+    pub terminator: Option<TerminatorSpec>,
+    /// Schema-declared thread-profile name (looked up in the daemon's
+    /// `KindProfileRegistry`). The terminator dispatchers
+    /// (`dispatch_subprocess`, `dispatch_native_runtime`) read this
+    /// instead of hardcoding profile names — V5.4 SSE adds a streaming
+    /// runtime profile by changing the schema, not the dispatch code.
+    #[serde(default)]
+    pub thread_profile: Option<String>,
 }
 
 fn default_alias_depth() -> usize {
@@ -982,11 +1092,89 @@ fn parse_execution_schema(
         }
     }
 
+    let terminator = parse_terminator_spec(execution_value, display)?;
+
+    let thread_profile = execution_value
+        .get("thread_profile")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+
+    // S1: load-time non-actionable schema rejection. A kind that
+    // declares `execution:` MUST be reachable to a terminator OR
+    // a downstream resolution (alias chain / registry hop with a
+    // declared `thread_profile`). A schema with no terminator, no
+    // aliases, and no `thread_profile` cannot be dispatched and is
+    // therefore a non-actionable mistake — fail closed at load.
+    if terminator.is_none() && aliases.is_empty() && thread_profile.is_none() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: kind declares `execution:` block but no terminator, \
+                 no aliases, and no thread_profile — schema is non-actionable"
+            ),
+        });
+    }
+
     Ok(Some(ExecutionSchema {
         aliases,
         alias_max_depth,
         resolution,
+        terminator,
+        thread_profile,
     }))
+}
+
+/// Parse the `execution.terminator` field (and its associated `registry`
+/// for `in_process_handler`) from a kind schema. Returns `None` when no
+/// terminator is declared. Closed-enum validation: any terminator name
+/// or registry name not in the Rust enum is a hard parse error.
+fn parse_terminator_spec(
+    execution_value: &serde_yaml::Value,
+    display: &str,
+) -> Result<Option<TerminatorSpec>, EngineError> {
+    let Some(t_value) = execution_value.get("terminator") else {
+        return Ok(None);
+    };
+    let t_str = t_value
+        .as_str()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: `execution.terminator` must be a string"),
+        })?;
+    let spec = match t_str {
+        "subprocess" => TerminatorSpec::Subprocess,
+        "in_process_handler" => {
+            let registry_str = execution_value
+                .get("registry")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: `execution.terminator: in_process_handler` requires \
+                         a `registry` field"
+                    ),
+                })?;
+            let registry = match registry_str {
+                "services" => HandlerRegistryKind::Services,
+                other => {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: unknown handler registry `{other}` \
+                             (known: services)"
+                        ),
+                    });
+                }
+            };
+            TerminatorSpec::InProcessHandler { registry }
+        }
+        "native_runtime_spawn" => TerminatorSpec::NativeRuntimeSpawn,
+        other => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: unknown terminator `{other}` \
+                     (known: subprocess, in_process_handler, native_runtime_spawn)"
+                ),
+            });
+        }
+    };
+    Ok(Some(spec))
 }
 
 #[cfg(test)]
@@ -1057,6 +1245,7 @@ metadata:
 location:
   directory: directives
 execution:
+  thread_profile: directive_run
   aliases: {}
   resolution:
     - step: resolve_extends_chain
@@ -1596,6 +1785,7 @@ formats:
 location:
   directory: directives
 execution:
+  thread_profile: directive_run
   aliases: {}
 formats:
   - extensions: [\".md\"]
@@ -1609,6 +1799,122 @@ formats:
         let overlaid = base.with_project_overlay(&project, &ts).unwrap();
         let dir = overlaid.get("directive").unwrap();
         assert!(dir.execution.as_ref().map_or(true, |e| e.resolution.is_empty()));
+    }
+
+    fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {
+        let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        parse_execution_schema(&v, "test.yaml")
+    }
+
+    #[test]
+    fn execution_schema_parses_subprocess_terminator() {
+        let yaml = "\
+execution:
+  terminator: subprocess
+  aliases:
+    \"@subprocess\": \"tool:rye/core/subprocess/execute\"
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(exec.terminator, Some(TerminatorSpec::Subprocess));
+        assert_eq!(
+            exec.aliases.get("@subprocess").map(|s| s.as_str()),
+            Some("tool:rye/core/subprocess/execute")
+        );
+    }
+
+    #[test]
+    fn execution_schema_parses_in_process_handler_terminator_with_services_registry() {
+        let yaml = "\
+execution:
+  terminator: in_process_handler
+  registry: services
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(
+            exec.terminator,
+            Some(TerminatorSpec::InProcessHandler {
+                registry: HandlerRegistryKind::Services
+            })
+        );
+    }
+
+    #[test]
+    fn execution_schema_parses_native_runtime_spawn_terminator() {
+        let yaml = "\
+execution:
+  terminator: native_runtime_spawn
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(exec.terminator, Some(TerminatorSpec::NativeRuntimeSpawn));
+    }
+
+    #[test]
+    fn execution_schema_terminator_field_optional() {
+        // Terminator may be omitted when at least one other actionable
+        // dispatch directive is present (alias, thread_profile, etc.).
+        // Per S1 (V5.3 advanced-path foundation), an `execution:` block
+        // with NONE of these is non-actionable and is rejected at load.
+        let yaml = "\
+execution:
+  thread_profile: directive_run
+  aliases: {}
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(exec.terminator, None);
+        assert_eq!(exec.thread_profile.as_deref(), Some("directive_run"));
+    }
+
+    /// S1: `execution:` block with no terminator AND no aliases AND
+    /// no `thread_profile` is non-actionable and MUST fail at load.
+    #[test]
+    fn execution_block_without_terminator_or_aliases_or_thread_profile_rejected_at_load() {
+        let yaml = "\
+execution:
+  aliases: {}
+";
+        let err = parse_exec(yaml).expect_err("non-actionable schema must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-actionable") || msg.contains("no terminator"),
+            "error must explain why schema is non-actionable, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn execution_schema_rejects_unknown_terminator() {
+        let yaml = "\
+execution:
+  terminator: wasm_sandbox
+";
+        let err = parse_exec(yaml).unwrap_err();
+        match err {
+            EngineError::SchemaLoaderError { reason } => {
+                assert!(
+                    reason.contains("unknown terminator") && reason.contains("wasm_sandbox"),
+                    "unexpected error: {reason}"
+                );
+            }
+            other => panic!("expected SchemaLoaderError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_schema_rejects_in_process_handler_with_unknown_registry() {
+        let yaml = "\
+execution:
+  terminator: in_process_handler
+  registry: parsers
+";
+        let err = parse_exec(yaml).unwrap_err();
+        match err {
+            EngineError::SchemaLoaderError { reason } => {
+                assert!(
+                    reason.contains("unknown handler registry") && reason.contains("parsers"),
+                    "unexpected error: {reason}"
+                );
+            }
+            other => panic!("expected SchemaLoaderError, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,9 +1,11 @@
-# rye:signed:2026-04-25T10:35:27Z:5b16612af59c86ad0bcbb3fac33e02c2cc2ed47de5932bc9c95e1bb5c49f4c59:8MMmUt/QoD5Bb3mM5YYoCF/auAX49cjEiwCgNTfyuuNJbFcF83DQeV5uCLt+EI+N0S0zP54PBssOumk1zH0RAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T10:33:19Z:21d727ddf3002c03a212005955ffb161cf9d59488bc92ffe0611bef143046b35:x27hwmHqhqd7jnkx/nyENgVIiXWjrl0e8mxdoc9QAr7boSb43LhvE2XJPeTIcNnsgIVAUIj79TvqsyiNRi08BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
   directory: tools
 execution:
+  terminator: subprocess
+  thread_profile: tool_run
   aliases:
     "@subprocess": "tool:rye/core/subprocess/execute"
   resolution: []
@@ -48,14 +50,12 @@ runtime:
   # error.
   ignored_keys:
     - version
-    - tool_type
     - category
     - description
     - __executor_id__
     - __version__
     - __tool_description__
     - __category__
-    - __tool_type__
     - required_secrets
     - name
     # `config_schema` is validated as a pre-pass against the user's
@@ -83,9 +83,6 @@ metadata:
     category:
       from: path
       key: __category__
-    tool_type:
-      from: path
-      key: __tool_type__
     required_secrets:
       from: path_string_seq
       key: required_secrets

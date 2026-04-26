@@ -1,7 +1,6 @@
-# rye:signed:2026-04-23T23:06:25Z:bed27ed6d9ae9dfd128039cfb763cbe314f3a595687f5e904deeeed6c3e554d0:O4Tcz8ESUUQtSG7OkhHyr0blNtb2NBZesQ9kwI4wFQxqybc+gefcgvkXdyyYlpawl95K5r9k3JMZ8NAwur+0Dg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T09:49:06Z:40ae46d0a2b451c0a966c8d090638fba4f8fbd0e6a6d06b748024e4361bce4bf:/9SltF3ezY6cL11Ep4y6iGg1j5WzGBE1Bx4NiS8j4mdjqjcO5sTCgb3Oh5od0GsD7c3eAdaiTzHpDe6jJJ3SDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 # rye:unsigned
 version: "1.0.0"
-tool_type: runtime
 __executor_id__: "@subprocess"
 category: rye/core/runtimes/bash
 description: "Bash runtime - executes shell commands directly"

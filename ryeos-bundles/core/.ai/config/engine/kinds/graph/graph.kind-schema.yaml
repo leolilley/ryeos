@@ -1,11 +1,14 @@
-# rye:signed:2026-04-25T06:47:55Z:58a1568372da7c5a7c860ec66425db4c35fe099c38e09bd7ec14b7e72577315a:OusnKeE/p4K3BPtIdWOSiastIGIBcCnguaeiXfnXr4fJpIyYc8S5WjNMDyBdYjnmjiOoZr6yAT/rXjNU6meTDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T10:34:13Z:0ebc66d5484bf6c272cf785791d6f810c9485abf849766c984bd4244f37a1a9e:0ilOq4Ww3Bkd5wcVOinHnAvYyVUiBRg/Szm913VNxGuJwKLu37ix2PzdXUC0fzERYAIyp0FH6H6m/fb0FFUuBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
   directory: graphs
 execution:
-  aliases:
-    "@graph": "tool:rye/graph-runtime/runtime"
+  # No `@graph` alias — graph→runtime dispatch is resolved by
+  # `RuntimeRegistry::lookup_for("graph")` in the dispatch loop.
+  # This is an EXPLICIT, NAMED registry hop (see B2 in the V5.4
+  # advanced-path foundation), not a silent fallback.
+  thread_profile: graph_run
   resolution:
     - step: resolve_extends_chain
 formats:

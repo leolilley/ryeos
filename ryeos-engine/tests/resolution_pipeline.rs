@@ -123,6 +123,7 @@ formats:
       prefix: \"#\"
 execution:
   aliases: {}
+  thread_profile: node_run
   resolution:
     - step: resolve_references
       field: refs
@@ -217,6 +218,7 @@ formats:
       suffix: \"-->\"
 execution:
   aliases: {}
+  thread_profile: directive_run
   resolution: []
 ";
 

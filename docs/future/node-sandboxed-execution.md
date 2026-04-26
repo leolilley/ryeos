@@ -469,3 +469,37 @@ cleaner architecture.
 expressed as a subprocess with subprocess semantics — and in that
 case, a new dedicated handler with first-class Phase 5/6 coverage
 is the right answer, not a generic engine/callee toggle.
+
+## Integration Seam: V5.3 Dispatch + Future `remote_broker` / `wasm_sandbox` Terminator
+
+V5.3 (`.tmp/IMPLEMENTATION/V5.3-PLAN.md`) makes ryeosd's dispatch
+fully data-driven via kind-schema YAMLs declaring an
+`execution.terminator` field, with three terminator variants:
+`subprocess`, `in_process_handler`, `native_runtime_spawn`. The
+sandbox/attestation work this document describes lands cleanly as one
+or more **additional terminator variants** post-V5.3.
+
+The shape:
+
+| Future terminator                | What it does                                                                                                        | Attestation surface                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `node_sandboxed_subprocess`      | Spawn a subprocess inside the node-attested sandbox container declared by the node's environment attestation.       | Node signs its environment description; Lillux refuses to dispatch unless attestation ≥ item's required class. |
+| `remote_broker`                  | Forward execution to a different verified node via the cluster broker, return result over the same channel.         | Both nodes attest; `ChainHop.trust_class` propagates across the broker hop.                  |
+| `wasm_sandbox`                   | Execute inside an in-process WASM runtime with capability-bound imports.                                            | The WASM runtime itself is a `kind: runtime` item; the sandbox terminator is what gates entry. |
+
+For each, **adding the terminator is one `TerminatorSpec` variant + one
+match arm in `dispatch::dispatch`**. The kind-schema YAML for any kind
+that wants this dispatch shape declares `terminator:
+node_sandboxed_subprocess` (or whichever) — no daemon code change to
+opt a new kind in.
+
+This is exactly the "sandbox engines as data-driven providers" shape
+described above, expressed at the dispatch layer instead of the
+provider layer. The two are complementary: the provider table chooses
+*which* sandbox engine handles a given attestation class; the
+terminator chooses *whether to enter the provider table at all* for a
+given kind.
+
+V5.3 deliberately does not ship any of these terminators — see
+`docs/future/resolution-pipeline-advanced.md` "Deferred from V5.3" for
+the trigger conditions and the broader catalog of cuts.

@@ -299,11 +299,14 @@ fn gate_service_kind_in_bundle() {
     );
 
     let service_kind = kinds.get("service").expect("service kind");
-    // Service kind is daemon-dispatched, not execution-pipeline.
-    // It does NOT need `execution:` block — service_registry.rs handles dispatch.
+    // V5.3 Task 0a.2: service kind is now schema-driven via the
+    // `in_process_handler { services }` terminator. Backed by the same
+    // ServiceDescriptor table; the schema just declares the dispatch
+    // path. Wired by 0a.3.
     assert!(
-        !service_kind.is_executable(),
-        "`service` kind should NOT be executable (no execution pipeline needed)"
+        service_kind.is_executable(),
+        "`service` kind must declare an execution block in V5.3 \
+         (terminator: in_process_handler, registry: services)"
     );
 }
 

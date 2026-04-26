@@ -65,7 +65,6 @@ fn synth_project_with_resume_tool() -> PathBuf {
     // shorthand → engine default policy). Sits in the chain so the
     // FirstWins handler claims the block.
     let runtime_body = r#"version: "1.0.0"
-tool_type: runtime
 __executor_id__: "@subprocess"
 category: test/native_resume/runtime
 description: "test runtime with native_resume"
@@ -78,7 +77,6 @@ config:
     fs::write(runtime_dir.join("runtime.yaml"), runtime_body).unwrap();
 
     let tool_body = r#"version: "1.0.0"
-tool_type: tool
 __executor_id__: "tool:local_resume_runtime/runtime"
 category: test/native_resume
 description: "native_resume demo"

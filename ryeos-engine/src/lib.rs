@@ -14,6 +14,7 @@ pub mod boot_validation;
 pub mod plan_builder;
 pub mod resolution;
 pub mod runtime;
+pub mod runtime_registry;
 pub mod scope;
 pub mod trust;
 

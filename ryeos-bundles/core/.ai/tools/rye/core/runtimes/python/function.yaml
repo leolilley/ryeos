@@ -1,6 +1,5 @@
-# rye:signed:2026-04-25T09:50:28Z:635525ca54816229adfe1851285f7bb79e775293977a88378cd54e924be154e2:FGcMOMy1nhB8pfRmDxX5lijk4xvoyV0tdSl24owO09L8E1Aoq6/zqcEZaImGlCisYcNxh6A/4tYj+1kaBqwmDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T09:49:05Z:6dd3c2a8ac15ff344da444f659f2f4220dbd70d7ee3b0ff1b2c8a50cd8c1263b:NQ0ypLGDgWh+JEiF+PS0EGdGoWAf3VsxoRcmwdIOZbNSxp31an2NLC9FnaNS3S3G0tg/R1nqBzLyb6gxxhdoDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 version: "1.0.0"
-tool_type: runtime
 __executor_id__: "@subprocess"
 category: rye/core/runtimes/python
 description: "Python function runtime - calls execute(params, project_path) and serializes result to stdout"

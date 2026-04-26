@@ -1,6 +1,5 @@
-# rye:signed:2026-04-25T09:50:28Z:ccd948b714bd7c9c81fab323e912a0230d6f4530f1f6a5c3ffa57a9182264220:Fx6etk4JJ22snWhCCSLyWAY2JYp8TL45k8vb9hhc3XO7xlRiG+t71jVnjhPZ46kVhHqKzsbwHPvaT6hj4v45AA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T09:49:05Z:2789713ac782b825130ac61387e7bd38fe966c060a78aa457a8363af9103593e:+DBfQuxNtYoxJIGaMNrKJmCrPjfTSWWgn7zDOaJkeBmhxOzNdiEN7eO1P+o/3ZX5d9Lhf3L8XgqVF7RgjRSaDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 version: "1.0.0"
-tool_type: runtime
 __executor_id__: "@subprocess"
 category: rye/core/runtimes/state-graph
 description: "State graph runtime — walks graph YAML tools, dispatching RYE for each node"

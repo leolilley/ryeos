@@ -12,6 +12,7 @@ use crate::error::EngineError;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::item_resolution::ResolutionRoots;
+use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
 use crate::AI_DIR;
 
@@ -31,6 +32,12 @@ pub struct Engine {
     /// runtime construction sites).
     pub composers: ComposerRegistry,
 
+    /// Catalog of verified `kind: runtime` items, scanned at engine
+    /// init via `RuntimeRegistry::build_from_bundles`. Empty by
+    /// default so test sites that construct an engine directly without
+    /// a runtimes scan still compile.
+    pub runtimes: RuntimeRegistry,
+
     /// User-space root (parent of `AI_DIR`)
     pub user_root: Option<PathBuf>,
     /// System bundle roots (parents of `AI_DIR`)
@@ -49,6 +56,7 @@ impl Engine {
             parser_dispatcher,
             trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
+            runtimes: RuntimeRegistry::default(),
             user_root,
             system_roots,
         }
@@ -56,6 +64,14 @@ impl Engine {
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
+        self
+    }
+
+    /// Install the catalog of `kind: runtime` items, normally built
+    /// once at daemon startup by scanning bundle roots. Optional —
+    /// `Engine::new` initializes the field to an empty registry.
+    pub fn with_runtimes(mut self, runtimes: RuntimeRegistry) -> Self {
+        self.runtimes = runtimes;
         self
     }
 

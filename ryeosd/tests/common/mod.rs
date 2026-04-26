@@ -123,6 +123,28 @@ impl DaemonHarness {
     /// Spawn a fresh daemon, allowing the caller to mutate the `Command`
     /// (e.g. add extra env vars or args) before spawn.
     pub async fn start_with<F: FnOnce(&mut Command)>(tweak: F) -> anyhow::Result<Self> {
+        Self::start_with_pre_init(|_, _| Ok(()), tweak).await
+    }
+
+    /// Spawn a fresh daemon, with a pre-init hook that runs **after**
+    /// the state and user-space tempdirs are chosen but **before** the
+    /// daemon process is spawned. The hook receives
+    /// `(state_path, user_space)` and may write files into either tree
+    /// (e.g. signed bundle registrations) so that the daemon's Phase 1
+    /// bootstrap and engine init pick them up.
+    ///
+    /// Used by `dispatch_pin.rs` to pre-register the `standard` bundle
+    /// so the daemon's `RuntimeRegistry` discovers
+    /// `runtime:directive-runtime` at startup — without that, the V5.3
+    /// runtime refs would not resolve in tests.
+    pub async fn start_with_pre_init<S, F>(
+        pre_init: S,
+        tweak: F,
+    ) -> anyhow::Result<Self>
+    where
+        S: FnOnce(&Path, &Path) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
         let state_dir_outer = tempfile::tempdir()?;
         let user_space = tempfile::tempdir()?;
         populate_user_space(user_space.path());
@@ -130,6 +152,8 @@ impl DaemonHarness {
         // Use a NON-EXISTENT subdir so `--init-if-missing` actually triggers
         // init. (`init-if-missing` skips when the marker file exists.)
         let state_path = state_dir_outer.path().join("state");
+
+        pre_init(&state_path, user_space.path())?;
 
         let port = pick_free_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();

@@ -101,6 +101,21 @@ impl KindProfileRegistry {
                 supports_continuation: false,
             },
         );
+        // V5.4 SSE seam: `runtime_run` is the schema-declared
+        // `thread_profile` for `kind: runtime` items. In V5.3 it
+        // mirrors `tool_run` exactly (same lifecycle — no interrupt,
+        // no continuation) because every shipped runtime spawns via
+        // the V5.2 native machinery. V5.4 streaming runtimes will
+        // diverge this profile (e.g. `supports_interrupt: true`)
+        // without touching the dispatch core.
+        profiles.insert(
+            "runtime_run".to_string(),
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
         Self { profiles }
     }
 
@@ -162,6 +177,17 @@ mod tests {
     fn service_run_no_interrupt_or_continuation() {
         let reg = KindProfileRegistry::load_defaults();
         let profile = reg.get("service_run").unwrap();
+        assert!(!profile.supports_interrupt);
+        assert!(!profile.supports_continuation);
+    }
+
+    #[test]
+    fn kind_profile_default_runtime_run_exists() {
+        let reg = KindProfileRegistry::load_defaults();
+        let profile = reg
+            .get("runtime_run")
+            .expect("`runtime_run` must be a default profile (A3 SSE seam)");
+        assert!(profile.root_executable);
         assert!(!profile.supports_interrupt);
         assert!(!profile.supports_continuation);
     }

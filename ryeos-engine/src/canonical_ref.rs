@@ -3,7 +3,7 @@ use std::fmt;
 use crate::error::EngineError;
 
 /// Suffix modifiers on canonical refs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RefSuffix {
     /// `@cap:<signature>:<fingerprint>:<constraints_hash>`
     Capability {
@@ -31,7 +31,7 @@ pub enum RefSuffix {
 ///
 /// Rejects bare refs, legacy formats, and anything without an explicit
 /// `kind:bare_id` structure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanonicalRef {
     /// The kind string, e.g. `"tool"`, `"directive"`, `"graph"`
     pub kind: String,
@@ -397,5 +397,28 @@ mod tests {
         assert_eq!(r.kind, "service");
         assert_eq!(r.bare_id, "system/status");
         assert!(r.suffix.is_some());
+    }
+
+    #[test]
+    fn canonical_ref_is_hashable_consistently_with_eq() {
+        // Two refs that parse equal must hash to the same bucket — this is
+        // the std::derive contract, but pin it here so we catch any future
+        // hand-rolled Hash impl that breaks the invariant.
+        use std::collections::HashSet;
+
+        let a = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
+        let b = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
+        assert_eq!(a, b);
+
+        let mut set: HashSet<CanonicalRef> = HashSet::new();
+        assert!(set.insert(a.clone()));
+        // Inserting the equal-but-distinct b must collide and return false.
+        assert!(!set.insert(b.clone()));
+        assert_eq!(set.len(), 1);
+
+        // Suffix difference must split into distinct keys.
+        let c = CanonicalRef::parse("service:system/status@t:2026-04-26T00:00:00Z").unwrap();
+        assert!(set.insert(c));
+        assert_eq!(set.len(), 2);
     }
 }

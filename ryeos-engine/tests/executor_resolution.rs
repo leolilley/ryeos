@@ -104,6 +104,67 @@ fn missing_for_host_triple_errors() {
 }
 
 #[test]
+fn missing_for_host_triple_lists_available_triples() {
+    // Manifest ships the binary for two OTHER triples but not the host.
+    // Error must enumerate them so the operator can see at a glance.
+    let cas = FakeCas::new();
+    let mut manifest_hashes = HashMap::new();
+    manifest_hashes.insert(
+        "bin/aarch64-apple-darwin/directive-runtime".to_string(),
+        "11".repeat(32),
+    );
+    manifest_hashes.insert(
+        "bin/x86_64-pc-windows-msvc/directive-runtime".to_string(),
+        "22".repeat(32),
+    );
+    // Unrelated executor — must NOT pollute available_triples.
+    manifest_hashes.insert(
+        "bin/x86_64-unknown-linux-gnu/some-other-tool".to_string(),
+        "33".repeat(32),
+    );
+
+    let err = resolve_native_executor(
+        &manifest_hashes,
+        "native:directive-runtime",
+        "x86_64-unknown-linux-gnu",
+        cas.get_object_fn(),
+    )
+    .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(msg.contains("aarch64-apple-darwin"), "got: {msg}");
+    assert!(msg.contains("x86_64-pc-windows-msvc"), "got: {msg}");
+    assert!(!msg.contains("some-other-tool"), "must not leak unrelated executors: {msg}");
+    assert!(msg.contains("rebuild"), "diagnostic should suggest rebuild action: {msg}");
+}
+
+#[test]
+fn missing_executor_entirely_says_so() {
+    // Manifest ships nothing for this executor at all (no triple anywhere).
+    let cas = FakeCas::new();
+    let mut manifest_hashes = HashMap::new();
+    manifest_hashes.insert(
+        "bin/x86_64-unknown-linux-gnu/some-other-tool".to_string(),
+        "11".repeat(32),
+    );
+
+    let err = resolve_native_executor(
+        &manifest_hashes,
+        "native:directive-runtime",
+        "x86_64-unknown-linux-gnu",
+        cas.get_object_fn(),
+    )
+    .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("ships no binaries for this executor at all"),
+        "should say bundle ships zero binaries for this executor; got: {msg}"
+    );
+    assert!(msg.contains("rebuild"), "should suggest rebuild: {msg}");
+}
+
+#[test]
 fn missing_blob_in_cas_errors() {
     let cas = FakeCas::new();
 

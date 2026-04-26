@@ -35,9 +35,13 @@ pub enum ExecutorResolutionError {
     /// The executor ref does not start with `native:`.
     NotNativeExecutor,
     /// The binary is not in the manifest for this host triple.
+    /// `available_triples` lists every triple the manifest DOES ship the
+    /// requested binary for, sorted, so the operator can see at a glance
+    /// whether the bundle was built for a different host (and which one).
     NotInManifest {
         executor_ref: String,
         host_triple: String,
+        available_triples: Vec<String>,
     },
     /// The item_source object is missing from CAS.
     ItemSourceMissingFromCas {
@@ -53,8 +57,23 @@ impl std::fmt::Display for ExecutorResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotNativeExecutor => write!(f, "executor_ref is not a native executor"),
-            Self::NotInManifest { executor_ref, host_triple } => {
-                write!(f, "executor {executor_ref} not found in manifest for host triple {host_triple}")
+            Self::NotInManifest { executor_ref, host_triple, available_triples } => {
+                if available_triples.is_empty() {
+                    write!(
+                        f,
+                        "executor {executor_ref} not found in manifest for host triple {host_triple} \
+                         (the bundle ships no binaries for this executor at all — \
+                         rebuild with `build-bundle` for {host_triple})"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "executor {executor_ref} not found in manifest for host triple {host_triple} \
+                         (the bundle ships this executor for: {}; rebuild with `build-bundle` \
+                         targeting {host_triple} or run on one of the supported hosts)",
+                        available_triples.join(", ")
+                    )
+                }
             }
             Self::ItemSourceMissingFromCas { item_ref } => {
                 write!(f, "item_source for {item_ref} not found in CAS")
@@ -93,12 +112,24 @@ pub fn resolve_native_executor(
 
     let item_ref = format!("bin/{host_triple}/{bare}");
 
-    let object_hash = manifest_item_source_hashes
-        .get(&item_ref)
-        .ok_or(ExecutorResolutionError::NotInManifest {
+    let object_hash = manifest_item_source_hashes.get(&item_ref).ok_or_else(|| {
+        // Enumerate triples for which the manifest DOES ship this bare
+        // executor — turns "binary not found" into a loud, actionable
+        // diagnostic rather than a silent miss.
+        let suffix = format!("/{bare}");
+        let mut available_triples: Vec<String> = manifest_item_source_hashes
+            .keys()
+            .filter_map(|k| k.strip_prefix("bin/").and_then(|rest| rest.strip_suffix(&suffix)))
+            .map(|t| t.to_string())
+            .collect();
+        available_triples.sort();
+        available_triples.dedup();
+        ExecutorResolutionError::NotInManifest {
             executor_ref: executor_ref.to_string(),
             host_triple: host_triple.to_string(),
-        })?;
+            available_triples,
+        }
+    })?;
 
     let item_source_value = cas_get_object(object_hash)
         .map_err(|_| ExecutorResolutionError::ItemSourceMissingFromCas {

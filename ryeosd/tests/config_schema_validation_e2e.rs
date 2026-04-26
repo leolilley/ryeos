@@ -47,7 +47,6 @@ fn synth_project_with_schema_tool() -> PathBuf {
     fs::create_dir_all(&tools_dir).unwrap();
 
     let body = r#"version: "1.0.0"
-tool_type: subprocess
 __executor_id__: "tool:rye/core/subprocess/execute"
 category: test/demo
 description: "schema-checked demo"

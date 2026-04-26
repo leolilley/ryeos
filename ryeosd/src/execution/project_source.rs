@@ -5,6 +5,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
 
+/// RAII cleanup for the optional checkout-derived tempdir produced by
+/// [`resolve_project_context`]. Created when `temp_dir` is `Some`
+/// (i.e. for `pushed_head` / snapshot project sources), it removes the
+/// directory when it goes out of scope. Idempotent — [`Self::disarm`]
+/// consumes the guard without removing the directory if you need to
+/// hand the path to a long-running detached owner.
+pub(crate) struct TempDirGuard(Option<PathBuf>);
+
+impl TempDirGuard {
+    pub(crate) fn new(path: Option<PathBuf>) -> Self {
+        Self(path)
+    }
+
+    /// Disarm the guard (consume without cleanup). Returns the path so
+    /// callers can hand it to a runner / detached thread that takes
+    /// over lifecycle ownership.
+    pub(crate) fn disarm(mut self) -> Option<PathBuf> {
+        self.0.take()
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+}
+
 /// How the project root is determined for execution.
 ///
 /// Tagged enum — callers specify `{ "kind": "live_fs" }` or

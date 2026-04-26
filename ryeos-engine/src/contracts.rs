@@ -281,7 +281,7 @@ mod value_shape_tests {
     }
 
     #[test]
-    fn required_consumer_NOT_satisfied_by_optional_producer() {
+    fn required_consumer_not_satisfied_by_optional_producer() {
         // A required consumer demand cannot be satisfied by an
         // optional producer emission: the producer is allowed to
         // skip the field entirely. Reported as MissingRequiredField

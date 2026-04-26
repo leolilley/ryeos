@@ -70,7 +70,6 @@ fn synth_project_with_async_tool(native_async_yaml: &str) -> PathBuf {
     // claims it and propagates into SubprocessSpec.execution.native_async.
     let runtime_body = format!(
         r#"version: "1.0.0"
-tool_type: runtime
 __executor_id__: "@subprocess"
 category: test/native_async/runtime
 description: "test runtime with native_async block under test"
@@ -85,7 +84,6 @@ config:
 
     // The user-facing tool just routes to the custom runtime above.
     let tool_body = r#"version: "1.0.0"
-tool_type: tool
 __executor_id__: "tool:local_async_runtime/runtime"
 category: test/native_async
 description: "native_async demo"

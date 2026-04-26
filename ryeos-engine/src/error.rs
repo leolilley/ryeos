@@ -198,6 +198,33 @@ pub enum EngineError {
     #[error("delegated principal validation failed: {reason}")]
     DelegationValidationFailed { reason: String },
 
+    // ── Runtime registry ─────────────────────────────────────────────
+
+    #[error("runtime YAML invalid at {path}: {reason}")]
+    RuntimeYamlInvalid { path: PathBuf, reason: String },
+
+    #[error("no runtime registered for kind `{kind}`")]
+    NoRuntimeFor { kind: String },
+
+    #[error(
+        "kind `{kind}` has multiple registered runtimes ({}) but none is marked `default: true`; \
+         caller must use an explicit `runtime:` override",
+        candidates.join(", ")
+    )]
+    RuntimeDefaultRequired {
+        kind: String,
+        candidates: Vec<String>,
+    },
+
+    #[error(
+        "kind `{kind}` has multiple runtimes marked `default: true`: {}",
+        defaults.join(", ")
+    )]
+    MultipleRuntimeDefaults {
+        kind: String,
+        defaults: Vec<String>,
+    },
+
     // ── Internal ─────────────────────────────────────────────────────
 
     #[error("internal engine error: {0}")]

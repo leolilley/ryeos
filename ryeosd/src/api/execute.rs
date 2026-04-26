@@ -1,17 +1,11 @@
-use std::collections::HashMap;
-
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::task;
 
-use crate::execution::launch;
-use crate::execution::project_source::{self, ProjectSource};
-use crate::execution::runner::{self, ExecutionParams};
+use crate::execution::project_source::{self, ProjectSource, TempDirGuard};
 use crate::policy;
-use crate::services::thread_lifecycle;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -98,7 +92,7 @@ pub async fn execute(
     // For pushed_head, this checks out from CAS so resolution runs against
     // the correct project root.
     let checkout_id = format!("pre-{}-{:08x}", lillux::time::timestamp_millis(), rand::random::<u32>());
-    let project_ctx = project_source::resolve_project_context(
+    let mut project_ctx = project_source::resolve_project_context(
         &state,
         &project_source,
         &project_path,
@@ -114,234 +108,94 @@ pub async fn execute(
         }
     })?;
 
-    // ── Service dispatch path ─────────────────────────────────────────
-    // `kind: service` items are daemon-owned in-process operations.
-    // Delegated to the shared service executor which handles
-    // resolve→verify→availability→cap enforcement→audit→dispatch.
-    if request.item_ref.starts_with("service:") {
-        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+    // Centralized cleanup: take ownership of the optional checkout
+    // tempdir into a Drop guard. The dispatch path below disarms the
+    // guard via `disarm()` and hands the path to the runner's
+    // `ExecutionGuard`, which owns cleanup for the remainder of the
+    // (possibly background) execution. Every early return below this
+    // point drops the guard and removes the directory.
+    let temp_dir_guard = TempDirGuard::new(project_ctx.temp_dir.take());
 
-        let plan_ctx = PlanContext {
-            requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
+    // ── Sole dispatch path ────────────────────────────────────────────
+    //
+    // V5.3 Task 7 — `dispatch::dispatch` is now the SOLE path from
+    // `/execute` to any terminator (Subprocess, InProcessHandler,
+    // NativeRuntimeSpawn). It walks the kind-schema alias chain
+    // (cycle-checked, hop-bounded), then routes to the matching
+    // dispatch_subprocess / dispatch_service / dispatch_native_runtime.
+    // No silent fallback: a kind without an `execution:` block returns
+    // 501; a schema misconfiguration returns 400 with a clear message.
+    use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(
+            ryeos_engine::contracts::Principal {
                 fingerprint: caller_principal_id.clone(),
                 scopes: caller_scopes.clone(),
-            }),
-            project_context: ProjectContext::LocalPath {
-                path: project_ctx.effective_path.clone(),
             },
-            current_site_id: site_id.to_string(),
-            origin_site_id: site_id.to_string(),
-            execution_hints: Default::default(),
-            validate_only: false,
-        };
-
-        let exec_ctx = crate::service_executor::ExecutionContext {
-            principal_fingerprint: caller_principal_id.clone(),
-            caller_scopes: caller_scopes.clone(),
-            engine: state.engine.clone(),
-            plan_ctx,
-        };
-
-        match crate::service_executor::execute_service(
-            &request.item_ref,
-            request.parameters,
-            crate::service_executor::ExecutionMode::Live,
-            &exec_ctx,
-            &state,
-        )
-        .await
-        {
-            Ok(result) => {
-                if let Some(ref d) = project_ctx.temp_dir {
-                    let _ = std::fs::remove_dir_all(d);
-                }
-                return Ok(Json(json!({
-                    "thread": {
-                        "thread_id": result.audit_thread_id,
-                        "kind": "service_run",
-                        "item_ref": request.item_ref,
-                        "status": "completed",
-                        "trust_class": format!("{:?}", result.trust_class),
-                        "effective_caps": result.effective_caps,
-                    },
-                    "result": result.value,
-                })));
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if let Some(ref d) = project_ctx.temp_dir {
-                    let _ = std::fs::remove_dir_all(d);
-                }
-                // Map cap denial to 403
-                if msg.contains("insufficient capabilities") {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        Json(json!({ "error": msg })),
-                    ));
-                }
-                return Err(invalid_request(e));
-            }
-        }
-    }
-
-    // ── Tool / directive dispatch path ────────────────────────────────
-    let mut resolved = thread_lifecycle::resolve_root_execution(
-            &state.engine,
-            site_id,
-            &project_ctx.effective_path,
-            &request.item_ref,
-            &request.launch_mode,
-            request.parameters.clone(),
-            Some(caller_principal_id.clone()),
-            caller_scopes,
-            request.validate_only,
-        )
-        .map_err(|err| {
-            if let Some(ref d) = project_ctx.temp_dir {
-                let _ = std::fs::remove_dir_all(d);
-            }
-            invalid_request(err)
-        })?;
-
-    if let Some(target) = request.target_site_id {
-        resolved.target_site_id = Some(target);
-    }
-
-    if !state.threads.kind_profiles().is_root_executable(&resolved.kind) {
-        if let Some(ref d) = project_ctx.temp_dir {
-            let _ = std::fs::remove_dir_all(d);
-        }
-        return Err(not_implemented(&format!(
-            "kind '{}' is not root executable",
-            resolved.kind
-        )));
-    }
-
-    // Check if this resolves to a native runtime binary
-    let is_native = launch::is_native_executor(&resolved.executor_ref);
-    if is_native {
-        // Reject unsupported modes on native path
-        if matches!(project_source, ProjectSource::PushedHead) {
-            if let Some(ref d) = project_ctx.temp_dir {
-                let _ = std::fs::remove_dir_all(d);
-            }
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "pushed_head not yet supported for native runtimes" })),
-            ));
-        }
-        if resolved.target_site_id.is_some() {
-            if let Some(ref d) = project_ctx.temp_dir {
-                let _ = std::fs::remove_dir_all(d);
-            }
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "remote execution not yet supported for native runtimes" })),
-            ));
-        }
-        if request.launch_mode == "detached" {
-            if let Some(ref d) = project_ctx.temp_dir {
-                let _ = std::fs::remove_dir_all(d);
-            }
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "detached mode not yet supported for native runtimes" })),
-            ));
-        }
-    }
-
-    if request.validate_only {
-        let engine = state.engine.clone();
-        let resolved_clone = resolved.clone();
-        let validated = task::spawn_blocking(move || {
-            thread_lifecycle::validate_item(&engine, &resolved_clone)
-        })
-        .await
-        .map_err(|err| policy::internal_error(err.into()))?
-        .map_err(invalid_request)?;
-
-        if let Some(ref d) = project_ctx.temp_dir {
-            let _ = std::fs::remove_dir_all(d);
-        }
-
-        return Ok(Json(json!({
-            "validated": true,
-            "item_ref": resolved.item_ref,
-            "kind": resolved.kind,
-            "executor_ref": resolved.executor_ref,
-            "trust_class": validated.trust_class,
-            "plan_id": validated.plan_id,
-        })));
-    }
-
-    // Resolve vault secrets from item-declared required_secrets only.
-    let vault_bindings = HashMap::new();
-
-    // Capture executor_ref before `resolved` is moved into ExecutionParams.
-    let executor_ref = resolved.executor_ref.clone();
-
-    let params = ExecutionParams {
-        resolved,
-        acting_principal: caller_principal_id,
-        project_path: Some(project_ctx.original_path),
-        vault_bindings,
-        snapshot_hash: project_ctx.snapshot_hash,
-        parameters: request.parameters,
-        temp_dir: project_ctx.temp_dir,
+        ),
+        project_context: ProjectContext::LocalPath {
+            path: project_ctx.effective_path.clone(),
+        },
+        current_site_id: site_id.to_string(),
+        origin_site_id: site_id.to_string(),
+        execution_hints: Default::default(),
+        validate_only: request.validate_only,
+    };
+    let exec_ctx = crate::service_executor::ExecutionContext {
+        principal_fingerprint: caller_principal_id.clone(),
+        caller_scopes: caller_scopes.clone(),
+        engine: state.engine.clone(),
+        plan_ctx,
     };
 
-    // Native runtime path
-    if is_native {
-        let project_path = params.project_path.as_ref().ok_or_else(|| {
-            policy::internal_error(anyhow::anyhow!(
-                "native runtime launch requires a project_path"
-            ))
-        })?;
-        let result = launch::build_and_launch(
-            &state,
-            &executor_ref,
-            &params.acting_principal,
-            &params.resolved,
-            project_path,
-            &params.parameters,
-            &params.vault_bindings,
-        )
-        .map_err(|err| policy::internal_error(err))?;
-
-        if let Some(tid) = result.thread.get("thread_id").and_then(|v| v.as_str()) {
-            span.record("thread_id", tid);
+    // **B1**: parse the user-supplied root ref ONCE here so the
+    // dispatch loop can gate `runtime.execute` on direct vs. indirect
+    // invocation. Parse failure is a 400 — the substring match below
+    // is gone (A1), so we surface a clear DispatchError variant.
+    let root_canonical = match ryeos_engine::canonical_ref::CanonicalRef::parse(
+        &request.item_ref,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("invalid item ref '{}': {e}", request.item_ref)
+                })),
+            ));
         }
+    };
 
-        return Ok(Json(json!({
-            "thread": result.thread,
-            "result": result.result,
-        })));
+    let dispatch_req = crate::dispatch::DispatchRequest {
+        launch_mode: request.launch_mode.as_str(),
+        target_site_id: request.target_site_id.as_deref(),
+        project_source_is_pushed_head: matches!(project_source, ProjectSource::PushedHead),
+        validate_only: request.validate_only,
+        params: request.parameters.clone(),
+        acting_principal: caller_principal_id.as_str(),
+        project_path: &project_ctx.effective_path,
+        original_project_path: project_ctx.original_path.clone(),
+        snapshot_hash: project_ctx.snapshot_hash.clone(),
+        temp_dir: temp_dir_guard.disarm(),
+        original_root_kind: root_canonical.kind.as_str(),
+        current_resolved: None,
+    };
+
+    match crate::dispatch::dispatch(&request.item_ref, &dispatch_req, &exec_ctx, &state).await {
+        Ok(crate::dispatch::DispatchOutcome::Unary(value)) => Ok(Json(value)),
+        Ok(crate::dispatch::DispatchOutcome::Stream(_)) => Err(not_implemented(
+            "streaming dispatch outcome is not implemented in V5.3",
+        )),
+        // **A1**: typed-error mapping. Single call to `http_status()`;
+        // no substring matching survives. The `Display` impl of each
+        // variant carries the wording the pin tests assert against, so
+        // status code + body shape are byte-stable across this refactor.
+        Err(e) => {
+            let status = e.http_status();
+            Err((status, Json(json!({ "error": e.to_string() }))))
+        }
     }
-
-    if request.launch_mode == "detached" {
-        let result = runner::run_detached(state.clone(), params)
-            .await
-            .map_err(|err| policy::internal_error(err.into()))?;
-
-        span.record("thread_id", result.running_thread.thread_id.as_str());
-
-        return Ok(Json(json!({
-            "thread": result.running_thread,
-            "detached": true,
-        })));
-    }
-
-    // Inline execution
-    let result = runner::run_inline(state.clone(), params)
-        .await
-        .map_err(|err| policy::internal_error(err.into()))?;
-
-    span.record("thread_id", result.finalized_thread.thread_id.as_str());
-
-    Ok(Json(json!({
-        "thread": result.finalized_thread,
-        "result": result.result,
-    })))
 }
 
 fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {

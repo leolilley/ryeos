@@ -1,14 +1,8 @@
-# rye:signed:2026-04-25T06:47:55Z:e8ccac3144975451724cc39de0b1a6135150116f746b8da5f8e29c03329489be:nUCbihdnyuNLahwZ1B8AJvlt1sKNvYGDyVK06WbJl8x8SrBTkPyG4xHrDUsxuoZj6NJcn+HhsRt5XqBU+SZfCQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T10:33:19Z:504a202c8868c50ad6eadf906b8f49d8cf95b283bc21d6e4ee1529d813e1df46:htPE77wIvK16tQwIgIv/zJm7MoTg2ypfC72DdmLxYED2KRS84t7Kk96aNQVQr9NGMj+QjpJ9hqDMWzUYQS2HAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
   directory: knowledge
-execution:
-  aliases:
-    "@knowledge": "tool:rye/core/executors/knowledge/knowledge"
-  resolution:
-    - step: resolve_extends_chain
-    - step: resolve_references
 formats:
   - extensions: [".md"]
     parser: parser:rye/core/markdown/frontmatter

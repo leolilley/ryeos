@@ -1,0 +1,9 @@
+# rye:signed:2026-04-26T09:30:14Z:7c5f3a74be0ed67e4d56857b21ee481d841de047663fa8d002290bfda163e313:36TUvw6wXVujzHnerex8bs+Q9fzo7DkfxKc0r9oeiHG9qJhl36Cl8vu3rxXuuFXA014DxvTS5IL42YZlYQdvAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: runtime
+serves: directive
+default: true
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-runtime
+abi_version: "v1"
+required_caps:
+  - runtime.execute
+description: "Interprets directive workflows by orchestrating LLM threads"

@@ -15,6 +15,7 @@ use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
@@ -143,9 +144,27 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     //     launcher reads the registry back off the engine — there is
     //     no second construction site that could drift.
     let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
+
+    // Scan every bundle root (system + user, when present) for verified
+    // `kind: runtime` YAMLs. Fail-closed on any verification error or
+    // multi-default conflict — runtime catalog drift is a startup-time
+    // problem, not a per-request one.
+    let mut runtime_scan_roots: Vec<PathBuf> = system_roots.clone();
+    if let Some(ref ur) = user_root {
+        runtime_scan_roots.push(ur.clone());
+    }
+    let runtimes = RuntimeRegistry::build_from_bundles(&runtime_scan_roots, &trust_store)
+        .context("failed to build runtime registry")?;
+    tracing::info!(
+        count = runtimes.all().count(),
+        roots = runtime_scan_roots.len(),
+        "loaded runtime registry"
+    );
+
     let engine = Engine::new(kinds, parser_dispatcher, user_root, system_roots)
         .with_trust_store(trust_store)
-        .with_composers(composers);
+        .with_composers(composers)
+        .with_runtimes(runtimes);
 
     Ok(engine)
 }

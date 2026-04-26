@@ -3,6 +3,8 @@ pub mod api;
 pub mod auth;
 pub mod bootstrap;
 pub mod config;
+pub mod dispatch;
+pub mod dispatch_error;
 pub mod engine_init;
 pub mod execution;
 pub mod identity;
