@@ -21,8 +21,15 @@ fn current_uid() -> u32 {
 #[derive(Debug, Parser)]
 #[command(name = "ryeosd", about = "Rust control plane daemon for Rye OS")]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<DaemonCommand>,
+
     #[arg(long)]
     pub config: Option<PathBuf>,
+
+    /// Override the state directory (default: XDG state dir / ryeosd)
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
 
     #[arg(long, default_value = "127.0.0.1:7400")]
     pub bind: SocketAddr,
@@ -35,10 +42,6 @@ pub struct Cli {
 
     #[arg(long)]
     pub system_data_dir: Option<PathBuf>,
-
-    /// Additional bundle roots (ordered, first match wins for kind schema conflicts)
-    #[arg(long)]
-    pub bundle_root: Vec<PathBuf>,
 
     #[arg(long)]
     pub require_auth: bool,
@@ -59,6 +62,19 @@ pub struct Cli {
     pub force: bool,
 }
 
+#[derive(Debug, clap::Subcommand)]
+pub enum DaemonCommand {
+    /// Run a service handler in standalone mode (daemon must be stopped).
+    RunService {
+        /// Canonical service ref, e.g. service:system/status
+        service_ref: String,
+
+        /// JSON parameters for the service call
+        #[arg(long)]
+        params: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -67,8 +83,6 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub signing_key_path: PathBuf,
     pub system_data_dir: PathBuf,
-    /// Additional bundle roots beyond system_data_dir (ordered, first match wins).
-    pub bundle_roots: Vec<PathBuf>,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
 }
@@ -81,20 +95,11 @@ struct PartialConfig {
     state_dir: Option<PathBuf>,
     signing_key_path: Option<PathBuf>,
     system_data_dir: Option<PathBuf>,
-    #[serde(default)]
-    bundle_roots: Vec<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
 }
 
 impl Config {
-    /// All system roots in resolution order: system_data_dir first, then bundle_roots.
-    pub fn all_system_roots(&self) -> Vec<PathBuf> {
-        let mut roots = vec![self.system_data_dir.clone()];
-        roots.extend(self.bundle_roots.iter().cloned());
-        roots
-    }
-
     pub fn load(cli: &Cli) -> Result<Self> {
         let defaults = Self::default_paths(cli.bind)?;
         let file_cfg = if let Some(path) = &cli.config {
@@ -109,9 +114,13 @@ impl Config {
         };
 
         let state_dir = cli
-            .db_path
-            .as_ref()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .state_dir
+            .clone()
+            .or_else(|| {
+                cli.db_path
+                    .as_ref()
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+            })
             .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.state_dir.clone()))
             .unwrap_or_else(|| defaults.state_dir.clone());
 
@@ -134,7 +143,7 @@ impl Config {
             signing_key_path: file_cfg
                 .as_ref()
                 .and_then(|cfg| cfg.signing_key_path.clone())
-                .unwrap_or_else(|| state_dir.join("identity").join("node-key.pem")),
+                .unwrap_or_else(|| state_dir.join(".ai").join("identity").join("node-key.pem")),
             system_data_dir: env::var_os("RYE_SYSTEM_SPACE")
                 .map(PathBuf::from)
                 .or_else(|| cli.system_data_dir.clone())
@@ -144,14 +153,6 @@ impl Config {
                         .and_then(|cfg| cfg.system_data_dir.clone())
                 })
                 .unwrap_or_else(|| defaults.system_data_dir.clone()),
-            bundle_roots: if cli.bundle_root.is_empty() {
-                file_cfg
-                    .as_ref()
-                    .map(|cfg| cfg.bundle_roots.clone())
-                    .unwrap_or_default()
-            } else {
-                cli.bundle_root.clone()
-            },
             require_auth: cli.require_auth
                 || file_cfg
                     .as_ref()
@@ -222,7 +223,6 @@ impl Config {
                     home.join(".ai/config/keys/signing/private_key.pem")
                 }),
             system_data_dir: data_dir,
-            bundle_roots: Vec::new(),
             require_auth: false,
             authorized_keys_dir: state_dir.join("auth").join("authorized_keys"),
         })

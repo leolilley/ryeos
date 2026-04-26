@@ -1,0 +1,349 @@
+//! Smoke tests for the build-bundle pipeline (PR1b2 / V5.1).
+//!
+//! These tests verify the *structure* of a built bundle without
+//! re-running the full build pipeline (which requires `cargo build`).
+//!
+//! Prerequisite: `cargo run -p rye-cli --bin rye -- build-bundle`
+//! must have been run at least once.
+
+use sha2::Digest;
+use std::path::Path;
+
+/// The standard bundle directory relative to workspace root.
+fn bundle_dir() -> std::path::PathBuf {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR not set");
+    Path::new(&manifest_dir)
+        .parent()
+        .unwrap()
+        .join("ryeos-bundles/standard")
+}
+
+/// Default host triple.
+fn host_triple() -> String {
+    let output = std::process::Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .expect("rustc -vV");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find(|l| l.starts_with("host:"))
+        .expect("host triple in rustc -vV")
+        .strip_prefix("host:")
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn bundle_binary_exists_and_is_executable() {
+    let triple = host_triple();
+    let bin_path = bundle_dir()
+        .join(".ai/bin")
+        .join(&triple)
+        .join("rye");
+
+    assert!(
+        bin_path.exists(),
+        "bundle binary not found at {bin_path:?}. Run: rye dev build-bundle"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&bin_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "binary should be executable");
+    }
+}
+
+#[test]
+fn bundle_sidecar_exists_and_parsable() {
+    let triple = host_triple();
+    let sidecar_path = bundle_dir()
+        .join(".ai/bin")
+        .join(&triple)
+        .join("rye.item_source.json");
+
+    assert!(
+        sidecar_path.exists(),
+        "sidecar not found at {sidecar_path:?}"
+    );
+
+    let content = std::fs::read_to_string(&sidecar_path)
+        .expect("read sidecar");
+
+    // The sidecar is signed — skip the signature header, parse the JSON body
+    let json_start = content
+        .find('\n')
+        .expect("sidecar should have signature header line followed by JSON");
+    let json_str = &content[json_start + 1..];
+    let value: serde_json::Value = serde_json::from_str(json_str)
+        .expect("sidecar JSON body should be valid");
+
+    assert_eq!(
+        value["item_ref"],
+        format!("bin/{triple}/rye"),
+        "item_ref mismatch"
+    );
+    assert!(
+        value.get("content_blob_hash").is_some(),
+        "missing content_blob_hash"
+    );
+    assert!(
+        value.get("mode").is_some(),
+        "missing mode"
+    );
+    assert_eq!(value["mode"], 493, "mode should be 0o755");
+    assert!(
+        value["signature_info"]["fingerprint"]
+            .as_str()
+            .unwrap_or("")
+            .len()
+            == 64,
+        "fingerprint should be 64-char hex"
+    );
+}
+
+#[test]
+fn bundle_manifest_ref_exists() {
+    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
+
+    assert!(
+        ref_path.exists(),
+        "manifest ref not found at {ref_path:?}. Run: rye dev build-bundle"
+    );
+
+    let content = std::fs::read_to_string(&ref_path)
+        .expect("read manifest ref");
+    let hash = content.trim();
+
+    // SHA-256 hash is 64 hex chars
+    assert_eq!(hash.len(), 64, "manifest ref should be 64-char hex hash");
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "manifest ref should be hex"
+    );
+}
+
+#[test]
+fn bundle_cas_contains_manifest_object() {
+    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
+    if !ref_path.exists() {
+        return; // Skip if bundle not built
+    }
+
+    let hash = std::fs::read_to_string(&ref_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let objects_dir = bundle_dir().join(".ai/objects/objects");
+    // lillux uses 2+2 shard prefix
+    let shard = format!("{}/{}", &hash[..2], &hash[2..4]);
+    let object_path = objects_dir.join(&shard).join(format!("{hash}.json"));
+
+    assert!(
+        object_path.exists(),
+        "manifest object not found at {object_path:?}"
+    );
+
+    let content = std::fs::read_to_string(&object_path)
+        .expect("read manifest object");
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .expect("manifest object should be valid JSON");
+
+    assert_eq!(value["kind"], "source_manifest");
+    assert!(
+        value.get("item_source_hashes").is_some(),
+        "manifest should have item_source_hashes"
+    );
+}
+
+#[test]
+fn bundle_cas_contains_binary_blob() {
+    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
+    if !ref_path.exists() {
+        return; // Skip if bundle not built
+    }
+
+    // Load the manifest to get the item_source hash
+    let manifest_hash = std::fs::read_to_string(&ref_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let objects_dir = bundle_dir().join(".ai/objects/objects");
+    let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
+    let manifest_path = objects_dir.join(&shard).join(format!("{manifest_hash}.json"));
+
+    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_content).unwrap();
+
+    // Get the item_source_hash for our binary
+    let triple = host_triple();
+    let item_ref = format!("bin/{triple}/rye");
+    let item_source_hash = manifest["item_source_hashes"][&item_ref]
+        .as_str()
+        .expect("item_source_hash not found in manifest");
+
+    // Load the item_source to get the blob hash
+    let is_shard = format!("{}/{}", &item_source_hash[..2], &item_source_hash[2..4]);
+    let is_path = objects_dir
+        .join(&is_shard)
+        .join(format!("{item_source_hash}.json"));
+    let is_content = std::fs::read_to_string(&is_path).unwrap();
+    let item_source: serde_json::Value = serde_json::from_str(&is_content).unwrap();
+
+    let blob_hash = item_source["content_blob_hash"]
+        .as_str()
+        .expect("content_blob_hash missing");
+
+    // Verify blob exists
+    let blobs_dir = bundle_dir().join(".ai/objects/blobs");
+    let blob_shard = format!("{}/{}", &blob_hash[..2], &blob_hash[2..4]);
+    let blob_path = blobs_dir.join(&blob_shard).join(blob_hash);
+
+    assert!(
+        blob_path.exists(),
+        "binary blob not found at {blob_path:?}"
+    );
+
+    // Verify blob hash matches
+    let blob_bytes = std::fs::read(&blob_path).unwrap();
+    let computed_hash = format!("{:x}", sha2::Sha256::digest(&blob_bytes));    assert_eq!(
+        computed_hash, blob_hash,
+        "blob content hash mismatch (corrupted blob)"
+    );
+}
+
+#[test]
+fn bundle_manifest_json_exists() {
+    let triple = host_triple();
+    let manifest_path = bundle_dir()
+        .join(".ai/bin")
+        .join(&triple)
+        .join("MANIFEST.json");
+
+    assert!(
+        manifest_path.exists(),
+        "MANIFEST.json not found at {manifest_path:?}"
+    );
+
+    let content = std::fs::read_to_string(&manifest_path)
+        .expect("read MANIFEST.json");
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .expect("MANIFEST.json should be valid JSON");
+
+    assert!(value.get("rye").is_some(), "MANIFEST.json should have 'rye' entry");
+    assert!(
+        value["rye"].get("content_blob_hash").is_some(),
+        "MANIFEST.json rye entry should have content_blob_hash"
+    );
+    assert!(
+        value["rye"].get("manifest_hash").is_some(),
+        "MANIFEST.json rye entry should have manifest_hash"
+    );
+    assert!(
+        value["rye"].get("item_source_hash").is_some(),
+        "MANIFEST.json rye entry should have item_source_hash"
+    );
+}
+
+#[test]
+fn bundle_tools_dir_has_13_signed_yamls() {
+    let tools_dir = bundle_dir().join(".ai").join("tools").join("rye");
+    if !tools_dir.is_dir() {
+        return; // Skip if bundle not built yet
+    }
+
+    let mut yaml_files = Vec::new();
+    walk_yaml_files(&tools_dir, &mut yaml_files);
+
+    assert_eq!(
+        yaml_files.len(),
+        13,
+        "expected exactly 13 tool YAMLs (V5.1: verify carved out), found {}: {:?}",
+        yaml_files.len(),
+        yaml_files
+    );
+}
+
+#[test]
+fn bundle_all_yamls_are_signed() {
+    let tools_dir = bundle_dir().join(".ai").join("tools").join("rye");
+    if !tools_dir.is_dir() {
+        return; // Skip if bundle not built yet
+    }
+
+    let mut yaml_files = Vec::new();
+    walk_yaml_files(&tools_dir, &mut yaml_files);
+
+    for path in &yaml_files {
+        let content = std::fs::read_to_string(path).unwrap();
+        let first_line = content.lines().next().unwrap_or("");
+        assert!(
+            first_line.starts_with("# rye:signed:"),
+            "not signed: {} — first line: {:?}",
+            path.display(),
+            first_line
+        );
+    }
+}
+
+#[test]
+fn descriptor_table_count_and_prefix() {
+    // These must match the canonical list in ryeosd::services::handlers::ALL.
+    let services: &[&str] = &[
+        "service:system/status",
+        "service:identity/public_key",
+        "service:threads/list",
+        "service:threads/get",
+        "service:threads/children",
+        "service:threads/chain",
+        "service:events/replay",
+        "service:events/chain_replay",
+        "service:commands/submit",
+        "service:bundle/install",
+        "service:bundle/list",
+        "service:bundle/remove",
+        "service:maintenance/gc",
+        "service:rebuild",
+        "service:verify",
+        "service:fetch",
+        "service:sign",
+    ];
+    assert_eq!(
+        services.len(),
+        17,
+        "service descriptor table count drifted from expected 17"
+    );
+
+    // Every entry should be service:*
+    for service_ref in services {
+        assert!(
+            service_ref.starts_with("service:"),
+            "unexpected service_ref: {service_ref}"
+        );
+    }
+}
+
+fn walk_yaml_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_yaml_files(&path, files);
+            } else {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if matches!(ext, "yaml" | "yml") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+}

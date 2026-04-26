@@ -19,7 +19,7 @@ mod integration_tests {
 
     fn setup_state_store() -> (TempDir, Arc<StateStore>) {
         let tmpdir = TempDir::new().unwrap();
-        let state_root = tmpdir.path().join(".state");
+        let state_root = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
         let test_key_path = tmpdir.path().join("test_key.pem");

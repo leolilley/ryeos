@@ -23,11 +23,26 @@ pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<
 
     let signature_info = parse_signature_info_from_bytes(&bytes);
 
+    // Detect Unix exec bit on the source file.
+    let mode = fs::metadata(file_path)
+        .ok()
+        .and_then(|m| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                Some(m.permissions().mode())
+            }
+            #[cfg(not(unix))]
+            None
+        })
+        .filter(|m| m & 0o111 != 0);
+
     let source = ItemSource {
         item_ref: item_ref.to_string(),
         content_blob_hash: blob_hash.clone(),
         integrity: integrity.clone(),
         signature_info,
+        mode,
     };
     let object_hash = cas.store_object(&source.to_value())?;
 

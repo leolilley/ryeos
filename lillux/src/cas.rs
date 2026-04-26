@@ -34,6 +34,21 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Materialize a blob from CAS to a target path, setting Unix permission
+/// bits so the result is executable. Like `atomic_write` but preserves
+/// the exec mode from the `ItemSource` record.
+///
+/// On non-Unix platforms, the mode is ignored (the file is still written).
+pub fn materialize_executable(target: &Path, data: &[u8], mode: u32) -> Result<()> {
+    atomic_write(target, data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
 fn escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

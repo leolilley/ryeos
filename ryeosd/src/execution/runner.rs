@@ -24,6 +24,7 @@ use crate::services::thread_lifecycle::{
     self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
 use crate::state::AppState;
+use super::callback_token::compute_ttl;
 
 /// All inputs needed to run an execution.
 pub struct ExecutionParams {
@@ -52,6 +53,7 @@ struct ExecutionGuard {
     thread_id: Option<String>,
     temp_dir: Option<PathBuf>,
     thread_finalized: bool,
+    callback_token: Option<String>,
 }
 
 impl ExecutionGuard {
@@ -61,6 +63,7 @@ impl ExecutionGuard {
             thread_id: None,
             temp_dir: None,
             thread_finalized: false,
+            callback_token: None,
         }
     }
 
@@ -74,8 +77,15 @@ impl ExecutionGuard {
         self.temp_dir = Some(dir);
     }
 
+    /// Track a callback token for revocation on cleanup.
+    fn track_callback_token(&mut self, token: String) {
+        self.callback_token = Some(token);
+    }
+
     /// Fail the tracked thread if it hasn't been finalized yet.
+    /// Also revokes the callback token.
     fn fail_thread(&mut self, outcome_code: &str) {
+        self.revoke_callback_token();
         if self.thread_finalized {
             return;
         }
@@ -100,8 +110,19 @@ impl ExecutionGuard {
         self.thread_finalized = true;
     }
 
+    /// Revoke the callback token if one was tracked.
+    fn revoke_callback_token(&mut self) {
+        if let Some(ref token) = self.callback_token {
+            self.state.callback_tokens.invalidate(token);
+            if let Some(ref tid) = self.thread_id {
+                self.state.callback_tokens.invalidate_for_thread(tid);
+            }
+        }
+    }
+
     /// Perform all cleanup: remove temp dir.
     fn cleanup(&mut self) {
+        self.revoke_callback_token();
         if let Some(ref d) = self.temp_dir {
             if d.exists() {
                 let _ = std::fs::remove_dir_all(d);
@@ -112,11 +133,12 @@ impl ExecutionGuard {
     /// Consume into parts for moving into tokio::spawn.
     fn into_detached_parts(
         mut self,
-    ) -> (AppState, Option<String>, Option<PathBuf>) {
+    ) -> (AppState, Option<String>, Option<PathBuf>, Option<String>) {
         let state = self.state.clone();
         let thread_id = self.thread_id.take();
         let temp_dir = self.temp_dir.take();
-        (state, thread_id, temp_dir)
+        let callback_token = self.callback_token.take();
+        (state, thread_id, temp_dir, callback_token)
     }
 }
 
@@ -423,6 +445,43 @@ pub struct DetachedResult {
     pub running_thread: ThreadDetail,
 }
 
+/// Mint a fresh callback token and build the standard daemon-callback env
+/// bindings that every spawned subprocess receives.
+///
+/// The token is registered in `state.callback_tokens` before return and
+/// must be invalidated by the caller after the child exits (or on any
+/// failure path that prevents child execution). The token is fresh per
+/// spawn and per resume — no reuse across attempts.
+fn mint_callback_env(
+    state: &AppState,
+    thread_id: &str,
+    project_path: Option<&std::path::Path>,
+    duration_seconds: Option<u64>,
+) -> (HashMap<String, String>, String) {
+    let ttl = compute_ttl(duration_seconds);
+    let cap = state.callback_tokens.generate(
+        thread_id,
+        project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
+        ttl,
+    );
+
+    let mut bindings = HashMap::new();
+    bindings.insert(
+        "RYEOSD_SOCKET_PATH".to_string(),
+        state.config.uds_path.to_string_lossy().to_string(),
+    );
+    bindings.insert("RYEOSD_CALLBACK_TOKEN".to_string(), cap.token.clone());
+    bindings.insert("RYEOSD_THREAD_ID".to_string(), thread_id.to_string());
+    if let Some(pp) = project_path {
+        bindings.insert(
+            "RYEOSD_PROJECT_PATH".to_string(),
+            pp.to_string_lossy().to_string(),
+        );
+    }
+
+    (bindings, cap.token)
+}
+
 /// Run an execution inline (blocking until completion).
 ///
 /// Handles the full lifecycle: CAS context, snapshot, spawn,
@@ -481,6 +540,12 @@ pub async fn run_inline(
     let crid = running.chain_root_id.clone();
     let resolved = params.resolved.clone();
     let vault = params.vault_bindings.clone();
+
+    // Mint callback token for the spawned subprocess.
+    let (cb_bindings, _cb_token) = mint_callback_env(
+        &state, &tid, Some(&effective_path), None,
+    );
+
     // Daemon-owned per-thread state dir under config.state_dir — does
     // NOT live under the (ephemeral, CAS-checkout) working directory,
     // so checkpoints survive working-dir cleanup and daemon restart.
@@ -497,6 +562,7 @@ pub async fn run_inline(
             &tid,
             &crid,
             vault,
+            cb_bindings,
             Some(state_dir.as_path()),
             false,
             inline_snapshot.as_deref(),
@@ -657,13 +723,21 @@ pub async fn run_detached(
     // Capture thread details before moving guard
     let running_thread_id = running.thread_id.clone();
 
+    // Mint callback token for the spawned subprocess. Token lifetime is
+    // owned by the background task (revoked on wait completion or error).
+    let (cb_bindings, cb_token) = mint_callback_env(
+        &state, &running.thread_id, Some(effective_path.as_path()), None,
+    );
+    guard.track_callback_token(cb_token);
+
     // Move guard parts into the background task
-    let (bg_state, _bg_thread_id, bg_temp_dir) = guard.into_detached_parts();
+    let (bg_state, _bg_thread_id, bg_temp_dir, bg_cb_token) = guard.into_detached_parts();
     let bg_thread_id = running.thread_id.clone();
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
     let bg_engine = state.engine.clone();
     let bg_vault = params.vault_bindings.clone();
+    let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
@@ -677,6 +751,7 @@ pub async fn run_detached(
         bg_resolved,
         bg_engine,
         bg_vault,
+        bg_cb_bindings,
         bg_acting_principal,
         bg_pre_manifest_hash,
         bg_base_snapshot_hash,
@@ -685,6 +760,7 @@ pub async fn run_detached(
         bg_state_root,
         false, // is_resume
         None,  // prior_status_for_mark_running
+        bg_cb_token,
     ));
 
     // Re-fetch the thread detail (the original was consumed by the background task setup)
@@ -717,8 +793,10 @@ pub async fn run_detached(
     name = "thread:dispatch",
     skip(
         bg_state, bg_chain_root_id, bg_resolved, bg_engine, bg_vault,
-        bg_acting_principal, bg_pre_manifest_hash, bg_base_snapshot_hash,
-        bg_project_path, bg_temp_dir, bg_state_root, prior_status_for_mark_running
+        bg_cb_bindings, bg_acting_principal, bg_pre_manifest_hash,
+        bg_base_snapshot_hash,
+        bg_project_path, bg_temp_dir, bg_state_root, prior_status_for_mark_running,
+        bg_cb_token
     ),
     fields(
         thread_id = %bg_thread_id,
@@ -734,6 +812,7 @@ async fn dispatch_detached_bg_task(
     bg_resolved: ResolvedExecutionRequest,
     bg_engine: std::sync::Arc<ryeos_engine::engine::Engine>,
     bg_vault: HashMap<String, String>,
+    bg_cb_bindings: HashMap<String, String>,
     bg_acting_principal: String,
     bg_pre_manifest_hash: Option<String>,
     mut bg_base_snapshot_hash: Option<String>,
@@ -742,7 +821,12 @@ async fn dispatch_detached_bg_task(
     bg_state_root: PathBuf,
     is_resume: bool,
     prior_status_for_mark_running: Option<String>,
+    bg_cb_token: Option<String>,
 ) {
+    // Revoke callback token on every exit path of this function.
+    // The token's lifetime is owned by this background task.
+    let _cb_guard = defer_cb_token_revocation(&bg_state, &bg_thread_id, &bg_cb_token);
+
     if let Some(ref s) = prior_status_for_mark_running {
         tracing::Span::current().record("prior_status", &s.as_str());
     }
@@ -761,6 +845,7 @@ async fn dispatch_detached_bg_task(
     let res_for_spawn = bg_resolved.clone();
     let eng_for_spawn = bg_engine.clone();
     let vault_for_spawn = bg_vault;
+    let cb_for_spawn = bg_cb_bindings;
     let snap_for_spawn = bg_base_snapshot_hash.clone();
 
     let spawn_result = task::spawn_blocking(move || {
@@ -770,6 +855,7 @@ async fn dispatch_detached_bg_task(
             &tid_for_spawn,
             &crid_for_spawn,
             vault_for_spawn,
+            cb_for_spawn,
             Some(state_dir.as_path()),
             is_resume,
             snap_for_spawn.as_deref(),
@@ -902,6 +988,7 @@ fn cleanup_temp_dir(temp_dir: Option<&std::path::Path>) {
 }
 
 /// Fail a thread without a guard (for use inside detached tasks).
+/// Note: callback token revocation is handled by CbTokenGuard::drop.
 fn fail_thread_static(state: &AppState, thread_id: &str, outcome_code: &str) {
     let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
@@ -914,6 +1001,39 @@ fn fail_thread_static(state: &AppState, thread_id: &str, outcome_code: &str) {
         final_cost: None,
         summary_json: None,
     });
+}
+
+/// Revoke a callback token. Called on every exit path of the background task.
+fn revoke_token(state: &AppState, thread_id: &str, token: &Option<String>) {
+    if let Some(ref t) = token {
+        state.callback_tokens.invalidate(t);
+    }
+    state.callback_tokens.invalidate_for_thread(thread_id);
+}
+
+/// Set up deferred token revocation. Returns a guard struct that revokes
+/// the token when dropped. Used as the first statement in the detached bg
+/// task so every return path (success, error, panic) revokes the token.
+struct CbTokenGuard {
+    state: AppState,
+    thread_id: String,
+    token: Option<String>,
+}
+
+impl CbTokenGuard {
+    fn new(state: AppState, thread_id: String, token: Option<String>) -> Self {
+        Self { state, thread_id, token }
+    }
+}
+
+impl Drop for CbTokenGuard {
+    fn drop(&mut self) {
+        revoke_token(&self.state, &self.thread_id, &self.token);
+    }
+}
+
+fn defer_cb_token_revocation(state: &AppState, thread_id: &str, token: &Option<String>) -> CbTokenGuard {
+    CbTokenGuard::new(state.clone(), thread_id.to_string(), token.clone())
 }
 
 /// Build `ExecutionParams` from a captured `ResumeContext`.
@@ -1071,12 +1191,20 @@ pub async fn run_existing_detached(
         };
     }
 
-    let (bg_state, _bg_thread_id, bg_temp_dir) = guard.into_detached_parts();
+    // Mint a FRESH callback token for the resumed subprocess (never reuse
+    // the original — it was revoked when the prior process exited).
+    let (cb_bindings, cb_token) = mint_callback_env(
+        &state, &thread_id, Some(effective_path.as_path()), None,
+    );
+    guard.track_callback_token(cb_token);
+
+    let (bg_state, _bg_thread_id, bg_temp_dir, bg_cb_token) = guard.into_detached_parts();
     let bg_thread_id = thread_id.clone();
     let bg_chain_root_id = chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
     let bg_engine = state.engine.clone();
     let bg_vault = params.vault_bindings.clone();
+    let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
@@ -1090,6 +1218,7 @@ pub async fn run_existing_detached(
         bg_resolved,
         bg_engine,
         bg_vault,
+        bg_cb_bindings,
         bg_acting_principal,
         bg_pre_manifest_hash,
         bg_base_snapshot_hash,
@@ -1098,6 +1227,7 @@ pub async fn run_existing_detached(
         bg_state_root,
         true, // is_resume
         Some(prior_status),
+        bg_cb_token,
     ));
 
     Ok(())

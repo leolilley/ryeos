@@ -14,3 +14,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 [dev-dependencies]
+tempfile = "3"
+serde_json = "1"
+ryeos-tracing = { path = ".", features = ["test-harness"] }

@@ -380,4 +380,22 @@ mod tests {
         assert_eq!(r.kind, "tool");
         assert_eq!(r.bare_id, "my-tool_v2");
     }
+
+    #[test]
+    fn parse_service_ref() {
+        let r = CanonicalRef::parse("service:commands/submit").unwrap();
+        assert_eq!(r.kind, "service");
+        assert_eq!(r.bare_id, "commands/submit");
+        assert!(r.suffix.is_none());
+        assert_eq!(r.to_string(), "service:commands/submit");
+    }
+
+    #[test]
+    fn parse_service_ref_with_suffix() {
+        let r =
+            CanonicalRef::parse("service:system/status@t:2026-04-26T00:00:00Z").unwrap();
+        assert_eq!(r.kind, "service");
+        assert_eq!(r.bare_id, "system/status");
+        assert!(r.suffix.is_some());
+    }
 }

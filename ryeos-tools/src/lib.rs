@@ -1,12 +1,19 @@
 //! Shared utilities for rye-core-tools
-//! 
+//!
 //! - Environment parsing
 //! - Output formatting
-//! - Common traits
+//! - Action library (`actions::*`) shared by the busybox `rye` CLI
+
+pub mod actions;
 
 use anyhow::{Context, Result};
 
 /// Parse RYE_STATE environment variable.
+///
+/// Returns the `state_dir` — the daemon's working directory. This is convention A
+/// (canonical): `RYE_STATE` points at the directory containing `daemon.json`,
+/// `config.yaml`, `db/`, `identity/`, etc. CAS artifacts live under
+/// `<state_dir>/.state/`.
 ///
 /// Fails explicitly if the environment variable is not set.
 /// (No fallback to current directory — that would silently operate on wrong state.)
@@ -14,6 +21,15 @@ pub fn get_state_root() -> Result<std::path::PathBuf> {
     let root = std::env::var("RYE_STATE")
         .context("RYE_STATE environment variable not set")?;
     Ok(std::path::PathBuf::from(root))
+}
+
+/// Returns `<state_dir>/.state` — the CAS interior root passed to
+/// `ryeos_state::StateDb::open()`, `GcLock::acquire()`, etc.
+///
+/// Under convention A, `RYE_STATE` is the `state_dir`. All CAS objects, refs,
+/// projection DB, GC lock files, and event logs live under `.state/` inside it.
+pub fn state_inner(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join(".state")
 }
 
 /// Format JSON output

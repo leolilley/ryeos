@@ -1,0 +1,8 @@
+# rye:signed:2026-04-26T06:36:30Z:d310ddee25c6c54169ac160a6bef35a92d2cbdac36987dff5e3bd6f84327c911:cyDzYu/v4sFhtvqy1NKqqvSpN43oVhBcQdZsnvBnxIojavR0FQINcxyf20KSgyw/OzxMtrqjKrZ6T/coIO3DAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: maintenance.gc
+required_caps: ["node.maintenance"]
+schema:
+  dry_run: boolean?
+  compact: boolean?
+description: "Run maintenance garbage collection with write barrier quiesce"

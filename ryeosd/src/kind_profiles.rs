@@ -93,6 +93,14 @@ impl KindProfileRegistry {
                 supports_continuation: false,
             },
         );
+        profiles.insert(
+            "service_run".to_string(),
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
         Self { profiles }
     }
 
@@ -137,5 +145,38 @@ impl KindProfileRegistry {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_run_is_root_executable() {
+        let reg = KindProfileRegistry::load_defaults();
+        assert!(reg.is_root_executable("service_run"));
+    }
+
+    #[test]
+    fn service_run_no_interrupt_or_continuation() {
+        let reg = KindProfileRegistry::load_defaults();
+        let profile = reg.get("service_run").unwrap();
+        assert!(!profile.supports_interrupt);
+        assert!(!profile.supports_continuation);
+    }
+
+    #[test]
+    fn service_run_allowed_actions() {
+        let reg = KindProfileRegistry::load_defaults();
+        // Running: cancel + kill (has_process=true)
+        let actions = reg.allowed_actions("service_run", "running", true);
+        assert_eq!(actions, vec!["cancel", "kill"]);
+        // Running: cancel only (no process)
+        let actions = reg.allowed_actions("service_run", "running", false);
+        assert_eq!(actions, vec!["cancel"]);
+        // Completed: no continuation
+        let actions = reg.allowed_actions("service_run", "completed", false);
+        assert!(actions.is_empty());
     }
 }

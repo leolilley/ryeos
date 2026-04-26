@@ -1,0 +1,9 @@
+{
+  "rye": {
+    "blob_hash": "56dd637b4bcca845337ee4c3c0146dd8132eb9b4b39113d2ab8a2066564e0c04",
+    "content_blob_hash": "56dd637b4bcca845337ee4c3c0146dd8132eb9b4b39113d2ab8a2066564e0c04",
+    "item_source_hash": "f68e5b3c1d007cd4e77f993511275d574cd00b7acafe90de260bf5fed14ffb9a",
+    "manifest_hash": "79739e9766254d07ce8ff5a388cf71fdd3d19913741791b4f81658a78c001d01",
+    "source_checksum": "c079dcdec9d02d485e59ffab4269569eb485dcf881c77696cf4582bd3964f362"
+  }
+}

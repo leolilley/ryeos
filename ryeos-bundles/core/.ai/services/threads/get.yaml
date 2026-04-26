@@ -1,0 +1,7 @@
+# rye:signed:2026-04-26T06:36:30Z:8d65681b3616d9ddf0bcf48bc21a5693dca75f6b064303104ea900490ff3a352:ZsZKkND/dSe3D1WTmpFqGgUj/ZIQL8ySlWYwxiykpli9nDdcq8EVnpwYjKDO8BxKxe6Lz5acx1lypwbEqsv3Dw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: threads.get
+required_caps: []
+schema:
+  thread_id: string
+description: "Get thread detail, result, artifacts, and facets"

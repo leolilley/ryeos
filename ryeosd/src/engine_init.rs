@@ -23,11 +23,10 @@ use crate::config::Config;
 ///
 /// Scans the config-provided system data directory and user space for kind
 /// schema files, loads the trust store from the daemon's trusted keys
-/// directory.
-#[tracing::instrument(name = "engine:lifecycle", skip(config), fields(event = "build_engine"))]
-pub fn build_engine(config: &Config) -> Result<Engine> {
+/// directory. Uses the provided `bundle_roots` for item resolution.
+pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
-    for root in &config.bundle_roots {
+    for root in bundle_roots {
         if !root.is_dir() {
             tracing::warn!(
                 path = %root.display(),
@@ -37,7 +36,8 @@ pub fn build_engine(config: &Config) -> Result<Engine> {
     }
 
     // 2. Collect all system roots (system_data_dir + bundle_roots, ordered)
-    let system_roots = config.all_system_roots();
+    let mut system_roots = vec![config.system_data_dir.clone()];
+    system_roots.extend(bundle_roots.iter().cloned());
     let user_root = discover_user_root();
 
     // 3. Collect kind schema search roots from all system roots + user space

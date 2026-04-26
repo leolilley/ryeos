@@ -7,36 +7,8 @@ edition = "2021"
 name = "ryeos_tools"
 path = "src/lib.rs"
 
-[[bin]]
-name = "rye-status"
-path = "src/bin/status.rs"
-
-[[bin]]
-name = "rye-verify"
-path = "src/bin/verify.rs"
-
-[[bin]]
-name = "rye-fetch"
-path = "src/bin/fetch.rs"
-
-[[bin]]
-name = "rye-sign"
-path = "src/bin/sign.rs"
-
-[[bin]]
-name = "rye-gc"
-path = "src/bin/gc.rs"
-
-[[bin]]
-name = "rye-rebuild"
-path = "src/bin/rebuild.rs"
-
-[[bin]]
-name = "rye-bundle"
-path = "src/bin/bundle.rs"
-
 [dependencies]
- anyhow = "1.0"
+anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }

@@ -1115,6 +1115,54 @@ formats:
         sign_and_write_schema(dir, "directive", DIRECTIVE_SCHEMA, sk);
     }
 
+    const SERVICE_SCHEMA: &str = "\
+location:
+  directory: services
+formats:
+  - extensions: [\".yaml\", \".yml\"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    endpoint:
+      from: path
+      key: endpoint
+    required_caps:
+      from: path_string_seq
+      key: required_caps
+";
+
+    fn write_service_schema(dir: &Path, sk: &SigningKey) {
+        sign_and_write_schema(dir, "service", SERVICE_SCHEMA, sk);
+    }
+
+    #[test]
+    fn load_service_kind_schema() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        write_service_schema(&tmp, &sk);
+
+        let reg = KindRegistry::load_base(&[tmp.clone()], &ts).unwrap();
+
+        let svc = reg.get("service").expect("service kind should be registered");
+        assert_eq!(svc.directory, "services");
+        let exts = svc.extension_strs();
+        assert!(exts.contains(&".yaml"));
+        assert!(exts.contains(&".yml"));
+
+        // Service has no runtime handlers (daemon-dispatched, not subprocess)
+        assert!(svc.runtime.is_none());
+
+        // Service has no execution aliases (no resolve_extends_chain)
+        assert!(svc.execution.is_none());
+    }
+
     #[test]
     fn load_from_temp_dir() {
         let tmp = tempdir();

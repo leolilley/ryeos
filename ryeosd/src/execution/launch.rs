@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
+use super::arch_check;
 use super::callback_token::compute_ttl;
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
@@ -13,6 +14,161 @@ use super::limits::{compute_effective_limits, load_limits_config};
 use super::thread_meta::ThreadMeta;
 use crate::services::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use crate::state::AppState;
+
+/// Host triple for native executor resolution.
+/// Follows rustc target-triple convention: `ARCH-VENDOR-OS`.
+fn host_triple() -> String {
+    format!(
+        "{}-{}-{}",
+        std::env::consts::ARCH,
+        if cfg!(target_os = "linux") {
+            "unknown"
+        } else if cfg!(target_os = "macos") {
+            "apple"
+        } else if cfg!(target_os = "windows") {
+            "pc"
+        } else {
+            "unknown"
+        },
+        std::env::consts::OS
+    )
+}
+
+/// Ref path under `.ai/` that stores the system bundle manifest hash.
+/// PR1b2 writes this ref during bundle build.
+const BUNDLE_MANIFEST_REF: &str = "refs/bundles/manifest";
+
+/// Resolve a native executor from the system bundle's CAS.
+///
+/// Looks up the system bundle manifest via `refs/bundles/manifest`,
+/// resolves `bin/<host_triple>/<bare>` in the manifest, verifies
+/// trust on the binary's `item_source` record, checks architecture,
+/// and materializes the binary to the target directory.
+///
+/// Returns the path to the materialized binary.
+///
+/// This function implements the full verified-chain path per the
+/// PR1b1 design: no PATH lookup, no fallback. If the bundle manifest
+/// doesn't exist (pre-PR1b2), resolution fails with a clear error.
+pub fn resolve_native_executor_path(
+    system_roots: &[PathBuf],
+    executor_ref: &str,
+    materialize_dir: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<PathBuf> {
+    let bare = executor_ref
+        .strip_prefix("native:")
+        .ok_or_else(|| anyhow::anyhow!("executor_ref '{executor_ref}' is not a native executor"))?;
+
+    let triple = host_triple();
+
+    // 1. Find a system root with a valid CAS
+    let mut found_root: Option<PathBuf> = None;
+    let mut manifest_hash: Option<String> = None;
+
+    for system_root in system_roots {
+        let ai_dir = system_root.join(".ai");
+        let objects_dir = ai_dir.join("objects");
+
+        // Check CAS exists
+        if !objects_dir.join("blobs").is_dir() || !objects_dir.join("objects").is_dir() {
+            continue;
+        }
+
+        // Read the bundle manifest ref
+        let ref_path = ai_dir.join(BUNDLE_MANIFEST_REF);
+        if let Ok(ref_content) = std::fs::read_to_string(&ref_path) {
+            // Ref files contain the hash as the first line
+            let hash = ref_content.trim().lines().next().unwrap_or("").trim();
+            if lillux::cas::valid_hash(hash) {
+                found_root = Some(objects_dir);
+                manifest_hash = Some(hash.to_string());
+                break;
+            }
+        }
+    }
+
+    let (cas_root, mhash) = match (found_root, manifest_hash) {
+        (Some(root), Some(hash)) => (root, hash),
+        _ => bail!(
+            "native executor '{bare}' not available: system bundle manifest not found \
+             ({BUNDLE_MANIFEST_REF}). The bundle pipeline (PR1b2) must ship binaries for host triple '{triple}'."
+        ),
+    };
+
+    let cas = lillux::cas::CasStore::new(cas_root);
+
+    // 2. Load the manifest
+    let manifest_value = cas
+        .get_object(&mhash)?
+        .ok_or_else(|| anyhow::anyhow!("bundle manifest object {mhash} not found in system CAS"))?;
+
+    let manifest =
+        ryeos_state::objects::SourceManifest::from_value(&manifest_value)
+            .map_err(|e| anyhow::anyhow!("failed to parse bundle manifest: {e}"))?;
+
+    tracing::debug!(
+        executor_ref,
+        host_triple = %triple,
+        manifest_entries = manifest.item_source_hashes.len(),
+        "loaded bundle manifest for native executor resolution"
+    );
+
+    // 3. Resolve the executor from the manifest
+    let resolved = ryeos_engine::executor_resolution::resolve_native_executor(
+        &manifest.item_source_hashes,
+        executor_ref,
+        &triple,
+        |hash| {
+            cas.get_object(hash)
+                .map_err(|e| e.to_string())
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("executor resolution failed: {e}"))?;
+
+    // 4. Verify trust on the binary's item_source record
+    let (trust_class, fingerprint) =
+        ryeos_engine::executor_resolution::verify_executor_trust(
+            &resolved.item_source,
+            |fp| trust_store.get(fp).is_some(),
+        );
+
+    tracing::info!(
+        executor_ref,
+        host_triple = %triple,
+        blob_hash = %resolved.blob_hash,
+        trust_class = ?trust_class,
+        signer = ?fingerprint,
+        "native executor resolved and trust-verified"
+    );
+
+    // 5. Fetch the binary blob from CAS
+    let blob_bytes = cas
+        .get_blob(&resolved.blob_hash)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("binary blob {} not found in system CAS", resolved.blob_hash)
+        })?;
+
+    // 6. Architecture check
+    arch_check::check_arch(&blob_bytes, std::env::consts::ARCH)
+        .map_err(|e| anyhow::anyhow!("arch check failed for {bare}: {e}"))?;
+
+    // 7. Materialize to target directory
+    let bin_dir = materialize_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let target_path = bin_dir.join(bare);
+
+    lillux::cas::materialize_executable(&target_path, &blob_bytes, resolved.mode)?;
+
+    tracing::info!(
+        executor_ref,
+        target = %target_path.display(),
+        mode = format!("{:o}", resolved.mode),
+        "native executor materialized"
+    );
+
+    Ok(target_path)
+}
 
 pub struct NativeLaunchResult {
     pub thread: Value,
@@ -58,18 +214,16 @@ pub(crate) fn derive_effective_caps(
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
 }
 
-/// Extract native runtime binary from an executor ref.
-/// Returns None for non-native executors (use old inline path).
-pub fn native_runtime_binary(executor_ref: &str) -> Option<String> {
+/// Check if an executor ref is a native executor (starts with `native:`).
+pub fn is_native_executor(executor_ref: &str) -> bool {
     executor_ref
         .strip_prefix("native:")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .is_some_and(|s| !s.is_empty())
 }
 
 pub fn build_and_launch(
     state: &AppState,
-    runtime_binary: &str,
+    executor_ref: &str,
     acting_principal: &str,
     resolved: &ResolvedExecutionRequest,
     project_path: &Path,
@@ -77,7 +231,7 @@ pub fn build_and_launch(
     vault_bindings: &HashMap<String, String>,
 ) -> Result<NativeLaunchResult> {
     tracing::info!(
-        runtime_binary,
+        executor_ref,
         acting_principal,
         item_ref = %resolved.item_ref,
         kind = %resolved.resolved_item.kind,
@@ -184,10 +338,21 @@ pub fn build_and_launch(
         "launcher policy resolved from composed view"
     );
 
-    // EnvelopeTarget is gone. The runtime reads the root path / digest /
-    // kind / id from `resolution.root` directly. There is now exactly one
-    // root snapshot in the envelope, eliminating the split-brain where
-    // `envelope.target` and `envelope.resolution.root` could disagree.
+    // 7. Resolve the native executor from the system bundle's CAS.
+    //    This is the verified-chain path: the binary is materialized from
+    //    CAS, trust-verified, arch-checked — no PATH lookup.
+    let materialized_binary = resolve_native_executor_path(
+        &system_roots,
+        executor_ref,
+        project_path,
+        &state.engine.trust_store,
+    )?;
+
+    // 8. Build envelope
+    //    EnvelopeTarget is gone. The runtime reads the root path / digest /
+    //    kind / id from `resolution.root` directly. There is now exactly one
+    //    root snapshot in the envelope, eliminating the split-brain where
+    //    `envelope.target` and `envelope.resolution.root` could disagree.
     let envelope = LaunchEnvelope {
         invocation_id: cap.invocation_id.clone(),
         thread_id: thread_id.clone(),
@@ -214,7 +379,7 @@ pub fn build_and_launch(
         resolution,
     };
 
-    // 6. Write thread.json (status = created, pre-execution audit).
+    // 8. Write thread.json (status = created, pre-execution audit).
     //    `executor_trust_class` is recorded so the on-disk audit trail
     //    matches what the launcher used for spawn-gating.
     let meta = ThreadMeta {
@@ -235,16 +400,17 @@ pub fn build_and_launch(
         &project_path.to_path_buf(), thread_id, &meta, identity,
     )?;
 
-    // 7. Spawn runtime (env vars + stdin envelope)
+    // 9. Spawn runtime (env vars + stdin envelope)
     let envelope_json = serde_json::to_string(&envelope)?;
     let spawn_result = spawn_runtime(
-        runtime_binary, project_path, &envelope_json,
+        &materialized_binary.to_string_lossy(),
+        project_path, &envelope_json,
         hard_limits.duration_seconds,
         &envelope.callback,
         thread_id,
     );
 
-    // 8. ALWAYS invalidate callback token (cleanup guard)
+    // 10. ALWAYS invalidate callback token (cleanup guard)
     state.callback_tokens.invalidate(&cap.token);
     state.callback_tokens.invalidate_for_thread(thread_id);
 
@@ -254,7 +420,7 @@ pub fn build_and_launch(
         tracing::debug!(pruned, "cleaned up expired callback capabilities");
     }
 
-    // 9. Handle spawn result
+    // 11. Handle spawn result
     let runtime_result = match spawn_result {
         Ok(result) => result,
         Err(err) => {
@@ -282,7 +448,7 @@ pub fn build_and_launch(
         }
     };
 
-    // 10. Build response from DB thread (runtime already finalized via callback)
+    // 12. Build response from DB thread (runtime already finalized via callback)
     let thread_detail = state.threads.get_thread(thread_id)?
         .unwrap_or(thread);
 
@@ -347,20 +513,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_runtime_binary_extracts_native_prefix() {
-        assert_eq!(native_runtime_binary("native:directive-runtime"), Some("directive-runtime".to_string()));
-        assert_eq!(native_runtime_binary("native:graph-runtime"), Some("graph-runtime".to_string()));
+    fn is_native_executor_detects_native_prefix() {
+        assert!(is_native_executor("native:directive-runtime"));
+        assert!(is_native_executor("native:graph-runtime"));
     }
 
     #[test]
-    fn native_runtime_binary_rejects_empty() {
-        assert_eq!(native_runtime_binary("native:"), None);
+    fn is_native_executor_rejects_empty() {
+        assert!(!is_native_executor("native:"));
     }
 
     #[test]
-    fn native_runtime_binary_returns_none_for_non_native() {
-        assert_eq!(native_runtime_binary("tool:rye/core/bash/bash"), None);
-        assert_eq!(native_runtime_binary("inline"), None);
+    fn is_native_executor_rejects_non_native() {
+        assert!(!is_native_executor("tool:rye/core/bash/bash"));
+        assert!(!is_native_executor("inline"));
     }
 
     use ryeos_engine::resolution::{KindComposedView, TrustClass};

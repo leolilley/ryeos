@@ -1,0 +1,9 @@
+# rye:signed:2026-04-26T06:36:30Z:740bbdd0d6e751798fd6eb9314e23b2949a4f637972dabac1ed1efd9b09e64a0:wEmEB/EPuxk+b5YlHFDVyO6v0c95+c2aEB887DBe9h+K1EmuRrygivk8G8xW/9aEVjFlWXfU6s+1P0Y1taP7Dw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: events.replay
+required_caps: []
+schema:
+  thread_id: string
+  after_chain_seq: integer?
+  limit: integer?
+description: "Replay events for a thread (by thread_id)"

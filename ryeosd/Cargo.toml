@@ -38,11 +38,17 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 ryeos-tracing = { path = "../ryeos-tracing" }
+ryeos-tools = { path = "../ryeos-tools" }   # for actions::catalog::OPERATIONAL_TOOLS
 
 [dev-dependencies]
 tempfile = "3"
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-tracing = { path = "../ryeos-tracing", features = ["test-harness"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+bytes = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

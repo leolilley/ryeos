@@ -1,0 +1,7 @@
+# rye:signed:2026-04-26T06:36:30Z:bef39c1f68b7ea14b62755c38bd0fc27f2450950537bb110d74877dd8071505b:wlXVhylKd+uTmErdYuqf0nYA/PN0emjM072wtAKkjCKRX6LPIKZOQ8eeT8/0pI0kn67/9fi/7AJehnzzqTVdBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: threads.list
+required_caps: []
+schema:
+  limit: integer?
+description: "List threads, optionally limited"

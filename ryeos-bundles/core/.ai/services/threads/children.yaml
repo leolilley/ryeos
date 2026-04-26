@@ -1,0 +1,7 @@
+# rye:signed:2026-04-26T06:36:30Z:145a96d1ac6617920e84ad56dab1cf8e23edc0de273514351ce82b5e94df551e:3+HLPMtBj1vJ+Q5aBkdNP7dxZLOzoo4U346GhjUS2KaUXkL9Es1wsKfWHJJylrmj4e+wFSmAA8qnHgkSbnOLCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: threads.children
+required_caps: []
+schema:
+  thread_id: string
+description: "List child threads of a parent thread"

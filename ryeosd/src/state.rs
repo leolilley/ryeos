@@ -8,11 +8,19 @@ use ryeos_engine::engine::Engine;
 use crate::config::Config;
 use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
+use crate::node_config::NodeConfigSnapshot;
+use crate::service_registry::ServiceRegistry;
 use crate::state_store::StateStore;
 use crate::services::command_service::CommandService;
 use crate::services::event_store::EventStoreService;
 use crate::services::thread_lifecycle::ThreadLifecycleService;
 use crate::write_barrier::WriteBarrier;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogHealth {
+    pub status: String,
+    pub missing_services: Vec<String>,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +35,12 @@ pub struct AppState {
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,
+    /// Result of the operational tool catalog self-check at startup.
+    pub catalog_health: CatalogHealth,
+    /// Service handler registry for in-process `kind: service` dispatch.
+    pub services: Arc<ServiceRegistry>,
+    /// Node-config snapshot loaded at startup.
+    pub node_config: Arc<NodeConfigSnapshot>,
 }
 
 #[derive(Debug, Serialize)]

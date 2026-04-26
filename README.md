@@ -84,8 +84,10 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only)                        |
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions                           |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                                         |
-| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three primitives                  |
+| `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three commands                  |
 | `ryeos-node`   | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
+
+> **Legacy note:** The `ryeos-cli/` directory contains an older Python CLI. It is out of scope for the cas-as-truth branch and will be removed in a dedicated cleanup pass once Python tests and docs are migrated to the Rust CLI (`rye-cli/`).
 
 > **Note:** The CLI is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 

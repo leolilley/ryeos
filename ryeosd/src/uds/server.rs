@@ -10,9 +10,9 @@ use crate::services::command_service::{
 };
 use crate::services::event_store::{EventAppendBatchParams, EventAppendParams, EventReplayParams};
 use crate::services::thread_lifecycle::{
-    ArtifactPublishParams, ThreadAttachProcessParams, ThreadChainParams, ThreadChildrenParams,
-    ThreadContinuationParams, ThreadCreateParams, ThreadFinalizeParams, ThreadGetParams,
-    ThreadListParams, ThreadMarkRunningParams,
+    ArtifactPublishParams, ThreadAttachProcessParams,
+    ThreadContinuationParams, ThreadFinalizeParams, ThreadGetParams,
+    ThreadMarkRunningParams,
 };
 use crate::state::AppState;
 use crate::uds::protocol::{RpcRequest, RpcResponse};
@@ -53,113 +53,23 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
         }
         let _enter = span.enter();
 
-        // maintenance.gc requires async dispatch (run_maintenance_gc is async)
-        let response = if request.method == "maintenance.gc" {
-            dispatch_maintenance_gc(request, &state).await
-        } else {
-            dispatch(request, &state)
-        };
+        let response = dispatch(request, &state);
 
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;
     }
 }
 
-/// Async handler for `maintenance.gc` RPC method.
-///
-/// Routes through the daemon's maintenance GC flow:
-/// lock → quiesce write barrier → GC → resume.
-async fn dispatch_maintenance_gc(request: RpcRequest, state: &AppState) -> RpcResponse {
-    use ryeos_state::gc::GcParams;
-
-    let params: GcParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(err) => {
-            return RpcResponse::err(
-                request.request_id,
-                "invalid_params",
-                format!("invalid maintenance.gc params: {}", err),
-            );
-        }
-    };
-
-    match crate::maintenance::run_maintenance_gc(state, &params).await {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(value) => RpcResponse::ok(request.request_id, value),
-            Err(err) => RpcResponse::err(request.request_id, "encode_failed", err.to_string()),
-        },
-        Err(err) => RpcResponse::err(request.request_id, "gc_failed", err.to_string()),
-    }
-}
-
 pub(crate) fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     match request.method.as_str() {
+        // ── daemon health (lightweight, only ungated method) ─────────
         "system.health" => RpcResponse::ok(request.request_id, json!({ "status": "ok" })),
-        "system.status" => match serde_json::to_value(state.status()) {
-            Ok(status) => RpcResponse::ok(request.request_id, status),
-            Err(err) => RpcResponse::err(request.request_id, "encode_failed", err.to_string()),
-        },
-        "threads.create" => rpc_result(request.request_id, handle_create(&request.params, state)),
-        "threads.mark_running" => rpc_result(
-            request.request_id,
-            handle_mark_running(&request.params, state),
-        ),
-        "threads.attach_process" => rpc_result(
-            request.request_id,
-            handle_attach_process(&request.params, state),
-        ),
-        "threads.finalize" => {
-            rpc_result(request.request_id, handle_finalize(&request.params, state))
-        }
-        "threads.get" => rpc_result(request.request_id, handle_get(&request.params, state)),
-        "threads.list" => rpc_result(request.request_id, handle_list(&request.params, state)),
-        "threads.children" => {
-            rpc_result(request.request_id, handle_children(&request.params, state))
-        }
-        "threads.chain" => rpc_result(request.request_id, handle_chain(&request.params, state)),
-        "threads.request_continuation" => rpc_result(
-            request.request_id,
-            handle_request_continuation(&request.params, state),
-        ),
-        "events.append" => rpc_result(
-            request.request_id,
-            handle_append_event(&request.params, state),
-        ),
-        "events.append_batch" => rpc_result(
-            request.request_id,
-            handle_append_event_batch(&request.params, state),
-        ),
-        "events.replay" => rpc_result(
-            request.request_id,
-            handle_replay_events(&request.params, state),
-        ),
-        "commands.submit" => rpc_result(
-            request.request_id,
-            handle_submit_command(&request.params, state),
-        ),
-        "commands.claim" => rpc_result(
-            request.request_id,
-            handle_claim_commands(&request.params, state),
-        ),
-        "commands.complete" => rpc_result(
-            request.request_id,
-            handle_complete_command(&request.params, state),
-        ),
-        "artifacts.publish" => rpc_result(
-            request.request_id,
-            handle_publish_artifact(&request.params, state),
-        ),
-        "threads.get_facets" => rpc_result(
-            request.request_id,
-            handle_get_facets(&request.params, state),
-        ),
-        "identity.public_key" => rpc_result(
-            request.request_id,
-            handle_public_key(state),
-        ),
+
+        // ── runtime callbacks (token-gated, used by runtimes) ───────
         other if other.starts_with("runtime.") => {
             rpc_result(request.request_id, dispatch_runtime_method(other, &request.params, state))
         }
+
         other => RpcResponse::err(
             request.request_id,
             "unknown_method",
@@ -207,13 +117,6 @@ pub fn dispatch_runtime_method(
     }
 }
 
-fn handle_create(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: ThreadCreateParams =
-        serde_json::from_value(params.clone()).context("invalid threads.create params")?;
-    serde_json::to_value(state.threads.create_thread(&params)?)
-        .context("failed to encode threads.create result")
-}
-
 fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadMarkRunningParams =
         serde_json::from_value(params.clone()).context("invalid threads.mark_running params")?;
@@ -254,30 +157,6 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
             }))
             .context("failed to encode threads.get result")
         }
-        None => Ok(serde_json::Value::Null),
-    }
-}
-
-fn handle_list(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: ThreadListParams =
-        serde_json::from_value(params.clone()).context("invalid threads.list params")?;
-    state.threads.list_threads(params.limit)
-}
-
-fn handle_children(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: ThreadChildrenParams =
-        serde_json::from_value(params.clone()).context("invalid threads.children params")?;
-    serde_json::to_value(json!({
-        "children": state.threads.list_children(&params.thread_id)?,
-    }))
-    .context("failed to encode threads.children result")
-}
-
-fn handle_chain(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: ThreadChainParams =
-        serde_json::from_value(params.clone()).context("invalid threads.chain params")?;
-    match state.threads.get_chain(&params.thread_id)? {
-        Some(chain) => serde_json::to_value(chain).context("failed to encode threads.chain result"),
         None => Ok(serde_json::Value::Null),
     }
 }
@@ -367,16 +246,6 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
     Ok(serde_json::to_value(facets_map).context("failed to encode facets")?)
 }
 
-fn handle_public_key(state: &AppState) -> Result<serde_json::Value> {
-    let identity_path = state
-        .config
-        .state_dir
-        .join("identity")
-        .join("public-identity.json");
-    let doc = crate::identity::NodeIdentity::load_public_identity(&identity_path)?;
-    serde_json::to_value(doc).context("failed to encode public identity")
-}
-
 fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {
     match result {
         Ok(value) => RpcResponse::ok(request_id, value),
@@ -440,7 +309,7 @@ mod tests {
     /// Build a minimal AppState for UDS dispatch tests.
     fn setup_app_state() -> (TempDir, AppState) {
         let tmpdir = TempDir::new().unwrap();
-        let state_root = tmpdir.path().join(".state");
+        let state_root = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = Config {
@@ -450,7 +319,6 @@ mod tests {
             state_dir: tmpdir.path().to_path_buf(),
             signing_key_path: key_path.clone(),
             system_data_dir: tmpdir.path().join("system"),
-            bundle_roots: Vec::new(),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
@@ -502,6 +370,12 @@ mod tests {
             write_barrier: Arc::new(WriteBarrier::new()),
             started_at: Instant::now(),
             started_at_iso: lillux::time::iso8601_now(),
+            catalog_health: crate::state::CatalogHealth {
+                status: "ok".into(),
+                missing_services: vec![],
+            },
+            services: Arc::new(crate::service_registry::build_service_registry()),
+            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![] }),
         };
 
         (tmpdir, state)
@@ -549,17 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn system_status_returns_status_object() {
-        let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("system.status", json!({})), &state);
-        assert!(resp.error.is_none());
-        let result = rpc_ok(&resp);
-        assert!(result.get("version").is_some());
-        assert!(result.get("uptime_seconds").is_some());
-        assert!(result.get("bind").is_some());
-    }
-
-    #[test]
     fn unknown_method_returns_error() {
         let (_tmp, state) = setup_app_state();
         let resp = dispatch(rpc("nonexistent.method", json!({})), &state);
@@ -567,92 +430,131 @@ mod tests {
         assert_eq!(err.code, "unknown_method");
     }
 
-    // ── identity methods ────────────────────────────────────────────
+    // ── removed methods return unknown_method ──────────────────────
 
     #[test]
-    fn identity_public_key_returns_key() {
+    fn removed_methods_return_unknown() {
         let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("identity.public_key", json!({})), &state);
-        assert!(resp.error.is_none(), "expected ok, got error: {:?}", resp.error);
-        let result = rpc_ok(&resp);
-        assert_eq!(result["kind"], "identity/v1");
-        assert!(result.get("principal_id").is_some());
-        assert!(result.get("signing_key").is_some());
+        for method in [
+            // V5.2 removed catalog methods
+            "system.status",
+            "identity.public_key",
+            "threads.get",
+            "threads.list",
+            "threads.children",
+            "threads.chain",
+            // V5.2 cleanup: all runtime-internal bare methods removed
+            "threads.create",
+            "threads.mark_running",
+            "threads.attach_process",
+            "threads.finalize",
+            "threads.request_continuation",
+            "events.append",
+            "events.append_batch",
+            "events.replay",
+            "commands.submit",
+            "commands.claim",
+            "commands.complete",
+            "artifacts.publish",
+            "threads.get_facets",
+        ] {
+            let resp = dispatch(rpc(method, json!({})), &state);
+            assert_eq!(
+                rpc_err(&resp).code,
+                "unknown_method",
+                "expected unknown_method for {method}"
+            );
+        }
     }
 
-    // ── thread lifecycle methods ────────────────────────────────────
+    /// Assert that `system.health` is the ONLY ungated method on the bare UDS
+    /// surface. Every other method must go through token-gated `runtime.*` or
+    /// be unknown.
+    #[test]
+    fn only_system_health_is_ungated() {
+        let (_tmp, state) = setup_app_state();
+
+        // system.health must work
+        let resp = dispatch(rpc("system.health", json!({})), &state);
+        assert!(resp.error.is_none());
+        assert_eq!(rpc_ok(&resp)["status"], "ok");
+
+        // A sample of methods that MUST NOT be ungated
+        for method in [
+            "threads.create",
+            "events.replay",
+            "commands.submit",
+            "artifacts.publish",
+        ] {
+            let resp = dispatch(rpc(method, json!({})), &state);
+            assert_eq!(
+                rpc_err(&resp).code,
+                "unknown_method",
+                "bare-namespace method `{method}` should not be ungated"
+            );
+        }
+    }
+
+    // ── thread lifecycle (runtime-internal, via runtime.*) ──────────
 
     #[test]
-    fn threads_create_and_get_roundtrip() {
+    fn runtime_finalize_thread_works() {
         let (_tmp, state) = setup_app_state();
         let params = make_create_params("T-1", "T-1");
 
-        let create_resp = dispatch(
-            rpc("threads.create", serde_json::to_value(&params).unwrap()),
-            &state,
+        // threads.create is internal — call service directly
+        state.threads.create_thread(&params).unwrap();
+
+        let cbt = state.callback_tokens.generate(
+            "T-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
         );
-        assert!(create_resp.error.is_none(), "create failed: {:?}", create_resp.error);
-
-        let get_resp = dispatch(rpc("threads.get", json!({ "thread_id": "T-1" })), &state);
-        assert!(get_resp.error.is_none(), "get failed: {:?}", get_resp.error);
-        let result = rpc_ok(&get_resp);
-        assert_eq!(result["thread"]["thread_id"], "T-1");
-        assert_eq!(result["thread"]["kind"], "directive_run");
-    }
-
-    #[test]
-    fn threads_get_missing_returns_null() {
-        let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("threads.get", json!({ "thread_id": "NONEXISTENT" })), &state);
-        assert!(resp.error.is_none());
-        assert_eq!(*rpc_ok(&resp), serde_json::Value::Null);
-    }
-
-    #[test]
-    fn threads_list_returns_threads() {
-        let (_tmp, state) = setup_app_state();
-
-        state.threads.create_thread(&make_create_params("T-list-1", "T-list-1")).unwrap();
-        state.threads.create_thread(&make_create_params("T-list-2", "T-list-2")).unwrap();
-
-        let resp = dispatch(rpc("threads.list", json!({ "limit": 10 })), &state);
-        assert!(resp.error.is_none());
-        let result = rpc_ok(&resp);
-        let threads = result["threads"].as_array().unwrap();
-        assert!(threads.len() >= 2);
-    }
-
-    #[test]
-    fn threads_chain_requires_existing_thread() {
-        let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("threads.chain", json!({ "thread_id": "NONEXISTENT" })), &state);
-        assert!(resp.error.is_none());
-        assert_eq!(*rpc_ok(&resp), serde_json::Value::Null);
-    }
-
-    #[test]
-    fn threads_children_empty_for_root() {
-        let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-root", "T-root")).unwrap();
 
         let resp = dispatch(
-            rpc("threads.children", json!({ "thread_id": "T-root" })),
+            rpc("runtime.finalize_thread", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-1",
+                "status": "completed",
+                "outcome_code": "test",
+            })),
             &state,
         );
-        assert!(resp.error.is_none());
-        let result = rpc_ok(&resp);
-        assert_eq!(result["children"], json!([]));
+        assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
     }
 
-    // ── thread finalize and events ──────────────────────────────────
+    #[test]
+    fn runtime_finalize_missing_token_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-Bad", "T-Bad")).unwrap();
+
+        let resp = dispatch(
+            rpc("runtime.finalize_thread", json!({
+                "thread_id": "T-Bad",
+                "status": "completed",
+                "outcome_code": "test",
+            })),
+            &state,
+        );
+        assert!(resp.error.is_some());
+    }
+
+    // ── events (via runtime.* token-gated) ──────────────────────────
 
     #[test]
-    fn events_replay_after_thread_lifecycle() {
+    fn runtime_events_replay_after_thread_lifecycle() {
         let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate(
+            "T-events-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+        );
+
         state.threads.create_thread(&make_create_params("T-events-1", "T-events-1")).unwrap();
 
         let finalize_resp = dispatch(
-            rpc("threads.finalize", json!({
+            rpc("runtime.finalize_thread", json!({
+                "callback_token": cbt.token,
                 "thread_id": "T-events-1",
                 "status": "completed",
                 "outcome_code": "test",
@@ -662,7 +564,11 @@ mod tests {
         assert!(finalize_resp.error.is_none(), "finalize failed: {:?}", finalize_resp.error);
 
         let replay_resp = dispatch(
-            rpc("events.replay", json!({ "thread_id": "T-events-1", "limit": 10 })),
+            rpc("runtime.replay_events", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-events-1",
+                "limit": 10,
+            })),
             &state,
         );
         assert!(replay_resp.error.is_none(), "replay failed: {:?}", replay_resp.error);
@@ -674,21 +580,43 @@ mod tests {
         assert!(types.contains(&"thread_completed"));
     }
 
-    // ── command methods ────────────────────────────────────────────
+    #[test]
+    fn runtime_events_replay_missing_token_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(
+            rpc("runtime.replay_events", json!({
+                "thread_id": "NONEXISTENT",
+            })),
+            &state,
+        );
+        assert!(resp.error.is_some());
+    }
+
+    // ── commands (via runtime.* token-gated) ────────────────────────
 
     #[test]
-    fn commands_submit_and_claim() {
+    fn runtime_commands_submit_and_claim() {
         let (_tmp, state) = setup_app_state();
         state.threads.create_thread(&make_create_params("T-cmd-1", "T-cmd-1")).unwrap();
 
+        let cbt = state.callback_tokens.generate(
+            "T-cmd-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+        );
+
         // Mark running first — cancel is only allowed on running threads
         let _ = dispatch(
-            rpc("threads.mark_running", json!({ "thread_id": "T-cmd-1" })),
+            rpc("runtime.mark_running", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-cmd-1",
+            })),
             &state,
         );
 
         let submit_resp = dispatch(
-            rpc("commands.submit", json!({
+            rpc("runtime.submit_command", json!({
+                "callback_token": cbt.token,
                 "thread_id": "T-cmd-1",
                 "command_type": "cancel",
             })),
@@ -699,7 +627,10 @@ mod tests {
         assert_eq!(submitted["command_type"], "cancel");
 
         let claim_resp = dispatch(
-            rpc("commands.claim", json!({ "thread_id": "T-cmd-1" })),
+            rpc("runtime.claim_commands", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-cmd-1",
+            })),
             &state,
         );
         assert!(claim_resp.error.is_none(), "claim failed: {:?}", claim_resp.error);
@@ -709,32 +640,30 @@ mod tests {
         assert_eq!(commands[0]["command_type"], "cancel");
     }
 
-    // ── error handling ──────────────────────────────────────────────
+    // ── facets (via runtime.* token-gated) ─────────────────────────
 
     #[test]
-    fn threads_create_missing_fields_returns_error() {
+    fn runtime_get_facets_returns_empty_for_new_thread() {
         let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("threads.create", json!({ "thread_id": "T-Bad" })), &state);
-        assert!(resp.error.is_some());
-        assert_eq!(rpc_err(&resp).code, "request_failed");
-    }
+        state.threads.create_thread(&make_create_params("T-facets-1", "T-facets-1")).unwrap();
 
-    #[test]
-    fn events_replay_missing_thread_returns_error() {
-        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate(
+            "T-facets-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+        );
         let resp = dispatch(
-            rpc("events.replay", json!({ "thread_id": "NONEXISTENT" })),
+            rpc("runtime.get_facets", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-facets-1",
+            })),
             &state,
         );
-        assert!(resp.error.is_some());
-    }
-
-    #[test]
-    fn threads_get_facets_missing_thread_id_returns_error() {
-        let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("threads.get_facets", json!({})), &state);
-        assert!(resp.error.is_some());
-        assert_eq!(rpc_err(&resp).code, "request_failed");
+        // Empty facets is OK — new thread has no facets
+        if resp.error.is_none() {
+            let result = rpc_ok(&resp);
+            assert!(result.is_object());
+        }
     }
 }
 

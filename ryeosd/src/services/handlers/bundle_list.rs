@@ -1,0 +1,41 @@
+//! `bundle.list` — enumerate registered bundles from the node-config snapshot.
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use serde_json::Value;
+
+use crate::service_executor::ServiceAvailability;
+use crate::service_registry::ServiceDescriptor;
+use crate::state::AppState;
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+pub struct Request {}
+
+pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
+    let mut bundles = Vec::new();
+    for record in &state.node_config.bundles {
+        bundles.push(serde_json::json!({
+            "name": record.name,
+            "path": record.path.display().to_string(),
+        }));
+    }
+    Ok(serde_json::json!({ "bundles": bundles }))
+}
+
+pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:bundle/list",
+    endpoint: "bundle.list",
+    availability: ServiceAvailability::Both,
+    handler: |params, state| {
+        Box::pin(async move {
+            let req: Request = if params.is_null() {
+                Request::default()
+            } else {
+                serde_json::from_value(params)?
+            };
+            handle(req, state).await
+        })
+    },
+};

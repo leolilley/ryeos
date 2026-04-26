@@ -1,0 +1,5 @@
+# rye:signed:2026-04-26T06:36:29Z:e96932b95c2fb81cd88fddbf66fecce90e870ba795954184e494d8ecf920b55f:28xwiXx/NnO33nbc2ObMuU7+jJOCZ59z0fudPI0gq+tHhYhwru5pPPLwP7QvtWaRsn90VvCkpDpDbRcap4MhDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: bundle.list
+required_caps: []
+description: "List installed bundles"

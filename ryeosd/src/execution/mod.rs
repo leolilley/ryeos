@@ -4,6 +4,7 @@
 //! 1. Checkout project from CAS to working directory
 //! 2. After execution, diff working dir and fold back changes
 
+pub mod arch_check;
 pub mod cache;
 pub mod callback_token;
 pub mod ingest;

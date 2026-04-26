@@ -1,0 +1,9 @@
+# rye:signed:2026-04-26T06:36:30Z:18456a4d78e9036758d8c78a2243df19dd179a3548752fe567d9e714f5ebdbc0:VS1D3DVQ9Qp/mRIXGcMoVRphZnnzY5zJuStE57zdZpWdp3G3sBTQV0G5p82zzDFKYkpgk7eJMhYH8gBVjPwaDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: service
+endpoint: fetch
+required_caps: ["bundle.read"]
+schema:
+  item_ref: string
+  with_content: boolean?
+  verify: boolean?
+description: "Resolve, optionally verify, and read an item via the engine"

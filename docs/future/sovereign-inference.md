@@ -551,3 +551,65 @@ Two concurrent requests both query `/status`, both see node-9 as least loaded, b
 ### GPU execution node CAS sync is a non-issue
 
 Worth noting: the CAS sync overhead on the execute path to GPU execution nodes is negligible in practice. GPU execution nodes are pre-provisioned with their `llm/complete` tools, model family configs, and tinygrad — all installed locally in `.ai/`. The `has/put` exchange on each request just confirms "I already have everything" and moves on. The actual inference payload (messages + tools) travels in the `/execute` request body, not through CAS. CAS sync only gets expensive when deploying new tools or configs to a node — that's the setup step, not the hot path.
+
+---
+
+## Infrastructure gaps this work activates
+
+Several pieces of infrastructure are deliberately simple in the single-node setup today and will need to grow before sovereign inference at cluster scale becomes real. Captured here so the dependency chain is visible up front rather than rediscovered as pain when this work starts.
+
+### Live engine reload
+
+Today `bundle.install` and `bundle.remove` require a daemon restart to pick up new items — the engine, trust store, and kind registries are built once at startup. Acceptable for single-node development. Unacceptable when:
+
+- A new model family lands in CAS and GPU execution nodes need to learn about its `llm/complete` tool implementation without dropping in-flight requests.
+- The completions server needs to add a routing tool for a new node class without restarting (would terminate live agent threads).
+- The cluster is doing rolling upgrades and individual nodes can't take downtime windows.
+
+Hot reload of `Config.bundle_roots` plus the engine plus dependent registries becomes load-bearing. Budget it explicitly; it's a substantial standalone effort.
+
+### Multi-principal model for non-daemon paths
+
+The current standalone service-execution path (`ryeosd run-service` for offline-eligible services like `rebuild`, `verify`, `fetch`) is documented as "privileged local operator mode" — a single principal authorized by OS-level filesystem access. Fine for single-machine development.
+
+A cluster of 15 machines × 30 GPUs has multiple operators, multiple service accounts running daemons, and (eventually) AI-as-operator scenarios where an agent invokes node-management services on a peer. The "operator" principal collapses; you need:
+
+- Real principal identity for non-`/execute` invocations (mTLS or signed inter-node tokens).
+- Audit records that capture **which node and which agent** initiated a cluster-internal service call, not just "operator did X locally."
+- Cap-checking that works across the inter-node boundary, not just within a single daemon's `/execute`.
+
+Budget this before any inter-node service call goes live in production.
+
+### Shared service-handlers crate
+
+Today the daemon's service handlers live inside the daemon binary; both `/execute` and the standalone `run-service` subcommand call them through a shared in-binary executor function. The standalone path works by spawning the daemon binary as a subprocess.
+
+At cluster scale, the completions server, the routing tool, and per-node execution daemons all need to invoke services with consistent semantics. Spawning a subprocess per inter-node service call is wrong — too much startup cost, no streaming. Extracting handlers into a `service-handlers` crate that all those binaries link against becomes the right shape.
+
+The shared in-binary executor is the natural seam to extract from. The refactor is mechanical when the trigger arrives; it just isn't worth doing pre-emptively.
+
+### Principal-aware audit across nodes
+
+Standalone-mode audit currently writes to a local NDJSON file with no principal beyond "operator." For sovereign inference, audit needs to be a first-class cross-node concern:
+
+- Every inference call's audit record needs to capture the originating agent thread, the GPU node that executed, the model used, the tool calls dispatched, and the cap chain that authorized it.
+- Audit needs to be queryable across the cluster (likely via an `audit/replay` service that aggregates across nodes).
+- Compliance, billing, and cost-attribution all want to ride this rail.
+
+This is its own design problem, but it's the place where the "operator-only" simplification of single-node operation has to be revisited honestly.
+
+### Daemon-down semantics break in cluster context
+
+A core simplification today — "tools require the daemon, services may not" — assumes a single daemon. In a cluster, "the daemon" becomes ambiguous: which node's daemon? Local? Routing? GPU? Services that today require "no daemon running" (like `rebuild` and the offline-only bundle ops) become "this node's local daemon must be down" — a much weaker constraint.
+
+Likely outcome: those services either disappear (becoming hot-reload services per the live-reload work above) or get re-scoped explicitly to per-node maintenance (`service:node/rebuild` rather than `service:rebuild`). Worth deciding before cluster work starts, not after.
+
+### Net
+
+None of these block single-node operation. They're recorded so when sovereign inference moves from exploratory to scheduled, the dependency chain is visible up front. Rough order of attack when the time comes:
+
+1. Live engine reload (foundation for everything else)
+2. Inter-node principal model + cross-node audit
+3. Shared service-handlers crate
+4. Re-scope offline-only services
+5. Cluster-aware everything else

@@ -78,22 +78,6 @@ pub struct ThreadGetParams {
     pub thread_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadListParams {
-    #[serde(default = "default_list_limit")]
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadChildrenParams {
-    pub thread_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadChainParams {
-    pub thread_id: String,
-}
-
 #[derive(Debug, Serialize)]
 pub struct ThreadChainResult {
     pub threads: Vec<ThreadDetail>,
@@ -161,10 +145,6 @@ pub struct ResolvedExecutionRequest {
     pub resolved_item: ResolvedItem,
     /// The PlanContext used during resolution — reused for verify/build_plan.
     pub plan_context: PlanContext,
-}
-
-fn default_list_limit() -> usize {
-    20
 }
 
 impl ThreadLifecycleService {
@@ -730,7 +710,7 @@ impl SpawnedItem {
 /// on cold-start vs. resume.
 #[tracing::instrument(
     name = "thread:spawn",
-    skip(engine, resolved, extra_runtime_bindings, thread_state_dir, original_snapshot_hash),
+    skip(engine, resolved, vault_bindings, daemon_callback_env, thread_state_dir, original_snapshot_hash),
     fields(
         thread_id,
         chain_root_id,
@@ -744,21 +724,16 @@ pub fn spawn_item(
     resolved: &ResolvedExecutionRequest,
     thread_id: &str,
     chain_root_id: &str,
-    mut extra_runtime_bindings: std::collections::HashMap<String, String>,
+    vault_bindings: std::collections::HashMap<String, String>,
+    daemon_callback_env: std::collections::HashMap<String, String>,
     thread_state_dir: Option<&std::path::Path>,
     is_resume: bool,
     original_snapshot_hash: Option<&str>,
 ) -> Result<SpawnedItem> {
-    if let Ok(socket_path) = std::env::var("RYEOSD_SOCKET_PATH") {
-        extra_runtime_bindings
-            .entry("RYEOSD_SOCKET_PATH".to_string())
-            .or_insert(socket_path);
-    }
-    if let Ok(url) = std::env::var("RYEOSD_URL") {
-        extra_runtime_bindings
-            .entry("RYEOSD_URL".to_string())
-            .or_insert(url);
-    }
+    // vault_bindings: user-provided secret/capability env vars.
+    // daemon_callback_env: daemon infrastructure env (socket path, callback
+    // token, thread id, project path). Sourced from AppState by the caller
+    // (runner.rs), NOT from the daemon's own process env.
     let verified = engine
         .verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
@@ -772,13 +747,11 @@ pub fn spawn_item(
         )
         .map_err(|e| anyhow!("plan build failed: {e}"))?;
 
-    // Inject extra runtime bindings (e.g. vault env vars) into subprocess nodes
-    if !extra_runtime_bindings.is_empty() {
-        for node in &mut plan.nodes {
-            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
-            {
-                spec.env.extend(extra_runtime_bindings.clone());
-            }
+    // Inject vault bindings + daemon callback env into every subprocess node.
+    for node in &mut plan.nodes {
+        if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
+            spec.env.extend(vault_bindings.iter().map(|(k, v)| (k.clone(), v.clone())));
+            spec.env.extend(daemon_callback_env.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
     }
 

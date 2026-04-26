@@ -4,7 +4,7 @@
 //! When GC is triggered, the daemon quiesces (blocks new permits),
 //! waits for active writers to drain, then runs GC with all writes paused.
 //!
-//! If the daemon is not running, `rye-gc` runs directly — no quiesce needed.
+//! If the daemon is not running, `rye gc` runs directly — no quiesce needed.
 
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::Duration;

@@ -15,6 +15,11 @@ pub struct ItemSource {
     /// Optional signature metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_info: Option<Value>,
+    /// Unix permission bits for executable binaries (e.g. `0o755`).
+    /// `None` for non-executable items (text files, configs, etc.).
+    /// Ingested from file mode when the exec bit is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
 }
 
 impl ItemSource {
@@ -30,6 +35,11 @@ impl ItemSource {
             v.as_object_mut()
                 .unwrap()
                 .insert("signature_info".into(), sig.clone());
+        }
+        if let Some(mode) = self.mode {
+            v.as_object_mut()
+                .unwrap()
+                .insert("mode".into(), json!(mode));
         }
         v
     }
@@ -53,6 +63,10 @@ impl ItemSource {
                 .ok_or_else(|| anyhow::anyhow!("missing integrity"))?
                 .to_string(),
             signature_info: value.get("signature_info").cloned(),
+            mode: value
+                .get("mode")
+                .and_then(|v| v.as_u64())
+                .map(|m| m as u32),
         })
     }
 }
@@ -68,6 +82,7 @@ mod tests {
             content_blob_hash: "ab".repeat(32),
             integrity: "ed25519:fp123".to_string(),
             signature_info: None,
+            mode: None,
         };
         let value = original.to_value();
         let restored = ItemSource::from_value(&value).unwrap();

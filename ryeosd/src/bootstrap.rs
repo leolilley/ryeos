@@ -1,11 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use lillux::crypto::DecodePrivateKey;
+
+use ryeos_engine::engine::Engine;
+use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
 use crate::identity::NodeIdentity;
+use crate::node_config::{NodeConfigSnapshot, SectionTable};
 
 #[derive(Debug)]
 pub struct InitOptions {
@@ -52,7 +56,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     );
 
     // 5. Write public identity document
-    let identity_path = config.state_dir.join("identity").join("public-identity.json");
+    let identity_path = config.state_dir.join(".ai").join("identity").join("public-identity.json");
     if options.force || !identity_path.exists() {
         identity.write_public_identity(&identity_path)?;
         tracing::info!(path = %identity_path.display(), "wrote public identity");
@@ -66,10 +70,16 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         write_self_trust(&trust_dir, &trust_entry, identity.verifying_key())?;
     }
 
-    tracing::info!(
-        state_dir = %config.state_dir.display(),
-        "bootstrap complete"
-    );
+    // Write signed core bundle registration so Phase 1 bootstrap can discover it.
+    let node_dir = config.state_dir.join(".ai").join("node").join("bundles");
+    std::fs::create_dir_all(&node_dir).with_context(|| {
+        format!("failed to create node config bundles dir {}", node_dir.display())
+    })?;
+    crate::node_config::loader::write_core_bundle_registration(
+        &config.state_dir,
+        &config.system_data_dir,
+        &identity,
+    )?;
 
     Ok(())
 }
@@ -84,8 +94,12 @@ fn write_self_trust(
         .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
     let fingerprint = lillux::cas::sha256_hex(verifying_key.as_bytes());
-    let pem = lillux::crypto::EncodePublicKey::to_public_key_pem(verifying_key, Default::default())
-        .context("failed to encode verifying key as PEM")?;
+    // Use single-line `ed25519:<base64>` form — matches `TrustedKeyDoc::to_toml`
+    // in ryeos-engine and avoids fragile multiline TOML quoting at write time.
+    let key_b64 = base64::engine::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        verifying_key.as_bytes(),
+    );
 
     let toml_content = format!(
         r#"version = "1.0.0"
@@ -95,12 +109,11 @@ owner = "self"
 attestation = ""
 
 [public_key]
-pem = \"\"\"
-{pem}\"\"\"
+pem = "ed25519:{key_b64}"
 "#
     );
 
-    fs::write(trust_entry, toml_content.trim().as_bytes())
+    fs::write(trust_entry, toml_content.as_bytes())
         .with_context(|| format!("failed to write trust entry {}", trust_entry.display()))?;
 
     tracing::info!(
@@ -119,161 +132,15 @@ fn discover_user_root() -> Option<PathBuf> {
         .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
 }
 
-/// Sign all unsigned items in system bundle roots using the user's signing key.
-///
-/// Runs on every daemon start. If no user key exists, logs a warning and
-/// returns (items will fail to verify at load time).
-pub fn sign_unsigned_items(config: &Config) {
-    let key_path = &config.signing_key_path;
-    if !key_path.exists() {
-        tracing::warn!("no user signing key — cannot sign unsigned items");
-        return;
-    }
+// V5.2-CLOSEOUT: sign_unsigned_items + walk helpers deleted.
+// Daemon bootstrap is bootstrap-only — must NEVER mutate
+// system_data_dir or any operator/publisher-managed bundle.
+// To sign bundle items use: cargo run --example resign_yaml -p ryeos-engine -- <path>
 
-    let sk = match lillux::crypto::SigningKey::from_pkcs8_pem(
-        &fs::read_to_string(key_path).unwrap_or_default(),
-    ) {
-        Ok(sk) => sk,
-        Err(e) => {
-            tracing::error!(path = %key_path.display(), error = %e, "failed to load user signing key");
-            return;
-        }
-    };
-
-    let all_roots = config.all_system_roots();
-    let mut signed = 0u32;
-    let mut skipped = 0u32;
-
-    for root in &all_roots {
-        // Sign kind schemas
-        let kinds_dir = root.join(ryeos_engine::AI_DIR).join("config").join("engine").join("kinds");
-        if kinds_dir.is_dir() {
-            signed += walk_and_sign(&kinds_dir, &sk, "#", &mut skipped);
-        }
-
-        // Sign bundle items (directives, tools, knowledge, configs)
-        let ai_dir = root.join(ryeos_engine::AI_DIR);
-        if ai_dir.is_dir() {
-            signed += walk_and_sign_items(&ai_dir, &sk, &mut skipped);
-        }
-    }
-
-    tracing::info!(signed, skipped, "bundle item signing");
-}
-
-/// Walk a directory and sign any unsigned .kind-schema.yaml files.
-fn walk_and_sign(dir: &Path, sk: &lillux::crypto::SigningKey, sig_prefix: &str, skipped: &mut u32) -> u32 {
-    let mut count = 0u32;
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            count += walk_and_sign(&path, sk, sig_prefix, skipped);
-            continue;
-        }
-        if path.extension().map_or(false, |e| e == "yaml") {
-            match sign_file_if_unsigned(&path, sk, sig_prefix) {
-                Ok(true) => {
-                    count += 1;
-                    tracing::info!(path = %path.display(), "signed file");
-                }
-                Ok(false) => {
-                    *skipped += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to sign file");
-                }
-            }
-        }
-    }
-    count
-}
-
-/// Walk a directory tree and sign any unsigned or wrong-key-signed items.
-///
-/// Signs .md, .py, .yaml/.yml files with the appropriate
-/// signature prefix for each type.
-fn walk_and_sign_items(dir: &Path, sk: &lillux::crypto::SigningKey, skipped: &mut u32) -> u32 {
-    let mut count = 0u32;
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip config/ subdirectory (kind schemas handled separately)
-            if path.file_name().map_or(false, |n| n == "config") {
-                continue;
-            }
-            count += walk_and_sign_items(&path, sk, skipped);
-            continue;
-        }
-        let sig_prefix = match path.extension().and_then(|e| e.to_str()) {
-            Some("md") => "<!--",
-            Some("yaml") | Some("yml") | Some("py") | Some("toml") => "#",
-            _ => continue,
-        };
-        match sign_file_if_unsigned(&path, sk, sig_prefix) {
-            Ok(true) => {
-                count += 1;
-            }
-            Ok(false) => {
-                *skipped += 1;
-            }
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to sign file");
-            }
-        }
-    }
-    count
-}
-
-/// Sign a file if it's not already signed by the current key.
-/// Returns Ok(true) if signed (or re-signed), Ok(false) if skipped.
-fn sign_file_if_unsigned(path: &Path, sk: &lillux::crypto::SigningKey, sig_prefix: &str) -> Result<bool> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-
-    let our_fp = lillux::signature::compute_fingerprint(&sk.verifying_key());
-
-    // Check if already signed by our key
-    if let Some(first_line) = content.lines().next() {
-        if let Some(header) = lillux::signature::parse_signature_line(first_line, sig_prefix, None) {
-            if header.signer_fingerprint == our_fp {
-                return Ok(false); // already signed by us
-            }
-            // Signed by a different key — strip old signature and re-sign
-            let body = lillux::signature::strip_signature_lines(&content);
-            let signed = lillux::signature::sign_content(&body, sk, sig_prefix, None);
-            fs::write(path, &signed)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-            tracing::info!(
-                path = %path.display(),
-                old_fp = %header.signer_fingerprint,
-                new_fp = %our_fp,
-                "re-signed file (was signed by different key)"
-            );
-            return Ok(true);
-        }
-    }
-
-    // Not signed at all — sign it
-    let signed = lillux::signature::sign_content(&content, sk, sig_prefix, None);
-    fs::write(path, &signed)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    Ok(true)
-}
 
 fn create_directory_layout(config: &Config) -> Result<()> {
-    // Canonical paths — one CAS root under .state/objects
-    let state_root = config.state_dir.join(".state");
+    // Canonical paths — one CAS root under .ai/state/objects
+    let state_root = config.state_dir.join(".ai").join("state");
     let dirs = [
         config.state_dir.join("auth").join("authorized_keys"),
         config.state_dir.join("db"),
@@ -311,4 +178,83 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
         tracing::warn!("no user signing key found — signed items will fail to verify");
     }
     Ok(())
+}
+
+/// Two-phase node-config bootstrap: shared by daemon-start and standalone paths.
+///
+/// 1. Phase 1: load bundle section from `system_data_dir` + `state_dir`
+///    to determine effective bundle roots.
+/// 2. Build the engine with those roots.
+/// 3. Phase 2: full node-config scan across all sections → snapshot.
+///
+/// Trust continuity: the trust store used for node-config verification includes
+/// the same sources the engine's `TrustStore::load_three_tier` uses (system +
+/// user tiers). This ensures daemon-written `kind: node` items (signed by daemon
+/// identity, whose trust lives in user-tier) verify on next boot.
+///
+/// Returns `(engine, node_config_snapshot)`.
+pub fn load_node_config_two_phase(
+    config: &Config,
+) -> Result<(Arc<Engine>, Arc<NodeConfigSnapshot>)> {
+    let system_data_dir = &config.system_data_dir;
+    let state_dir = &config.state_dir;
+
+    // Discover user root (same logic as engine_init)
+    let user_root = discover_user_root();
+    let system_roots_phase1 = vec![system_data_dir.to_path_buf()];
+
+    // ── Phase 1: bootstrap trust store + bundle section ──
+    // Use three-tier trust (same as engine_init) so daemon-written items verify.
+    let bootstrap_trust_store = TrustStore::load_three_tier(
+        None, // project root unknown at startup
+        user_root.as_deref(),
+        &system_roots_phase1,
+    )
+    .context("failed to load bootstrap trust store for node-config verification")?;
+
+    let bootstrap_loader = crate::node_config::loader::BootstrapLoader {
+        system_data_dir,
+        state_dir,
+        trust_store: &bootstrap_trust_store,
+    };
+
+    let bundle_records = bootstrap_loader
+        .load_bundle_section()
+        .context("Phase 1: failed to load bundle section from node config")?;
+
+    let effective_bundle_roots: Vec<PathBuf> = bundle_records
+        .iter()
+        .map(|b| b.path.clone())
+        .collect();
+
+    tracing::info!(
+        system_data_dir = %system_data_dir.display(),
+        bundle_count = effective_bundle_roots.len(),
+        trust_signers = bootstrap_trust_store.len(),
+        "Phase 1: effective bundle roots determined"
+    );
+
+    // ── Build engine ──
+    let engine = Arc::new(
+        crate::engine_init::build_engine(config, &effective_bundle_roots)?,
+    );
+
+    // ── Phase 2: full node-config scan ──
+    let section_table = SectionTable::new();
+    let full_loader = crate::node_config::loader::BootstrapLoader {
+        system_data_dir,
+        state_dir,
+        trust_store: &bootstrap_trust_store,
+    };
+    let snapshot = Arc::new(
+        full_loader
+            .load_full(&section_table)
+            .context("Phase 2: failed to load full node config")?,
+    );
+    tracing::info!(
+        bundle_count = snapshot.bundles.len(),
+        "Phase 2: node config loaded"
+    );
+
+    Ok((engine, snapshot))
 }

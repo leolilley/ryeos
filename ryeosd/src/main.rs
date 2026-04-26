@@ -1,23 +1,3 @@
-mod api;
-mod auth;
-mod bootstrap;
-mod config;
-mod engine_init;
-mod execution;
-mod identity;
-mod kind_profiles;
-mod launch_metadata;
-mod maintenance;
-mod policy;
-mod process;
-mod reconcile;
-mod runtime_db;
-mod services;
-mod state;
-mod state_store;
-mod uds;
-mod write_barrier;
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,59 +5,201 @@ use anyhow::{Context, Result};
 use axum::routing::{get, post};
 use axum::{serve, Router};
 use clap::Parser;
-use config::{Cli, Config};
 use tokio::net::{TcpListener, UnixListener};
 
-use crate::execution::callback_token::CallbackCapabilityStore;
-use crate::identity::NodeIdentity;
-use crate::services::command_service::CommandService;
-use crate::services::event_store::EventStoreService;
-use crate::services::thread_lifecycle::ThreadLifecycleService;
-use crate::state::AppState;
+use ryeosd::config::{self, Cli, Config};
+use ryeosd::execution::callback_token::CallbackCapabilityStore;
+use ryeosd::identity::NodeIdentity;
+use ryeosd::services::command_service::CommandService;
+use ryeosd::services::event_store::EventStoreService;
+use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
+use ryeosd::state::AppState;
+use ryeosd::{
+    api, auth, bootstrap, execution, kind_profiles, process, reconcile, service_executor,
+    service_registry, services, state, state_lock, state_store, uds,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon());
-
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
 
-    // --init-only: run bootstrap + sign, then exit
+    // Initialize tracing with file sink (writes ndjson to <state_dir>/.ai/state/trace-events.ndjson).
+    // Must come after config load so state_dir is known.
+    // The init_if_missing / init_only paths below may create .ai/state/ if it doesn't exist yet,
+    // but for_daemon_with_file_sink already creates .ai/state/ on its own.
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(&config.state_dir));
+
+    // --init-only: bootstrap node-local state (identity, trust, dirs) and exit.
+    //
+    // This intentionally does NOT walk or sign items in `system_data_dir`.
+    // System-tier bundle items are operator/publisher-managed and out of
+    // scope for daemon init. To sign bundle items, use the explicit signer
+    // tool (`cargo run --example resign_yaml -p ryeos-engine -- <path>`).
     if cli.init_only {
         let force = cli.force;
         bootstrap::init(&config, &bootstrap::InitOptions { force })?;
-        bootstrap::sign_unsigned_items(&config);
         tracing::info!("init-only complete, exiting");
         return Ok(());
     }
 
-    // Init-if-missing convenience (creates runtime dirs + default config)
-    if cli.init_if_missing && !config.state_dir.exists() {
+    // Init-if-missing convenience: applies to BOTH daemon-start and the
+    // standalone `run-service` subcommand. Done before subcommand dispatch
+    // so standalone callers don't need a separate init step.
+    //
+    // We check for `signing_key_path` rather than `state_dir.exists()`
+    // because the tracing subscriber pre-creates `<state_dir>/.ai/state/`
+    // before this code runs, which would otherwise defeat the predicate.
+    if cli.init_if_missing && !config.signing_key_path.exists() {
         bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
+    }
+
+    // Handle subcommands before daemon startup
+    if let Some(ref cmd) = cli.command {
+        match cmd {
+            config::DaemonCommand::RunService { service_ref, params } => {
+                return run_service_standalone(&config, service_ref, params.as_deref()).await;
+            }
+        }
     }
 
     // Verify initialization
     bootstrap::verify_initialized(&config)?;
 
-    // Sign any unsigned bundle items using the user's signing key.
-    // Runs on every start so that newly-added bundles get signed on first use.
-    bootstrap::sign_unsigned_items(&config);
+    // Startup auto-signing is intentionally NOT called here.
+    // The daemon start path is fail-closed on unsigned trust-sensitive items.
+    // Use `ryeosd --init-only` (or `--init-only --force`) to sign items.
 
     process::remove_stale_socket(&config.uds_path)?;
 
+    // ── Two-phase node-config bootstrap ──
+    let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
+
+    // Build the service registry early — self-check needs it.
+    let services = Arc::new(service_registry::build_service_registry());
+
+    // Self-check: verify every registered service resolves and is trusted.
+    // Every service must resolve, verify, extract an endpoint, AND have a
+    // registered handler. Any failure prevents daemon start (fail-closed).
+    let catalog_health = {
+        let operational_services = ryeosd::service_handlers::ALL;
+
+        let plan_ctx = ryeos_engine::contracts::PlanContext {
+            requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                ryeos_engine::contracts::Principal {
+                    fingerprint: "fp:daemon-self-check".into(),
+                    scopes: vec![],
+                },
+            ),
+            project_context: ryeos_engine::contracts::ProjectContext::None,
+            current_site_id: "site:local".into(),
+            origin_site_id: "site:local".into(),
+            execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+            validate_only: true,
+        };
+
+        let mut failed: Vec<(&str, String)> = Vec::new();
+        let mut missing: Vec<&str> = Vec::new();
+
+        for desc in operational_services {
+            let canonical = match ryeos_engine::canonical_ref::CanonicalRef::parse(desc.service_ref) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(service = desc.service_ref, error = %e, "operational service ref parse failed");
+                    continue;
+                }
+            };
+
+            match engine.resolve(&plan_ctx, &canonical) {
+                Ok(resolved) => {
+                    match engine.verify(&plan_ctx, resolved) {
+                        Ok(verified) => {
+                            // Fail-closed: endpoint extraction + handler registration
+                            match ryeosd::service_registry::extract_endpoint(&verified.resolved.metadata.extra) {
+                                Ok(endpoint) => {
+                                    if !services.has(&endpoint) {
+                                        let msg = format!(
+                                            "service resolves to endpoint '{}' but no handler registered",
+                                            endpoint
+                                        );
+                                        tracing::error!(service = desc.service_ref, %endpoint, "{}", msg);
+                                        failed.push((desc.service_ref, msg));
+                                    } else {
+                                        tracing::debug!(
+                                            service = desc.service_ref,
+                                            trust_class = ?verified.trust_class,
+                                            %endpoint,
+                                            "operational service verified"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    let msg = format!("endpoint extraction failed: {e}");
+                                    tracing::error!(service = desc.service_ref, error = %e, "{}", msg);
+                                    failed.push((desc.service_ref, msg));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            tracing::error!(service = desc.service_ref, error = %msg, "operational service verification FAILED");
+                            failed.push((desc.service_ref, msg));
+                        }
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(service = desc.service_ref, "operational service not found in bundle");
+                    missing.push(desc.service_ref);
+                }
+            }
+        }
+
+        if !failed.is_empty() {
+            for (svc, error) in &failed {
+                tracing::error!(svc, error, "refusing to start: operational service failed verification");
+            }
+            anyhow::bail!(
+                "operational service catalog self-check failed: {} service(s) failed verification",
+                failed.len()
+            );
+        }
+
+        if !missing.is_empty() {
+            for svc in &missing {
+                tracing::error!(svc, "refusing to start: operational service not found in bundle");
+            }
+            anyhow::bail!(
+                "operational service catalog self-check failed: {} service(s) missing",
+                missing.len()
+            );
+        }
+
+        ryeosd::state::CatalogHealth {
+            status: "ok".into(),
+            missing_services: vec![],
+        }
+    };
+
+    // These must be initialized after the self-check (which only needs engine + services).
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
     let identity = NodeIdentity::load(&config.signing_key_path)?;
-    let engine = Arc::new(engine_init::build_engine(&config)?);
     
-    let state_root = config.state_dir.join(".state");
+    let state_root = config.state_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     
-    let write_barrier = crate::write_barrier::WriteBarrier::new();
+    let write_barrier = ryeosd::write_barrier::WriteBarrier::new();
     
     let state_store = Arc::new(state_store::StateStore::new(state_root, runtime_db_path, signer, write_barrier.clone())
         .context("StateStore initialization failed")?);
     tracing::info!("StateStore initialized successfully");
+
+    // Acquire operator state lock — prevents standalone services from
+    // running while the daemon is up. Released on process exit (Drop).
+    let _state_lock = state_lock::StateLock::acquire(
+        &state_lock::default_lock_path(&config.state_dir),
+    ).context("failed to acquire state lock — is another ryeosd instance or standalone service running?")?;
+    tracing::info!("State lock acquired");
     
     let events = Arc::new(EventStoreService::new(
         state_store.clone(),
@@ -89,6 +211,7 @@ async fn main() -> Result<()> {
     ));
     let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
+    // `services` already built above for self-check
 
     let app_state = AppState {
         config: Arc::new(config.clone()),
@@ -102,6 +225,9 @@ async fn main() -> Result<()> {
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
+        catalog_health,
+        services,
+        node_config: node_config_snapshot,
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -130,6 +256,7 @@ async fn main() -> Result<()> {
     let daemon_info = serde_json::json!({
         "pid": std::process::id(),
         "socket": config.uds_path.display().to_string(),
+        "bind": config.bind.to_string(),
         "started_at": lillux::time::iso8601_now(),
     });
     let daemon_json_path = config.state_dir.join("daemon.json");
@@ -176,7 +303,7 @@ async fn main() -> Result<()> {
         let st = app_state.clone();
         let threads = app_state.threads.clone();
         tokio::spawn(async move {
-            let params = match crate::execution::runner::execution_params_from_resume_context(
+            let params = match ryeosd::execution::runner::execution_params_from_resume_context(
                 &st,
                 &intent.resume_context,
             ) {
@@ -188,7 +315,7 @@ async fn main() -> Result<()> {
                         "resume: failed to build ExecutionParams from ResumeContext — finalizing"
                     );
                     if let Err(fin_err) = threads.finalize_thread(
-                        &crate::services::thread_lifecycle::ThreadFinalizeParams {
+                        &ryeosd::services::thread_lifecycle::ThreadFinalizeParams {
                             thread_id: intent.thread_id.clone(),
                             status: "failed".to_string(),
                             outcome_code: Some("resume_rebuild_failed".to_string()),
@@ -212,7 +339,7 @@ async fn main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(err) = crate::execution::runner::run_existing_detached(
+            if let Err(err) = ryeosd::execution::runner::run_existing_detached(
                 st,
                 intent.thread_id.clone(),
                 intent.chain_root_id,
@@ -363,6 +490,122 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+}
+
+/// Run a service in standalone mode (daemon is not running).
+///
+/// Performs bootstrap: load config, build engine + trust store,
+/// load full node-config, build service registry, acquire state lock, dispatch via shared executor.
+async fn run_service_standalone(
+    config: &config::Config,
+    service_ref: &str,
+    params_json: Option<&str>,
+) -> Result<()> {
+    use ryeosd::service_executor::{ExecutionContext, ExecutionMode};
+
+    // Verify initialization
+    bootstrap::verify_initialized(config)?;
+
+    // Minimal bootstrap (subset of daemon startup)
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(config));
+    let identity = NodeIdentity::load(&config.signing_key_path)?;
+
+    // Two-phase node-config bootstrap (same as daemon-start path)
+    let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
+
+    let services = Arc::new(service_registry::build_service_registry());
+
+    // Acquire state lock (prevents concurrent daemon)
+    let _state_lock = state_lock::StateLock::acquire(
+        &state_lock::default_lock_path(&config.state_dir),
+    ).context("failed to acquire state lock — is the daemon running?")?;
+
+    let state_root = config.state_dir.join(".ai").join("state");
+    let runtime_db_path = config.db_path.clone();
+    let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
+    let write_barrier = ryeosd::write_barrier::WriteBarrier::new();
+    let state_store = Arc::new(state_store::StateStore::new(
+        state_root, runtime_db_path, signer, write_barrier.clone(),
+    )?);
+
+    let events = Arc::new(services::event_store::EventStoreService::new(state_store.clone()));
+    let threads = Arc::new(services::thread_lifecycle::ThreadLifecycleService::new(
+        state_store.clone(),
+        kind_profiles.clone(),
+        events.clone(),
+    ));
+    let commands = Arc::new(services::command_service::CommandService::new(
+        state_store.clone(),
+        kind_profiles,
+        events.clone(),
+    ));
+
+    let app_state = state::AppState {
+        config: Arc::new(config.clone()),
+        state_store,
+        engine: engine.clone(),
+        identity: Arc::new(identity),
+        threads,
+        events,
+        commands,
+        callback_tokens: Arc::new(execution::callback_token::CallbackCapabilityStore::new()),
+        write_barrier: Arc::new(write_barrier),
+        started_at: Instant::now(),
+        started_at_iso: lillux::time::iso8601_now(),
+        catalog_health: state::CatalogHealth {
+            status: "standalone".into(),
+            missing_services: vec![],
+        },
+        services,
+        node_config: node_config_snapshot,
+    };
+
+    let params: serde_json::Value = match params_json {
+        Some(json_str) => serde_json::from_str(json_str)
+            .with_context(|| "parse --params as JSON")?,
+        None => serde_json::json!({}),
+    };
+
+    let ctx = ExecutionContext {
+        principal_fingerprint: "fp:standalone-operator".into(),
+        caller_scopes: vec![], // standalone: operator authority, no caps
+        engine,
+        plan_ctx: ryeos_engine::contracts::PlanContext {
+            requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                ryeos_engine::contracts::Principal {
+                    fingerprint: "fp:standalone-operator".into(),
+                    scopes: vec![],
+                },
+            ),
+            project_context: ryeos_engine::contracts::ProjectContext::None,
+            current_site_id: "site:local".into(),
+            origin_site_id: "site:local".into(),
+            execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+            validate_only: false,
+        },
+    };
+
+    let result = service_executor::execute_service(
+        service_ref,
+        params,
+        ExecutionMode::Standalone,
+        &ctx,
+        &app_state,
+    )
+    .await?;
+
+    tracing::info!(
+        endpoint = %result.endpoint,
+        trust_class = ?result.trust_class,
+        effective_caps = ?result.effective_caps,
+        audit_thread_id = %result.audit_thread_id,
+        "standalone service completed"
+    );
+
+    // Print result to stdout
+    println!("{}", serde_json::to_string_pretty(&result.value)?);
+
+    Ok(())
 }
 
 #[cfg(test)]

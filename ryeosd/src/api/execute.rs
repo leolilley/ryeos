@@ -114,6 +114,77 @@ pub async fn execute(
         }
     })?;
 
+    // ── Service dispatch path ─────────────────────────────────────────
+    // `kind: service` items are daemon-owned in-process operations.
+    // Delegated to the shared service executor which handles
+    // resolve→verify→availability→cap enforcement→audit→dispatch.
+    if request.item_ref.starts_with("service:") {
+        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+
+        let plan_ctx = PlanContext {
+            requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
+                fingerprint: caller_principal_id.clone(),
+                scopes: caller_scopes.clone(),
+            }),
+            project_context: ProjectContext::LocalPath {
+                path: project_ctx.effective_path.clone(),
+            },
+            current_site_id: site_id.to_string(),
+            origin_site_id: site_id.to_string(),
+            execution_hints: Default::default(),
+            validate_only: false,
+        };
+
+        let exec_ctx = crate::service_executor::ExecutionContext {
+            principal_fingerprint: caller_principal_id.clone(),
+            caller_scopes: caller_scopes.clone(),
+            engine: state.engine.clone(),
+            plan_ctx,
+        };
+
+        match crate::service_executor::execute_service(
+            &request.item_ref,
+            request.parameters,
+            crate::service_executor::ExecutionMode::Live,
+            &exec_ctx,
+            &state,
+        )
+        .await
+        {
+            Ok(result) => {
+                if let Some(ref d) = project_ctx.temp_dir {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+                return Ok(Json(json!({
+                    "thread": {
+                        "thread_id": result.audit_thread_id,
+                        "kind": "service_run",
+                        "item_ref": request.item_ref,
+                        "status": "completed",
+                        "trust_class": format!("{:?}", result.trust_class),
+                        "effective_caps": result.effective_caps,
+                    },
+                    "result": result.value,
+                })));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if let Some(ref d) = project_ctx.temp_dir {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+                // Map cap denial to 403
+                if msg.contains("insufficient capabilities") {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(json!({ "error": msg })),
+                    ));
+                }
+                return Err(invalid_request(e));
+            }
+        }
+    }
+
+    // ── Tool / directive dispatch path ────────────────────────────────
     let mut resolved = thread_lifecycle::resolve_root_execution(
             &state.engine,
             site_id,
@@ -147,8 +218,8 @@ pub async fn execute(
     }
 
     // Check if this resolves to a native runtime binary
-    let runtime_binary = launch::native_runtime_binary(&resolved.executor_ref);
-    if runtime_binary.is_some() {
+    let is_native = launch::is_native_executor(&resolved.executor_ref);
+    if is_native {
         // Reject unsupported modes on native path
         if matches!(project_source, ProjectSource::PushedHead) {
             if let Some(ref d) = project_ctx.temp_dir {
@@ -206,6 +277,9 @@ pub async fn execute(
     // Resolve vault secrets from item-declared required_secrets only.
     let vault_bindings = HashMap::new();
 
+    // Capture executor_ref before `resolved` is moved into ExecutionParams.
+    let executor_ref = resolved.executor_ref.clone();
+
     let params = ExecutionParams {
         resolved,
         acting_principal: caller_principal_id,
@@ -217,7 +291,7 @@ pub async fn execute(
     };
 
     // Native runtime path
-    if let Some(binary) = runtime_binary {
+    if is_native {
         let project_path = params.project_path.as_ref().ok_or_else(|| {
             policy::internal_error(anyhow::anyhow!(
                 "native runtime launch requires a project_path"
@@ -225,7 +299,7 @@ pub async fn execute(
         })?;
         let result = launch::build_and_launch(
             &state,
-            &binary,
+            &executor_ref,
             &params.acting_principal,
             &params.resolved,
             project_path,

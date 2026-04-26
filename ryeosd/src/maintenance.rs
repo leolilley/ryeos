@@ -45,7 +45,7 @@ pub async fn run_maintenance_gc(
     state: &AppState,
     params: &GcParams,
 ) -> Result<GcResult> {
-    let state_root = state.config.state_dir.join(".state");
+    let state_root = state.config.state_dir.join(".ai").join("state");
     let cas_root = state_root.join("objects");
     let refs_root = state_root.join("refs");
 
