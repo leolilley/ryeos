@@ -44,7 +44,6 @@ impl AuthVerifierRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::compile::AuthVerifier;
 
     #[test]
     #[should_panic(expected = "duplicate verifier")]

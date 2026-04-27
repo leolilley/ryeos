@@ -577,14 +577,14 @@ fn validate_thread_id_format(id: &str) -> Result<()> {
     let segments: Vec<&str> = suffix.split('-').collect();
     if segments.len() != 5 {
         bail!(
-            "thread_id suffix must be UUID-format (8-4-4-4-12 hex groups): got `{suffix}`"
+            "thread_id suffix must have 5 dash-separated hex groups: got `{suffix}`"
         );
     }
     let expected_lengths: &[usize] = &[8, 4, 4, 4, 12];
     for (seg, &expected) in segments.iter().zip(expected_lengths.iter()) {
         if seg.len() != expected || !seg.chars().all(|c| c.is_ascii_hexdigit()) {
             bail!(
-                "thread_id suffix must be hex groups of lengths {expected_lengths:?}: got `{suffix}`"
+                "thread_id suffix hex groups must have lengths {expected_lengths:?}: got `{suffix}`"
             );
         }
     }
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn validate_thread_id_accepts_valid_format() {
-        assert!(validate_thread_id_format("T-0123456789abcdef-0123-4567-89ab-cdef01234567").is_ok());
+        assert!(validate_thread_id_format("T-01234567-abcd-ef01-2345-6789abcdef01").is_ok());
         let id = new_thread_id();
         assert!(validate_thread_id_format(&id).is_ok());
     }
@@ -924,19 +924,19 @@ mod tests {
     fn validate_thread_id_rejects_non_uuid_suffix() {
         let err = validate_thread_id_format("T-not-a-uuid").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("UUID-format"), "got: {msg}");
+        assert!(msg.contains("hex groups"), "got: {msg}");
     }
 
     #[test]
     fn validate_thread_id_rejects_wrong_segment_lengths() {
-        let err = validate_thread_id_format("T-0123456789abcdef-01-4567-89ab-cdef01234567").unwrap_err();
+        let err = validate_thread_id_format("T-01234567-ab-cdef-0123-456789abcdef01").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("hex groups"), "got: {msg}");
     }
 
     #[test]
     fn validate_thread_id_rejects_non_hex_chars() {
-        let err = validate_thread_id_format("T-ghijklmnopqrst-0123-4567-89ab-cdef01234567").unwrap_err();
+        let err = validate_thread_id_format("T-ghijklmn-abcd-ef01-2345-6789abcdef01").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("hex groups"), "got: {msg}");
     }
