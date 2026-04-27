@@ -151,6 +151,22 @@ fn extract_dotted_value<'a>(body: &'a Value, dotted_path: &str) -> Option<&'a Va
     Some(current)
 }
 
+// FIXME (§E.3 residual gap): this helper currently goes via
+// `services::thread_lifecycle::resolve_root_execution` + `execution::launch::build_and_launch`
+// directly, which requires `metadata.executor_id` to be set on the
+// resolved item. The `directive` kind schema has no extraction rule
+// for `executor_id`; production directives alias through
+// `runtime:directive-runtime` via `dispatch::dispatch`'s kind-alias
+// loop. As a consequence, `/execute/stream` cannot launch standard
+// directives today — it fails with `"item ... does not declare an
+// executor_id"`. The fix is to plumb `pre_minted_thread_id` into
+// `dispatch::DispatchRequest` (then through to
+// `services::thread_lifecycle::create_root_thread_with_id`, which
+// already accepts a pre-minted id per E.1) and call `dispatch::dispatch`
+// here instead. The Phase E e2e round-trip test
+// (`sse_directive_launch_e2e_round_trip`) is gated by `#[ignore]`
+// until this lands. The other two Phase E tests cover wiring +
+// thread-id mint contract.
 fn build_launch_task(
     state: &AppState,
     item_ref: &str,
