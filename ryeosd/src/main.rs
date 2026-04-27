@@ -8,6 +8,7 @@ use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
 
 use ryeosd::config::{self, Cli, Config};
+use ryeosd::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
 use ryeosd::execution::callback_token::CallbackCapabilityStore;
 use ryeosd::identity::NodeIdentity;
 use ryeosd::services::command_service::CommandService;
@@ -220,6 +221,7 @@ async fn main() -> Result<()> {
         identity: Arc::new(identity),
         threads,
         events,
+        event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
         commands,
         callback_tokens,
         write_barrier: Arc::new(write_barrier),
@@ -547,6 +549,7 @@ async fn run_service_standalone(
         identity: Arc::new(identity),
         threads,
         events,
+        event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
         commands,
         callback_tokens: Arc::new(execution::callback_token::CallbackCapabilityStore::new()),
         write_barrier: Arc::new(write_barrier),

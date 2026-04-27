@@ -49,10 +49,17 @@ pub async fn dispatch_action(
         },
     };
 
-    let result = client.dispatch_action(request).await
+    let response = client.dispatch_action(request).await
         .map_err(|e| anyhow::anyhow!("dispatch failed: {e}"))?;
 
-    let followed = follow_continuation(client, &result, thread_id, project_path, 0).await?;
+    // The typed callback contract puts the leaf-dispatcher value in
+    // `response.result`; the wrapping `thread` snapshot is for audit
+    // only and never feeds into graph-walker control flow. Pass JUST
+    // the leaf value into continuation chasing — `continuation_id`
+    // (when present) lives at the leaf result's top level under the
+    // typed contract.
+    let leaf = response.result;
+    let followed = follow_continuation(client, &leaf, thread_id, project_path, 0).await?;
     Ok(followed)
 }
 
@@ -91,10 +98,11 @@ fn follow_continuation<'a>(
             return Ok(result.clone());
         }
 
+        // Typed callback contract: continuation IDs live at the leaf
+        // result's top level. The legacy `.data.continuation_id`
+        // sidechannel is gone — there is one source of truth here.
         let continuation_id = result
-            .get("data")
-            .and_then(|d| d.get("continuation_id"))
-            .or_else(|| result.get("continuation_id"))
+            .get("continuation_id")
             .and_then(|v| v.as_str());
 
         let Some(cont_id) = continuation_id else {
@@ -111,58 +119,41 @@ fn follow_continuation<'a>(
             .unwrap_or("unknown");
 
         if thread_status == "continued" {
+            // No silent fallback to the legacy `continuation.successor_thread_id`
+            // sidechannel: `runtime.get_thread` already returns a stable
+            // `{ thread, result, artifacts, facets }` shape and continued
+            // threads MUST advertise their successor under
+            // `thread.successor_thread_id`. A missing field is a daemon
+            // contract violation, not a soft case.
             let successor_id = thread_result
                 .get("thread")
                 .and_then(|t| t.get("successor_thread_id"))
-                .or_else(|| {
-                    thread_result
-                        .get("continuation")
-                        .and_then(|c| c.get("successor_thread_id"))
-                })
                 .and_then(|v| v.as_str())
-                .unwrap_or(cont_id);
+                .ok_or_else(|| anyhow::anyhow!(
+                    "continued thread {cont_id} missing thread.successor_thread_id \
+                     in get_thread response — daemon contract violation"
+                ))?;
 
-            let inner = json!({"data": {"continuation_id": successor_id}});
+            // Recurse with a leaf-shaped value: continuation IDs live
+            // at the leaf's top level under the typed callback contract.
+            let inner = json!({"continuation_id": successor_id});
             return follow_continuation(client, &inner, thread_id, project_path, depth + 1).await;
         }
 
+        // Terminal: return the leaf value directly. No fallback to
+        // returning the whole `{thread, result, ...}` wrapper —
+        // `runtime.get_thread` always carries `result` for non-continued
+        // threads, and a missing field is a daemon contract violation.
         let terminal_result = thread_result
             .get("result")
             .cloned()
-            .unwrap_or(thread_result);
+            .ok_or_else(|| anyhow::anyhow!(
+                "thread {cont_id} status={thread_status:?} missing top-level \
+                 `result` field in get_thread response — daemon contract violation"
+            ))?;
 
-        Ok(json!({
-            "status": "ok",
-            "data": terminal_result,
-        }))
+        Ok(terminal_result)
     })
-}
-
-pub fn unwrap_result(raw: &Value) -> Value {
-    if let Some(data) = raw.get("data") {
-        let status = raw.get("status").and_then(|s| s.as_str());
-        let success = raw.get("success").and_then(|s| s.as_bool());
-        if status == Some("error") || success == Some(false) {
-            let mut result = data.clone();
-            if let Value::Object(ref mut map) = result {
-                map.insert("status".into(), Value::String("error".into()));
-            }
-            return result;
-        }
-        return data.clone();
-    }
-
-    if let Some(status) = raw.get("status").and_then(|s| s.as_str()) {
-        if status == "error" {
-            return raw.clone();
-        }
-    }
-
-    if raw.is_object() {
-        raw.clone()
-    } else {
-        json!({"result": raw})
-    }
 }
 
 #[cfg(test)]
@@ -190,7 +181,12 @@ mod tests {
     impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
         async fn dispatch_action(&self, _request: DispatchActionRequest) -> Result<Value, CallbackError> {
             let mut results = self.results.lock().unwrap();
-            if results.is_empty() { Ok(json!({"status": "ok", "data": {}})) } else { Ok(results.remove(0)) }
+            // Strict typed contract: wrap leaf in `{thread, result}`.
+            if results.is_empty() {
+                Ok(json!({"thread": {}, "result": {}}))
+            } else {
+                Ok(json!({"thread": {}, "result": results.remove(0)}))
+            }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
@@ -206,19 +202,6 @@ mod tests {
         async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-    }
-
-    #[test]
-    fn unwrap_result_extracts_data() {
-        let raw = json!({"status": "ok", "data": {"msg": "hello"}});
-        assert_eq!(unwrap_result(&raw), json!({"msg": "hello"}));
-    }
-
-    #[test]
-    fn unwrap_result_error_status() {
-        let raw = json!({"status": "error", "data": {"message": "boom"}});
-        let result = unwrap_result(&raw);
-        assert_eq!(result["status"], "error");
     }
 
     #[test]
@@ -238,9 +221,16 @@ mod tests {
 
     #[tokio::test]
     async fn follow_continuation_respects_max_depth() {
-        let client = make_mock_client(vec![json!({"data": {"continuation_id": "cont-1"}})]);
+        // Leaf-shaped continuation: typed contract puts continuation_id
+        // at the leaf's top level, and follow_continuation recurses on
+        // leaves. The mock get_thread always returns "continued" so the
+        // chain runs to depth 20 and then returns the leaf as-is.
+        let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
         let action = json!({"item_id": "tool:test/deep"});
         let result = dispatch_action(&client, &action, "t-1", "/tmp/test", None).await.unwrap();
-        assert!(result.get("data").and_then(|d| d.get("continuation_id")).is_some());
+        assert!(
+            result.get("continuation_id").and_then(|v| v.as_str()).is_some(),
+            "expected leaf continuation_id at top level after max-depth abort, got: {result}"
+        );
     }
 }

@@ -26,7 +26,7 @@ pub struct BootstrapLoader<'a> {
 }
 
 impl<'a> BootstrapLoader<'a> {
-    /// Phase 1: load only the `bundle` section to determine effective bundle roots.
+    /// Phase 1: load only the `bundles` section to determine effective bundle roots.
     ///
     /// Scans `system_data_dir/.ai/node/bundles/` and `state_dir/.ai/node/bundles/`.
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
@@ -264,7 +264,7 @@ impl<'a> BootstrapLoader<'a> {
                         );
                     }
 
-                    if section_name == "bundle" {
+                    if section_name == "bundles" {
                         let record = section
                             .parse(name, &body)
                             .with_context(|| format!("failed to parse bundle record {}", path.display()))?;
@@ -296,7 +296,7 @@ impl<'a> BootstrapLoader<'a> {
                 }
             }
 
-            if section_name == "bundle" {
+            if section_name == "bundles" {
                 check_bundle_collisions(&bundles)?;
             }
         }
@@ -331,7 +331,7 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
     for record in records {
         if let Some(prev) = by_name.get(record.name.as_str()) {
             bail!(
-                "node config section 'bundle' has duplicate name '{}': \
+                "node config section 'bundles' has duplicate name '{}': \
                  first registered from '{}' (path: {}), second from '{}' (path: {})",
                 record.name,
                 prev.source_file.display(),
@@ -342,7 +342,7 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
         }
         if let Some(prev) = by_path.get(record.path.as_path()) {
             bail!(
-                "node config section 'bundle' has duplicate canonical path '{}': \
+                "node config section 'bundles' has duplicate canonical path '{}': \
                  first registered as '{}' (from {}), second as '{}' (from {})",
                 record.path.display(),
                 prev.name,
@@ -357,42 +357,24 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
     Ok(())
 }
 
-/// Write a signed `core` bundle registration during init.
-///
-/// Called by `bootstrap::init` so that Phase 1 can discover the system bundle.
-pub fn write_core_bundle_registration(
-    state_dir: &Path,
-    system_data_dir: &Path,
-    identity: &crate::identity::NodeIdentity,
-) -> Result<()> {
-    super::writer::write_signed_node_item(
-        &state_dir.join(".ai").join("node"),
-        "bundle",
-        "core",
-        &serde_json::json!({ "path": system_data_dir }),
-        identity,
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn strip_signature_removes_signed_line() {
-        let content = "# rye:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundle\npath: /foo\n";
+        let content = "# rye:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundles\npath: /foo\n";
         let stripped = strip_signature(content);
-        assert!(stripped.starts_with("section: bundle"));
+        assert!(stripped.starts_with("section: bundles"));
         assert!(!stripped.contains("rye:signed:"));
     }
 
     #[test]
     fn strip_signature_preserves_body() {
-        let content = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundle\npath: /foo/bar\n";
+        let content = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundles\npath: /foo/bar\n";
         let stripped = strip_signature(content);
         let parsed: Value = serde_yaml::from_str(&stripped).unwrap();
-        assert_eq!(parsed["section"], "bundle");
+        assert_eq!(parsed["section"], "bundles");
         assert_eq!(parsed["path"], "/foo/bar");
     }
 

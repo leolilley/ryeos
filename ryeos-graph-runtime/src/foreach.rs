@@ -37,12 +37,13 @@ pub async fn run_foreach_sequential(
         let stripped = strip_none_values(&interpolated);
 
         if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx).await {
-            let unwrapped = crate::dispatch::unwrap_result(&val);
-            results.push(unwrapped.clone());
+            // Typed contract: dispatch_action returns the leaf result
+            // directly; no `{status, data}` unwrap step.
+            results.push(val.clone());
 
             if let Some(ref assign) = node.assign {
                 let mut assign_ctx_map = item_ctx_val.as_object().cloned().unwrap_or_default();
-                assign_ctx_map.insert("result".into(), unwrapped);
+                assign_ctx_map.insert("result".into(), val);
                 let assign_ctx = Value::Object(assign_ctx_map);
                 if let Ok(interpolated) = ryeos_runtime::interpolate(assign, &assign_ctx) {
                     merge_into(state, &interpolated);
@@ -94,8 +95,9 @@ pub async fn run_foreach_parallel(
             let interpolated = ryeos_runtime::interpolate_action(&action, &item_ctx_val)
                 .unwrap_or(action.clone());
             let stripped = strip_none_values(&interpolated);
-            let val = crate::dispatch::dispatch_action(&client, &stripped, &thread_id, &project_path, Some(&exec_ctx)).await;
-            val.map(|v| crate::dispatch::unwrap_result(&v))
+            // Typed contract: dispatch_action already returns the leaf
+            // result directly; no `{status, data}` unwrap step.
+            crate::dispatch::dispatch_action(&client, &stripped, &thread_id, &project_path, Some(&exec_ctx)).await
         });
         handles.push(handle);
     }

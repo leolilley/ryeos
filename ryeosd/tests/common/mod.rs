@@ -9,6 +9,8 @@
 
 #![allow(dead_code)] // helpers are only used by some integration test bins
 
+pub mod mock_provider;
+
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -167,8 +169,20 @@ impl DaemonHarness {
             .env("RYE_SYSTEM_SPACE", system_data_dir())
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
+            // When RYEOSD_TEST_STDERR_DIR is set, mirror daemon stderr
+            // to a stable on-disk file (named per-port) so test
+            // failures can dump diagnostics post-mortem. Otherwise
+            // pipe so drain_stderr_nonblocking can read it directly.
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(
+                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+                    .and_then(|d| {
+                        let path = std::path::PathBuf::from(d)
+                            .join(format!("daemon-{port}.stderr.log"));
+                        std::fs::File::create(&path).ok().map(Stdio::from)
+                    })
+                    .unwrap_or_else(|| Stdio::piped())
+            )
             .kill_on_drop(true);
 
         tweak(&mut cmd);
@@ -182,7 +196,25 @@ impl DaemonHarness {
                 break;
             }
             if Instant::now() > deadline {
-                anyhow::bail!("daemon.json never appeared at {}", daemon_json.display());
+                // Drain stderr so the failure message includes the
+                // daemon's own diagnostics. Stderr may be either a
+                // piped handle or the on-disk log file.
+                let mut child = child;
+                child.start_kill().ok();
+                let mut buf = String::new();
+                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
+                    let path = std::path::PathBuf::from(dir)
+                        .join(format!("daemon-{port}.stderr.log"));
+                    buf = std::fs::read_to_string(&path).unwrap_or_default();
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    stderr.read_to_string(&mut buf).await.ok();
+                }
+                anyhow::bail!(
+                    "daemon.json never appeared at {} — daemon stderr:\n{}",
+                    daemon_json.display(),
+                    buf
+                );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -237,6 +269,40 @@ impl DaemonHarness {
     /// Path the daemon writes standalone-mode audit records to.
     pub fn standalone_audit_path(&self) -> PathBuf {
         self.state_path.join(".ai/state/audit/standalone.ndjson")
+    }
+
+    /// Drain whatever has accumulated on the child's stderr handle
+    /// **without blocking** on EOF. Used by tests that need to print
+    /// diagnostics on assertion failure without waiting for the
+    /// daemon to exit. After the call the stderr handle is gone, so
+    /// only call once per harness.
+    pub async fn drain_stderr_nonblocking(&mut self) -> String {
+        // When RYEOSD_TEST_STDERR_DIR is set, the harness redirects
+        // stderr to a per-port file there; read that. Otherwise, fall
+        // through and drain the piped handle.
+        if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
+            let path = std::path::PathBuf::from(dir)
+                .join(format!("daemon-{}.stderr.log", self.bind.port()));
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                return s;
+            }
+        }
+        use tokio::time::{timeout, Duration};
+        let Some(mut stderr) = self.child.stderr.take() else {
+            return String::new();
+        };
+        let mut buf = Vec::new();
+        let _ = timeout(Duration::from_millis(500), async {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+        }).await;
+        String::from_utf8_lossy(&buf).into_owned()
     }
 }
 

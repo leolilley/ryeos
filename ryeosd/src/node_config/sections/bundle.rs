@@ -1,8 +1,8 @@
-//! `bundle` section handler for node-config.
+//! `bundles` section handler for node-config.
 //!
 //! Each record registers one installed bundle:
 //! ```yaml
-//! section: bundle
+//! section: bundles
 //! path: <absolute path to bundle root>
 //! ```
 
@@ -13,7 +13,7 @@ use crate::node_config::{
     BundleRecord, NodeConfigSection, SectionRecord, SectionSourcePolicy,
 };
 
-/// Section handler for `bundle` node-config items.
+/// Section handler for `bundles` node-config items.
 pub struct BundleSection;
 
 impl NodeConfigSection for BundleSection {

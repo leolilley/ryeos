@@ -6,6 +6,7 @@ pub mod config;
 pub mod dispatch;
 pub mod dispatch_error;
 pub mod engine_init;
+pub mod event_stream;
 pub mod execution;
 pub mod identity;
 #[path = "io/mod.rs"]

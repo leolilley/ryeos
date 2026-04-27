@@ -267,6 +267,40 @@ pub fn capabilities_for(terminator: &TerminatorSpec) -> DispatchCapabilities {
     }
 }
 
+/// Mechanism by which a non-terminating, non-aliased kind delegates
+/// dispatch to another item. Closed enum — adding a new variant is a
+/// real architectural change. Currently the only mechanism is
+/// `runtime_registry`: ask `RuntimeRegistry::lookup_for(serves_kind)`
+/// for the default runtime serving this kind, then continue the
+/// dispatch loop on the returned canonical ref.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "via", rename_all = "snake_case")]
+pub enum DelegationVia {
+    /// Look the next hop up in the runtime registry by `serves_kind`
+    /// (defaulting to this schema's own kind name when omitted on the
+    /// schema).
+    RuntimeRegistry {
+        /// Override the kind key used for the registry lookup. When
+        /// `None`, the dispatcher uses the schema's own kind. Allows a
+        /// schema to delegate "as if it were another kind" without
+        /// being one — rarely needed but explicit.
+        #[serde(default)]
+        serves_kind: Option<String>,
+    },
+}
+
+/// Explicit delegation declaration on a kind schema. When present,
+/// the dispatch loop is allowed to perform a non-terminating,
+/// non-aliased hop via the declared mechanism. Absence means the
+/// dispatcher will NEVER consult the runtime registry on behalf of
+/// this kind — silent fallback is gone.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationSpec {
+    #[serde(flatten)]
+    pub via: DelegationVia,
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -282,19 +316,26 @@ pub struct ExecutionSchema {
     /// Ordered preprocessing pipeline run before dispatch.
     #[serde(default)]
     pub resolution: Vec<ResolutionStepDecl>,
-    /// How this kind terminates dispatch. Optional ONLY because a kind
-    /// may instead dispatch by alias chain (the `aliases` field above):
-    /// the dispatch loop walks aliases until it reaches a kind that
-    /// declares a `terminator`. Exactly one of {terminator, aliases-with-
-    /// terminating-target} must be reachable from any executable kind;
-    /// neither present (or an unresolvable alias chain) means the kind is
-    /// NOT root-executable and `/execute` returns 501.
+    /// How this kind terminates dispatch. Optional because a kind may
+    /// instead dispatch by alias chain (the `aliases` field above) or
+    /// by explicit delegation (the `delegate` field below). Exactly
+    /// one of {terminator, terminating alias chain, delegate} must be
+    /// declared on any executable schema; pure absence is a load-time
+    /// error.
     ///
-    /// There is NO silent fallback to a legacy dispatch path. If a kind
-    /// declares `execution:` with neither a terminator nor aliases, that
-    /// is a schema error caught at load time (0a.3 wires this).
+    /// There is NO silent fallback to a legacy dispatch path. If a
+    /// schema declares `execution:` with none of the three, that is a
+    /// schema error caught at load time.
     #[serde(default, skip)]
     pub terminator: Option<TerminatorSpec>,
+    /// Explicit delegation declaration. When `Some`, the dispatch
+    /// loop is permitted to consult the declared mechanism (today:
+    /// `RuntimeRegistry::lookup_for`). When `None`, the dispatcher
+    /// will NEVER consult the registry on behalf of this kind — the
+    /// "no terminator + no alias = look it up in the registry"
+    /// implicit fallback was removed in favor of this explicit field.
+    #[serde(default)]
+    pub delegate: Option<DelegationSpec>,
     /// Schema-declared thread-profile name (looked up in the daemon's
     /// `KindProfileRegistry`). The terminator dispatchers
     /// (`dispatch_subprocess`, `dispatch_native_runtime`) read this
@@ -351,6 +392,20 @@ pub struct KindSchema {
     /// `None` for kinds whose items are never compiled into a
     /// `SubprocessSpec` (e.g. config kinds).
     pub runtime: Option<RuntimeSpec>,
+    /// **Launching-side** declaration: kinds whose items the daemon
+    /// should bake into `LaunchEnvelope.inventory[<kind>]` whenever
+    /// THIS kind is the executor of a `/execute` request. Empty when
+    /// the kind doesn't need any pre-baked inventory (most kinds).
+    /// `directive` declares `inventory_kinds: [tool]`; future runtimes
+    /// add their own without the daemon needing kind-specific code.
+    pub inventory_kinds: Vec<String>,
+    /// **Inventoried-side** declaration: candidate keys (in priority
+    /// order) the engine should probe in a parsed item's body to fill
+    /// `ItemDescriptor.schema`. The first key whose value is non-null
+    /// wins. Empty when this kind has no schema field (e.g. `config`,
+    /// `directive`, `parser`). Tools typically declare
+    /// `inventory_schema_keys: [input_schema, parameters, config_schema]`.
+    pub inventory_schema_keys: Vec<String>,
 }
 
 impl KindSchema {
@@ -871,6 +926,14 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         _ => None,
     };
 
+    // `inventory_kinds` (launching-side) and `inventory_schema_keys`
+    // (inventoried-side) are both optional — most kinds need neither.
+    // When present, they MUST be sequences of plain strings; a wrong
+    // shape is a hard schema error rather than a silent default.
+    let inventory_kinds = parse_optional_string_seq(&data, "inventory_kinds", display)?;
+    let inventory_schema_keys =
+        parse_optional_string_seq(&data, "inventory_schema_keys", display)?;
+
     Ok(KindSchema {
         directory,
         extensions,
@@ -880,7 +943,40 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         composer,
         composer_config,
         runtime,
+        inventory_kinds,
+        inventory_schema_keys,
     })
+}
+
+fn parse_optional_string_seq(
+    data: &serde_yaml::Value,
+    key: &str,
+    display: &str,
+) -> Result<Vec<String>, EngineError> {
+    match data.get(key) {
+        None | Some(serde_yaml::Value::Null) => Ok(Vec::new()),
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let mut out = Vec::with_capacity(seq.len());
+            for (i, v) in seq.iter().enumerate() {
+                match v.as_str() {
+                    Some(s) => out.push(s.to_owned()),
+                    None => {
+                        return Err(EngineError::SchemaLoaderError {
+                            reason: format!(
+                                "{display}: `{key}[{i}]` must be a string, got {v:?}"
+                            ),
+                        })
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Some(other) => Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: `{key}` must be a sequence of strings, got {other:?}"
+            ),
+        }),
+    }
 }
 
 fn yaml_to_json(value: serde_yaml::Value) -> Result<Value, String> {
@@ -1094,22 +1190,48 @@ fn parse_execution_schema(
 
     let terminator = parse_terminator_spec(execution_value, display)?;
 
+    let delegate = parse_delegation_spec(execution_value, display)?;
+
     let thread_profile = execution_value
         .get("thread_profile")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
 
     // S1: load-time non-actionable schema rejection. A kind that
-    // declares `execution:` MUST be reachable to a terminator OR
-    // a downstream resolution (alias chain / registry hop with a
-    // declared `thread_profile`). A schema with no terminator, no
-    // aliases, and no `thread_profile` cannot be dispatched and is
-    // therefore a non-actionable mistake — fail closed at load.
-    if terminator.is_none() && aliases.is_empty() && thread_profile.is_none() {
+    // declares `execution:` MUST declare at least one routing
+    // primitive the dispatcher can act on:
+    //   * a `terminator` (Subprocess / InProcessHandler / NativeRuntimeSpawn)
+    //   * one or more `aliases` (which may include an `@<own_kind>`
+    //     entry the dispatch loop walks via `FollowAlias`, OR
+    //     `@<other>` entries used by `plan_builder` for tool-chain
+    //     `executor_id` resolution — both are legitimate uses of the
+    //     same field)
+    //   * a `delegate` block (explicit registry/etc. routing)
+    //
+    // Pre-V5.4 the dispatcher silently consulted
+    // `RuntimeRegistry::lookup_for` when a schema had a
+    // `thread_profile` but no terminator/aliases. That implicit
+    // fallback is gone: a schema must opt in to registry routing via
+    // `delegate: { via: runtime_registry }`.
+    //
+    // Note: we do NOT require mutual exclusion among the three. The
+    // tool kind, for example, declares `terminator: subprocess` AND
+    // `aliases: { "@subprocess": ... }` — the alias serves the
+    // tool-chain `executor_id` mechanism in `plan_builder`, not the
+    // dispatch loop. Precedence in the dispatch loop is fixed
+    // (terminator > `@<own_kind>` alias > delegate); a schema author
+    // declaring more than one is exercising different mechanisms,
+    // not creating dispatcher ambiguity.
+    let has_routing_primitive = terminator.is_some()
+        || !aliases.is_empty()
+        || delegate.is_some();
+    if !has_routing_primitive {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
-                "{display}: kind declares `execution:` block but no terminator, \
-                 no aliases, and no thread_profile — schema is non-actionable"
+                "{display}: kind declares `execution:` block but none of \
+                 `terminator`, `aliases`, or `delegate` — schema cannot be \
+                 dispatched. Add a terminator, an `@<kind>` alias chain, or \
+                 `delegate: {{ via: runtime_registry }}`."
             ),
         });
     }
@@ -1119,8 +1241,53 @@ fn parse_execution_schema(
         alias_max_depth,
         resolution,
         terminator,
+        delegate,
         thread_profile,
     }))
+}
+
+/// Parse the `execution.delegate` block from a kind schema. Returns
+/// `None` when no delegation is declared. Closed-enum on `via`: any
+/// mechanism name not in the Rust enum is a hard parse error.
+fn parse_delegation_spec(
+    execution_value: &serde_yaml::Value,
+    display: &str,
+) -> Result<Option<DelegationSpec>, EngineError> {
+    let Some(d_value) = execution_value.get("delegate") else {
+        return Ok(None);
+    };
+    let mapping = d_value
+        .as_mapping()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: `execution.delegate` must be a mapping"),
+        })?;
+    let via_str = mapping
+        .get(serde_yaml::Value::String("via".to_string()))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: `execution.delegate` requires a `via` field \
+                 (known: runtime_registry)"
+            ),
+        })?;
+    let via = match via_str {
+        "runtime_registry" => {
+            let serves_kind = mapping
+                .get(serde_yaml::Value::String("serves_kind".to_string()))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            DelegationVia::RuntimeRegistry { serves_kind }
+        }
+        other => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: unknown delegation mechanism `{other}` \
+                     (known: runtime_registry)"
+                ),
+            });
+        }
+    };
+    Ok(Some(DelegationSpec { via }))
 }
 
 /// Parse the `execution.terminator` field (and its associated `registry`
@@ -1246,7 +1413,8 @@ location:
   directory: directives
 execution:
   thread_profile: directive_run
-  aliases: {}
+  delegate:
+    via: runtime_registry
   resolution:
     - step: resolve_extends_chain
     - step: resolve_references
@@ -1786,7 +1954,8 @@ location:
   directory: directives
 execution:
   thread_profile: directive_run
-  aliases: {}
+  delegate:
+    via: runtime_registry
 formats:
   - extensions: [\".md\"]
     parser: parser:rye/core/markdown/directive
@@ -1850,33 +2019,91 @@ execution:
 
     #[test]
     fn execution_schema_terminator_field_optional() {
-        // Terminator may be omitted when at least one other actionable
-        // dispatch directive is present (alias, thread_profile, etc.).
-        // Per S1 (V5.3 advanced-path foundation), an `execution:` block
-        // with NONE of these is non-actionable and is rejected at load.
+        // Terminator may be omitted when an alternative routing
+        // primitive is present. Per S1, `delegate: { via: runtime_registry }`
+        // is the explicit opt-in for runtime-registry routing — pre-V5.4
+        // the dispatcher used a silent fallback when only `thread_profile`
+        // was declared; that path is removed.
         let yaml = "\
 execution:
   thread_profile: directive_run
-  aliases: {}
+  delegate:
+    via: runtime_registry
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(exec.terminator, None);
         assert_eq!(exec.thread_profile.as_deref(), Some("directive_run"));
+        assert!(exec.delegate.is_some(), "delegate must parse");
     }
 
     /// S1: `execution:` block with no terminator AND no aliases AND
-    /// no `thread_profile` is non-actionable and MUST fail at load.
+    /// no `delegate` is non-actionable and MUST fail at load.
     #[test]
     fn execution_block_without_terminator_or_aliases_or_thread_profile_rejected_at_load() {
         let yaml = "\
 execution:
   aliases: {}
+  thread_profile: directive_run
 ";
         let err = parse_exec(yaml).expect_err("non-actionable schema must reject");
         let msg = err.to_string();
         assert!(
-            msg.contains("non-actionable") || msg.contains("no terminator"),
-            "error must explain why schema is non-actionable, got: {msg}"
+            msg.contains("none of") && msg.contains("delegate"),
+            "error must enumerate the missing routing primitives \
+             (terminator/aliases/delegate), got: {msg}"
+        );
+    }
+
+    /// Explicit-delegation parse: `delegate: { via: runtime_registry }`
+    /// produces a `DelegationSpec` with the registry variant. Optional
+    /// `serves_kind` defaults to `None` and is populated only when set.
+    #[test]
+    fn execution_schema_parses_delegate_runtime_registry() {
+        let yaml = "\
+execution:
+  thread_profile: directive_run
+  delegate:
+    via: runtime_registry
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let delegation = exec.delegate.expect("delegate must parse");
+        match delegation.via {
+            DelegationVia::RuntimeRegistry { serves_kind } => {
+                assert_eq!(serves_kind, None);
+            }
+        }
+    }
+
+    #[test]
+    fn execution_schema_parses_delegate_with_serves_kind() {
+        let yaml = "\
+execution:
+  thread_profile: graph_run
+  delegate:
+    via: runtime_registry
+    serves_kind: directive
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let delegation = exec.delegate.expect("delegate must parse");
+        match delegation.via {
+            DelegationVia::RuntimeRegistry { serves_kind } => {
+                assert_eq!(serves_kind.as_deref(), Some("directive"));
+            }
+        }
+    }
+
+    #[test]
+    fn execution_schema_rejects_unknown_delegate_via() {
+        let yaml = "\
+execution:
+  delegate:
+    via: not_a_real_mechanism
+";
+        let err = parse_exec(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not_a_real_mechanism") && msg.contains("runtime_registry"),
+            "unknown delegate.via must enumerate known mechanisms, got: {msg}"
         );
     }
 

@@ -122,8 +122,9 @@ formats:
     signature:
       prefix: \"#\"
 execution:
-  aliases: {}
   thread_profile: node_run
+  delegate:
+    via: runtime_registry
   resolution:
     - step: resolve_references
       field: refs
@@ -217,8 +218,9 @@ formats:
       prefix: \"<!--\"
       suffix: \"-->\"
 execution:
-  aliases: {}
   thread_profile: directive_run
+  delegate:
+    via: runtime_registry
   resolution: []
 ";
 

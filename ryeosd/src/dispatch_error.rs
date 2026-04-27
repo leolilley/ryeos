@@ -12,6 +12,12 @@
 //! `ryeosd/tests/dispatch_pin.rs` lock the resulting status codes and
 //! JSON shapes; if a future variant changes the status mapping, the
 //! pin test catches it before the HTTP contract drifts.
+//!
+//! **V5.4 P1.2**: operator-fixable failures are now distinct variants
+//! instead of collapsing into `Internal(#[from] anyhow::Error) → 500`.
+//! The HTTP contract is honest: cap denial → 403, manifest miss → 502,
+//! push-first → 409, unknown service handler → 502, materialization
+//! error → 502. Only truly unexpected internal errors remain 500.
 
 use axum::http::StatusCode;
 
@@ -49,6 +55,56 @@ pub enum DispatchError {
     StreamingNotImplemented,
     #[error("project source error: {0}")]
     ProjectSource(String),
+    // ── P1.2: operator-fixable failures, no longer 500 ────────────
+    /// Service handler not found in the in-process handler registry.
+    /// The kind schema declared `InProcessHandler { Services }` but
+    /// no handler matched the item's service name.
+    #[error("service handler not found for '{service_ref}' in {registry}; available: [{available}]")]
+    ServiceHandlerMissing {
+        service_ref: String,
+        registry: String,
+        available: String,
+    },
+    /// Service capability denied — the caller lacks the scope required
+    /// by the service handler's declared capabilities.
+    #[error("service '{service_ref}' denied: caller scopes {caller_scopes:?} do not include required '{required}'")]
+    ServiceCapDenied {
+        service_ref: String,
+        required: String,
+        caller_scopes: Vec<String>,
+    },
+    /// Service is unavailable in the current execution mode (e.g.
+    /// daemon-only service called from offline/standalone mode).
+    #[error("service '{service_ref}' is unavailable in {mode} mode (requires {requires})")]
+    ServiceUnavailable {
+        service_ref: String,
+        mode: String,
+        requires: String,
+    },
+    /// Subprocess executor missing — the resolved item's executor_ref
+    /// does not correspond to a known executor.
+    #[error("subprocess executor missing for '{item_ref}': {detail}")]
+    SubprocessExecutorMissing { item_ref: String, detail: String },
+    /// Subprocess run failed — the inline or detached run encountered
+    /// an error after resolution succeeded.
+    #[error("subprocess run failed for '{item_ref}': {detail}")]
+    SubprocessRunFailed { item_ref: String, detail: String },
+    /// Runtime binary materialization failed — the native executor
+    /// could not be resolved from the bundle CAS.
+    #[error("runtime materialization failed for '{executor_ref}': {detail}")]
+    RuntimeMaterializationFailed { executor_ref: String, detail: String },
+    /// Project source push-first — the project has not been pushed to
+    /// the daemon's CAS before execution was requested. The Display
+    /// is the bare wording (e.g. `"no pushed HEAD for project '<path>' \
+    /// — push first"`) so the V5.2 pin in `dispatch_pin.rs::\
+    /// pin_native_runtime_with_pushed_head` continues to hold byte-\
+    /// identically. The HTTP layer maps this variant to 409.
+    #[error("{0}")]
+    ProjectSourcePushFirst(String),
+    /// Project source checkout failed — the pushed HEAD snapshot
+    /// could not be checked out from CAS.
+    #[error("project source checkout failed: {0}")]
+    ProjectSourceCheckoutFailed(String),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -64,14 +120,23 @@ impl DispatchError {
             | Self::AliasChainTooLong { .. }
             | Self::CapabilityRejected { .. }
             | Self::SchemaMisconfigured { .. } => StatusCode::BAD_REQUEST,
-            Self::InsufficientCaps { .. } => StatusCode::FORBIDDEN,
+            Self::InsufficientCaps { .. }
+            | Self::ServiceCapDenied { .. } => StatusCode::FORBIDDEN,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
-            // V5.3 keeps the V5.2 contract: any project-source failure
-            // (push-first, missing CAS HEAD, ...) maps to 409 — this
-            // is a state-conflict, not a malformed request.
-            Self::ProjectSource(_) => StatusCode::CONFLICT,
+            // State-conflict: push-first, checkout race, etc.
+            Self::ProjectSource(_)
+            | Self::ProjectSourcePushFirst(_) => StatusCode::CONFLICT,
+            // Bad gateway: the daemon reached out to a subsystem
+            // (service handler, runtime binary, CAS) and it was
+            // missing, unavailable, or returned an error.
+            Self::ServiceHandlerMissing { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::SubprocessExecutorMissing { .. }
+            | Self::SubprocessRunFailed { .. }
+            | Self::RuntimeMaterializationFailed { .. }
+            | Self::ProjectSourceCheckoutFailed(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

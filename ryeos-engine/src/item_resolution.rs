@@ -167,6 +167,131 @@ pub fn resolve_item(
     Ok((result.winner_path, result.winner_space, result.matched_ext))
 }
 
+/// Enumerate every canonical ref of `kind_schema` reachable from `roots`,
+/// honouring resolution priority and the kind schema's own
+/// `directory` + `extensions` declaration.
+///
+/// Walks `<root.ai_root>/<kind_schema.directory>/` recursively for each
+/// root in `roots.ordered`. Files whose extension matches one of
+/// `kind_schema.extensions[].ext` produce a `CanonicalRef { kind,
+/// bare_id }` where `bare_id` is the path relative to the kind
+/// directory with the matched extension stripped (slashes preserved
+/// for nested layouts: `<dir>/rye/core/read.py` → `rye/core/read`).
+///
+/// Precedence semantics mirror `resolve_item_full`: the first root in
+/// `roots.ordered` to surface a given `bare_id` wins, later occurrences
+/// in lower-priority roots are silently dropped. Symlink loops, hidden
+/// directories (starting with `.`), and IO errors on individual entries
+/// are skipped — the loud failure modes are reserved for **resolving**
+/// (where the caller asked for a specific ref); enumeration is a
+/// best-effort discovery primitive.
+///
+/// Returns refs in deterministic order — sorted by `bare_id` after
+/// precedence-collapse — so callers can rely on stable output for
+/// caching / fingerprinting.
+///
+/// NB: this is intentionally **schema-driven**. There is no hardcoded
+/// extension list, no hardcoded subdirectory; adding a new format =
+/// adding an entry to the kind schema's `formats` block. Runtime /
+/// daemon code consuming this primitive must not duplicate either.
+pub fn enumerate_kind_refs(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+) -> Vec<CanonicalRef> {
+    use std::collections::HashSet;
+
+    let extensions: HashSet<&str> = kind_schema
+        .extensions
+        .iter()
+        .map(|e| e.ext.trim_start_matches('.'))
+        .collect();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut refs: Vec<CanonicalRef> = Vec::new();
+
+    for root in &roots.ordered {
+        let kind_dir = root.ai_root.join(&kind_schema.directory);
+        if !kind_dir.is_dir() {
+            continue;
+        }
+        walk_kind_dir(&kind_dir, &kind_dir, &extensions, &mut |bare_id| {
+            if seen.insert(bare_id.clone()) {
+                refs.push(CanonicalRef {
+                    kind: kind.to_owned(),
+                    bare_id,
+                    suffix: None,
+                });
+            }
+        });
+    }
+
+    refs.sort_by(|a, b| a.bare_id.cmp(&b.bare_id));
+    refs
+}
+
+/// Recursively walk `dir`, invoking `emit(bare_id)` for each file whose
+/// extension is in `extensions`. `bare_id` is computed relative to
+/// `kind_root` with the matched extension stripped and platform path
+/// separators normalised to `/`.
+///
+/// Hidden entries (basename starting with `.`) are skipped — they're
+/// not legitimate item paths and tend to be VCS / editor noise.
+fn walk_kind_dir(
+    kind_root: &std::path::Path,
+    dir: &std::path::Path,
+    extensions: &std::collections::HashSet<&str>,
+    emit: &mut dyn FnMut(String),
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let basename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if basename.starts_with('.') {
+            continue;
+        }
+        let ftype = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ftype.is_dir() {
+            walk_kind_dir(kind_root, &path, extensions, emit);
+            continue;
+        }
+        if !ftype.is_file() {
+            continue;
+        }
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => continue,
+        };
+        if !extensions.contains(ext) {
+            continue;
+        }
+        let rel = match path.strip_prefix(kind_root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut bare = String::with_capacity(rel.as_os_str().len());
+        for (i, comp) in rel.with_extension("").components().enumerate() {
+            if i > 0 {
+                bare.push('/');
+            }
+            bare.push_str(&comp.as_os_str().to_string_lossy());
+        }
+        if bare.is_empty() {
+            continue;
+        }
+        emit(bare);
+    }
+}
+
 /// Parse a `rye:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>` header
 /// from file content, using the envelope to locate the signature line.
 pub fn parse_signature_header(
@@ -236,6 +361,7 @@ mod tests {
                 alias_max_depth: 8,
                 resolution: Vec::new(),
                 terminator: None,
+                delegate: None,
                 thread_profile: None,
             }),
             extensions: extensions
@@ -254,6 +380,8 @@ mod tests {
             composer: "rye/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,
             runtime: None,
+            inventory_kinds: Vec::new(),
+            inventory_schema_keys: Vec::new(),
         }
     }
 

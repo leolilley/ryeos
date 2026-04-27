@@ -51,10 +51,10 @@ use std::pin::Pin;
 use serde_json::{json, Value};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::contracts::ResolvedItem;
+use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    capabilities_for, DispatchCapabilities, ExecutionSchema, HandlerRegistryKind,
-    TerminatorSpec,
+    capabilities_for, DelegationVia, DispatchCapabilities, ExecutionSchema,
+    HandlerRegistryKind, TerminatorSpec,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -93,10 +93,6 @@ pub(crate) const ROOT_KIND_RUNTIME: &str = "runtime";
 /// original `/execute` `item_ref`. The runtime cap gate fires ONLY
 /// when this is `"runtime"`. Alias chains that land on a runtime via
 /// the registry / `@directive` chain do not inherit `runtime.execute`.
-///
-/// **B4**: `current_resolved` is the per-hop resolved item attached by
-/// the dispatch loop so leaf dispatchers (notably
-/// `dispatch_native_runtime`) don't re-resolve.
 #[derive(Debug, Clone)]
 pub struct DispatchRequest<'a> {
     pub launch_mode: &'a str,
@@ -125,11 +121,6 @@ pub struct DispatchRequest<'a> {
     /// on this being `"runtime"` so indirect alias chains are not
     /// retroactively cap-broadened.
     pub original_root_kind: &'a str,
-    /// **B4**: per-hop resolved item attached by the dispatch loop.
-    /// `None` for `runtime:*` refs (engine resolution requires an
-    /// `executor_id` which runtime YAMLs do not declare; the loop
-    /// uses `RuntimeRegistry::lookup_by_ref` instead).
-    pub current_resolved: Option<&'a ResolvedItem>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -193,24 +184,54 @@ pub(crate) enum HopAction {
 }
 
 /// Per-hop verification output. The dispatch loop stays thin by
-/// delegating all hop logic here; the leaf dispatchers receive the
-/// already-resolved item via `DispatchRequest.current_resolved`.
+/// delegating all hop logic here.
 ///
-/// `schema_kind` is folded into the `next` action's diagnostic context
-/// rather than carried separately — keeping the struct minimal so the
-/// loop can pattern-match without juggling fields it never reads.
+/// **P1.3**: carries `Option<VerifiedItem>` (verified, not just resolved).
+/// Leaf dispatchers trust the hop's verification and stop re-verifying
+/// defensively.
+///
+/// **P1.1**: `thread_profile` is extracted from the schema's
+/// `execution.thread_profile` at every hop — including hops that
+/// don't terminate (registry/alias hops). The dispatch loop captures
+/// this from the FIRST hop as the "root subject" profile, so indirect
+/// paths (directive → registry → runtime) correctly record the
+/// directive's profile, not the runtime's.
+///
+/// **P1.4**: `runtime` is populated for runtime-kind refs via
+/// `RuntimeRegistry::lookup_by_ref`, providing binary_ref and
+/// required_caps for downstream use. Non-runtime refs leave this
+/// `None`.
 #[derive(Debug)]
 pub(crate) struct VerifiedHop {
     pub canonical_ref: CanonicalRef,
-    pub resolved: Option<ResolvedItem>,
+    /// P1.3: per-hop verified item. The loop verifies at every hop
+    /// boundary — leaf dispatchers trust this and skip re-verification.
+    pub verified: Option<VerifiedItem>,
+    /// P1.1: thread_profile from the schema's `execution` block.
+    /// Available for all executable kinds. Used by the loop to capture
+    /// the root subject's profile on the first hop.
+    pub thread_profile: Option<String>,
+    /// P1.4: for runtime-kind refs, the verified runtime metadata
+    /// from the registry. Provides binary_ref and required_caps.
+    pub runtime: Option<VerifiedRuntime>,
     pub next: HopAction,
 }
 
-/// **A4**: single-hop resolve + schema lookup + HopAction decision.
-/// Pulled out of the dispatch loop so the loop body is a thin
-/// dispatcher. The streaming seam for V5.4 is added by extending
-/// `dispatch_by` (a new `HopAction` arm or a `TerminatorSpec` variant)
-/// — never by editing the loop body itself.
+/// **A4**: single-hop resolve + verify + schema lookup + HopAction decision.
+///
+/// **P1.3**: calls `engine.verify` after `engine.resolve` at every hop
+/// boundary. Leaf dispatchers trust the verification and skip
+/// re-verification defensively.
+///
+/// **P1.4**: always calls `engine.resolve` (no special-case for
+/// runtime refs). For runtime-kind refs, also looks up
+/// `RuntimeRegistry::lookup_by_ref` in addition, attaching the typed
+/// `VerifiedRuntime` to the hop result.
+///
+/// **P1.1**: always extracts `thread_profile` from the schema's
+/// `execution` block, even for non-terminator hops (registry/alias),
+/// so the loop can capture it on the first hop as the root subject
+/// profile.
 pub(crate) fn resolve_dispatch_hop(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
@@ -231,29 +252,43 @@ pub(crate) fn resolve_dispatch_hop(
         }
     }
 
-    // **B4**: per-hop resolve. `runtime:` refs lack `executor_id`
-    // (runtime YAMLs declare `binary_ref` instead); engine resolution
-    // would fail. Special-case to use the runtime registry instead so
-    // the verified runtime metadata is available downstream without
-    // double-resolution.
-    let is_runtime_ref = current_ref.kind == ROOT_KIND_RUNTIME;
-    let resolved: Option<ResolvedItem> = if is_runtime_ref {
-        None
-    } else {
-        Some(
-            ctx.engine
-                .resolve(&ctx.plan_ctx, current_ref)
-                .map_err(|e| DispatchError::InvalidRef(
+    // **P1.3 + P1.4**: per-hop resolve AND verify. No special-case
+    // for runtime refs — engine.resolve produces content_hash,
+    // source_path, and audit data for ALL kinds including runtime.
+    // Verification failure is a hard error at the hop boundary.
+    let verified: Option<VerifiedItem> = match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
+        Ok(resolved) => {
+            let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
+                DispatchError::InvalidRef(
                     current_ref.to_string(),
-                    format!("resolution failed: {e}"),
-                ))?,
-        )
+                    format!("verification failed: {e}"),
+                )
+            })?;
+            tracing::debug!(
+                item_ref = %current_ref,
+                trust_class = ?v.trust_class,
+                "hop verified"
+            );
+            Some(v)
+        }
+        Err(_) => {
+            // Resolution failed — the ref may not exist on disk. This
+            // is not necessarily fatal: the schema lookup below will
+            // produce a clearer error (SchemaMisconfigured enumerating
+            // available kinds) if the kind has no items at all.
+            None
+        }
     };
 
-    let schema_kind: String = resolved
+    let schema_kind: String = verified
         .as_ref()
-        .map(|r| r.kind.clone())
+        .map(|v| v.resolved.kind.clone())
         .unwrap_or_else(|| current_ref.kind.clone());
+
+    // **P1.1**: extract thread_profile from the schema's execution
+    // block at every hop — even non-terminator hops. The dispatch loop
+    // captures this from the first hop as the root subject profile.
+    let thread_profile: Option<String>;
 
     let schema = ctx.engine.kinds.get(&schema_kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx
@@ -279,6 +314,19 @@ pub(crate) fn resolve_dispatch_hop(
         }
     })?;
 
+    thread_profile = exec.thread_profile.clone();
+
+    // **P1.4**: for runtime-kind refs, also look up the runtime
+    // registry. This provides binary_ref, required_caps, and the
+    // canonical ref for downstream dispatch. The registry lookup is
+    // IN ADDITION to engine.resolve — we get both audit data AND
+    // runtime metadata.
+    let runtime: Option<VerifiedRuntime> = if current_ref.kind == ROOT_KIND_RUNTIME {
+        ctx.engine.runtimes.lookup_by_ref(current_ref).cloned()
+    } else {
+        None
+    };
+
     // Terminator wins over alias/registry.
     if let Some(terminator) = exec.terminator.as_ref() {
         // **A3**: thread profile MUST be declared on the schema; no
@@ -286,7 +334,7 @@ pub(crate) fn resolve_dispatch_hop(
         // this for any executable schema, but we re-check defensively
         // so an out-of-band schema mutation cannot silently degrade
         // the audit trail.
-        let thread_profile = exec.thread_profile.as_deref().ok_or_else(|| {
+        let tp = thread_profile.as_deref().ok_or_else(|| {
             DispatchError::SchemaMisconfigured {
                 kind: schema_kind.clone(),
                 detail: "schema declares a terminator but no `execution.thread_profile`".into(),
@@ -294,8 +342,10 @@ pub(crate) fn resolve_dispatch_hop(
         })?;
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
-            resolved,
-            next: HopAction::Terminate(terminator.clone(), thread_profile.to_string()),
+            verified,
+            thread_profile: Some(tp.to_string()),
+            runtime,
+            next: HopAction::Terminate(terminator.clone(), tp.to_string()),
         });
     }
 
@@ -312,44 +362,67 @@ pub(crate) fn resolve_dispatch_hop(
         })?;
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
-            resolved,
+            verified,
+            thread_profile,
+            runtime,
             next: HopAction::FollowAlias(next_ref),
         });
     }
 
-    // **B2**: no terminator and no alias on this schema. Consult the
-    // runtime registry for the kind's default runtime. This is an
-    // explicit named registry hop — NOT a silent fallback. If the
-    // registry has nothing for this kind, the loop fails closed with
-    // a `SchemaMisconfigured` error enumerating all alternatives the
-    // operator could fix (S2/F4).
-    if let Ok(rt) = ctx.engine.runtimes.lookup_for(&schema_kind) {
-        return Ok(VerifiedHop {
-            canonical_ref: current_ref.clone(),
-            resolved,
-            next: HopAction::UseRegistry(rt.canonical_ref.clone()),
-        });
+    // Explicit delegation — schema MUST opt in via `delegate:` to be
+    // routed through the runtime registry. There is no implicit
+    // fallback on absence: pre-V5.4 the dispatcher silently called
+    // `RuntimeRegistry::lookup_for` here when terminator and alias
+    // were both missing. Now the schema author has to declare intent.
+    if let Some(delegation) = exec.delegate.as_ref() {
+        match &delegation.via {
+            DelegationVia::RuntimeRegistry { serves_kind } => {
+                let lookup_kind = serves_kind
+                    .as_deref()
+                    .unwrap_or(schema_kind.as_str());
+                let rt = ctx.engine.runtimes.lookup_for(lookup_kind).map_err(|_| {
+                    let mut serves: Vec<String> = ctx
+                        .engine
+                        .runtimes
+                        .all()
+                        .map(|r| format!("{}→{}", r.yaml.serves, r.canonical_ref))
+                        .collect();
+                    serves.sort();
+                    DispatchError::SchemaMisconfigured {
+                        kind: schema_kind.clone(),
+                        detail: format!(
+                            "schema declares `delegate: {{ via: runtime_registry, \
+                             serves_kind: {lookup_kind} }}` but no runtime serves \
+                             '{lookup_kind}' (registered runtimes: [{}])",
+                            serves.join(", ")
+                        ),
+                    }
+                })?;
+                return Ok(VerifiedHop {
+                    canonical_ref: current_ref.clone(),
+                    verified,
+                    thread_profile,
+                    runtime,
+                    next: HopAction::UseRegistry(rt.canonical_ref.clone()),
+                });
+            }
+        }
     }
 
-    // Truly stuck: enumerate available aliases on this schema and
-    // every runtime currently registered so the operator can pick a
-    // remediation (S2/F4).
+    // Truly stuck. Schema-load validation should have rejected this
+    // shape (no terminator, no aliases, no delegate), so this branch
+    // is defensive against an out-of-band schema mutation. Enumerate
+    // what the schema declared so an operator can repair it (S2/F4).
     let mut alias_keys: Vec<String> = exec.aliases.keys().cloned().collect();
     alias_keys.sort();
-    let mut serves: Vec<String> = ctx
-        .engine
-        .runtimes
-        .all()
-        .map(|r| format!("{}→{}", r.yaml.serves, r.canonical_ref))
-        .collect();
-    serves.sort();
     Err(DispatchError::SchemaMisconfigured {
         kind: schema_kind.clone(),
         detail: format!(
-            "no terminator, no '{alias_key}' alias, and no runtime in registry serves this kind \
-             (declared aliases on schema: [{}]; runtimes registered: [{}])",
-            alias_keys.join(", "),
-            serves.join(", ")
+            "schema has no terminator, no matching '{alias_key}' alias, and no \
+             `delegate` block — kind cannot be dispatched. Add a terminator, an \
+             '@<kind>' alias, or `delegate: {{ via: runtime_registry }}` to the \
+             kind schema (declared aliases on schema: [{}])",
+            alias_keys.join(", ")
         ),
     })
 }
@@ -441,70 +514,12 @@ pub async fn dispatch_service(
 
 // ── Native runtime terminator ─────────────────────────────────────────
 
-/// Look up a verified runtime entry by canonical ref, after confirming
-/// the kind schema declares the `NativeRuntimeSpawn` terminator. All
-/// failure modes return clear enumerated errors — no silent fallback.
-pub(crate) fn lookup_runtime_for_dispatch<'a>(
-    engine: &'a ryeos_engine::engine::Engine,
-    item_ref: &str,
-) -> Result<&'a VerifiedRuntime, DispatchError> {
-    let canonical = CanonicalRef::parse(item_ref).map_err(|e| {
-        DispatchError::InvalidRef(item_ref.to_string(), e.to_string())
-    })?;
-    let schema = engine.kinds.get(&canonical.kind).ok_or_else(|| {
-        let mut available: Vec<String> =
-            engine.kinds.kinds().map(|k| k.to_string()).collect();
-        available.sort();
-        DispatchError::SchemaMisconfigured {
-            kind: canonical.kind.clone(),
-            detail: format!(
-                "no kind schema registered for ref '{item_ref}'; registered kinds: [{}]",
-                available.join(", ")
-            ),
-        }
-    })?;
-    let exec = schema.execution().ok_or_else(|| {
-        DispatchError::NotRootExecutable {
-            kind: canonical.kind.clone(),
-            detail: "schema has no `execution:` block".into(),
-        }
-    })?;
-    let terminator = exec.terminator.as_ref().ok_or_else(|| {
-        DispatchError::SchemaMisconfigured {
-            kind: canonical.kind.clone(),
-            detail: "dispatch_native_runtime called on a schema with no terminator".into(),
-        }
-    })?;
-    if !matches!(terminator, TerminatorSpec::NativeRuntimeSpawn) {
-        return Err(DispatchError::SchemaMisconfigured {
-            kind: canonical.kind.clone(),
-            detail: format!(
-                "dispatch_native_runtime called on schema declaring terminator {terminator:?}, not NativeRuntimeSpawn"
-            ),
-        });
-    }
-
-    engine.runtimes.lookup_by_ref(&canonical).ok_or_else(|| {
-        let mut available: Vec<String> = engine
-            .runtimes
-            .all()
-            .map(|r| r.canonical_ref.to_string())
-            .collect();
-        available.sort();
-        let detail = if available.is_empty() {
-            format!("runtime '{item_ref}' not found in registry; no runtimes are currently registered")
-        } else {
-            format!(
-                "runtime '{item_ref}' not found in registry; registered runtimes: [{}]",
-                available.join(", ")
-            )
-        };
-        DispatchError::SchemaMisconfigured {
-            kind: canonical.kind.clone(),
-            detail,
-        }
-    })
-}
+// Note: pre-P1.4 there was a `lookup_runtime_for_dispatch` helper that
+// re-resolved runtime refs from the engine. P1.4 made it dead — the
+// dispatch loop now attaches `VerifiedRuntime` to the hop via
+// `RuntimeRegistry::lookup_by_ref` (see `resolve_dispatch_hop`), and
+// `dispatch_native_runtime` consumes that owned value. Don't reintroduce
+// a per-call lookup; the loop owns runtime metadata as part of the hop.
 
 /// Strip the `bin/<triple>/` prefix from a runtime YAML's `binary_ref`.
 fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
@@ -551,30 +566,65 @@ fn enforce_runtime_caps(
 
 /// Dispatch a `runtime:*` ref through the schema-declared
 /// `NativeRuntimeSpawn` terminator.
-pub async fn dispatch_native_runtime(
-    item_ref: &str,
-    thread_profile: &str,
+///
+/// **P1.1 root/runtime split**: The thread record uses the *subject*
+/// item's identity (from `root_subject`), not the runtime's. For
+/// direct `runtime:foo` invocation, the subject IS the runtime. For
+/// indirect `directive:bar` → registry → runtime, the subject is the
+/// directive. This ensures:
+/// - `thread.item_ref` echoes the user's original ref
+/// - `thread.kind` uses the subject's `thread_profile` (e.g.
+///   `directive_run`, not `runtime_run`)
+/// - The resolution pipeline runs on the subject item (directives have
+///   extends chains; runtimes do not)
+/// - Effective-cap composition is computed from the subject
+///
+/// The runtime executor is metadata: binary path from the registry's
+/// `VerifiedRuntime`, required caps for the B1 gate.
+pub(crate) async fn dispatch_native_runtime(
+    canonical_ref: CanonicalRef,
+    hop_verified: Option<VerifiedItem>,
+    hop_thread_profile: Option<String>,
+    hop_runtime: Option<VerifiedRuntime>,
+    root_subject: Option<RootSubject>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<DispatchOutcome, DispatchError> {
+    let runtime_ref = canonical_ref.to_string();
+
+    // The runtime metadata comes from the hop's registry lookup (P1.4).
+    let verified_runtime = hop_runtime.ok_or_else(|| {
+        // No runtime in registry — this shouldn't happen since the
+        // hop matched NativeRuntimeSpawn, but fail closed.
+        let mut available: Vec<String> = ctx
+            .engine
+            .runtimes
+            .all()
+            .map(|r| r.canonical_ref.to_string())
+            .collect();
+        available.sort();
+        DispatchError::SchemaMisconfigured {
+            kind: canonical_ref.kind.clone(),
+            detail: format!(
+                "runtime '{runtime_ref}' has no registry entry; registered runtimes: [{}]",
+                available.join(", ")
+            ),
+        }
+    })?;
+
     let params = request.params.clone();
     let acting_principal = request.acting_principal;
     let project_path: &Path = request.project_path;
-    let verified = lookup_runtime_for_dispatch(&ctx.engine, item_ref)?;
 
     // **B1**: only enforce `runtime.execute` for DIRECT `runtime:*`
     // invocation. Indirect alias chains (directive→registry→runtime)
     // do NOT inherit the cap; the `original_root_kind` field tells us
-    // what the user actually typed at /execute. Regression-pinned in
-    // `dispatch_pin.rs` (directive paths stay green without this cap)
-    // and exercised by the new `enforce_runtime_caps_skipped_for_indirect_alias_chain`
-    // unit test below + the `e2e_directive_via_registry_does_not_require_runtime_execute`
-    // integration test.
+    // what the user actually typed at /execute.
     if request.original_root_kind == ROOT_KIND_RUNTIME {
         enforce_runtime_caps(
-            item_ref,
-            &verified.yaml.required_caps,
+            &runtime_ref,
+            &verified_runtime.yaml.required_caps,
             &ctx.caller_scopes,
         )?;
     }
@@ -583,32 +633,50 @@ pub async fn dispatch_native_runtime(
     // pinned by `ryeosd/tests/dispatch_pin.rs::pin_native_runtime_with_*`.
     check_dispatch_capabilities(&TerminatorSpec::NativeRuntimeSpawn, request)?;
 
-    let bare = strip_binary_ref_prefix(&verified.yaml.binary_ref)?;
+    let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
     let executor_ref = format!("native:{bare}");
 
-    // **B4**: prefer the loop's pre-resolved item; fall back to a
-    // direct engine resolve only when the loop didn't supply one
-    // (which happens for `runtime:` kind refs). For runtime: refs the
-    // resolve will still fail upstream and the loop never gets here
-    // via the per-hop path — direct callers (e.g. tests) hit this
-    // branch instead. The wording references the runtime ref so the
-    // F4 enumeration is satisfied.
-    let canonical = CanonicalRef::parse(item_ref).map_err(|e| {
-        DispatchError::InvalidRef(item_ref.to_string(), e.to_string())
-    })?;
-    let resolved_item: ResolvedItem = match request.current_resolved {
-        Some(r) => r.clone(),
-        None => ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
-            DispatchError::SchemaMisconfigured {
-                kind: canonical.kind.clone(),
-                detail: format!("runtime resolution failed for '{item_ref}': {e}"),
-            }
-        })?,
+    // **P1.1**: determine the subject item for the thread record.
+    // For indirect paths, root_subject carries the directive's identity.
+    // For direct runtime invocation, root_subject IS the runtime hop.
+    // If root_subject wasn't captured (edge case), fall back to the
+    // current hop's data.
+    let subject = root_subject.unwrap_or_else(|| RootSubject {
+        item_ref: runtime_ref.clone(),
+        thread_profile: hop_thread_profile
+            .unwrap_or_else(|| "runtime_run".to_string()),
+        verified: hop_verified,
+    });
+
+    // Resolve the subject item for the resolution pipeline. The subject
+    // is the directive for indirect paths — we need its extends chain,
+    // references DAG, and trust class. For direct runtime paths the
+    // hop already has the verified item.
+    let resolved_item: ResolvedItem = match subject.verified {
+        Some(v) => v.resolved,
+        None => {
+            // Subject wasn't verified at the first hop — resolve now.
+            // This should be rare (only if the first hop's engine.resolve
+            // failed). The resolution pipeline below will handle the
+            // error if the item truly doesn't exist.
+            let canonical = CanonicalRef::parse(&subject.item_ref).map_err(|e| {
+                DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string())
+            })?;
+            ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
+                DispatchError::SchemaMisconfigured {
+                    kind: canonical.kind.clone(),
+                    detail: format!(
+                        "subject resolution failed for '{}': {e}",
+                        subject.item_ref
+                    ),
+                }
+            })?
+        }
     };
 
     let resolved = ResolvedExecutionRequest {
-        kind: thread_profile.to_string(),
-        item_ref: item_ref.to_string(),
+        kind: subject.thread_profile.clone(),
+        item_ref: subject.item_ref.clone(),
         executor_ref: executor_ref.clone(),
         launch_mode: "inline".to_string(),
         current_site_id: ctx.plan_ctx.current_site_id.clone(),
@@ -628,7 +696,23 @@ pub async fn dispatch_native_runtime(
         project_path,
         &params,
         &HashMap::new(),
-    )?;
+    ).await.map_err(|e| {
+        // P1.2: classify the anyhow error. Materialization failures
+        // (binary not in manifest, CAS miss, arch mismatch) get 502.
+        // Everything else stays 500 (unexpected internal errors).
+        let msg = e.to_string();
+        if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
+            || msg.contains("materializ") || msg.contains("native executor")
+            || msg.contains("arch check")
+        {
+            DispatchError::RuntimeMaterializationFailed {
+                executor_ref: executor_ref.clone(),
+                detail: msg,
+            }
+        } else {
+            DispatchError::Internal(e)
+        }
+    })?;
 
     Ok(DispatchOutcome::Unary(json!({
         "thread": result.thread,
@@ -641,6 +725,7 @@ pub async fn dispatch_native_runtime(
 pub async fn dispatch_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
+    _verified: Option<&VerifiedItem>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -726,7 +811,10 @@ pub async fn dispatch_subprocess(
             crate::services::thread_lifecycle::validate_item(&engine, &resolved_clone)
         })
         .await
-        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("validate_only join failure: {e}")))??;
+        .map_err(|e| DispatchError::SubprocessRunFailed {
+            item_ref: resolved.item_ref.clone(),
+            detail: format!("validate_only join failure: {e}"),
+        })??;
 
         return Ok(DispatchOutcome::Unary(json!({
             "validated": true,
@@ -737,6 +825,8 @@ pub async fn dispatch_subprocess(
             "plan_id": validated.plan_id,
         })));
     }
+
+    let item_ref_for_error = resolved.item_ref.clone();
 
     let params = crate::execution::runner::ExecutionParams {
         resolved,
@@ -749,13 +839,21 @@ pub async fn dispatch_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        let result = crate::execution::runner::run_detached(state.clone(), params).await?;
+        let result = crate::execution::runner::run_detached(state.clone(), params).await
+            .map_err(|e| DispatchError::SubprocessRunFailed {
+                item_ref: item_ref_for_error.clone(),
+                detail: e.to_string(),
+            })?;
         Ok(DispatchOutcome::Unary(json!({
             "thread": result.running_thread,
             "detached": true,
         })))
     } else {
-        let result = crate::execution::runner::run_inline(state.clone(), params).await?;
+        let result = crate::execution::runner::run_inline(state.clone(), params).await
+            .map_err(|e| DispatchError::SubprocessRunFailed {
+                item_ref: item_ref_for_error,
+                detail: e.to_string(),
+            })?;
         Ok(DispatchOutcome::Unary(json!({
             "thread": result.finalized_thread,
             "result": result.result,
@@ -765,14 +863,42 @@ pub async fn dispatch_subprocess(
 
 // ── Top-level dispatch loop ───────────────────────────────────────────
 
+/// **P1.1**: The subject item being dispatched. For direct runtime
+/// invocation (`runtime:foo`) this IS the runtime. For indirect paths
+/// (`directive:bar` → registry → `runtime:directive-runtime`) this is
+/// the original directive. Thread records, audit trails, and capability
+/// composition use the subject's identity — the runtime is just the
+/// executor.
+#[derive(Debug, Clone)]
+pub(crate) struct RootSubject {
+    /// The item ref of the subject (e.g. `directive:my/agent`).
+    pub item_ref: String,
+    /// The thread_profile from the subject's kind schema
+    /// (e.g. `directive_run`).
+    pub thread_profile: String,
+    /// The verified item from the first hop, carrying trust class,
+    /// content hash, and source path for the resolution pipeline.
+    pub verified: Option<VerifiedItem>,
+}
+
 /// Sole `/execute` → terminator entry point post-V5.3 Task 7.
 ///
 /// Walks the kind-schema alias chain (cycle-checked via `visited`,
 /// hop-bounded by `MAX_HOPS`) until `resolve_dispatch_hop` returns a
 /// `Terminate` action. All routing decisions (terminator vs. alias
 /// vs. registry hop) live in `resolve_dispatch_hop`; the loop just
-/// reacts. Adding a streaming terminator (V5.4 SSE) extends
-/// `dispatch_by` only.
+/// reacts.
+///
+/// **P1.1**: The loop captures a `RootSubject` from the first hop's
+/// `thread_profile` and carries it forward through alias/registry
+/// hops. When the loop terminates on a `NativeRuntimeSpawn`, the
+/// root subject's identity (not the runtime's) is used for the thread
+/// record. This fixes the subject/executor conflation where indirect
+/// paths incorrectly recorded the runtime's `thread_profile` and
+/// `item_ref`.
+///
+/// Adding a streaming terminator (V5.4 SSE) extends `dispatch_by`
+/// only.
 pub async fn dispatch(
     item_ref: &str,
     request: &DispatchRequest<'_>,
@@ -784,6 +910,11 @@ pub async fn dispatch(
     let mut hops: usize = 0;
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
+
+    // P1.1: root subject captured from the first hop's resolution.
+    // For direct paths, root_subject IS the runtime. For indirect
+    // paths, it's the directive/tool that initiated the chain.
+    let mut root_subject: Option<RootSubject> = None;
 
     loop {
         if !visited.insert(current_ref.clone()) {
@@ -804,21 +935,50 @@ pub async fn dispatch(
         }
 
         let hop = resolve_dispatch_hop(&current_ref, ctx)?;
-        match hop.next {
-            HopAction::Terminate(terminator, thread_profile) => {
+
+        // Destructure up front so the match on `next` (which moves
+        // the terminator out) can't conflict with later borrows. All
+        // subsequent uses operate on owned locals, no view structs.
+        let VerifiedHop {
+            canonical_ref: hop_ref,
+            verified,
+            thread_profile,
+            runtime,
+            next,
+        } = hop;
+
+        // P1.1: capture root subject from the FIRST hop that has a
+        // thread_profile. This is the subject's identity for the
+        // entire dispatch chain. We clone here because the loop may
+        // continue (alias/registry hop) and dispatch_by also needs
+        // the same data on the terminating hop.
+        if root_subject.is_none() {
+            if let Some(tp) = thread_profile.as_ref() {
+                root_subject = Some(RootSubject {
+                    item_ref: hop_ref.to_string(),
+                    thread_profile: tp.clone(),
+                    verified: verified.clone(),
+                });
+            }
+        }
+
+        match next {
+            HopAction::Terminate(terminator, _hop_profile) => {
                 return dispatch_by(
                     terminator,
-                    &thread_profile,
-                    &hop.canonical_ref,
-                    hop.resolved.as_ref(),
+                    hop_ref,
+                    verified,
+                    thread_profile,
+                    runtime,
+                    root_subject,
                     request,
                     ctx,
                     state,
                 )
                 .await;
             }
-            HopAction::FollowAlias(next) | HopAction::UseRegistry(next) => {
-                current_ref = next;
+            HopAction::FollowAlias(next_ref) | HopAction::UseRegistry(next_ref) => {
+                current_ref = next_ref;
             }
         }
     }
@@ -826,31 +986,57 @@ pub async fn dispatch(
 
 /// Route a single terminated hop to its leaf dispatcher. The SSE seam
 /// (V5.4) is just a new arm or a `TerminatorSpec` variant here.
+///
+/// **P1.1**: receives the hop's fields individually (owned: verified
+/// item, runtime metadata, thread_profile) and the `RootSubject`
+/// captured from the first hop. Leaf dispatchers consume what they
+/// need from both. No borrowed view struct — owned values flow through
+/// the match.
 async fn dispatch_by(
     terminator: TerminatorSpec,
-    thread_profile: &str,
-    current_ref: &CanonicalRef,
-    current_resolved: Option<&ResolvedItem>,
+    canonical_ref: CanonicalRef,
+    verified: Option<VerifiedItem>,
+    thread_profile: Option<String>,
+    runtime: Option<VerifiedRuntime>,
+    root_subject: Option<RootSubject>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<DispatchOutcome, DispatchError> {
-    // Thread the per-hop resolved item through to the leaf so
-    // `dispatch_native_runtime` doesn't double-resolve (B4).
-    let mut req_with_resolved = request.clone();
-    req_with_resolved.current_resolved = current_resolved;
-
     match terminator {
         TerminatorSpec::Subprocess => {
-            dispatch_subprocess(current_ref, thread_profile, &req_with_resolved, ctx, state).await
+            // Subprocess uses the hop's thread_profile directly —
+            // there's no registry hop for subprocess, so root_subject
+            // and hop always agree.
+            let tp = thread_profile.ok_or_else(|| {
+                DispatchError::SchemaMisconfigured {
+                    kind: canonical_ref.kind.clone(),
+                    detail: "subprocess terminator has no thread_profile".into(),
+                }
+            })?;
+            dispatch_subprocess(
+                &canonical_ref,
+                &tp,
+                verified.as_ref(),
+                request,
+                ctx,
+                state,
+            )
+            .await
         }
         TerminatorSpec::InProcessHandler {
             registry: HandlerRegistryKind::Services,
         } => {
+            let tp = thread_profile.ok_or_else(|| {
+                DispatchError::SchemaMisconfigured {
+                    kind: canonical_ref.kind.clone(),
+                    detail: "service terminator has no thread_profile".into(),
+                }
+            })?;
             dispatch_service(
-                &current_ref.to_string(),
-                thread_profile,
-                &req_with_resolved,
+                &canonical_ref.to_string(),
+                &tp,
+                request,
                 ctx,
                 state,
             )
@@ -858,9 +1044,12 @@ async fn dispatch_by(
         }
         TerminatorSpec::NativeRuntimeSpawn => {
             dispatch_native_runtime(
-                &current_ref.to_string(),
+                canonical_ref,
+                verified,
                 thread_profile,
-                &req_with_resolved,
+                runtime,
+                root_subject,
+                request,
                 ctx,
                 state,
             )
@@ -962,31 +1151,12 @@ metadata:
         Engine::new(kinds, parser_dispatcher, None, vec![]).with_trust_store(ts)
     }
 
-    #[test]
-    fn lookup_runtime_for_dispatch_enumerates_when_registry_empty() {
-        let engine = build_test_engine();
-        let err = lookup_runtime_for_dispatch(&engine, "runtime:nonexistent")
-            .expect_err("empty registry must error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("runtime:nonexistent"),
-            "error must mention requested ref, got: {msg}"
-        );
-        assert!(
-            msg.contains("no runtimes are currently registered"),
-            "empty-registry error must say so explicitly, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn lookup_runtime_for_dispatch_rejects_invalid_ref() {
-        let engine = build_test_engine();
-        let err = lookup_runtime_for_dispatch(&engine, "not-a-canonical-ref")
-            .expect_err("invalid ref must error");
-        let msg = err.to_string();
-        assert!(msg.contains("not-a-canonical-ref"), "got: {msg}");
-        assert!(msg.contains("invalid"), "got: {msg}");
-    }
+    // P1.4: tests for `lookup_runtime_for_dispatch` were removed when
+    // that helper was deleted. The dispatch loop now attaches the
+    // verified runtime to the hop via `RuntimeRegistry::lookup_by_ref`
+    // (covered by `runtime_registry` integration tests) and
+    // `dispatch_native_runtime` consumes that owned value, so the
+    // per-call lookup path no longer exists.
 
     #[test]
     fn strip_binary_ref_prefix_strips_triple() {

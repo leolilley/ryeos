@@ -178,9 +178,17 @@ pub fn init_subscriber(config: SubscriberConfig) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&config.default_filter));
 
+    // Tracing output MUST go to stderr — stdout is reserved for
+    // structured runtime results (e.g. directive-runtime writes its
+    // terminal `RuntimeResult` JSON to stdout for the daemon to
+    // parse). Mixing tracing into stdout silently corrupts the
+    // protocol and surfaces as "failed to parse runtime stdout"
+    // errors at the daemon. The default `tracing_subscriber::fmt()`
+    // writer is `std::io::stdout`, so this override is required.
     let _ = if config.json_output {
         tracing_subscriber::fmt()
             .json()
+            .with_writer(std::io::stderr)
             .with_env_filter(filter)
             .with_target(config.with_target)
             .with_file(config.with_file)
@@ -188,6 +196,7 @@ pub fn init_subscriber(config: SubscriberConfig) {
             .try_init()
     } else {
         tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_env_filter(filter)
             .with_target(config.with_target)
             .with_file(config.with_file)

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-26T10:33:19Z:21d727ddf3002c03a212005955ffb161cf9d59488bc92ffe0611bef143046b35:x27hwmHqhqd7jnkx/nyENgVIiXWjrl0e8mxdoc9QAr7boSb43LhvE2XJPeTIcNnsgIVAUIj79TvqsyiNRi08BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T16:24:42Z:30943b97fa576dbbfba14fb6108ddc668738c12d94bde55573e27a7d2e0ff68b:Dj1UyxeDEL7o0CkEAuqclXwZRkAgNEakWam4TxMIqMMG3nbWxJTjBAPSiBh0eD5cOTJwH5BdMbmNgLUX4jc6BQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -31,6 +31,7 @@ formats:
 # extracted via metadata.rules from kind-specific keys in parser_config,
 # not enforced at the kind-level shape.
 # Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+inventory_schema_keys: [input_schema, parameters, config_schema]
 composer: rye/core/identity
 composed_value_contract:
   root_type: mapping

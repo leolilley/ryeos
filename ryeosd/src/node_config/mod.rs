@@ -4,7 +4,7 @@
 //! Each declares `section: <name>` which must match its parent directory.
 //!
 //! The daemon loads node-config at startup in two phases:
-//! - **Phase 1 (bootstrap):** load only the `bundle` section from
+//! - **Phase 1 (bootstrap):** load only the `bundles` section from
 //!   `system_data_dir` + `state_dir` to determine effective bundle roots.
 //! - **Phase 2 (full pass):** build the engine with effective roots, then
 //!   scan all sections from all sources.
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionSourcePolicy {
     /// Only `system_data_dir` + `state_dir`.
-    /// Used by the `bundle` section so bundles can't self-register.
+    /// Used by the `bundles` section so bundles can't self-register.
     SystemAndState,
 }
 
@@ -81,7 +81,7 @@ impl SectionTable {
     pub fn new() -> Self {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
         sections.insert(
-            "bundle",
+            "bundles",
             Box::new(sections::bundle::BundleSection),
         );
         Self { sections }

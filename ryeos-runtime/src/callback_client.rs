@@ -6,6 +6,23 @@ use serde_json::Value;
 use crate::callback::RuntimeCallbackAPI;
 use crate::envelope::EnvelopeCallback;
 
+/// Map an event type name to the storage class the daemon's
+/// `EventStoreService::validate_storage_class` accepts. High-frequency
+/// progressive events go to `journal_only`; everything else is a
+/// milestone and goes to `indexed`. The set of accepted event names
+/// (and the journal_only short-list) MUST stay in sync with
+/// `ryeosd/src/services/event_store.rs::validate_event_type`.
+pub fn storage_class_for(event_type: &str) -> &'static str {
+    match event_type {
+        // High-frequency progressive events.
+        "token_delta"
+        | "stream_snapshot"
+        | "cognition_reasoning" => "journal_only",
+        // Everything else is a milestone.
+        _ => "indexed",
+    }
+}
+
 pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
@@ -70,21 +87,43 @@ impl CallbackClient {
         &self.project_path
     }
 
+    /// Dispatch a sub-action through the daemon's `runtime.dispatch_action`
+    /// endpoint and return the typed response.
+    ///
+    /// The daemon contract is `CallbackDispatchResponse` (see
+    /// `crate::callback_contract`). We deserialize STRICTLY — a legacy
+    /// envelope (`{thread, result, data, status}`) fails loudly here
+    /// rather than silently dropping fields into the model's
+    /// tool-result bytes.
+    ///
+    /// When the callback channel is disconnected (no UDS socket), we
+    /// surface that explicitly rather than fabricating an empty
+    /// response: a runtime that ignored the disconnect could feed
+    /// "Null" to the model and the LLM would see a tool that returned
+    /// `null` instead of failing visibly.
     pub async fn dispatch_action(
         &self,
         req: crate::callback::DispatchActionRequest,
-    ) -> Result<Value> {
-        match &self.inner {
-            Some(client) => Ok(client.dispatch_action(req).await
-                .map_err(|e| anyhow::anyhow!("{e}"))?),
-            None => Ok(Value::Null),
-        }
+    ) -> Result<crate::callback_contract::CallbackDispatchResponse> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback dispatch_action called without an inner UDS client \
+                 (socket missing); runtime cannot route to the daemon"
+            )
+        })?;
+        let raw: Value = client
+            .dispatch_action(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        serde_json::from_value::<crate::callback_contract::CallbackDispatchResponse>(raw)
+            .map_err(|e| anyhow::anyhow!("invalid CallbackDispatchResponse from daemon: {e}"))
     }
 
     pub async fn append_event(&self, event_type: &str, payload: Value) -> Result<()> {
+        let storage_class = storage_class_for(event_type);
         match &self.inner {
             Some(client) => {
-                client.append_event(&self.thread_id, event_type, payload, "transient").await
+                client.append_event(&self.thread_id, event_type, payload, storage_class).await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
             }
@@ -167,36 +206,46 @@ impl CallbackClient {
 
     // Typed event emission methods (merged from EventEmitter)
 
+    /// Begin-of-turn marker — model inputs going into cognition.
+    /// Maps to the validator-accepted `cognition_in` event.
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
-        self.append_event("turn_start", serde_json::json!({"turn": turn})).await
+        self.append_event("cognition_in", serde_json::json!({"turn": turn})).await
     }
 
+    /// End-of-turn marker — model output and token usage.
+    /// Maps to the validator-accepted `cognition_out` event.
     pub async fn emit_turn_complete(&self, turn: u32, tokens: Option<(u64, u64)>) -> Result<()> {
         let mut data = serde_json::json!({"turn": turn});
         if let Some((input, output)) = tokens {
             data["input_tokens"] = serde_json::json!(input);
             data["output_tokens"] = serde_json::json!(output);
         }
-        self.append_event("turn_complete", data).await
+        self.append_event("cognition_out", data).await
     }
 
+    /// A tool call is being dispatched. Maps to `tool_call_start`.
     pub async fn emit_tool_dispatch(&self, tool: &str, call_id: Option<&str>) -> Result<()> {
         let mut data = serde_json::json!({"tool": tool});
         if let Some(id) = call_id {
             data["call_id"] = serde_json::json!(id);
         }
-        self.append_event("tool_dispatch", data).await
+        self.append_event("tool_call_start", data).await
     }
 
+    /// A tool call returned. Maps to `tool_call_result`.
     pub async fn emit_tool_result(&self, call_id: &str, truncated: bool) -> Result<()> {
         self.append_event(
-            "tool_result",
+            "tool_call_result",
             serde_json::json!({"call_id": call_id, "truncated": truncated}),
         ).await
     }
 
+    /// Terminal failure — surfaced as `thread_failed`. Callers that
+    /// also call `finalize_thread("failed")` should call this FIRST so
+    /// the failure reason hits the audit trail before the lifecycle
+    /// transition.
     pub async fn emit_error(&self, error: &str) -> Result<()> {
-        self.append_event("error", serde_json::json!({"message": error})).await
+        self.append_event("thread_failed", serde_json::json!({"message": error})).await
     }
 
     pub async fn emit_thread_continued(&self, previous_id: &str) -> Result<()> {
@@ -226,7 +275,15 @@ impl CallbackClient {
     pub async fn emit_progress(&self, payload: crate::progress::ProgressEvent) -> Result<()> {
         let value = serde_json::to_value(&payload)
             .map_err(|e| anyhow::anyhow!("encode ProgressEvent: {e}"))?;
-        self.append_event("progress", value).await
+        // High-frequency progressive event — maps to `stream_snapshot`
+        // (journal_only). The original "progress" name is preserved
+        // inside the payload via a `kind` field for downstream
+        // consumers that want to discriminate.
+        let mut wrapped = serde_json::json!({"kind": "progress"});
+        if let Some(map) = wrapped.as_object_mut() {
+            map.insert("payload".into(), value);
+        }
+        self.append_event("stream_snapshot", wrapped).await
     }
 
     /// Emit a typed status / lifecycle transition event.
@@ -235,7 +292,15 @@ impl CallbackClient {
     pub async fn emit_status(&self, payload: crate::progress::StatusEvent) -> Result<()> {
         let value = serde_json::to_value(&payload)
             .map_err(|e| anyhow::anyhow!("encode StatusEvent: {e}"))?;
-        self.append_event("status", value).await
+        // Lifecycle status update — maps to `stream_snapshot` (the
+        // closest validator-accepted bucket; lifecycle transitions
+        // proper go through `finalize_thread` which emits
+        // thread_completed/failed/cancelled).
+        let mut wrapped = serde_json::json!({"kind": "status"});
+        if let Some(map) = wrapped.as_object_mut() {
+            map.insert("payload".into(), value);
+        }
+        self.append_event("stream_snapshot", wrapped).await
     }
 }
 
@@ -258,7 +323,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_action_succeeds_when_disconnected() {
+    async fn dispatch_action_errors_when_disconnected() {
+        // Post-V5.4 callback contract: a disconnected callback MUST
+        // surface as an error, not a fabricated empty response.
+        // Otherwise the calling runtime would feed `null` to the model
+        // as a tool result, hiding the daemon link being down.
         let client = make_client();
         let req = DispatchActionRequest {
             thread_id: "T-test".to_string(),
@@ -270,9 +339,12 @@ mod tests {
                 thread: "inline".to_string(),
             },
         };
-        let result = client.dispatch_action(req).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Null);
+        let err = client.dispatch_action(req).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("socket missing") || msg.contains("inner UDS client"),
+            "expected disconnect error, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -387,5 +459,84 @@ mod tests {
             .emit_status(crate::progress::StatusEvent::new("ready"))
             .await
             .unwrap();
+    }
+
+    /// V5.4 P2.2 — every event name the runtime can emit MUST be in
+    /// the daemon's `EventStoreService::validate_event_type` allow-list,
+    /// and every storage class returned by `storage_class_for` MUST be
+    /// in `validate_storage_class`. The list below is the canonical
+    /// set of names produced by `CallbackClient`'s typed emitters
+    /// AND the bare `append_event` calls in `ryeos-directive-runtime`'s
+    /// `runner.rs`. If a new emitter is added without aligning the
+    /// daemon validator (or vice versa), this test fails loudly here
+    /// instead of being silently dropped at the daemon boundary.
+    ///
+    /// We mirror the validator's two allow-lists rather than depending
+    /// on `ryeosd` (which would be a circular dep).
+    #[test]
+    fn every_emitted_event_passes_the_daemon_validator() {
+        const VALIDATOR_EVENTS: &[&str] = &[
+            "thread_created",
+            "thread_started",
+            "thread_completed",
+            "thread_failed",
+            "thread_cancelled",
+            "thread_killed",
+            "thread_timed_out",
+            "thread_continued",
+            "edge_recorded",
+            "child_thread_spawned",
+            "continuation_requested",
+            "continuation_accepted",
+            "command_submitted",
+            "command_claimed",
+            "command_completed",
+            "stream_opened",
+            "token_delta",
+            "stream_snapshot",
+            "stream_closed",
+            "artifact_published",
+            "thread_reconciled",
+            "orphan_process_killed",
+            "system_prompt",
+            "context_injected",
+            "cognition_in",
+            "cognition_out",
+            "cognition_reasoning",
+            "tool_call_start",
+            "tool_call_result",
+        ];
+        const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only"];
+
+        // Every event the runtime can emit, post-P2.2:
+        let runtime_emits: &[&str] = &[
+            // Typed emitters in CallbackClient
+            "cognition_in",          // emit_turn_start
+            "cognition_out",         // emit_turn_complete
+            "tool_call_start",       // emit_tool_dispatch
+            "tool_call_result",      // emit_tool_result
+            "thread_failed",         // emit_error
+            "thread_continued",      // emit_thread_continued
+            "stream_snapshot",       // emit_progress / emit_status
+            // Bare append_event calls in ryeos-directive-runtime/runner.rs
+            "stream_opened",         // State::Streaming
+            "cognition_reasoning",   // FiringHooks
+            // tool_call_result(blocked) re-uses the validator name
+            // already covered above.
+        ];
+
+        for ev in runtime_emits {
+            assert!(
+                VALIDATOR_EVENTS.contains(ev),
+                "runtime emits {ev:?} but the daemon's validate_event_type \
+                 does not accept it — runtime <> daemon vocabulary drift"
+            );
+            let sc = storage_class_for(ev);
+            assert!(
+                VALIDATOR_STORAGE.contains(&sc),
+                "storage_class_for({ev:?}) returned {sc:?} which is not in \
+                 the daemon's accepted set"
+            );
+        }
     }
 }

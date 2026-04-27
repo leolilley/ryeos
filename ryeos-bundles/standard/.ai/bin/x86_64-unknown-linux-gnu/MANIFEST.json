@@ -1,9 +1,30 @@
 {
   "rye": {
-    "blob_hash": "56dd637b4bcca845337ee4c3c0146dd8132eb9b4b39113d2ab8a2066564e0c04",
-    "content_blob_hash": "56dd637b4bcca845337ee4c3c0146dd8132eb9b4b39113d2ab8a2066564e0c04",
-    "item_source_hash": "f68e5b3c1d007cd4e77f993511275d574cd00b7acafe90de260bf5fed14ffb9a",
-    "manifest_hash": "79739e9766254d07ce8ff5a388cf71fdd3d19913741791b4f81658a78c001d01",
-    "source_checksum": "c079dcdec9d02d485e59ffab4269569eb485dcf881c77696cf4582bd3964f362"
+    "blob_hash": "0160c0ab536764e6c35094797276d4c2298ff3ead3a312570ab3da02589dc72e",
+    "content_blob_hash": "0160c0ab536764e6c35094797276d4c2298ff3ead3a312570ab3da02589dc72e",
+    "item_source_hash": "a6f2cfe49119bc0319797b37b2edaa160fa1655e46eb3ffec6127b5dd32817c1",
+    "manifest_hash": "9ea683fd67f98ded0ac2ebbd5835e891595a9e0d7c15e566f6c9de1a6c328092",
+    "source_checksum": "0160c0ab536764e6c35094797276d4c2298ff3ead3a312570ab3da02589dc72e"
+  },
+  "ryeos-directive-runtime": {
+    "blob_hash": "cbffc7dc86f61e3c5be841c5709d67650b9a47a93c0e4dfde65a34d8709de43d",
+    "content_blob_hash": "cbffc7dc86f61e3c5be841c5709d67650b9a47a93c0e4dfde65a34d8709de43d",
+    "item_source_hash": "20d6143224448f85a5fb3044ba5ee60e80d4c90ff6f6d68d74284ef798e85d87",
+    "manifest_hash": "9ea683fd67f98ded0ac2ebbd5835e891595a9e0d7c15e566f6c9de1a6c328092",
+    "source_checksum": "cbffc7dc86f61e3c5be841c5709d67650b9a47a93c0e4dfde65a34d8709de43d"
+  },
+  "ryeos-graph-runtime": {
+    "blob_hash": "4b0bc7e8ca05bd044651124e03bfa8074648ddca9b4844b3b95de3e8e4aca73f",
+    "content_blob_hash": "4b0bc7e8ca05bd044651124e03bfa8074648ddca9b4844b3b95de3e8e4aca73f",
+    "item_source_hash": "3d3f1a522442970ad7a92ed061732e78772d9cbe3643ff9a01f2c7f3b9c14f2e",
+    "manifest_hash": "9ea683fd67f98ded0ac2ebbd5835e891595a9e0d7c15e566f6c9de1a6c328092",
+    "source_checksum": "4b0bc7e8ca05bd044651124e03bfa8074648ddca9b4844b3b95de3e8e4aca73f"
+  },
+  "ryeos-knowledge-runtime": {
+    "blob_hash": "a85d74902898652980e65b23ac8165d44e037e655e34172054bddafefc039b37",
+    "content_blob_hash": "a85d74902898652980e65b23ac8165d44e037e655e34172054bddafefc039b37",
+    "item_source_hash": "9769c9a2ac142196bc22bd5e57a0ccbff4b9eb1c320413695024c29a6154f00b",
+    "manifest_hash": "9ea683fd67f98ded0ac2ebbd5835e891595a9e0d7c15e566f6c9de1a6c328092",
+    "source_checksum": "a85d74902898652980e65b23ac8165d44e037e655e34172054bddafefc039b37"
   }
 }

@@ -70,16 +70,14 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         write_self_trust(&trust_dir, &trust_entry, identity.verifying_key())?;
     }
 
-    // Write signed core bundle registration so Phase 1 bootstrap can discover it.
-    let node_dir = config.state_dir.join(".ai").join("node").join("bundles");
-    std::fs::create_dir_all(&node_dir).with_context(|| {
-        format!("failed to create node config bundles dir {}", node_dir.display())
-    })?;
-    crate::node_config::loader::write_core_bundle_registration(
-        &config.state_dir,
-        &config.system_data_dir,
-        &identity,
-    )?;
+    // NOTE: We intentionally do NOT write a node-config registration for the
+    // system bundle here. `engine_init::build_engine` always adds
+    // `config.system_data_dir` to its system roots unconditionally, so a
+    // `bundles` registration pointing back at it would cause Phase 1 to
+    // return that same path, which `engine_init` would then add a second
+    // time (producing duplicate parsers / kinds at boot). The `bundles`
+    // section is reserved for ADDITIONAL bundles installed via
+    // `bundle.install`.
 
     Ok(())
 }

@@ -202,7 +202,9 @@ fn lower_to_execute(cmd: &ClientCmd) -> Result<(String, String)> {
             item_ref.clone(),
             params.as_deref().unwrap_or("{}").into(),
         )),
-        ClientCmd::BuildBundle { .. } | ClientCmd::UserKeySign { .. } => {
+        ClientCmd::BuildBundle { .. }
+        | ClientCmd::UserKeySign { .. }
+        | ClientCmd::RebuildManifest { .. } => {
             bail!("cannot lower to execute")
         }
     }
@@ -260,6 +262,24 @@ pub async fn dispatch(state_dir: &std::path::Path, cmd: ClientCmd) -> Result<()>
         ClientCmd::UserKeySign { input, key } => {
             let _report = ryeos_tools::actions::sign::run_sign(&input, key.as_deref())
                 .map_err(|e| anyhow::anyhow!("user-key-sign: {e}"))?;
+            Ok(())
+        }
+        ClientCmd::RebuildManifest { source, key, seed } => {
+            let signing_key = match (key.as_ref(), seed) {
+                (Some(_), Some(_)) => {
+                    bail!("rebuild-manifest: pass either --key or --seed, not both")
+                }
+                (Some(p), None) => ryeos_tools::actions::build_bundle::load_signing_key(p)?,
+                (None, Some(s)) => ryeos_tools::actions::build_bundle::signing_key_from_seed(s),
+                (None, None) => bail!(
+                    "rebuild-manifest: --key <pem> or --seed <0..=255> is required"
+                ),
+            };
+            let report = ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(
+                &source,
+                &signing_key,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         other => {

@@ -1861,6 +1861,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-knowledge-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "ryeos-runtime",
+ "ryeos-tracing",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ryeos-runtime"
 version = "0.1.0"
 dependencies = [

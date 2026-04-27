@@ -213,7 +213,7 @@ pub(crate) fn derive_effective_caps(
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
 }
 
-pub fn build_and_launch(
+pub async fn build_and_launch(
     state: &AppState,
     executor_ref: &str,
     acting_principal: &str,
@@ -330,6 +330,25 @@ pub fn build_and_launch(
         "launcher policy resolved from composed view"
     );
 
+    // 6b. Build inventory the launching kind asked for. The engine
+    //     enumerates + parses every inventoried item once here so the
+    //     runtime is a pure consumer of `envelope.inventory`.
+    let launching_kind_schema = state
+        .engine
+        .kinds
+        .get(&resolved.resolved_item.kind)
+        .ok_or_else(|| anyhow::anyhow!(
+            "build_and_launch: launching kind `{}` is not registered",
+            resolved.resolved_item.kind
+        ))?;
+    let inventory = ryeos_engine::inventory::build_inventory_for_launching_kind(
+        launching_kind_schema,
+        &state.engine.kinds,
+        &engine_roots,
+        &effective_parsers,
+    )
+    .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
+
     // 7. Resolve the native executor from the system bundle's CAS.
     //    This is the verified-chain path: the binary is materialized from
     //    CAS, trust-verified, arch-checked — no PATH lookup.
@@ -369,6 +388,7 @@ pub fn build_and_launch(
             token: cap.token.clone(),
         },
         resolution,
+        inventory,
     };
 
     // 8. Write thread.json (status = created, pre-execution audit).
@@ -393,14 +413,35 @@ pub fn build_and_launch(
     )?;
 
     // 9. Spawn runtime (env vars + stdin envelope)
+    //
+    // `spawn_runtime` calls `lillux::run` which is a fully synchronous
+    // subprocess wait (std::process + blocking pipe drains). Calling
+    // it directly inside an async fn pins the current Tokio worker
+    // for the entire runtime lifetime — and the runtime's first action
+    // is a `runtime.mark_running` UDS callback. If the daemon's UDS
+    // server task is scheduled on the same worker, the runtime
+    // deadlocks waiting for a response that never comes (oracle review
+    // of P3b.2 hang). `spawn_blocking` moves the wait onto Tokio's
+    // dedicated blocking pool so async workers stay free to service
+    // UDS callbacks.
     let envelope_json = serde_json::to_string(&envelope)?;
-    let spawn_result = spawn_runtime(
-        &materialized_binary.to_string_lossy(),
-        project_path, &envelope_json,
-        hard_limits.duration_seconds,
-        &envelope.callback,
-        thread_id,
-    );
+    let binary_path = materialized_binary.to_string_lossy().to_string();
+    let project_owned = project_path.to_path_buf();
+    let callback_owned = envelope.callback.clone();
+    let thread_id_owned = thread_id.to_string();
+    let duration = hard_limits.duration_seconds;
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        spawn_runtime(
+            &binary_path,
+            &project_owned,
+            &envelope_json,
+            duration,
+            &callback_owned,
+            &thread_id_owned,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_runtime join error: {e}"))?;
 
     // 10. ALWAYS invalidate callback token (cleanup guard)
     state.callback_tokens.invalidate(&cap.token);
@@ -444,12 +485,19 @@ pub fn build_and_launch(
     let thread_detail = state.threads.get_thread(thread_id)?
         .unwrap_or(thread);
 
+    // The runtime returns terminal text in `result` (Option<String>) and any
+    // non-fatal callback drift in `warnings`. Both must be visible to the
+    // HTTP caller — dropping `result` would silently lose the assistant's
+    // last message; dropping `warnings` would silently lose contract-drift
+    // diagnostics surfaced via `record_callback_warning`.
     Ok(NativeLaunchResult {
         thread: serde_json::to_value(&thread_detail)?,
         result: json!({
             "success": runtime_result.success,
             "status": runtime_result.status,
+            "result": runtime_result.result,
             "outputs": runtime_result.outputs,
+            "warnings": runtime_result.warnings,
         }),
     })
 }
@@ -490,6 +538,7 @@ fn spawn_runtime(
             result: Some(result.stderr.clone()),
             outputs: Value::Null,
             cost: None,
+            warnings: Vec::new(),
         });
     }
 

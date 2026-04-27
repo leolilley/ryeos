@@ -5,4 +5,5 @@
 //! No `Command::new("rye-*")` shelling — every direct subcommand runs
 //! the logic in-process.
 
+pub mod build_bundle;
 pub mod sign;

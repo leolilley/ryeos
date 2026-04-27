@@ -75,6 +75,14 @@ impl TrustStore {
         let mut owner = String::new();
         let mut pem_lines: Vec<String> = Vec::new();
         let mut in_pem = false;
+        // Single-line `pem = "ed25519:<b64>"` form, used by the rye-cli
+        // identity command and the e2e test fixtures. The legacy
+        // multi-line `-----BEGIN PUBLIC KEY-----` form is also supported
+        // (see the daemon's trusted-signer fixture in
+        // `ryeosd/tests/fixtures/trusted_signers/`). Either form is
+        // accepted; if both appear the multi-line PEM wins (it is the
+        // strictly typed format).
+        let mut inline_key_b64: Option<String> = None;
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -105,20 +113,48 @@ impl TrustStore {
                     .trim_matches('"');
                 owner = val.to_string();
             }
+            if let Some(val) = trimmed.strip_prefix("pem") {
+                let val = val
+                    .trim_start_matches(|c: char| c == '=' || c == ' ')
+                    .trim()
+                    .trim_matches('"');
+                if let Some(b64) = val.strip_prefix("ed25519:") {
+                    inline_key_b64 = Some(b64.to_string());
+                }
+            }
         }
 
         let fingerprint = fingerprint.ok_or_else(|| anyhow::anyhow!("missing fingerprint"))?;
-        let pem_b64: String = pem_lines.join("");
-        let pem_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&pem_b64)
-            .context("invalid base64 in PEM")?;
-
-        if pem_bytes.len() < 44 {
-            bail!("PEM too short for Ed25519 public key");
-        }
-        let key_bytes: [u8; 32] = pem_bytes[pem_bytes.len() - 32..]
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid key length"))?;
+        let key_bytes: [u8; 32] = if !pem_lines.is_empty() {
+            let pem_b64: String = pem_lines.join("");
+            let pem_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&pem_b64)
+                .context("invalid base64 in PEM")?;
+            if pem_bytes.len() < 44 {
+                bail!("PEM too short for Ed25519 public key");
+            }
+            pem_bytes[pem_bytes.len() - 32..]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid key length"))?
+        } else if let Some(b64) = inline_key_b64 {
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(&b64)
+                .context("invalid base64 in inline ed25519 key")?;
+            if raw.len() != 32 {
+                bail!(
+                    "inline ed25519 key has wrong length: {} (expected 32 raw bytes)",
+                    raw.len()
+                );
+            }
+            raw.try_into()
+                .map_err(|_| anyhow::anyhow!("invalid inline ed25519 key length"))?
+        } else {
+            bail!(
+                "trust entry at {} has no public-key block: expected either a multi-line \
+                 `-----BEGIN PUBLIC KEY-----` PEM or a single-line `pem = \"ed25519:<base64>\"`",
+                path.display()
+            );
+        };
         let verifying_key = VerifyingKey::from_bytes(&key_bytes)
             .map_err(|_| anyhow::anyhow!("invalid Ed25519 public key"))?;
 

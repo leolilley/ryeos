@@ -551,8 +551,10 @@ impl Walker {
                         Some(&exec_ctx),
                     ).await;
                     if let Ok(ref val) = res {
-                        let unwrapped = dispatch::unwrap_result(val);
-                        let is_error = unwrapped.get("status")
+                        // Typed contract: dispatch_action returns the
+                        // leaf result directly. Soft-errors surface as
+                        // `status == "error"` at the leaf top level.
+                        let is_error = val.get("status")
                             .and_then(|s| s.as_str())
                             .map(|s| s == "error")
                             .unwrap_or(false);
@@ -576,7 +578,10 @@ impl Walker {
 
             match result {
                 Some(val) => {
-                    let unwrapped = dispatch::unwrap_result(&val);
+                    // Typed contract: dispatch_action returns the leaf
+                    // result directly. Soft-errors surface as
+                    // `status == "error"` at the leaf top level.
+                    let unwrapped = val;
 
                     let is_error = unwrapped.get("status")
                         .and_then(|s| s.as_str())
@@ -972,10 +977,13 @@ mod tests {
             _request: DispatchActionRequest,
         ) -> Result<Value, CallbackError> {
             let mut results = self.results.lock().unwrap();
+            // Strict typed contract: CallbackClient::dispatch_action
+            // requires `{thread, result}` shape; preserve any caller-
+            // supplied leaf by wrapping it under `result`.
             if results.is_empty() {
-                Ok(json!({"status": "ok", "data": {}}))
+                Ok(json!({"thread": {}, "result": {}}))
             } else {
-                Ok(results.remove(0))
+                Ok(json!({"thread": {}, "result": results.remove(0)}))
             }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
@@ -1027,7 +1035,7 @@ config:
       node_type: return
 "#;
         let graph = make_graph(yaml);
-        let w = make_walker(graph, vec![json!({"data": {"msg": "hello"}})]);
+        let w = make_walker(graph, vec![json!({"msg": "hello"})]);
         let result = w.execute(json!({}), None).await;
         assert!(result.success);
         assert_eq!(result.status, "completed");
@@ -1075,10 +1083,10 @@ config:
 "#;
         let graph = make_graph(yaml);
         let w = make_walker(graph, vec![
-            json!({"data": {}}),
-            json!({"data": {}}),
-            json!({"data": {}}),
-            json!({"data": {}}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
         ]);
         let result = w.execute(json!({}), None).await;
         assert!(!result.success);
@@ -1122,9 +1130,9 @@ config:
 "#;
         let graph = make_graph(yaml);
         let w = make_walker(graph, vec![
-            json!({"data": {"value": "a"}}),
-            json!({"data": {"value": "b"}}),
-            json!({"data": {"value": "c"}}),
+            json!({"value": "a"}),
+            json!({"value": "b"}),
+            json!({"value": "c"}),
         ]);
         let result = w.execute(json!({"inject_state": {"items": ["a", "b", "c"]}}), None).await;
         assert!(result.success);
@@ -1150,7 +1158,7 @@ config:
 "#;
         let graph = make_graph(yaml);
         let w = make_walker(graph, vec![
-            json!({"status": "error", "data": {"error": "forced failure"}}),
+            json!({"status": "error", "error": "forced failure"}),
         ]);
         let result = w.execute(json!({}), None).await;
         assert!(result.success);
@@ -1169,7 +1177,7 @@ config:
 
         assert!(cache.lookup(&key).is_none());
 
-        let val = json!({"status": "ok", "data": {"msg": "cached"}});
+        let val = json!({"msg": "cached"});
         cache.store(&key, &val);
         let cached = cache.lookup(&key).unwrap();
         assert_eq!(cached, val);

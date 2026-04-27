@@ -53,21 +53,21 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
         }
         let _enter = span.enter();
 
-        let response = dispatch(request, &state);
+        let response = dispatch(request, &state).await;
 
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;
     }
 }
 
-pub(crate) fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
+pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     match request.method.as_str() {
         // ── daemon health (lightweight, only ungated method) ─────────
         "system.health" => RpcResponse::ok(request.request_id, json!({ "status": "ok" })),
 
         // ── runtime callbacks (token-gated, used by runtimes) ───────
         other if other.starts_with("runtime.") => {
-            rpc_result(request.request_id, dispatch_runtime_method(other, &request.params, state))
+            rpc_result(request.request_id, dispatch_runtime_method(other, &request.params, state).await)
         }
 
         other => RpcResponse::err(
@@ -78,7 +78,7 @@ pub(crate) fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     }
 }
 
-pub fn dispatch_runtime_method(
+pub async fn dispatch_runtime_method(
     method: &str,
     params: &serde_json::Value,
     state: &AppState,
@@ -97,7 +97,7 @@ pub fn dispatch_runtime_method(
 
     match method {
         "runtime.dispatch_action" => {
-            crate::execution::runtime_dispatch::handle(params, state)
+            crate::execution::runtime_dispatch::handle(params, state).await
         }
         "runtime.append_event" => handle_append_event(params, state),
         "runtime.append_events" => handle_append_event_batch(params, state),
@@ -174,8 +174,14 @@ fn handle_request_continuation(
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: EventAppendParams =
         serde_json::from_value(params.clone()).context("invalid events.append params")?;
-    serde_json::to_value(state.events.append(&params)?)
-        .context("failed to encode events.append result")
+    let persisted = state.events.append(&params)?;
+    // Publish AFTER persistence so live subscribers receive the same
+    // chain_seq the event store recorded. Persistence-first is the
+    // contract; SSE consumers replay from the event store on lag.
+    state
+        .event_streams
+        .publish(&persisted.thread_id, persisted.clone());
+    serde_json::to_value(persisted).context("failed to encode events.append result")
 }
 
 fn handle_append_event_batch(
@@ -184,8 +190,22 @@ fn handle_append_event_batch(
 ) -> Result<serde_json::Value> {
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
-    serde_json::to_value(state.events.append_batch(&params)?)
-        .context("failed to encode events.append_batch result")
+    let result = state.events.append_batch(&params)?;
+    // Group by thread_id and bulk-publish so each thread's
+    // subscribers receive its events in persisted order under a
+    // single hub lock acquisition per thread.
+    let mut by_thread: std::collections::HashMap<String, Vec<_>> =
+        std::collections::HashMap::new();
+    for ev in &result.persisted {
+        by_thread
+            .entry(ev.thread_id.clone())
+            .or_default()
+            .push(ev.clone());
+    }
+    for (thread_id, events) in &by_thread {
+        state.event_streams.publish_batch(thread_id, events);
+    }
+    serde_json::to_value(result).context("failed to encode events.append_batch result")
 }
 
 fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -292,6 +312,7 @@ async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
     use crate::execution::callback_token::CallbackCapabilityStore;
     use crate::identity::NodeIdentity;
     use crate::kind_profiles::KindProfileRegistry;
@@ -365,6 +386,7 @@ mod tests {
             identity: Arc::new(identity),
             threads,
             events,
+            event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
             write_barrier: Arc::new(WriteBarrier::new()),
@@ -414,26 +436,26 @@ mod tests {
 
     // ── system methods ──────────────────────────────────────────────
 
-    #[test]
-    fn system_health_returns_ok() {
+    #[tokio::test]
+    async fn system_health_returns_ok() {
         let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("system.health", json!({})), &state);
+        let resp = dispatch(rpc("system.health", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "ok");
     }
 
-    #[test]
-    fn unknown_method_returns_error() {
+    #[tokio::test]
+    async fn unknown_method_returns_error() {
         let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("nonexistent.method", json!({})), &state);
+        let resp = dispatch(rpc("nonexistent.method", json!({})), &state).await;
         let err = rpc_err(&resp);
         assert_eq!(err.code, "unknown_method");
     }
 
     // ── removed methods return unknown_method ──────────────────────
 
-    #[test]
-    fn removed_methods_return_unknown() {
+    #[tokio::test]
+    async fn removed_methods_return_unknown() {
         let (_tmp, state) = setup_app_state();
         for method in [
             // V5.2 removed catalog methods
@@ -458,7 +480,7 @@ mod tests {
             "artifacts.publish",
             "threads.get_facets",
         ] {
-            let resp = dispatch(rpc(method, json!({})), &state);
+            let resp = dispatch(rpc(method, json!({})), &state).await;
             assert_eq!(
                 rpc_err(&resp).code,
                 "unknown_method",
@@ -470,12 +492,12 @@ mod tests {
     /// Assert that `system.health` is the ONLY ungated method on the bare UDS
     /// surface. Every other method must go through token-gated `runtime.*` or
     /// be unknown.
-    #[test]
-    fn only_system_health_is_ungated() {
+    #[tokio::test]
+    async fn only_system_health_is_ungated() {
         let (_tmp, state) = setup_app_state();
 
         // system.health must work
-        let resp = dispatch(rpc("system.health", json!({})), &state);
+        let resp = dispatch(rpc("system.health", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "ok");
 
@@ -486,7 +508,7 @@ mod tests {
             "commands.submit",
             "artifacts.publish",
         ] {
-            let resp = dispatch(rpc(method, json!({})), &state);
+            let resp = dispatch(rpc(method, json!({})), &state).await;
             assert_eq!(
                 rpc_err(&resp).code,
                 "unknown_method",
@@ -497,8 +519,8 @@ mod tests {
 
     // ── thread lifecycle (runtime-internal, via runtime.*) ──────────
 
-    #[test]
-    fn runtime_finalize_thread_works() {
+    #[tokio::test]
+    async fn runtime_finalize_thread_works() {
         let (_tmp, state) = setup_app_state();
         let params = make_create_params("T-1", "T-1");
 
@@ -511,38 +533,36 @@ mod tests {
             std::time::Duration::from_secs(300),
         );
 
-        let resp = dispatch(
-            rpc("runtime.finalize_thread", json!({
+        let resp = dispatch(rpc("runtime.finalize_thread", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-1",
                 "status": "completed",
                 "outcome_code": "test",
             })),
             &state,
-        );
+        ).await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
     }
 
-    #[test]
-    fn runtime_finalize_missing_token_returns_error() {
+    #[tokio::test]
+    async fn runtime_finalize_missing_token_returns_error() {
         let (_tmp, state) = setup_app_state();
         state.threads.create_thread(&make_create_params("T-Bad", "T-Bad")).unwrap();
 
-        let resp = dispatch(
-            rpc("runtime.finalize_thread", json!({
+        let resp = dispatch(rpc("runtime.finalize_thread", json!({
                 "thread_id": "T-Bad",
                 "status": "completed",
                 "outcome_code": "test",
             })),
             &state,
-        );
+        ).await;
         assert!(resp.error.is_some());
     }
 
     // ── events (via runtime.* token-gated) ──────────────────────────
 
-    #[test]
-    fn runtime_events_replay_after_thread_lifecycle() {
+    #[tokio::test]
+    async fn runtime_events_replay_after_thread_lifecycle() {
         let (_tmp, state) = setup_app_state();
         let cbt = state.callback_tokens.generate(
             "T-events-1",
@@ -552,25 +572,23 @@ mod tests {
 
         state.threads.create_thread(&make_create_params("T-events-1", "T-events-1")).unwrap();
 
-        let finalize_resp = dispatch(
-            rpc("runtime.finalize_thread", json!({
+        let finalize_resp = dispatch(rpc("runtime.finalize_thread", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-events-1",
                 "status": "completed",
                 "outcome_code": "test",
             })),
             &state,
-        );
+        ).await;
         assert!(finalize_resp.error.is_none(), "finalize failed: {:?}", finalize_resp.error);
 
-        let replay_resp = dispatch(
-            rpc("runtime.replay_events", json!({
+        let replay_resp = dispatch(rpc("runtime.replay_events", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-events-1",
                 "limit": 10,
             })),
             &state,
-        );
+        ).await;
         assert!(replay_resp.error.is_none(), "replay failed: {:?}", replay_resp.error);
         let result = rpc_ok(&replay_resp);
         let events = result["events"].as_array().unwrap();
@@ -580,22 +598,106 @@ mod tests {
         assert!(types.contains(&"thread_completed"));
     }
 
-    #[test]
-    fn runtime_events_replay_missing_token_returns_error() {
+    #[tokio::test]
+    async fn append_event_bridges_to_event_stream_subscribers() {
+        // Persistence-first contract: a successful runtime.append_event
+        // RPC must (a) record the event in the event store AND (b)
+        // publish the same PersistedEventRecord into the per-thread
+        // hub so SSE subscribers tail in real time.
         let (_tmp, state) = setup_app_state();
-        let resp = dispatch(
-            rpc("runtime.replay_events", json!({
+        let cbt = state.callback_tokens.generate(
+            "T-stream-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+        );
+        state
+            .threads
+            .create_thread(&make_create_params("T-stream-1", "T-stream-1"))
+            .unwrap();
+
+        // Subscribe BEFORE the callback fires so the event lands in
+        // the live broadcast.
+        let mut rx = state.event_streams.subscribe("T-stream-1");
+
+        let resp = dispatch(rpc("runtime.append_event", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-stream-1",
+                "event": {
+                    "event_type": "stream_opened",
+                    "storage_class": "indexed",
+                    "payload": {"turn": 1},
+                },
+            })),
+            &state,
+        ).await;
+        assert!(resp.error.is_none(), "append_event failed: {:?}", resp.error);
+
+        let live = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("hub did not deliver event in time")
+            .expect("hub channel closed");
+        assert_eq!(live.event_type, "stream_opened");
+        assert_eq!(live.thread_id, "T-stream-1");
+        assert_eq!(live.payload, json!({"turn": 1}));
+    }
+
+    #[tokio::test]
+    async fn append_events_batch_bridges_in_persisted_order() {
+        // Bulk callback: each event lands in the broadcast in
+        // persisted (chain_seq) order so SSE consumers reconstruct
+        // the runtime's emission sequence verbatim.
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate(
+            "T-stream-2",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+        );
+        state
+            .threads
+            .create_thread(&make_create_params("T-stream-2", "T-stream-2"))
+            .unwrap();
+        let mut rx = state.event_streams.subscribe("T-stream-2");
+
+        let resp = dispatch(rpc("runtime.append_events", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-stream-2",
+                "events": [
+                    {"event_type": "tool_call_start",  "payload": {"i": 1}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_result", "payload": {"i": 2}, "storage_class": "indexed"},
+                    {"event_type": "stream_closed",    "payload": {"i": 3}, "storage_class": "indexed"},
+                ],
+            })),
+            &state,
+        ).await;
+        assert!(resp.error.is_none(), "append_events failed: {:?}", resp.error);
+
+        let mut last_seq = 0;
+        for expected_type in ["tool_call_start", "tool_call_result", "stream_closed"] {
+            let live = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("hub did not deliver event in time")
+                .expect("hub channel closed");
+            assert_eq!(live.event_type, expected_type);
+            assert!(live.chain_seq > last_seq, "chain_seq must be monotonic");
+            last_seq = live.chain_seq;
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_events_replay_missing_token_returns_error() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("runtime.replay_events", json!({
                 "thread_id": "NONEXISTENT",
             })),
             &state,
-        );
+        ).await;
         assert!(resp.error.is_some());
     }
 
     // ── commands (via runtime.* token-gated) ────────────────────────
 
-    #[test]
-    fn runtime_commands_submit_and_claim() {
+    #[tokio::test]
+    async fn runtime_commands_submit_and_claim() {
         let (_tmp, state) = setup_app_state();
         state.threads.create_thread(&make_create_params("T-cmd-1", "T-cmd-1")).unwrap();
 
@@ -606,33 +708,30 @@ mod tests {
         );
 
         // Mark running first — cancel is only allowed on running threads
-        let _ = dispatch(
-            rpc("runtime.mark_running", json!({
+        let _ = dispatch(rpc("runtime.mark_running", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-cmd-1",
             })),
             &state,
-        );
+        ).await;
 
-        let submit_resp = dispatch(
-            rpc("runtime.submit_command", json!({
+        let submit_resp = dispatch(rpc("runtime.submit_command", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-cmd-1",
                 "command_type": "cancel",
             })),
             &state,
-        );
+        ).await;
         assert!(submit_resp.error.is_none(), "submit failed: {:?}", submit_resp.error);
         let submitted = rpc_ok(&submit_resp);
         assert_eq!(submitted["command_type"], "cancel");
 
-        let claim_resp = dispatch(
-            rpc("runtime.claim_commands", json!({
+        let claim_resp = dispatch(rpc("runtime.claim_commands", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-cmd-1",
             })),
             &state,
-        );
+        ).await;
         assert!(claim_resp.error.is_none(), "claim failed: {:?}", claim_resp.error);
         let claimed = rpc_ok(&claim_resp);
         let commands = claimed["commands"].as_array().unwrap();
@@ -642,8 +741,8 @@ mod tests {
 
     // ── facets (via runtime.* token-gated) ─────────────────────────
 
-    #[test]
-    fn runtime_get_facets_returns_empty_for_new_thread() {
+    #[tokio::test]
+    async fn runtime_get_facets_returns_empty_for_new_thread() {
         let (_tmp, state) = setup_app_state();
         state.threads.create_thread(&make_create_params("T-facets-1", "T-facets-1")).unwrap();
 
@@ -652,13 +751,12 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
         );
-        let resp = dispatch(
-            rpc("runtime.get_facets", json!({
+        let resp = dispatch(rpc("runtime.get_facets", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-facets-1",
             })),
             &state,
-        );
+        ).await;
         // Empty facets is OK — new thread has no facets
         if resp.error.is_none() {
             let result = rpc_ok(&resp);

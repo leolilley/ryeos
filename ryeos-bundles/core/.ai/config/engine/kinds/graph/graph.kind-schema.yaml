@@ -1,13 +1,16 @@
-# rye:signed:2026-04-26T10:34:13Z:0ebc66d5484bf6c272cf785791d6f810c9485abf849766c984bd4244f37a1a9e:0ilOq4Ww3Bkd5wcVOinHnAvYyVUiBRg/Szm913VNxGuJwKLu37ix2PzdXUC0fzERYAIyp0FH6H6m/fb0FFUuBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T16:24:57Z:da32c741f3b17948ab2895860b27ec5b82bd339a26be91c5a1f9be8bee615272:zex4vmM3pQ/fXPMDftt17dPsvghLjW3EwffOE6RrHch8B3K+7F2TCw6i6I1Y7N+Uov9+CfB0g90zHfaA4OIMDQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
   directory: graphs
 execution:
-  # No `@graph` alias — graph→runtime dispatch is resolved by
-  # `RuntimeRegistry::lookup_for("graph")` in the dispatch loop.
-  # This is an EXPLICIT, NAMED registry hop (see B2 in the V5.4
-  # advanced-path foundation), not a silent fallback.
+  # Explicit delegation to the runtime registry. The dispatcher will
+  # call `RuntimeRegistry::lookup_for("graph")` to find the default
+  # runtime serving this kind (today: `runtime:graph-runtime`).
+  # Without this `delegate` block the dispatcher refuses to consult
+  # the registry — there is no implicit fallback.
+  delegate:
+    via: runtime_registry
   thread_profile: graph_run
   resolution:
     - step: resolve_extends_chain
@@ -19,6 +22,7 @@ formats:
 # Empty until graph schema stabilizes — graph-walker enforces fields
 # at consumer layer for now.
 # Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+inventory_kinds: [tool]
 composer: rye/core/identity
 composed_value_contract:
   root_type: mapping

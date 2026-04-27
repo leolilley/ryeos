@@ -33,6 +33,7 @@ pub fn bootstrap(
     composed_view: &KindComposedView,
     _envelope_limits: &ryeos_runtime::envelope::HardLimits,
     loader: &VerifiedLoader,
+    inventory: &HashMap<String, Vec<ryeos_runtime::envelope::ItemDescriptor>>,
 ) -> Result<BootstrapOutput> {
     // The runtime no longer composes — the daemon-side composer has
     // already produced the effective header (in `composed`), the
@@ -47,12 +48,14 @@ pub fn bootstrap(
     let provider = resolve_provider(&header, &model_routing, loader)?;
     let (model_name, context_window) = resolve_model(&header, &model_routing);
 
-    // Strict tool / hook loading: any unparseable tool YAML or
-    // unreadable hook config is a hard error. Silent drops here meant
-    // a malformed tool would simply vanish from the runtime's tool
-    // list, leaving the user wondering why a declared tool wasn't
-    // available.
-    let tools = scan_tools(loader)?;
+    // Tools come from the daemon-baked `LaunchEnvelope.inventory` —
+    // the directive-runtime never re-scans, re-parses, or extracts
+    // tool metadata. The daemon owns the engine + parser dispatcher
+    // and is the single source of truth for kind-aware work
+    // (`Engine::build_inventory_for_launching_kind`). Anything missing
+    // from the inventory is treated as "no such tool" by the
+    // dispatcher's per-call resolution.
+    let tools = project_tool_inventory(inventory);
     let hooks = load_hooks(loader)?;
 
     let risk_policy: Option<crate::harness::RiskPolicy> = loader
@@ -210,55 +213,35 @@ fn resolve_model(
     (format!("anthropic/claude-sonnet-4-20250514"), 200_000)
 }
 
-fn scan_tools(loader: &VerifiedLoader) -> Result<Vec<ToolSchema>> {
-    let mut tools = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    let items = loader
-        .scan_kind("tool")
-        .map_err(|e| anyhow::anyhow!("scan_tools: cannot enumerate kind `tool`: {e}"))?;
-
-    for item in &items {
-        let name = item.name.clone();
-        if name.is_empty() {
-            return Err(anyhow::anyhow!(
-                "scan_tools: tool at {} has empty `name`",
-                item.path.display()
-            ));
-        }
-        if seen.contains(&name) {
-            // First-write-wins (shadowing project > user > system) is
-            // intentional — silently ignoring later duplicates is the
-            // correct precedence behaviour, not a "drop". Continue.
-            continue;
-        }
-        let verified = loader.load_verified("tool", &item.path).map_err(|e| {
-            anyhow::anyhow!("scan_tools: load `{name}` at {}: {e}", item.path.display())
-        })?;
-        let doc: serde_yaml::Value = serde_yaml::from_str(&verified.content).map_err(|e| {
-            anyhow::anyhow!(
-                "scan_tools: parse YAML for `{name}` at {}: {e}",
-                item.path.display()
-            )
-        })?;
-        seen.insert(name.clone());
-        let rel = item.path.strip_prefix(&item.root).unwrap_or(&item.path);
-        let schema_val = doc.get("input_schema").or_else(|| doc.get("parameters"));
-        let input_schema = match schema_val {
-            None => None,
-            Some(v) => Some(serde_json::to_value(v).map_err(|e| {
-                anyhow::anyhow!("scan_tools: schema for `{name}` not JSON-able: {e}")
-            })?),
-        };
-        tools.push(ToolSchema {
-            name: name.clone(),
-            item_id: format!("tool:{}", rel.display()),
-            description: doc.get("description").and_then(|v| v.as_str()).map(String::from),
-            input_schema,
-        });
-    }
-
-    Ok(tools)
+/// Project the daemon-baked inventory of `kind:tool` items shipped in
+/// `LaunchEnvelope.inventory["tool"]` into the runtime's typed
+/// `ToolSchema` shape.
+///
+/// The directive-runtime no longer scans, parses, or extracts tool
+/// metadata. The daemon already owns the engine + parser dispatcher
+/// and bakes the inventory via `Engine::build_inventory_for_launching_kind`
+/// before spawning. Hard-failing on missing inventory would penalise
+/// the legitimate "directive declares tools but the LLM never calls
+/// any" case, so we treat an absent `tool` entry as "no tools declared"
+/// and let the dispatcher's per-call `unknown tool` path surface any
+/// genuine misconfiguration.
+fn project_tool_inventory(
+    inventory: &std::collections::HashMap<String, Vec<ryeos_runtime::envelope::ItemDescriptor>>,
+) -> Vec<ToolSchema> {
+    inventory
+        .get("tool")
+        .map(|items| {
+            items
+                .iter()
+                .map(|d| ToolSchema {
+                    name: d.name.clone(),
+                    item_id: d.item_id.clone(),
+                    description: d.description.clone(),
+                    input_schema: d.schema.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefinition>> {

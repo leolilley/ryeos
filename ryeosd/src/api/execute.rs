@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::dispatch_error::DispatchError;
 use crate::execution::project_source::{self, ProjectSource, TempDirGuard};
 use crate::policy;
 use crate::state::AppState;
@@ -100,12 +101,29 @@ pub async fn execute(
         &checkout_id,
     )
     .map_err(|err| {
-        let msg = err.to_string();
-        if msg.contains("push first") {
-            (StatusCode::CONFLICT, Json(json!({ "error": msg })))
-        } else {
-            policy::internal_error(err)
-        }
+        // P1.2: pattern-match on the typed `ProjectSourceError`
+        // returned by `resolve_project_context`. No substring matching
+        // anywhere on this path. Wording for `PushFirst` is preserved
+        // verbatim by the variant's `Display` so the V5.2 pin in
+        // `dispatch_pin.rs::pin_native_runtime_with_pushed_head`
+        // continues to hold byte-identically.
+        use crate::execution::project_source::ProjectSourceError as PSE;
+        let dispatch_err = match err {
+            err @ PSE::PushFirst { .. } => {
+                // Carry the variant's Display string forward so the
+                // V5.2 wording survives byte-identically to the HTTP
+                // response.
+                DispatchError::ProjectSourcePushFirst(err.to_string())
+            }
+            PSE::CheckoutFailed(detail) => {
+                DispatchError::ProjectSourceCheckoutFailed(detail)
+            }
+            PSE::Other(detail) => DispatchError::ProjectSource(detail),
+        };
+        (
+            dispatch_err.http_status(),
+            Json(json!({ "error": dispatch_err.to_string() })),
+        )
     })?;
 
     // Centralized cleanup: take ownership of the optional checkout
@@ -179,7 +197,6 @@ pub async fn execute(
         snapshot_hash: project_ctx.snapshot_hash.clone(),
         temp_dir: temp_dir_guard.disarm(),
         original_root_kind: root_canonical.kind.as_str(),
-        current_resolved: None,
     };
 
     match crate::dispatch::dispatch(&request.item_ref, &dispatch_req, &exec_ctx, &state).await {

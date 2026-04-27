@@ -1,7 +1,7 @@
 //! `bundle.install` — install a bundle via node-config writer.
 //!
 //! Copies source to `<state_dir>/.ai/bundles/<name>/`, writes a signed
-//! `kind: node` `section: bundle` item at `<state_dir>/.ai/node/bundles/<name>.yaml`.
+//! `kind: node` `section: bundles` item at `<state_dir>/.ai/node/bundles/<name>.yaml`.
 //!
 //! OfflineOnly: the daemon must be stopped (engine reload not implemented).
 
@@ -81,7 +81,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Write signed kind: node bundle registration
     let config_item_path = crate::node_config::writer::write_signed_node_item(
         &state.config.state_dir.join(".ai").join("node"),
-        "bundle",
+        "bundles",
         &req.name,
         &serde_json::json!({ "path": canonical_target }),
         &state.identity,

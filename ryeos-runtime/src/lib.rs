@@ -1,5 +1,6 @@
 pub mod callback;
 pub mod callback_client;
+pub mod callback_contract;
 pub mod checkpoint;
 pub mod callback_uds;
 pub mod envelope;

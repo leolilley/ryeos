@@ -1,13 +1,16 @@
-# rye:signed:2026-04-26T10:34:12Z:64a85b2445b3166c758cc31ff696a91051e3212e1e77fd84749c90395336624d:7lml/8JH5CYO2ooUdHiG1xAbvpG3TDKx78xU8EJE5gPp6thJ59HvhHpgMR6LsT7QzbNviraxavCcZeLx3F0CDQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-26T16:24:34Z:e2410f50547813e2bb12d13ba6ddaf356146b85442bfff5480c986f53541e0d5:L9SZ6DFj5dpS8/NALoN3qg5B4nZoMvBNhsKJw12H5dXjHMmBUPo088/BZMTgI59gwjRvAAio+vhxbFDtAohFBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
   directory: directives
 execution:
-  # No `@directive` alias — directive→runtime dispatch is resolved
-  # by `RuntimeRegistry::lookup_for("directive")` in the dispatch
-  # loop. This is an EXPLICIT, NAMED registry hop (see B2 in the
-  # V5.4 advanced-path foundation), not a silent fallback.
+  # Explicit delegation to the runtime registry. The dispatcher will
+  # call `RuntimeRegistry::lookup_for("directive")` to find the
+  # default runtime serving this kind (today: `runtime:directive-runtime`).
+  # Without this `delegate` block the dispatcher refuses to consult
+  # the registry — there is no implicit fallback.
+  delegate:
+    via: runtime_registry
   thread_profile: directive_run
   resolution:
     - step: resolve_extends_chain
@@ -17,6 +20,7 @@ formats:
     signature:
       prefix: "<!--"
       suffix: "-->"
+inventory_kinds: [tool]
 composer: rye/core/extends_chain
 composer_config:
   extends_field: extends

@@ -225,6 +225,34 @@ pub enum EngineError {
         defaults: Vec<String>,
     },
 
+    // ── Inventory ────────────────────────────────────────────────────
+
+    /// A per-item failure during inventory construction. The inner
+    /// `EngineError` is preserved verbatim so the launcher can map
+    /// resolution / parser / verification failures to the appropriate
+    /// classification (4xx vs 5xx) without re-parsing strings.
+    #[error("inventory[{kind}:{bare_id}]: {source}")]
+    InventoryItemFailed {
+        kind: String,
+        bare_id: String,
+        #[source]
+        source: Box<EngineError>,
+    },
+
+    /// Two inventoried items in the same kind produced the same
+    /// flattened API-safe name. Silent shadowing here would let one
+    /// tool overwrite another in runtime dispatchers — fail loud.
+    #[error(
+        "inventory[{kind}]: duplicate flattened name `{flattened}` from \
+         `{first_item_id}` and `{second_item_id}` (rename one of the source items)"
+    )]
+    DuplicateInventoryName {
+        kind: String,
+        flattened: String,
+        first_item_id: String,
+        second_item_id: String,
+    },
+
     // ── Internal ─────────────────────────────────────────────────────
 
     #[error("internal engine error: {0}")]

@@ -78,6 +78,19 @@ impl Drop for RunGuard {
     }
 }
 
+/// Record a callback failure as a non-fatal warning. Replaces the
+/// `let _ = self.callback.append_event(...)` pattern that silently
+/// dropped event-store rejection (V5.4 P2.2 review finding).
+fn record_callback_warning(
+    warnings: &mut Vec<String>,
+    event_label: &str,
+    result: anyhow::Result<()>,
+) {
+    if let Err(e) = result {
+        warnings.push(format!("callback append_event({event_label}) failed: {e}"));
+    }
+}
+
 impl Runner {
     pub fn new(
         messages: Vec<ProviderMessage>,
@@ -155,11 +168,6 @@ impl Runner {
         runner
     }
 
-    #[allow(dead_code)]
-    pub fn budget(&self) -> &BudgetTracker {
-        &self.budget
-    }
-
     pub fn messages(&self) -> &[ProviderMessage] {
         &self.messages
     }
@@ -173,11 +181,22 @@ impl Runner {
         let mut state = State::Init;
         let mut turn = self.initial_turn;
         let max_turns = 100;
+        // Collected non-fatal callback failures. P2.2 — runtime no
+        // longer silently drops `append_event` errors; everything that
+        // would have hit `let _ = ...` is now recorded here and
+        // surfaced via `RuntimeResult.warnings` so the daemon /
+        // operator can see contract drift (rejected event names,
+        // transport hiccups, etc.).
+        let mut warnings: Vec<String> = Vec::new();
 
         loop {
             state = match state {
                 State::Init => {
-                    let _ = self.callback.mark_running().await;
+                    record_callback_warning(
+                        &mut warnings,
+                        "mark_running",
+                        self.callback.mark_running().await,
+                    );
                     State::CheckingLimits
                 }
 
@@ -203,7 +222,11 @@ impl Runner {
                     self.harness.record_turn();
                     turn += 1;
 
-                    let _ = self.callback.emit_turn_start(turn).await;
+                    record_callback_warning(
+                        &mut warnings,
+                        "emit_turn_start",
+                        self.callback.emit_turn_start(turn).await,
+                    );
 
                     if self.budget.is_exhausted() {
                         state = State::Errored { error: "budget_exceeded".to_string() };
@@ -228,13 +251,16 @@ impl Runner {
                                 self.budget.report(usage.input_tokens, usage.output_tokens, usd);
                             }
                             self.messages.push(resp.message.clone());
-                            let _ = self
-                                .callback
-                                .emit_turn_complete(
-                                    turn,
-                                    resp.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
-                                )
-                                .await;
+                            record_callback_warning(
+                                &mut warnings,
+                                "emit_turn_complete",
+                                self.callback
+                                    .emit_turn_complete(
+                                        turn,
+                                        resp.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
+                                    )
+                                    .await,
+                            );
                             if let Some(ref reason) = resp.finish_reason {
                                 tracing::debug!(finish_reason = %reason, "provider response");
                             }
@@ -254,7 +280,13 @@ impl Runner {
                 }
 
                 State::Streaming { mut events, mut accumulated_text, mut tool_calls } => {
-                    let _ = self.callback.append_event("streaming", json!({"turn": turn})).await;
+                    record_callback_warning(
+                        &mut warnings,
+                        "stream_opened",
+                        self.callback
+                            .append_event("stream_opened", json!({"turn": turn}))
+                            .await,
+                    );
 
                     // Process StreamEvents
                     while let Some(event) = events.pop() {
@@ -335,7 +367,11 @@ impl Runner {
                         State::CheckingContinuation
                     } else {
                         let tc = &pending[index];
-                        let _ = self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref()).await;
+                        record_callback_warning(
+                            &mut warnings,
+                            "emit_tool_dispatch",
+                            self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref()).await,
+                        );
 
                         let required_cap = format!("rye.execute.tool.{}", tc.name);
                         if !self.harness.check_permission(&required_cap) {
@@ -364,16 +400,24 @@ impl Runner {
                             if dispatch_result.dispatch_kind == DispatchKind::Internal && self.dispatcher.is_directive_return(&dispatch_result.tool_name) {
                                 let outputs = dispatch_result.arguments;
                                 // Publish outputs as artifact
-                                let _ = self.callback.publish_artifact(json!({
-                                    "artifact_type": "directive_outputs",
-                                    "uri": format!("thread://{}/outputs", self.thread_id),
-                                    "content": &outputs,
-                                })).await;
+                                record_callback_warning(
+                                    &mut warnings,
+                                    "publish_artifact(directive_outputs)",
+                                    self.callback.publish_artifact(json!({
+                                        "artifact_type": "directive_outputs",
+                                        "uri": format!("thread://{}/outputs", self.thread_id),
+                                        "content": &outputs,
+                                    })).await,
+                                );
                                 let mut result = self.finalize(json!("directive_return"));
                                 result.outputs = outputs;
-                                let _ = self.callback.finalize_thread("completed").await;
+                                record_callback_warning(
+                                    &mut warnings,
+                                    "finalize_thread(completed)",
+                                    self.callback.finalize_thread("completed").await,
+                                );
                                 guard.finalized = true;
-                                return result;
+                                return Self::attach_warnings(result, &mut warnings);
                             }
 
                             // Record spawn for child executions (directive/graph)
@@ -395,12 +439,27 @@ impl Runner {
                                     requires_ack = risk.requires_ack,
                                     "tool call blocked by risk policy"
                                 );
-                                let _ = self.callback.append_event("risk_blocked", json!({
-                                    "tool": dispatch_result.canonical_ref,
-                                    "call_id": dispatch_result.call_id,
-                                    "level": risk.level,
-                                    "requires_ack": risk.requires_ack,
-                                })).await;
+                                // Risk-policy block surfaces as a
+                                // `tool_call_result` with a `blocked`
+                                // status payload so the daemon's
+                                // event-store validator (which has no
+                                // `risk_blocked` name) accepts it.
+                                record_callback_warning(
+                                    &mut warnings,
+                                    "tool_call_result(blocked)",
+                                    self.callback
+                                        .append_event(
+                                            "tool_call_result",
+                                            json!({
+                                                "tool": dispatch_result.canonical_ref,
+                                                "call_id": dispatch_result.call_id,
+                                                "blocked": true,
+                                                "level": risk.level,
+                                                "requires_ack": risk.requires_ack,
+                                            }),
+                                        )
+                                        .await,
+                                );
                                 serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
                                     .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string())
                             } else {
@@ -414,9 +473,15 @@ impl Runner {
                                         thread: "inline".to_string(),
                                     },
                                 }).await {
-                                    Ok(result_value) => {
-                                        // Process raw bytes through ResultGuard
-                                        let raw_bytes = serde_json::to_vec(&result_value)
+                                    Ok(response) => {
+                                        // Model-visible bytes are ONLY the leaf
+                                        // dispatcher's `result` — never the
+                                        // wrapping `thread` snapshot. Without
+                                        // this, the LLM saw the whole
+                                        // {thread, result} envelope and the
+                                        // child-thread metadata leaked into
+                                        // every tool-result message.
+                                        let raw_bytes = serde_json::to_vec(&response.result)
                                             .unwrap_or_default();
                                         let processed_bytes = self.result_guard.process_bytes(&raw_bytes);
                                         String::from_utf8_lossy(&processed_bytes).to_string()
@@ -431,7 +496,11 @@ impl Runner {
                     };
 
                     let truncated = tool_result_content.len() != raw_args.len();
-                    let _ = self.callback.emit_tool_result(&call_id, truncated).await;
+                    record_callback_warning(
+                        &mut warnings,
+                        "emit_tool_result",
+                        self.callback.emit_tool_result(&call_id, truncated).await,
+                    );
                     self.messages.push(ProviderMessage {
                         role: "tool".to_string(),
                         content: Some(json!(tool_result_content)),
@@ -467,13 +536,21 @@ impl Runner {
                                     .map_err(|e| ryeos_runtime::callback::CallbackError::Transport(
                                         anyhow::anyhow!("invalid hook action: {}", e)
                                     ))?;
-                                cb.dispatch_action(ryeos_runtime::callback::DispatchActionRequest {
-                                    thread_id: tid,
-                                    project_path: proj,
-                                    action: payload,
-                                }).await.map_err(|e| ryeos_runtime::callback::CallbackError::Transport(
-                                    anyhow::anyhow!("{}", e)
-                                ))
+                                let response = cb.dispatch_action(
+                                    ryeos_runtime::callback::DispatchActionRequest {
+                                        thread_id: tid,
+                                        project_path: proj,
+                                        action: payload,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| ryeos_runtime::callback::CallbackError::Transport(
+                                    anyhow::anyhow!("{}", e),
+                                ))?;
+                                // Hooks run on the leaf result only —
+                                // the parent-thread snapshot has no
+                                // bearing on hook control flow.
+                                Ok(response.result)
                             })
                         }
                     );
@@ -486,7 +563,25 @@ impl Runner {
                         &dispatcher,
                     ).await;
 
-                    let _ = self.callback.append_event(&event, json!({"hook_result": hook_result})).await;
+                    // Hook events ("before_step", "after_step", …)
+                    // are not in the daemon's event-vocabulary
+                    // allow-list; map them to `cognition_reasoning`
+                    // (journal_only) and stash the original hook name
+                    // in the payload so consumers can still
+                    // discriminate.
+                    record_callback_warning(
+                        &mut warnings,
+                        &format!("cognition_reasoning(hook={event})"),
+                        self.callback
+                            .append_event(
+                                "cognition_reasoning",
+                                json!({
+                                    "hook_event": event,
+                                    "hook_result": hook_result,
+                                }),
+                            )
+                            .await,
+                    );
 
                     match hook_result {
                         Some(ref val) => {
@@ -517,36 +612,50 @@ impl Runner {
                         .continuation
                         .should_continue(&self.messages, Some(&self.budget.cost()))
                     {
+                        // Context-window overflow → ask daemon to spawn
+                        // a chained thread carrying the current
+                        // transcript. This is the ONLY terminal path
+                        // out of CheckingContinuation; otherwise we
+                        // loop back to the agent loop for the next LLM
+                        // turn (see comment below — the previous code
+                        // finalized here, which short-circuited
+                        // multi-turn tool-call dialogues after the
+                        // very first tool dispatch).
                         State::Continued
                     } else {
-                        // Extract last assistant content for finalization
-                        let content = self
-                            .messages
-                            .iter()
-                            .rev()
-                            .find_map(|m| {
-                                if m.role == "assistant" && m.content.is_some() {
-                                    m.content.clone()
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(Value::Null);
-                        State::Finalizing { result: content }
+                        // Loop back to the limits + provider call.
+                        // Reaching CheckingContinuation means the prior
+                        // turn either dispatched a tool (post-tool
+                        // resume from `FiringHooks`) or returned an
+                        // empty assistant message (edge case from
+                        // `ParsingResponse`). In both cases the
+                        // correct next step is another LLM turn —
+                        // finalizing here would emit the last
+                        // assistant content (typically `null` when
+                        // the only assistant message is a tool_call
+                        // envelope) and silently truncate the
+                        // dialogue.
+                        State::CheckingLimits
                     }
                 }
 
                 State::Finalizing { result } => {
-                    let _ = self.callback.finalize_thread("completed").await;
+                    record_callback_warning(
+                        &mut warnings,
+                        "finalize_thread(completed)",
+                        self.callback.finalize_thread("completed").await,
+                    );
                     let runtime_result = self.finalize(result);
                     guard.finalized = true;
-                    return runtime_result;
+                    return Self::attach_warnings(runtime_result, &mut warnings);
                 }
 
                 State::Continued => {
                     // Request continuation chain from daemon
                     let reason = "context limit reached, continuation needed";
-                    let _ = self.callback.request_continuation(reason).await;
+                    if let Err(e) = self.callback.request_continuation(reason).await {
+                        warnings.push(format!("callback request_continuation failed: {e}"));
+                    }
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: "continued".to_string(),
@@ -554,14 +663,23 @@ impl Runner {
                         result: Some(reason.to_string()),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
+                        warnings: Vec::new(),
                     };
                     guard.finalized = true;
-                    return runtime_result;
+                    return Self::attach_warnings(runtime_result, &mut warnings);
                 }
 
                 State::Errored { error } => {
-                    let _ = self.callback.emit_error(&error).await;
-                    let _ = self.callback.finalize_thread("failed").await;
+                    record_callback_warning(
+                        &mut warnings,
+                        "thread_failed(emit_error)",
+                        self.callback.emit_error(&error).await,
+                    );
+                    record_callback_warning(
+                        &mut warnings,
+                        "finalize_thread(failed)",
+                        self.callback.finalize_thread("failed").await,
+                    );
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: "errored".to_string(),
@@ -569,9 +687,10 @@ impl Runner {
                         result: Some(error),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
+                        warnings: Vec::new(),
                     };
                     guard.finalized = true;
-                    return runtime_result;
+                    return Self::attach_warnings(runtime_result, &mut warnings);
                 }
 
                 State::Cancelled => {
@@ -582,9 +701,10 @@ impl Runner {
                         result: Some("cancelled by signal".to_string()),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
+                        warnings: Vec::new(),
                     };
                     guard.finalized = true;
-                    return runtime_result;
+                    return Self::attach_warnings(runtime_result, &mut warnings);
                 }
             };
         }
@@ -600,6 +720,18 @@ impl Runner {
         } else {
             0.0
         }
+    }
+
+    /// Drain the run-loop's accumulated warnings into a finished
+    /// `RuntimeResult`. Caller MUST invoke this on every terminal
+    /// branch so callback drift is surfaced; a missed call would
+    /// silently drop everything `record_callback_warning` recorded.
+    fn attach_warnings(
+        mut result: RuntimeResult,
+        warnings: &mut Vec<String>,
+    ) -> RuntimeResult {
+        result.warnings = std::mem::take(warnings);
+        result
     }
 
     fn finalize(&self, result: Value) -> RuntimeResult {
@@ -624,6 +756,7 @@ impl Runner {
             result: Some(result_str),
             outputs: json!({}),
             cost: Some(self.budget.cost()),
+            warnings: Vec::new(),
         }
     }
 }

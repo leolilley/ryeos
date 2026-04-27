@@ -26,17 +26,29 @@ fn main() {
         Err(_) => 1,
     };
 
-    if let Ok(runtime_result) = result {
-        let output = serde_json::to_string(&runtime_result).unwrap_or_else(|e| {
-            serde_json::to_string(&json!({
-                "success": false,
-                "status": "errored",
-                "thread_id": "",
-                "result": format!("serialization error: {}", e),
-            }))
-            .unwrap()
-        });
-        println!("{}", output);
+    match result {
+        Ok(runtime_result) => {
+            let output = serde_json::to_string(&runtime_result).unwrap_or_else(|e| {
+                serde_json::to_string(&json!({
+                    "success": false,
+                    "status": "errored",
+                    "thread_id": "",
+                    "result": format!("serialization error: {}", e),
+                }))
+                .unwrap()
+            });
+            println!("{}", output);
+        }
+        Err(err) => {
+            // Bootstrap / I/O failures pre-runner. Surface the full error
+            // chain on stderr — the daemon captures stderr into the
+            // RuntimeResult fallback path (`launch.rs` !result.success
+            // branch) and tracing alone never showed the underlying
+            // `anyhow::Error`. Without this, P3b.4 / P3b.5 failures appear
+            // as opaque "runtime exited non-zero" with only the early
+            // tracing lines visible (oracle-flagged P3b.4 diagnostic gap).
+            eprintln!("ryeos-directive-runtime fatal: {err:#}");
+        }
     }
 
     std::process::exit(exit_code);
@@ -56,6 +68,7 @@ fn run_directive() -> Result<RuntimeResult> {
                 result: Some(format!("invalid envelope: {}", e)),
                 outputs: json!({}),
                 cost: None,
+                warnings: Vec::new(),
             });
         }
     };
@@ -92,6 +105,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &envelope.resolution.composed,
         &envelope.policy.hard_limits,
         &verified_loader,
+        &envelope.inventory,
     )?;
 
     let provider = bootstrap_output.provider.clone();
@@ -119,7 +133,16 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
         let resume_state = resume::load_resume_state(&callback, resume_id).await?;
-        callback.append_event("thread_continued", json!({"previous_thread_id": resume_id})).await?;
+        if let Err(e) = callback
+            .append_event("thread_continued", json!({"previous_thread_id": resume_id}))
+            .await
+        {
+            tracing::warn!(
+                thread_id = %envelope.thread_id,
+                error = %e,
+                "callback append_event(thread_continued) failed"
+            );
+        }
         runner::Runner::from_resume(
             resume_state,
             bootstrap_output.config.tools,

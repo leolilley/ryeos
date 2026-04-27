@@ -6,6 +6,7 @@ use serde::Serialize;
 use ryeos_engine::engine::Engine;
 
 use crate::config::Config;
+use crate::event_stream::ThreadEventHub;
 use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
 use crate::node_config::NodeConfigSnapshot;
@@ -30,6 +31,11 @@ pub struct AppState {
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,
     pub events: Arc<EventStoreService>,
+    /// Per-thread live broadcast hub for SSE subscribers. Populated by
+    /// the UDS callback handler after persistence so subscribers see
+    /// the same `PersistedEventRecord` instances the event store
+    /// recorded.
+    pub event_streams: Arc<ThreadEventHub>,
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
     pub write_barrier: Arc<WriteBarrier>,

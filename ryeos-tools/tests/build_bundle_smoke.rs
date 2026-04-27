@@ -332,6 +332,80 @@ fn descriptor_table_count_and_prefix() {
     }
 }
 
+// ── V5.4 P2.1 — runtime binaries must be in the manifest ──────────────
+
+#[test]
+fn bundle_manifest_includes_all_runtime_binaries() {
+    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
+    if !ref_path.exists() {
+        return; // bundle not built
+    }
+    let manifest_hash = std::fs::read_to_string(&ref_path).unwrap().trim().to_string();
+    let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
+    let manifest_path = bundle_dir()
+        .join(".ai/objects/objects")
+        .join(&shard)
+        .join(format!("{manifest_hash}.json"));
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let triple = host_triple();
+    let map = value["item_source_hashes"].as_object().expect("map");
+    for bare in &["rye", "ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
+        let key = format!("bin/{triple}/{bare}");
+        assert!(
+            map.contains_key(&key),
+            "manifest missing {key}; entries: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn materialization_resolves_each_runtime_binary() {
+    use std::collections::HashMap;
+    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
+    if !ref_path.exists() {
+        return;
+    }
+    let manifest_hash = std::fs::read_to_string(&ref_path).unwrap().trim().to_string();
+    let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
+    let manifest_path = bundle_dir()
+        .join(".ai/objects/objects")
+        .join(&shard)
+        .join(format!("{manifest_hash}.json"));
+    let manifest_value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let item_source_hashes: HashMap<String, String> = manifest_value
+        ["item_source_hashes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+        .collect();
+
+    let cas = lillux::cas::CasStore::new(bundle_dir().join(".ai/objects"));
+    let triple = host_triple();
+    for bare in &["rye", "ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
+        let executor_ref = format!("native:{bare}");
+        let resolved = ryeos_engine::executor_resolution::resolve_native_executor(
+            &item_source_hashes,
+            &executor_ref,
+            &triple,
+            |hash| cas.get_object(hash).map_err(|e| e.to_string()),
+        )
+        .unwrap_or_else(|e| panic!("resolve {executor_ref}: {e}"));
+        assert!(
+            !resolved.blob_hash.is_empty(),
+            "{bare}: empty blob_hash"
+        );
+        assert!(
+            resolved.mode & 0o111 != 0,
+            "{bare}: mode {:o} missing exec bit",
+            resolved.mode
+        );
+    }
+}
+
 fn walk_yaml_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {

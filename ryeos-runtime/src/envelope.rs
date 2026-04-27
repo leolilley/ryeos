@@ -1,8 +1,15 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use ryeos_engine::resolution::ResolutionOutput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+// `ItemDescriptor` is defined in the engine (where it's produced by
+// `Engine::build_inventory_for_launching_kind`) and re-exported here
+// so runtimes have a single canonical import for the launch-contract
+// shape.
+pub use ryeos_engine::inventory::ItemDescriptor;
 
 /// Envelope shipped from daemon to runtime over stdin.
 ///
@@ -28,6 +35,22 @@ pub struct LaunchEnvelope {
     /// re-walking the chain themselves *or* re-reading the root from
     /// disk.
     pub resolution: ResolutionOutput,
+    /// Pre-baked **inventory** of items the launching kind asked the
+    /// daemon to resolve on its behalf. Keyed by inventoried kind
+    /// (`"tool"`, `"knowledge"`, `"graph_node"`, …); each entry is a
+    /// fully-parsed `ItemDescriptor` produced via
+    /// `Engine::build_inventory_for_launching_kind`.
+    ///
+    /// Runtimes consume this directly — no re-scanning, no extension
+    /// switching, no duplicate parser dispatch in agent code. The set
+    /// of inventoried kinds is declared by the launching kind's
+    /// schema (`inventory_kinds:` block); a kind that declares none
+    /// receives an empty map. Each runtime project-specifically
+    /// re-shapes the descriptors into its own typed view (e.g. the
+    /// directive-runtime maps `inventory["tool"]` into its
+    /// `ToolSchema`).
+    #[serde(default)]
+    pub inventory: HashMap<String, Vec<ItemDescriptor>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +117,7 @@ pub struct EnvelopeCallback {
     pub token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeResult {
     pub success: bool,
     pub status: String,
@@ -105,6 +128,14 @@ pub struct RuntimeResult {
     pub outputs: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<RuntimeCost>,
+    /// Non-fatal contract drift surfaced by the runtime — e.g. a
+    /// callback `append_event` returned an error (event-vocabulary
+    /// rejection, transient transport hiccup, …). Failed callbacks
+    /// no longer terminate the runtime, but they MUST appear here so
+    /// the daemon and operator can see what was dropped. Empty when
+    /// no warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +177,7 @@ mod tests {
                 socket_path: PathBuf::from("/tmp/ryeosd.sock"),
                 token: "cbt-test".to_string(),
             },
+            inventory: HashMap::new(),
             resolution: ResolutionOutput {
                 root: ryeos_engine::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),
@@ -193,6 +225,7 @@ mod tests {
                 output_tokens: 50,
                 total_usd: 0.01,
             }),
+            warnings: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: RuntimeResult = serde_json::from_str(&json).unwrap();
