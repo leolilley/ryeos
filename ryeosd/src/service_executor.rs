@@ -184,19 +184,25 @@ pub async fn execute_service_verified(
 
     // 5. Cap enforcement (live mode only)
     let effective_caps = if mode == ExecutionMode::Live {
-        let eff: Vec<String> = required_caps
-            .iter()
-            .filter(|cap| ctx.caller_scopes.contains(cap))
-            .cloned()
-            .collect();
-        let all_satisfied = required_caps.is_empty() || eff.len() == required_caps.len();
-        if !all_satisfied {
-            bail!(
-                "insufficient capabilities: required {:?}, effective {:?}",
-                required_caps, eff
-            );
+        // Wildcard scope ("*") satisfies all requirements — matches the
+        // behaviour of dispatch::enforce_runtime_caps.
+        if ctx.caller_scopes.iter().any(|s| s == "*") {
+            required_caps.clone()
+        } else {
+            let eff: Vec<String> = required_caps
+                .iter()
+                .filter(|cap| ctx.caller_scopes.contains(cap))
+                .cloned()
+                .collect();
+            let all_satisfied = required_caps.is_empty() || eff.len() == required_caps.len();
+            if !all_satisfied {
+                bail!(
+                    "insufficient capabilities: required {:?}, effective {:?}",
+                    required_caps, eff
+                );
+            }
+            eff
         }
-        eff
     } else {
         Vec::new()
     };
