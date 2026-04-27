@@ -132,6 +132,7 @@ async fn handle_execute(params: DispatchActionParams, state: &AppState) -> Resul
         snapshot_hash: None,
         temp_dir: None,
         original_root_kind: root_canonical.kind.as_str(),
+        pre_minted_thread_id: None,
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is

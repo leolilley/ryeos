@@ -151,8 +151,6 @@ response:
   mode: event_stream
   source: directive_launch
   source_config:
-    item_ref: "${request.body_json.item_ref}"
-    parameters: "${request.body_json.parameters}"
     keep_alive_secs: 15
 "#;
     let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
@@ -312,26 +310,15 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
     (h, node_sk, node_fp)
 }
 
-/// FIXME (residual gap from in-tree draft): the current
-/// `directive_launch::build_launch_task` calls
-/// `services::thread_lifecycle::resolve_root_execution`, which requires
-/// `metadata.executor_id` to be populated on the resolved item. The
-/// `directive` kind schema has NO extraction rule for `executor_id`,
-/// so directives never set it — they alias through `runtime:directive-runtime`
-/// via `dispatch::dispatch`'s kind-alias loop. As a result, attempting
-/// to launch any standard directive through `/execute/stream` fails
-/// with `"item ... does not declare an executor_id"`.
+/// Full happy-path: POST /execute/stream → SSE
+/// `stream_started` → lifecycle/LLM events → terminal `thread_completed`.
 ///
-/// The fix per spec §E.3: replace `build_launch_task`'s call to
-/// `resolve_root_execution + build_and_launch` with `dispatch::dispatch`
-/// (or a factored helper) that takes a `pre_minted_thread_id` field on
-/// `DispatchRequest`. Phase E.1's `create_root_thread_with_id` is the
-/// downstream sink for that field.
-///
-/// Until that lands, this round-trip test is gated by `#[ignore]`. The
-/// other two Phase E tests still cover wiring (route loaded, source
-/// compiled, `Last-Event-ID` rejected) and the thread-id mint contract.
-#[ignore = "requires dispatch::dispatch refactor with pre_minted_thread_id (residual gap §E.3)"]
+/// `build_launch_task` calls `dispatch::dispatch` with
+/// `pre_minted_thread_id = Some(thread_id)`, so the SSE-minted id
+/// flows all the way through to `create_root_thread_with_id` and the
+/// resulting thread row uses that exact id. The subscriber attached
+/// to `event_streams.subscribe(&thread_id)` therefore observes every
+/// lifecycle event from `thread_started` onward.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_directive_launch_e2e_round_trip() {
     let (h, node_sk, node_fp) = boot_daemon().await;
@@ -479,28 +466,81 @@ async fn sse_directive_launch_rejects_last_event_id() {
     drop(project);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn sse_directive_launch_collision() {
-    // E.5 test 3 collision: directive_launch mints a fresh thread id
-    // via `new_thread_id()`. If by astronomical chance that id collides
-    // with an existing thread row, `create_root_thread_with_id` returns
-    // an error (PRIMARY KEY constraint), which the launch task surfaces
-    // as a `stream_error` SSE event.
-    //
-    // Replicating that path end-to-end requires injecting a
-    // deterministic test rng into `new_thread_id`, which the production
-    // signature does not expose. Instead we exercise the same internal
-    // contract: `create_root_thread_with_id` must reject a duplicate id.
-    // This is what the source code path relies on.
+/// E.5 test 3 — duplicate-id collision contract.
+///
+/// `directive_launch::build_launch_task` calls `dispatch::dispatch`
+/// with `pre_minted_thread_id = Some(thread_id)`, which lands at
+/// `services::thread_lifecycle::create_root_thread_with_id` →
+/// `StateStore::create_thread`. If the pre-minted id collides with
+/// an existing row the chain insert must fail (PRIMARY KEY
+/// constraint on `thread_id`), and the launch task surfaces this as
+/// a `stream_error` SSE event.
+///
+/// This test stands up an in-process `StateStore` and proves the
+/// underlying SQL constraint that the SSE source's collision-error
+/// path relies on: a second `create_thread` call with the same
+/// `thread_id` MUST error. No RNG injection shim — `new_thread_id`
+/// is OsRng-backed and operationally collision-free.
+#[test]
+fn sse_directive_launch_collision() {
+    use ryeosd::identity::NodeIdentity;
+    use ryeosd::services::thread_lifecycle::new_thread_id;
+    use ryeosd::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
+    use ryeosd::write_barrier::WriteBarrier;
+    use std::sync::Arc;
 
+    let tmpdir = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmpdir.path().join(".ai").join("state");
+    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+    let key_path = tmpdir.path().join("identity").join("node-key.pem");
+
+    let identity = NodeIdentity::create(&key_path).expect("create identity");
+    let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+    let write_barrier = WriteBarrier::new();
+    let state_store =
+        StateStore::new(state_root, runtime_db_path, signer, write_barrier)
+            .expect("open state store");
+
+    let id = new_thread_id();
+
+    let record = NewThreadRecord {
+        thread_id: id.clone(),
+        chain_root_id: id.clone(),
+        kind: "directive_run".to_string(),
+        item_ref: "directive:test/collision".to_string(),
+        executor_ref: "native:test-runtime".to_string(),
+        launch_mode: "inline".to_string(),
+        current_site_id: "site:test".to_string(),
+        origin_site_id: "site:test".to_string(),
+        upstream_thread_id: None,
+        requested_by: Some("fp:test-collision".to_string()),
+    };
+
+    // First insert must succeed.
+    let first = state_store.create_thread(&record);
+    assert!(
+        first.is_ok(),
+        "first state_store.create_thread must succeed; got: {first:?}"
+    );
+
+    // Second insert with the SAME thread_id MUST fail.
+    let second = state_store.create_thread(&record);
+    assert!(
+        second.is_err(),
+        "second state_store.create_thread with the same id must error \
+         (the path that surfaces as stream_error in directive_launch); \
+         got Ok"
+    );
+}
+
+/// `new_thread_id()` mints SSE-mintable thread ids that conform to
+/// the `T-<8-4-4-4-12>` UUID shape `validate_thread_id_format`
+/// enforces on insert. Two consecutive mints must differ (122-bit id
+/// space).
+#[test]
+fn new_thread_id_format_and_uniqueness() {
     use ryeosd::services::thread_lifecycle::new_thread_id;
 
-    // Two fresh mints must be distinct (the OsRng-driven id space is
-    // 122 bits; collision probability is operationally negligible) and
-    // both must conform to the documented `T-<8-4-4-4-12>` UUID-shape
-    // that `create_root_thread_with_id`'s validator enforces. Any
-    // future drift in `new_thread_id`'s output that breaks the INSERT
-    // contract trips this test.
     let a = new_thread_id();
     let b = new_thread_id();
     assert_ne!(a, b, "two consecutive mints must differ");

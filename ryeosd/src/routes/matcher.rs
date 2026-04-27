@@ -152,9 +152,14 @@ mod tests {
     fn make_route(id: &str, path: &str, methods: &[&str]) -> Arc<CompiledRoute> {
         use crate::routes::compile::{AuthVerifier, ResponseMode};
         use crate::routes::raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec};
-        use crate::routes::response_modes::placeholder::PlaceholderMode;
+        use crate::routes::response_modes::static_mode::StaticMode;
 
-        let mode = PlaceholderMode;
+        // Use `static` mode for the matcher's unit tests: it's the
+        // simplest registered mode whose compile-path produces a
+        // valid `CompiledResponseMode` from a minimal `RawRouteSpec`.
+        // The test only exercises path/method matching — it never
+        // dispatches the route — so the response body is irrelevant.
+        let mode = StaticMode;
         let ctx = crate::routes::compile::ModeCompileContext {
             streaming_sources: &crate::routes::streaming_sources::StreamingSourceRegistry::new(),
         };
@@ -167,12 +172,12 @@ mod tests {
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {
-                mode: "placeholder".to_string(),
+                mode: "static".to_string(),
                 source: None,
                 source_config: serde_json::Value::Null,
-                status: None,
-                content_type: None,
-                body_b64: None,
+                status: Some(200),
+                content_type: Some("text/plain".to_string()),
+                body_b64: Some("aGVsbG8=".to_string()), // "hello"
             },
             execute: None,
             request: RawRequest { body: RawRequestBody::None },

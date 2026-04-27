@@ -47,7 +47,6 @@ pub struct RouteDispatchContext {
     pub body_raw: Vec<u8>,
     pub principal: RoutePrincipal,
     pub state: crate::state::AppState,
-    pub project_path: Option<std::path::PathBuf>,
 }
 
 pub trait AuthVerifier: Send + Sync {

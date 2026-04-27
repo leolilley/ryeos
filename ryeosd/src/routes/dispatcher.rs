@@ -73,7 +73,6 @@ pub async fn custom_route_dispatcher(
         body_raw,
         principal,
         state,
-        project_path: std::env::current_dir().ok(),
     };
 
     let route_ref = route.clone();

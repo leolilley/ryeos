@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
@@ -42,6 +42,24 @@ fn is_terminal_status(status: &str) -> bool {
     )
 }
 
+/// Typed body shape for `POST /execute/stream`.
+///
+/// Three required fields, no others. The verifier (`rye_signed`)
+/// commits to the body bytes, so a typed deserialization with
+/// `deny_unknown_fields` is the source-of-truth contract for what
+/// the SSE source consumes — no template indirection, no
+/// `Option<...>.unwrap_or(Value::Null)` silent fallbacks.
+///
+/// `parameters: Value` is required (must be present in the body), but
+/// its inner shape is up to the directive's input schema.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteStreamRequest {
+    item_ref: String,
+    project_path: String,
+    parameters: Value,
+}
+
 impl StreamingSource for DirectiveLaunchSource {
     fn key(&self) -> &'static str {
         "directive_launch"
@@ -72,51 +90,10 @@ impl StreamingSource for DirectiveLaunchSource {
 
         let cfg = &raw_event_stream.source_config;
 
-        let item_ref = cfg
-            .get("item_ref")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-                id: raw_route.id.clone(),
-                src: "directive_launch".into(),
-                reason: "missing 'item_ref' in source_config".into(),
-            })?;
-
-        if !item_ref.starts_with("${request.body_json.") || !item_ref.ends_with('}') {
-            return Err(RouteConfigError::InvalidSourceConfig {
-                id: raw_route.id.clone(),
-                src: "directive_launch".into(),
-                reason: "item_ref must use ${request.body_json.<key>} interpolation".into(),
-            });
-        }
-        let item_ref_path = item_ref
-            .trim_start_matches("${request.body_json.")
-            .trim_end_matches('}')
-            .to_string();
-
-        let parameters = cfg.get("parameters");
-        let parameters_path = match parameters {
-            Some(v) => {
-                let s = v.as_str().ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-                    id: raw_route.id.clone(),
-                    src: "directive_launch".into(),
-                    reason: "parameters must be a string template".into(),
-                })?;
-                if !s.starts_with("${request.body_json.") || !s.ends_with('}') {
-                    return Err(RouteConfigError::InvalidSourceConfig {
-                        id: raw_route.id.clone(),
-                        src: "directive_launch".into(),
-                        reason: "parameters must use ${request.body_json.<key>} interpolation".into(),
-                    });
-                }
-                Some(
-                    s.trim_start_matches("${request.body_json.")
-                        .trim_end_matches('}')
-                        .to_string(),
-                )
-            }
-            None => None,
-        };
-
+        // Source_config is fixed: only `keep_alive_secs` is a knob.
+        // The request body shape is hard-coded to `ExecuteStreamRequest`
+        // (item_ref + project_path + parameters), so there is no
+        // template indirection to validate.
         let keep_alive_secs = cfg
             .get("keep_alive_secs")
             .and_then(|v| v.as_u64())
@@ -129,103 +106,106 @@ impl StreamingSource for DirectiveLaunchSource {
             });
         }
 
+        // Reject any unknown keys in source_config so misconfigured
+        // YAMLs surface at load time, not at first request.
+        if let Some(obj) = cfg.as_object() {
+            for k in obj.keys() {
+                if k != "keep_alive_secs" {
+                    return Err(RouteConfigError::InvalidSourceConfig {
+                        id: raw_route.id.clone(),
+                        src: "directive_launch".into(),
+                        reason: format!(
+                            "unknown source_config key '{k}'; allowed keys: [keep_alive_secs]"
+                        ),
+                    });
+                }
+            }
+        }
+
         Ok(Arc::new(CompiledDirectiveLaunchSource {
-            item_ref_path,
-            parameters_path,
             keep_alive_secs,
         }))
     }
 }
 
 struct CompiledDirectiveLaunchSource {
-    item_ref_path: String,
-    parameters_path: Option<String>,
     keep_alive_secs: u64,
 }
 
-fn extract_dotted_value<'a>(body: &'a Value, dotted_path: &str) -> Option<&'a Value> {
-    let mut current = body;
-    for key in dotted_path.split('.') {
-        current = current.get(key)?;
-    }
-    Some(current)
-}
-
-// FIXME (§E.3 residual gap): this helper currently goes via
-// `services::thread_lifecycle::resolve_root_execution` + `execution::launch::build_and_launch`
-// directly, which requires `metadata.executor_id` to be set on the
-// resolved item. The `directive` kind schema has no extraction rule
-// for `executor_id`; production directives alias through
-// `runtime:directive-runtime` via `dispatch::dispatch`'s kind-alias
-// loop. As a consequence, `/execute/stream` cannot launch standard
-// directives today — it fails with `"item ... does not declare an
-// executor_id"`. The fix is to plumb `pre_minted_thread_id` into
-// `dispatch::DispatchRequest` (then through to
-// `services::thread_lifecycle::create_root_thread_with_id`, which
-// already accepts a pre-minted id per E.1) and call `dispatch::dispatch`
-// here instead. The Phase E e2e round-trip test
-// (`sse_directive_launch_e2e_round_trip`) is gated by `#[ignore]`
-// until this lands. The other two Phase E tests cover wiring +
-// thread-id mint contract.
+/// Spawn the dispatch task that turns a directive into a running
+/// thread.  Calls `dispatch::dispatch` with `pre_minted_thread_id =
+/// Some(thread_id)` so the resulting thread row uses the SSE-minted
+/// id — the SSE subscriber registered against that id receives every
+/// event from the very first lifecycle event onward.
 fn build_launch_task(
     state: &AppState,
-    item_ref: &str,
+    item_ref: String,
+    project_path: std::path::PathBuf,
     parameters: Value,
-    principal_id: &str,
-    principal_scopes: &[String],
-    project_path: Option<&std::path::Path>,
+    principal_id: String,
+    principal_scopes: Vec<String>,
     pre_minted_thread_id: String,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     let state_clone = state.clone();
-    let item_ref_owned = item_ref.to_string();
-    let principal_id_owned = principal_id.to_string();
-    let principal_scopes_owned: Vec<String> = principal_scopes.to_vec();
-    let project_path_owned = project_path.map(|p| p.to_path_buf());
 
     tokio::spawn(async move {
-        let project_path = match &project_path_owned {
-            Some(p) => p,
-            None => {
-                anyhow::bail!("directive_launch requires a project_path");
-            }
+        use ryeos_engine::canonical_ref::CanonicalRef;
+        use ryeos_engine::contracts::{
+            EffectivePrincipal, PlanContext, Principal, ProjectContext,
         };
 
-        let site_id = state_clone.threads.site_id();
+        let site_id = state_clone.threads.site_id().to_string();
 
-        let resolved = crate::services::thread_lifecycle::resolve_root_execution(
-            &state_clone.engine,
-            site_id,
-            project_path,
-            &item_ref_owned,
-            "inline",
-            parameters,
-            Some(principal_id_owned.clone()),
-            principal_scopes_owned.clone(),
-            false,
-        )?;
+        let plan_ctx = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: principal_id.clone(),
+                scopes: principal_scopes.clone(),
+            }),
+            project_context: ProjectContext::LocalPath {
+                path: project_path.clone(),
+            },
+            current_site_id: site_id.clone(),
+            origin_site_id: site_id,
+            execution_hints: Default::default(),
+            validate_only: false,
+        };
 
-        let executor_ref = resolved
-            .resolved_item
-            .metadata
-            .executor_id
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!("item {} does not declare an executor_id", item_ref_owned)
-            })?;
+        let exec_ctx = crate::service_executor::ExecutionContext {
+            principal_fingerprint: principal_id.clone(),
+            caller_scopes: principal_scopes,
+            engine: state_clone.engine.clone(),
+            plan_ctx,
+        };
 
-        crate::execution::launch::build_and_launch(
-            &state_clone,
-            &executor_ref,
-            &principal_id_owned,
-            &resolved,
-            project_path,
-            &resolved.parameters,
-            &HashMap::new(),
-            Some(&pre_minted_thread_id),
-        )
-        .await?;
+        let root_canonical = CanonicalRef::parse(&item_ref).map_err(|e| {
+            anyhow::anyhow!("invalid item_ref '{item_ref}': {e}")
+        })?;
 
-        Ok(())
+        let dispatch_req = crate::dispatch::DispatchRequest {
+            launch_mode: "inline",
+            target_site_id: None,
+            project_source_is_pushed_head: false,
+            validate_only: false,
+            params: parameters,
+            acting_principal: principal_id.as_str(),
+            project_path: project_path.as_path(),
+            original_project_path: project_path.clone(),
+            snapshot_hash: None,
+            temp_dir: None,
+            original_root_kind: root_canonical.kind.as_str(),
+            pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
+        };
+
+        match crate::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state_clone).await {
+            Ok(crate::dispatch::DispatchOutcome::Unary(_)) => Ok(()),
+            Ok(crate::dispatch::DispatchOutcome::Stream(_)) => {
+                Err(anyhow::anyhow!(
+                    "dispatch produced a streaming outcome — directive_launch \
+                     cannot consume it (only Unary supported here)"
+                ))
+            }
+            Err(e) => Err(anyhow::anyhow!(e.to_string())),
+        }
     })
 }
 
@@ -243,26 +223,25 @@ impl BoundStreamingSource for CompiledDirectiveLaunchSource {
             ));
         }
 
-        let body: Value = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
-            RouteDispatchError::BadRequest(format!("invalid JSON body: {e}"))
+        // Typed body deserialization: the three required fields
+        // (item_ref, project_path, parameters) MUST be present, with
+        // no unknown extras. Missing fields → 400.
+        let req: ExecuteStreamRequest = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
+            RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
         })?;
 
-        let item_ref = extract_dotted_value(&body, &self.item_ref_path)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                RouteDispatchError::BadRequest(format!(
-                    "body missing field '{}'",
-                    self.item_ref_path
-                ))
-            })?
-            .to_string();
+        // `directive_launch` is the SSE source for *directive*
+        // execution. Other kinds (tools, services, runtimes) have
+        // their own dispatch paths; refusing them here keeps the
+        // semantic contract tight.
+        if !req.item_ref.starts_with("directive:") {
+            return Err(RouteDispatchError::BadRequest(format!(
+                "directive_launch only accepts 'directive:*' refs, got '{}'",
+                req.item_ref
+            )));
+        }
 
-        let parameters = match &self.parameters_path {
-            Some(path) => extract_dotted_value(&body, path)
-                .cloned()
-                .unwrap_or(Value::Null),
-            None => Value::Null,
-        };
+        let project_path = std::path::PathBuf::from(&req.project_path);
 
         let thread_id = crate::services::thread_lifecycle::new_thread_id();
 
@@ -271,11 +250,11 @@ impl BoundStreamingSource for CompiledDirectiveLaunchSource {
 
         let mut launch_handle = build_launch_task(
             state,
-            &item_ref,
-            parameters,
-            &ctx.principal.id,
-            &ctx.principal.scopes,
-            ctx.project_path.as_deref(),
+            req.item_ref,
+            project_path,
+            req.parameters,
+            ctx.principal.id.clone(),
+            ctx.principal.scopes.clone(),
             thread_id.clone(),
         );
 
@@ -291,49 +270,93 @@ impl BoundStreamingSource for CompiledDirectiveLaunchSource {
                     .data(serde_json::json!({"thread_id": thread_id_for_stream}).to_string())
             );
 
+            // Track the highest chain_seq we've yielded so a lag
+            // recovery can resume from there with `after_chain_seq`
+            // (matching `thread_events`'s pattern). 0 is a safe
+            // start — no event has chain_seq 0.
+            let mut current_max: i64 = 0;
+            let replay_batch_size = 200usize;
+
             loop {
                 tokio::select! {
                     recv_result = rx.recv() => {
                         match recv_result {
                             Ok(ev) => {
                                 let event_type = ev.event_type.clone();
-                                yield Ok(
-                                    axum::response::sse::Event::default()
-                                        .event(ev.event_type.clone())
-                                        .id(ev.chain_seq.to_string())
-                                        .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                );
+                                if ev.chain_seq > current_max {
+                                    current_max = ev.chain_seq;
+                                    yield Ok(
+                                        axum::response::sse::Event::default()
+                                            .event(ev.event_type.clone())
+                                            .id(ev.chain_seq.to_string())
+                                            .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
+                                    );
+                                }
                                 if is_terminal(&event_type) {
                                     return;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                let replay_result = events_svc
-                                    .replay(&EventReplayParams {
+                                // Paged replay matching thread_events:
+                                // start at after_chain_seq = current_max,
+                                // walk pages of `replay_batch_size`,
+                                // dedup is implicit via current_max
+                                // monotonicity.
+                                let mut lag_max = current_max;
+                                let mut lag_error: Option<String> = None;
+                                let mut next_after: Option<i64> =
+                                    if current_max > 0 { Some(current_max) } else { None };
+                                loop {
+                                    let page = events_svc.replay(&EventReplayParams {
                                         chain_root_id: None,
                                         thread_id: Some(thread_id_for_stream.clone()),
-                                        after_chain_seq: None,
-                                        limit: 200,
+                                        after_chain_seq: next_after,
+                                        limit: replay_batch_size,
                                     });
-                                match replay_result {
-                                    Ok(result) => {
-                                        for ev in &result.events {
-                                            yield Ok(
-                                                axum::response::sse::Event::default()
-                                                    .event(ev.event_type.clone())
-                                                    .id(ev.chain_seq.to_string())
-                                                    .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                            );
-                                            if is_terminal(&ev.event_type) {
-                                                return;
+                                    match page {
+                                        Ok(page_result) => {
+                                            if page_result.events.is_empty() {
+                                                break;
                                             }
+                                            for ev in &page_result.events {
+                                                if ev.chain_seq > lag_max {
+                                                    lag_max = ev.chain_seq;
+                                                    yield Ok(
+                                                        axum::response::sse::Event::default()
+                                                            .event(ev.event_type.clone())
+                                                            .id(ev.chain_seq.to_string())
+                                                            .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
+                                                    );
+                                                    if is_terminal(&ev.event_type) {
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            if page_result.next_cursor.is_none() {
+                                                break;
+                                            }
+                                            next_after = Some(lag_max);
+                                        }
+                                        Err(e) => {
+                                            lag_error = Some(format!("lag replay failed: {e}"));
+                                            break;
                                         }
                                     }
-                                    Err(e) => {
-                                        yield Ok(sse_error_event(&format!("lag replay failed: {e}")));
-                                        return;
-                                    }
                                 }
+
+                                if let Some(err_msg) = lag_error {
+                                    let thread = state_store_clone.get_thread(&thread_id_for_stream);
+                                    if let Ok(Some(detail)) = thread {
+                                        if is_terminal_status(&detail.status) {
+                                            return;
+                                        }
+                                    }
+                                    yield Ok(sse_error_event(&err_msg));
+                                    return;
+                                }
+
+                                current_max = lag_max;
+
                                 tracing::info!(
                                     thread_id = %thread_id_for_stream,
                                     lagged = n,
@@ -348,6 +371,64 @@ impl BoundStreamingSource for CompiledDirectiveLaunchSource {
                     join_result = &mut launch_handle => {
                         match join_result {
                             Ok(Ok(())) => {
+                                // Persistence-first drain: when the
+                                // launch task resolves successfully,
+                                // any events the broadcast didn't
+                                // deliver are still in the durable
+                                // store. Replay from `after_chain_seq
+                                // = current_max` until we hit the
+                                // terminal lifecycle event (or the
+                                // store runs out).
+                                let mut next_after: Option<i64> =
+                                    if current_max > 0 { Some(current_max) } else { None };
+                                let mut saw_terminal = false;
+                                loop {
+                                    let page = events_svc.replay(&EventReplayParams {
+                                        chain_root_id: None,
+                                        thread_id: Some(thread_id_for_stream.clone()),
+                                        after_chain_seq: next_after,
+                                        limit: replay_batch_size,
+                                    });
+                                    match page {
+                                        Ok(page_result) => {
+                                            if page_result.events.is_empty() {
+                                                break;
+                                            }
+                                            for ev in &page_result.events {
+                                                if ev.chain_seq > current_max {
+                                                    current_max = ev.chain_seq;
+                                                    yield Ok(
+                                                        axum::response::sse::Event::default()
+                                                            .event(ev.event_type.clone())
+                                                            .id(ev.chain_seq.to_string())
+                                                            .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
+                                                    );
+                                                    if is_terminal(&ev.event_type) {
+                                                        saw_terminal = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if saw_terminal {
+                                                return;
+                                            }
+                                            if page_result.next_cursor.is_none() {
+                                                break;
+                                            }
+                                            next_after = Some(current_max);
+                                        }
+                                        Err(e) => {
+                                            yield Ok(sse_error_event(&format!("post-launch replay failed: {e}")));
+                                            return;
+                                        }
+                                    }
+                                }
+                                // Replay finished without a terminal
+                                // event in the store. Check thread
+                                // status: if terminal, that's fine —
+                                // some lifecycle events are stored on
+                                // a separate path. Otherwise emit a
+                                // diagnostic.
                                 let detail = state_store_clone.get_thread(&thread_id_for_stream);
                                 if let Ok(Some(d)) = detail {
                                     if is_terminal_status(&d.status) {
@@ -397,8 +478,6 @@ mod tests {
                 mode: "event_stream".into(),
                 source: Some("directive_launch".into()),
                 source_config: serde_json::json!({
-                    "item_ref": "${request.body_json.item_ref}",
-                    "parameters": "${request.body_json.parameters}",
                     "keep_alive_secs": 15,
                 }),
                 status: None,
@@ -419,11 +498,7 @@ mod tests {
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
-            source_config: serde_json::json!({
-                "item_ref": "${request.body_json.item_ref}",
-                "parameters": "${request.body_json.parameters}",
-                "keep_alive_secs": 15,
-            }),
+            source_config: serde_json::json!({"keep_alive_secs": 15}),
         };
         let ctx = SourceCompileContext {
             auth_verifier_key: "none",
@@ -443,9 +518,7 @@ mod tests {
         raw.request.body = RawRequestBody::Raw;
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
-            source_config: serde_json::json!({
-                "item_ref": "${request.body_json.item_ref}",
-            }),
+            source_config: serde_json::json!({"keep_alive_secs": 15}),
         };
         let ctx = SourceCompileContext {
             auth_verifier_key: "rye_signed",
@@ -459,36 +532,12 @@ mod tests {
     }
 
     #[test]
-    fn compile_rejects_missing_item_ref() {
-        let source = DirectiveLaunchSource;
-        let raw = make_test_raw("r1", "/execute/stream");
-        let es = RawEventStreamResponse {
-            source: "directive_launch".into(),
-            source_config: serde_json::json!({
-                "keep_alive_secs": 15,
-            }),
-        };
-        let ctx = SourceCompileContext {
-            auth_verifier_key: "rye_signed",
-        };
-        let err = match source.compile(&raw, &es, &ctx) {
-            Err(e) => e,
-            Ok(_) => panic!("expected error"),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("missing 'item_ref'"), "got: {msg}");
-    }
-
-    #[test]
     fn compile_rejects_keep_alive_zero() {
         let source = DirectiveLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
-            source_config: serde_json::json!({
-                "item_ref": "${request.body_json.item_ref}",
-                "keep_alive_secs": 0,
-            }),
+            source_config: serde_json::json!({"keep_alive_secs": 0}),
         };
         let ctx = SourceCompileContext {
             auth_verifier_key: "rye_signed",
@@ -502,16 +551,37 @@ mod tests {
     }
 
     #[test]
-    fn compile_succeeds_with_valid_config() {
+    fn compile_rejects_unknown_source_config_key() {
         let source = DirectiveLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
             source_config: serde_json::json!({
+                "keep_alive_secs": 15,
                 "item_ref": "${request.body_json.item_ref}",
-                "parameters": "${request.body_json.parameters}",
-                "keep_alive_secs": 10,
             }),
+        };
+        let ctx = SourceCompileContext {
+            auth_verifier_key: "rye_signed",
+        };
+        let err = match source.compile(&raw, &es, &ctx) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown source_config key 'item_ref'"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_succeeds_with_valid_config() {
+        let source = DirectiveLaunchSource;
+        let raw = make_test_raw("r1", "/execute/stream");
+        let es = RawEventStreamResponse {
+            source: "directive_launch".into(),
+            source_config: serde_json::json!({"keep_alive_secs": 10}),
         };
         let ctx = SourceCompileContext {
             auth_verifier_key: "rye_signed",
@@ -520,17 +590,49 @@ mod tests {
     }
 
     #[test]
-    fn extract_dotted_value_nested() {
-        let body = serde_json::json!({"a": {"b": {"c": 42}}});
-        assert_eq!(
-            extract_dotted_value(&body, "a.b.c"),
-            Some(&serde_json::json!(42))
+    fn execute_stream_request_rejects_missing_fields() {
+        // No project_path, parameters
+        let body = serde_json::json!({"item_ref": "directive:foo"});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let err = serde_json::from_slice::<ExecuteStreamRequest>(&bytes)
+            .expect_err("must reject missing fields");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing field"),
+            "expected missing-field error, got: {msg}"
         );
     }
 
     #[test]
-    fn extract_dotted_value_missing() {
-        let body = serde_json::json!({"a": 1});
-        assert_eq!(extract_dotted_value(&body, "x.y.z"), None);
+    fn execute_stream_request_rejects_unknown_field() {
+        let body = serde_json::json!({
+            "item_ref": "directive:foo",
+            "project_path": "/tmp",
+            "parameters": {},
+            "extra": "nope",
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let err = serde_json::from_slice::<ExecuteStreamRequest>(&bytes)
+            .expect_err("must reject unknown fields");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") && msg.contains("extra"),
+            "expected unknown-field error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn execute_stream_request_accepts_complete_body() {
+        let body = serde_json::json!({
+            "item_ref": "directive:my/agent",
+            "project_path": "/tmp/proj",
+            "parameters": {"name": "World"},
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let req: ExecuteStreamRequest =
+            serde_json::from_slice(&bytes).expect("valid body must parse");
+        assert_eq!(req.item_ref, "directive:my/agent");
+        assert_eq!(req.project_path, "/tmp/proj");
+        assert_eq!(req.parameters["name"], "World");
     }
 }

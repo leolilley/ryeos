@@ -154,7 +154,20 @@ response:
 }
 
 fn write_authorized_key(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
-    let vk = sk.verifying_key();
+    write_authorized_key_signed_by(state_path, sk, sk)
+}
+
+/// Write an authorized-key TOML for `subject_sk`, signed by
+/// `node_sk`. The daemon's auth layer requires the file to be signed
+/// by the node identity (see [`ryeosd::auth::load_authorized_key`]),
+/// so when the authorized subject differs from the node identity we
+/// must sign with the node key.
+fn write_authorized_key_signed_by(
+    state_path: &Path,
+    subject_sk: &SigningKey,
+    node_sk: &SigningKey,
+) -> anyhow::Result<()> {
+    let vk = subject_sk.verifying_key();
     let fp = lillux::signature::compute_fingerprint(&vk);
     let auth_dir = state_path.join("auth").join("authorized_keys");
     std::fs::create_dir_all(&auth_dir)?;
@@ -170,7 +183,7 @@ label = "sse-e2e-test"
 "#
     );
 
-    let signed = lillux::signature::sign_content(&toml_body, sk, "#", None);
+    let signed = lillux::signature::sign_content(&toml_body, node_sk, "#", None);
     std::fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
     Ok(())
 }
@@ -422,6 +435,17 @@ fn pre_create_node_key_from(state_path: &Path, sk: &SigningKey) -> anyhow::Resul
 /// directive end-to-end. Returns `(harness, node_sk, node_fp, thread_id)`.
 /// Reused by D.3 reconnect + non-owner tests.
 async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String) {
+    boot_and_run_directive_with_extra_keys(&[]).await
+}
+
+/// Variant of `boot_and_run_directive` that pre-installs additional
+/// authorized keys at pre-init time. Used by the non-owner test so a
+/// second key is recognized by the verifier (avoiding 401 on the
+/// rye_signed verifier path) and the request reaches the source's
+/// principal-mismatch 404 branch deterministically.
+async fn boot_and_run_directive_with_extra_keys(
+    extra_keys: &[SigningKey],
+) -> (DaemonHarness, SigningKey, String, String) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
@@ -432,6 +456,7 @@ async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String)
     let node_sk = SigningKey::generate(&mut rand::rngs::OsRng);
     let node_fp = lillux::signature::compute_fingerprint(&node_sk.verifying_key());
     let node_bytes = node_sk.to_bytes();
+    let extra_key_bytes: Vec<[u8; 32]> = extra_keys.iter().map(|sk| sk.to_bytes()).collect();
 
     let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
         std::fs::create_dir_all(state_path)?;
@@ -446,6 +471,14 @@ async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String)
         let saved_sk = SigningKey::from_bytes(&node_bytes);
         pre_create_node_key_from(state_path, &saved_sk)?;
         write_authorized_key(state_path, &saved_sk)?;
+        for bytes in &extra_key_bytes {
+            let extra = SigningKey::from_bytes(bytes);
+            // Authorized-key files MUST be signed by the node
+            // identity (auth.rs::load_authorized_key checks
+            // signer_fp == node_identity.fingerprint). When the
+            // subject is a different key, sign with the node key.
+            write_authorized_key_signed_by(state_path, &extra, &saved_sk)?;
+        }
         Ok(())
     };
 
@@ -490,34 +523,17 @@ async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String)
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_thread_events_returns_404_for_non_owner() {
-    let (h, _node_sk, node_fp, thread_id) = boot_and_run_directive().await;
-
-    // A second key, freshly generated. We must add it to authorized_keys
-    // so the rye_signed verifier accepts the request — otherwise the
-    // verifier itself would reject with 401 before we ever hit the
-    // source's principal check (which is what the test is targeting).
+    // Pre-install BOTH keys at pre-init time so the rye_signed
+    // verifier accepts the second key's request. That puts the
+    // request through the source's principal-mismatch branch, which
+    // is the path we want to assert returns 404 (not 401).
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let auth_dir = h.state_path.join("auth").join("authorized_keys");
-    write_authorized_key(&h.state_path, &other_sk).expect("write other authorized key");
-    assert!(auth_dir.exists());
+    let (h, _node_sk, node_fp, thread_id) =
+        boot_and_run_directive_with_extra_keys(std::slice::from_ref(&other_sk)).await;
 
-    // Reload the daemon's authorized-keys cache by sending a SIGHUP-equivalent
-    // — the harness exposes routes_reload via UDS, which also reloads
-    // authorized keys via the runtime config snapshot. For this test we'll
-    // poll-and-retry instead, since key reload is on the same loader path
-    // as routes.reload (snapshots are cheap).
-    //
-    // In the current daemon, authorized keys are loaded once at startup.
-    // To make a freshly-added key effective, we must restart. The simpler
-    // alternative — and what the spec actually intends — is to add BOTH
-    // keys at pre-init. That requires refactoring boot_and_run_directive,
-    // so for this test we plant the other key via state_path BEFORE the
-    // daemon starts. Update boot_and_run_directive's pre_init accordingly:
-    // we need a variant that takes a slice of additional authorized keys.
-
-    // Sign the SSE GET with the OTHER key. The `audience` is the daemon's
-    // own fingerprint (where the request is going); the principal_id is
-    // the OTHER key's fingerprint (who is calling).
+    // Sign the SSE GET with the OTHER (authorized) key. The
+    // `audience` is the daemon's fingerprint; the principal_id is
+    // the OTHER key's fingerprint.
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
     let headers =
@@ -531,15 +547,12 @@ async fn sse_thread_events_returns_404_for_non_owner() {
     }
     let resp = req.send().await.expect("SSE request failed");
 
-    // Per CONVENTIONS / Phase C invariant: principal mismatch → 404 (not 403)
-    // so existence of the thread is not leaked. If authorized_keys hot-reload
-    // is not yet wired this returns 401 instead, which is also a fail-closed
-    // outcome; assert either is acceptable so the test isn't brittle on that
-    // dimension while still proving non-owner cannot read.
-    assert!(
-        resp.status() == reqwest::StatusCode::NOT_FOUND
-            || resp.status() == reqwest::StatusCode::UNAUTHORIZED,
-        "expected 404 (principal mismatch) or 401 (other key not yet authorized); \
+    // Per CONVENTIONS / Phase C invariant: principal mismatch → 404
+    // (not 403) so existence of the thread is not leaked.
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "expected 404 for principal mismatch on /threads/{{id}}/events/stream; \
          got {}",
         resp.status()
     );

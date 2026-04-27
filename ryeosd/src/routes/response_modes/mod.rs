@@ -1,5 +1,4 @@
 pub mod event_stream_mode;
-pub mod placeholder;
 pub mod static_mode;
 
 use std::sync::Arc;
@@ -48,7 +47,6 @@ mod tests {
         assert!(r.get("static").is_some());
         assert!(r.get("event_stream").is_some());
         assert!(r.get("tool_response").is_none());
-        assert!(r.get("placeholder").is_none());
     }
 
     #[test]

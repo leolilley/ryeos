@@ -121,6 +121,15 @@ pub struct DispatchRequest<'a> {
     /// on this being `"runtime"` so indirect alias chains are not
     /// retroactively cap-broadened.
     pub original_root_kind: &'a str,
+    /// **Phase E.3**: when `Some`, the thread row created by
+    /// `dispatch_native_runtime` must use this id (via
+    /// `create_root_thread_with_id`) instead of minting one. The SSE
+    /// `directive_launch` source mints the id up front so it can
+    /// subscribe to the event hub *before* the launch task begins,
+    /// which is required to avoid losing the very first lifecycle
+    /// event. `None` (the default) preserves the legacy
+    /// "mint inside `create_root_thread`" path.
+    pub pre_minted_thread_id: Option<String>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -696,7 +705,7 @@ pub(crate) async fn dispatch_native_runtime(
         project_path,
         &params,
         &HashMap::new(),
-        None,
+        request.pre_minted_thread_id.as_deref(),
     ).await.map_err(|e| {
         // P1.2: classify the anyhow error. Materialization failures
         // (binary not in manifest, CAS miss, arch mismatch) get 502.

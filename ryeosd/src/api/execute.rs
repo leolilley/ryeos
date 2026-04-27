@@ -197,6 +197,7 @@ pub async fn execute(
         snapshot_hash: project_ctx.snapshot_hash.clone(),
         temp_dir: temp_dir_guard.disarm(),
         original_root_kind: root_canonical.kind.as_str(),
+        pre_minted_thread_id: None,
     };
 
     match crate::dispatch::dispatch(&request.item_ref, &dispatch_req, &exec_ctx, &state).await {
