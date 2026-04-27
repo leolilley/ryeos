@@ -144,6 +144,13 @@ pub struct ResumeContext {
     /// verbatim so executor-specific flags survive resume.
     #[serde(default = "default_execution_hints")]
     pub execution_hints: ExecutionHints,
+    /// V5.5 P2: composed `effective_caps` captured at original spawn
+    /// time. The reconciler re-mints a callback token for the resumed
+    /// subprocess and the daemon enforces caps on every callback
+    /// dispatch — this set is what gets enforced. Empty `Vec` means
+    /// deny-all.
+    #[serde(default)]
+    pub effective_caps: Vec<String>,
 }
 
 fn default_execution_hints() -> ExecutionHints {
@@ -349,6 +356,7 @@ mod tests {
             origin_site_id: "site:a".to_string(),
             requested_by: local_principal(),
             execution_hints: ExecutionHints::default(),
+            effective_caps: vec!["rye.execute.tool.test".to_string()],
         };
         let m = RuntimeLaunchMetadata::default().with_resume_context(ctx);
         let json = serde_json::to_string(&m).unwrap();
@@ -374,5 +382,11 @@ mod tests {
             }
             _ => panic!("expected LocalPath"),
         }
+        // V5.5 P2: effective_caps survive resume serialization so the
+        // reconciler restores the same daemon-enforced cap set.
+        assert_eq!(
+            back_ctx.effective_caps,
+            vec!["rye.execute.tool.test".to_string()]
+        );
     }
 }

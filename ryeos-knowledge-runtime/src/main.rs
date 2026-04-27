@@ -96,7 +96,7 @@ fn main() -> anyhow::Result<()> {
             success: true,
             status: "completed".to_string(),
             thread_id: thread_id.clone(),
-            result: Some(body),
+            result: Some(json!(body)),
             outputs: json!({}),
             cost: None,
             warnings,

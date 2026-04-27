@@ -122,8 +122,14 @@ pub struct RuntimeResult {
     pub success: bool,
     pub status: String,
     pub thread_id: String,
+    /// Terminal payload from the runtime. `Value` (not `String`) so
+    /// runtimes that produce structured terminal output (graph
+    /// runtime's `GraphResult`, directive runtime's tool/assistant
+    /// final value, knowledge runtime's projection) can ship it
+    /// without lossy stringification. The daemon passes this through
+    /// verbatim into the `/execute` response envelope.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
+    pub result: Option<Value>,
     #[serde(default)]
     pub outputs: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,7 +224,7 @@ mod tests {
             success: true,
             status: "completed".to_string(),
             thread_id: "T-test".to_string(),
-            result: Some("Done".to_string()),
+            result: Some(serde_json::json!("Done")),
             outputs: serde_json::json!({"answer": "42"}),
             cost: Some(RuntimeCost {
                 input_tokens: 100,

@@ -4,38 +4,6 @@ use ryeos_runtime::callback_client::CallbackClient;
 
 use crate::model::NodeReceipt;
 
-pub async fn write_checkpoint(
-    _callback: &CallbackClient,
-    graph_run_id: &str,
-    current_node: &str,
-    step: u32,
-    state: &Value,
-) -> anyhow::Result<String> {
-    let checkpoint = json!({
-        "current_node": current_node,
-        "step_count": step,
-        "state": state,
-        "timestamp": lillux::time::iso8601_now(),
-    });
-
-    let checkpoint_json = serde_json::to_string(&checkpoint)?;
-    let hash = lillux::cas::sha256_hex(checkpoint_json.as_bytes());
-
-    let _ref_data = json!({
-        "graph_run_id": graph_run_id,
-        "checkpoint_hash": hash,
-        "current_node": current_node,
-        "step_count": step,
-        "timestamp": lillux::time::iso8601_now(),
-    });
-
-    // Note: graph checkpoint data was previously persisted via callback.set_facets()
-    // (a CAS violation). It should be persisted via snapshot updates in the
-    // execution path instead. For now, checkpoint data is not persisted.
-
-    Ok(hash)
-}
-
 pub async fn write_node_receipt(
     callback: &CallbackClient,
     graph_run_id: &str,
@@ -128,23 +96,5 @@ mod tests {
 
         let artifacts = mock.artifacts.lock().unwrap();
         assert_eq!(artifacts.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn write_checkpoint_computes_hash() {
-        let (callback, _mock) = make_callback();
-        let hash = write_checkpoint(
-            &callback,
-            "gr-test",
-            "step3",
-            5,
-            &json!({"key": "val"}),
-        )
-        .await
-        .unwrap();
-        assert!(!hash.is_empty());
-
-        // Note: checkpoint data is no longer persisted via set_facets
-        // (CAS violation). Hash is still computed for integrity purposes.
     }
 }

@@ -28,7 +28,9 @@ impl NodeCache {
         }
         let path = self.cache_dir.join(format!("{key}.json"));
         if let Ok(content) = serde_json::to_string(value) {
-            let _ = std::fs::write(&path, content);
+            if let Err(e) = std::fs::write(&path, content) {
+                tracing::warn!("cache write failed for {key}: {e}");
+            }
         }
     }
 }

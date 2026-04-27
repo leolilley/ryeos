@@ -201,10 +201,7 @@ pub async fn execute(
     };
 
     match crate::dispatch::dispatch(&request.item_ref, &dispatch_req, &exec_ctx, &state).await {
-        Ok(crate::dispatch::DispatchOutcome::Unary(value)) => Ok(Json(value)),
-        Ok(crate::dispatch::DispatchOutcome::Stream(_)) => Err(not_implemented(
-            "streaming dispatch outcome is not implemented in V5.3",
-        )),
+        Ok(value) => Ok(Json(value)),
         // **A1**: typed-error mapping. Single call to `http_status()`;
         // no substring matching survives. The `Display` impl of each
         // variant carries the wording the pin tests assert against, so
@@ -220,12 +217,5 @@ fn invalid_request(err: anyhow::Error) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": err.to_string() })),
-    )
-}
-
-fn not_implemented(message: &str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": message })),
     )
 }

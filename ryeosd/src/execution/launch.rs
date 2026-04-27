@@ -325,17 +325,11 @@ pub async fn build_and_launch(
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback
     //    enforcement and the runtime see the *same* composed capability
-    //    set.
+    //    set. The callback capability is minted AFTER caps derivation
+    //    (V5.5 P2) so the daemon-side dispatcher can enforce caps from
+    //    the token instead of trusting the runtime to self-police.
 
-    // 4. Mint callback capability
-    let ttl = compute_ttl(Some(hard_limits.duration_seconds));
-    let cap = state.callback_tokens.generate(
-        thread_id,
-        project_path.to_path_buf(),
-        ttl,
-    );
-
-    // 5. Build envelope
+    // 4. Build envelope
     let engine_roots = state.engine.resolution_roots(Some(project_path.to_path_buf()));
 
     let user_root = engine_roots.ordered.iter()
@@ -406,6 +400,18 @@ pub async fn build_and_launch(
         executor_trust_class = ?executor_trust_class,
         effective_caps_count = effective_caps.len(),
         "launcher policy resolved from composed view"
+    );
+
+    // V5.5 P2: mint the callback capability AFTER `effective_caps` is
+    // derived so the daemon-side dispatcher can enforce the same set
+    // the runtime sees. This closes the trust gap where the runtime
+    // was the only entity gating its own callback dispatches.
+    let ttl = compute_ttl(Some(hard_limits.duration_seconds));
+    let cap = state.callback_tokens.generate(
+        thread_id,
+        project_path.to_path_buf(),
+        ttl,
+        effective_caps.clone(),
     );
 
     // 6b. Build inventory the launching kind asked for. The engine
@@ -613,7 +619,7 @@ fn spawn_runtime(
             success: false,
             status: "failed".to_string(),
             thread_id: String::new(),
-            result: Some(result.stderr.clone()),
+            result: Some(json!(result.stderr.clone())),
             outputs: Value::Null,
             cost: None,
             warnings: Vec::new(),

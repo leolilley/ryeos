@@ -660,7 +660,7 @@ impl Runner {
                         success: false,
                         status: "continued".to_string(),
                         thread_id: self.thread_id.clone(),
-                        result: Some(reason.to_string()),
+                        result: Some(json!(reason)),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
                         warnings: Vec::new(),
@@ -684,7 +684,7 @@ impl Runner {
                         success: false,
                         status: "errored".to_string(),
                         thread_id: self.thread_id.clone(),
-                        result: Some(error),
+                        result: Some(json!(error)),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
                         warnings: Vec::new(),
@@ -698,7 +698,7 @@ impl Runner {
                         success: false,
                         status: "cancelled".to_string(),
                         thread_id: self.thread_id.clone(),
-                        result: Some("cancelled by signal".to_string()),
+                        result: Some(json!("cancelled by signal")),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
                         warnings: Vec::new(),
@@ -735,11 +735,12 @@ impl Runner {
     }
 
     fn finalize(&self, result: Value) -> RuntimeResult {
-        let result_str = match result {
-            Value::String(s) => s,
-            other => other.to_string(),
-        };
-
+        // D1: ship the structured terminal value through verbatim.
+        // Previous behaviour stringified non-string Values, which lost
+        // structure and forced HTTP callers to re-parse. RuntimeResult.result
+        // is `Option<Value>` so callers see exactly what the directive
+        // produced — assistant text as JSON string, tool outputs as the
+        // tool's own structured result, etc.
         tracing::info!(
             thread_id = %self.thread_id,
             turns = self.harness.turns_used(),
@@ -753,7 +754,7 @@ impl Runner {
             success: true,
             status: "completed".to_string(),
             thread_id: self.thread_id.clone(),
-            result: Some(result_str),
+            result: Some(result),
             outputs: json!({}),
             cost: Some(self.budget.cost()),
             warnings: Vec::new(),

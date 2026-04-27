@@ -6,6 +6,7 @@
 //! `super::ComposerRegistry::from_kinds`).
 
 pub mod extends_chain;
+pub mod graph_permissions;
 pub mod identity;
 
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use serde_json::Value;
 use crate::resolution::{KindComposedView, ResolutionError, ResolvedAncestor};
 
 pub use extends_chain::ExtendsChainComposer;
+pub use graph_permissions::GraphPermissionsComposer;
 pub use identity::IdentityComposer;
 
 /// Trait implemented by per-kind composer handlers.
@@ -70,6 +72,7 @@ impl NativeComposerHandlerRegistry {
     pub fn with_builtins() -> Self {
         let mut reg = Self::new();
         reg.register(extends_chain::HANDLER_ID, Arc::new(ExtendsChainComposer));
+        reg.register(graph_permissions::HANDLER_ID, Arc::new(GraphPermissionsComposer));
         reg.register(identity::HANDLER_ID, Arc::new(IdentityComposer));
         reg
     }
@@ -110,11 +113,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn with_builtins_registers_extends_chain_and_identity() {
+    fn with_builtins_registers_all_handlers() {
         let reg = NativeComposerHandlerRegistry::with_builtins();
         assert!(reg.contains(extends_chain::HANDLER_ID));
+        assert!(reg.contains(graph_permissions::HANDLER_ID));
         assert!(reg.contains(identity::HANDLER_ID));
         assert!(reg.get(extends_chain::HANDLER_ID).is_some());
+        assert!(reg.get(graph_permissions::HANDLER_ID).is_some());
         assert!(reg.get(identity::HANDLER_ID).is_some());
         assert!(reg.get("missing").is_none());
     }
@@ -124,6 +129,10 @@ mod tests {
         let reg = NativeComposerHandlerRegistry::with_builtins();
         let mut ids: Vec<&str> = reg.handler_ids().collect();
         ids.sort();
-        assert_eq!(ids, vec!["rye/core/extends_chain", "rye/core/identity"]);
+        assert_eq!(ids, vec![
+            "rye/core/extends_chain",
+            "rye/core/graph_permissions",
+            "rye/core/identity",
+        ]);
     }
 }

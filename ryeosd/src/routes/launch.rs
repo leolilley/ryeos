@@ -40,20 +40,17 @@ use crate::state::AppState;
 pub enum LaunchSpawnError {
     #[error("invalid item_ref '{ref_str}': {reason}")]
     InvalidRef { ref_str: String, reason: String },
-    #[error("dispatch produced a streaming outcome — launch helper only supports Unary")]
-    StreamingFromLaunch,
     #[error("dispatch failed: {0}")]
     Dispatch(#[from] DispatchError),
 }
 
 impl LaunchSpawnError {
     /// Stable machine-readable error code matching the `DispatchError`
-    /// code for the `Dispatch` variant, with two launch-specific codes
-    /// for the other arms.
+    /// code for the `Dispatch` variant, with one launch-specific code
+    /// for `InvalidRef`.
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidRef { .. } => "invalid_ref",
-            Self::StreamingFromLaunch => "streaming_from_launch",
             Self::Dispatch(e) => e.code(),
         }
     }
@@ -130,10 +127,7 @@ pub(crate) fn spawn_dispatch_launch(
         };
 
         match crate::dispatch::dispatch(item_ref.as_str(), &dispatch_req, &exec_ctx, &state_clone).await {
-            Ok(crate::dispatch::DispatchOutcome::Unary(_)) => Ok(()),
-            Ok(crate::dispatch::DispatchOutcome::Stream(_)) => {
-                Err(LaunchSpawnError::StreamingFromLaunch)
-            }
+            Ok(_value) => Ok(()),
             Err(e) => Err(LaunchSpawnError::Dispatch(e)),
         }
     })
@@ -150,11 +144,6 @@ mod tests {
             reason: "bad".into(),
         };
         assert_eq!(e.code(), "invalid_ref");
-    }
-
-    #[test]
-    fn launch_spawn_error_code_streaming_from_launch() {
-        assert_eq!(LaunchSpawnError::StreamingFromLaunch.code(), "streaming_from_launch");
     }
 
     #[test]

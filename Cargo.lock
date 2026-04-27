@@ -1965,7 +1965,6 @@ dependencies = [
  "clap",
  "directories",
  "form_urlencoded",
- "futures-core",
  "hmac",
  "http-body-util",
  "hyper",

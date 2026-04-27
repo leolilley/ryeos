@@ -1,9 +1,10 @@
-# rye:signed:2026-04-26T09:30:26Z:953a61715169851b7dc3b49792ba9842af68b11f79ff8e51f77681cb63e8a345:eMapWph+9GCsAp420mayxhAmsOd8PqjzzlZtiqxv/cQzfjuhwFyoeHdQrl2MlLswxQlMXPKcAAe7dlbjkSzIBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-27T13:34:36Z:704a0dd240f5626ed582fa1642dbce98d193a683208e86606e1fb25d66f71202:rc8bu8H1hZI2wB7NLQHE96Z/aBKUDpMHy3IdEN+9hAeShRJN/iNyETC+TIWlpZIA6msH12lUDaiZbUN/KMlTCQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: runtime
-serves: directive
-default: false
+serves: graph
+default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-runtime
 abi_version: "v1"
+native_resume: true
 required_caps:
   - runtime.execute
-description: "Interprets graph-shaped directive workflows"
+description: "Interprets graph workflows"

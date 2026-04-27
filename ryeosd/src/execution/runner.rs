@@ -49,6 +49,11 @@ pub struct ExecutionParams {
     /// Mirrors the same field on `dispatch::DispatchRequest` and
     /// `execution::launch::build_and_launch`'s native runtime path.
     pub pre_minted_thread_id: Option<String>,
+    /// V5.5 P2: composed capability set the daemon will enforce on
+    /// every callback dispatch the spawned subprocess attempts. The
+    /// caller MUST supply this explicitly — empty `Vec` means deny-all
+    /// (the trust-boundary default).
+    pub effective_caps: Vec<String>,
 }
 
 /// Tracks execution state and ensures cleanup on all exit paths.
@@ -459,17 +464,23 @@ pub struct DetachedResult {
 /// must be invalidated by the caller after the child exits (or on any
 /// failure path that prevents child execution). The token is fresh per
 /// spawn and per resume — no reuse across attempts.
+///
+/// `effective_caps` is the composed capability set the daemon will
+/// enforce on every callback dispatch this token authorizes. The
+/// caller MUST supply the explicit set; an empty Vec means deny-all.
 fn mint_callback_env(
     state: &AppState,
     thread_id: &str,
     project_path: Option<&std::path::Path>,
     duration_seconds: Option<u64>,
+    effective_caps: Vec<String>,
 ) -> (HashMap<String, String>, String) {
     let ttl = compute_ttl(duration_seconds);
     let cap = state.callback_tokens.generate(
         thread_id,
         project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
         ttl,
+        effective_caps,
     );
 
     let mut bindings = HashMap::new();
@@ -556,6 +567,7 @@ pub async fn run_inline(
     // Mint callback token for the spawned subprocess.
     let (cb_bindings, _cb_token) = mint_callback_env(
         &state, &tid, Some(&effective_path), None,
+        params.effective_caps.clone(),
     );
 
     // Daemon-owned per-thread state dir under config.state_dir — does
@@ -741,6 +753,7 @@ pub async fn run_detached(
     // owned by the background task (revoked on wait completion or error).
     let (cb_bindings, cb_token) = mint_callback_env(
         &state, &running.thread_id, Some(effective_path.as_path()), None,
+        params.effective_caps.clone(),
     );
     guard.track_callback_token(cb_token);
 
@@ -1145,6 +1158,11 @@ pub fn execution_params_from_resume_context(
         // `attach_to_existing_thread` rather than `create_root_thread`,
         // so `pre_minted_thread_id` is irrelevant on this path.
         pre_minted_thread_id: None,
+        // V5.5 P2: carry the effective_caps captured at original
+        // spawn time. The reconciler restores them verbatim so
+        // resumed callbacks are enforced under the same set the
+        // pre-crash run had.
+        effective_caps: resume.effective_caps.clone(),
     })
 }
 
@@ -1213,6 +1231,7 @@ pub async fn run_existing_detached(
     // the original — it was revoked when the prior process exited).
     let (cb_bindings, cb_token) = mint_callback_env(
         &state, &thread_id, Some(effective_path.as_path()), None,
+        params.effective_caps.clone(),
     );
     guard.track_callback_token(cb_token);
 

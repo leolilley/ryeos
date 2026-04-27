@@ -654,6 +654,131 @@ inputs: {}
     drop(project);
 }
 
+// ── 5d. P4.B2 — graph indirect: subject identity wins audit ────────────
+//
+// Mirror of `e2e_indirect_directive_audit_records_subject_not_runtime`
+// for the graph kind. Pins that an indirect dispatch chain
+//   graph:p4/flow → registry → runtime:p4-graph-runtime
+// records the SUBJECT's identity (`graph_run` thread_profile +
+// `graph:p4/flow` item_ref), not the runtime's. If the V5.5 P4 B2
+// subject/runtime split regresses for graphs specifically, this test
+// will see `kind == "runtime_run"` and an item_ref starting with
+// `runtime:` — and fail loud.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_indirect_graph_records_graph_thread_profile() {
+    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
+        let sk = e2e_signing_key();
+        write_trusted_signer(user, &sk.verifying_key())?;
+        // Synth runtime serving "graph" with a well-formed binary_ref
+        // pointing at a non-existent binary. Dispatch progresses into
+        // build_and_launch and creates the thread DB row before
+        // failing at native-executor materialization — the row's
+        // subject identity is what we assert.
+        install_runtime(user, "p4-graph-runtime", "graph", true, "v1")?;
+        let dir = user.join(".ai/graphs/p4");
+        std::fs::create_dir_all(&dir)?;
+        let body = r#"category: "test/p4-graph"
+description: "P4 B2 graph subject/runtime split pin"
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+        // Graph YAMLs use `#` for signature comments (matching
+        // `parser:rye/core/yaml/yaml`).
+        let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+        std::fs::write(dir.join("flow.yaml"), signed)?;
+        Ok(())
+    };
+
+    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let (status, body) = h
+        .post_execute(
+            "graph:p4/flow",
+            project.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("post /execute");
+
+    // Dispatch is expected to fail at materialization (no binary for
+    // p4-graph-runtime). The KEY assertion is that the dispatch loop
+    // reached build_and_launch's thread-create step.
+    assert!(
+        !status.is_success(),
+        "expected dispatch to fail at materialization; got {status}: {body}"
+    );
+
+    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    for _ in 0..20 {
+        if projection_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        projection_path.exists(),
+        "projection.sqlite3 must exist at {}",
+        projection_path.display()
+    );
+
+    let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
+        .expect("open projection db");
+    let threads = ryeos_state::queries::list_threads(&db, 100)
+        .expect("list_threads");
+
+    let subject_thread = threads
+        .iter()
+        .find(|t| t.item_ref == "graph:p4/flow")
+        .unwrap_or_else(|| {
+            panic!(
+                "no thread row with subject item_ref 'graph:p4/flow' \
+                 — root/runtime split regressed for graph kind. \
+                 All rows: {:#?}",
+                threads
+            )
+        });
+
+    // ── B2 contract assertions ──────────────────────────────────────
+    assert_eq!(
+        subject_thread.kind, "graph_run",
+        "thread.kind must be the graph subject's thread_profile \
+         ('graph_run'), not the runtime's ('runtime_run'). Got: {:#?}",
+        subject_thread
+    );
+    assert_eq!(
+        subject_thread.item_ref, "graph:p4/flow",
+        "thread.item_ref must echo the user-typed graph subject ref, \
+         not the runtime ref. Got: {:#?}",
+        subject_thread
+    );
+    assert!(
+        subject_thread.executor_ref.starts_with("native:"),
+        "thread.executor_ref records the runtime executor binary; got: {:?}",
+        subject_thread.executor_ref
+    );
+
+    // Defense in depth: no parallel thread row recorded against the
+    // graph runtime ref.
+    let runtime_rows: Vec<_> = threads
+        .iter()
+        .filter(|t| t.item_ref.starts_with("runtime:"))
+        .collect();
+    assert!(
+        runtime_rows.is_empty(),
+        "no thread row should be recorded against the runtime ref; got: {:#?}",
+        runtime_rows
+    );
+
+    drop(project);
+}
+
 // ── 6. Grep gate: zero kind-name branching in dispatch code ────────────
 
 #[test]

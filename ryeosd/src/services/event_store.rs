@@ -154,45 +154,17 @@ impl EventStoreService {
     }
 }
 
+/// V5.5 D11: delegate to the typed `RuntimeEventType` enum.
+///
+/// `ryeos-runtime/src/events.rs` is the single source of truth for
+/// the event vocabulary. Both daemon validators and runtime emitters
+/// consume the same enum, so adding a variant cannot drift between
+/// the two — the producer and consumer surfaces both fail to compile
+/// (or accept the new variant) atomically.
 fn validate_event_type(event_type: &str) -> Result<()> {
-    match event_type {
-        "thread_created"
-        | "thread_started"
-        | "thread_completed"
-        | "thread_failed"
-        | "thread_cancelled"
-        | "thread_killed"
-        | "thread_timed_out"
-        | "thread_continued"
-        | "edge_recorded"
-        | "child_thread_spawned"
-        | "continuation_requested"
-        | "continuation_accepted"
-        | "command_submitted"
-        | "command_claimed"
-        | "command_completed"
-        | "stream_opened"
-        | "token_delta"
-        | "stream_snapshot"
-        | "stream_closed"
-        | "artifact_published"
-        | "thread_reconciled"
-        | "orphan_process_killed"
-        | "system_prompt"
-        | "context_injected"
-        | "cognition_in"
-        | "cognition_out"
-        | "cognition_reasoning"
-        | "tool_call_start"
-        | "tool_call_result" => Ok(()),
-        other if other.trim().is_empty() => bail!("event_type must not be empty"),
-        other => bail!("invalid event_type: {other}"),
-    }
+    ryeos_runtime::RuntimeEventType::parse(event_type).map(|_| ())
 }
 
 fn validate_storage_class(storage_class: &str) -> Result<()> {
-    match storage_class {
-        "indexed" | "journal_only" => Ok(()),
-        other => bail!("invalid storage_class: {other}"),
-    }
+    ryeos_runtime::StorageClass::parse(storage_class).map(|_| ())
 }

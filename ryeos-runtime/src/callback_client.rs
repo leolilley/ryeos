@@ -5,21 +5,21 @@ use serde_json::Value;
 
 use crate::callback::RuntimeCallbackAPI;
 use crate::envelope::EnvelopeCallback;
+use crate::events::{RuntimeEventType, StorageClass};
 
 /// Map an event type name to the storage class the daemon's
-/// `EventStoreService::validate_storage_class` accepts. High-frequency
-/// progressive events go to `journal_only`; everything else is a
-/// milestone and goes to `indexed`. The set of accepted event names
-/// (and the journal_only short-list) MUST stay in sync with
-/// `ryeosd/src/services/event_store.rs::validate_event_type`.
+/// `EventStoreService::validate_storage_class` accepts.
+///
+/// V5.5 D11: this function delegates to `RuntimeEventType::storage_class`
+/// — the typed enum is the single source of truth. Unknown event names
+/// fall through to `"indexed"` so the daemon validator (which also
+/// delegates to the enum's `parse`) can produce the canonical error
+/// message at append time. Callers that have a `RuntimeEventType`
+/// already should use `append_runtime_event` directly.
 pub fn storage_class_for(event_type: &str) -> &'static str {
-    match event_type {
-        // High-frequency progressive events.
-        "token_delta"
-        | "stream_snapshot"
-        | "cognition_reasoning" => "journal_only",
-        // Everything else is a milestone.
-        _ => "indexed",
+    match RuntimeEventType::parse(event_type) {
+        Ok(t) => t.storage_class().as_str(),
+        Err(_) => StorageClass::Indexed.as_str(),
     }
 }
 
@@ -124,6 +124,35 @@ impl CallbackClient {
         match &self.inner {
             Some(client) => {
                 client.append_event(&self.thread_id, event_type, payload, storage_class).await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// V5.5 D11: typed event emitter. Prefer this over `append_event`
+    /// for new code — adding a new event variant to
+    /// `RuntimeEventType` makes this method emit it without any
+    /// further string-based dispatch. The daemon validator delegates
+    /// to the same enum, so the producer/consumer surfaces stay in
+    /// lock-step.
+    pub async fn append_runtime_event(
+        &self,
+        event_type: RuntimeEventType,
+        payload: Value,
+    ) -> Result<()> {
+        let storage_class = event_type.storage_class().as_str();
+        match &self.inner {
+            Some(client) => {
+                client
+                    .append_event(
+                        &self.thread_id,
+                        event_type.as_str(),
+                        payload,
+                        storage_class,
+                    )
+                    .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
             }
@@ -505,6 +534,13 @@ mod tests {
             "cognition_reasoning",
             "tool_call_start",
             "tool_call_result",
+            // Graph lifecycle events
+            "graph_started",
+            "graph_completed",
+            "graph_step_started",
+            "graph_step_completed",
+            "graph_branch_taken",
+            "graph_foreach_iteration",
         ];
         const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only"];
 

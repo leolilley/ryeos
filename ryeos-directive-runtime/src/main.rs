@@ -65,7 +65,7 @@ fn run_directive() -> Result<RuntimeResult> {
                 success: false,
                 status: "errored".to_string(),
                 thread_id: String::new(),
-                result: Some(format!("invalid envelope: {}", e)),
+                result: Some(json!(format!("invalid envelope: {}", e))),
                 outputs: json!({}),
                 cost: None,
                 warnings: Vec::new(),
