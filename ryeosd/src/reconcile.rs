@@ -349,6 +349,7 @@ mod tests {
             origin_site_id: "site:a".into(),
             requested_by: principal(),
             execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
         }
     }
 

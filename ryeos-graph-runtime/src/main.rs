@@ -8,31 +8,24 @@ mod hooks;
 mod knowledge;
 mod model;
 mod persistence;
-mod permissions;
 mod resume;
 mod validation;
 mod walker;
 
 use std::io::Read;
-use std::path::PathBuf;
 
 use clap::Parser;
 use serde_json::{json, Value};
 
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::envelope::EnvelopeCallback;
+use ryeos_runtime::checkpoint::CheckpointWriter;
+use ryeos_runtime::envelope::{EnvelopeCallback, RuntimeResult};
 
 #[derive(Parser)]
 #[command(name = "graph-runtime", about = "Native graph walker for Rye OS")]
 struct Cli {
     #[arg(long)]
-    graph_path: Option<PathBuf>,
-
-    #[arg(long)]
-    project_path: Option<PathBuf>,
-
-    #[arg(long)]
-    validate: bool,
+    graph_path: Option<String>,
 
     #[arg(long)]
     graph_run_id: Option<String>,
@@ -45,25 +38,29 @@ struct Cli {
 
     #[arg(long)]
     pre_registered: bool,
+
+    /// Accepted for spawn-contract parity with the daemon launcher. Ignored
+    /// in favour of `envelope.roots.project_root` (which is the single
+    /// source of truth per C1).
+    #[arg(long)]
+    project_path: Option<String>,
 }
 
-/// Normalized launch data from either envelope or CLI flags.
+/// Normalized launch data from the envelope.
 struct ResolvedLaunch {
-    project_root: PathBuf,
-    graph_path: PathBuf,
+    project_root: std::path::PathBuf,
+    graph_path: std::path::PathBuf,
     thread_id: String,
     graph_run_id: Option<String>,
     inputs: Value,
     previous_thread_id: Option<String>,
     parent_thread_id: Option<String>,
-    parent_capabilities: Vec<String>,
     depth: u32,
-    effective_caps: Vec<String>,
     hard_limits: Value,
     callback: Option<EnvelopeCallback>,
     target_digest: Option<String>,
-    user_root: Option<PathBuf>,
-    system_roots: Vec<PathBuf>,
+    user_root: Option<std::path::PathBuf>,
+    system_roots: Vec<std::path::PathBuf>,
     invocation_id: Option<String>,
 }
 
@@ -74,13 +71,11 @@ fn main() -> anyhow::Result<()> {
 
     let mut stdin_data = Vec::new();
     std::io::stdin().read_to_end(&mut stdin_data)?;
-    let has_stdin = !stdin_data.is_empty();
+    if stdin_data.is_empty() {
+        anyhow::bail!("graph runtime requires LaunchEnvelope on stdin");
+    }
 
-    let resolved = if has_stdin {
-        resolve_from_envelope(&stdin_data, &cli)?
-    } else {
-        resolve_from_cli(&cli)?
-    };
+    let resolved = resolve_from_envelope(&stdin_data, &cli)?;
 
     let raw = std::fs::read_to_string(&resolved.graph_path)?;
     let graph = model::GraphDefinition::from_yaml(
@@ -95,18 +90,24 @@ fn main() -> anyhow::Result<()> {
         invocation_id = ?resolved.invocation_id,
         user_root = ?resolved.user_root,
         system_roots = ?resolved.system_roots,
-        effective_caps = ?resolved.effective_caps,
         "launch resolved"
     );
 
-    let callback = match resolved.callback {
-        Some(ref cb) => CallbackClient::new(
+    let rt = tokio::runtime::Runtime::new()?;
+
+    let checkpoint = CheckpointWriter::from_env();
+
+    // Resume precedence (D10):
+    // 1. RYE_RESUME=1 + local checkpoint → checkpoint wins
+    // 2. RYE_RESUME=1 + no local checkpoint → explicit fallback to replay
+    // 3. Both unavailable + resume requested → fail loud
+    let callback = match resolved.callback.as_ref() {
+        Some(cb) => CallbackClient::new(
             cb,
             &resolved.thread_id,
             resolved.project_root.to_str().unwrap_or(""),
         ),
         None => {
-            // CLI mode: construct from env or fallback
             if let Some(ref socket) = cli.daemon_socket {
                 std::env::set_var("RYEOSD_SOCKET_PATH", socket);
             }
@@ -122,61 +123,136 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    if cli.validate {
-        let _rt = tokio::runtime::Runtime::new()?;
-        let w = walker::Walker::new(
-            graph,
-            resolved.project_root.to_string_lossy().to_string(),
-            resolved.thread_id,
-            callback,
+    // V5.5 D10 resume precedence (the rule itself lives in
+    // `resume::decide_resume_source` — pure function, unit-tested):
+    //   1. RYE_RESUME=1 + local CheckpointWriter payload → checkpoint wins.
+    //   2. RYE_RESUME=1 + no local checkpoint → fall back to replay-events.
+    //   3. RYE_RESUME=1 + neither available → fail loud (NO silent cold-start).
+    //   4. RYE_RESUME unset → cold start (None).
+    let resume_requested = CheckpointWriter::is_resume();
+    let local_checkpoint: Option<Value> = if resume_requested {
+        checkpoint
+            .as_ref()
+            .and_then(|w| w.load_latest().transpose())
+            .transpose()?
+    } else {
+        None
+    };
+    let replay_state: Option<resume::ResumeState> = if resume_requested
+        && local_checkpoint.is_none()
+    {
+        // D12: replay resume keys on thread_id only, not graph_run_id.
+        // The launcher doesn't supply graph_run_id; thread is the actual
+        // partition; matched event payload reconstructs the run_id.
+        tracing::warn!(
+            thread_id = %resolved.thread_id,
+            "RYE_RESUME=1 but no local checkpoint; falling back to replay-events resume"
         );
-        let result = w.validate();
-        println!("{}", serde_json::to_string(&result)?);
-        if !result.success {
-            std::process::exit(1);
+        rt.block_on(resume::load_resume_state(
+            &callback,
+            &resolved.thread_id,
+        ))?
+    } else {
+        None
+    };
+
+    let resume_state: Option<resume::ResumeState> = match resume::decide_resume_source(
+        resume_requested,
+        local_checkpoint.is_some(),
+        replay_state.is_some(),
+    ) {
+        resume::ResumeSource::ColdStart => None,
+        resume::ResumeSource::LocalCheckpoint => {
+            tracing::info!("resuming from local checkpoint");
+            Some(resume::from_checkpoint_value(
+                local_checkpoint
+                    .as_ref()
+                    .expect("LocalCheckpoint variant requires payload"),
+            )?)
         }
-        return Ok(());
+        resume::ResumeSource::ReplayFallback => Some(
+            replay_state.expect("ReplayFallback variant requires replay state"),
+        ),
+        resume::        ResumeSource::NoSourceAvailable => {
+            anyhow::bail!(
+                "RYE_RESUME=1 but no resume source is available for thread '{}': \
+                 local checkpoint absent and replay-events reconstruction found \
+                 no graph_step_started for this thread; \
+                 refusing silent cold-start (V5.5 D10)",
+                resolved.thread_id
+            );
+        }
+    };
+
+    // If we got a resume state, inject it so the walker picks up where it left off.
+    if let Some(ref rs) = resume_state {
+        tracing::info!(
+            node = %rs.current_node,
+            step = rs.step_count,
+            "resuming graph"
+        );
     }
 
     let mut params = json!({
         "inputs": resolved.inputs,
         "previous_thread_id": resolved.previous_thread_id,
         "parent_thread_id": resolved.parent_thread_id,
-        "parent_capabilities": resolved.parent_capabilities,
         "depth": resolved.depth,
-        "effective_caps": resolved.effective_caps,
         "hard_limits": resolved.hard_limits,
     });
 
+    // Inject resume state so walker.rs picks it up
+    if let Some(ref rs) = resume_state {
+        params["resume_state"] = json!({
+            "current_node": rs.current_node,
+            "step_count": rs.step_count,
+            "state": rs.state,
+        });
+    }
+
     if let Some(ref schema) = graph.config.config_schema {
         if let Err(err) = normalize_inputs_against_schema(&mut params, schema) {
-            let result = model::GraphResult {
-                success: false,
-                graph_id: graph.graph_id.clone(),
-                graph_run_id: String::new(),
-                status: "invalid_inputs".into(),
-                steps: 0,
-                state: serde_json::json!({}),
-                result: None,
-                errors_suppressed: None,
-                errors: None,
-                error: Some(format!("input validation failed: {err}")),
-            };
-            println!("{}", serde_json::to_string(&result)?);
+            let runtime_result = make_error_runtime_result(
+                &resolved.thread_id,
+                "invalid_inputs",
+                &format!("input validation failed: {err}"),
+            );
+            println!("{}", serde_json::to_string(&runtime_result)?);
             std::process::exit(0);
         }
     }
 
     let rt = tokio::runtime::Runtime::new()?;
+
     let w = walker::Walker::new(
         graph,
         resolved.project_root.to_string_lossy().to_string(),
-        resolved.thread_id,
+        resolved.thread_id.clone(),
         callback,
+        checkpoint,
     );
 
-    let result = rt.block_on(w.execute(params, resolved.graph_run_id));
-    println!("{}", serde_json::to_string(&result)?);
+    let graph_result = rt.block_on(w.execute(params, resolved.graph_run_id));
+    // V5.5 P0 #3: pull non-fatal callback drift the walker
+    // accumulated during the run. Empty on a clean run.
+    let warnings = w.take_warnings();
+
+    // D1 / B5: ship the structured GraphResult through verbatim.
+    // Daemon parses RuntimeResult and forwards `result` into the
+    // `/execute` response, so HTTP callers see the typed graph
+    // result (success/status/state/path) without re-parsing JSON
+    // out of a string.
+    let runtime_result = RuntimeResult {
+        success: graph_result.success,
+        status: graph_result.status.clone(),
+        thread_id: resolved.thread_id.clone(),
+        result: Some(serde_json::to_value(&graph_result)?),
+        outputs: serde_json::Value::Null,
+        cost: None,
+        warnings,
+    };
+
+    println!("{}", serde_json::to_string(&runtime_result)?);
 
     Ok(())
 }
@@ -185,10 +261,8 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     let envelope: ryeos_runtime::envelope::LaunchEnvelope = serde_json::from_slice(stdin_data)
         .map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
 
-    // Root path comes from `resolution.root.source_path` (already an
-    // absolute, daemon-verified path). EnvelopeTarget is gone — there is
-    // exactly one root snapshot in the envelope.
     let graph_path = cli.graph_path.clone()
+        .map(std::path::PathBuf::from)
         .unwrap_or_else(|| envelope.resolution.root.source_path.clone());
 
     Ok(ResolvedLaunch {
@@ -199,9 +273,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         inputs: envelope.request.inputs.clone(),
         previous_thread_id: envelope.request.previous_thread_id.clone(),
         parent_thread_id: envelope.request.parent_thread_id.clone(),
-        parent_capabilities: envelope.request.parent_capabilities.unwrap_or_default(),
         depth: envelope.request.depth,
-        effective_caps: envelope.policy.effective_caps.clone(),
         hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
         callback: Some(envelope.callback),
         target_digest: Some(envelope.resolution.root.raw_content_digest.clone()),
@@ -211,30 +283,16 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     })
 }
 
-fn resolve_from_cli(cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
-    let project_path = cli.project_path.clone()
-        .ok_or_else(|| anyhow::anyhow!("project-path required via --project-path or envelope"))?;
-    let graph_path = cli.graph_path.clone()
-        .ok_or_else(|| anyhow::anyhow!("graph-path required via --graph-path or envelope"))?;
-
-    Ok(ResolvedLaunch {
-        project_root: project_path,
-        graph_path,
-        thread_id: cli.thread_id.clone(),
-        graph_run_id: cli.graph_run_id.clone(),
-        inputs: json!({}),
-        previous_thread_id: None,
-        parent_thread_id: None,
-        parent_capabilities: vec![],
-        depth: 0,
-        effective_caps: vec![],
-        hard_limits: json!({}),
-        callback: None,
-        target_digest: None,
-        user_root: None,
-        system_roots: vec![],
-        invocation_id: None,
-    })
+fn make_error_runtime_result(thread_id: &str, status: &str, error: &str) -> RuntimeResult {
+    RuntimeResult {
+        success: false,
+        status: status.to_string(),
+        thread_id: thread_id.to_string(),
+        result: Some(json!(error)),
+        outputs: serde_json::Value::Null,
+        cost: None,
+        warnings: Vec::new(),
+    }
 }
 
 /// Normalize inputs against a shallow JSON Schema:
@@ -260,14 +318,12 @@ fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow
         let inputs = match input_obj.as_object_mut() {
             Some(obj) => obj,
             None => {
-                // inputs is not an object — skip property checks
                 return Ok(());
             }
         };
 
         for (name, prop_schema) in props {
             if let Some(val) = inputs.get(name) {
-                // 2. Type-check provided value
                 if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str()) {
                     let type_ok = match expected_type {
                         "string" => val.is_string(),
@@ -276,7 +332,7 @@ fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow
                         "boolean" => val.is_boolean(),
                         "array" => val.is_array(),
                         "object" => val.is_object(),
-                        _ => true, // unknown type, pass through
+                        _ => true,
                     };
                     if !type_ok {
                         anyhow::bail!(
@@ -295,11 +351,9 @@ fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow
                     }
                 }
             } else {
-                // 3. Apply default if absent
                 if let Some(default) = prop_schema.get("default") {
                     inputs.insert(name.clone(), default.clone());
                 }
-                // Absent + no default + not required → ignore
             }
         }
 
@@ -373,5 +427,75 @@ mod tests {
         let mut params = json!({"inputs": {"name": "test"}});
         assert!(normalize_inputs_against_schema(&mut params, &schema).is_ok());
         assert!(params["inputs"].get("optional_field").is_none());
+    }
+
+    #[test]
+    fn make_error_runtime_result_shapes_correctly() {
+        let rr = make_error_runtime_result("T-1", "bad_input", "missing field");
+        assert!(!rr.success);
+        assert_eq!(rr.status, "bad_input");
+        assert_eq!(rr.thread_id, "T-1");
+        // D1: result is `Option<Value>`; error string wraps as
+        // `Value::String(...)`.
+        assert_eq!(rr.result, Some(json!("missing field")));
+        assert!(rr.warnings.is_empty());
+    }
+
+    #[test]
+    fn cli_accepts_project_path_without_error() {
+        // F1 pin: the daemon passes --project-path to every native runtime.
+        // The graph CLI MUST accept this flag (clap rejects unknown args
+        // with a non-zero exit before main runs).
+        let cli = Cli::try_parse_from([
+            "graph-runtime",
+            "--project-path", "/tmp/test-project",
+            "--thread-id", "T-f1-test",
+            "--pre-registered",
+        ]);
+        assert!(cli.is_ok(), "graph CLI must accept --project-path");
+        let parsed = cli.unwrap();
+        assert_eq!(parsed.project_path.as_deref(), Some("/tmp/test-project"));
+    }
+
+    #[test]
+    fn cli_accepts_all_daemon_spawn_flags() {
+        // F1 pin: the full set of flags the daemon passes must parse clean.
+        let cli = Cli::try_parse_from([
+            "graph-runtime",
+            "--project-path", "/tmp/project",
+            "--thread-id", "T-full",
+            "--pre-registered",
+            "--graph-path", "/tmp/graph.yaml",
+            "--graph-run-id", "GR-42",
+            "--daemon-socket", "/tmp/daemon.sock",
+        ]);
+        assert!(cli.is_ok(), "graph CLI must accept all daemon flags");
+    }
+
+    #[test]
+    fn stdout_contract_is_runtime_result_not_graph_result() {
+        // Verify that a RuntimeResult round-trips through JSON correctly.
+        // D1: `result` carries the typed `GraphResult` value, not a
+        // stringified JSON blob. The daemon parses RuntimeResult, so
+        // the structured payload survives the wire.
+        let graph_result_value = json!({
+            "success": true,
+            "status": "completed",
+        });
+        let rr = RuntimeResult {
+            success: true,
+            status: "completed".into(),
+            thread_id: "T-test".into(),
+            result: Some(graph_result_value.clone()),
+            outputs: Value::Null,
+            cost: None,
+            warnings: Vec::new(),
+        };
+        let json_str = serde_json::to_string(&rr).unwrap();
+        let parsed: RuntimeResult = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.success, true);
+        assert_eq!(parsed.status, "completed");
+        assert_eq!(parsed.result, Some(graph_result_value));
+        assert!(parsed.result.is_some());
     }
 }

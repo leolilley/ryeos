@@ -118,6 +118,10 @@ pub struct GraphDefinition {
     pub graph_id: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
+    /// Graph-level permissions. Consumed by the graph_permissions
+    /// composer at the daemon layer to produce effective_caps. No
+    /// longer read by the walker (D15).
+    #[allow(dead_code)]
     pub permissions: Vec<String>,
 }
 

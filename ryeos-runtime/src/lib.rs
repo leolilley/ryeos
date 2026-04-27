@@ -4,6 +4,7 @@ pub mod callback_contract;
 pub mod checkpoint;
 pub mod callback_uds;
 pub mod envelope;
+pub mod events;
 pub mod capability_tokens;
 pub mod condition;
 pub mod daemon_rpc;
@@ -25,6 +26,7 @@ pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{
     resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
 };
+pub use events::{RuntimeEventType, StorageClass};
 pub use lillux::crypto::SigningKey;
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{merge_hooks, run_hooks, HookDispatcher};

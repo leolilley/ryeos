@@ -197,13 +197,7 @@ fn build_launch_task(
         };
 
         match crate::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state_clone).await {
-            Ok(crate::dispatch::DispatchOutcome::Unary(_)) => Ok(()),
-            Ok(crate::dispatch::DispatchOutcome::Stream(_)) => {
-                Err(anyhow::anyhow!(
-                    "dispatch produced a streaming outcome — directive_launch \
-                     cannot consume it (only Unary supported here)"
-                ))
-            }
+            Ok(_) => Ok(()),
             Err(e) => Err(anyhow::anyhow!(e.to_string())),
         }
     })

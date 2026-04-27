@@ -12,6 +12,11 @@ pub struct CallbackCapability {
     pub thread_id: String,
     pub project_path: PathBuf,
     pub expires_at: Instant,
+    /// V5.5 P2: composed effective capabilities the parent thread
+    /// holds. Carried on the callback token so the daemon-side
+    /// dispatcher can enforce caps at the trust boundary instead of
+    /// trusting the runtime to self-police. Empty = deny-all.
+    pub effective_caps: Vec<String>,
 }
 
 pub struct CallbackCapabilityStore {
@@ -30,6 +35,7 @@ impl CallbackCapabilityStore {
         thread_id: &str,
         project_path: PathBuf,
         ttl: Duration,
+        effective_caps: Vec<String>,
     ) -> CallbackCapability {
         let random_bytes: [u8; 32] = rand::random();
         let hex = lillux::cas::sha256_hex(&random_bytes);
@@ -45,6 +51,7 @@ impl CallbackCapabilityStore {
             thread_id: thread_id.to_string(),
             project_path,
             expires_at: Instant::now() + ttl,
+            effective_caps,
         };
 
         self.capabilities
@@ -137,6 +144,7 @@ mod tests {
             "T-test123",
             PathBuf::from("/project"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         assert!(cap.token.starts_with("cbt-"));
         assert!(cap.invocation_id.starts_with("inv-"));
@@ -164,6 +172,7 @@ mod tests {
             "T-test",
             PathBuf::from("/p"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         store.invalidate(&cap.token);
         assert!(store
@@ -178,11 +187,13 @@ mod tests {
             "T-1",
             PathBuf::from("/p"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         let cap2 = store.generate(
             "T-2",
             PathBuf::from("/p"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         store.invalidate_for_thread("T-1");
         assert!(store
@@ -200,6 +211,7 @@ mod tests {
             "T-test",
             PathBuf::from("/p"),
             Duration::from_secs(0),
+            Vec::new(),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         let err = store
@@ -215,6 +227,7 @@ mod tests {
             "T-1",
             PathBuf::from("/p"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         let err = store
             .validate(&cap.token, "T-2", PathBuf::from("/p").as_path())
@@ -229,6 +242,7 @@ mod tests {
             "T-1",
             PathBuf::from("/project-a"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         let err = store
             .validate(&cap.token, "T-1", PathBuf::from("/project-b").as_path())
@@ -243,12 +257,14 @@ mod tests {
             "T-1",
             PathBuf::from("/p"),
             Duration::from_secs(0),
+            Vec::new(),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         store.generate(
             "T-2",
             PathBuf::from("/p"),
             Duration::from_secs(300),
+            Vec::new(),
         );
         let pruned = store.prune_expired();
         assert_eq!(pruned, 1);

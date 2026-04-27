@@ -534,6 +534,7 @@ mod tests {
             "T-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
+            Vec::new(),
         );
 
         let resp = dispatch(rpc("runtime.finalize_thread", json!({
@@ -571,6 +572,7 @@ mod tests {
             "T-events-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
+            Vec::new(),
         );
 
         state.threads.create_thread(&make_create_params("T-events-1", "T-events-1")).unwrap();
@@ -612,6 +614,7 @@ mod tests {
             "T-stream-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
+            Vec::new(),
         );
         state
             .threads
@@ -654,6 +657,7 @@ mod tests {
             "T-stream-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
+            Vec::new(),
         );
         state
             .threads
@@ -708,6 +712,7 @@ mod tests {
             "T-cmd-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
+            Vec::new(),
         );
 
         // Mark running first — cancel is only allowed on running threads
@@ -753,6 +758,7 @@ mod tests {
             "T-facets-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
+            Vec::new(),
         );
         let resp = dispatch(rpc("runtime.get_facets", json!({
                 "callback_token": cbt.token,

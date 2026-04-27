@@ -38,15 +38,13 @@
 //!   which returns a `VerifiedHop` carrying the schema, the
 //!   (optional) resolved item, and a `HopAction` instructing the
 //!   loop to terminate, follow an alias, or use a registry hop. The
-//!   loop body is therefore a thin dispatcher — and the SSE seam for
-//!   V5.4 is just a new arm in `dispatch_by`.
+//!   loop body is therefore a thin dispatcher.
 //! - **S2 / F4** Every "X not found" surface enumerates the
 //!   alternatives so an operator can fix the schema/cap/registry
 //!   without spelunking the source.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use serde_json::{json, Value};
 
@@ -65,12 +63,6 @@ use crate::service_executor::{
 };
 use crate::services::thread_lifecycle::ResolvedExecutionRequest;
 use crate::state::AppState;
-
-/// Boxed stream type, kept local so we don't pull in the full `futures`
-/// crate just for the SSE seam. `futures-core` is already a workspace
-/// dep; we re-export its `Stream` trait shape via `Pin<Box<...>>`.
-pub type BoxStream<'a, T> =
-    Pin<Box<dyn futures_core::Stream<Item = T> + Send + 'a>>;
 
 /// Single source of truth for the `runtime:` ref kind discriminator.
 /// Used in two narrow places (B1 cap gate, B4 resolve special-case)
@@ -159,17 +151,6 @@ fn check_dispatch_capabilities(
         });
     }
     Ok(())
-}
-
-/// Result shape from a dispatch call. V5.3 ships only `Unary`; the
-/// `Stream` variant is the SSE seam for V5.4 — adding a streaming
-/// terminator later does not require changing the dispatch core.
-pub enum DispatchOutcome {
-    Unary(Value),
-    /// Reserved for V5.4 SSE work — no V5.3 terminator constructs this.
-    /// The HTTP layer in `api/execute.rs` returns 501 if it ever sees
-    /// one (defensive — should be unreachable in V5.3).
-    Stream(BoxStream<'static, Value>),
 }
 
 // ── A4: per-hop resolution helper + HopAction ─────────────────────────
@@ -450,7 +431,7 @@ pub async fn dispatch_service(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-) -> Result<DispatchOutcome, DispatchError> {
+) -> Result<Value, DispatchError> {
     let params = request.params.clone();
     let canonical = CanonicalRef::parse(item_ref).map_err(|e| {
         DispatchError::InvalidRef(item_ref.to_string(), e.to_string())
@@ -510,7 +491,7 @@ pub async fn dispatch_service(
                 },
                 "result": result.value,
             });
-            Ok(DispatchOutcome::Unary(envelope))
+            Ok(envelope)
         }
         other => Err(DispatchError::SchemaMisconfigured {
             kind: canonical.kind.clone(),
@@ -599,7 +580,7 @@ pub(crate) async fn dispatch_native_runtime(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-) -> Result<DispatchOutcome, DispatchError> {
+) -> Result<Value, DispatchError> {
     let runtime_ref = canonical_ref.to_string();
 
     // The runtime metadata comes from the hop's registry lookup (P1.4).
@@ -724,10 +705,10 @@ pub(crate) async fn dispatch_native_runtime(
         }
     })?;
 
-    Ok(DispatchOutcome::Unary(json!({
+    Ok(json!({
         "thread": result.thread,
         "result": result.result,
-    })))
+    }))
 }
 
 // ── Subprocess terminator ─────────────────────────────────────────────
@@ -739,7 +720,7 @@ pub async fn dispatch_subprocess(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-) -> Result<DispatchOutcome, DispatchError> {
+) -> Result<Value, DispatchError> {
     // Defense-in-depth schema check. The loop already matched
     // Subprocess; we re-check here so any future direct caller cannot
     // accidentally route a non-subprocess ref through.
@@ -826,18 +807,23 @@ pub async fn dispatch_subprocess(
             detail: format!("validate_only join failure: {e}"),
         })??;
 
-        return Ok(DispatchOutcome::Unary(json!({
+        return Ok(json!({
             "validated": true,
             "item_ref": resolved.item_ref,
             "kind": resolved.kind,
             "executor_ref": resolved.executor_ref,
             "trust_class": validated.trust_class,
             "plan_id": validated.plan_id,
-        })));
+        }));
     }
 
     let item_ref_for_error = resolved.item_ref.clone();
 
+    // V5.5 P2 — subprocess (raw tool) terminator: no permissions
+    // composition step exists, so the callback token carries no caps
+    // (deny-all). Tools that need to call back into the daemon must
+    // be lifted to a kind that has a permissions model (directive,
+    // graph, …) and dispatched through that kind's runtime.
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
@@ -846,6 +832,7 @@ pub async fn dispatch_subprocess(
         snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
         temp_dir: request.temp_dir.clone(),
+        effective_caps: Vec::new(),
     };
 
     if request.launch_mode == "detached" {
@@ -854,20 +841,20 @@ pub async fn dispatch_subprocess(
                 item_ref: item_ref_for_error.clone(),
                 detail: e.to_string(),
             })?;
-        Ok(DispatchOutcome::Unary(json!({
+        Ok(json!({
             "thread": result.running_thread,
             "detached": true,
-        })))
+        }))
     } else {
         let result = crate::execution::runner::run_inline(state.clone(), params).await
             .map_err(|e| DispatchError::SubprocessRunFailed {
                 item_ref: item_ref_for_error,
                 detail: e.to_string(),
             })?;
-        Ok(DispatchOutcome::Unary(json!({
+        Ok(json!({
             "thread": result.finalized_thread,
             "result": result.result,
-        })))
+        }))
     }
 }
 
@@ -907,14 +894,16 @@ pub(crate) struct RootSubject {
 /// paths incorrectly recorded the runtime's `thread_profile` and
 /// `item_ref`.
 ///
-/// Adding a streaming terminator (V5.4 SSE) extends `dispatch_by`
-/// only.
+/// `/execute` is unary forever (V5.5 Phase 3 deletion). Live
+/// observation is provided by route-system `event_stream`-mode
+/// routes that tail the durable event store; dispatch never owns
+/// streaming.
 pub async fn dispatch(
     item_ref: &str,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-) -> Result<DispatchOutcome, DispatchError> {
+) -> Result<Value, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
     let mut hops: usize = 0;
@@ -994,8 +983,7 @@ pub async fn dispatch(
     }
 }
 
-/// Route a single terminated hop to its leaf dispatcher. The SSE seam
-/// (V5.4) is just a new arm or a `TerminatorSpec` variant here.
+/// Route a single terminated hop to its leaf dispatcher.
 ///
 /// **P1.1**: receives the hop's fields individually (owned: verified
 /// item, runtime metadata, thread_profile) and the `RootSubject`
@@ -1012,7 +1000,7 @@ async fn dispatch_by(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-) -> Result<DispatchOutcome, DispatchError> {
+) -> Result<Value, DispatchError> {
     match terminator {
         TerminatorSpec::Subprocess => {
             // Subprocess uses the hop's thread_profile directly —

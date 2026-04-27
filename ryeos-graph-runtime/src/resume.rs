@@ -1,3 +1,26 @@
+//! Replay-events resume fallback for the graph runtime.
+//!
+//! V5.5 D10 precedence:
+//!
+//! 1. `RYE_RESUME=1` + a writable local `CheckpointWriter` payload →
+//!    `from_checkpoint_value` (the typed source of truth: cursor +
+//!    state both come back atomically).
+//! 2. `RYE_RESUME=1` + no local checkpoint → fall back to this
+//!    module's `load_resume_state`, which reconstructs the **cursor
+//!    only** by replaying the durable event log. Graph state cannot
+//!    be reconstructed this way (state mutations don't surface in
+//!    indexed events), so resumed runs lose the in-flight `state`
+//!    facet — a deliberate v1 limitation, documented because it's
+//!    the rare path (typically a daemon restart before the first
+//!    checkpoint write).
+//! 3. Both unavailable + resume requested → `main.rs` must fail
+//!    loudly. Silent cold-start when `RYE_RESUME=1` is forbidden.
+//!
+//! The previous facet-keyed implementation (`graph_checkpoint:*`,
+//! `graph_ref:*`) has been removed — facets are runtime-thread
+//! storage that doesn't survive daemon restart, so it never
+//! delivered on its promise as a resume source.
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,65 +35,168 @@ pub struct ResumeState {
     pub graph_run_id: String,
 }
 
+/// Reconstruct a [`ResumeState`] for the thread by scanning its
+/// durable event log.
+///
+/// Walks the persisted events looking for the latest
+/// `graph_step_started` — regardless of `graph_run_id`. Events are
+/// already partitioned by `thread_id`, so the latest `graph_step_started`
+/// for that thread IS the cursor we want. The matched event payload's
+/// `graph_run_id` is reconstructed into the returned `ResumeState`.
+///
+/// D12: replay resume keys on `thread_id` only, not `graph_run_id`.
+/// The launcher doesn't supply graph_run_id, so the old filter always
+/// matched `""` — making replay effectively dead.
+///
+/// Returns `Ok(None)` when no `graph_step_started` exists.
+/// `main.rs` is responsible for turning that into a hard failure
+/// when `RYE_RESUME=1`.
 pub async fn load_resume_state(
     callback: &CallbackClient,
-    graph_run_id: &str,
+    thread_id: &str,
 ) -> Result<Option<ResumeState>> {
-    let facets = callback.get_facets().await?;
+    let response = callback.replay_events_for(thread_id).await?;
+    let events = response
+        .get("events")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-    let checkpoint_key = format!("graph_checkpoint:{}", graph_run_id);
-    let checkpoint_str = facets.get(&checkpoint_key).and_then(|v| v.as_str());
-
-    let Some(checkpoint_str) = checkpoint_str else {
-        let ref_key = format!("graph_ref:{}", graph_run_id);
-        let ref_str = facets.get(&ref_key).and_then(|v| v.as_str());
-        let Some(ref_str) = ref_str else {
-            return Ok(None);
+    // Events are returned in chain-seq order; the LAST
+    // graph_step_started is the cursor we want (no graph_run_id
+    // filter — D12).
+    let mut latest: Option<(String, u32, String)> = None;
+    for ev in &events {
+        let event_type = ev
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if event_type != "graph_step_started" {
+            continue;
+        }
+        let payload = match ev.get("payload") {
+            Some(p) => p,
+            None => continue,
         };
-        let ref_data: Value = serde_json::from_str(ref_str)?;
-        return load_from_ref_data(&ref_data, graph_run_id);
-    };
+        let payload_run_id = payload
+            .get("graph_run_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let node = match payload.get("node").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let step = match payload.get("step").and_then(|v| v.as_u64()) {
+            Some(s) => s as u32,
+            None => continue,
+        };
+        latest = Some((node, step, payload_run_id));
+    }
 
-    let checkpoint: Value = serde_json::from_str(checkpoint_str)?;
-
-    let current_node = checkpoint
-        .get("current_node")
-        .and_then(|v| v.as_str())
-        .unwrap_or("start")
-        .to_string();
-    let step_count = checkpoint
-        .get("step_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-    let state = checkpoint.get("state").cloned().unwrap_or(Value::Object(Default::default()));
-
-    Ok(Some(ResumeState {
-        current_node,
-        step_count,
-        state,
-        graph_run_id: graph_run_id.to_string(),
+    Ok(latest.map(|(node, step, graph_run_id)| ResumeState {
+        current_node: node,
+        step_count: step,
+        // V1 limitation: replay-resume cannot recover state.
+        // CheckpointWriter is the primary resume source.
+        state: Value::Object(Default::default()),
+        graph_run_id,
     }))
 }
 
-fn load_from_ref_data(ref_data: &Value, graph_run_id: &str) -> Result<Option<ResumeState>> {
-    let current_node = ref_data
+/// Construct a `ResumeState` from a `CheckpointWriter` JSON payload.
+///
+/// Payload shape (written by `walker::write_checkpoint`):
+/// ```json
+/// {
+///   "graph_run_id": "...",
+///   "current_node": "<NEXT cursor>",
+///   "step_count": N,
+///   "state": {...},
+///   "written_at": "<iso>"
+/// }
+/// ```
+///
+/// Note: `current_node` here means "where to resume *into*" — the
+/// walker writes the NEXT node's name, not the just-completed one
+/// (R4 fix in `walker.rs`).
+pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
+    let current_node = value
         .get("current_node")
         .and_then(|v| v.as_str())
-        .map(String::from);
-    let step_count = ref_data
+        .ok_or_else(|| anyhow::anyhow!("checkpoint payload missing 'current_node'"))?
+        .to_string();
+    let step_count = value
         .get("step_count")
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-    let state = ref_data.get("state").cloned();
+        .ok_or_else(|| anyhow::anyhow!("checkpoint payload missing 'step_count'"))?
+        as u32;
+    let state = value
+        .get("state")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("checkpoint payload missing 'state'"))?;
+    let graph_run_id = value
+        .get("graph_run_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
 
-    match (current_node, step_count, state) {
-        (Some(node), Some(steps), Some(st)) => Ok(Some(ResumeState {
-            current_node: node,
-            step_count: steps,
-            state: st,
-            graph_run_id: graph_run_id.to_string(),
-        })),
-        _ => Ok(None),
+    Ok(ResumeState {
+        current_node,
+        step_count,
+        state,
+        graph_run_id,
+    })
+}
+
+/// Result of evaluating the V5.5 D10 resume precedence.
+///
+/// `main.rs` reduces the (`RYE_RESUME=1`?, local-checkpoint?, replay?)
+/// triple into one of these four variants. Hoisting the decision into
+/// a pure function keeps the precedence rule unit-testable without
+/// having to spin up a real `CheckpointWriter` + callback transport.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResumeSource {
+    /// `RYE_RESUME` was unset → cold start. Walker boots from
+    /// `cfg.start`.
+    ColdStart,
+    /// Local `CheckpointWriter` payload was present. Wins over
+    /// replay; carries cursor + state both.
+    LocalCheckpoint,
+    /// No local checkpoint, replay-events reconstruction succeeded.
+    /// Carries cursor only — graph state is lost on this path
+    /// (documented v1 limitation).
+    ReplayFallback,
+    /// `RYE_RESUME=1` but neither source is available. `main.rs`
+    /// MUST surface this as a hard error — silent cold-start when
+    /// resume is requested is forbidden by D10.
+    NoSourceAvailable,
+}
+
+/// Pure precedence rule: given (resume requested?, local checkpoint
+/// available?, replay reconstruction succeeded?) return the chosen
+/// source. The caller (`main.rs`) is responsible for actually loading
+/// the payload — this function makes no I/O.
+///
+/// V5.5 D10:
+/// 1. `RYE_RESUME=1` + local checkpoint → `LocalCheckpoint`
+/// 2. `RYE_RESUME=1` + no local + replay hit → `ReplayFallback`
+/// 3. `RYE_RESUME=1` + neither → `NoSourceAvailable` (caller MUST fail loud)
+/// 4. `RYE_RESUME` unset → `ColdStart`
+pub fn decide_resume_source(
+    resume_requested: bool,
+    local_checkpoint_present: bool,
+    replay_succeeded: bool,
+) -> ResumeSource {
+    if !resume_requested {
+        return ResumeSource::ColdStart;
+    }
+    if local_checkpoint_present {
+        ResumeSource::LocalCheckpoint
+    } else if replay_succeeded {
+        ResumeSource::ReplayFallback
+    } else {
+        ResumeSource::NoSourceAvailable
     }
 }
 
@@ -80,16 +206,17 @@ mod tests {
     use async_trait::async_trait;
     use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, RuntimeCallbackAPI};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    struct FacetsMock {
-        facets: HashMap<String, String>,
+    struct ReplayMock {
+        events: Vec<Value>,
     }
 
     #[async_trait]
-    impl RuntimeCallbackAPI for FacetsMock {
-        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> { Ok(json!({})) }
+    impl RuntimeCallbackAPI for ReplayMock {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
@@ -97,66 +224,187 @@ mod tests {
         async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"events": self.events.clone()}))
+        }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
-            Ok(serde_json::to_value(&self.facets).unwrap())
-        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
     }
 
-    fn make_callback(facets: HashMap<String, String>) -> CallbackClient {
-        let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(FacetsMock { facets });
+    fn make_callback(events: Vec<Value>) -> CallbackClient {
+        let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(ReplayMock { events });
         CallbackClient::from_inner(inner, "T-test", "/tmp/test")
     }
 
     #[tokio::test]
-    async fn load_resume_state_returns_none_when_no_data() {
-        let callback = make_callback(HashMap::new());
-        let result = load_resume_state(&callback, "gr-1").await.unwrap();
+    async fn replay_resume_returns_none_when_log_empty() {
+        let callback = make_callback(vec![]);
+        let result = load_resume_state(&callback, "T-test").await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn load_resume_state_from_facets() {
-        let checkpoint = json!({
-            "current_node": "step3",
-            "step_count": 5,
-            "state": {"key": "value"}
-        });
-        let mut facets = HashMap::new();
-        facets.insert(
-            "graph_checkpoint:gr-test123".to_string(),
-            serde_json::to_string(&checkpoint).unwrap(),
-        );
+    async fn replay_resume_loads_from_events() {
+        let events = vec![
+            json!({
+                "event_type": "graph_started",
+                "payload": {"graph_run_id": "gr-target", "graph_id": "g1"}
+            }),
+            json!({
+                "event_type": "graph_step_started",
+                "payload": {"graph_run_id": "gr-target", "node": "step1", "step": 0}
+            }),
+            json!({
+                "event_type": "graph_step_completed",
+                "payload": {"graph_run_id": "gr-target", "node": "step1", "step": 0, "status": "ok"}
+            }),
+            json!({
+                "event_type": "graph_step_started",
+                "payload": {"graph_run_id": "gr-target", "node": "step2", "step": 1}
+            }),
+        ];
+        let callback = make_callback(events);
+        let rs = load_resume_state(&callback, "T-test")
+            .await
+            .unwrap()
+            .expect("resume state must be present");
+        assert_eq!(rs.current_node, "step2");
+        assert_eq!(rs.step_count, 1);
+        assert_eq!(rs.graph_run_id, "gr-target");
+        // V1 limitation: state is empty on replay-resume.
+        assert!(rs.state.as_object().map_or(false, |m| m.is_empty()));
+    }
 
-        let callback = make_callback(facets);
-        let result = load_resume_state(&callback, "gr-test123").await.unwrap();
-        assert!(result.is_some());
-        let state = result.unwrap();
-        assert_eq!(state.current_node, "step3");
-        assert_eq!(state.step_count, 5);
+    /// D12: replay picks the latest graph_step_started for the thread,
+    /// ignoring graph_run_id mismatch. The old filter-by-graph_run_id
+    /// path was dead because the launcher never supplied graph_run_id.
+    #[tokio::test]
+    async fn replay_resume_picks_latest_step_started_ignoring_run_id() {
+        let events = vec![
+            json!({
+                "event_type": "graph_step_started",
+                "payload": {"graph_run_id": "run-a", "node": "step1", "step": 0}
+            }),
+            json!({
+                "event_type": "graph_step_started",
+                "payload": {"graph_run_id": "run-b", "node": "step3", "step": 2}
+            }),
+            json!({
+                "event_type": "graph_step_started",
+                "payload": {"graph_run_id": "run-a", "node": "step5", "step": 4}
+            }),
+        ];
+        let callback = make_callback(events);
+        let rs = load_resume_state(&callback, "T-test")
+            .await
+            .unwrap()
+            .expect("resume state must be present");
+        // Picks the LAST graph_step_started regardless of run_id.
+        assert_eq!(rs.current_node, "step5");
+        assert_eq!(rs.step_count, 4);
+        assert_eq!(rs.graph_run_id, "run-a", "graph_run_id reconstructed from matched event");
     }
 
     #[tokio::test]
-    async fn load_resume_state_from_ref_facet() {
-        let ref_data = json!({
-            "current_node": "step3",
-            "step_count": 5,
-            "state": {"key": "value"}
-        });
-        let mut facets = HashMap::new();
-        facets.insert(
-            "graph_ref:gr-refonly".to_string(),
-            serde_json::to_string(&ref_data).unwrap(),
-        );
+    async fn replay_resume_returns_none_when_no_step_started_events() {
+        let events = vec![json!({
+            "event_type": "graph_started",
+            "payload": {"graph_run_id": "gr-target", "graph_id": "g1"}
+        })];
+        let callback = make_callback(events);
+        let rs = load_resume_state(&callback, "T-test")
+            .await
+            .unwrap();
+        assert!(rs.is_none());
+    }
 
-        let callback = make_callback(facets);
-        let result = load_resume_state(&callback, "gr-refonly").await.unwrap();
-        assert!(result.is_some());
-        let state = result.unwrap();
-        assert_eq!(state.current_node, "step3");
-        assert_eq!(state.step_count, 5);
+    #[test]
+    fn from_checkpoint_value_parses_valid_payload() {
+        let payload = json!({
+            "graph_run_id": "gr-test",
+            "current_node": "step4",
+            "step_count": 7,
+            "state": {"counter": 42},
+            "written_at": "2026-01-01T00:00:00Z",
+        });
+        let state = from_checkpoint_value(&payload).unwrap();
+        assert_eq!(state.current_node, "step4");
+        assert_eq!(state.step_count, 7);
+        assert_eq!(state.graph_run_id, "gr-test");
+        assert_eq!(state.state["counter"], 42);
+    }
+
+    #[test]
+    fn from_checkpoint_value_rejects_missing_fields() {
+        let missing_node = json!({"step_count": 1, "state": {}});
+        assert!(from_checkpoint_value(&missing_node).is_err());
+
+        let missing_step = json!({"current_node": "x", "state": {}});
+        assert!(from_checkpoint_value(&missing_step).is_err());
+
+        let missing_state = json!({"current_node": "x", "step_count": 1});
+        assert!(from_checkpoint_value(&missing_state).is_err());
+    }
+
+    // ── V5.5 D10 precedence (decide_resume_source) ────────────────────
+
+    #[test]
+    fn decide_resume_cold_start_when_resume_unset() {
+        // Without RYE_RESUME=1, presence of either source MUST NOT
+        // cause an unintended resume — the walker is supposed to
+        // cold-start.
+        assert_eq!(
+            decide_resume_source(false, false, false),
+            ResumeSource::ColdStart,
+        );
+        assert_eq!(
+            decide_resume_source(false, true, false),
+            ResumeSource::ColdStart,
+            "checkpoint presence MUST be ignored when RYE_RESUME unset",
+        );
+        assert_eq!(
+            decide_resume_source(false, true, true),
+            ResumeSource::ColdStart,
+        );
+    }
+
+    #[test]
+    fn checkpoint_wins_over_replay_when_both_present() {
+        // D10 step 1: local checkpoint always wins when both sources
+        // are available. The replay path is the explicit fallback
+        // path, never co-equal.
+        assert_eq!(
+            decide_resume_source(true, true, true),
+            ResumeSource::LocalCheckpoint,
+        );
+        assert_eq!(
+            decide_resume_source(true, true, false),
+            ResumeSource::LocalCheckpoint,
+            "checkpoint wins regardless of replay availability",
+        );
+    }
+
+    #[test]
+    fn explicit_replay_fallback_when_no_local_checkpoint() {
+        // D10 step 2: no local checkpoint and replay reconstruction
+        // succeeded → explicit replay fallback. Documented v1
+        // limitation: state cannot be reconstructed (cursor only).
+        assert_eq!(
+            decide_resume_source(true, false, true),
+            ResumeSource::ReplayFallback,
+        );
+    }
+
+    #[test]
+    fn no_source_available_fails_loud() {
+        // D10 step 3: RYE_RESUME=1 but neither source has a payload.
+        // `main.rs` MUST translate this into a hard `bail!`. Pure
+        // function returns the variant; caller surfaces the error.
+        assert_eq!(
+            decide_resume_source(true, false, false),
+            ResumeSource::NoSourceAvailable,
+        );
     }
 }

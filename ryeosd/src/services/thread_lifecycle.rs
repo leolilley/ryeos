@@ -880,6 +880,12 @@ pub fn spawn_item(
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),
                 execution_hints: resolved.plan_context.execution_hints.clone(),
+                // V5.5 P2: subprocess terminator has no permissions
+                // composition step, so resumed callbacks inherit the
+                // same deny-all posture the original spawn had. Native
+                // runtime spawns that DO have a permissions model go
+                // through `launch::build_and_launch`, not `spawn_item`.
+                effective_caps: Vec::new(),
             },
         );
     }

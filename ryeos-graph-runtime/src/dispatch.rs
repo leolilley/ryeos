@@ -58,9 +58,48 @@ pub async fn dispatch_action(
     // the leaf value into continuation chasing — `continuation_id`
     // (when present) lives at the leaf result's top level under the
     // typed contract.
-    let leaf = response.result;
+    let leaf = unwrap_execute_envelope(response.result);
     let followed = follow_continuation(client, &leaf, thread_id, project_path, 0).await?;
     Ok(followed)
+}
+
+/// Peel the daemon's audit envelope so graph `assign` templates see the
+/// bare tool output, not daemon plumbing.
+///
+/// The subprocess terminator (`ryeosd::dispatch::dispatch_subprocess`)
+/// wraps tool stdout in `ExecuteResponseResult { outcome_code, result,
+/// error, artifacts }`. The native-runtime terminator wraps with
+/// `{ success, status, result, outputs, warnings }`. Both are daemon-
+/// internal accounting; the graph user wants `${result.msg}` to access
+/// the tool's actual JSON output, not `${result.result.msg}`.
+///
+/// Detection is structural: an Object containing `result` plus EITHER
+/// the subprocess audit fields (`outcome_code`/`error`/`artifacts`) OR
+/// the native-runtime envelope fields (`success`/`status`/`outputs`).
+/// A bare tool that happens to print `{"result": ...}` without those
+/// sibling fields is left alone — we don't unwrap on `result` alone.
+///
+/// `continuation_id` lives at the leaf's top level under the typed
+/// callback contract, so the unwrap MUST happen before continuation
+/// chasing reads it.
+fn unwrap_execute_envelope(value: Value) -> Value {
+    let Some(obj) = value.as_object() else {
+        return value;
+    };
+    let has_result = obj.contains_key("result");
+    if !has_result {
+        return value;
+    }
+    let is_subprocess_envelope = obj.contains_key("outcome_code")
+        || obj.contains_key("error")
+        || obj.contains_key("artifacts");
+    let is_native_runtime_envelope = obj.contains_key("success")
+        && obj.contains_key("status")
+        && (obj.contains_key("outputs") || obj.contains_key("warnings"));
+    if is_subprocess_envelope || is_native_runtime_envelope {
+        return obj.get("result").cloned().unwrap_or(Value::Null);
+    }
+    value
 }
 
 fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
@@ -76,9 +115,6 @@ fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
 
     if let Some(ref parent_id) = ctx.parent_thread_id {
         params.entry("parent_thread_id").or_insert(json!(parent_id));
-    }
-    if !ctx.capabilities.is_empty() {
-        params.entry("parent_capabilities").or_insert(json!(ctx.capabilities));
     }
     if !ctx.limits.is_null() {
         params.entry("parent_limits").or_insert(ctx.limits.clone());
@@ -209,14 +245,13 @@ mod tests {
         let mut action = json!({"item_id": "directive:test", "params": {}});
         let ctx = ExecutionContext {
             parent_thread_id: Some("T-parent".to_string()),
-            capabilities: vec!["rye.execute.*".to_string()],
             limits: json!({"turns": 10}),
             depth: 2,
         };
         inject_parent_context(&mut action, &ctx);
         assert_eq!(action["params"]["parent_thread_id"], "T-parent");
         assert_eq!(action["params"]["depth"], 3);
-        assert_eq!(action["params"]["parent_capabilities"][0], "rye.execute.*");
+        assert_eq!(action["params"]["parent_limits"]["turns"], 10);
     }
 
     #[tokio::test]
@@ -232,5 +267,83 @@ mod tests {
             result.get("continuation_id").and_then(|v| v.as_str()).is_some(),
             "expected leaf continuation_id at top level after max-depth abort, got: {result}"
         );
+    }
+
+    // ── unwrap_execute_envelope ────────────────────────────────────────
+
+    #[test]
+    fn unwrap_subprocess_envelope_exposes_inner_result() {
+        // dispatch_subprocess returns ExecuteResponseResult-shaped value:
+        // `{outcome_code, result, error, artifacts}`. Graph templates
+        // expect `${result.msg}` to access the bare tool output.
+        let envelope = json!({
+            "outcome_code": "completed",
+            "result": {"msg": "hello"},
+            "error": null,
+            "artifacts": []
+        });
+        let unwrapped = unwrap_execute_envelope(envelope);
+        assert_eq!(unwrapped, json!({"msg": "hello"}));
+    }
+
+    #[test]
+    fn unwrap_native_runtime_envelope_exposes_inner_result() {
+        // dispatch_native_runtime wraps RuntimeResult fields:
+        // `{success, status, result, outputs, warnings}`. Same unwrap
+        // applies for graph→graph or graph→directive dispatches.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": {"state": {"x": 1}},
+            "outputs": null,
+            "warnings": []
+        });
+        let unwrapped = unwrap_execute_envelope(envelope);
+        assert_eq!(unwrapped, json!({"state": {"x": 1}}));
+    }
+
+    #[test]
+    fn unwrap_leaves_bare_tool_output_alone() {
+        // A tool that prints `{"msg": "hello"}` directly (no envelope)
+        // must NOT be unwrapped — there's no `result` key to peel.
+        let bare = json!({"msg": "hello"});
+        assert_eq!(unwrap_execute_envelope(bare.clone()), bare);
+    }
+
+    #[test]
+    fn unwrap_leaves_continuation_id_alone() {
+        // Leaf-shaped continuation values (from sub-thread dispatches)
+        // carry `continuation_id` at the top level. They have no audit
+        // fields, so no unwrap.
+        let cont = json!({"continuation_id": "cont-abc"});
+        assert_eq!(unwrap_execute_envelope(cont.clone()), cont);
+    }
+
+    #[test]
+    fn unwrap_leaves_innocent_result_key_alone() {
+        // A tool that legitimately prints `{"result": ...}` without any
+        // audit/envelope sibling fields must NOT be unwrapped.
+        let bare = json!({"result": "not an envelope"});
+        assert_eq!(unwrap_execute_envelope(bare.clone()), bare);
+    }
+
+    #[test]
+    fn unwrap_handles_non_object_values() {
+        assert_eq!(unwrap_execute_envelope(json!(null)), json!(null));
+        assert_eq!(unwrap_execute_envelope(json!("string")), json!("string"));
+        assert_eq!(unwrap_execute_envelope(json!([1, 2, 3])), json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn unwrap_handles_subprocess_envelope_with_null_inner_result() {
+        // Tool dispatched but no stdout produced — `result` is Null
+        // inside the envelope. Unwrap returns Null, not the wrapper.
+        let envelope = json!({
+            "outcome_code": "completed",
+            "result": null,
+            "error": null,
+            "artifacts": []
+        });
+        assert_eq!(unwrap_execute_envelope(envelope), json!(null));
     }
 }

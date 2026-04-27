@@ -25,7 +25,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 pub use handlers::{
-    ExtendsChainComposer, IdentityComposer, KindComposer, NativeComposerHandlerRegistry,
+    ExtendsChainComposer, GraphPermissionsComposer, IdentityComposer, KindComposer,
+    NativeComposerHandlerRegistry,
 };
 
 use crate::error::EngineError;
@@ -168,8 +169,10 @@ impl std::fmt::Debug for ComposerRegistry {
 mod tests {
     use super::*;
     use crate::kind_registry::KindRegistry;
+    use crate::resolution::{ResolutionStepName, ResolvedAncestor, TrustClass};
     use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
+    use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
 
@@ -243,15 +246,68 @@ composer: {composer}
         let cfg = "  extends_field: ext\n  fields: []\n";
         write_kind(&root, "alpha", "rye/core/extends_chain", Some(cfg), &sk);
         write_kind(&root, "beta", "rye/core/identity", None, &sk);
+        write_kind(&root, "gamma", "rye/core/graph_permissions", None, &sk);
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
         let native = NativeComposerHandlerRegistry::with_builtins();
         let reg = ComposerRegistry::from_kinds(&kinds, &native).unwrap();
         assert!(reg.get("alpha").is_some());
         assert!(reg.get("beta").is_some());
+        assert!(reg.get("gamma").is_some());
         let mut names: Vec<&str> = reg.kinds().collect();
         names.sort();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    /// R-E guardrail: adding graph_permissions composer MUST NOT break
+    /// the extends_chain composer's effective_caps policy-fact
+    /// projection. This test pins that directive-style kinds using
+    /// extends_chain still produce effective_caps via policy_facts.
+    #[test]
+    fn extends_chain_effective_caps_projection_unchanged_after_graph_permissions() {
+        let root = tempdir();
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let cfg = r#"
+  extends_field: ext
+  fields: []
+  policy_facts:
+    - name: effective_caps
+      path: ["permissions", "execute"]
+      expect: array_of_strings
+"#;
+        write_kind(&root, "directive", "rye/core/extends_chain", Some(cfg), &sk);
+        let kinds = KindRegistry::load_base(&[root.clone()], &ts).unwrap();
+
+        let native = NativeComposerHandlerRegistry::with_builtins();
+        let reg = ComposerRegistry::from_kinds(&kinds, &native).unwrap();
+
+        // Compose a directive fixture with permissions.execute
+        let parsed = json!({
+            "permissions": {
+                "execute": ["rye.execute.tool.echo", "rye.execute.tool.read"]
+            }
+        });
+        let anc = ResolvedAncestor {
+            requested_id: "directive:test".into(),
+            resolved_ref: "directive:test".into(),
+            source_path: root.join("directive/test.directive.md"),
+            trust_class: TrustClass::TrustedSystem,
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            raw_content_digest: String::new(),
+        };
+        let (handler, config) = reg.get("directive").unwrap();
+        let view = handler
+            .compose(config, &anc, &parsed, &[], &[])
+            .unwrap();
+        let caps = view.policy_fact_string_seq("effective_caps");
+        assert_eq!(
+            caps,
+            vec!["rye.execute.tool.echo", "rye.execute.tool.read"],
+            "extends_chain effective_caps projection must work unchanged"
+        );
     }
 
     #[test]

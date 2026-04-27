@@ -1,4 +1,4 @@
-# rye:signed:2026-04-26T16:24:57Z:da32c741f3b17948ab2895860b27ec5b82bd339a26be91c5a1f9be8bee615272:zex4vmM3pQ/fXPMDftt17dPsvghLjW3EwffOE6RrHch8B3K+7F2TCw6i6I1Y7N+Uov9+CfB0g90zHfaA4OIMDQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-27T16:16:17Z:b4373416cd33deb713a51abba97435bc1d388fd0162bbadb35e03be36061b5bb:6IWVYqrnQrVeqe6NqCeCdvkUNgPeLTIEjpdJ2YZlfbqwFcMExbXqriTF16kNivsK4hnj0GHan096L9UOM+XhCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -19,14 +19,18 @@ formats:
     parser: parser:rye/core/yaml/yaml
     signature:
       prefix: "#"
-# Empty until graph schema stabilizes — graph-walker enforces fields
-# at consumer layer for now.
-# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
-inventory_kinds: [tool]
-composer: rye/core/identity
+# Graph permissions composer — lifts `permissions:` from the graph item
+# into `policy_facts.effective_caps` so the daemon-side callback cap
+# enforcement (V5.5 P2) gates graph action callbacks the same way it
+# gates directive tool callbacks. Replaces the identity composer which
+# produced no policy facts (deny-all at the daemon boundary).
+composer: rye/core/graph_permissions
 composed_value_contract:
   root_type: mapping
   required: {}
+  optional:
+    config: mapping
+    permissions: sequence
 metadata:
   rules:
     name:

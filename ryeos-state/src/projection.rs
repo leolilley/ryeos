@@ -253,6 +253,45 @@ pub fn project_thread_snapshot(
     )
     .context("failed to project thread snapshot")?;
 
+    // Project the snapshot's `result` / `error` fields into the
+    // `thread_results` table so callers (e.g. graph runtime callback
+    // dispatch through `dispatch_subprocess` → `build_execute_result`)
+    // can read the leaf value back. Without this insert, the
+    // `thread_results` table stays empty even on terminal status, and
+    // every `get_thread_result` returns None — which surfaces as
+    // `response.result == null` at the callback boundary.
+    //
+    // Idempotent under INSERT OR REPLACE: the snapshot is the source
+    // of truth, so re-projection (rebuild, re-apply) overwrites with
+    // the same row.
+    if snapshot.result.is_some() || snapshot.error.is_some() {
+        let result_blob = snapshot
+            .result
+            .as_ref()
+            .map(|v| serde_json::to_vec(v).unwrap_or_default());
+        let error_text = snapshot
+            .error
+            .as_ref()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            });
+        db.connection().execute(
+            "INSERT OR REPLACE INTO thread_results (
+                thread_id, chain_root_id, status, result, error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                &snapshot.thread_id,
+                chain_root_id,
+                snapshot.status.to_string(),
+                result_blob,
+                error_text,
+                &snapshot.updated_at,
+            ],
+        )
+        .context("failed to project thread result")?;
+    }
+
     // Derive edge from upstream_thread_id (CAS-truth derived projection)
     if let Some(ref upstream_id) = snapshot.upstream_thread_id {
         // Avoid duplicate edges — only insert if not already present

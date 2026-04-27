@@ -8,12 +8,6 @@ pub struct ValidationResult {
     pub warnings: Vec<String>,
 }
 
-impl ValidationResult {
-    pub fn ok(&self) -> bool {
-        self.errors.is_empty()
-    }
-}
-
 pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
     let mut result = ValidationResult {
         errors: Vec::new(),
@@ -21,7 +15,12 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
     };
     let cfg = &def.config;
 
-    if !cfg.nodes.contains_key(&cfg.start) {
+    // C3: config.start must exist and be non-empty
+    if cfg.start.is_empty() {
+        result
+            .errors
+            .push("config.start must be a non-empty string".into());
+    } else if !cfg.nodes.contains_key(&cfg.start) {
         result
             .errors
             .push(format!("start node '{}' does not exist", cfg.start));
@@ -34,6 +33,13 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
             .push("graph has no return node — will terminate on max_steps".into());
     }
 
+    // C3: config.nodes must not be empty
+    if cfg.nodes.is_empty() {
+        result
+            .errors
+            .push("config.nodes is empty — at least one node is required".into());
+    }
+
     for (name, node) in &cfg.nodes {
         validate_node(name, node, cfg, &mut result);
     }
@@ -42,6 +48,17 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
 }
 
 fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut ValidationResult) {
+    // R-D: nodes that declare neither `action` nor an explicit
+    // `node_type` (other than default Action) MUST be rejected.
+    // The parser defaults to NodeType::Action, so a bare `{name: {}}`
+    // becomes an action node with no action — a no-op that masks
+    // typos. Reject it.
+    if node.node_type == NodeType::Action && node.action.is_none() && name != &cfg.start {
+        result
+            .errors
+            .push(format!("node '{name}' has no 'action' and no explicit 'node_type' — this is ambiguous"));
+    }
+
     match node.node_type {
         NodeType::Foreach => {
             if node.over.is_none() {
@@ -54,14 +71,39 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                     .errors
                     .push(format!("foreach node '{name}' missing 'action'"));
             }
+            // R-D: foreach nodes MUST declare `as` for the iteration
+            // variable. Without it, the variable defaults to "item"
+            // silently — a typo in the key goes unnoticed.
+            if node.r#as.is_none() {
+                result
+                    .errors
+                    .push(format!("foreach node '{name}' must declare 'as' for the iteration variable"));
+            }
         }
-        NodeType::Gate => {}
+        NodeType::Gate => {
+            // R-D: gate nodes MUST declare `next` as a sequence of
+            // conditions. An unconditional `next` on a gate node means
+            // the gate always goes to the same place — that's an action
+            // node, not a gate. Reject it.
+            match &node.next {
+                None | Some(EdgeSpec::Unconditional(_)) => {
+                    result
+                        .errors
+                        .push(format!("gate node '{name}' must declare conditional 'next' (a sequence of conditions)"));
+                }
+                Some(EdgeSpec::Conditional(edges)) => {
+                    if edges.is_empty() {
+                        result
+                            .errors
+                            .push(format!("gate node '{name}' has empty conditional edges"));
+                    }
+                }
+            }
+        }
         NodeType::Return => {}
         NodeType::Action => {
             if node.action.is_none() && name != &cfg.start {
-                result
-                    .warnings
-                    .push(format!("action node '{name}' has no 'action' defined"));
+                // Already caught above — skip the redundant warning.
             }
         }
     }
@@ -278,5 +320,109 @@ config:
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
         assert!(result.warnings.iter().any(|w| w.contains("undef_key") && w.contains("never assigned")));
+    }
+
+    #[test]
+    fn validate_graph_rejects_empty_nodes() {
+        let yaml = r#"
+category: test
+config:
+  start: step1
+  nodes: {}
+"#;
+        let graph = make_graph(yaml);
+        let result = validate_graph(&graph);
+        assert!(result.errors.iter().any(|e| e.contains("config.nodes is empty")));
+    }
+
+    #[test]
+    fn validate_graph_rejects_missing_config_start_node() {
+        let yaml = r#"
+category: test
+config:
+  start: nonexistent
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo"}
+"#;
+        let graph = make_graph(yaml);
+        let result = validate_graph(&graph);
+        assert!(result.errors.iter().any(|e| e.contains("nonexistent") && e.contains("does not exist")));
+    }
+
+    // R-D: foreach nodes MUST declare `as`.
+
+    #[test]
+    fn validate_graph_rejects_foreach_missing_as() {
+        let yaml = r#"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      action: {item_id: "tool:test/echo"}
+      collect: "results"
+      next: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let result = validate_graph(&graph);
+        assert!(
+            result.errors.iter().any(|e| e.contains("iterate") && e.contains("must declare 'as'")),
+            "expected error for foreach without 'as', got: {:?}",
+            result.errors
+        );
+    }
+
+    // R-D: gate nodes MUST declare conditional `next`.
+
+    #[test]
+    fn validate_graph_rejects_gate_with_unconditional_next() {
+        let yaml = r#"
+category: test
+config:
+  start: check
+  nodes:
+    check:
+      node_type: gate
+      next: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let result = validate_graph(&graph);
+        assert!(
+            result.errors.iter().any(|e| e.contains("check") && e.contains("conditional")),
+            "expected error for gate with unconditional next, got: {:?}",
+            result.errors
+        );
+    }
+
+    // R-D: nodes with no action and no explicit node_type must be rejected.
+
+    #[test]
+    fn validate_graph_rejects_node_with_no_action_or_type() {
+        let yaml = r#"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      next: done
+    done:
+      node_type: return
+    orphan:
+      assign: {foo: bar}
+"#;
+        let graph = make_graph(yaml);
+        let result = validate_graph(&graph);
+        assert!(
+            result.errors.iter().any(|e| e.contains("orphan") && e.contains("ambiguous")),
+            "expected error for node with no action/type, got: {:?}",
+            result.errors
+        );
     }
 }
