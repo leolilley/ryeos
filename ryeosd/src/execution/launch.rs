@@ -221,6 +221,7 @@ pub async fn build_and_launch(
     project_path: &Path,
     parameters: &Value,
     vault_bindings: &HashMap<String, String>,
+    pre_minted_thread_id: Option<&str>,
 ) -> Result<NativeLaunchResult> {
     tracing::info!(
         executor_ref,
@@ -231,7 +232,10 @@ pub async fn build_and_launch(
         "launching native runtime"
     );
     // 1. Create DB thread (status = created)
-    let thread = state.threads.create_root_thread(resolved)?;
+    let thread = match pre_minted_thread_id {
+        Some(id) => state.threads.create_root_thread_with_id(id, resolved)?,
+        None => state.threads.create_root_thread(resolved)?,
+    };
     let thread_id = &thread.thread_id;
 
     // 2. Compute limits (root execution: depth = 0)

@@ -1,0 +1,17 @@
+# rye:signed:2026-04-27T06:12:22Z:c21b44942d362e862b60536b4dea764ae280888b56d4da6550105ee43d9b2e2f:ZNy8CUwDR63iKl7NhhWX/1sesm9fUa4iHVPcPMKn2EcBuUC1/lftdsvOoeVjsdsLTxDTjwZ4zRB2JwMMf7FkDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+section: routes
+id: thread/events-stream
+path: /threads/{thread_id}/events/stream
+methods:
+  - GET
+auth: rye_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 0
+  concurrent_max: 64
+response:
+  mode: event_stream
+  source: thread_events
+  source_config:
+    thread_id: "${path.thread_id}"
+    keep_alive_secs: 15

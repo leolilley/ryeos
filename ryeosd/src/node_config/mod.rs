@@ -21,12 +21,17 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::routes::raw::RawRouteSpec;
+
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionSourcePolicy {
     /// Only `system_data_dir` + `state_dir`.
     /// Used by the `bundles` section so bundles can't self-register.
     SystemAndState,
+    /// `state_dir` + all effective bundle roots.
+    /// Used by sections like `routes` that bundles can contribute to.
+    EffectiveBundleRootsAndState,
 }
 
 /// A single parsed bundle registration record.
@@ -45,6 +50,8 @@ pub struct BundleRecord {
 pub struct NodeConfigSnapshot {
     /// All registered bundle records, in load order.
     pub bundles: Vec<BundleRecord>,
+    /// All loaded route specifications, in load order.
+    pub routes: Vec<RawRouteSpec>,
 }
 
 impl NodeConfigSnapshot {
@@ -83,6 +90,10 @@ impl SectionTable {
         sections.insert(
             "bundles",
             Box::new(sections::bundle::BundleSection),
+        );
+        sections.insert(
+            "routes",
+            Box::new(sections::route::RouteSection),
         );
         Self { sections }
     }

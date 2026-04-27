@@ -696,6 +696,7 @@ pub(crate) async fn dispatch_native_runtime(
         project_path,
         &params,
         &HashMap::new(),
+        None,
     ).await.map_err(|e| {
         // P1.2: classify the anyhow error. Materialization failures
         // (binary not in manifest, CAS miss, arch mismatch) get 502.

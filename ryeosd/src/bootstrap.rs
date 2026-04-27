@@ -246,11 +246,12 @@ pub fn load_node_config_two_phase(
     };
     let snapshot = Arc::new(
         full_loader
-            .load_full(&section_table)
+            .load_full(&section_table, &bundle_records)
             .context("Phase 2: failed to load full node config")?,
     );
     tracing::info!(
         bundle_count = snapshot.bundles.len(),
+        route_count = snapshot.routes.len(),
         "Phase 2: node config loaded"
     );
 

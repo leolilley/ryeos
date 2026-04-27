@@ -18,6 +18,7 @@ pub mod node_config;
 pub mod policy;
 pub mod process;
 pub mod reconcile;
+pub mod routes;
 pub mod runtime_db;
 pub mod service_executor;
 pub mod service_registry;

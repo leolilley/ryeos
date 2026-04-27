@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use serde::Serialize;
 
 use ryeos_engine::engine::Engine;
@@ -10,6 +11,7 @@ use crate::event_stream::ThreadEventHub;
 use crate::execution::callback_token::CallbackCapabilityStore;
 use crate::identity::NodeIdentity;
 use crate::node_config::NodeConfigSnapshot;
+use crate::routes::RouteTable;
 use crate::service_registry::ServiceRegistry;
 use crate::state_store::StateStore;
 use crate::services::command_service::CommandService;
@@ -47,6 +49,8 @@ pub struct AppState {
     pub services: Arc<ServiceRegistry>,
     /// Node-config snapshot loaded at startup.
     pub node_config: Arc<NodeConfigSnapshot>,
+    /// Compiled route table (hot-swapped on UDS reload).
+    pub route_table: Arc<ArcSwap<RouteTable>>,
 }
 
 #[derive(Debug, Serialize)]

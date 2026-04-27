@@ -16,7 +16,7 @@ use ryeosd::services::event_store::EventStoreService;
 use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
 use ryeosd::state::AppState;
 use ryeosd::{
-    api, auth, bootstrap, execution, kind_profiles, process, reconcile, service_executor,
+    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, service_executor,
     service_registry, services, state, state_lock, state_store, uds,
 };
 
@@ -115,7 +115,6 @@ async fn main() -> Result<()> {
                 Ok(resolved) => {
                     match engine.verify(&plan_ctx, resolved) {
                         Ok(verified) => {
-                            // Fail-closed: endpoint extraction + handler registration
                             match ryeosd::service_registry::extract_endpoint(&verified.resolved.metadata.extra) {
                                 Ok(endpoint) => {
                                     if !services.has(&endpoint) {
@@ -181,6 +180,14 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Build the route table from the node-config snapshot.
+    let route_table = {
+        let table = routes::build_route_table_or_bail(&node_config_snapshot)
+            .context("route table build failed at startup — check route YAML files")?;
+        Arc::new(arc_swap::ArcSwap::from_pointee(table))
+    };
+    tracing::info!(routes = route_table.load().all.len(), "route table built");
+
     // These must be initialized after the self-check (which only needs engine + services).
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
     let identity = NodeIdentity::load(&config.signing_key_path)?;
@@ -230,6 +237,7 @@ async fn main() -> Result<()> {
         catalog_health,
         services,
         node_config: node_config_snapshot,
+        route_table,
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -468,6 +476,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(api::health::health))
         .route("/execute", post(api::execute::execute))
+        .fallback(routes::dispatcher::custom_route_dispatcher)
         .with_state(state)
 }
 
@@ -560,7 +569,10 @@ async fn run_service_standalone(
             missing_services: vec![],
         },
         services,
-        node_config: node_config_snapshot,
+        node_config: node_config_snapshot.clone(),
+        route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
+            routes::build_route_table_or_bail(&node_config_snapshot)?,
+        )),
     };
 
     let params: serde_json::Value = match params_json {

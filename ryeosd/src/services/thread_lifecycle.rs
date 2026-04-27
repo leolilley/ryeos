@@ -185,11 +185,19 @@ impl ThreadLifecycleService {
         )
     )]
     pub fn create_root_thread(&self, request: &ResolvedExecutionRequest) -> Result<ThreadDetail> {
+        self.create_root_thread_with_id(&new_thread_id(), request)
+    }
+
+    pub fn create_root_thread_with_id(
+        &self,
+        thread_id: &str,
+        request: &ResolvedExecutionRequest,
+    ) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
-        let thread_id = new_thread_id();
+        validate_thread_id_format(thread_id)?;
         let thread_record = NewThreadRecord {
-            thread_id: thread_id.clone(),
-            chain_root_id: thread_id.clone(),
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
             kind: request.kind.clone(),
             item_ref: request.item_ref.clone(),
             executor_ref: request.executor_ref.clone(),
@@ -561,7 +569,32 @@ fn cost_to_facets(cost: &FinalCost) -> Vec<(String, String)> {
     facets
 }
 
-fn new_thread_id() -> String {
+fn validate_thread_id_format(id: &str) -> Result<()> {
+    if !id.starts_with("T-") {
+        bail!("thread_id must start with `T-`: got `{id}`");
+    }
+    let suffix = &id[2..];
+    let segments: Vec<&str> = suffix.split('-').collect();
+    if segments.len() != 5 {
+        bail!(
+            "thread_id suffix must be UUID-format (8-4-4-4-12 hex groups): got `{suffix}`"
+        );
+    }
+    let expected_lengths: &[usize] = &[8, 4, 4, 4, 12];
+    for (seg, &expected) in segments.iter().zip(expected_lengths.iter()) {
+        if seg.len() != expected || !seg.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!(
+                "thread_id suffix must be hex groups of lengths {expected_lengths:?}: got `{suffix}`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Mints a fresh `T-{uuid}` thread id. 16 random bytes from `OsRng`.
+/// Collision probability is operationally negligible; `state_store`
+/// has `thread_id TEXT PRIMARY KEY` so an unlikely duplicate fails loudly.
+pub fn new_thread_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     format!(
@@ -867,4 +900,44 @@ pub fn spawn_item(
 /// registry has a more specific mapping.
 fn map_to_thread_kind(canonical_kind: &str) -> String {
     format!("{canonical_kind}_run")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_thread_id_accepts_valid_format() {
+        assert!(validate_thread_id_format("T-0123456789abcdef-0123-4567-89ab-cdef01234567").is_ok());
+        let id = new_thread_id();
+        assert!(validate_thread_id_format(&id).is_ok());
+    }
+
+    #[test]
+    fn validate_thread_id_rejects_missing_prefix() {
+        let err = validate_thread_id_format("foo-123").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must start with `T-`"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_thread_id_rejects_non_uuid_suffix() {
+        let err = validate_thread_id_format("T-not-a-uuid").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("UUID-format"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_thread_id_rejects_wrong_segment_lengths() {
+        let err = validate_thread_id_format("T-0123456789abcdef-01-4567-89ab-cdef01234567").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("hex groups"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_thread_id_rejects_non_hex_chars() {
+        let err = validate_thread_id_format("T-ghijklmnopqrst-0123-4567-89ab-cdef01234567").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("hex groups"), "got: {msg}");
+    }
 }

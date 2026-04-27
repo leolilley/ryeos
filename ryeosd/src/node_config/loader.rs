@@ -14,6 +14,7 @@ use super::sections::bundle::BundleSection;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, SectionSourcePolicy, SectionTable,
 };
+use crate::routes::raw::RawRouteSpec;
 
 /// Bootstrap loader for node-config items.
 ///
@@ -160,8 +161,13 @@ impl<'a> BootstrapLoader<'a> {
     }
 
     /// Phase 2: full node-config scan across all sections and sources.
-    pub fn load_full(&self, section_table: &SectionTable) -> Result<NodeConfigSnapshot> {
-        let mut bundles: Vec<BundleRecord> = Vec::new();
+    pub fn load_full(
+        &self,
+        section_table: &SectionTable,
+        bundles: &[BundleRecord],
+    ) -> Result<NodeConfigSnapshot> {
+        let mut loaded_bundles: Vec<BundleRecord> = Vec::new();
+        let mut routes: Vec<RawRouteSpec> = Vec::new();
 
         for section_name in section_table.section_names() {
             let section = section_table
@@ -171,6 +177,11 @@ impl<'a> BootstrapLoader<'a> {
             let scan_roots = match section.source_policy() {
                 SectionSourcePolicy::SystemAndState => {
                     vec![self.system_data_dir.to_path_buf(), self.state_dir.to_path_buf()]
+                }
+                SectionSourcePolicy::EffectiveBundleRootsAndState => {
+                    let mut roots = vec![self.state_dir.to_path_buf()];
+                    roots.extend(bundles.iter().map(|b| b.path.clone()));
+                    roots
                 }
             };
 
@@ -290,18 +301,31 @@ impl<'a> BootstrapLoader<'a> {
                             )
                         })?;
                         record.path = canonical;
-                        bundles.push(record);
+                        loaded_bundles.push(record);
+                    } else if section_name == "routes" {
+                        let record = section
+                            .parse(name, &body)
+                            .with_context(|| format!("failed to parse route record {}", path.display()))?;
+                        let mut record: RawRouteSpec = record
+                            .as_any()
+                            .downcast_ref::<RawRouteSpec>()
+                            .context("RouteSection::parse returned wrong type")?
+                            .clone();
+                        record.source_file = path.clone();
+                        routes.push(record);
                     }
-                    // Future sections (routes, etc.) would be handled here
                 }
             }
 
             if section_name == "bundles" {
-                check_bundle_collisions(&bundles)?;
+                check_bundle_collisions(&loaded_bundles)?;
             }
         }
 
-        Ok(NodeConfigSnapshot { bundles })
+        Ok(NodeConfigSnapshot {
+            bundles: loaded_bundles,
+            routes,
+        })
     }
 }
 

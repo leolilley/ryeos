@@ -40,6 +40,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 ryeos-tracing = { path = "../ryeos-tracing" }
 ryeos-tools = { path = "../ryeos-tools" }   # for actions::catalog::OPERATIONAL_TOOLS
+arc-swap = "1.9.1"
+tokio-stream = "0.1.18"
 
 [dev-dependencies]
 tempfile = "3"

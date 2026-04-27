@@ -1022,18 +1022,27 @@ impl StateStore {
         let event_rows = queries::replay_events(g.state_db.projection(), chain_root_id, thread_id, after_seq, limit)?;
         Ok(event_rows
             .into_iter()
-            .map(|row| PersistedEventRecord {
-                event_id: row.event_id,
-                chain_root_id: row.chain_root_id,
-                chain_seq: row.chain_seq,
-                thread_id: row.thread_id,
-                thread_seq: row.thread_seq,
-                event_type: row.event_type,
-                storage_class: row.durability,
-                ts: row.ts,
-                payload: serde_json::from_slice(&row.payload).unwrap_or(json!({})),
+            .map(|row| {
+                let payload: Value = serde_json::from_slice(&row.payload)
+                    .with_context(|| {
+                        format!(
+                            "malformed JSON payload for event {} (chain_seq {})",
+                            row.event_id, row.chain_seq
+                        )
+                    })?;
+                Ok(PersistedEventRecord {
+                    event_id: row.event_id,
+                    chain_root_id: row.chain_root_id,
+                    chain_seq: row.chain_seq,
+                    thread_id: row.thread_id,
+                    thread_seq: row.thread_seq,
+                    event_type: row.event_type,
+                    storage_class: row.durability,
+                    ts: row.ts,
+                    payload,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>>>()?)
     }
 
     pub fn submit_command(

@@ -397,7 +397,10 @@ mod tests {
                 missing_services: vec![],
             },
             services: Arc::new(crate::service_registry::build_service_registry()),
-            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![] }),
+            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![] }),
+            route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![] }).unwrap(),
+            )),
         };
 
         (tmpdir, state)

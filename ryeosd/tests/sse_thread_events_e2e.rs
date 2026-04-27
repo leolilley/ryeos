@@ -1,0 +1,419 @@
+//! Phase D — SSE thread-events end-to-end test.
+//!
+//! Proves the full SSE chain works:
+//!   1. Start mock provider
+//!   2. Pre-init: trusted signer, standard bundle, mock provider, model routing,
+//!      directive, route YAML, node signing key, authorized key file
+//!   3. Start daemon
+//!   4. POST /execute to run a directive, capture thread_id
+//!   5. GET /threads/{thread_id}/events/stream with rye_signed auth
+//!   6. Read SSE events until terminal
+//!   7. Assert events received correctly
+
+mod common;
+
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::Engine;
+use common::mock_provider::{MockProvider, MockResponse};
+use common::DaemonHarness;
+use lillux::crypto::{EncodePrivateKey, Signer, SigningKey};
+
+fn e2e_signing_key() -> lillux::crypto::SigningKey {
+    lillux::crypto::SigningKey::from_bytes(&[0x77u8; 32])
+}
+
+fn write_trusted_signer(
+    user_space: &Path,
+    vk: &lillux::crypto::VerifyingKey,
+) -> anyhow::Result<()> {
+    use base64::engine::Engine as _;
+
+    let fp = lillux::signature::compute_fingerprint(vk);
+    let trust_dir = user_space.join(".ai/config/keys/trusted");
+    std::fs::create_dir_all(&trust_dir)?;
+    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+    let toml = format!(
+        r#"version = "1.0.0"
+category = "keys/trusted"
+fingerprint = "{fp}"
+owner = "self"
+attestation = ""
+
+[public_key]
+pem = "ed25519:{key_b64}"
+"#
+    );
+    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
+    Ok(())
+}
+
+fn register_standard_bundle(state_path: &Path) -> anyhow::Result<()> {
+    let standard = common::workspace_root().join("ryeos-bundles/standard");
+    if !standard.is_dir() {
+        anyhow::bail!(
+            "ryeos-bundles/standard does not exist at {}; \
+             SSE e2e tests need its CAS-shipped directive-runtime binary",
+            standard.display()
+        );
+    }
+    let abs = standard.canonicalize()?;
+    let dir = state_path.join(".ai/node/bundles");
+    std::fs::create_dir_all(&dir)?;
+
+    let body = format!(
+        "section: bundles\npath: {}\n",
+        abs.display()
+    );
+    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
+    std::fs::write(dir.join("standard.yaml"), signed)?;
+    Ok(())
+}
+
+fn plant_mock_provider(user_space: &Path, mock_base_url: &str) -> anyhow::Result<()> {
+    let dir = user_space.join(".ai/config/rye-runtime/model_providers");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"base_url: "{mock_base_url}"
+auth: {{}}
+headers: {{}}
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
+    std::fs::write(dir.join("mock.yaml"), signed)?;
+    Ok(())
+}
+
+fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
+    let dir = user_space.join(".ai/config/rye-runtime");
+    std::fs::create_dir_all(&dir)?;
+    let body = r#"tiers:
+  general:
+    provider: mock
+    model: mock-model
+    context_window: 200000
+"#;
+    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    std::fs::write(dir.join("model_routing.yaml"), signed)?;
+    Ok(())
+}
+
+fn plant_directive(
+    user_space: &Path,
+    rel_path: &str,
+    body_text: &str,
+) -> anyhow::Result<()> {
+    let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
+    std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
+    let body = format!(
+        r#"---
+__category__: "{rel_path}"
+__directive_description__: "SSE e2e test fixture"
+inputs:
+  name:
+    type: string
+    required: true
+model:
+  tier: general
+---
+{body_text}
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+fn plant_route_yaml(state_path: &Path) -> anyhow::Result<()> {
+    let dir = state_path.join(".ai/node/routes");
+    std::fs::create_dir_all(&dir)?;
+    let body = r#"section: routes
+id: thread/events-stream
+path: /threads/{thread_id}/events/stream
+methods:
+  - GET
+auth: rye_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 0
+  concurrent_max: 64
+response:
+  mode: event_stream
+  source: thread_events
+  source_config:
+    thread_id: "${path.thread_id}"
+    keep_alive_secs: 15
+"#;
+    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    std::fs::write(dir.join("thread-events-stream.yaml"), signed)?;
+    Ok(())
+}
+
+fn write_authorized_key(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
+    let vk = sk.verifying_key();
+    let fp = lillux::signature::compute_fingerprint(&vk);
+    let auth_dir = state_path.join("auth").join("authorized_keys");
+    std::fs::create_dir_all(&auth_dir)?;
+
+    use base64::engine::Engine as _;
+    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+    let toml_body = format!(
+        r#"fingerprint = "{fp}"
+public_key = "ed25519:{key_b64}"
+scopes = ["*"]
+label = "sse-e2e-test"
+"#
+    );
+
+    let signed = lillux::signature::sign_content(&toml_body, sk, "#", None);
+    std::fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
+    Ok(())
+}
+
+fn build_rye_signed_auth_headers(
+    sk: &SigningKey,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    audience: &str,
+) -> Vec<(String, String)> {
+    let fp = lillux::signature::compute_fingerprint(&sk.verifying_key());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let nonce = format!("{:016x}", rand::random::<u64>());
+
+    let body_hash = lillux::cas::sha256_hex(body);
+    let string_to_sign = format!(
+        "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        method.to_uppercase(),
+        path,
+        body_hash,
+        timestamp,
+        nonce,
+        audience,
+    );
+    let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
+    let sig: lillux::crypto::Signature = sk.sign(content_hash.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+    vec![
+        ("x-rye-key-id".into(), format!("fp:{fp}")),
+        ("x-rye-timestamp".into(), timestamp),
+        ("x-rye-nonce".into(), nonce),
+        ("x-rye-signature".into(), sig_b64),
+    ]
+}
+
+struct SseEvent {
+    event: String,
+    id: Option<String>,
+    _data: String,
+}
+
+fn parse_sse_bytes(raw: &[u8]) -> Vec<SseEvent> {
+    let text = String::from_utf8_lossy(raw);
+    let mut events = Vec::new();
+    let mut event = String::new();
+    let mut id: Option<String> = None;
+    let mut data_lines: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        if line.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            event = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("id:") {
+            id = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.trim().to_string());
+        } else if line.is_empty() {
+            if !event.is_empty() || !data_lines.is_empty() {
+                events.push(SseEvent {
+                    event: event.clone(),
+                    id: id.take(),
+                    _data: data_lines.join("\n"),
+                });
+            }
+            event.clear();
+            data_lines.clear();
+        }
+    }
+
+    if !event.is_empty() || !data_lines.is_empty() {
+        events.push(SseEvent {
+            event,
+            id,
+            _data: data_lines.join("\n"),
+        });
+    }
+
+    events
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_thread_events_e2e_live_directive_round_trip() {
+    let mock = MockProvider::start(vec![
+        MockResponse::Text("Hello ".into()),
+        MockResponse::Text("world".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+
+    let node_sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let node_fp = lillux::signature::compute_fingerprint(&node_sk.verifying_key());
+    let node_bytes = node_sk.to_bytes();
+
+    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
+        std::fs::create_dir_all(state_path)?;
+        let sk = e2e_signing_key();
+        write_trusted_signer(user, &sk.verifying_key())?;
+        register_standard_bundle(state_path)?;
+        plant_mock_provider(user, &mock_url)?;
+        plant_model_routing(user)?;
+        plant_directive(user, "test/sse_e2e", "Say hello.",)?;
+        plant_route_yaml(state_path)?;
+
+        let saved_sk = SigningKey::from_bytes(&node_bytes);
+        pre_create_node_key_from(state_path, &saved_sk)?;
+        write_authorized_key(state_path, &saved_sk)?;
+        Ok(())
+    };
+
+    let mut h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "info,ryeosd=debug".into()
+            }),
+        );
+    })
+    .await
+    .expect("start daemon with mock + route YAML");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let (status, body) = match tokio::time::timeout(
+        Duration::from_secs(30),
+        h.post_execute(
+            "directive:test/sse_e2e",
+            project.path().to_str().unwrap(),
+            serde_json::json!({"name": "World"}),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("post /execute failed: {e}"),
+        Err(_) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "POST /execute timed out after 30s.\n\
+                 --- daemon stderr ---\n{stderr}"
+            );
+        }
+    };
+
+    if status != reqwest::StatusCode::OK {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!(
+            "expected 200 from execute; got {status}\nbody={body:#}\n--- stderr ---\n{stderr}"
+        );
+    }
+
+    let result = match body.get("result").cloned() {
+        Some(r) => r,
+        None => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("response missing `result`\nbody={body:#}\n--- stderr ---\n{stderr}");
+        }
+    };
+    if result.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!("result.success must be true\nbody={body:#}\n--- stderr ---\n{stderr}");
+    }
+
+    let thread_id = body
+        .get("thread")
+        .and_then(|t| t.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .expect("thread.thread_id")
+        .to_string();
+
+    let audience = format!("fp:{node_fp}");
+    let sse_path = format!("/threads/{thread_id}/events/stream");
+    let headers =
+        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+
+    let url = format!("http://{}{}", h.bind, sse_path);
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    for (k, v) in &headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    let resp = req.send().await.expect("SSE request failed");
+    assert!(
+        resp.status().is_success(),
+        "SSE returned {}: check daemon stderr",
+        resp.status()
+    );
+
+    let bytes = resp.bytes().await.expect("read SSE body");
+    let events = parse_sse_bytes(&bytes);
+
+    assert!(!events.is_empty(), "no SSE events received");
+
+    let first = &events[0];
+    assert!(
+        matches!(
+            first.event.as_str(),
+            "thread_created" | "stream_started"
+        ),
+        "first event must be thread_created or stream_started, got: {}",
+        first.event
+    );
+
+    let last = events.last().expect("at least one event");
+    let terminal_types = [
+        "thread_completed",
+        "thread_failed",
+        "thread_cancelled",
+        "thread_killed",
+        "thread_timed_out",
+    ];
+    assert!(
+        terminal_types.contains(&last.event.as_str()),
+        "last event must be terminal, got: {}",
+        last.event
+    );
+
+    let mut prev_seq: Option<i64> = None;
+    for ev in &events {
+        if let Some(ref id) = ev.id {
+            let seq: i64 = id.parse().expect("id is numeric");
+            if let Some(p) = prev_seq {
+                assert!(seq > p, "chain_seq must be monotonic: {seq} <= {p}");
+            }
+            prev_seq = Some(seq);
+        }
+    }
+
+    drop(project);
+    drop(mock);
+}
+
+fn pre_create_node_key_from(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
+    let key_dir = state_path.join(".ai").join("identity");
+    std::fs::create_dir_all(&key_dir)?;
+    let pem = sk.to_pkcs8_pem(Default::default())?;
+    std::fs::write(key_dir.join("node-key.pem"), pem.as_bytes())?;
+    Ok(())
+}

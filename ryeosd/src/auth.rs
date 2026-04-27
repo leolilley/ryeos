@@ -245,7 +245,7 @@ fn canonical_path(uri: &axum::http::Uri) -> String {
     }
 }
 
-fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers: &axum::http::HeaderMap, body: &[u8]) -> Result<Principal, String> {
+pub(crate) fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers: &axum::http::HeaderMap, body: &[u8]) -> Result<Principal, String> {
     let key_id = headers
         .get("x-rye-key-id")
         .and_then(|v| v.to_str().ok())
