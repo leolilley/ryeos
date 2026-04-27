@@ -16,6 +16,7 @@ impl AuthVerifier for NoneVerifier {
 
     fn validate_route_config(
         &self,
+        _route_id: &str,
         _auth_config: Option<&Value>,
     ) -> Result<Arc<dyn CompiledAuthVerifier>, RouteConfigError> {
         Ok(Arc::new(CompiledNoneVerifier))
@@ -36,6 +37,7 @@ impl CompiledAuthVerifier for CompiledNoneVerifier {
             scopes: vec![],
             verifier_key: "none",
             verified: false,
+            metadata: std::collections::BTreeMap::new(),
         })
     }
 }
@@ -138,6 +140,7 @@ mod tests {
             route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::routes::build_route_table_or_bail(&snapshot).unwrap(),
             )),
+            webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         };
 
         (tmpdir, state)
@@ -146,7 +149,7 @@ mod tests {
     #[test]
     fn none_verifier_always_succeeds() {
         let verifier = NoneVerifier;
-        let compiled = verifier.validate_route_config(None).unwrap();
+        let compiled = verifier.validate_route_config("test-route", None).unwrap();
         let ctx = VerifierRequestContext {
             method: &Method::GET,
             path: "/test",

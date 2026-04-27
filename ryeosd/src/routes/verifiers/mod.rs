@@ -1,3 +1,4 @@
+pub mod hmac;
 pub mod none;
 pub mod rye_signed;
 
@@ -35,6 +36,7 @@ impl AuthVerifierRegistry {
         let mut r = Self::new();
         r.register(Arc::new(none::NoneVerifier));
         r.register(Arc::new(rye_signed::RyeSignedVerifier));
+        r.register(Arc::new(hmac::HmacVerifier));
         r
     }
 }
@@ -52,13 +54,10 @@ mod tests {
     }
 
     #[test]
-    fn builtins_has_none_and_rye_signed() {
+    fn builtins_registers_none_rye_signed_and_hmac() {
         let r = AuthVerifierRegistry::with_builtins();
         assert!(r.get("none").is_some());
         assert!(r.get("rye_signed").is_some());
-        // hmac_sha256_v1 was deferred (F.17) — Phase E only needs rye_signed.
-        // If/when it's reintroduced it must implement timestamp window,
-        // anti-replay, and constant-time compare per spec §6.
-        assert!(r.get("hmac_sha256_v1").is_none());
+        assert!(r.get("hmac").is_some());
     }
 }

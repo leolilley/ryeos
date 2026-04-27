@@ -51,6 +51,9 @@ pub struct AppState {
     pub node_config: Arc<NodeConfigSnapshot>,
     /// Compiled route table (hot-swapped on UDS reload).
     pub route_table: Arc<ArcSwap<RouteTable>>,
+    /// Process-wide webhook delivery-id dedupe store. Configured per
+    /// route by the `hmac` verifier; constructed once at startup.
+    pub webhook_dedupe: Arc<crate::routes::webhook_dedupe::WebhookDedupeStore>,
 }
 
 #[derive(Debug, Serialize)]

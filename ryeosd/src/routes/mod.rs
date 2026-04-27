@@ -1,12 +1,16 @@
+pub mod abs_path;
 pub mod compile;
 pub mod dispatcher;
+pub mod launch;
 pub mod limits;
 pub mod matcher;
+pub mod parsed_ref;
 pub mod raw;
 pub mod reload;
 pub mod response_modes;
 pub mod streaming_sources;
 pub mod verifiers;
+pub mod webhook_dedupe;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,13 +108,19 @@ pub fn build_route_table(
             continue;
         }
 
+        // Built-in routes mounted in `build_router` (only `/health` +
+        // `/execute` today). Config routes cannot shadow these. The
+        // `/hook/` namespace is *config-owned* — there are no built-in
+        // handlers under it — so config routes are free to register
+        // there. Adding a built-in route here in the future also
+        // requires adding it to the exact-match list below; routes
+        // owned exclusively by config (e.g. `/execute/stream`,
+        // `/threads/{id}/stream`, `/hook/<route-name>/...`) MUST NOT
+        // appear in the reservation list.
         const RESERVED_EXACT: &[&str] = &["/health", "/execute"];
-        const RESERVED_PREFIXES: &[&str] = &["/hook/"];
 
         let path = &raw.path;
-        let reserved = RESERVED_EXACT.iter().find(|r| path == *r)
-            .or_else(|| RESERVED_PREFIXES.iter().find(|r| path.starts_with(*r)));
-        if let Some(r) = reserved {
+        if let Some(r) = RESERVED_EXACT.iter().find(|r| path == *r) {
             errors.push(RouteConfigError::ReservedPathPrefix {
                 id: raw.id.clone(),
                 path: path.clone(),
@@ -130,7 +140,7 @@ pub fn build_route_table(
             }
         };
 
-        let compiled_auth = match verifier.validate_route_config(raw.auth_config.as_ref()) {
+        let compiled_auth = match verifier.validate_route_config(&raw.id, raw.auth_config.as_ref()) {
             Ok(a) => a,
             Err(e) => {
                 errors.push(e);
@@ -322,14 +332,23 @@ mod tests {
     }
 
     #[test]
-    fn reserved_hook_prefix_rejected() {
+    fn hook_prefix_allowed_for_config_routes() {
+        // The `/hook/` namespace is owned by config, not by built-in
+        // routes. Webhook routes (Stripe, GitHub, Slack, ...) are
+        // ordinary config routes that the loader admits without any
+        // reservation check.
         let raw = make_raw("r1", "/hook/stripe", &["POST"], "none", "static");
         let verifier_registry = AuthVerifierRegistry::with_builtins();
         let mode_registry = ResponseModeRegistry::with_builtins();
         let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
-        let msg = format!("{}", err[0]);
-        assert!(msg.contains("reserved path"), "got: {msg}");
+        let table = build_route_table(
+            &[raw],
+            &verifier_registry,
+            &mode_registry,
+            &streaming_sources,
+        )
+        .expect("/hook/* must be admitted by the route table builder");
+        assert_eq!(table.all.len(), 1);
     }
 
     #[test]

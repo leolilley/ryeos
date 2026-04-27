@@ -1,19 +1,27 @@
-//! Phase E — SSE directive_launch end-to-end tests.
+//! Phase E / F.1 — SSE dispatch_launch (kind-agnostic launch source) end-to-end tests.
 //!
 //! Proves the one-call POST+stream chain works:
-//!   1. POST /execute/stream with a JSON body { item_ref, parameters }
+//!   1. POST /execute/stream with a JSON body { item_ref, project_path, parameters }
 //!   2. Receive `stream_started` SSE event with the minted thread_id
 //!   3. Receive lifecycle + LLM events as the directive runs
 //!   4. Receive a terminal `thread_completed` event and stream closes
 //!
 //! Coverage:
-//!   - `sse_directive_launch_e2e_round_trip` — full happy path
-//!   - `sse_directive_launch_rejects_last_event_id` — Last-Event-ID
+//!   - `sse_dispatch_launch_e2e_round_trip` — full happy path
+//!   - `sse_dispatch_launch_rejects_last_event_id` — Last-Event-ID
 //!     header → 400 (the source explicitly does not support resume since
 //!     each invocation mints a fresh thread)
-//!   - `sse_directive_launch_collision` — `create_root_thread_with_id`
+//!   - `sse_dispatch_launch_collision` — `create_root_thread_with_id`
 //!     refuses a duplicate (covers the unique-constraint path that the
 //!     source's launch task surfaces as `stream_error`)
+//!   - `sse_dispatch_launch_rejects_non_root_executable_kind` — posts
+//!     `knowledge:any/thing` and asserts a structured `stream_error`
+//!     with `code = "not_root_executable"` (F.1 negative path)
+//!
+//! Tool happy-path test: skipped. The standard bundle ships no
+//! launchable tool fixture with a trivial body (tool kind requires
+//! subprocess executor). Adding one would modify production bundle
+//! content solely for test enablement — out of scope per plan.
 
 mod common;
 
@@ -112,7 +120,7 @@ fn plant_directive(
     let body = format!(
         r#"---
 __category__: "{rel_path}"
-__directive_description__: "SSE directive_launch e2e test fixture"
+__directive_description__: "SSE dispatch_launch e2e test fixture"
 inputs:
   name:
     type: string
@@ -149,7 +157,7 @@ request:
   body: json
 response:
   mode: event_stream
-  source: directive_launch
+  source: dispatch_launch
   source_config:
     keep_alive_secs: 15
 "#;
@@ -272,7 +280,7 @@ fn parse_sse_bytes(raw: &[u8]) -> Vec<SseEvent> {
 async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
-        MockResponse::Text("from directive_launch".into()),
+        MockResponse::Text("from dispatch_launch".into()),
     ])
     .await;
     let mock_url = mock.base_url.clone();
@@ -320,7 +328,7 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
 /// to `event_streams.subscribe(&thread_id)` therefore observes every
 /// lifecycle event from `thread_started` onward.
 #[tokio::test(flavor = "multi_thread")]
-async fn sse_directive_launch_e2e_round_trip() {
+async fn sse_dispatch_launch_e2e_round_trip() {
     let (h, node_sk, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
@@ -423,7 +431,7 @@ async fn sse_directive_launch_e2e_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sse_directive_launch_rejects_last_event_id() {
+async fn sse_dispatch_launch_rejects_last_event_id() {
     let (h, node_sk, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
@@ -454,12 +462,12 @@ async fn sse_directive_launch_rejects_last_event_id() {
         .expect("POST timed out")
         .expect("POST send failed");
 
-    // `directive_launch::open()` rejects any Last-Event-ID with
+    // `dispatch_launch::open()` rejects any Last-Event-ID with
     // RouteDispatchError::BadRequest → 400.
     assert_eq!(
         resp.status(),
         reqwest::StatusCode::BAD_REQUEST,
-        "expected 400 for Last-Event-ID on directive_launch; got {}",
+        "expected 400 for Last-Event-ID on dispatch_launch; got {}",
         resp.status()
     );
 
@@ -468,7 +476,7 @@ async fn sse_directive_launch_rejects_last_event_id() {
 
 /// E.5 test 3 — duplicate-id collision contract.
 ///
-/// `directive_launch::build_launch_task` calls `dispatch::dispatch`
+/// `dispatch_launch::build_launch_task` calls `dispatch::dispatch`
 /// with `pre_minted_thread_id = Some(thread_id)`, which lands at
 /// `services::thread_lifecycle::create_root_thread_with_id` →
 /// `StateStore::create_thread`. If the pre-minted id collides with
@@ -482,7 +490,7 @@ async fn sse_directive_launch_rejects_last_event_id() {
 /// `thread_id` MUST error. No RNG injection shim — `new_thread_id`
 /// is OsRng-backed and operationally collision-free.
 #[test]
-fn sse_directive_launch_collision() {
+fn sse_dispatch_launch_collision() {
     use ryeosd::identity::NodeIdentity;
     use ryeosd::services::thread_lifecycle::new_thread_id;
     use ryeosd::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
@@ -528,7 +536,7 @@ fn sse_directive_launch_collision() {
     assert!(
         second.is_err(),
         "second state_store.create_thread with the same id must error \
-         (the path that surfaces as stream_error in directive_launch); \
+         (the path that surfaces as stream_error in dispatch_launch); \
          got Ok"
     );
 }
@@ -559,4 +567,126 @@ fn new_thread_id_format_and_uniqueness() {
             );
         }
     }
+}
+
+/// F.1 — non-root-executable negative path.
+///
+/// Posts `knowledge:any/thing` as `item_ref`. The `knowledge` kind
+/// has no `execution:` block in the kind schema, so `dispatch::dispatch`
+/// returns `DispatchError::NotRootExecutable`. The SSE source surfaces
+/// this as a structured `stream_error` event with `code =
+/// "not_root_executable"`.
+///
+/// The `code` field is the contract; the `error` message is
+/// informational and may change.
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
+    let (h, node_sk, node_fp) = boot_daemon().await;
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+
+    let body_obj = serde_json::json!({
+        "item_ref": "knowledge:any/thing",
+        "project_path": project_path,
+        "parameters": {},
+    });
+    let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
+
+    let audience = format!("fp:{node_fp}");
+    let path = "/execute/stream";
+    let headers =
+        build_rye_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+
+    let url = format!("http://{}{}", h.bind, path);
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).body(body_bytes.clone());
+    req = req.header("content-type", "application/json");
+    for (k, v) in &headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    let resp = tokio::time::timeout(Duration::from_secs(30), req.send())
+        .await
+        .expect("POST /execute/stream timed out")
+        .expect("POST /execute/stream send failed");
+    assert!(
+        resp.status().is_success(),
+        "POST /execute/stream returned {}",
+        resp.status()
+    );
+
+    let bytes = tokio::time::timeout(Duration::from_secs(30), resp.bytes())
+        .await
+        .expect("read SSE body timed out")
+        .expect("read SSE body failed");
+
+    let events = parse_sse_bytes(&bytes);
+    assert!(!events.is_empty(), "no SSE events received");
+
+    // First event must be stream_started.
+    assert_eq!(events[0].event, "stream_started");
+
+    // Find the stream_error event.
+    let err = events
+        .iter()
+        .find(|e| e.event == "stream_error")
+        .expect("expected a stream_error event for non-root-executable kind");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&err.data).expect("stream_error data is JSON");
+    assert_eq!(payload["code"], "not_root_executable");
+
+    drop(project);
+}
+
+/// Tool happy-path SSE test: skipped. The standard bundle ships no
+/// launchable tool fixture with a trivial body (tool kind requires
+/// subprocess executor). Adding one would modify production bundle
+/// content solely for test enablement — out of scope per plan.
+
+/// `/execute/stream` rejects a relative `project_path` with 400.
+///
+/// The response is a JSON error body (not SSE) because the
+/// validation happens before the SSE handshake completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_dispatch_launch_rejects_relative_project_path() {
+    let (h, node_sk, node_fp) = boot_daemon().await;
+
+    let body_obj = serde_json::json!({
+        "item_ref": "directive:test/launch_e2e",
+        "project_path": "relative/path",
+        "parameters": {},
+    });
+    let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
+
+    let audience = format!("fp:{node_fp}");
+    let path = "/execute/stream";
+    let headers =
+        build_rye_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+
+    let url = format!("http://{}{}", h.bind, path);
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).body(body_bytes.clone());
+    req = req.header("content-type", "application/json");
+    for (k, v) in &headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    let resp = tokio::time::timeout(Duration::from_secs(10), req.send())
+        .await
+        .expect("POST timed out")
+        .expect("POST send failed");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "expected 400 for relative project_path; got {}",
+        resp.status()
+    );
+
+    let text = resp.text().await.expect("read body");
+    assert!(
+        text.contains("must be absolute"),
+        "body should mention 'must be absolute'; got: {text}"
+    );
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use axum::http::{HeaderMap, Method};
@@ -32,6 +32,34 @@ pub struct RoutePrincipal {
     pub scopes: Vec<String>,
     pub verifier_key: &'static str,
     pub verified: bool,
+    /// Verifier-supplied metadata for downstream consumption by
+    /// response modes. Examples populated by the `hmac` verifier:
+    ///   * `delivery_id` — verifier-extracted unique id (used for
+    ///     dedupe key composition and surfaced in the launch envelope)
+    ///   * `header.<lowercase-name>` — value of an allow-listed
+    ///     forwarded request header (one entry per matched header)
+    ///
+    /// `BTreeMap` rather than `HashMap` so JSON serialization order
+    /// is deterministic — webhook directives often hash params for
+    /// idempotency, and a stable key order is part of that contract.
+    /// Scopes stay strictly authorization data; metadata never gates
+    /// access. The daemon never invents vendor labels; if a route
+    /// YAML wants a vendor tag, it forwards an upstream header via
+    /// `forwarded_headers`.
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl RoutePrincipal {
+    /// Convenience constructor with empty scopes + metadata.
+    pub fn anonymous(id: String, verifier_key: &'static str) -> Self {
+        Self {
+            id,
+            scopes: Vec::new(),
+            verifier_key,
+            verified: false,
+            metadata: BTreeMap::new(),
+        }
+    }
 }
 
 pub struct VerifierRequestContext<'a> {
@@ -53,6 +81,7 @@ pub trait AuthVerifier: Send + Sync {
     fn key(&self) -> &'static str;
     fn validate_route_config(
         &self,
+        route_id: &str,
         auth_config: Option<&Value>,
     ) -> Result<Arc<dyn CompiledAuthVerifier>, RouteConfigError>;
 }

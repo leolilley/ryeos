@@ -121,14 +121,18 @@ pub struct DispatchRequest<'a> {
     /// on this being `"runtime"` so indirect alias chains are not
     /// retroactively cap-broadened.
     pub original_root_kind: &'a str,
-    /// **Phase E.3**: when `Some`, the thread row created by
-    /// `dispatch_native_runtime` must use this id (via
-    /// `create_root_thread_with_id`) instead of minting one. The SSE
-    /// `directive_launch` source mints the id up front so it can
+    /// When `Some`, every dispatch leaf that creates a thread row
+    /// must use this id verbatim instead of minting a fresh one
+    /// (via `create_root_thread_with_id` / equivalent for the
+    /// service audit row). All built-in leaves honor it:
+    /// `dispatch_native_runtime`, `dispatch_subprocess` (inline +
+    /// detached), and `dispatch_service`. The kind-agnostic SSE
+    /// `dispatch_launch` source mints the id up front so it can
     /// subscribe to the event hub *before* the launch task begins,
     /// which is required to avoid losing the very first lifecycle
-    /// event. `None` (the default) preserves the legacy
-    /// "mint inside `create_root_thread`" path.
+    /// event. `None` (the default) preserves the
+    /// "mint inside the leaf" path used by indirect runtime
+    /// dispatch and ad-hoc `/execute` calls.
     pub pre_minted_thread_id: Option<String>,
 }
 
@@ -497,6 +501,7 @@ pub async fn dispatch_service(
                     ExecutionMode::Live,
                     ctx,
                     state,
+                    request.pre_minted_thread_id.as_deref(),
                 )
                 .await?;
             let envelope = serde_json::json!({
@@ -706,22 +711,14 @@ pub(crate) async fn dispatch_native_runtime(
         &params,
         &HashMap::new(),
         request.pre_minted_thread_id.as_deref(),
-    ).await.map_err(|e| {
-        // P1.2: classify the anyhow error. Materialization failures
-        // (binary not in manifest, CAS miss, arch mismatch) get 502.
-        // Everything else stays 500 (unexpected internal errors).
-        let msg = e.to_string();
-        if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
-            || msg.contains("materializ") || msg.contains("native executor")
-            || msg.contains("arch check")
-        {
+    ).await.map_err(|e| match e {
+        launch::BuildAndLaunchError::Materialization(me) => {
             DispatchError::RuntimeMaterializationFailed {
                 executor_ref: executor_ref.clone(),
-                detail: msg,
+                detail: me.to_string(),
             }
-        } else {
-            DispatchError::Internal(e)
         }
+        launch::BuildAndLaunchError::Internal(err) => DispatchError::Internal(err),
     })?;
 
     Ok(DispatchOutcome::Unary(json!({
@@ -846,6 +843,7 @@ pub async fn dispatch_subprocess(
         snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
         temp_dir: request.temp_dir.clone(),
+        pre_minted_thread_id: request.pre_minted_thread_id.clone(),
     };
 
     if request.launch_mode == "detached" {
