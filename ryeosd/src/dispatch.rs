@@ -654,13 +654,32 @@ pub(crate) async fn dispatch_native_runtime(
     // For indirect paths, root_subject carries the directive's identity.
     // For direct runtime invocation, root_subject IS the runtime hop.
     // If root_subject wasn't captured (edge case), fall back to the
-    // current hop's data.
-    let subject = root_subject.unwrap_or_else(|| RootSubject {
-        item_ref: runtime_ref.clone(),
-        thread_profile: hop_thread_profile
-            .unwrap_or_else(|| "runtime_run".to_string()),
-        verified: hop_verified,
-    });
+    // current hop's data — but ONLY if the hop supplied a
+    // schema-derived `thread_profile`. A missing `thread_profile`
+    // here means the runtime kind schema lacks `execution.thread_profile`;
+    // engine init should have rejected that at startup, but
+    // defense-in-depth fails loudly instead of inventing a literal.
+    let subject = match root_subject {
+        Some(s) => s,
+        None => {
+            let thread_profile = hop_thread_profile.ok_or_else(|| {
+                DispatchError::SchemaMisconfigured {
+                    kind: canonical_ref.kind.clone(),
+                    detail: format!(
+                        "runtime hop for '{runtime_ref}' produced no thread_profile; \
+                         the runtime kind schema must declare \
+                         `execution.thread_profile` (engine init should have \
+                         rejected this — fix the kind YAML)"
+                    ),
+                }
+            })?;
+            RootSubject {
+                item_ref: runtime_ref.clone(),
+                thread_profile,
+                verified: hop_verified,
+            }
+        }
+    };
 
     // Resolve the subject item for the resolution pipeline. The subject
     // is the directive for indirect paths — we need its extends chain,
