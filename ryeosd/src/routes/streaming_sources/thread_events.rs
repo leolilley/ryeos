@@ -298,26 +298,7 @@ impl BoundStreamingSource for CompiledThreadEventsSource {
                                 cursor = page_result.next_cursor;
                             }
                             Err(e) => {
-                                yield Ok(sse_error_event(&format!("replay failed: {e}")));
-                                break;
-                            }
-                        }
-                    }
-
-                    let mut buffered: Vec<PersistedEventRecord> = Vec::new();
-                    while let Ok(ev) = rx.try_recv() {
-                        if ev.chain_seq > max_seq {
-                            buffered.push(ev);
-                        }
-                    }
-                    buffered.sort_by_key(|e| e.chain_seq);
-
-                    for ev in &buffered {
-                        if ev.chain_seq > max_seq {
-                            max_seq = ev.chain_seq;
-                            yield Ok(sse_event_for_persisted(ev));
-                            yielded_any_replay_event = true;
-                            if is_terminal(&ev.event_type) {
+                                yield Ok(sse_error_event(&format!("replay paging failed: {e}")));
                                 return;
                             }
                         }

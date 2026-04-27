@@ -24,7 +24,6 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 form_urlencoded = "1"
 futures-core = "0.3"
-hmac = "0.12"
 lillux = { path = "../lillux" }
 rand = "0.8"
 rmp-serde = "1"

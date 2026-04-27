@@ -78,6 +78,13 @@ impl ThreadEventHub {
                 tx
             });
         let _ = sender.send(event);
+        let receiver_count = sender.receiver_count();
+        if receiver_count == 0 {
+            // Lazy cleanup: no live subscribers means this thread's
+            // sender is dead weight. Reclaim the entry; the next
+            // subscriber recreates lazily.
+            guard.remove(thread_id);
+        }
     }
 
     /// Bulk publish in order. Used by `runtime.append_events` so a
@@ -96,6 +103,11 @@ impl ThreadEventHub {
             });
         for ev in events {
             let _ = sender.send(ev.clone());
+        }
+        let receiver_count = sender.receiver_count();
+        if receiver_count == 0 {
+            // Lazy cleanup — see `publish`.
+            guard.remove(thread_id);
         }
     }
 
@@ -163,6 +175,26 @@ mod tests {
         // receivers and the hub deliberately ignores it because
         // persistence already happened upstream.
         hub.publish("T-y", sample_event("T-y", 1, "turn_start"));
+    }
+
+    #[tokio::test]
+    async fn publish_with_no_subscribers_lazily_cleans_up() {
+        let hub = ThreadEventHub::new(8);
+        hub.publish("T-cleanup", sample_event("T-cleanup", 1, "turn_start"));
+        // No subscriber was ever attached — the lazily-created sender
+        // is reclaimed so the hub does not accumulate zombie channels.
+        let count = hub.inner.lock().unwrap().len();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn publish_keeps_entry_when_subscriber_attached() {
+        let hub = ThreadEventHub::new(8);
+        let _rx = hub.subscribe("T-keep");
+        hub.publish("T-keep", sample_event("T-keep", 1, "turn_start"));
+        // A live subscriber means the entry is still useful.
+        let count = hub.inner.lock().unwrap().len();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
