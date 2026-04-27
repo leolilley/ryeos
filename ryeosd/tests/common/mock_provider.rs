@@ -39,11 +39,12 @@
 //! `common/mod.rs`.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::routing::post;
 use axum::Router;
@@ -97,12 +98,21 @@ impl MockResponse {
     }
 }
 
+/// Shared mock-provider state. The queue is popped FIFO per request;
+/// each request's headers are appended to `captured_headers` so a
+/// test can assert that env-var-injected secrets reach the wire.
+struct MockState {
+    queue: Vec<MockResponse>,
+    captured_headers: Vec<HashMap<String, String>>,
+}
+
 /// A live mock provider. Drop signals shutdown to the server task.
 pub struct MockProvider {
     /// Base URL clients should POST `/chat/completions` to. NB the
     /// adapter at `adapter.rs:24` appends `/chat/completions`, so
     /// `base_url` itself is the bare `http://127.0.0.1:<port>`.
     pub base_url: String,
+    state: Arc<Mutex<MockState>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<()>>,
 }
@@ -115,11 +125,14 @@ impl MockProvider {
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let base_url = format!("http://127.0.0.1:{port}");
 
-        let state = Arc::new(Mutex::new(canned));
+        let state = Arc::new(Mutex::new(MockState {
+            queue: canned,
+            captured_headers: Vec::new(),
+        }));
 
         let app = Router::new()
             .route("/chat/completions", post(handle_chat_completions))
-            .with_state(state);
+            .with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind(bind)
             .await
@@ -137,9 +150,18 @@ impl MockProvider {
 
         Self {
             base_url,
+            state,
             shutdown_tx: Some(shutdown_tx),
             join: Some(join),
         }
+    }
+
+    /// Snapshot of all request-header maps observed since startup,
+    /// in arrival order. Header names are lowercased and values are
+    /// taken from the first occurrence (axum's `HeaderMap`
+    /// preserves order; this helper flattens to `String -> String`).
+    pub async fn captured_headers(&self) -> Vec<HashMap<String, String>> {
+        self.state.lock().await.captured_headers.clone()
     }
 }
 
@@ -154,18 +176,30 @@ impl Drop for MockProvider {
     }
 }
 
+fn flatten_headers(headers: &HeaderMap) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (k, v) in headers.iter() {
+        let name = k.as_str().to_ascii_lowercase();
+        let value = v.to_str().unwrap_or("").to_string();
+        out.entry(name).or_insert(value);
+    }
+    out
+}
+
 async fn handle_chat_completions(
-    State(state): State<Arc<Mutex<Vec<MockResponse>>>>,
+    State(state): State<Arc<Mutex<MockState>>>,
+    headers: HeaderMap,
     Json(_body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let mut queue = state.lock().await;
-    if queue.is_empty() {
+    let mut g = state.lock().await;
+    g.captured_headers.push(flatten_headers(&headers));
+    if g.queue.is_empty() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "mock_provider: canned response queue exhausted".to_string(),
         ));
     }
-    let next = queue.remove(0);
+    let next = g.queue.remove(0);
     let choice = next.into_choice();
     let resp = json!({
         "choices": [choice],
