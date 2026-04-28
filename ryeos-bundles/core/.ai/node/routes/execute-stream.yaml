@@ -1,4 +1,4 @@
-# rye:signed:2026-04-27T13:13:31Z:ab0a0b461a4f1716f14534f93a2394bfc86645cd7c3fce2878f6984775f9d0ca:h0C5FYpv8asLtmY7p+wHDTWwcPOhZ6/uzO+rWfS4Xdv4F8o2bgLHfQqyZrwwNjUZ5UMhbNYpi6IX0l5NDGaJAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-27T14:54:12Z:c17eee860453b70a2a8e1359a0de445377f0b05ffcada167dabcdf2d63bdbd60:NdiczGrbMO4vDLgL0bEu+jHxZ2/3j4f/YJEBH/mIjrWXRAfN2dGaNs6kfMGphFWEjvYhUb1Ryc1gzPU82x+uBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 section: routes
 id: execute/stream
 path: /execute/stream
@@ -13,6 +13,6 @@ request:
   body: json
 response:
   mode: event_stream
-  source: directive_launch
+  source: dispatch_launch
   source_config:
     keep_alive_secs: 15

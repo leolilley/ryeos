@@ -1,4 +1,5 @@
 pub mod event_stream_mode;
+pub mod launch_mode;
 pub mod static_mode;
 
 use std::sync::Arc;
@@ -33,6 +34,7 @@ impl ResponseModeRegistry {
         let mut r = Self::new();
         r.register(Arc::new(static_mode::StaticMode));
         r.register(Arc::new(event_stream_mode::EventStreamMode));
+        r.register(Arc::new(launch_mode::LaunchMode));
         r
     }
 }
@@ -42,11 +44,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_register_static_and_event_stream() {
+    fn builtins_register_static_event_stream_and_launch() {
         let r = ResponseModeRegistry::with_builtins();
         assert!(r.get("static").is_some());
         assert!(r.get("event_stream").is_some());
-        assert!(r.get("tool_response").is_none());
+        assert!(r.get("launch").is_some());
+        // Unknown modes never silently resolve.
+        assert!(r.get("nonexistent_mode").is_none());
     }
 
     #[test]

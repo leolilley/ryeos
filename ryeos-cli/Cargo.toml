@@ -1,0 +1,39 @@
+[package]
+name = "ryeos-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for Rye OS"
+
+[[bin]]
+name = "rye"
+path = "src/main.rs"
+
+[[bin]]
+name = "rye-bundle-tool"
+path = "src/bin/rye-bundle-tool.rs"
+
+[dependencies]
+anyhow      = "1"
+base64      = "0.22"
+bytes       = "1"
+clap        = { version = "4", features = ["derive"] }
+dirs        = "5"
+hex         = "0.4"
+http-body-util = "0.1"
+hyper       = { version = "1", features = ["client", "http1"] }
+hyper-util  = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+rand        = "0.8"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
+thiserror   = "1"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-util", "net"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+lillux       = { path = "../lillux" }
+ryeos-engine = { path = "../ryeos-engine" }
+ryeos-tools  = { path = "../ryeos-tools" }
+
+[dev-dependencies]
+tempfile = "3"

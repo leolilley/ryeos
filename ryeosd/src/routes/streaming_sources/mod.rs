@@ -1,4 +1,4 @@
-pub mod directive_launch;
+pub mod dispatch_launch;
 pub mod thread_events;
 
 use std::sync::Arc;
@@ -79,7 +79,7 @@ impl StreamingSourceRegistry {
 
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
-        r.register(Arc::new(directive_launch::DirectiveLaunchSource));
+        r.register(Arc::new(dispatch_launch::DispatchLaunchSource));
         r.register(Arc::new(thread_events::ThreadEventsSource));
         r
     }
@@ -99,7 +99,7 @@ mod tests {
     fn builtins_register_thread_events() {
         let r = StreamingSourceRegistry::with_builtins();
         assert!(r.get("thread_events").is_some());
-        assert!(r.get("directive_launch").is_some());
+        assert!(r.get("dispatch_launch").is_some());
         assert!(r.get("nonexistent").is_none());
     }
 

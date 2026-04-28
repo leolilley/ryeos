@@ -1,9 +1,11 @@
-//! Action library — direct-mode logic shared by the `rye` CLI binary
-//! (in `rye-cli/`) and (transitively) the daemon's spawned-subprocess workers.
+//! Action library — direct-mode logic shared by maintainer-only binaries
+//! (e.g. `ryeos-cli`'s `rye-bundle-tool`, which calls
+//! [`build_bundle::rebuild_bundle_manifest`]) and (transitively) the
+//! daemon's spawned-subprocess workers.
 //!
-//! Each submodule exposes a small `run_*` API used by `rye-cli/src/exec.rs`.
-//! No `Command::new("rye-*")` shelling — every direct subcommand runs
-//! the logic in-process.
+//! Each submodule exposes a small `run_*` / `rebuild_*` API. No
+//! `Command::new("rye-*")` shelling — every direct subcommand runs the
+//! logic in-process so callers get typed errors and a single audit path.
 
 pub mod build_bundle;
 pub mod sign;

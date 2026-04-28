@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:34Z:0650b00f37fb0b51f3a7126a670dcc2b7dc05f7987d87d2c9cdc26321db5d200:xf4wCSslHvRemqOiEaow5LobxWAzqyA2a1apQj9t9tf49gs2uQOiCzAJCyEWX1ZzugUjSoyLYB84nHw0mEQnBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["thread", "chain"]
+description: "Get the parent chain for a thread (root -> ... -> thread)."
+execute: service:threads/chain

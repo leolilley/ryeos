@@ -422,6 +422,7 @@ mod tests {
             route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![] }).unwrap(),
             )),
+            webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         };
 
         (tmpdir, state)

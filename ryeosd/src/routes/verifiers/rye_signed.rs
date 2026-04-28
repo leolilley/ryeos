@@ -18,6 +18,7 @@ impl AuthVerifier for RyeSignedVerifier {
 
     fn validate_route_config(
         &self,
+        _route_id: &str,
         _auth_config: Option<&Value>,
     ) -> Result<Arc<dyn CompiledAuthVerifier>, RouteConfigError> {
         Ok(Arc::new(CompiledRyeSignedVerifier))
@@ -57,6 +58,7 @@ impl CompiledAuthVerifier for CompiledRyeSignedVerifier {
             scopes: principal.scopes,
             verifier_key: "rye_signed",
             verified: true,
+            metadata: std::collections::BTreeMap::new(),
         })
     }
 }

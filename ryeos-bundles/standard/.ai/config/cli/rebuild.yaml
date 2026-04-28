@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T23:42:32Z:ee074e874eae690f6f469fecd066ebce45ab951bd18f54927f2372cc95099cbb:oy5/5YrcZw4Rm+tMnd2dAT/OzQLu/LwbNZizt8ne2yDMhuwQsktbZDSZFiVW6jjAR+tgaOo3Lyho5qUGrvMRBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["rebuild"]
+description: "Rebuild the daemon's projection database."
+execute: service:rebuild

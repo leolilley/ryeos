@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:35Z:21f9adee6156ebca43e608ef606429bc32d5a11c4f12498081dff72234527e4a:fREMaFiwQ3ilSBUpv2iPzPQGzSpeDEqjnDFCY3Ip2NYm0h4fY/feufuVTpgVxF+mvgWyrkReN5bLShtxDp+lDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["thread", "get"]
+description: "Get a single thread's metadata by id."
+execute: service:threads/get

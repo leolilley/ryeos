@@ -189,7 +189,7 @@ mod tests {
             path_pattern: path.to_string(),
             methods: methods.iter().map(|s| s.parse().unwrap()).collect(),
             auth: crate::routes::verifiers::none::NoneVerifier
-                .validate_route_config(None)
+                .validate_route_config(id, None)
                 .unwrap(),
             limits: crate::routes::compile::CompiledLimits {
                 body_bytes_max: 1048576,

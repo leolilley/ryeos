@@ -42,6 +42,13 @@ pub struct ExecutionParams {
     /// Pre-checked-out CAS temp dir (from ResolvedProjectContext).
     /// When set, the runner should reuse this instead of doing a second checkout.
     pub temp_dir: Option<PathBuf>,
+    /// Caller-supplied thread id. When `Some(id)`, the new thread row
+    /// uses that id (so an external subscriber registered against `id`
+    /// receives every lifecycle event from `thread_started` onward).
+    /// When `None`, a fresh id is minted via the lifecycle service.
+    /// Mirrors the same field on `dispatch::DispatchRequest` and
+    /// `execution::launch::build_and_launch`'s native runtime path.
+    pub pre_minted_thread_id: Option<String>,
     /// V5.5 P2: composed capability set the daemon will enforce on
     /// every callback dispatch the spawned subprocess attempts. The
     /// caller MUST supply this explicitly — empty `Vec` means deny-all
@@ -516,11 +523,16 @@ pub async fn run_inline(
         guard.track_temp_dir(d.clone());
     }
 
-    // Create and track thread
-    let created = state
-        .threads
-        .create_root_thread(&params.resolved)
-        .map_err(|e| { guard.cleanup(); e })?;
+    // Create and track thread.
+    // When the caller pre-minted a thread id (e.g. an SSE subscriber
+    // registered against a known id before launch), use it verbatim
+    // so the persistence-first contract holds: the very first
+    // `thread_started` event lands under the id the subscriber sees.
+    let created = match params.pre_minted_thread_id.as_deref() {
+        Some(id) => state.threads.create_root_thread_with_id(id, &params.resolved),
+        None => state.threads.create_root_thread(&params.resolved),
+    }
+    .map_err(|e| { guard.cleanup(); e })?;
     let running = state
         .threads
         .mark_running(&created.thread_id)
@@ -703,11 +715,13 @@ pub async fn run_detached(
         guard.track_temp_dir(d.clone());
     }
 
-    // Create and track thread
-    let created = state
-        .threads
-        .create_root_thread(&params.resolved)
-        .map_err(|e| { guard.cleanup(); e })?;
+    // Create and track thread.
+    // See `run_inline` for why pre_minted_thread_id is honored.
+    let created = match params.pre_minted_thread_id.as_deref() {
+        Some(id) => state.threads.create_root_thread_with_id(id, &params.resolved),
+        None => state.threads.create_root_thread(&params.resolved),
+    }
+    .map_err(|e| { guard.cleanup(); e })?;
     let running = state
         .threads
         .mark_running(&created.thread_id)
@@ -1140,6 +1154,10 @@ pub fn execution_params_from_resume_context(
         snapshot_hash: resume.original_snapshot_hash.clone(),
         parameters: resume.parameters.clone(),
         temp_dir: None,
+        // Resume reuses the existing thread row's id by going through
+        // `attach_to_existing_thread` rather than `create_root_thread`,
+        // so `pre_minted_thread_id` is irrelevant on this path.
+        pre_minted_thread_id: None,
         // V5.5 P2: carry the effective_caps captured at original
         // spawn time. The reconciler restores them verbatim so
         // resumed callbacks are enforced under the same set the

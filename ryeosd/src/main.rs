@@ -238,6 +238,7 @@ async fn main() -> Result<()> {
         services,
         node_config: node_config_snapshot,
         route_table,
+        webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -573,6 +574,7 @@ async fn run_service_standalone(
         route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
             routes::build_route_table_or_bail(&node_config_snapshot)?,
         )),
+        webhook_dedupe: Arc::new(routes::webhook_dedupe::WebhookDedupeStore::new()),
     };
 
     let params: serde_json::Value = match params_json {

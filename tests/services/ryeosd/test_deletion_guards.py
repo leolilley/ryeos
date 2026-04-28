@@ -36,31 +36,42 @@ class TestNoLegacyImports:
             pass
 
     def test_no_registry_db_in_production_code(self):
-        """No file under ryeos/ or ryeos-cli/ should reference registry.db."""
-        for search_dir in ["ryeos/rye", "ryeos-cli/rye_cli"]:
-            root = PROJECT_ROOT / search_dir
+        """No production code should reference registry.db.
+
+        The V5.5 cli-impl swap replaced the Python `ryeos-cli/rye_cli/`
+        package with a Rust crate at `ryeos-cli/src/`, so this guard now
+        scans both Python (legacy `ryeos/rye/`) and Rust (`ryeos-cli/src/`)
+        production trees.
+        """
+        targets = [
+            (PROJECT_ROOT / "ryeos" / "rye", "*.py"),
+            (PROJECT_ROOT / "ryeos-cli" / "src", "*.rs"),
+        ]
+        for root, pattern in targets:
             if not root.exists():
                 continue
-            for py_file in root.rglob("*.py"):
-                if "__pycache__" in str(py_file):
+            for src_file in root.rglob(pattern):
+                if "__pycache__" in str(src_file) or "/target/" in str(src_file):
                     continue
-                source = py_file.read_text(errors="replace")
+                source = src_file.read_text(errors="replace")
                 assert "registry.db" not in source, (
-                    f"{py_file.relative_to(PROJECT_ROOT)} references registry.db"
+                    f"{src_file.relative_to(PROJECT_ROOT)} references registry.db"
                 )
 
     def test_cli_no_direct_execute_tool(self):
-        """CLI verbs must not instantiate ExecuteTool directly."""
-        cli_dir = PROJECT_ROOT / "ryeos-cli" / "rye_cli" / "verbs"
-        if not cli_dir.exists():
-            pytest.skip("CLI verbs directory does not exist yet")
-        for py_file in cli_dir.glob("*.py"):
-            if py_file.name.startswith("__"):
-                continue
-            # fetch.py and sign.py are allowed (policy operations)
-            if py_file.name in ("fetch.py", "sign.py", "uninstall.py"):
-                continue
-            source = py_file.read_text()
+        """CLI sources must not instantiate ExecuteTool directly.
+
+        Post cli-impl swap, the CLI is Rust under `ryeos-cli/src/`;
+        scan it for the forbidden symbol. (Detailed structural checks
+        live in `test_cli_cutover.py`; this is the deletion-guard
+        sentinel that fires if anything resurrects the legacy name.)
+        """
+        cli_src = PROJECT_ROOT / "ryeos-cli" / "src"
+        if not cli_src.exists():
+            pytest.skip("ryeos-cli/src does not exist yet")
+        for rs_file in cli_src.rglob("*.rs"):
+            source = rs_file.read_text(errors="replace")
             assert "ExecuteTool" not in source, (
-                f"{py_file.name} still uses ExecuteTool — must use daemon_execute"
+                f"{rs_file.relative_to(PROJECT_ROOT)} references ExecuteTool — "
+                "the CLI must dispatch via HTTP, not in-process engine calls."
             )

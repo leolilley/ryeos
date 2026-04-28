@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:35Z:4877a447ac172b01e4eec46349b255e69c8f34c13b0c6a0cb4f2d5b020836932:yeVHvuspZj/M5oPNNuyHp+YkM67qpJlJpOIhQpwqIKoltWKUmQ00cBruFFnY4nRYK/JPJwqpWlrJwPS4WV59Cw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["thread", "tail"]
+description: "Tail a thread's persisted events live (SSE)."
+execute: service:threads/tail

@@ -132,7 +132,7 @@ pub async fn execute_service(
     state: &AppState,
 ) -> Result<ServiceExecutionResult> {
     let verified = resolve_and_verify(&ctx.engine, &ctx.plan_ctx, service_ref, Some("service"))?;
-    execute_service_verified(verified, service_ref, params, mode, ctx, state).await
+    execute_service_verified(verified, service_ref, params, mode, ctx, state, None).await
 }
 
 /// Execute a service given an already-verified item.
@@ -141,6 +141,12 @@ pub async fn execute_service(
 /// check, cap enforcement, audit record creation, handler dispatch, audit
 /// finalization. Split out so future kind-agnostic dispatch can reuse the
 /// resolve+verify step independently.
+///
+/// `pre_minted_thread_id`: when `Some(id)`, the audit row uses that id
+/// verbatim. External subscribers registered against `id` (e.g. an SSE
+/// source that minted the id before launch) receive every persisted event
+/// from the very first lifecycle event onward. When `None`, a fresh
+/// `svc-<ts>-<rand>` id is minted as before.
 pub async fn execute_service_verified(
     verified: ryeos_engine::contracts::VerifiedItem,
     service_ref: &str,
@@ -148,6 +154,7 @@ pub async fn execute_service_verified(
     mode: ExecutionMode,
     ctx: &ExecutionContext,
     state: &AppState,
+    pre_minted_thread_id: Option<&str>,
 ) -> Result<ServiceExecutionResult> {
     let trust_class = verified.trust_class;
 
@@ -177,29 +184,41 @@ pub async fn execute_service_verified(
 
     // 5. Cap enforcement (live mode only)
     let effective_caps = if mode == ExecutionMode::Live {
-        let eff: Vec<String> = required_caps
-            .iter()
-            .filter(|cap| ctx.caller_scopes.contains(cap))
-            .cloned()
-            .collect();
-        let all_satisfied = required_caps.is_empty() || eff.len() == required_caps.len();
-        if !all_satisfied {
-            bail!(
-                "insufficient capabilities: required {:?}, effective {:?}",
-                required_caps, eff
-            );
+        // Wildcard scope ("*") satisfies all requirements — matches the
+        // behaviour of dispatch::enforce_runtime_caps.
+        if ctx.caller_scopes.iter().any(|s| s == "*") {
+            required_caps.clone()
+        } else {
+            let eff: Vec<String> = required_caps
+                .iter()
+                .filter(|cap| ctx.caller_scopes.contains(cap))
+                .cloned()
+                .collect();
+            let all_satisfied = required_caps.is_empty() || eff.len() == required_caps.len();
+            if !all_satisfied {
+                bail!(
+                    "insufficient capabilities: required {:?}, effective {:?}",
+                    required_caps, eff
+                );
+            }
+            eff
         }
-        eff
     } else {
         Vec::new()
     };
 
-    // 7a. Create audit record BEFORE dispatch
-    let audit_thread_id = format!(
-        "svc-{}-{:08x}",
-        lillux::time::timestamp_millis(),
-        rand::random::<u32>()
-    );
+    // 7a. Create audit record BEFORE dispatch.
+    // Honor a caller-supplied thread id when provided so external
+    // subscribers (route SSE sources) registered against the id see
+    // every persisted lifecycle event from the very first one.
+    let audit_thread_id = match pre_minted_thread_id {
+        Some(id) => id.to_string(),
+        None => format!(
+            "svc-{}-{:08x}",
+            lillux::time::timestamp_millis(),
+            rand::random::<u32>()
+        ),
+    };
 
     let create_params = crate::services::thread_lifecycle::ThreadCreateParams {
         thread_id: audit_thread_id.clone(),

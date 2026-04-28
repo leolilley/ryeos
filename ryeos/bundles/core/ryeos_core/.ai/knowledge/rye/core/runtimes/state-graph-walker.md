@@ -357,4 +357,4 @@ Checked against `os.environ` before execution starts. Returns list of missing va
 | `.ai/tools/rye/agent/threads/loaders/hooks_loader.py` | Builtin + infra hook loading |
 | `.ai/tools/rye/agent/threads/persistence/thread_registry.py` | Run registration + status tracking |
 | `.ai/tools/rye/core/processes/steps.py` | Step-by-step transcript summary |
-| `ryeos-cli/rye_cli/verbs/graph.py` | CLI integration |
+| `ryeos-bundles/standard/.ai/config/cli/thread-chain.yaml` (and sibling verb YAMLs) | CLI integration — declarative verbs that route to daemon `/execute` |

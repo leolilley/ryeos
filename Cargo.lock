@@ -735,6 +735,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1787,21 +1793,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "rye-cli"
+name = "ryeos-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "clap",
  "dirs",
- "http",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "lillux",
+ "rand 0.8.5",
+ "ryeos-engine",
  "ryeos-tools",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1967,6 +1982,7 @@ dependencies = [
  "clap",
  "directories",
  "form_urlencoded",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1985,6 +2001,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

@@ -75,10 +75,11 @@ impl TrustStore {
         let mut owner = String::new();
         let mut pem_lines: Vec<String> = Vec::new();
         let mut in_pem = false;
-        // Single-line `pem = "ed25519:<b64>"` form, used by the rye-cli
-        // identity command and the e2e test fixtures. The legacy
-        // multi-line `-----BEGIN PUBLIC KEY-----` form is also supported
-        // (see the daemon's trusted-signer fixture in
+        // Single-line `pem = "ed25519:<b64>"` form, written by the
+        // daemon's self-trust bootstrap and surfaced via the `ryeos-cli`
+        // `identity-public-key` verb. The multi-line
+        // `-----BEGIN PUBLIC KEY-----` PEM form is also supported (see
+        // the daemon's trusted-signer fixture in
         // `ryeosd/tests/fixtures/trusted_signers/`). Either form is
         // accepted; if both appear the multi-line PEM wins (it is the
         // strictly typed format).

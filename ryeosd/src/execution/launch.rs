@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::arch_check;
@@ -14,6 +14,50 @@ use super::limits::{compute_effective_limits, load_limits_config};
 use super::thread_meta::ThreadMeta;
 use crate::services::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use crate::state::AppState;
+
+/// Typed error for native executor materialization failures.
+///
+/// Raised by [`resolve_native_executor_path`] when the bundle CAS
+/// cannot supply the requested binary. The daemon's `dispatch.rs`
+/// maps this to `DispatchError::RuntimeMaterializationFailed` with
+/// a 502 status — no string-classifier anywhere.
+#[derive(Debug, thiserror::Error)]
+pub enum MaterializationError {
+    #[error("native executor '{executor_ref}' not available: {detail}")]
+    ExecutorUnavailable { executor_ref: String, detail: String },
+    #[error("bundle manifest error: {0}")]
+    ManifestError(String),
+    #[error("executor resolution failed for '{executor_ref}': {detail}")]
+    ResolutionFailed { executor_ref: String, detail: String },
+    #[error("binary blob '{hash}' not found in system CAS")]
+    BlobNotFound { hash: String },
+    #[error("arch check failed for '{executor_ref}': {detail}")]
+    ArchCheckFailed { executor_ref: String, detail: String },
+    #[error("executor materialization failed for '{executor_ref}': {detail}")]
+    MaterializationFailed { executor_ref: String, detail: String },
+}
+
+/// Typed error returned by [`build_and_launch`]. Materialization
+/// failures carry a stable variant; everything else is `Internal`.
+#[derive(Debug, thiserror::Error)]
+pub enum BuildAndLaunchError {
+    #[error("materialization failed: {0}")]
+    Materialization(#[from] MaterializationError),
+    #[error("{0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+impl From<serde_json::Error> for BuildAndLaunchError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Internal(anyhow::anyhow!(e))
+    }
+}
+
+impl From<std::io::Error> for BuildAndLaunchError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Internal(anyhow::anyhow!(e))
+    }
+}
 
 /// Host triple for native executor resolution.
 ///
@@ -54,10 +98,13 @@ pub fn resolve_native_executor_path(
     executor_ref: &str,
     materialize_dir: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
-) -> Result<PathBuf> {
+) -> Result<PathBuf, MaterializationError> {
     let bare = executor_ref
         .strip_prefix("native:")
-        .ok_or_else(|| anyhow::anyhow!("executor_ref '{executor_ref}' is not a native executor"))?;
+        .ok_or_else(|| MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "executor_ref is not a native executor".into(),
+        })?;
 
     let triple = host_triple();
 
@@ -89,22 +136,34 @@ pub fn resolve_native_executor_path(
 
     let (cas_root, mhash) = match (found_root, manifest_hash) {
         (Some(root), Some(hash)) => (root, hash),
-        _ => bail!(
-            "native executor '{bare}' not available: system bundle manifest not found \
-             ({BUNDLE_MANIFEST_REF}). The bundle pipeline (PR1b2) must ship binaries for host triple '{triple}'."
-        ),
+        _ => {
+            return Err(MaterializationError::ExecutorUnavailable {
+                executor_ref: bare.to_string(),
+                detail: format!(
+                    "system bundle manifest not found ({BUNDLE_MANIFEST_REF}). \
+                     The bundle pipeline (PR1b2) must ship binaries for host triple '{triple}'."
+                ),
+            })
+        }
     };
 
     let cas = lillux::cas::CasStore::new(cas_root);
 
     // 2. Load the manifest
     let manifest_value = cas
-        .get_object(&mhash)?
-        .ok_or_else(|| anyhow::anyhow!("bundle manifest object {mhash} not found in system CAS"))?;
+        .get_object(&mhash)
+        .map_err(|e| MaterializationError::ManifestError(format!(
+            "failed to read bundle manifest object {mhash}: {e}"
+        )))?
+        .ok_or_else(|| MaterializationError::ManifestError(
+            format!("bundle manifest object {mhash} not found in system CAS")
+        ))?;
 
     let manifest =
         ryeos_state::objects::SourceManifest::from_value(&manifest_value)
-            .map_err(|e| anyhow::anyhow!("failed to parse bundle manifest: {e}"))?;
+            .map_err(|e| MaterializationError::ManifestError(format!(
+                "failed to parse bundle manifest: {e}"
+            )))?;
 
     tracing::debug!(
         executor_ref,
@@ -123,10 +182,13 @@ pub fn resolve_native_executor_path(
                 .map_err(|e| e.to_string())
         },
     )
-    .map_err(|e| anyhow::anyhow!("executor resolution failed: {e}"))?;
+    .map_err(|e| MaterializationError::ResolutionFailed {
+        executor_ref: bare.to_string(),
+        detail: e.to_string(),
+    })?;
 
     // 4. Verify trust on the binary's item_source record
-    let (trust_class, fingerprint) =
+    let (_trust_class, _fingerprint) =
         ryeos_engine::executor_resolution::verify_executor_trust(
             &resolved.item_source,
             |fp| trust_store.get(fp).is_some(),
@@ -136,28 +198,40 @@ pub fn resolve_native_executor_path(
         executor_ref,
         host_triple = %triple,
         blob_hash = %resolved.blob_hash,
-        trust_class = ?trust_class,
-        signer = ?fingerprint,
         "native executor resolved and trust-verified"
     );
 
     // 5. Fetch the binary blob from CAS
     let blob_bytes = cas
-        .get_blob(&resolved.blob_hash)?
-        .ok_or_else(|| {
-            anyhow::anyhow!("binary blob {} not found in system CAS", resolved.blob_hash)
+        .get_blob(&resolved.blob_hash)
+        .map_err(|e| MaterializationError::BlobNotFound {
+            hash: format!("{} (read error: {e})", resolved.blob_hash),
+        })?
+        .ok_or_else(|| MaterializationError::BlobNotFound {
+            hash: resolved.blob_hash.clone(),
         })?;
 
     // 6. Architecture check
     arch_check::check_arch(&blob_bytes, std::env::consts::ARCH)
-        .map_err(|e| anyhow::anyhow!("arch check failed for {bare}: {e}"))?;
+        .map_err(|e| MaterializationError::ArchCheckFailed {
+            executor_ref: bare.to_string(),
+            detail: e.to_string(),
+        })?;
 
     // 7. Materialize to target directory
     let bin_dir = materialize_dir.join("bin");
-    std::fs::create_dir_all(&bin_dir)?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to create bin dir: {e}"),
+        })?;
     let target_path = bin_dir.join(bare);
 
-    lillux::cas::materialize_executable(&target_path, &blob_bytes, resolved.mode)?;
+    lillux::cas::materialize_executable(&target_path, &blob_bytes, resolved.mode)
+        .map_err(|e| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to materialize executable: {e}"),
+        })?;
 
     tracing::info!(
         executor_ref,
@@ -222,7 +296,7 @@ pub async fn build_and_launch(
     parameters: &Value,
     vault_bindings: &HashMap<String, String>,
     pre_minted_thread_id: Option<&str>,
-) -> Result<NativeLaunchResult> {
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     tracing::info!(
         executor_ref,
         acting_principal,
@@ -487,7 +561,7 @@ pub async fn build_and_launch(
             let _ = super::thread_meta::write_thread_meta(
                 &project_path.to_path_buf(), thread_id, &failed_meta, identity,
             );
-            return Err(err);
+            return Err(BuildAndLaunchError::Internal(err));
         }
     };
 
@@ -665,10 +739,77 @@ mod tests {
 
     #[test]
     fn missing_policy_fact_yields_empty_caps() {
-        // Identity-style view with no `effective_caps` policy fact —
-        // the launcher must treat this as deny-all rather than panic.
         let view = KindComposedView::identity(serde_json::json!({}));
         let caps = derive_effective_caps(&view);
         assert!(caps.is_empty(), "expected deny-all, got: {caps:?}");
+    }
+
+    #[test]
+    fn materialization_error_messages_are_descriptive() {
+        let cases: Vec<(MaterializationError, &str)> = vec![
+            (
+                MaterializationError::ExecutorUnavailable {
+                    executor_ref: "tool:my/bash".into(),
+                    detail: "not in manifest".into(),
+                },
+                "tool:my/bash",
+            ),
+            (
+                MaterializationError::ManifestError("bad json".into()),
+                "bad json",
+            ),
+            (
+                MaterializationError::ResolutionFailed {
+                    executor_ref: "tool:x/y".into(),
+                    detail: "no such ref".into(),
+                },
+                "tool:x/y",
+            ),
+            (
+                MaterializationError::BlobNotFound {
+                    hash: "sha256:abc123".into(),
+                },
+                "sha256:abc123",
+            ),
+            (
+                MaterializationError::ArchCheckFailed {
+                    executor_ref: "tool:x/y".into(),
+                    detail: "x86_64 vs aarch64".into(),
+                },
+                "x86_64",
+            ),
+            (
+                MaterializationError::MaterializationFailed {
+                    executor_ref: "tool:x/y".into(),
+                    detail: "disk full".into(),
+                },
+                "disk full",
+            ),
+        ];
+        for (err, expected_substr) in cases {
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(expected_substr),
+                "expected {:?} to contain {:?}",
+                msg,
+                expected_substr,
+            );
+        }
+    }
+
+    #[test]
+    fn build_and_launch_error_from_serde_json() {
+        let json_err = serde_json::from_str::<Value>("{bad").unwrap_err();
+        let err = BuildAndLaunchError::from(json_err);
+        let msg = format!("{err}");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn build_and_launch_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
+        let err = BuildAndLaunchError::from(io_err);
+        let msg = format!("{err}");
+        assert!(msg.contains("file gone"));
     }
 }

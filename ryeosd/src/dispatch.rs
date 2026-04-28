@@ -113,14 +113,18 @@ pub struct DispatchRequest<'a> {
     /// on this being `"runtime"` so indirect alias chains are not
     /// retroactively cap-broadened.
     pub original_root_kind: &'a str,
-    /// **Phase E.3**: when `Some`, the thread row created by
-    /// `dispatch_native_runtime` must use this id (via
-    /// `create_root_thread_with_id`) instead of minting one. The SSE
-    /// `directive_launch` source mints the id up front so it can
+    /// When `Some`, every dispatch leaf that creates a thread row
+    /// must use this id verbatim instead of minting a fresh one
+    /// (via `create_root_thread_with_id` / equivalent for the
+    /// service audit row). All built-in leaves honor it:
+    /// `dispatch_native_runtime`, `dispatch_subprocess` (inline +
+    /// detached), and `dispatch_service`. The kind-agnostic SSE
+    /// `dispatch_launch` source mints the id up front so it can
     /// subscribe to the event hub *before* the launch task begins,
     /// which is required to avoid losing the very first lifecycle
-    /// event. `None` (the default) preserves the legacy
-    /// "mint inside `create_root_thread`" path.
+    /// event. `None` (the default) preserves the
+    /// "mint inside the leaf" path used by indirect runtime
+    /// dispatch and ad-hoc `/execute` calls.
     pub pre_minted_thread_id: Option<String>,
 }
 
@@ -478,6 +482,7 @@ pub async fn dispatch_service(
                     ExecutionMode::Live,
                     ctx,
                     state,
+                    request.pre_minted_thread_id.as_deref(),
                 )
                 .await?;
             let envelope = serde_json::json!({
@@ -630,13 +635,32 @@ pub(crate) async fn dispatch_native_runtime(
     // For indirect paths, root_subject carries the directive's identity.
     // For direct runtime invocation, root_subject IS the runtime hop.
     // If root_subject wasn't captured (edge case), fall back to the
-    // current hop's data.
-    let subject = root_subject.unwrap_or_else(|| RootSubject {
-        item_ref: runtime_ref.clone(),
-        thread_profile: hop_thread_profile
-            .unwrap_or_else(|| "runtime_run".to_string()),
-        verified: hop_verified,
-    });
+    // current hop's data — but ONLY if the hop supplied a
+    // schema-derived `thread_profile`. A missing `thread_profile`
+    // here means the runtime kind schema lacks `execution.thread_profile`;
+    // engine init should have rejected that at startup, but
+    // defense-in-depth fails loudly instead of inventing a literal.
+    let subject = match root_subject {
+        Some(s) => s,
+        None => {
+            let thread_profile = hop_thread_profile.ok_or_else(|| {
+                DispatchError::SchemaMisconfigured {
+                    kind: canonical_ref.kind.clone(),
+                    detail: format!(
+                        "runtime hop for '{runtime_ref}' produced no thread_profile; \
+                         the runtime kind schema must declare \
+                         `execution.thread_profile` (engine init should have \
+                         rejected this — fix the kind YAML)"
+                    ),
+                }
+            })?;
+            RootSubject {
+                item_ref: runtime_ref.clone(),
+                thread_profile,
+                verified: hop_verified,
+            }
+        }
+    };
 
     // Resolve the subject item for the resolution pipeline. The subject
     // is the directive for indirect paths — we need its extends chain,
@@ -687,22 +711,14 @@ pub(crate) async fn dispatch_native_runtime(
         &params,
         &HashMap::new(),
         request.pre_minted_thread_id.as_deref(),
-    ).await.map_err(|e| {
-        // P1.2: classify the anyhow error. Materialization failures
-        // (binary not in manifest, CAS miss, arch mismatch) get 502.
-        // Everything else stays 500 (unexpected internal errors).
-        let msg = e.to_string();
-        if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
-            || msg.contains("materializ") || msg.contains("native executor")
-            || msg.contains("arch check")
-        {
+    ).await.map_err(|e| match e {
+        launch::BuildAndLaunchError::Materialization(me) => {
             DispatchError::RuntimeMaterializationFailed {
                 executor_ref: executor_ref.clone(),
-                detail: msg,
+                detail: me.to_string(),
             }
-        } else {
-            DispatchError::Internal(e)
         }
+        launch::BuildAndLaunchError::Internal(err) => DispatchError::Internal(err),
     })?;
 
     Ok(json!({
@@ -832,6 +848,14 @@ pub async fn dispatch_subprocess(
         snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
         temp_dir: request.temp_dir.clone(),
+        pre_minted_thread_id: request.pre_minted_thread_id.clone(),
+        // V5.5 P2: subprocess kinds (currently only `tool`) have no
+        // permissions model and therefore no callbacks the daemon
+        // would enforce. Pass an empty effective_caps; the runner
+        // treats this as deny-all (the trust-boundary default).
+        // Tools that need to call back into the daemon must be lifted
+        // to a kind that has a permissions model (directive, graph,
+        // …) and dispatched through that kind's runtime.
         effective_caps: Vec::new(),
     };
 

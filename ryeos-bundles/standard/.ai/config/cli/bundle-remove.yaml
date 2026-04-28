@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:33Z:0a2b7813e8a615a946c159ac0b371d720f20565cfbea44be60d177342b430f56:t4xYOn7VB7NcY9PkISK5qR8O9lZfXXRXOGO0xRmgs1VfwJjzcj4raL09kGLkF79SF73Wpohdh/tnuo7iL6g8BA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["bundle", "remove"]
+description: "Remove an installed bundle (offline-only; spawns ryeosd run-service)."
+execute: service:bundle/remove
