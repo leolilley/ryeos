@@ -22,7 +22,7 @@ pub use item_source::ItemSource;
 pub use project_snapshot::ProjectSnapshot;
 pub use source_manifest::SourceManifest;
 pub use thread_event::{EventDurability, ThreadEvent};
-pub use thread_snapshot::{ThreadSnapshot, ThreadSnapshotBuilder, ThreadStatus};
+pub use thread_snapshot::{ThreadSnapshot, ThreadSnapshotBuilder, ThreadStatus, ThreadUsage};
 
 /// Schema version shared across all CAS object types.
 /// Bump when the object format changes in a backward-incompatible way.

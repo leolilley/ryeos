@@ -189,12 +189,23 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
             Err(err) => {
-                tracing::warn!(
+                tracing::error!(
                     thread_id = %thread.thread_id,
                     error = %err,
-                    "failed to read resume_attempts; treating as 0"
+                    "failed to read resume_attempts; finalizing as failed instead of resuming"
                 );
-                0
+                finalize_dead(
+                    state,
+                    &thread.thread_id,
+                    pgid,
+                    &thread.status,
+                    Some((
+                        "resume_counter_io_error",
+                        json!({"error": err.to_string()}),
+                    )),
+                    &mut reconciled,
+                );
+                continue;
             }
         };
         let decision = decide_resume(thread.runtime.launch_metadata.as_ref(), attempts);

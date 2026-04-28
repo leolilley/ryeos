@@ -2,6 +2,19 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayedEventRecord {
+    pub event_type: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayResponse {
+    pub events: Vec<ReplayedEventRecord>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CallbackError {
     #[error("{code}: {message}")]

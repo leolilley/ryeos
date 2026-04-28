@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ryeos_runtime::callback_client::CallbackClient;
+#[cfg(test)]
+use ryeos_runtime::ReplayedEventRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeState {
@@ -56,38 +58,22 @@ pub async fn load_resume_state(
     thread_id: &str,
 ) -> Result<Option<ResumeState>> {
     let response = callback.replay_events_for(thread_id).await?;
-    let events = response
-        .get("events")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
 
-    // Events are returned in chain-seq order; the LAST
-    // graph_step_started is the cursor we want (no graph_run_id
-    // filter — D12).
     let mut latest: Option<(String, u32, String)> = None;
-    for ev in &events {
-        let event_type = ev
-            .get("event_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if event_type != "graph_step_started" {
+    for ev in &response.events {
+        if ev.event_type != "graph_step_started" {
             continue;
         }
-        let payload = match ev.get("payload") {
-            Some(p) => p,
-            None => continue,
-        };
-        let payload_run_id = payload
+        let payload_run_id = ev.payload
             .get("graph_run_id")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
-        let node = match payload.get("node").and_then(|v| v.as_str()) {
+        let node = match ev.payload.get("node").and_then(|v| v.as_str()) {
             Some(n) => n.to_string(),
             None => continue,
         };
-        let step = match payload.get("step").and_then(|v| v.as_u64()) {
+        let step = match ev.payload.get("step").and_then(|v| v.as_u64()) {
             Some(s) => s as u32,
             None => continue,
         };
@@ -204,12 +190,12 @@ pub fn decide_resume_source(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, RuntimeCallbackAPI};
+    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI};
     use serde_json::json;
     use std::sync::Arc;
 
     struct ReplayMock {
-        events: Vec<Value>,
+        events: Vec<ReplayedEventRecord>,
     }
 
     #[async_trait]
@@ -225,7 +211,7 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
-            Ok(json!({"events": self.events.clone()}))
+            Ok(serde_json::to_value(ReplayResponse { events: self.events.clone() }).unwrap())
         }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
@@ -233,7 +219,7 @@ mod tests {
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
     }
 
-    fn make_callback(events: Vec<Value>) -> CallbackClient {
+    fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(ReplayMock { events });
         CallbackClient::from_inner(inner, "T-test", "/tmp/test")
     }
@@ -248,22 +234,22 @@ mod tests {
     #[tokio::test]
     async fn replay_resume_loads_from_events() {
         let events = vec![
-            json!({
-                "event_type": "graph_started",
-                "payload": {"graph_run_id": "gr-target", "graph_id": "g1"}
-            }),
-            json!({
-                "event_type": "graph_step_started",
-                "payload": {"graph_run_id": "gr-target", "node": "step1", "step": 0}
-            }),
-            json!({
-                "event_type": "graph_step_completed",
-                "payload": {"graph_run_id": "gr-target", "node": "step1", "step": 0, "status": "ok"}
-            }),
-            json!({
-                "event_type": "graph_step_started",
-                "payload": {"graph_run_id": "gr-target", "node": "step2", "step": 1}
-            }),
+            ReplayedEventRecord {
+                event_type: "graph_started".to_string(),
+                payload: json!({"graph_run_id": "gr-target", "graph_id": "g1"}),
+            },
+            ReplayedEventRecord {
+                event_type: "graph_step_started".to_string(),
+                payload: json!({"graph_run_id": "gr-target", "node": "step1", "step": 0}),
+            },
+            ReplayedEventRecord {
+                event_type: "graph_step_completed".to_string(),
+                payload: json!({"graph_run_id": "gr-target", "node": "step1", "step": 0, "status": "ok"}),
+            },
+            ReplayedEventRecord {
+                event_type: "graph_step_started".to_string(),
+                payload: json!({"graph_run_id": "gr-target", "node": "step2", "step": 1}),
+            },
         ];
         let callback = make_callback(events);
         let rs = load_resume_state(&callback, "T-test")
@@ -283,18 +269,18 @@ mod tests {
     #[tokio::test]
     async fn replay_resume_picks_latest_step_started_ignoring_run_id() {
         let events = vec![
-            json!({
-                "event_type": "graph_step_started",
-                "payload": {"graph_run_id": "run-a", "node": "step1", "step": 0}
-            }),
-            json!({
-                "event_type": "graph_step_started",
-                "payload": {"graph_run_id": "run-b", "node": "step3", "step": 2}
-            }),
-            json!({
-                "event_type": "graph_step_started",
-                "payload": {"graph_run_id": "run-a", "node": "step5", "step": 4}
-            }),
+            ReplayedEventRecord {
+                event_type: "graph_step_started".to_string(),
+                payload: json!({"graph_run_id": "run-a", "node": "step1", "step": 0}),
+            },
+            ReplayedEventRecord {
+                event_type: "graph_step_started".to_string(),
+                payload: json!({"graph_run_id": "run-b", "node": "step3", "step": 2}),
+            },
+            ReplayedEventRecord {
+                event_type: "graph_step_started".to_string(),
+                payload: json!({"graph_run_id": "run-a", "node": "step5", "step": 4}),
+            },
         ];
         let callback = make_callback(events);
         let rs = load_resume_state(&callback, "T-test")
@@ -309,10 +295,10 @@ mod tests {
 
     #[tokio::test]
     async fn replay_resume_returns_none_when_no_step_started_events() {
-        let events = vec![json!({
-            "event_type": "graph_started",
-            "payload": {"graph_run_id": "gr-target", "graph_id": "g1"}
-        })];
+        let events = vec![ReplayedEventRecord {
+            event_type: "graph_started".to_string(),
+            payload: json!({"graph_run_id": "gr-target", "graph_id": "g1"}),
+        }];
         let callback = make_callback(events);
         let rs = load_resume_state(&callback, "T-test")
             .await

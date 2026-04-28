@@ -16,6 +16,7 @@ pub struct CommandService {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandSubmitParams {
     pub thread_id: String,
     pub command_type: String,
@@ -26,6 +27,7 @@ pub struct CommandSubmitParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandClaimParams {
     pub thread_id: String,
     #[serde(default)]
@@ -38,6 +40,7 @@ pub struct CommandClaimResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandCompleteParams {
     pub command_id: i64,
     pub status: String,

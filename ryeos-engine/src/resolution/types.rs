@@ -198,6 +198,7 @@ impl KindComposedView {
 /// weakest-link fold over root + ancestors. `composed` carries the
 /// daemon-side composed view (Phase 2) when a composer is registered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolutionOutput {
     /// The root item itself — always populated, even for kinds with no
     /// resolution steps (graphs, anything without extends).

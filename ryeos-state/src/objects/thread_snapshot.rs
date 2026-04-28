@@ -9,6 +9,20 @@ use serde::{Deserialize, Serialize};
 
 use super::{validate_object_kind, SCHEMA_VERSION};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadUsage {
+    pub completed_turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub spend_usd: f64,
+    pub spawns_used: u32,
+    pub started_at: String,
+    pub settled_at: String,
+    pub last_settled_turn_seq: u64,
+    pub elapsed_ms: u64,
+}
+
 /// Thread status enum — must match the CHECK constraint in db.rs exactly:
 /// created, running, completed, failed, cancelled, killed, timed_out, continued
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,8 +156,8 @@ pub struct ThreadSnapshot {
     pub result: Option<serde_json::Value>,
     /// Error payload (set on failed snapshots).
     pub error: Option<serde_json::Value>,
-    /// Budget information.
-    pub budget: Option<serde_json::Value>,
+    /// Budget / usage information (typed ThreadUsage).
+    pub budget: Option<ThreadUsage>,
     /// Published artifacts.
     pub artifacts: Vec<serde_json::Value>,
     /// Key-value facets (e.g. cost annotations). Uses BTreeMap for deterministic serialization.
@@ -262,7 +276,7 @@ pub struct ThreadSnapshotBuilder {
     finished_at: Option<String>,
     result: Option<serde_json::Value>,
     error: Option<serde_json::Value>,
-    budget: Option<serde_json::Value>,
+    budget: Option<ThreadUsage>,
     artifacts: Vec<serde_json::Value>,
     facets: BTreeMap<String, String>,
     last_event_hash: Option<String>,
@@ -369,7 +383,7 @@ impl ThreadSnapshotBuilder {
         self
     }
 
-    pub fn budget(mut self, budget: Option<serde_json::Value>) -> Self {
+    pub fn budget(mut self, budget: Option<ThreadUsage>) -> Self {
         self.budget = budget;
         self
     }

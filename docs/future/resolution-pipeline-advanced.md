@@ -188,7 +188,7 @@ re-architecting the dispatch core.
 - **Lillux envelope evolution** (`lillux-envelope-evolution.md`):
   envelope v2 is the v1 cut here. Future envelope bumps (v3+) likely
   carry sandbox-wrap data and the `step_durations` map from Phase E.
-- **Native runtimes** (`native-runtimes.md`): native runtimes get
+- **Native runtimes** (see `mcp-end-to-end-bug-sweep.md` for current architecture): native runtimes get
   pre-resolved DAGs for free; they never duplicate `resolve_extends_chain`.
 - **Encrypted shared intelligence**: per-hop `trust_class` is also the
   signal an encrypted-execution gate uses to decide whether a hop is

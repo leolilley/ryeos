@@ -23,6 +23,12 @@ impl BudgetTracker {
         self.total_usd += usd;
     }
 
+    pub fn reseed(&mut self, input: u64, output: u64, usd: f64) {
+        self.total_input = input;
+        self.total_output = output;
+        self.total_usd = usd;
+    }
+
     pub fn is_exhausted(&self) -> bool {
         self.max_usd > 0.0 && self.total_usd >= self.max_usd
     }

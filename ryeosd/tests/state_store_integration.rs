@@ -445,7 +445,14 @@ mod integration_tests {
                     metadata: None,
                 },
             ],
-            final_cost: Some(vec![("tokens".to_string(), "1500".to_string())]),
+            final_cost: Some(ryeos_engine::contracts::FinalCost {
+                turns: 3,
+                input_tokens: 1500,
+                output_tokens: 500,
+                spend: 0.05,
+                provider: None,
+                metadata: None,
+            }),
         };
         store.finalize_thread("T-e2e", &finalize).expect("finalize");
 

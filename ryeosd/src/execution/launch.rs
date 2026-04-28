@@ -507,6 +507,7 @@ pub async fn build_and_launch(
             "status": runtime_result.status,
             "result": runtime_result.result,
             "outputs": runtime_result.outputs,
+            "cost": runtime_result.cost,
             "warnings": runtime_result.warnings,
         }),
     })

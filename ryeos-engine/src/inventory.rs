@@ -69,6 +69,7 @@ use crate::parsers::ParserDispatcher;
 ///   kind-specific metadata it cares about without forcing every
 ///   field into the typed surface.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ItemDescriptor {
     pub name: String,
     pub item_id: String,

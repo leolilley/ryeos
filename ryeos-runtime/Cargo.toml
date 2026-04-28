@@ -18,6 +18,7 @@ async-trait = "0.1"
 base64 = "0.22"
 lillux = { path = "../lillux" }
 ryeos-engine = { path = "../ryeos-engine" }
+ryeos-state = { path = "../ryeos-state" }
 regex = "1"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }

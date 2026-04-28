@@ -1,17 +1,15 @@
-"""MCP server for RYE OS — daemon-backed execution.
+"""MCP server for RYE OS — thin wrapper over the `rye` CLI.
 
-Exposes 3 universal tools: mcp__rye__fetch, mcp__rye__execute, mcp__rye__sign
-
-- execute routes through ryeosd daemon HTTP API (Rust owns control)
-- fetch and sign remain Python-direct (Python owns policy: resolution, integrity)
+Exposes a single tool `rye` that shells to the data-driven CLI binary.
+Every invocation re-reads `.ai/config/cli/*.yaml`, so new verbs become
+callable immediately after bundle install with no MCP redeploy.
 """
 
 import asyncio
 import json
 import logging
 import os
-import urllib.error
-import urllib.request
+import shutil
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -19,287 +17,228 @@ from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel import NotificationOptions
 from mcp.types import Tool, TextContent
 
-from rye.constants import Action
-from rye.primary_action_descriptions import (
-    EXECUTE_ASYNC_DESC,
-    EXECUTE_DRY_RUN_DESC,
-    EXECUTE_PARAMETERS_DESC,
-    EXECUTE_TARGET_DESC,
-    EXECUTE_THREAD_DESC,
-    EXECUTE_TOOL_DESC,
-    FETCH_DESTINATION_DESC,
-    FETCH_LIMIT_DESC,
-    FETCH_QUERY_DESC,
-    FETCH_SCOPE_DESC,
-    FETCH_SOURCE_DESC,
-    FETCH_TOOL_DESC,
-    ITEM_ID_DESC,
-    PROJECT_PATH_DESC,
-    SIGN_ITEM_ID_DESC,
-    SIGN_SOURCE_DESC,
-    SIGN_TOOL_DESC,
-)
-from rye.utils.path_utils import get_user_space
-
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TIMEOUT_S = 60.0
+TOOL_NAME = "cli"
+TOOL_DESCRIPTION = (
+    "Run any Rye CLI verb. Verbs are loaded data-driven from "
+    "`.ai/config/cli/*.yaml` in the bundle hierarchy — call with "
+    "`args: [\"help\"]` to list available verbs in the current project. "
+    "Pass `project_path` to set the subprocess working directory; the "
+    "CLI defaults project_path to `.` when no -p flag is supplied. "
+    "Exit code, stdout, and stderr are returned verbatim; if stdout is "
+    "valid JSON it is parsed and returned in a `json` field."
+)
+INPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "args": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "argv passed to `rye`. Do NOT include 'rye' as the first "
+                "element — the MCP server prepends the binary path."
+            ),
+        },
+        "project_path": {
+            "type": "string",
+            "description": (
+                "Sets the subprocess cwd. Optional; if omitted the cwd of "
+                "the MCP server process is used. The CLI maps cwd to "
+                "project_path='.' in the /execute body."
+            ),
+        },
+        "timeout_s": {
+            "type": "number",
+            "minimum": 1,
+            "default": DEFAULT_TIMEOUT_S,
+            "description": (
+                "Seconds before the MCP kills the subprocess. Default 60. "
+                "Long-running graph or knowledge fetches may need a "
+                "larger value."
+            ),
+        },
+    },
+    "required": ["args"],
+}
 
-def _daemon_url() -> str:
-    """Get the daemon base URL from env or default."""
-    return os.environ.get("RYEOSD_URL", "http://127.0.0.1:7400")
+
+def _error_result(message: str, error_type: str) -> list[TextContent]:
+    """Build a typed JSON error result for user-visible failures.
+
+    Used for input-validation failures and wrapper-originated timeouts.
+    Programmer bugs and OS errors are NOT routed here — they propagate
+    as MCP-level errors so they cannot masquerade as successful tool
+    results.
+    """
+    return [TextContent(
+        type="text",
+        text=json.dumps({"error": message, "type": error_type}),
+    )]
 
 
-def _daemon_execute(item_ref: str, project_path: str, parameters: dict = None,
-                    launch_mode: str = "inline", target_site_id: str = None,
-                    validate_only: bool = False) -> dict:
-    """Submit an execution request to the ryeosd daemon via HTTP."""
-    payload = {
-        "item_ref": item_ref,
-        "project_path": project_path,
-        "parameters": parameters or {},
-        "launch_mode": launch_mode,
-    }
-    if target_site_id:
-        payload["target_site_id"] = target_site_id
-    if validate_only:
-        payload["validate_only"] = True
+def _resolve_bin() -> str:
+    """Find the `rye` binary via RYE_BIN env var or PATH lookup."""
+    explicit = os.environ.get("RYE_BIN")
+    if explicit:
+        return explicit
+    found = shutil.which("rye")
+    if not found:
+        raise RuntimeError(
+            "rye binary not found on PATH and RYE_BIN not set. "
+            "Build via `cargo build -p ryeos-cli --bin rye` and "
+            "set RYE_BIN, or install ryeos-cli."
+        )
+    return found
 
-    url = f"{_daemon_url()}/execute"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+
+async def _run_rye(
+    bin_path: str,
+    args: list[str],
+    project_path: str | None,
+    timeout_s: float,
+) -> dict:
+    """Spawn `rye` as a subprocess and capture its output.
+
+    `stdin` is closed (DEVNULL) so the child can never read from the MCP
+    server's stdio pipe — that would corrupt the JSON-RPC protocol on
+    stdio transport. `cwd` is forwarded only when explicitly supplied;
+    an empty string is rejected by the validation layer rather than
+    silently falling through to the server's cwd.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        bin_path,
+        *args,
+        cwd=project_path if project_path is not None else None,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
     try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        try:
-            err = json.loads(body)
-        except json.JSONDecodeError:
-            err = {"error": body}
-        return {"status": "error", "error": err.get("error", body)}
-    except urllib.error.URLError as e:
-        return {
-            "status": "error",
-            "error": f"Cannot connect to ryeosd daemon at {url}: {e.reason}",
-        }
+        out_bytes, err_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"rye {args!r} exceeded timeout {timeout_s}s"
+        )
+
+    out = out_bytes.decode(errors="replace")
+    err = err_bytes.decode(errors="replace")
+    result: dict = {
+        "exit_code": proc.returncode,
+        "stdout": out,
+        "stderr": err,
+    }
+    try:
+        result["json"] = json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        # stdout was not JSON — that's fine, leave `json` absent.
+        pass
+    return result
 
 
 class RYEServer:
-    """MCP Server for RYE OS — daemon-backed execution."""
+    """MCP server that shells to the `rye` CLI."""
 
-    def __init__(self):
-        """Initialize RYE server."""
-        self.user_space = str(get_user_space())
-        self.debug = os.getenv("RYE_DEBUG", "false").lower() == "true"
+    def __init__(self) -> None:
+        self._bin = _resolve_bin()
         self.server = Server("rye")
+        self._setup()
 
-        from rye.constants import AI_DIR
-        os.environ.setdefault("USER_SPACE", self.user_space)
-        os.environ.setdefault("AI_DIR", AI_DIR)
-
-        self._setup_handlers()
-
-    def _setup_handlers(self):
-        """Register MCP handlers."""
-        # fetch and sign remain Python-direct (policy operations)
-        from rye.actions.fetch import FetchTool
-        from rye.actions.sign import SignTool
-
-        self.fetch = FetchTool(self.user_space)
-        self.sign = SignTool(self.user_space)
-
+    def _setup(self) -> None:
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
-            """Return 3 MCP tools."""
             return [
                 Tool(
-                    name="fetch",
-                    description=FETCH_TOOL_DESC,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_id": {
-                                "type": "string",
-                                "description": ITEM_ID_DESC,
-                            },
-                            "query": {
-                                "type": "string",
-                                "description": FETCH_QUERY_DESC,
-                            },
-                            "scope": {
-                                "type": "string",
-                                "description": FETCH_SCOPE_DESC,
-                            },
-                            "project_path": {
-                                "type": "string",
-                                "description": PROJECT_PATH_DESC,
-                            },
-                            "source": {
-                                "type": "string",
-                                "enum": ["project", "user", "system", "local", "registry", "all"],
-                                "description": FETCH_SOURCE_DESC,
-                            },
-                            "destination": {
-                                "type": "string",
-                                "enum": ["project", "user"],
-                                "description": FETCH_DESTINATION_DESC,
-                            },
-                            "version": {
-                                "type": "string",
-                                "description": "Version to pull (registry source only).",
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "default": 10,
-                                "description": FETCH_LIMIT_DESC,
-                            },
-                        },
-                        "required": ["project_path"],
-                    },
-                ),
-                Tool(
-                    name="execute",
-                    description=EXECUTE_TOOL_DESC,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_id": {
-                                "type": "string",
-                                "description": ITEM_ID_DESC,
-                            },
-                            "project_path": {
-                                "type": "string",
-                                "description": PROJECT_PATH_DESC,
-                            },
-                            "parameters": {
-                                "type": "object",
-                                "description": EXECUTE_PARAMETERS_DESC,
-                            },
-                            "dry_run": {
-                                "type": "boolean",
-                                "default": False,
-                                "description": EXECUTE_DRY_RUN_DESC,
-                            },
-                            "target": {
-                                "type": "string",
-                                "default": "local",
-                                "description": EXECUTE_TARGET_DESC,
-                            },
-                            "thread": {
-                                "type": "string",
-                                "enum": ["inline", "fork"],
-                                "default": "inline",
-                                "description": EXECUTE_THREAD_DESC,
-                            },
-                            "async": {
-                                "type": "boolean",
-                                "default": False,
-                                "description": EXECUTE_ASYNC_DESC,
-                            },
-                        },
-                        "required": ["item_id", "project_path"],
-                    },
-                ),
-                Tool(
-                    name="sign",
-                    description=SIGN_TOOL_DESC,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "item_id": {
-                                "type": "string",
-                                "description": SIGN_ITEM_ID_DESC,
-                            },
-                            "project_path": {
-                                "type": "string",
-                                "description": PROJECT_PATH_DESC,
-                            },
-                            "source": {
-                                "type": "string",
-                                "enum": ["project", "user"],
-                                "default": "project",
-                                "description": SIGN_SOURCE_DESC,
-                            },
-                            "parameters": {"type": "object"},
-                        },
-                        "required": ["item_id", "project_path"],
-                    },
+                    name=TOOL_NAME,
+                    description=TOOL_DESCRIPTION,
+                    inputSchema=INPUT_SCHEMA,
                 ),
             ]
 
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-            """Dispatch to appropriate tool."""
+            if name != TOOL_NAME:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": f"unknown tool: {name}"}),
+                )]
+            # Validation errors (bad input shape) and subprocess
+            # timeouts are user-visible failures we surface as JSON
+            # tool results. We do NOT catch unexpected exceptions
+            # (programmer bugs, OS errors): those must propagate so
+            # they show up as MCP-level errors and don't silently
+            # masquerade as a "successful" tool result.
             try:
-                if name == "fetch":
-                    result = await self.fetch.handle(**arguments)
-                elif name == "execute":
-                    result = await self._handle_execute(arguments)
-                elif name == "sign":
-                    result = await self.sign.handle(**arguments)
-                else:
-                    result = {"error": f"Unknown tool: {name}"}
+                args = arguments["args"]
+            except KeyError:
+                return _error_result("missing required field `args`", "ValueError")
+            if not isinstance(args, list) or not all(
+                isinstance(a, str) for a in args
+            ):
+                return _error_result(
+                    "`args` must be an array of strings", "ValueError"
+                )
 
-                return [TextContent(type="text", text=json.dumps(result, default=str))]
-            except Exception as e:
-                import traceback
+            project_path = arguments.get("project_path")
+            if project_path is not None:
+                if not isinstance(project_path, str):
+                    return _error_result(
+                        "`project_path` must be a string", "ValueError"
+                    )
+                if project_path == "":
+                    return _error_result(
+                        "`project_path` must not be empty when supplied; "
+                        "omit the field to use the server cwd",
+                        "ValueError",
+                    )
 
-                error = {"error": str(e), "traceback": traceback.format_exc()}
-                return [TextContent(type="text", text=json.dumps(error, indent=2))]
+            raw_timeout = arguments.get("timeout_s", DEFAULT_TIMEOUT_S)
+            if not isinstance(raw_timeout, (int, float)) or isinstance(
+                raw_timeout, bool
+            ):
+                return _error_result(
+                    "`timeout_s` must be a number", "ValueError"
+                )
+            timeout_s = float(raw_timeout)
+            if timeout_s < 1:
+                return _error_result(
+                    "`timeout_s` must be >= 1", "ValueError"
+                )
 
-    async def _handle_execute(self, arguments: dict) -> dict:
-        """Route execute through the ryeosd daemon HTTP API."""
-        item_id = arguments.get("item_id", "")
-        parameters = arguments.get("parameters", {})
-        project_path = arguments.get("project_path", "")
+            try:
+                result = await _run_rye(
+                    self._bin, args, project_path, timeout_s,
+                )
+            except asyncio.TimeoutError as e:
+                # _run_rye raises RuntimeError on its own timeout, but
+                # if the underlying wait_for surfaces TimeoutError to
+                # the caller, treat it as a wrapper-originated failure
+                # (no CLI exit code to preserve).
+                return _error_result(str(e) or "timeout", "TimeoutError")
+            except RuntimeError as e:
+                # Includes _run_rye's "exceeded timeout" RuntimeError.
+                return _error_result(str(e), "RuntimeError")
 
-        if arguments.get("resume_thread_id"):
-            return {
-                "status": "error",
-                "error": "resume_thread_id is no longer accepted on execute; use the dedicated continuation API instead.",
-            }
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, default=str),
+            )]
 
-        if not isinstance(parameters, dict):
-            return {
-                "status": "error",
-                "error": "parameters must be an object",
-            }
-
-        launch_mode = "detached" if arguments.get("thread") == "fork" or arguments.get("async") else "inline"
-        target = arguments.get("target", "local")
-        target_site_id = None if target == "local" else target
-        validate_only = bool(arguments.get("dry_run"))
-
-        # Run the HTTP call in a thread to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: _daemon_execute(
-                item_id,
-                project_path,
-                parameters,
-                launch_mode=launch_mode,
-                target_site_id=target_site_id,
-                validate_only=validate_only,
-            ),
-        )
-        return result
-
-    async def start(self):
-        """Start the MCP server."""
+    async def start(self) -> None:
         async with stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
                     server_name="rye",
-                    server_version="0.1.0",
+                    server_version="0.2.0",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
@@ -308,16 +247,12 @@ class RYEServer:
             )
 
 
-async def run_stdio():
-    """Run in stdio mode."""
+async def run_stdio() -> None:
     server = RYEServer()
     await server.start()
 
 
-def main():
-    """Entry point."""
-    import sys
-    os.environ.setdefault("RYE_KERNEL_PYTHON", sys.executable)
+def main() -> None:
     asyncio.run(run_stdio())
 
 

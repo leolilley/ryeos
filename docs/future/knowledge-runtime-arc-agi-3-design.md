@@ -497,7 +497,7 @@ Knowledge transforms from **passive files that agents read** into an **active co
 
 ### Spec
 - `docs/future/knowledge-runtime.md` — full knowledge runtime specification
-- `docs/future/native-runtimes.md` — daemon launch pipeline, callback system, runtime_binary dispatch
+- daemon launch pipeline, callback system, runtime_binary dispatch (see `docs/future/mcp-end-to-end-bug-sweep.md`)
 
 ### arc-agi-3 Knowledge Graph
 - `.ai/knowledge/arc/foundation.md` — root hub (extends nothing, referenced by 13 nodes)

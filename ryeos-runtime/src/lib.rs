@@ -18,7 +18,8 @@ pub mod transcript;
 pub mod verified_loader;
 
 pub use callback::{
-    client_from_env, ActionPayload, CallbackError, DispatchActionRequest, RuntimeCallbackAPI,
+    client_from_env, ActionPayload, CallbackError, DispatchActionRequest, ReplayResponse,
+    ReplayedEventRecord, RuntimeCallbackAPI,
 };
 pub use checkpoint::CheckpointWriter;
 pub use capability_tokens::{cap_matches, check_capability, expand_capabilities};

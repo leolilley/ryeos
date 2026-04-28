@@ -22,7 +22,7 @@ status: planned
 
 > **Status:** Planned — knowledge is the only item kind without a native runtime. Currently handled by a trivial Python executor (`knowledge.py`, ~70 lines) that strips frontmatter and returns body text. This spec defines what a proper runtime would look like.
 
-> **Prerequisite:** [Native Runtimes](native-runtimes.md) — the daemon launch pipeline, callback capability system, and `runtime_binary` dispatch must be in place.
+> **Prerequisite:** Daemon launch pipeline, callback capability system, and `runtime_binary` dispatch must be in place (see `docs/future/mcp-end-to-end-bug-sweep.md`).
 
 > **Prerequisite:** Resolution Pipeline (`.tmp/RESOLUTION-PIPELINE.md`) — graph traversal (`extends`, `references`) is performed by the daemon's resolution pipeline, not by the runtime itself. The knowledge runtime receives pre-resolved DAGs in the LaunchEnvelope and only handles composition, budget fitting, and ordering.
 

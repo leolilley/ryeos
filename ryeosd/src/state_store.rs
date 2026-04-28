@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use ryeos_state::objects::ThreadUsage;
 use ryeos_state::StateDb;
 use ryeos_state::chain::SnapshotUpdate;
 use ryeos_state::signer::Signer;
@@ -93,7 +94,7 @@ pub struct FinalizeThreadRecord {
     pub result_json: Option<Value>,
     pub error_json: Option<Value>,
     pub artifacts: Vec<NewArtifactRecord>,
-    pub final_cost: Option<Vec<(String, String)>>,
+    pub final_cost: Option<ryeos_engine::contracts::FinalCost>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -485,8 +486,17 @@ impl StateStore {
 
         let mut facets = BTreeMap::new();
         if let Some(ref cost) = update.final_cost {
-            for (k, v) in cost {
-                facets.insert(k.clone(), v.clone());
+            facets.insert("cost.turns".to_string(), cost.turns.to_string());
+            facets.insert("cost.input_tokens".to_string(), cost.input_tokens.to_string());
+            facets.insert("cost.output_tokens".to_string(), cost.output_tokens.to_string());
+            facets.insert("cost.spend".to_string(), cost.spend.to_string());
+            if let Some(ref provider) = cost.provider {
+                facets.insert("cost.provider".to_string(), provider.clone());
+            }
+            if let Some(ref metadata) = cost.metadata {
+                if let Ok(s) = serde_json::to_string(metadata) {
+                    facets.insert("cost.metadata_json".to_string(), s);
+                }
             }
         }
 
@@ -511,10 +521,23 @@ impl StateStore {
             created_at: thread_row.created_at.clone(),
             updated_at: now.clone(),
             started_at: thread_row.started_at.clone(),
-            finished_at: Some(now),
+            finished_at: Some(now.clone()),
             result: update.result_json.clone(),
             error: update.error_json.clone(),
-            budget: None,
+            budget: update.final_cost.as_ref().map(|cost| {
+                ThreadUsage {
+                    completed_turns: cost.turns as u32,
+                    input_tokens: cost.input_tokens as u64,
+                    output_tokens: cost.output_tokens as u64,
+                    spend_usd: cost.spend,
+                    spawns_used: 0, // not tracked in FinalCost
+                    started_at: thread_row.started_at.clone()
+                        .unwrap_or_else(|| thread_row.created_at.clone()),
+                    settled_at: now.clone(),
+                    last_settled_turn_seq: cost.turns as u64,
+                    elapsed_ms: 0, // daemon doesn't track wall-clock time
+                }
+            }),
             artifacts: artifacts_json,
             facets,
             last_event_hash: None,
@@ -721,31 +744,55 @@ impl StateStore {
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
         let g = self.lock()?;
         let result_row = queries::get_thread_result(g.state_db.projection(), thread_id)?;
-        Ok(result_row.map(|row| {
-            let result_val = row.result.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-            ThreadResultRecord {
-                outcome_code: None,
-                result: result_val,
-                error: row.error.map(|e| json!(e)),
-                metadata: None,
+        let result = match result_row {
+            Some(row) => {
+                let result_val = match row.result {
+                    Some(bytes) => Some(serde_json::from_slice::<Value>(&bytes)
+                        .with_context(|| {
+                            format!(
+                                "malformed JSON in thread_results.result for thread_id {}",
+                                thread_id
+                            )
+                        })?),
+                    None => None,
+                };
+                Some(ThreadResultRecord {
+                    outcome_code: None,
+                    result: result_val,
+                    error: row.error.map(|e| json!(e)),
+                    metadata: None,
+                })
             }
-        }))
+            None => None,
+        };
+        Ok(result)
     }
 
     pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
         let g = self.lock()?;
         let artifact_rows = queries::list_thread_artifacts(g.state_db.projection(), thread_id)?;
-        Ok(artifact_rows
-            .into_iter()
-            .enumerate()
-            .map(|(idx, row)| ThreadArtifactRecord {
+        let mut records = Vec::with_capacity(artifact_rows.len());
+        for (idx, row) in artifact_rows.into_iter().enumerate() {
+            let metadata = match row.metadata {
+                Some(bytes) => Some(serde_json::from_slice::<Value>(&bytes)
+                    .with_context(|| {
+                        format!(
+                            "malformed JSON in thread_artifacts.metadata \
+                             for artifact at index {idx} of thread_id {}",
+                            thread_id
+                        )
+                    })?),
+                None => None,
+            };
+            records.push(ThreadArtifactRecord {
                 artifact_id: idx as i64 + 1,
                 artifact_type: row.kind,
                 uri: String::new(),
                 content_hash: None,
-                metadata: row.metadata.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()),
-            })
-            .collect())
+                metadata,
+            });
+        }
+        Ok(records)
     }
 
     #[tracing::instrument(
@@ -790,9 +837,10 @@ impl StateStore {
 
         let persisted = persisted_from_append(&result, &[event]);
 
-        let artifact_id = persisted.first()
-            .map(|p| p.event_id)
-            .unwrap_or(0);
+        let persisted_event = persisted.into_iter().next()
+            .ok_or_else(|| anyhow!("artifact_published event was not persisted for thread {thread_id}"))?;
+
+        let artifact_id = persisted_event.event_id;
 
         let record = ThreadArtifactRecord {
             artifact_id,
@@ -802,19 +850,7 @@ impl StateStore {
             metadata: artifact.metadata.clone(),
         };
 
-        let fallback = PersistedEventRecord {
-            event_id: 0,
-            chain_root_id: thread_row.chain_root_id,
-            chain_seq: 0,
-            thread_id: thread_id.to_string(),
-            thread_seq: 0,
-            event_type: "artifact_published".to_string(),
-            storage_class: "indexed".to_string(),
-            ts: lillux::time::iso8601_now(),
-            payload: json!({}),
-        };
-
-        Ok((record, persisted.into_iter().next().unwrap_or(fallback)))
+        Ok((record, persisted_event))
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Vec<ThreadListItem>> {
@@ -862,6 +898,7 @@ impl StateStore {
                 updated_at: row.updated_at,
                 started_at: row.started_at,
                 finished_at: row.finished_at,
+
                 runtime,
             });
         }
@@ -893,6 +930,7 @@ impl StateStore {
                 updated_at: row.updated_at,
                 started_at: row.started_at,
                 finished_at: row.finished_at,
+
                 runtime,
             });
         }
@@ -942,6 +980,7 @@ impl StateStore {
                 updated_at: row.updated_at,
                 started_at: row.started_at,
                 finished_at: row.finished_at,
+
                 runtime,
             });
         }

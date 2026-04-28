@@ -60,6 +60,22 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
     }
 }
 
+const TRANSPORT_FIELDS: &[&str] = &["callback_token"];
+
+fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(map) => {
+            let filtered: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .filter(|(k, _)| !TRANSPORT_FIELDS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            serde_json::Value::Object(filtered)
+        }
+        other => other.clone(),
+    }
+}
+
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     match request.method.as_str() {
         // ── daemon health (lightweight, only ungated method) ─────────
@@ -95,24 +111,29 @@ pub async fn dispatch_runtime_method(
         state.callback_tokens.validate_token_and_thread(token, thread_id)?;
     }
 
+    // Strip transport-level fields before typed deserialization so
+    // deny_unknown_fields on the RPC param structs doesn't reject
+    // callback_token.
+    let clean_params = strip_transport_fields(params);
+
     match method {
         "runtime.dispatch_action" => {
             crate::execution::runtime_dispatch::handle(params, state).await
         }
-        "runtime.append_event" => handle_append_event(params, state),
-        "runtime.append_events" => handle_append_event_batch(params, state),
-        "runtime.replay_events" => handle_replay_events(params, state),
-        "runtime.finalize_thread" => handle_finalize(params, state),
-        "runtime.mark_running" => handle_mark_running(params, state),
-        "runtime.request_continuation" => handle_request_continuation(params, state),
-        "runtime.publish_artifact" => handle_publish_artifact(params, state),
-        "runtime.get_facets" => handle_get_facets(params, state),
-        "runtime.get_thread" => handle_get(params, state),
-        "runtime.submit_command" => handle_submit_command(params, state),
-        "runtime.claim_commands" => handle_claim_commands(params, state),
-        "runtime.complete_command" => handle_complete_command(params, state),
-        "runtime.get_thread_events" => handle_replay_events(params, state),
-        "runtime.attach_process" => handle_attach_process(params, state),
+        "runtime.append_event" => handle_append_event(&clean_params, state),
+        "runtime.append_events" => handle_append_event_batch(&clean_params, state),
+        "runtime.replay_events" => handle_replay_events(&clean_params, state),
+        "runtime.finalize_thread" => handle_finalize(&clean_params, state),
+        "runtime.mark_running" => handle_mark_running(&clean_params, state),
+        "runtime.request_continuation" => handle_request_continuation(&clean_params, state),
+        "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
+        "runtime.get_facets" => handle_get_facets(&clean_params, state),
+        "runtime.get_thread" => handle_get(&clean_params, state),
+        "runtime.submit_command" => handle_submit_command(&clean_params, state),
+        "runtime.claim_commands" => handle_claim_commands(&clean_params, state),
+        "runtime.complete_command" => handle_complete_command(&clean_params, state),
+        "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
+        "runtime.attach_process" => handle_attach_process(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }

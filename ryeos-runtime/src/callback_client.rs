@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::callback::RuntimeCallbackAPI;
+use crate::callback::{ReplayResponse, RuntimeCallbackAPI};
 use crate::envelope::EnvelopeCallback;
 use crate::events::{RuntimeEventType, StorageClass};
 
@@ -119,14 +119,23 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("invalid CallbackDispatchResponse from daemon: {e}"))
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn append_event(&self, event_type: &str, payload: Value) -> Result<()> {
         let storage_class = storage_class_for(event_type);
+        let is_transcript = matches!(
+            event_type,
+            "cognition_in" | "cognition_out" | "tool_call_start" | "tool_call_result"
+        );
         match &self.inner {
             Some(client) => {
                 client.append_event(&self.thread_id, event_type, payload, storage_class).await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
             }
+            None if is_transcript => Err(anyhow::anyhow!(
+                "callback append_event({event_type}) called without an inner UDS client \
+                 (socket missing); transcript-bearing event must not be silently dropped"
+            )),
             None => Ok(()),
         }
     }
@@ -160,28 +169,33 @@ impl CallbackClient {
         }
     }
 
+    /// Resume-critical: must hard-fail on disconnect.
     pub async fn mark_running(&self) -> Result<()> {
-        match &self.inner {
-            Some(client) => {
-                client.mark_running(&self.thread_id).await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok(())
-            }
-            None => Ok(()),
-        }
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback mark_running called without an inner UDS client \
+                 (socket missing); cannot mark thread as running"
+            )
+        })?;
+        client.mark_running(&self.thread_id).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
     }
 
+    /// Resume-critical: must hard-fail on disconnect.
     pub async fn finalize_thread(&self, status: &str) -> Result<()> {
-        match &self.inner {
-            Some(client) => {
-                client.finalize_thread(&self.thread_id, status).await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok(())
-            }
-            None => Ok(()),
-        }
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback finalize_thread called without an inner UDS client \
+                 (socket missing); cannot finalize thread"
+            )
+        })?;
+        client.finalize_thread(&self.thread_id, status).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn request_continuation(&self, prompt: &str) -> Result<Value> {
         match &self.inner {
             Some(client) => Ok(client.request_continuation(&self.thread_id, prompt).await
@@ -190,6 +204,7 @@ impl CallbackClient {
         }
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn publish_artifact(&self, artifact: Value) -> Result<()> {
         match &self.inner {
             Some(client) => {
@@ -201,6 +216,7 @@ impl CallbackClient {
         }
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread(&self) -> Result<Value> {
         match &self.inner {
             Some(client) => Ok(client.get_thread(&self.thread_id).await
@@ -209,6 +225,7 @@ impl CallbackClient {
         }
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread_by_id(&self, thread_id: &str) -> Result<Value> {
         match &self.inner {
             Some(client) => Ok(client.get_thread(thread_id).await
@@ -217,14 +234,21 @@ impl CallbackClient {
         }
     }
 
-    pub async fn replay_events_for(&self, thread_id: &str) -> Result<Value> {
-        match &self.inner {
-            Some(client) => Ok(client.replay_events(thread_id).await
-                .map_err(|e| anyhow::anyhow!("{e}"))?),
-            None => Ok(Value::Null),
-        }
+    /// Resume-critical: must hard-fail on disconnect.
+    pub async fn replay_events_for(&self, thread_id: &str) -> Result<ReplayResponse> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback replay_events_for called without an inner UDS client \
+                 (socket missing); runtime cannot replay events for resume"
+            )
+        })?;
+        let raw: Value = client.replay_events(thread_id).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        serde_json::from_value::<ReplayResponse>(raw)
+            .map_err(|e| anyhow::anyhow!("invalid ReplayResponse from daemon: {e}"))
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_facets(&self) -> Result<Value> {
         match &self.inner {
             Some(client) => Ok(client.get_facets(&self.thread_id).await
@@ -235,13 +259,13 @@ impl CallbackClient {
 
     // Typed event emission methods (merged from EventEmitter)
 
-    /// Begin-of-turn marker — model inputs going into cognition.
+    /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to the validator-accepted `cognition_in` event.
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
         self.append_event("cognition_in", serde_json::json!({"turn": turn})).await
     }
 
-    /// End-of-turn marker — model output and token usage.
+    /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to the validator-accepted `cognition_out` event.
     pub async fn emit_turn_complete(&self, turn: u32, tokens: Option<(u64, u64)>) -> Result<()> {
         let mut data = serde_json::json!({"turn": turn});
@@ -252,7 +276,8 @@ impl CallbackClient {
         self.append_event("cognition_out", data).await
     }
 
-    /// A tool call is being dispatched. Maps to `tool_call_start`.
+    /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
+    /// Maps to `tool_call_start`.
     pub async fn emit_tool_dispatch(&self, tool: &str, call_id: Option<&str>) -> Result<()> {
         let mut data = serde_json::json!({"tool": tool});
         if let Some(id) = call_id {
@@ -261,7 +286,8 @@ impl CallbackClient {
         self.append_event("tool_call_start", data).await
     }
 
-    /// A tool call returned. Maps to `tool_call_result`.
+    /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
+    /// Maps to `tool_call_result`.
     pub async fn emit_tool_result(&self, call_id: &str, truncated: bool) -> Result<()> {
         self.append_event(
             "tool_call_result",
@@ -269,19 +295,42 @@ impl CallbackClient {
         ).await
     }
 
-    /// Terminal failure — surfaced as `thread_failed`. Callers that
-    /// also call `finalize_thread("failed")` should call this FIRST so
-    /// the failure reason hits the audit trail before the lifecycle
-    /// transition.
+    /// Advisory: warn-and-continue OK when disconnected.
+    /// Maps to `thread_failed`.
     pub async fn emit_error(&self, error: &str) -> Result<()> {
         self.append_event("thread_failed", serde_json::json!({"message": error})).await
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     pub async fn emit_thread_continued(&self, previous_id: &str) -> Result<()> {
         self.append_event(
             "thread_continued",
             serde_json::json!({"previous_thread_id": previous_id}),
         ).await
+    }
+
+    /// Resume-critical: must hard-fail on disconnect.
+    /// Emits a `thread_usage` event with the cumulative ThreadUsage
+    /// payload. The daemon persists this so resumed threads can reseed
+    /// BudgetTracker and Harness.
+    pub async fn emit_thread_usage(&self, usage: &ryeos_state::ThreadUsage) -> Result<()> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback emit_thread_usage called without an inner UDS client \
+                 (socket missing); thread usage ACK is required for settlement"
+            )
+        })?;
+        let storage_class = storage_class_for("thread_usage");
+        let payload = serde_json::to_value(usage)
+            .map_err(|e| anyhow::anyhow!("serialize ThreadUsage: {e}"))?;
+        client.append_event(&self.thread_id, "thread_usage", payload, storage_class).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
+    }
+
+    /// Advisory: warn-and-continue OK when disconnected.
+    pub async fn stream_opened(&self, turn: u32) -> Result<()> {
+        self.append_event("stream_opened", serde_json::json!({"turn": turn})).await
     }
 
     // ── native_async streaming contract ─────────────────────────────
@@ -296,6 +345,7 @@ impl CallbackClient {
     // when no callback socket is present), but consumers should not
     // rely on receiving them.
 
+    /// Advisory: warn-and-continue OK when disconnected.
     /// Emit a typed progress event.
     ///
     /// `phase` is a short identifier; `message` is human-readable;
@@ -315,6 +365,7 @@ impl CallbackClient {
         self.append_event("stream_snapshot", wrapped).await
     }
 
+    /// Advisory: warn-and-continue OK when disconnected.
     /// Emit a typed status / lifecycle transition event.
     ///
     /// See [`crate::progress::StatusEvent`].
@@ -386,22 +437,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_running_noop_when_disconnected() {
+    async fn append_event_transcript_type_errors_when_disconnected() {
         let client = make_client();
-        client.mark_running().await.unwrap();
+        let err = client
+            .append_event("cognition_in", json!({"turn": 1}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("socket missing"), "got: {err}");
     }
 
     #[tokio::test]
-    async fn all_methods_noop_when_disconnected() {
+    async fn mark_running_errors_when_disconnected() {
         let client = make_client();
+        let err = client.mark_running().await.unwrap_err();
+        assert!(err.to_string().contains("socket missing"), "got: {err}");
+    }
 
-        client.finalize_thread("completed").await.unwrap();
-        client
-            .publish_artifact(json!({"type": "summary", "content": "done"}))
-            .await
-            .unwrap();
-        let cont = client.request_continuation("continue?").await.unwrap();
-        assert_eq!(cont, Value::Null);
+    #[tokio::test]
+    async fn finalize_thread_errors_when_disconnected() {
+        let client = make_client();
+        let err = client.finalize_thread("completed").await.unwrap_err();
+        assert!(err.to_string().contains("socket missing"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn replay_events_for_errors_when_disconnected() {
+        let client = make_client();
+        let err = client.replay_events_for("T-other").await.unwrap_err();
+        assert!(err.to_string().contains("socket missing"), "got: {err}");
     }
 
     #[test]
@@ -420,46 +483,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_turn_start_noop_when_disconnected() {
-        let client = make_client();
-        client.emit_turn_start(1).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn emit_tool_dispatch_with_call_id() {
-        let client = make_client();
-        client.emit_tool_dispatch("read_file", Some("call_123")).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn emit_turn_complete_with_tokens() {
-        let client = make_client();
-        client.emit_turn_complete(1, Some((100, 50))).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn emit_tool_result_noop_when_disconnected() {
-        let client = make_client();
-        client.emit_tool_result("call_1", false).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn emit_error_noop_when_disconnected() {
-        let client = make_client();
-        client.emit_error("something broke").await.unwrap();
-    }
-
-    #[tokio::test]
     async fn emit_thread_continued_noop_when_disconnected() {
         let client = make_client();
         client.emit_thread_continued("T-prev").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn replay_events_for_noop_when_disconnected() {
-        let client = make_client();
-        let result = client.replay_events_for("T-other").await.unwrap();
-        assert_eq!(result, Value::Null);
     }
 
     #[tokio::test]
@@ -541,6 +567,7 @@ mod tests {
             "graph_step_completed",
             "graph_branch_taken",
             "graph_foreach_iteration",
+            "thread_usage",
         ];
         const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only"];
 
@@ -557,6 +584,7 @@ mod tests {
             // Bare append_event calls in ryeos-directive-runtime/runner.rs
             "stream_opened",         // State::Streaming
             "cognition_reasoning",   // FiringHooks
+            "thread_usage",          // emit_thread_usage
             // tool_call_result(blocked) re-uses the validator name
             // already covered above.
         ];

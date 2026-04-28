@@ -132,7 +132,132 @@ CREATE TABLE IF NOT EXISTS thread_facets (
 CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 "#;
 
-/// Metadata for a projection entry.
+use crate::sqlite_schema;
+
+/// Application ID stamp for projection.db.
+/// RYPJ = 0x5259504a ("RY" + "PJ" for "projection").
+const PROJECTION_APP_ID: i32 = 0x5259_504a;
+
+/// Schema spec for projection.db — the single source of truth for
+/// what tables/columns/indexes this database must contain.
+fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
+    sqlite_schema::SchemaSpec {
+        application_id: PROJECTION_APP_ID,
+        tables: &[
+            sqlite_schema::TableSpec {
+                name: "projection_meta",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "indexed_chain_state_hash", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at", col_type: "TEXT", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "threads",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "kind", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "status", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "item_ref", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "executor_ref", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "launch_mode", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "current_site_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "origin_site_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "upstream_thread_id", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "requested_by", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "created_at", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "started_at", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "finished_at", col_type: "TEXT", pk: false, not_null: false },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "events",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "event_id", col_type: "INTEGER", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_seq", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "thread_seq", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "event_type", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "durability", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "ts", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "prev_chain_event_hash", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "prev_thread_event_hash", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "payload", col_type: "BLOB", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "event_replay_index",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "last_indexed_chain_seq", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at", col_type: "TEXT", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_edges",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "edge_id", col_type: "INTEGER", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "parent_thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "spawn_seq", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "spawn_reason", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "created_at", col_type: "TEXT", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_results",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "status", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "result", col_type: "BLOB", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "error", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "updated_at", col_type: "TEXT", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_artifacts",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "artifact_id", col_type: "INTEGER", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "kind", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "metadata", col_type: "BLOB", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "created_at", col_type: "TEXT", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_facets",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "facet_id", col_type: "INTEGER", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "key", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "value", col_type: "BLOB", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at", col_type: "TEXT", pk: false, not_null: true },
+                ],
+            },
+        ],
+        indexes: &[
+            sqlite_schema::IndexSpec { name: "idx_threads_chain_root", table: "threads", columns: &["chain_root_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_threads_status", table: "threads", columns: &["status"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_threads_created_at", table: "threads", columns: &["created_at"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_threads_updated_at", table: "threads", columns: &["updated_at"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_events_chain_root", table: "events", columns: &["chain_root_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_events_thread_id", table: "events", columns: &["thread_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_events_ts", table: "events", columns: &["ts"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_edges_parent", table: "thread_edges", columns: &["parent_thread_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_edges_child", table: "thread_edges", columns: &["child_thread_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_results_chain_root", table: "thread_results", columns: &["chain_root_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_artifacts_thread", table: "thread_artifacts", columns: &["thread_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_artifacts_chain_root", table: "thread_artifacts", columns: &["chain_root_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_facets_thread", table: "thread_facets", columns: &["thread_id"], unique: false },
+        ],
+    }
+}
 #[derive(Debug, Clone)]
 pub struct ProjectionMeta {
     pub chain_root_id: String,
@@ -147,13 +272,22 @@ pub struct ProjectionDb {
 
 impl ProjectionDb {
     /// Open or create a projection database.
+    ///
+    /// If the file exists, verifies it matches the schema spec exactly
+    /// (tables, columns, indexes, application_id). If the file is empty
+    /// or missing, initialises it from the DDL and stamps the
+    /// application_id.
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
         let conn = rusqlite::Connection::open(path)
             .context("failed to open projection database")?;
 
-        // Apply schema
-        conn.execute_batch(SCHEMA_SQL)
-            .context("failed to initialize projection schema")?;
+        let spec = projection_schema_spec();
+
+        if sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
+            sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, path)?;
+        } else {
+            sqlite_schema::assert_owned(&conn, &spec, path)?;
+        }
 
         Ok(Self { conn })
     }

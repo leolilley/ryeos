@@ -39,6 +39,7 @@ pub struct ExecuteResponseResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadCreateParams {
     pub thread_id: String,
     pub chain_root_id: String,
@@ -55,11 +56,13 @@ pub struct ThreadCreateParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadMarkRunningParams {
     pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadAttachProcessParams {
     pub thread_id: String,
     pub pid: i64,
@@ -74,6 +77,7 @@ pub struct ThreadAttachProcessParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadGetParams {
     pub thread_id: String,
 }
@@ -85,6 +89,7 @@ pub struct ThreadChainResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactPublishParams {
     pub thread_id: String,
     pub artifact_type: String,
@@ -96,6 +101,7 @@ pub struct ArtifactPublishParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadFinalizeParams {
     pub thread_id: String,
     pub status: String,
@@ -116,6 +122,7 @@ pub struct ThreadFinalizeParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadContinuationParams {
     pub thread_id: String,
     #[serde(default)]
@@ -323,7 +330,7 @@ impl ThreadLifecycleService {
                     .iter()
                     .map(artifact_to_record)
                     .collect(),
-                final_cost: completion.final_cost.as_ref().map(cost_to_facets),
+                final_cost: completion.final_cost.clone(),
             },
         )?;
 
@@ -377,7 +384,7 @@ impl ThreadLifecycleService {
                 result_json: params.result.clone(),
                 error_json: params.error.clone(),
                 artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
-                final_cost: params.final_cost.as_ref().map(cost_to_facets),
+                final_cost: params.final_cost.clone(),
             },
         )?;
 
@@ -543,30 +550,6 @@ fn artifact_to_record(artifact: &ExecutionArtifact) -> NewArtifactRecord {
         content_hash: artifact.content_hash.clone(),
         metadata: artifact.metadata.clone(),
     }
-}
-
-fn cost_to_facets(cost: &FinalCost) -> Vec<(String, String)> {
-    let mut facets = vec![
-        ("cost.turns".to_string(), cost.turns.to_string()),
-        (
-            "cost.input_tokens".to_string(),
-            cost.input_tokens.to_string(),
-        ),
-        (
-            "cost.output_tokens".to_string(),
-            cost.output_tokens.to_string(),
-        ),
-        ("cost.spend".to_string(), cost.spend.to_string()),
-    ];
-    if let Some(provider) = &cost.provider {
-        facets.push(("cost.provider".to_string(), provider.clone()));
-    }
-    if let Some(metadata) = &cost.metadata {
-        if let Ok(s) = serde_json::to_string(metadata) {
-            facets.push(("cost.metadata_json".to_string(), s));
-        }
-    }
-    facets
 }
 
 fn validate_thread_id_format(id: &str) -> Result<()> {

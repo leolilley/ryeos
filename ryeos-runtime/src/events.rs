@@ -109,6 +109,9 @@ pub enum RuntimeEventType {
     GraphStepCompleted,
     GraphBranchTaken,
     GraphForeachIteration,
+
+    // ── Usage settlement (O3) ───────────────────────────────────
+    ThreadUsage,
 }
 
 impl RuntimeEventType {
@@ -149,6 +152,7 @@ impl RuntimeEventType {
             Self::GraphStepCompleted => "graph_step_completed",
             Self::GraphBranchTaken => "graph_branch_taken",
             Self::GraphForeachIteration => "graph_foreach_iteration",
+            Self::ThreadUsage => "thread_usage",
         }
     }
 
@@ -189,6 +193,7 @@ impl RuntimeEventType {
             "graph_step_completed" => Ok(Self::GraphStepCompleted),
             "graph_branch_taken" => Ok(Self::GraphBranchTaken),
             "graph_foreach_iteration" => Ok(Self::GraphForeachIteration),
+            "thread_usage" => Ok(Self::ThreadUsage),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
         }
@@ -240,7 +245,8 @@ impl RuntimeEventType {
             | Self::GraphCompleted
             | Self::GraphStepStarted
             | Self::GraphStepCompleted
-            | Self::GraphBranchTaken => StorageClass::Indexed,
+            | Self::GraphBranchTaken
+            | Self::ThreadUsage => StorageClass::Indexed,
         }
     }
 }
@@ -289,6 +295,7 @@ mod tests {
             RuntimeEventType::GraphStepCompleted,
             RuntimeEventType::GraphBranchTaken,
             RuntimeEventType::GraphForeachIteration,
+            RuntimeEventType::ThreadUsage,
         ];
         for v in variants {
             let s = v.as_str();

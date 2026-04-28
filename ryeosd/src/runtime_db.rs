@@ -71,6 +71,53 @@ CREATE INDEX IF NOT EXISTS idx_thread_commands_thread_status
     ON thread_commands(thread_id, status);
 "#;
 
+use ryeos_state::sqlite_schema;
+
+/// Application ID stamp for runtime.db.
+/// RYEA = 0x5259_4541 ("RY" + "EA" for "runtime").
+const RUNTIME_APP_ID: i32 = 0x5259_4541;
+
+/// Schema spec for runtime.db — the single source of truth for
+/// what tables/columns/indexes this database must contain.
+fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
+    sqlite_schema::SchemaSpec {
+        application_id: RUNTIME_APP_ID,
+        tables: &[
+            sqlite_schema::TableSpec {
+                name: "thread_runtime",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "pid", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "pgid", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "metadata", col_type: "BLOB", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "launch_metadata", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "resume_attempts", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_commands",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "command_id", col_type: "INTEGER", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "command_type", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "status", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "requested_by", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "params", col_type: "BLOB", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "result", col_type: "BLOB", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "created_at", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "claimed_at", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "completed_at", col_type: "TEXT", pk: false, not_null: false },
+                ],
+            },
+        ],
+        indexes: &[
+            sqlite_schema::IndexSpec { name: "idx_thread_runtime_chain_root", table: "thread_runtime", columns: &["chain_root_id"], unique: false },
+            sqlite_schema::IndexSpec { name: "idx_thread_commands_thread_status", table: "thread_commands", columns: &["thread_id", "status"], unique: false },
+        ],
+    }
+}
+
 pub struct RuntimeDb {
     conn: Connection,
 }
@@ -83,8 +130,13 @@ impl RuntimeDb {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open runtime db {}", path.display()))?;
-        conn.execute_batch(SCHEMA_SQL)
-            .context("failed to initialize runtime db schema")?;
+
+        let spec = runtime_schema_spec();
+        if ryeos_state::sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
+            ryeos_state::sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, path)?;
+        } else {
+            ryeos_state::sqlite_schema::assert_owned(&conn, &spec, path)?;
+        }
         Ok(Self { conn })
     }
 
@@ -149,16 +201,16 @@ impl RuntimeDb {
             Some(s) => match serde_json::from_str::<RuntimeLaunchMetadata>(s) {
                 Ok(m) => {
                     if m.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
-                        tracing::warn!(
-                            thread_id = %thread_id,
-                            persisted_schema_version = m.schema_version,
-                            expected_schema_version = LAUNCH_METADATA_SCHEMA_VERSION,
-                            payload_len = s.len(),
-                            "launch_metadata schema_version mismatch; treating as None — \
-                             resume eligibility and cancellation routing disabled \
-                             for this thread until the row is rewritten"
+                        bail!(
+                            "launch_metadata schema_version mismatch for thread {thread_id}: \
+                             persisted={}; expected={}; payload_len={}. \
+                             Refusing to operate on stale schema. \
+                             Recovery: mv <db_file> <db_file>.foreign.$(date +%s); \
+                             then restart with --init-if-missing.",
+                            m.schema_version,
+                            LAUNCH_METADATA_SCHEMA_VERSION,
+                            s.len(),
                         );
-                        None
                     } else {
                         Some(m)
                     }
@@ -166,15 +218,13 @@ impl RuntimeDb {
                 Err(err) => {
                     // Do NOT log raw payload — ResumeContext.parameters
                     // can contain user/tool params that may include secrets.
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        error = %err,
-                        payload_len = s.len(),
-                        "failed to decode launch_metadata; treating as None — \
-                         resume eligibility and cancellation routing disabled \
-                         for this thread until the row is rewritten"
+                    bail!(
+                        "failed to decode launch_metadata for thread {thread_id}: {err:#} \
+                         (payload_len={}). Corrupt or foreign row. \
+                         Recovery: mv <db_file> <db_file>.foreign.$(date +%s); \
+                         then restart with --init-if-missing.",
+                        s.len(),
                     );
-                    None
                 }
             },
         };
@@ -185,18 +235,42 @@ impl RuntimeDb {
         }))
     }
 
-    /// Read the auto-resume attempt counter for a thread. Missing row
-    /// (or DB rows with no counter persisted) ⇒ 0.
+    /// Read the auto-resume attempt counter for a thread.
+    /// Missing row (legitimate fresh thread) ⇒ 0.
+    /// Row present but `resume_attempts` NULL (corruption) ⇒ bail.
     pub fn get_resume_attempts(&self, thread_id: &str) -> Result<u32> {
+        let row_exists: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM thread_runtime WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get(0),
+            )?;
+        if !row_exists {
+            return Ok(0);
+        }
         let n: Option<i64> = self
             .conn
             .query_row(
                 "SELECT resume_attempts FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| row.get(0),
-            )
-            .optional()?;
-        Ok(n.unwrap_or(0).max(0) as u32)
+            )?;
+        match n {
+            Some(v) => {
+                if v < 0 {
+                    bail!(
+                        "resume_attempts is negative ({v}) for thread {thread_id} — \
+                         corrupt row; refusing to fabricate a counter"
+                    );
+                }
+                Ok(v as u32)
+            }
+            None => bail!(
+                "resume_attempts is NULL for thread {thread_id} — \
+                 corrupt row; refusing to fabricate a counter"
+            ),
+        }
     }
 
     /// Atomically increment the auto-resume attempt counter for a
@@ -422,10 +496,9 @@ mod tests {
     }
 
     #[test]
-    fn garbage_launch_metadata_decodes_to_none_without_panic() {
-        // Schema drift / corruption must surface as None (with a warn
-        // log emitted) rather than panicking or silently dropping the
-        // entire row.
+    fn garbage_launch_metadata_decodes_to_error() {
+        // O5: Schema drift / corruption must surface as a typed error,
+        // not silently degrade to None.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
         db.conn
@@ -435,9 +508,13 @@ mod tests {
                 params!["t1", 1i64, 2i64, "{not valid json"],
             )
             .unwrap();
-        let info = db.get_runtime_info("t1").unwrap().unwrap();
-        assert_eq!(info.pid, Some(1));
-        assert!(info.launch_metadata.is_none());
+        let err = db
+            .get_runtime_info("t1")
+            .expect_err("garbage launch_metadata must error");
+        assert!(
+            err.to_string().contains("failed to decode launch_metadata"),
+            "expected decode error, got: {err}"
+        );
     }
 
     #[test]
@@ -476,12 +553,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_mismatch_yields_none_with_warn() {
+    fn schema_version_mismatch_errors() {
+        // O5: Schema version mismatch must surface as a typed error,
+        // not silently degrade to None.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
-        // Persist a payload that decodes successfully but carries a
-        // future schema_version. get_runtime_info must drop the
-        // metadata to avoid acting on an unknown shape.
         let payload = serde_json::json!({ "schema_version": 999 }).to_string();
         db.conn
             .execute(
@@ -490,8 +566,12 @@ mod tests {
                 params!["t1", 1i64, 2i64, payload],
             )
             .unwrap();
-        let info = db.get_runtime_info("t1").unwrap().unwrap();
-        assert_eq!(info.pid, Some(1));
-        assert!(info.launch_metadata.is_none());
+        let err = db
+            .get_runtime_info("t1")
+            .expect_err("schema version mismatch must error");
+        assert!(
+            err.to_string().contains("schema_version mismatch"),
+            "expected schema mismatch error, got: {err}"
+        );
     }
 }

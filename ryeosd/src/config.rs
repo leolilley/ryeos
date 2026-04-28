@@ -3,7 +3,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
@@ -31,8 +31,8 @@ pub struct Cli {
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
 
-    #[arg(long, default_value = "127.0.0.1:7400")]
-    pub bind: SocketAddr,
+    #[arg(long)]
+    pub bind: Option<SocketAddr>,
 
     #[arg(long)]
     pub db_path: Option<PathBuf>,
@@ -88,6 +88,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PartialConfig {
     bind: Option<SocketAddr>,
     db_path: Option<PathBuf>,
@@ -101,15 +102,43 @@ struct PartialConfig {
 
 impl Config {
     pub fn load(cli: &Cli) -> Result<Self> {
-        let defaults = Self::default_paths(cli.bind)?;
+        let compiled_default: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let defaults = Self::default_paths(compiled_default)?;
         let file_cfg = if let Some(path) = &cli.config {
             Some(Self::load_file(path)?)
         } else {
             let default_config = defaults.state_dir.join("config.yaml");
             if default_config.exists() {
-                Self::load_file(&default_config).ok()
+                Some(Self::load_file(&default_config)
+                    .with_context(|| format!("failed to load existing config at {}", default_config.display()))?)
             } else {
                 None
+            }
+        };
+
+        // R1: Typed --bind precedence. CLI `--bind` is Option<SocketAddr>;
+        // None means the operator omitted it.
+        let file_bind = file_cfg.as_ref().and_then(|cfg| cfg.bind);
+        let resolved_bind = match (file_bind, cli.bind) {
+            // Neither file nor CLI → compiled default
+            (None, None) => compiled_default,
+            // File only → use file value, no error
+            (Some(fb), None) => fb,
+            // CLI only → use CLI value (fresh-init or unconfigured-bind)
+            (None, Some(cb)) => cb,
+            // Both agree → use it
+            (Some(fb), Some(cb)) if fb == cb => cb,
+            // Both present but disagree — require --force
+            (Some(fb), Some(cb)) => {
+                if !cli.force {
+                    bail!(
+                        "conflict between CLI --bind ({cb}) and stored config.yaml ({fb}) — \
+                         pass --force to overwrite"
+                    );
+                }
+                // --force: use CLI value, caller (bootstrap::init) will
+                // rewrite config.yaml so subsequent boots are consistent.
+                cb
             }
         };
 
@@ -125,10 +154,7 @@ impl Config {
             .unwrap_or_else(|| defaults.state_dir.clone());
 
         let cfg = Self {
-            bind: file_cfg
-                .as_ref()
-                .and_then(|cfg| cfg.bind)
-                .unwrap_or(cli.bind),
+            bind: resolved_bind,
             db_path: cli
                 .db_path
                 .clone()

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use serde_json::{json, Value};
 
 use crate::adapter;
@@ -142,8 +144,8 @@ impl Runner {
         resume: ResumeState,
         tools: Vec<ToolSchema>,
         system_prompt: Option<String>,
-        harness: Harness,
-        budget: BudgetTracker,
+        mut harness: Harness,
+        mut budget: BudgetTracker,
         callback: CallbackClient,
         context_window: u64,
         provider_config: crate::directive::ProviderConfig,
@@ -151,6 +153,10 @@ impl Runner {
         thread_id: String,
         hooks: Vec<ryeos_runtime::HookDefinition>,
     ) -> Self {
+        if let Some(ref usage) = resume.thread_usage {
+            harness.reseed(usage.completed_turns, usage.input_tokens + usage.output_tokens, usage.spend_usd, usage.spawns_used);
+            budget.reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd);
+        }
         let mut runner = Self::new(
             resume.messages,
             tools,
@@ -192,11 +198,10 @@ impl Runner {
         loop {
             state = match state {
                 State::Init => {
-                    record_callback_warning(
-                        &mut warnings,
-                        "mark_running",
-                        self.callback.mark_running().await,
-                    );
+                    if let Err(e) = self.callback.mark_running().await {
+                        state = State::Errored { error: format!("resume-critical callback mark_running failed: {e}") };
+                        continue;
+                    }
                     State::CheckingLimits
                 }
 
@@ -219,14 +224,14 @@ impl Runner {
                 }
 
                 State::CallingProvider => {
+                    let turn_start = Instant::now();
                     self.harness.record_turn();
                     turn += 1;
 
-                    record_callback_warning(
-                        &mut warnings,
-                        "emit_turn_start",
-                        self.callback.emit_turn_start(turn).await,
-                    );
+                    if let Err(e) = self.callback.emit_turn_start(turn).await {
+                        state = State::Errored { error: format!("resume-critical callback emit_turn_start failed: {e}") };
+                        continue;
+                    }
 
                     if self.budget.is_exhausted() {
                         state = State::Errored { error: "budget_exceeded".to_string() };
@@ -244,23 +249,43 @@ impl Runner {
                     .await
                     {
                         Ok(resp) => {
+                            let input_tok = resp.usage.as_ref().map_or(0, |u| u.input_tokens);
+                            let output_tok = resp.usage.as_ref().map_or(0, |u| u.output_tokens);
+                            let usd = self.compute_cost(input_tok, output_tok);
+
+                            let proposed_usage = ryeos_state::ThreadUsage {
+                                completed_turns: self.harness.turns_used(),
+                                input_tokens: self.budget.cost().input_tokens + input_tok,
+                                output_tokens: self.budget.cost().output_tokens + output_tok,
+                                spend_usd: self.budget.cost().total_usd + usd,
+                                spawns_used: self.harness.spawns_used(),
+                                started_at: lillux::time::iso8601_now(),
+                                settled_at: lillux::time::iso8601_now(),
+                                last_settled_turn_seq: turn as u64,
+                                elapsed_ms: turn_start.elapsed().as_millis() as u64,
+                            };
+
+                            if let Err(e) = self.callback.emit_thread_usage(&proposed_usage).await {
+                                state = State::Errored { error: format!("resume-critical callback emit_thread_usage failed: {e}") };
+                                continue;
+                            }
+
                             if let Some(ref usage) = resp.usage {
                                 self.harness.record_tokens(usage.input_tokens, usage.output_tokens);
-                                let usd = self.compute_cost(usage.input_tokens, usage.output_tokens);
                                 self.harness.record_spend(usd);
                                 self.budget.report(usage.input_tokens, usage.output_tokens, usd);
                             }
                             self.messages.push(resp.message.clone());
-                            record_callback_warning(
-                                &mut warnings,
-                                "emit_turn_complete",
-                                self.callback
-                                    .emit_turn_complete(
-                                        turn,
-                                        resp.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
-                                    )
-                                    .await,
-                            );
+                            if let Err(e) = self.callback
+                                .emit_turn_complete(
+                                    turn,
+                                    resp.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
+                                )
+                                .await
+                            {
+                                state = State::Errored { error: format!("resume-critical callback emit_turn_complete failed: {e}") };
+                                continue;
+                            }
                             if let Some(ref reason) = resp.finish_reason {
                                 tracing::debug!(finish_reason = %reason, "provider response");
                             }
@@ -367,11 +392,10 @@ impl Runner {
                         State::CheckingContinuation
                     } else {
                         let tc = &pending[index];
-                        record_callback_warning(
-                            &mut warnings,
-                            "emit_tool_dispatch",
-                            self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref()).await,
-                        );
+                        if let Err(e) = self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref()).await {
+                            state = State::Errored { error: format!("resume-critical callback emit_tool_dispatch failed: {e}") };
+                            continue;
+                        }
 
                         let required_cap = format!("rye.execute.tool.{}", tc.name);
                         if !self.harness.check_permission(&required_cap) {
@@ -411,11 +435,19 @@ impl Runner {
                                 );
                                 let mut result = self.finalize(json!("directive_return"));
                                 result.outputs = outputs;
-                                record_callback_warning(
-                                    &mut warnings,
-                                    "finalize_thread(completed)",
-                                    self.callback.finalize_thread("completed").await,
-                                );
+                                if let Err(e) = self.callback.finalize_thread("completed").await {
+                                    // Finalize failed — return errored result
+                                    guard.finalized = true;
+                                    return Self::attach_warnings(RuntimeResult {
+                                        success: false,
+                                        status: "errored".to_string(),
+                                        thread_id: self.thread_id.clone(),
+                                        result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
+                                        outputs: json!({}),
+                                        cost: Some(self.budget.cost()),
+                                        warnings: std::mem::take(&mut warnings),
+                                    }, &mut warnings);
+                                }
                                 guard.finalized = true;
                                 return Self::attach_warnings(result, &mut warnings);
                             }
@@ -496,11 +528,10 @@ impl Runner {
                     };
 
                     let truncated = tool_result_content.len() != raw_args.len();
-                    record_callback_warning(
-                        &mut warnings,
-                        "emit_tool_result",
-                        self.callback.emit_tool_result(&call_id, truncated).await,
-                    );
+                    if let Err(e) = self.callback.emit_tool_result(&call_id, truncated).await {
+                        state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
+                        continue;
+                    }
                     self.messages.push(ProviderMessage {
                         role: "tool".to_string(),
                         content: Some(json!(tool_result_content)),
@@ -640,11 +671,19 @@ impl Runner {
                 }
 
                 State::Finalizing { result } => {
-                    record_callback_warning(
-                        &mut warnings,
-                        "finalize_thread(completed)",
-                        self.callback.finalize_thread("completed").await,
-                    );
+                    if let Err(e) = self.callback.finalize_thread("completed").await {
+                        let runtime_result = RuntimeResult {
+                            success: false,
+                            status: "errored".to_string(),
+                            thread_id: self.thread_id.clone(),
+                            result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
+                            outputs: json!({}),
+                            cost: Some(self.budget.cost()),
+                            warnings: Vec::new(),
+                        };
+                        guard.finalized = true;
+                        return Self::attach_warnings(runtime_result, &mut warnings);
+                    }
                     let runtime_result = self.finalize(result);
                     guard.finalized = true;
                     return Self::attach_warnings(runtime_result, &mut warnings);
@@ -675,11 +714,10 @@ impl Runner {
                         "thread_failed(emit_error)",
                         self.callback.emit_error(&error).await,
                     );
-                    record_callback_warning(
-                        &mut warnings,
-                        "finalize_thread(failed)",
-                        self.callback.finalize_thread("failed").await,
-                    );
+                    if let Err(e) = self.callback.finalize_thread("failed").await {
+                        // Finalize failed — surface in the error result
+                        warnings.push(format!("resume-critical callback finalize_thread(failed) also failed: {e}"));
+                    }
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: "errored".to_string(),

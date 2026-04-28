@@ -12,6 +12,7 @@ pub struct EventStoreService {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventAppendItem {
     pub event_type: String,
     pub storage_class: String,
@@ -20,12 +21,14 @@ pub struct EventAppendItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventAppendParams {
     pub thread_id: String,
     pub event: EventAppendItem,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventAppendBatchParams {
     pub thread_id: String,
     pub events: Vec<EventAppendItem>,
@@ -37,6 +40,7 @@ pub struct EventAppendBatchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventReplayParams {
     #[serde(default)]
     pub chain_root_id: Option<String>,

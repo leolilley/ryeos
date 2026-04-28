@@ -21,6 +21,7 @@ pub use ryeos_engine::inventory::ItemDescriptor;
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaunchEnvelope {
     pub invocation_id: String,
     pub thread_id: String,
@@ -54,6 +55,7 @@ pub struct LaunchEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvelopeRoots {
     pub project_root: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,8 +63,11 @@ pub struct EnvelopeRoots {
     pub system_roots: Vec<PathBuf>,
 }
 
+/// Intentionally open payload — shape is kind-defined.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvelopeRequest {
+    /// Intentionally open — directive/graph inputs are user-defined per-kind.
     #[serde(default)]
     pub inputs: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +81,7 @@ pub struct EnvelopeRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HardLimits {
     #[serde(default)]
     pub turns: u32,
@@ -105,6 +111,7 @@ impl Default for HardLimits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvelopePolicy {
     #[serde(default)]
     pub effective_caps: Vec<String>,
@@ -112,12 +119,15 @@ pub struct EnvelopePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvelopeCallback {
     pub socket_path: PathBuf,
     pub token: String,
 }
 
+/// Intentionally open payload — the runtime's final output is kind-defined.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeResult {
     pub success: bool,
     pub status: String,
@@ -128,8 +138,11 @@ pub struct RuntimeResult {
     /// final value, knowledge runtime's projection) can ship it
     /// without lossy stringification. The daemon passes this through
     /// verbatim into the `/execute` response envelope.
+    ///
+    /// Intentionally open — the shape is kind-defined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Intentionally open — same as result.
     #[serde(default)]
     pub outputs: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +158,7 @@ pub struct RuntimeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeCost {
     #[serde(default)]
     pub input_tokens: u64,

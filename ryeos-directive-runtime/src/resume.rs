@@ -1,13 +1,20 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::Value;
 
 use ryeos_runtime::callback_client::CallbackClient;
+use ryeos_runtime::ReplayedEventRecord;
+use ryeos_state::ThreadUsage;
 
 use crate::directive::ProviderMessage;
 
 pub struct ResumeState {
     pub messages: Vec<ProviderMessage>,
     pub turns_completed: u32,
+    pub thread_usage: Option<ThreadUsage>,
+    /// Whether the replayed events contained at least one `thread_usage`
+    /// entry. Used by the resume gate in main.rs to refuse resume when
+    /// prerequisites are unmet.
+    pub has_thread_usage_event: bool,
 }
 
 pub async fn load_resume_state(
@@ -16,55 +23,88 @@ pub async fn load_resume_state(
 ) -> Result<ResumeState> {
     let response = callback.replay_events_for(previous_thread_id).await?;
 
-    let events = response
-        .get("events")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let messages = reconstruct_messages(&events);
+    let messages = reconstruct_messages(&response.events)?;
     let turns_completed = count_turns(&messages);
 
     let trimmed = trim_to_token_budget(messages, 16_000);
 
+    // Scan replayed events for the most recent thread_usage entry.
+    // This is the runtime reconstructing its own budget from the
+    // event stream — the daemon stays generic.
+    let mut has_thread_usage_event = false;
+    let thread_usage = extract_thread_usage_from_events(&response.events, &mut has_thread_usage_event);
+
     Ok(ResumeState {
         messages: trimmed,
         turns_completed,
+        thread_usage,
+        has_thread_usage_event,
     })
 }
 
-fn reconstruct_messages(events: &[Value]) -> Vec<ProviderMessage> {
+/// Extract the most recent `ThreadUsage` from replayed events by
+/// scanning for `thread_usage` event_type entries. Sets the flag
+/// if any such entry is found, even if deserialization fails.
+fn extract_thread_usage_from_events(
+    events: &[ReplayedEventRecord],
+    found: &mut bool,
+) -> Option<ThreadUsage> {
+    // Walk in reverse to get the latest usage
+    for event in events.iter().rev() {
+        if event.event_type == "thread_usage" {
+            *found = true;
+            if let Ok(usage) = serde_json::from_value::<ThreadUsage>(event.payload.clone()) {
+                return Some(usage);
+            }
+            // Found a thread_usage event but failed to deserialize — bail
+            // is handled by the caller checking has_thread_usage_event
+            return None;
+        }
+    }
+    None
+}
+
+fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMessage>> {
     let mut messages = Vec::new();
 
     for event in events {
-        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-        match event_type {
+        match event.event_type.as_str() {
             "user_message" => {
-                if let Some(content) = event.get("data").and_then(|d| d.get("content")) {
-                    messages.push(ProviderMessage {
-                        role: "user".to_string(),
-                        content: Some(content.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                }
+                let content = event.payload.get("content").cloned();
+                messages.push(ProviderMessage {
+                    role: "user".to_string(),
+                    content,
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
             }
             "assistant_message" => {
-                let data = event.get("data").cloned().unwrap_or(Value::Null);
-                let content = data.get("content").cloned();
-                let tool_calls = data.get("tool_calls").and_then(|tc| tc.as_array()).map(
-                    |arr| {
-                        arr.iter()
-                            .filter_map(|tc| {
-                                let id = tc.get("id").and_then(|v| v.as_str()).map(String::from);
-                                let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let arguments = tc.get("arguments").cloned().unwrap_or(Value::Null);
-                                Some(crate::directive::ToolCall { id, name, arguments })
+                let content = event.payload.get("content").cloned();
+                let tool_calls = match event.payload.get("tool_calls").and_then(|tc| tc.as_array()) {
+                    Some(arr) => {
+                        let calls: Vec<crate::directive::ToolCall> = arr
+                            .iter()
+                            .map(|tc| {
+                                let id = tc.get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let name = tc.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| anyhow::anyhow!(
+                                        "malformed tool_call in replay: missing or non-string 'name' field"
+                                    ))?
+                                    .to_string();
+                                let arguments = tc.get("arguments").cloned()
+                                    .ok_or_else(|| anyhow::anyhow!(
+                                        "malformed tool_call in replay: missing 'arguments' field on tool '{name}'"
+                                    ))?;
+                                Ok::<_, anyhow::Error>(crate::directive::ToolCall { id, name, arguments })
                             })
-                            .collect::<Vec<_>>()
-                    },
-                );
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Some(calls)
+                    }
+                    None => None,
+                };
 
                 messages.push(ProviderMessage {
                     role: "assistant".to_string(),
@@ -74,15 +114,10 @@ fn reconstruct_messages(events: &[Value]) -> Vec<ProviderMessage> {
                 });
             }
             "tool_result" => {
-                let call_id = event
-                    .get("data")
-                    .and_then(|d| d.get("call_id"))
+                let call_id = event.payload.get("call_id")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let content = event
-                    .get("data")
-                    .and_then(|d| d.get("result"))
-                    .cloned();
+                let content = event.payload.get("result").cloned();
 
                 messages.push(ProviderMessage {
                     role: "tool".to_string(),
@@ -91,11 +126,13 @@ fn reconstruct_messages(events: &[Value]) -> Vec<ProviderMessage> {
                     tool_call_id: call_id,
                 });
             }
-            _ => {}
+            other => {
+                bail!("unknown event_type in replay: {other}");
+            }
         }
     }
 
-    messages
+    Ok(messages)
 }
 
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
@@ -145,12 +182,13 @@ fn estimate_tokens_from_value(v: &Option<Value>) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, RuntimeCallbackAPI};
+    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI};
+    use ryeos_runtime::ReplayedEventRecord;
     use serde_json::json;
     use std::sync::Arc;
 
     struct MockCallback {
-        events: Vec<Value>,
+        events: Vec<ReplayedEventRecord>,
     }
 
     #[async_trait]
@@ -166,7 +204,7 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
-            Ok(json!({"events": self.events.clone()}))
+            Ok(serde_json::to_value(ReplayResponse { events: self.events.clone() }).unwrap())
         }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
@@ -174,7 +212,7 @@ mod tests {
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
     }
 
-    fn make_callback(events: Vec<Value>) -> CallbackClient {
+    fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(MockCallback { events });
         CallbackClient::from_inner(inner, "T-test", "/tmp/test")
     }
@@ -185,43 +223,62 @@ mod tests {
         let state = load_resume_state(&callback, "nonexistent").await.unwrap();
         assert!(state.messages.is_empty());
         assert_eq!(state.turns_completed, 0);
+        assert!(state.thread_usage.is_none());
     }
 
     #[test]
-    fn reconstruct_messages_from_events() {
+    fn reconstruct_messages_from_typed_events() {
         let events = vec![
-            json!({
-                "type": "user_message",
-                "data": {"content": "Hello"}
-            }),
-            json!({
-                "type": "assistant_message",
-                "data": {"content": "Hi there!"}
-            }),
-            json!({
-                "type": "user_message",
-                "data": {"content": "Do something"}
-            }),
-            json!({
-                "type": "assistant_message",
-                "data": {
+            ReplayedEventRecord {
+                event_type: "user_message".to_string(),
+                payload: json!({"content": "Hello"}),
+            },
+            ReplayedEventRecord {
+                event_type: "assistant_message".to_string(),
+                payload: json!({"content": "Hi there!"}),
+            },
+            ReplayedEventRecord {
+                event_type: "user_message".to_string(),
+                payload: json!({"content": "Do something"}),
+            },
+            ReplayedEventRecord {
+                event_type: "assistant_message".to_string(),
+                payload: json!({
                     "content": null,
                     "tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "/tmp"}}]
-                }
-            }),
-            json!({
-                "type": "tool_result",
-                "data": {"call_id": "c1", "result": "file contents"}
-            }),
+                }),
+            },
+            ReplayedEventRecord {
+                event_type: "tool_result".to_string(),
+                payload: json!({"call_id": "c1", "result": "file contents"}),
+            },
         ];
 
-        let messages = reconstruct_messages(&events);
+        let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[2].role, "user");
         assert!(messages[3].tool_calls.is_some());
         assert_eq!(messages[4].role, "tool");
+    }
+
+    #[test]
+    fn unknown_event_type_bails() {
+        let events = vec![
+            ReplayedEventRecord {
+                event_type: "user_message".to_string(),
+                payload: json!({"content": "Hello"}),
+            },
+            ReplayedEventRecord {
+                event_type: "unknown_kind".to_string(),
+                payload: json!({}),
+            },
+        ];
+        let result = reconstruct_messages(&events);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown event_type"), "expected bail on unknown type, got: {err}");
     }
 
     #[test]
@@ -274,8 +331,14 @@ mod tests {
     #[tokio::test]
     async fn full_roundtrip_via_callback() {
         let events = vec![
-            json!({"type": "user_message", "data": {"content": "Do task"}}),
-            json!({"type": "assistant_message", "data": {"content": "Done!"}}),
+            ReplayedEventRecord {
+                event_type: "user_message".to_string(),
+                payload: json!({"content": "Do task"}),
+            },
+            ReplayedEventRecord {
+                event_type: "assistant_message".to_string(),
+                payload: json!({"content": "Done!"}),
+            },
         ];
         let callback = make_callback(events);
         let state = load_resume_state(&callback, "T-prev").await.unwrap();

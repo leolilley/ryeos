@@ -133,6 +133,25 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
         let resume_state = resume::load_resume_state(&callback, resume_id).await?;
+
+        // R5: Resume gate — refuse resume if the prior thread has no
+        // settled `thread_usage` event in the replay stream. Without
+        // prior budget data, the runtime cannot reseed BudgetTracker
+        // or Harness, so resuming would silently start from zero.
+        if !resume_state.has_thread_usage_event {
+            return Ok(RuntimeResult {
+                success: false,
+                status: "errored".to_string(),
+                thread_id: envelope.thread_id.clone(),
+                result: Some(json!(
+                    "resume prerequisites unmet: no thread_usage event found in prior thread"
+                )),
+                outputs: json!({}),
+                cost: None,
+                warnings: Vec::new(),
+            });
+        }
+
         if let Err(e) = callback
             .append_event("thread_continued", json!({"previous_thread_id": resume_id}))
             .await

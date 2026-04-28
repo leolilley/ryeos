@@ -117,6 +117,13 @@ impl Harness {
         self.spawns_used += 1;
     }
 
+    pub fn reseed(&mut self, turns: u32, tokens: u64, spend: f64, spawns: u32) {
+        self.turns_used = turns;
+        self.tokens_used = tokens;
+        self.spend_used = spend;
+        self.spawns_used = spawns;
+    }
+
     pub fn turns_used(&self) -> u32 {
         self.turns_used
     }
@@ -127,6 +134,10 @@ impl Harness {
 
     pub fn spend_used(&self) -> f64 {
         self.spend_used
+    }
+
+    pub fn spawns_used(&self) -> u32 {
+        self.spawns_used
     }
 
     pub fn is_cancelled(&self) -> bool {
