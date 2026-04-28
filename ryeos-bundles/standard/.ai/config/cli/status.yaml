@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:34Z:986807d01181b5dbc73b09d4e57ab27a410e2cd60ac159f4eeef3761fdb286fa:fNGWWzdoyQTEYUpXmMxinuZEhCULfscFNVMnJoZhEbyhJB/bFsSsTV6K4i7I4sR/qhgv1shtQqboysNlV9AGBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["status"]
+description: "Show daemon status: version, uptime, bind address, active threads."
+execute: service:system/status

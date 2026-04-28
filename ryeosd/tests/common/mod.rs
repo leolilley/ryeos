@@ -39,10 +39,10 @@ pub fn rye_binary() -> PathBuf {
         // be a no-op once the binary is up-to-date.
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = std::process::Command::new(&cargo)
-            .args(["build", "-p", "rye-cli", "--bin", "rye"])
+            .args(["build", "-p", "ryeos-cli", "--bin", "rye"])
             .status()
-            .expect("failed to invoke `cargo build -p rye-cli`");
-        assert!(status.success(), "cargo build -p rye-cli failed");
+            .expect("failed to invoke `cargo build -p ryeos-cli`");
+        assert!(status.success(), "cargo build -p ryeos-cli failed");
     }
     assert!(
         candidate.exists(),

@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:33Z:e344e43a7b8329df649f73697d91aba5033310c51163c575bdac84d04986b2ba:IaHoAumQMwzsyUgm6jj49sD1ji3koMZWkJkXCeOFTzeJ41QNK51hN1GukSV00hJIc/VRQbaCnNs+GLBv8PUyCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["commands", "submit"]
+description: "Submit a runtime command (e.g. cancel) to a thread."
+execute: service:commands/submit

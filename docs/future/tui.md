@@ -214,7 +214,7 @@ Dependencies:
 - `reqwest` or `hyper` — SSE streaming client
 - `pulldown-cmark` — markdown to terminal rendering
 
-Workspace member alongside `ryeosd`, `rye-cli`, `rye-input`, `rye_engine`.
+Workspace member alongside `ryeosd`, `ryeos-cli`, `rye-input`, `ryeos-engine`.
 
 ---
 

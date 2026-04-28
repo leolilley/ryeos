@@ -28,7 +28,7 @@ ryeos/               → pip: ryeos-engine  (ships rye/ module, no .ai/ data)
     email/           → pip: ryeos-email  (ryeos_email/.ai/rye/email/*)
 
 ryeos-mcp/           → pip: ryeos-mcp    (rye_mcp/ module)
-ryeos-cli/           → pip: ryeos-cli   (rye_cli/ module)
+ryeos-cli/           → cargo: ryeos-cli (Rust crate, binary `rye`)
 ```
 
 ## Install Tiers
@@ -203,13 +203,13 @@ The MCP server transport. Exposes the four Rye MCP tools over stdio or SSE so an
 
 ### ryeos-cli (terminal CLI)
 
-**Package name:** `ryeos-cli`
-**Source:** `ryeos-cli/`
-**Python module:** `rye_cli/`
-**Dependencies:** `ryeos`, `pyyaml`
-**Bundle:** none — inherits bundles from its `ryeos` dependency
+**Crate name:** `ryeos-cli`
+**Source:** `ryeos-cli/` (Rust workspace member)
+**Binary:** `rye` (also ships `rye-bundle-tool` for maintainer workflows)
+**Dependencies:** `ryeos-engine`, `lillux`, `ryeos-tools`
+**Bundle:** none — verbs are loaded data-driven from `.ai/config/cli/*.yaml` in the standard bundle
 
-The terminal-native CLI. Maps shell verbs (`fetch`, `execute`, `sign`, `thread`, `graph`, `test`, `registry`, `install`, `uninstall`) directly to the three RYE primitives — no MCP transport. Imports `ryeos` directly as a Python library for zero-overhead invocation.
+The terminal-native CLI. Verbs are declared in YAML in the standard bundle's `.ai/config/cli/`; the CLI is a thin client that resolves a verb to a canonical item ref and POSTs `{item_ref, project_path, parameters}` to the running daemon's HTTP `/execute`. There is no in-process engine fallback — when the daemon is down, the CLI fails fast (exit 75, "daemon.json not found"). The explicit offline path is `ryeosd run-service <ref>`.
 
 Use `ryeos-cli` when you want to invoke RYE from the terminal without an MCP client — CI scripts, graph operations, test running, or interactive development.
 
@@ -448,7 +448,7 @@ Code packages contain Python or Rust source code that implements functionality:
 | `lillux`       | Python library        | Microkernel primitives (subprocess, signing, HTTP) |
 | `ryeos-engine` | Python library        | Execution engine (`rye/` module), no `.ai/` data   |
 | `ryeos-mcp`    | Python library        | MCP server transport (`rye_mcp/` module)           |
-| `ryeos-cli`    | Python library        | Terminal CLI (`rye_cli/` module)                    |
+| `ryeos-cli`    | Rust crate            | Terminal CLI (binary `rye`, data-driven verbs over HTTP) |
 
 Data bundles are primarily `.ai/` item collections with minimal Python glue:
 

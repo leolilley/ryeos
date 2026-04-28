@@ -3,8 +3,11 @@
 //! These tests verify the *structure* of a built bundle without
 //! re-running the full build pipeline (which requires `cargo build`).
 //!
-//! Prerequisite: `cargo run -p rye-cli --bin rye -- build-bundle`
-//! must have been run at least once.
+//! Prerequisite: a populated `ryeos-bundles/standard/.ai/bin/<triple>/`
+//! plus its `MANIFEST.json`. Regenerate via:
+//!   `cargo run -p ryeos-cli --bin rye-bundle-tool -- rebuild-manifest \
+//!        --source ryeos-bundles/standard --seed 119`
+//! (or run the full build-bundle pipeline if binaries need rebuilding).
 
 use sha2::Digest;
 use std::path::Path;

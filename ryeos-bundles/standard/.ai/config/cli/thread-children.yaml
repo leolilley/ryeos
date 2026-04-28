@@ -1,0 +1,6 @@
+# rye:signed:2026-04-27T16:06:35Z:e346bd6e67a0a492d270ba76536a01ceef311739e403cd03df8d3782b1f47af7:2mD5oNPsG9Ttgn1qEdZHSOur+TXZ87T2TffU0TfnkUVwxibmLpnSF+RXtGbKKCAEDT9PvGKJEniwFA5sHmSDDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+kind: config
+category: cli
+tokens: ["thread", "children"]
+description: "List a thread's direct children."
+execute: service:threads/children
