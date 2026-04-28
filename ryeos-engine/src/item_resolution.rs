@@ -374,6 +374,9 @@ mod tests {
                 terminator: None,
                 delegate: None,
                 thread_profile: None,
+                default_operation: None,
+                operations: Vec::new(),
+                launch_augmentations: Vec::new(),
             }),
             extensions: extensions
                 .into_iter()
