@@ -1949,12 +1949,13 @@ dependencies = [
 
 [[package]]
 name = "ryeos-knowledge-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
- "lillux",
+ "ryeos-knowledge",
  "ryeos-runtime",
  "ryeos-tracing",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
