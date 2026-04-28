@@ -28,6 +28,12 @@ pub struct ExecuteRequest {
     /// How the project root is determined. Defaults to live FS.
     #[serde(default)]
     pub project_source: Option<ProjectSource>,
+    /// **Op dispatch**: operation name for kinds with `operations` schemas.
+    #[serde(default)]
+    pub operation: Option<String>,
+    /// **Op dispatch**: op-specific inputs for kinds with `operations` schemas.
+    #[serde(default)]
+    pub inputs: Option<Value>,
 }
 
 fn default_launch_mode() -> String {
@@ -166,6 +172,8 @@ pub async fn execute(
         caller_scopes: caller_scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx,
+        requested_op: request.operation.clone(),
+        requested_inputs: request.inputs.clone(),
     };
 
     // **B1**: parse the user-supplied root ref ONCE here so the
@@ -199,6 +207,8 @@ pub async fn execute(
         temp_dir: temp_dir_guard.disarm(),
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
+        operation: request.operation.clone(),
+        inputs: request.inputs.clone(),
     };
 
     match crate::dispatch::dispatch(&request.item_ref, &dispatch_req, &exec_ctx, &state).await {

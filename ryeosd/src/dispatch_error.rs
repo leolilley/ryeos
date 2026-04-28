@@ -57,7 +57,7 @@ pub enum DispatchError {
     ProjectSource(String),
     // ── P1.2: operator-fixable failures, no longer 500 ────────────
     /// Service handler not found in the in-process handler registry.
-    /// The kind schema declared `InProcess { registry: Services }` but
+    /// The kind schema declared `InProcessHandler { Services }` but
     /// no handler matched the item's service name.
     #[error("service handler not found for '{service_ref}' in {registry}; available: [{available}]")]
     ServiceHandlerMissing {
@@ -105,23 +105,34 @@ pub enum DispatchError {
     /// could not be checked out from CAS.
     #[error("project source checkout failed: {0}")]
     ProjectSourceCheckoutFailed(String),
-    /// Caller lacks a required capability for the dispatch role.
-    /// Mapped to 403 by the HTTP layer with body `{ "required_cap": "..." }`.
-    #[error("missing required capability: {required}")]
-    MissingCap { required: String },
-    /// Protocol descriptor not found in the protocol registry.
-    #[error("protocol `{0}` not registered")]
-    ProtocolNotRegistered(String),
-    /// Subprocess spec build failed (vocabulary violation).
-    #[error("subprocess spec build failed: {0}")]
-    SpecBuild(#[source] ryeos_engine::error::EngineError),
-    /// Streaming protocol cannot be invoked with launch_mode=detached.
-    /// Pin-test-pinned wording.
-    #[error("streaming protocols cannot be invoked with launch_mode=detached")]
-    StreamingNotDetachable,
-    /// Invalid launch_mode value.
-    #[error("invalid launch_mode: {other}")]
-    InvalidLaunchMode { other: String },
+    // ── Op dispatch errors ─────────────────────────────────────────
+    /// The requested operation is not declared on the kind's schema.
+    #[error("unknown op '{requested}' for kind '{kind}'; declared ops: [{declared}]")]
+    UnknownOp {
+        kind: String,
+        requested: String,
+        declared: String,
+    },
+    /// A required input for the op is missing or has wrong type.
+    #[error("invalid input for op '{op}': {reason}")]
+    OpInvalidInput { op: String, reason: String },
+    /// The op's runtime returned a structured failure.
+    #[error("op '{op}' on kind '{kind}' failed: {reason}")]
+    OpFailed {
+        kind: String,
+        op: String,
+        reason: String,
+    },
+    /// The op returned NotImplemented (phase gate).
+    #[error("op '{op}' on kind '{kind}' is not implemented (phase {phase})")]
+    OpNotImplemented {
+        kind: String,
+        op: String,
+        phase: u8,
+    },
+    /// Projection invariant violated during slim-payload construction.
+    #[error("projection invariant violated: {reason}")]
+    ProjectionInvariant { reason: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -146,12 +157,6 @@ pub enum RouteConfigError {
     },
     #[error("unknown auth verifier '{name}' for route '{id}'")]
     UnknownVerifier { id: String, name: String },
-    #[error("invalid auth_config for verifier '{verifier}' on route '{id}': {reason}")]
-    InvalidAuthConfig {
-        id: String,
-        verifier: String,
-        reason: String,
-    },
     #[error("unknown response mode '{name}' for route '{id}'")]
     UnknownResponseMode { id: String, name: String },
     #[error("invalid limits for route '{id}': {reason}")]
@@ -210,12 +215,9 @@ impl DispatchError {
             | Self::AliasCycle { .. }
             | Self::AliasChainTooLong { .. }
             | Self::CapabilityRejected { .. }
-            | Self::SchemaMisconfigured { .. }
-            | Self::StreamingNotDetachable
-            | Self::InvalidLaunchMode { .. } => StatusCode::BAD_REQUEST,
+            | Self::SchemaMisconfigured { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
-            | Self::ServiceCapDenied { .. }
-            | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
+            | Self::ServiceCapDenied { .. } => StatusCode::FORBIDDEN,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
@@ -231,186 +233,12 @@ impl DispatchError {
             | Self::SubprocessRunFailed { .. }
             | Self::RuntimeMaterializationFailed { .. }
             | Self::ProjectSourceCheckoutFailed(_)
-            | Self::ProtocolNotRegistered(_)
-            | Self::SpecBuild(_) => StatusCode::BAD_GATEWAY,
+            | Self::OpFailed { .. }
+            | Self::OpNotImplemented { .. } => StatusCode::BAD_GATEWAY,
+            Self::UnknownOp { .. }
+            | Self::OpInvalidInput { .. }
+            | Self::ProjectionInvariant { .. } => StatusCode::BAD_REQUEST,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
-    }
-
-    /// Stable machine-readable error code for each variant.
-    ///
-    /// Consumed by SSE `stream_error` events and daemon tracing.
-    /// Adding a new variant is a build error here (exhaustive match),
-    /// so codes cannot silently drift.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::InvalidRef(..) => "invalid_ref",
-            Self::NotRootExecutable { .. } => "not_root_executable",
-            Self::InsufficientCaps { .. } => "insufficient_caps",
-            Self::AliasCycle { .. } => "alias_cycle",
-            Self::AliasChainTooLong { .. } => "alias_chain_too_long",
-            Self::SchemaMisconfigured { .. } => "schema_misconfigured",
-            Self::CapabilityRejected { .. } => "capability_rejected",
-            Self::StreamingNotImplemented => "streaming_not_implemented",
-            Self::ProjectSource(_) => "project_source",
-            Self::ServiceHandlerMissing { .. } => "service_handler_missing",
-            Self::ServiceCapDenied { .. } => "service_cap_denied",
-            Self::ServiceUnavailable { .. } => "service_unavailable",
-            Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
-            Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
-            Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
-            Self::ProjectSourcePushFirst(_) => "project_source_push_first",
-            Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
-            Self::MissingCap { .. } => "missing_cap",
-            Self::ProtocolNotRegistered(_) => "protocol_not_registered",
-            Self::SpecBuild(_) => "spec_build",
-            Self::StreamingNotDetachable => "streaming_not_detachable",
-            Self::InvalidLaunchMode { .. } => "invalid_launch_mode",
-            Self::Internal(_) => "internal",
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn internal_err(msg: &str) -> DispatchError {
-        DispatchError::Internal(anyhow::anyhow!("{msg}"))
-    }
-
-    #[test]
-    fn code_invalid_ref() {
-        assert_eq!(
-            DispatchError::InvalidRef("x".into(), "bad".into()).code(),
-            "invalid_ref"
-        );
-    }
-
-    #[test]
-    fn code_not_root_executable() {
-        assert_eq!(
-            DispatchError::NotRootExecutable { kind: "k".into(), detail: "d".into() }.code(),
-            "not_root_executable"
-        );
-    }
-
-    #[test]
-    fn code_insufficient_caps() {
-        assert_eq!(
-            DispatchError::InsufficientCaps { runtime: "r".into(), required: vec![], caller_scopes: vec![] }.code(),
-            "insufficient_caps"
-        );
-    }
-
-    #[test]
-    fn code_alias_cycle() {
-        assert_eq!(
-            DispatchError::AliasCycle { root_ref: "a".into(), visited: vec![] }.code(),
-            "alias_cycle"
-        );
-    }
-
-    #[test]
-    fn code_alias_chain_too_long() {
-        assert_eq!(
-            DispatchError::AliasChainTooLong { root_ref: "a".into(), max_hops: 5 }.code(),
-            "alias_chain_too_long"
-        );
-    }
-
-    #[test]
-    fn code_schema_misconfigured() {
-        assert_eq!(
-            DispatchError::SchemaMisconfigured { kind: "k".into(), detail: "d".into() }.code(),
-            "schema_misconfigured"
-        );
-    }
-
-    #[test]
-    fn code_capability_rejected() {
-        assert_eq!(
-            DispatchError::CapabilityRejected { reason: "r".into() }.code(),
-            "capability_rejected"
-        );
-    }
-
-    #[test]
-    fn code_streaming_not_implemented() {
-        assert_eq!(DispatchError::StreamingNotImplemented.code(), "streaming_not_implemented");
-    }
-
-    #[test]
-    fn code_project_source() {
-        assert_eq!(DispatchError::ProjectSource("e".into()).code(), "project_source");
-    }
-
-    #[test]
-    fn code_service_handler_missing() {
-        assert_eq!(
-            DispatchError::ServiceHandlerMissing { service_ref: "s".into(), registry: "r".into(), available: "a".into() }.code(),
-            "service_handler_missing"
-        );
-    }
-
-    #[test]
-    fn code_service_cap_denied() {
-        assert_eq!(
-            DispatchError::ServiceCapDenied { service_ref: "s".into(), required: "r".into(), caller_scopes: vec![] }.code(),
-            "service_cap_denied"
-        );
-    }
-
-    #[test]
-    fn code_service_unavailable() {
-        assert_eq!(
-            DispatchError::ServiceUnavailable { service_ref: "s".into(), mode: "m".into(), requires: "r".into() }.code(),
-            "service_unavailable"
-        );
-    }
-
-    #[test]
-    fn code_subprocess_executor_missing() {
-        assert_eq!(
-            DispatchError::SubprocessExecutorMissing { item_ref: "i".into(), detail: "d".into() }.code(),
-            "subprocess_executor_missing"
-        );
-    }
-
-    #[test]
-    fn code_subprocess_run_failed() {
-        assert_eq!(
-            DispatchError::SubprocessRunFailed { item_ref: "i".into(), detail: "d".into() }.code(),
-            "subprocess_run_failed"
-        );
-    }
-
-    #[test]
-    fn code_runtime_materialization_failed() {
-        assert_eq!(
-            DispatchError::RuntimeMaterializationFailed { executor_ref: "e".into(), detail: "d".into() }.code(),
-            "runtime_materialization_failed"
-        );
-    }
-
-    #[test]
-    fn code_project_source_push_first() {
-        assert_eq!(
-            DispatchError::ProjectSourcePushFirst("e".into()).code(),
-            "project_source_push_first"
-        );
-    }
-
-    #[test]
-    fn code_project_source_checkout_failed() {
-        assert_eq!(
-            DispatchError::ProjectSourceCheckoutFailed("e".into()).code(),
-            "project_source_checkout_failed"
-        );
-    }
-
-    #[test]
-    fn code_internal() {
-        assert_eq!(internal_err("oops").code(), "internal");
     }
 }

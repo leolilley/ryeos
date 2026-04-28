@@ -1,16 +1,23 @@
 //! Knowledge runtime — receives a BatchOpEnvelope on stdin, dispatches
-//! the requested op via `ryeos_knowledge::dispatch`, and writes a
-//! `BatchOpResult` to stdout.
+//! the requested op, and writes a BatchOpResult to stdout.
 //!
 //! Spawned exclusively by `ryeosd` via `lillux::run`. Single mode:
 //! always a thread, always wires CallbackClient lifecycle.
 
+mod budget;
+mod compose;
+mod dispatch;
+mod frontmatter;
+mod ordering;
+mod render;
+mod types;
+
 use std::io::Read;
 
-use ryeos_knowledge::{
-    dispatch, BatchOpEnvelope, BatchOpError, BatchOpResult, KnowledgeError, KnowledgeRequest,
-};
 use ryeos_runtime::callback_client::CallbackClient;
+use ryeos_runtime::op_wire::{BatchOpEnvelope, BatchOpError, BatchOpResult};
+
+use types::{KnowledgeError, KnowledgeRequest};
 
 fn parse_request(envelope: &BatchOpEnvelope) -> Result<KnowledgeRequest, KnowledgeError> {
     let mut tagged = serde_json::Map::new();
@@ -33,7 +40,7 @@ fn parse_request(envelope: &BatchOpEnvelope) -> Result<KnowledgeRequest, Knowled
 }
 
 fn dispatch_op(envelope: &BatchOpEnvelope) -> BatchOpResult {
-    match parse_request(envelope).and_then(|req| dispatch(&req)) {
+    match parse_request(envelope).and_then(|req| dispatch::dispatch(&req)) {
         Ok(value) => BatchOpResult::success(envelope, value),
         Err(e) => BatchOpResult::failure(envelope, knowledge_to_batch_error(e)),
     }
