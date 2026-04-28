@@ -13,6 +13,7 @@ pub mod identity;
 #[path = "io/mod.rs"]
 pub mod io;
 pub mod kind_profiles;
+pub mod launch_augmentations;
 pub mod launch_metadata;
 pub mod maintenance;
 pub mod node_config;

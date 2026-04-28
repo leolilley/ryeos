@@ -945,7 +945,7 @@ fn map_batch_error(
 
 /// Helper to build a `ThreadFinalizeParams` with only the required fields
 /// set and all optional fields defaulted to `None` / empty.
-fn finalize_params(thread_id: &str, status: &str, result: Option<Value>) -> crate::services::thread_lifecycle::ThreadFinalizeParams {
+pub(crate) fn finalize_params(thread_id: &str, status: &str, result: Option<Value>) -> crate::services::thread_lifecycle::ThreadFinalizeParams {
     use crate::services::thread_lifecycle::ThreadFinalizeParams;
     ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
@@ -1055,7 +1055,7 @@ pub async fn dispatch_service(
 // a per-call lookup; the loop owns runtime metadata as part of the hop.
 
 /// Strip the `bin/<triple>/` prefix from a runtime YAML's `binary_ref`.
-fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
+pub(crate) fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
     let parts: Vec<&str> = binary_ref.split('/').collect();
     if parts.len() < 3 || parts[0] != "bin" || parts[1].is_empty() || parts[2].is_empty() {
         return Err(DispatchError::SchemaMisconfigured {

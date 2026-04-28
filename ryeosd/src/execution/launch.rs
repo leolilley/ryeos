@@ -412,7 +412,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         .effective_parser_dispatcher(Some(project_path))
         .map_err(|e| anyhow::anyhow!("effective parser dispatcher: {e}"))?;
 
-    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+    let mut resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &resolved.resolved_item.canonical_ref,
         &state.engine.kinds,
         &effective_parsers,
@@ -429,6 +429,38 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         executor_trust_class = ?resolution.executor_trust_class,
         "resolution pipeline complete"
     );
+
+    // ── Launch augmentations ──────────────────────────────────────
+    // Walk any launch_augmentations declared on the kind's schema.
+    // Augmentations run between resolution and parent spawn, mutating
+    // resolution.composed.derived in place. On failure, abort the
+    // parent launch with a structured error.
+    {
+        let launching_kind_schema = state
+            .engine
+            .kinds
+            .get(&resolved.resolved_item.kind)
+            .ok_or_else(|| anyhow::anyhow!(
+                "build_and_launch: launching kind `{}` is not registered",
+                resolved.resolved_item.kind
+            ))?;
+        if let Some(exec) = launching_kind_schema.execution() {
+            if !exec.launch_augmentations.is_empty() {
+                crate::launch_augmentations::run_augmentations(
+                    exec,
+                    &mut resolution,
+                    &thread.thread_id,
+                    project_path,
+                    &state.engine,
+                    &resolved.plan_context,
+                    acting_principal,
+                    state,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("launch augmentation failed: {e}"))?;
+            }
+        }
+    }
 
     // Active trust enforcement: hard-fail before spawn if the daemon
     // resolved an `Unsigned` executor for ANY kind. The trust posture is
