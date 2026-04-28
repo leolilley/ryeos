@@ -213,6 +213,13 @@ pub struct ResolutionOutput {
     pub ancestors: Vec<ResolvedAncestor>,
     /// Lateral references edges (deduped by (from_source_path, to_source_path) pair).
     pub references_edges: Vec<ResolutionEdge>,
+    /// Verified, content-pinned items resolved through the references step.
+    /// Deduplicated by canonical ref (first discovery wins; edges preserve
+    /// topology). Each entry carries the full verified bytes + trust class
+    /// so downstream consumers (slim-payload projection, context rendering)
+    /// never need to re-resolve or re-verify.
+    #[serde(default)]
+    pub referenced_items: Vec<ResolvedAncestor>,
     /// Per-step metadata (what each step computed).
     pub step_outputs: HashMap<String, serde_json::Value>,
     /// Daemon-computed executor trust posture: weakest of

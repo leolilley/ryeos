@@ -107,6 +107,10 @@ pub struct ResolutionContext<'a> {
     pub ancestor_parsed: Vec<Value>,
     /// Lateral references edges, deduplicated by `(from_source_path, to_source_path)`.
     pub references_edges: Vec<ResolutionEdge>,
+    /// Verified, content-pinned items resolved through the references step.
+    /// Deduplicated by canonical ref. Each entry carries full verified bytes
+    /// + trust class. Populated by the `resolve_references` step.
+    pub referenced_items: Vec<ResolvedAncestor>,
     /// Source paths currently on the DFS recursion stack — populated on
     /// entry, cleared on return. A path appearing here when about to be
     /// recursed into is a true cycle (A → … → A), distinct from a node
@@ -159,6 +163,7 @@ impl<'a> ResolutionContext<'a> {
             ancestors: Vec::new(),
             ancestor_parsed: Vec::new(),
             references_edges: Vec::new(),
+            referenced_items: Vec::new(),
             visiting_extends: HashSet::new(),
             done_extends: HashSet::new(),
             step_outputs: HashMap::new(),
@@ -190,6 +195,7 @@ impl<'a> ResolutionContext<'a> {
             root: self.root_ancestor,
             ancestors: self.ancestors,
             references_edges: self.references_edges,
+            referenced_items: self.referenced_items,
             step_outputs: self.step_outputs,
             executor_trust_class,
             composed,
