@@ -1,32 +1,61 @@
 //! Fast, deterministic fixture for ryeosd integration tests.
 //!
-//! Drop-in replacement for the daemon's real `--init-if-missing` path.
-//! Pre-populates `state_dir` and `user_space` with byte-equivalent
-//! state to what `ryeosd::bootstrap::init` would produce, but using
-//! deterministic keys so tests are reproducible and faster.
+//! Drop-in replacement for the daemon's real `--init-if-missing` path
+//! using fixed keys + a fixed signing timestamp so the produced state
+//! is **byte-stable across runs of the fixture**.
 //!
-//! ## Why
+//! ## What is byte-stable
 //!
-//! Most e2e tests don't care about init or bundle install — they only
-//! need a daemon that can boot, verify trust, and dispatch items. The
-//! fast fixture writes the keys, trust docs, and vault keypair directly
-//! and skips real `rye init`. The slow `start_with_pre_init` path stays
-//! around for the 1-3 smoke tests that exercise real init/install.
+//! After [`populate_initialized_state`] returns, the following files
+//! have identical bytes across every run of the fixture:
+//!
+//!   * `<state>/.ai/node/identity/private_key.pem`   (deterministic Ed25519)
+//!   * `<state>/.ai/node/identity/public-identity.json`
+//!   * `<state>/.ai/node/vault/private_key.pem`      (deterministic X25519)
+//!   * `<state>/.ai/node/vault/public_key.pem`
+//!   * `<user>/.ai/config/keys/signing/private_key.pem`
+//!   * `<user>/.ai/config/keys/trusted/<fp>.toml` for publisher / node / user
+//!
+//! Determinism is achieved by signing all fixture-authored content with
+//! [`FAST_FIXTURE_TIME`] via `lillux::signature::sign_content_at` and
+//! `NodeIdentity::write_public_identity_at`.
+//!
+//! ## Differences from `ryeosd::bootstrap::init`
+//!
+//! The fast fixture is structurally a **superset** of `init` with one
+//! intentional omission:
+//!
+//!   * **Adds** publisher self-trust: tests sign their own bundle /
+//!     directive / route content with `FastFixture::publisher`, and the
+//!     daemon's trust store needs that key pinned. Real `init` doesn't
+//!     pin publisher keys — the operator does that via `rye trust pin`.
+//!   * **Adds** system-bundle signer trust (via
+//!     `super::populate_user_space`): without this the daemon refuses
+//!     to load `node:engine/kinds/...` items in the core bundle and
+//!     bootstrap aborts. Real `init` doesn't seed this either; the
+//!     operator pins the platform author key manually or via the
+//!     standard install flow.
+//!   * **Omits** `<state>/.ai/node/config.yaml`. Real `init` writes
+//!     this for next-boot persistence, but its content is per-run
+//!     dependent (tempdir paths, picked port). Fast-path tests pass
+//!     all settings via CLI/env which take precedence in
+//!     `Config::load`, and `bootstrap::verify_initialized` does not
+//!     require the file. Writing it would either lie about real values
+//!     or break byte-stability; we skip it.
 //!
 //! ## Three-key role split
 //!
-//! Three deterministic Ed25519 keys, mirroring the publisher / user /
-//! node split documented in `docs/future/key-rotation-and-trust-policy.md`:
+//! Mirrors the locked publisher / user / node split:
 //!
-//!   * [`publisher_signing_key`] — signs test bundle / directive /
-//!     route content. Most tests use this one.
-//!   * [`node_signing_key`]      — daemon's persistent identity.
-//!   * [`user_signing_key`]      — operator's persistent identity.
+//!   * [`FastFixture::publisher`] — signs test bundle / directive /
+//!     route content. Most tests use this.
+//!   * [`FastFixture::node`]      — daemon's persistent identity.
+//!     Signs daemon-state artifacts (e.g. authorized-key files).
+//!   * [`FastFixture::user`]      — operator's persistent identity.
+//!     Signs HTTP requests when the test exercises authenticated routes.
 //!
-//! Plus an X25519 vault keypair distinct from the Ed25519 keys (so node
+//! Plus an X25519 vault keypair distinct from all Ed25519 keys (so node
 //! key rotation doesn't brick the vault) — see [`vault_secret_key`].
-//!
-//! Returned by [`populate_initialized_state`] inside a [`FastFixture`].
 
 #![allow(dead_code)] // helpers are only used by some integration test bins
 
@@ -38,6 +67,11 @@ use base64::Engine as _;
 use lillux::crypto::{EncodePrivateKey, SigningKey};
 
 use ryeos_engine::AI_DIR;
+
+/// Fixed signing timestamp used by all fixture-authored content.
+/// Every call to `sign_content_at` / `write_public_identity_at` in this
+/// module passes this value so the output is byte-identical across runs.
+pub const FAST_FIXTURE_TIME: &str = "2026-01-01T00:00:00Z";
 
 /// Deterministic publisher signing key. Used for signing test bundle
 /// content (directives, routes, providers, …). Bytes pattern: `[42; 32]`.
@@ -142,7 +176,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     let public_identity_path = node_identity_dir.join("public-identity.json");
     ryeosd::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
         .context("re-load node identity to write public doc")?
-        .write_public_identity(&public_identity_path)
+        .write_public_identity_at(&public_identity_path, FAST_FIXTURE_TIME)
         .context("write node public identity")?;
 
     // ── User Ed25519 identity ──
@@ -201,15 +235,25 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
         "kind: node\nsection: bundles\nid: standard\npath: {}\n",
         abs.display()
     );
-    let signed = lillux::signature::sign_content(&body, &fixture.publisher, "#", None);
+    let signed = lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
     Ok(())
 }
 
 /// Write a signed authorized-key TOML for the daemon's HTTP auth path.
-/// Used by tests that POST signed `/execute*` requests.
-pub fn write_authorized_key(state_path: &Path, sk: &SigningKey) -> Result<()> {
-    let vk = sk.verifying_key();
+///
+/// `subject_sk` is the public key the daemon will accept on
+/// `x-rye-key-id`-signed HTTP requests (typically [`FastFixture::user`]).
+///
+/// `signer_sk` MUST be the node identity ([`FastFixture::node`]) — the
+/// daemon's auth loader requires authorized-key files to be signed by
+/// the node key. Passing a non-node signer is a test bug.
+pub fn write_authorized_key_signed_by(
+    state_path: &Path,
+    subject_sk: &SigningKey,
+    signer_sk: &SigningKey,
+) -> Result<()> {
+    let vk = subject_sk.verifying_key();
     let fp = lillux::signature::compute_fingerprint(&vk);
     let auth_dir = state_path
         .join(AI_DIR)
@@ -226,7 +270,13 @@ scopes = ["*"]
 label = "fast-fixture-authorized-key"
 "#
     );
-    let signed = lillux::signature::sign_content(&toml_body, sk, "#", None);
+    let signed = lillux::signature::sign_content_at(
+        &toml_body,
+        signer_sk,
+        "#",
+        None,
+        FAST_FIXTURE_TIME,
+    );
     fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
     Ok(())
 }
@@ -259,7 +309,7 @@ attestation = ""
 pem = "ed25519:{key_b64}"
 "#
     );
-    let signed = lillux::signature::sign_content(&body, sk, "#", None);
+    let signed = lillux::signature::sign_content_at(&body, sk, "#", None, FAST_FIXTURE_TIME);
     fs::write(trust_dir.join(format!("{fp}.toml")), signed)
         .with_context(|| format!("write trust doc for {fp}"))?;
     Ok(())

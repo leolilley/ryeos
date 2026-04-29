@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key, FastFixture};
+use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
@@ -111,37 +111,6 @@ response:
 "#;
     let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(dir.join("thread-events-stream.yaml"), signed)?;
-    Ok(())
-}
-
-/// Write an authorized-key TOML for `subject_sk`, signed by
-/// `node_sk`. The daemon's auth layer requires the file to be signed
-/// by the node identity (see [`ryeosd::auth::load_authorized_key`]),
-/// so when the authorized subject differs from the node identity we
-/// must sign with the node key.
-fn write_authorized_key_signed_by(
-    state_path: &Path,
-    subject_sk: &SigningKey,
-    node_sk: &SigningKey,
-) -> anyhow::Result<()> {
-    let vk = subject_sk.verifying_key();
-    let fp = lillux::signature::compute_fingerprint(&vk);
-    let auth_dir = state_path.join(".ai").join("node").join("auth").join("authorized_keys");
-    std::fs::create_dir_all(&auth_dir)?;
-
-    use base64::engine::Engine as _;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-
-    let toml_body = format!(
-        r#"fingerprint = "{fp}"
-public_key = "ed25519:{key_b64}"
-scopes = ["*"]
-label = "sse-e2e-test"
-"#
-    );
-
-    let signed = lillux::signature::sign_content(&toml_body, node_sk, "#", None);
-    std::fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
     Ok(())
 }
 
@@ -244,7 +213,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
         plant_model_routing(user, &fixture.publisher)?;
         plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
         plant_route_yaml(state_path, &fixture.publisher)?;
-        write_authorized_key(state_path, &fixture.node)?;
+        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
         Ok(())
     };
 
@@ -260,7 +229,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     .expect("start daemon with mock + route YAML");
 
     let node_fp = fixture.node_fp();
-    let node_sk = fixture.node;
+    let user_sk = fixture.user;
 
     let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = match tokio::time::timeout(
@@ -313,7 +282,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
     let headers =
-        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+        build_rye_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
 
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
@@ -404,9 +373,9 @@ async fn boot_and_run_directive_with_extra_keys(
         plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
         plant_route_yaml(state_path, &fixture.publisher)?;
 
-        // Authorize the deterministic node key — that's what signs
-        // the SSE GET requests below.
-        write_authorized_key(state_path, &fixture.node)?;
+        // Authorize the user key (HTTP caller principal). The file
+        // must be signed by the node identity (daemon requirement).
+        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
         for bytes in &extra_key_bytes {
             let extra = SigningKey::from_bytes(bytes);
             // Authorized-key files MUST be signed by the node
@@ -428,7 +397,7 @@ async fn boot_and_run_directive_with_extra_keys(
     .expect("start daemon with mock + route YAML");
 
     let node_fp = fixture.node_fp();
-    let node_sk = fixture.node;
+    let user_sk = fixture.user;
 
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
@@ -457,7 +426,7 @@ async fn boot_and_run_directive_with_extra_keys(
     std::mem::forget(project);
     std::mem::forget(mock);
 
-    (h, node_sk, node_fp, thread_id)
+    (h, user_sk, node_fp, thread_id)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -467,7 +436,7 @@ async fn sse_thread_events_returns_404_for_non_owner() {
     // request through the source's principal-mismatch branch, which
     // is the path we want to assert returns 404 (not 401).
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let (h, _node_sk, node_fp, thread_id) =
+    let (h, _user_sk, node_fp, thread_id) =
         boot_and_run_directive_with_extra_keys(std::slice::from_ref(&other_sk)).await;
 
     // Sign the SSE GET with the OTHER (authorized) key. The
@@ -499,14 +468,14 @@ async fn sse_thread_events_returns_404_for_non_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
-    let (h, node_sk, node_fp, thread_id) = boot_and_run_directive().await;
+    let (h, user_sk, node_fp, thread_id) = boot_and_run_directive().await;
 
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
 
     // First connect: drain all events, capture their IDs.
     let headers_1 =
-        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+        build_rye_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
 
@@ -541,7 +510,7 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
 
     // Second connect: same path, with Last-Event-ID = resume_from.
     let headers_2 =
-        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+        build_rye_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
     let mut req2 = client.get(&url);
     for (k, v) in &headers_2 {
         req2 = req2.header(k.as_str(), v.as_str());

@@ -29,7 +29,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key, FastFixture};
+use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
@@ -214,7 +214,7 @@ fn parse_sse_bytes(raw: &[u8]) -> Vec<SseEvent> {
     events
 }
 
-async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
+async fn boot_daemon() -> (DaemonHarness, SigningKey, String, String) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("from dispatch_launch".into()),
@@ -228,9 +228,9 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
         plant_model_routing(user, &fixture.publisher)?;
         plant_directive(user, "test/launch_e2e", "Say hello.", &fixture.publisher)?;
         plant_execute_stream_route(state_path, &fixture.publisher)?;
-        // Authorize the deterministic node key so signed HTTP requests
-        // (built below with `fixture.node`) verify against it.
-        write_authorized_key(state_path, &fixture.node)?;
+        // Authorize the user key (HTTP caller principal). The file must
+        // be signed by the node identity (daemon requirement).
+        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
         Ok(())
     };
 
@@ -244,8 +244,9 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
     .expect("start daemon with mock + execute-stream route");
 
     std::mem::forget(mock);
+    let user_fp = fixture.user_fp();
     let node_fp = fixture.node_fp();
-    (h, fixture.node, node_fp)
+    (h, fixture.user, user_fp, node_fp)
 }
 
 /// Full happy-path: POST /execute/stream → SSE
@@ -362,7 +363,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_last_event_id() {
-    let (h, node_sk, node_fp) = boot_daemon().await;
+    let (h, user_sk, _user_fp, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -376,7 +377,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+        build_rye_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -511,21 +512,21 @@ fn new_thread_id_format_and_uniqueness() {
 /// informational and may change.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
-    let (h, node_sk, node_fp) = boot_daemon().await;
+    let (h, user_sk, _user_fp, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
-        "item_ref": "knowledge:any/thing",
+        "item_ref": "directive:test/launch_e2e",
         "project_path": project_path,
-        "parameters": {},
+        "parameters": {"name": "World"},
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+        build_rye_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -580,7 +581,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 /// validation happens before the SSE handshake completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_relative_project_path() {
-    let (h, node_sk, node_fp) = boot_daemon().await;
+    let (h, user_sk, _user_fp, node_fp) = boot_daemon().await;
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
@@ -592,7 +593,7 @@ async fn sse_dispatch_launch_rejects_relative_project_path() {
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+        build_rye_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
