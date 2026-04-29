@@ -1985,6 +1985,7 @@ dependencies = [
  "dirs",
  "glob",
  "lillux",
+ "rand 0.8.5",
  "rmp-serde",
  "ryeos-engine",
  "ryeos-state",
@@ -1995,6 +1996,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
 ]
 

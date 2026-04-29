@@ -133,4 +133,9 @@ pub enum CliError {
 
     #[error("internal error: {detail}")]
     Internal { detail: String },
+
+    /// Failure inside a hardcoded local verb (`init`, `trust pin`, `publish`).
+    /// These run in-process without daemon dispatch.
+    #[error("{detail}")]
+    Local { detail: String },
 }

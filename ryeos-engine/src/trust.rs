@@ -1,7 +1,10 @@
 //! Item signer trust store and signature verification.
 //!
-//! Loads trusted signer public keys from `.ai/config/keys/trusted/` across
-//! the three-tier space (project > user > system).
+//! Loads trusted signer public keys from `.ai/config/keys/trusted/`. Trust
+//! is **operator-tier state only**: the resolution order is project > user.
+//! Bundles never auto-trust their own keys — operators pin publisher keys
+//! explicitly via `rye init` (platform author) and `rye trust pin <fp>`
+//! (third parties). Legacy bundle-internal trust dirs are ignored.
 //! Supports two key file formats:
 //!   - Raw `.pub`/`.key` files: base64-encoded 32-byte Ed25519 keys
 //!   - Signed `.toml` identity docs: structured TOML with PEM public keys
@@ -210,11 +213,20 @@ impl TrustStore {
         Ok(Self { signers })
     }
 
-    /// Load trusted keys with three-tier resolution: project > user > system.
+    /// Load trusted keys with operator-tier resolution: project > user.
     ///
-    /// Each root is expected to contain `.ai/config/keys/trusted/` with
-    /// `.toml` and/or `.pub`/`.key` files. First match wins — a key present
-    /// in the project space is not overridden by user or system.
+    /// Trust is operator-side state. Bundles MUST NOT auto-trust their
+    /// own keys — `system_roots` is preserved in the signature for caller
+    /// convenience but is intentionally NOT iterated for trust loading.
+    /// Operators pin publisher keys explicitly via `rye init` (platform
+    /// author key) and `rye trust pin <fingerprint>` (third parties).
+    ///
+    /// First match wins: a key present in the project tier is not
+    /// overridden by user.
+    ///
+    /// If any path in `system_roots` contains a `.ai/config/keys/trusted/`
+    /// directory, a warning is emitted to alert the operator to legacy
+    /// bundle-internal trust docs that the engine ignores.
     pub fn load_three_tier(
         project_root: Option<&Path>,
         user_root: Option<&Path>,
@@ -223,7 +235,7 @@ impl TrustStore {
         let mut signers = HashMap::new();
         let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
 
-        // Collect dirs in resolution order: project > user > system
+        // Collect operator-tier dirs only. system_roots is NOT a trust source.
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Some(root) = project_root {
             dirs.push(root.join(&trust_subdir));
@@ -231,8 +243,18 @@ impl TrustStore {
         if let Some(root) = user_root {
             dirs.push(root.join(&trust_subdir));
         }
+
+        // Diagnostic: warn on legacy bundle-internal trust dirs that are
+        // now ignored. Helps operators who paste-installed an old bundle
+        // and wonder why trust didn't propagate.
         for root in system_roots {
-            dirs.push(root.join(&trust_subdir));
+            let candidate = root.join(&trust_subdir);
+            if candidate.is_dir() {
+                tracing::warn!(
+                    path = %candidate.display(),
+                    "ignoring bundle-internal trust dir — pin the publisher key with `rye trust pin <fingerprint>` instead"
+                );
+            }
         }
 
         for dir in &dirs {
@@ -248,7 +270,7 @@ impl TrustStore {
 
         let count = signers.len();
         if count > 0 {
-            tracing::info!(count, dirs = dirs.len(), "loaded trust store (three-tier)");
+            tracing::info!(count, dirs = dirs.len(), "loaded trust store (operator-tier)");
         }
 
         Ok(Self { signers })
@@ -591,7 +613,15 @@ fn verify_key_doc_integrity(
 
 /// Pin a public key to the trust store by writing a signed TOML doc.
 ///
-/// Idempotent: no-op if `{target_dir}/{fingerprint}.toml` already exists.
+/// Idempotent: returns `Ok(fingerprint)` without rewriting if
+/// `{target_dir}/{fingerprint}.toml` already exists AND validates as a
+/// trust doc whose embedded public key bytes equal `verifying_key`.
+///
+/// **Refuses on inconsistent state**: if an existing trust doc fails to
+/// parse, has a fingerprint that doesn't match its filename, or whose
+/// embedded key disagrees with `verifying_key`, this returns an error
+/// rather than silently overwriting. The operator must remove the bad
+/// file manually.
 ///
 /// If `signing_key` is provided, the TOML doc is self-signed by the
 /// pinned key (standard TOFU pattern). Otherwise it is written unsigned.
@@ -606,9 +636,11 @@ pub fn pin_key(
     let fingerprint = compute_fingerprint(verifying_key);
     let key_file = target_dir.join(format!("{fingerprint}.toml"));
 
-    // Idempotent — already pinned
+    // Idempotent — already pinned. Strictly validate the existing doc
+    // rather than blindly accepting its presence.
     if key_file.exists() {
-        tracing::debug!(fingerprint = %fingerprint, "key already pinned, skipping");
+        validate_existing_pin(&key_file, verifying_key, &fingerprint)?;
+        tracing::debug!(fingerprint = %fingerprint, "key already pinned and validated, skipping");
         return Ok(fingerprint);
     }
 
@@ -652,6 +684,68 @@ pub fn pin_key(
 /// Prepend a `# rye:signed:...` line to a TOML document body.
 fn sign_toml_doc(body: &str, signing_key: &lillux::crypto::SigningKey) -> String {
     lillux::signature::sign_content(body, signing_key, "#", None)
+}
+
+/// Validate that an on-disk pin file matches the key being pinned.
+///
+/// Refuses idempotency on:
+///   - unreadable file
+///   - invalid TOML
+///   - fingerprint declared inside the file ≠ the filename `<fp>.toml`
+///   - embedded public key bytes ≠ the bytes being pinned now
+///
+/// Returns `Ok(())` only when everything matches.
+fn validate_existing_pin(
+    key_file: &Path,
+    verifying_key: &VerifyingKey,
+    expected_fingerprint: &str,
+) -> Result<(), EngineError> {
+    let content = std::fs::read_to_string(key_file).map_err(|e| {
+        EngineError::Internal(format!(
+            "existing trust doc {} cannot be read for idempotency check: {e} \
+             — remove it manually if intentional",
+            key_file.display()
+        ))
+    })?;
+
+    let toml_body = lillux::signature::strip_signature_lines(&content);
+    let parsed: TrustedKeyToml = toml::from_str(&toml_body).map_err(|e| {
+        EngineError::Internal(format!(
+            "existing trust doc {} is not valid TOML: {e} \
+             — remove it manually if intentional",
+            key_file.display()
+        ))
+    })?;
+
+    let on_disk_key = parse_public_key_field(&parsed.public_key.pem, key_file)?;
+    let on_disk_fp = compute_fingerprint(&on_disk_key);
+    if on_disk_fp != expected_fingerprint {
+        return Err(EngineError::Internal(format!(
+            "existing trust doc {} hashes to {} but its filename declares {} \
+             — refuse to overwrite. Remove the file manually if intentional.",
+            key_file.display(),
+            on_disk_fp,
+            expected_fingerprint,
+        )));
+    }
+    if parsed.fingerprint != expected_fingerprint {
+        return Err(EngineError::Internal(format!(
+            "existing trust doc {} embeds fingerprint {} but filename is {} \
+             — refuse to overwrite. Remove the file manually if intentional.",
+            key_file.display(),
+            parsed.fingerprint,
+            expected_fingerprint,
+        )));
+    }
+    if on_disk_key.as_bytes() != verifying_key.as_bytes() {
+        return Err(EngineError::Internal(format!(
+            "existing trust doc {} contains a different public key than the \
+             one being pinned — refuse to overwrite. Remove the file manually \
+             if intentional.",
+            key_file.display(),
+        )));
+    }
+    Ok(())
 }
 
 // ── Fingerprint computation ─────────────────────────────────────────
@@ -1378,6 +1472,43 @@ pem = "ed25519:{key_b64}"
 
         pin_key(&vk, "charlie", &nested, None).unwrap();
         assert!(nested.join(format!("{fp}.toml")).exists());
+    }
+
+    #[test]
+    fn pin_key_refuses_existing_doc_with_different_key() {
+        let dir = tempdir();
+        let (_, vk1, fp1) = gen_key();
+        let (_, vk2, _fp2) = gen_key2();
+
+        // Pretend trust dir has a (corrupt) doc named after fp1 but
+        // containing key bytes for vk2.
+        let body = build_key_doc_toml(&fp1, "spoofed", &vk2);
+        fs::write(dir.join(format!("{fp1}.toml")), &body).unwrap();
+
+        // Pin attempt for vk1 (whose fingerprint IS fp1) must refuse
+        // because the existing on-disk key bytes don't match vk1.
+        let err = pin_key(&vk1, "alice", &dir, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("different public key") || msg.contains("hashes to"),
+            "expected drift refusal, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn pin_key_refuses_corrupt_existing_doc() {
+        let dir = tempdir();
+        let (_, vk, fp) = gen_key();
+
+        // Write garbage at the canonical pin filename
+        fs::write(dir.join(format!("{fp}.toml")), "this is not toml ===").unwrap();
+
+        let err = pin_key(&vk, "alice", &dir, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not valid TOML") || msg.contains("invalid TOML"),
+            "expected corrupt-doc refusal, got: {msg}"
+        );
     }
 
     // ── Content hash tests ──────────────────────────────────────────

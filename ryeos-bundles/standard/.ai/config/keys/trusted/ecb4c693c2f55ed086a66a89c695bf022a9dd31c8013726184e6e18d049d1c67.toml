@@ -1,8 +1,0 @@
-# rye:signed:2026-04-28T15:54:28Z:f9a93a9a9d564e259a1eb5b8a70bd6320055628ae6d0b2ac58e4ff639526f86d:oph+WJMkQ3zAsjkLfCgUtpOg16WuVo6zQ5r8FRaSqutvRp2PC2reia8XygRfRE9KRamY/7G4CK8pKeY6Ha7NCA==:ecb4c693c2f55ed086a66a89c695bf022a9dd31c8013726184e6e18d049d1c67
-fingerprint = "ecb4c693c2f55ed086a66a89c695bf022a9dd31c8013726184e6e18d049d1c67"
-owner = "self"
-version = "1.0.0"
-attestation = ""
-
-[public_key]
-pem = "ed25519:fN1OF6bK1YSsfjU3Hj/EWcB8RDN04l9Ml6CXvaVzbIk="

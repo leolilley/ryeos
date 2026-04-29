@@ -58,17 +58,20 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         }
     }
 
-    // 4. Load trust store with three-tier resolution (project > user > system)
-    //    Trust store loads BEFORE kind schemas because kind schema verification
-    //    requires the trust store. Both use raw filesystem scanning (no item
-    //    resolution dependency), so there is no bootstrap cycle.
+    // 4. Load trust store. Trust is operator-tier ONLY (project > user);
+    //    system_roots is preserved in the call signature for diagnostic
+    //    warnings about legacy bundle-internal trust dirs but is NOT
+    //    consulted for trust admission. Trust store loads BEFORE kind
+    //    schemas because kind schema verification requires the trust
+    //    store. Both use raw filesystem scanning (no item resolution
+    //    dependency), so there is no bootstrap cycle.
     let trust_store = match TrustStore::load_three_tier(
         None, // project root not known at daemon startup — resolved per-request
         user_root.as_deref(),
         &system_roots,
     ) {
         Ok(store) => {
-            tracing::info!(count = store.len(), "loaded trust store (three-tier)");
+            tracing::info!(count = store.len(), "loaded operator trust store");
             store
         }
         Err(err) => {

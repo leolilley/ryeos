@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::error::CliError;
 use crate::help;
+use crate::local_verbs;
 use crate::verbs;
 
 /// CLI struct for clap argument parsing.
@@ -42,7 +43,17 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 2. State dir
     let state_dir = discover_state_dir();
 
-    // 3. Load verb table
+    // 3. Hardcoded LOCAL verbs (must work on a fresh checkout before
+    //    keys / core bundle exist). These run in-process; no daemon
+    //    round-trip and no verb-table dependency:
+    //      rye init             — bootstrap operator state
+    //      rye trust pin <fp>   — pin a publisher key (cap-gated rye.trust.pin)
+    //      rye publish <src>    — bundle author publish dance
+    if local_verbs::try_dispatch(&cli.rest)? {
+        return Ok(());
+    }
+
+    // 4. Load verb table
     let table = verbs::load_verbs(&project_root)?;
 
     // 4. No verb = help

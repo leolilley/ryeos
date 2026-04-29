@@ -196,9 +196,15 @@ fn discover_user_root() -> Option<PathBuf> {
 
 
 fn create_directory_layout(config: &Config) -> Result<()> {
-    // Node root layout: config, auth, and CAS state live under .ai/
+    // Node root layout: config, auth, vault, and CAS state live under .ai/.
+    //
+    // The vault directory is currently a placeholder — keypair generation
+    // and sealed-envelope encryption land in a later step (see
+    // .tmp/POST-KINDS-FLIP-PLAN.md §7). Reserved here so the layout is
+    // stable across the v1 → vault upgrade.
     let dirs = [
         config.state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+        config.state_dir.join(".ai").join("node").join("vault"),
         config.state_dir.join(".ai").join("state").join("objects"),
         config.state_dir.join(".ai").join("state").join("refs"),
     ];
@@ -245,10 +251,12 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 /// 2. Build the engine with those roots.
 /// 3. Phase 2: full node-config scan across all sections → snapshot.
 ///
-/// Trust continuity: the trust store used for node-config verification includes
-/// the same sources the engine's `TrustStore::load_three_tier` uses (system +
-/// user tiers). This ensures daemon-written `kind: node` items (signed by daemon
-/// identity, whose trust lives in user-tier) verify on next boot.
+/// Trust continuity: the trust store used for node-config verification is
+/// loaded via the engine's `TrustStore::load_three_tier`, which sources trust
+/// from operator tiers ONLY (project + user). The daemon's identity must
+/// have its trust doc pinned in the user tier (created by `rye init` /
+/// daemon bootstrap) for daemon-written `kind: node` items to verify on
+/// next boot.
 ///
 /// Returns `(engine, node_config_snapshot)`.
 pub fn load_node_config_two_phase(

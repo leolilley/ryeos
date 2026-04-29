@@ -5,6 +5,7 @@ mod dispatcher;
 mod error;
 mod exit;
 mod help;
+mod local_verbs;
 mod project_root;
 mod transport;
 mod verbs;

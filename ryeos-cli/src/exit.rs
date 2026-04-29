@@ -19,6 +19,7 @@ impl CliError {
             CliError::Interrupted => EX_INTERRUPT,
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Internal { .. } => EX_SOFTWARE,
+            CliError::Local { .. } => 1,
         }
     }
 }
