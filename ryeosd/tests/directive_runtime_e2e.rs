@@ -18,73 +18,16 @@ mod common;
 
 use std::path::Path;
 
+use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
-
-fn e2e_signing_key() -> lillux::crypto::SigningKey {
-    lillux::crypto::SigningKey::from_bytes(&[0x77u8; 32])
-}
-
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-category = "keys/trusted"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
-
-/// Plant a `bundles` node-config registration so the daemon's
-/// engine discovers `ryeos-bundles/standard` (which ships the
-/// `runtime:directive-runtime` YAML + the materializable binary
-/// blob in its CAS).
-///
-/// `bundles` section policy is `SystemAndState`, so writing under
-/// `<state_dir>/.ai/node/bundles/` is honored without mutating
-/// the read-only system_data_dir (`ryeos-bundles/core`).
-fn register_standard_bundle(state_path: &Path) -> anyhow::Result<()> {
-    let standard = common::workspace_root().join("ryeos-bundles/standard");
-    if !standard.is_dir() {
-        anyhow::bail!(
-            "ryeos-bundles/standard does not exist at {}; \
-             P3b tests need its CAS-shipped directive-runtime binary",
-            standard.display()
-        );
-    }
-    let abs = standard.canonicalize()?;
-    let dir = state_path.join(".ai/node/bundles");
-    std::fs::create_dir_all(&dir)?;
-
-    let body = format!(
-        "section: bundles\npath: {}\n",
-        abs.display()
-    );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
-    std::fs::write(dir.join("standard.yaml"), signed)?;
-    Ok(())
-}
+use lillux::crypto::SigningKey;
 
 /// Plant the `model_providers/mock` config under
 /// `<user>/.ai/config/rye-runtime/model_providers/mock.yaml`.
 /// `auth: {}` keeps the adapter's `Authorization` header skipped
 /// (see `ryeos-directive-runtime/src/adapter.rs:38-43`).
-fn plant_mock_provider(user_space: &Path, mock_base_url: &str) -> anyhow::Result<()> {
+fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/rye-runtime/model_providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -96,13 +39,13 @@ pricing:
   output_per_million: 0.0
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("mock.yaml"), signed)?;
     Ok(())
 }
 
 /// Plant `model_routing` mapping `tier: general` to provider `mock`.
-fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
+fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/rye-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
@@ -111,7 +54,7 @@ fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
     model: mock-model
     context_window: 200000
 "#;
-    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(dir.join("model_routing.yaml"), signed)?;
     Ok(())
 }
@@ -134,6 +77,7 @@ fn plant_directive(
     rel_path: &str,
     body_text: &str,
     execute_caps: &[&str],
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
     std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
@@ -170,7 +114,7 @@ model:
 {body_text}
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "<!--", Some("-->"));
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(&path, signed)?;
     Ok(())
 }
@@ -221,18 +165,15 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     let mock = MockProvider::start(vec![MockResponse::Text("hello World".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider(user, &mock_url)?;
-        plant_model_routing(user)?;
-        plant_directive(user, "test/hello", "Say hello to {{ name }}.", &[])?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+        plant_model_routing(user, &fixture.publisher)?;
+        plant_directive(user, "test/hello", "Say hello to {{ name }}.", &[], &fixture.publisher)?;
         Ok(())
     };
 
-    let mut h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         // Bubble runtime tracing through to the daemon's stderr so a
         // hung directive-runtime child can be debugged from the test
         // panic message.
@@ -343,18 +284,15 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mock = MockProvider::start(vec![MockResponse::Text("hi P3b.3".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider(user, &mock_url)?;
-        plant_model_routing(user)?;
-        plant_directive(user, "p3b3/subject", "irrelevant — mock returns canned text", &[])?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+        plant_model_routing(user, &fixture.publisher)?;
+        plant_directive(user, "p3b3/subject", "irrelevant — mock returns canned text", &[], &fixture.publisher)?;
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon");
 
@@ -463,13 +401,10 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider(user, &mock_url)?;
-        plant_model_routing(user)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+        plant_model_routing(user, &fixture.publisher)?;
         plant_python_echo_tool(user, "echo")?;
         // Wildcard cap so BOTH gates pass:
         // - runner's `Harness::check_permission("rye.execute.tool.echo")`
@@ -485,11 +420,12 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
             "test/round_trip",
             "Call the echo tool, then summarise.",
             &["rye.execute.tool.*"],
+            &fixture.publisher,
         )?;
         Ok(())
     };
 
-    let mut h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
@@ -586,13 +522,10 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider(user, &mock_url)?;
-        plant_model_routing(user)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+        plant_model_routing(user, &fixture.publisher)?;
         plant_python_echo_tool(user, "echo")?;
         // Grant ONLY a non-matching cap. `echo` is not in this set,
         // and `cap_matches` is anchored ($-terminated regex) so the
@@ -602,11 +535,12 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
             "test/denied",
             "Try to call echo; you should be denied.",
             &["rye.execute.tool.allowed_only"],
+            &fixture.publisher,
         )?;
         Ok(())
     };
 
-    let mut h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {

@@ -29,57 +29,12 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use common::fast_fixture::{register_standard_bundle, write_authorized_key, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
-use lillux::crypto::{EncodePrivateKey, Signer, SigningKey};
+use lillux::crypto::{Signer, SigningKey};
 
-fn e2e_signing_key() -> lillux::crypto::SigningKey {
-    lillux::crypto::SigningKey::from_bytes(&[0x77u8; 32])
-}
-
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-category = "keys/trusted"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
-
-fn register_standard_bundle(state_path: &Path) -> anyhow::Result<()> {
-    let standard = common::workspace_root().join("ryeos-bundles/standard");
-    if !standard.is_dir() {
-        anyhow::bail!(
-            "ryeos-bundles/standard does not exist at {}",
-            standard.display()
-        );
-    }
-    let abs = standard.canonicalize()?;
-    let dir = state_path.join(".ai/node/bundles");
-    std::fs::create_dir_all(&dir)?;
-    let body = format!("section: bundles\npath: {}\n", abs.display());
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
-    std::fs::write(dir.join("standard.yaml"), signed)?;
-    Ok(())
-}
-
-fn plant_mock_provider(user_space: &Path, mock_base_url: &str) -> anyhow::Result<()> {
+fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/rye-runtime/model_providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -91,12 +46,12 @@ pricing:
   output_per_million: 0.0
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("mock.yaml"), signed)?;
     Ok(())
 }
 
-fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
+fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/rye-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
@@ -105,7 +60,7 @@ fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
     model: mock-model
     context_window: 200000
 "#;
-    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(dir.join("model_routing.yaml"), signed)?;
     Ok(())
 }
@@ -114,6 +69,7 @@ fn plant_directive(
     user_space: &Path,
     rel_path: &str,
     body_text: &str,
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
     let dir_relative = Path::new(rel_path)
@@ -141,16 +97,16 @@ model:
 {body_text}
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "<!--", Some("-->"));
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(&path, signed)?;
     Ok(())
 }
 
 /// Plant the /execute/stream route YAML. Phase E ships this in
 /// `ryeos-bundles/core/.ai/node/routes/execute-stream.yaml`; the test
-/// re-plants it under the daemon's state path signed by the e2e key
-/// so the trusted-loader policy accepts it.
-fn plant_execute_stream_route(state_path: &Path) -> anyhow::Result<()> {
+/// re-plants it under the daemon's state path signed by the publisher
+/// key so the trusted-loader policy accepts it.
+fn plant_execute_stream_route(state_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = state_path.join(".ai/node/routes");
     std::fs::create_dir_all(&dir)?;
     let body = r#"section: routes
@@ -171,37 +127,8 @@ response:
   source_config:
     keep_alive_secs: 15
 "#;
-    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(dir.join("execute-stream.yaml"), signed)?;
-    Ok(())
-}
-
-fn write_authorized_key(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
-    let vk = sk.verifying_key();
-    let fp = lillux::signature::compute_fingerprint(&vk);
-    let auth_dir = state_path.join(".ai").join("node").join("auth").join("authorized_keys");
-    std::fs::create_dir_all(&auth_dir)?;
-
-    use base64::engine::Engine as _;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-
-    let toml_body = format!(
-        r#"fingerprint = "{fp}"
-public_key = "ed25519:{key_b64}"
-scopes = ["*"]
-label = "directive-launch-e2e-test"
-"#
-    );
-    let signed = lillux::signature::sign_content(&toml_body, sk, "#", None);
-    std::fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
-    Ok(())
-}
-
-fn pre_create_node_key_from(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
-    let key_dir = state_path.join(".ai").join("node").join("identity");
-    std::fs::create_dir_all(&key_dir)?;
-    let pem = sk.to_pkcs8_pem(Default::default())?;
-    std::fs::write(key_dir.join("private_key.pem"), pem.as_bytes())?;
     Ok(())
 }
 
@@ -295,27 +222,19 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let node_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let node_fp = lillux::signature::compute_fingerprint(&node_sk.verifying_key());
-    let node_bytes = node_sk.to_bytes();
-
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider(user, &mock_url)?;
-        plant_model_routing(user)?;
-        plant_directive(user, "test/launch_e2e", "Say hello.")?;
-        plant_execute_stream_route(state_path)?;
-
-        let saved_sk = SigningKey::from_bytes(&node_bytes);
-        pre_create_node_key_from(state_path, &saved_sk)?;
-        write_authorized_key(state_path, &saved_sk)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+        plant_model_routing(user, &fixture.publisher)?;
+        plant_directive(user, "test/launch_e2e", "Say hello.", &fixture.publisher)?;
+        plant_execute_stream_route(state_path, &fixture.publisher)?;
+        // Authorize the deterministic node key so signed HTTP requests
+        // (built below with `fixture.node`) verify against it.
+        write_authorized_key(state_path, &fixture.node)?;
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
@@ -325,7 +244,8 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String) {
     .expect("start daemon with mock + execute-stream route");
 
     std::mem::forget(mock);
-    (h, node_sk, node_fp)
+    let node_fp = fixture.node_fp();
+    (h, fixture.node, node_fp)
 }
 
 /// Full happy-path: POST /execute/stream → SSE

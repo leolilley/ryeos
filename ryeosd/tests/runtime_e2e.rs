@@ -26,38 +26,11 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use common::fast_fixture::FastFixture;
 use common::DaemonHarness;
+use lillux::crypto::SigningKey;
 
-// ── Helpers (signing + trust setup mirrors dispatch_pin.rs) ────────────
-
-fn e2e_signing_key() -> lillux::crypto::SigningKey {
-    lillux::crypto::SigningKey::from_bytes(&[0x77u8; 32])
-}
-
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-category = "keys/trusted"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
+// ── Helpers (signing setup uses the fast fixture's publisher key) ──────
 
 /// Install one signed runtime YAML in user space with a default
 /// well-formed `binary_ref: bin/<host_triple>/<name>`. For tests that
@@ -70,6 +43,7 @@ fn install_runtime(
     serves: &str,
     default: bool,
     abi_version: &str,
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     install_runtime_with_binary_ref(
         user_space,
@@ -78,6 +52,7 @@ fn install_runtime(
         default,
         abi_version,
         &format!("bin/x86_64-unknown-linux-gnu/{name}"),
+        signer,
     )
 }
 
@@ -93,6 +68,7 @@ fn install_runtime_with_binary_ref(
     default: bool,
     abi_version: &str,
     binary_ref: &str,
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     let runtimes_dir = user_space.join(".ai/runtimes");
     std::fs::create_dir_all(&runtimes_dir)?;
@@ -107,7 +83,7 @@ required_caps:
 description: "synth runtime for runtime_e2e"
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(runtimes_dir.join(format!("{name}.yaml")), signed)?;
     Ok(())
 }
@@ -116,7 +92,7 @@ description: "synth runtime for runtime_e2e"
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_config_ref_returns_501() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("config:any/thing", ".", serde_json::json!({}))
         .await
@@ -147,7 +123,7 @@ async fn e2e_knowledge_ref_returns_501_in_v53() {
     // ref that no longer exists post-V5.3. Either way, the schema gate
     // must yield 501 (or a clear non-200) — not a generic 500 stack
     // trace and not a silent fallback to legacy code.
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("knowledge:any/note", ".", serde_json::json!({}))
         .await
@@ -191,13 +167,11 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // to tests; for now this test pins only that the dispatch loop
     // reaches the materialization step and surfaces a clean lookup
     // error rather than a silent fallthrough.
-    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        install_runtime(user, "e2e-direct-runtime", "e2e_kind", true, "v1")
+    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        install_runtime(user, "e2e-direct-runtime", "e2e_kind", true, "v1", &fixture.publisher)
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon with synth runtime");
 
@@ -246,27 +220,43 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     // Plant TWO runtimes both declaring `serves: dup_kind, default: true`.
     // RuntimeRegistry::build_from_bundles must error; engine_init.rs
     // propagates the error; daemon child exits non-zero.
-    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        install_runtime(user, "dup-runtime-a", "dup_kind", true, "v1")?;
-        install_runtime(user, "dup-runtime-b", "dup_kind", true, "v1")?;
-        Ok(())
-    };
-
     let state_dir_outer = tempfile::tempdir().expect("state dir");
     let user_space = tempfile::tempdir().expect("user space");
-    common::populate_user_space(user_space.path());
-    pre_init(state_dir_outer.path(), user_space.path()).expect("plant runtimes");
-
     let state_path = state_dir_outer.path().join("state");
+
+    // Pre-populate via fast fixture (no --init-if-missing on the daemon
+    // command below). populate_initialized_state writes the deterministic
+    // node identity, vault keypair, user identity, and trust docs, plus
+    // imports the system-bundle signer trust.
+    let fixture =
+        common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
+            .expect("fast fixture populate");
+
+    install_runtime(
+        user_space.path(),
+        "dup-runtime-a",
+        "dup_kind",
+        true,
+        "v1",
+        &fixture.publisher,
+    )
+    .expect("plant dup-runtime-a");
+    install_runtime(
+        user_space.path(),
+        "dup-runtime-b",
+        "dup_kind",
+        true,
+        "v1",
+        &fixture.publisher,
+    )
+    .expect("plant dup-runtime-b");
+
     let port = common::pick_free_port();
     let bind = format!("127.0.0.1:{port}");
     let uds_path = state_path.join("ryeosd.sock");
 
     let mut cmd = Command::new(common::ryeosd_binary());
-    cmd.arg("--init-if-missing")
-        .arg("--state-dir")
+    cmd.arg("--state-dir")
         .arg(&state_path)
         .arg("--bind")
         .arg(&bind)
@@ -355,13 +345,11 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_does_not_require_runtime_execute() {
-    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
+    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         // Synth runtime serves "directive". With only a single runtime
         // serving the kind, `RuntimeRegistry::lookup_for("directive")`
         // returns it regardless of `default`.
-        install_runtime(user, "e2e-directive-runtime", "directive", true, "v1")?;
+        install_runtime(user, "e2e-directive-runtime", "directive", true, "v1", &fixture.publisher)?;
         // Synth directive item — minimal valid YAML so engine
         // resolution succeeds and the dispatch loop reaches the
         // `@directive` alias / registry hop.
@@ -375,12 +363,12 @@ inputs: {}
 ---
 # E2E B1
 "#;
-        let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+        let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
         std::fs::write(dir.join("flow.md"), signed)?;
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon with synth directive + runtime");
 
@@ -439,9 +427,7 @@ inputs: {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
-    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
+    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         // Synth runtime serves "directive" with a deliberately
         // malformed binary_ref. P1.5: the dispatcher must walk past
         // B1's cap-gate site and hit strip_binary_ref_prefix.
@@ -452,6 +438,7 @@ async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
             true,
             "v1",
             "badshape",
+            &fixture.publisher,
         )?;
         let dir = user.join(".ai/directives/p15");
         std::fs::create_dir_all(&dir)?;
@@ -463,12 +450,12 @@ inputs: {}
 ---
 # P1.5
 "#;
-        let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+        let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
         std::fs::write(dir.join("flow.md"), signed)?;
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon with synth bad-binary-ref runtime");
 
@@ -537,9 +524,7 @@ inputs: {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
-    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
+    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         // Well-formed binary_ref pointing at a nonexistent binary.
         // Dispatch progresses through strip_binary_ref_prefix and into
         // build_and_launch, which creates the thread DB row before
@@ -550,6 +535,7 @@ async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
             "directive",
             true,
             "v1",
+            &fixture.publisher,
         )?;
         let dir = user.join(".ai/directives/p16");
         std::fs::create_dir_all(&dir)?;
@@ -562,12 +548,12 @@ inputs: {}
 # P1.6
 "#;
         let signed =
-            lillux::signature::sign_content(body, &e2e_signing_key(), "<!--", Some("-->"));
+            lillux::signature::sign_content(body, &fixture.publisher, "<!--", Some("-->"));
         std::fs::write(dir.join("flow.md"), signed)?;
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon");
 
@@ -670,15 +656,13 @@ inputs: {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_graph_records_graph_thread_profile() {
-    let pre_init = |_: &Path, user: &Path| -> anyhow::Result<()> {
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
+    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         // Synth runtime serving "graph" with a well-formed binary_ref
         // pointing at a non-existent binary. Dispatch progresses into
         // build_and_launch and creates the thread DB row before
         // failing at native-executor materialization — the row's
         // subject identity is what we assert.
-        install_runtime(user, "p4-graph-runtime", "graph", true, "v1")?;
+        install_runtime(user, "p4-graph-runtime", "graph", true, "v1", &fixture.publisher)?;
         let dir = user.join(".ai/graphs/p4");
         std::fs::create_dir_all(&dir)?;
         let body = r#"category: "p4"
@@ -691,12 +675,12 @@ config:
 "#;
         // Graph YAMLs use `#` for signature comments (matching
         // `parser:rye/core/yaml/yaml`).
-        let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+        let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
         std::fs::write(dir.join("flow.yaml"), signed)?;
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |_| {})
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
         .expect("start daemon");
 

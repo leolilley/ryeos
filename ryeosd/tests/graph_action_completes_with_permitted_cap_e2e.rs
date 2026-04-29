@@ -15,57 +15,9 @@ mod common;
 
 use std::path::Path;
 
+use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::DaemonHarness;
-
-fn e2e_signing_key() -> lillux::crypto::SigningKey {
-    lillux::crypto::SigningKey::from_bytes(&[0x77u8; 32])
-}
-
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-category = "keys/trusted"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
-
-fn register_standard_bundle(state_path: &Path) -> anyhow::Result<()> {
-    let standard = common::workspace_root().join("ryeos-bundles/standard");
-    if !standard.is_dir() {
-        anyhow::bail!(
-            "ryeos-bundles/standard does not exist at {}",
-            standard.display()
-        );
-    }
-    let abs = standard.canonicalize()?;
-    let dir = state_path.join(".ai/node/bundles");
-    std::fs::create_dir_all(&dir)?;
-
-    let body = format!(
-        "section: bundles\npath: {}\n",
-        abs.display()
-    );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
-    std::fs::write(dir.join("standard.yaml"), signed)?;
-    Ok(())
-}
+use lillux::crypto::SigningKey;
 
 /// Plant a Python tool at `.ai/tools/echo.py`.
 ///
@@ -94,7 +46,7 @@ print(json.dumps({"msg": params.get("msg", "default")}))
 }
 
 /// Plant a graph with permissions that allow tool:echo/echo.
-fn plant_permitted_graph(project_dir: &Path) -> anyhow::Result<()> {
+fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: ""
@@ -115,13 +67,13 @@ config:
     done:
       node_type: return
 "#;
-    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(graphs_dir.join("flow.yaml"), signed)?;
     Ok(())
 }
 
 /// Plant a graph with empty permissions (deny-all).
-fn plant_denied_graph(project_dir: &Path) -> anyhow::Result<()> {
+fn plant_denied_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: ""
@@ -141,22 +93,19 @@ config:
     done:
       node_type: return
 "#;
-    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(graphs_dir.join("denied.yaml"), signed)?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_completes_with_permitted_cap() {
-    let pre_init = |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
         Ok(())
     };
 
-    let mut h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
@@ -169,7 +118,7 @@ async fn graph_action_completes_with_permitted_cap() {
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_echo_tool(project.path()).expect("plant echo tool");
-    plant_permitted_graph(project.path()).expect("plant permitted graph");
+    plant_permitted_graph(project.path(), &fixture.publisher).expect("plant permitted graph");
 
     let post_fut = h.post_execute(
         "graph:flow",
@@ -253,15 +202,12 @@ async fn graph_action_completes_with_permitted_cap() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_denied_without_permitted_cap() {
-    let pre_init = |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
         Ok(())
     };
 
-    let mut h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
@@ -274,7 +220,7 @@ async fn graph_action_denied_without_permitted_cap() {
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_echo_tool(project.path()).expect("plant echo tool");
-    plant_denied_graph(project.path()).expect("plant denied graph");
+    plant_denied_graph(project.path(), &fixture.publisher).expect("plant denied graph");
 
     let post_fut = h.post_execute(
         "graph:denied",

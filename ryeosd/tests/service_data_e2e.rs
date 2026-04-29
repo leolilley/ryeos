@@ -43,7 +43,7 @@ fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> V
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_system_status_returns_snapshot() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(&h, "service:system/status", json!({})).await;
     let result = unwrap_result(status, &body, "system.status");
     // The status snapshot is an object; assert at least one expected key.
@@ -61,7 +61,7 @@ async fn service_system_status_returns_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_identity_public_key_returns_doc() {
     common::ensure_rye_inspect_in_core_bundle();
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(&h, "tool:rye/core/identity/public_key", json!({})).await;
     let result = unwrap_tool_result(status, &body, "identity.public_key");
     // The node identity doc must contain a non-empty fingerprint and a
@@ -78,7 +78,7 @@ async fn tool_identity_public_key_returns_doc() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_bundle_list_returns_at_least_core() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(&h, "service:bundle/list", json!({})).await;
     let result = unwrap_result(status, &body, "bundle.list");
     let bundles = result
@@ -99,7 +99,7 @@ async fn service_bundle_list_returns_at_least_core() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_list_empty_on_fresh_daemon() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(&h, "service:threads/list", json!({"limit": 100})).await;
     let result = unwrap_result(status, &body, "threads.list");
     let threads = result
@@ -119,7 +119,7 @@ async fn service_threads_list_empty_on_fresh_daemon() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_list_grows_with_each_call() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     // Each successful service call creates an audit thread row. Call
     // `system.status` 3 times, then check `threads.list` returns at
     // least 4 (the 3 calls plus the threads.list call itself).
@@ -141,7 +141,7 @@ async fn service_threads_list_grows_with_each_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_get_returns_audit_row() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     // Run any Both service to mint an audit thread.
     let (_, body1) = exec(&h, "service:system/status", json!({})).await;
     let tid = body1
@@ -168,7 +168,7 @@ async fn service_threads_get_returns_audit_row() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_get_missing_returns_null() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h,
         "service:threads/get",
@@ -182,7 +182,7 @@ async fn service_threads_get_missing_returns_null() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_chain_returns_chain_for_audit_thread() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (_, body1) = exec(&h, "service:system/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
@@ -200,7 +200,7 @@ async fn service_threads_chain_returns_chain_for_audit_thread() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_children_returns_empty_for_audit_thread() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (_, body1) = exec(&h, "service:system/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
@@ -216,7 +216,7 @@ async fn service_threads_children_returns_empty_for_audit_thread() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_events_replay_returns_events_for_audit_thread() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (_, body1) = exec(&h, "service:system/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
@@ -236,7 +236,7 @@ async fn service_events_replay_returns_events_for_audit_thread() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_events_chain_replay_returns_events_for_audit_chain() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (_, body1) = exec(&h, "service:system/status", json!({})).await;
     // For service-run threads, chain_root_id == thread_id (see service_executor.rs).
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
@@ -257,7 +257,7 @@ async fn service_events_chain_replay_returns_events_for_audit_chain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_fetch_resolves_known_service() {
     common::ensure_rye_inspect_in_core_bundle();
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": false, "verify": true}),
@@ -277,7 +277,7 @@ async fn tool_fetch_resolves_known_service() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_fetch_with_content_includes_body() {
     common::ensure_rye_inspect_in_core_bundle();
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": true, "verify": false}),
@@ -294,7 +294,7 @@ async fn tool_fetch_with_content_includes_body() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_fetch_unknown_ref_errors() {
     common::ensure_rye_inspect_in_core_bundle();
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:does/not/exist"}),
@@ -318,7 +318,7 @@ async fn tool_fetch_unknown_ref_errors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_verify_returns_trusted_for_core_service() {
     common::ensure_rye_inspect_in_core_bundle();
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h, "tool:rye/core/verify",
         json!({"item_ref": "service:system/status"}),
@@ -338,7 +338,7 @@ async fn tool_verify_returns_trusted_for_core_service() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_node_sign_rejects_non_system_space() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // node-sign only accepts system space — project space must be rejected.
     let (status, _body) = exec(
@@ -354,7 +354,7 @@ async fn service_node_sign_rejects_non_system_space() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_maintenance_gc_dry_run_returns_stats() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h, "service:maintenance/gc",
         json!({"dry_run": true, "compact": false}),
@@ -381,7 +381,7 @@ async fn service_maintenance_gc_dry_run_returns_stats() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_maintenance_gc_real_run_writes_event_log() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = exec(
         &h, "service:maintenance/gc",
         json!({"dry_run": false, "compact": false}),
@@ -398,7 +398,7 @@ async fn service_maintenance_gc_real_run_writes_event_log() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_commands_submit_against_audit_thread() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     // First mint an audit thread by running a Both service.
     let (_, body1) = exec(&h, "service:system/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
@@ -432,7 +432,7 @@ async fn service_commands_submit_against_audit_thread() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_offline_only_services_reject_in_live_mode() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     for svc in &["service:rebuild", "service:bundle/install", "service:bundle/remove"] {
         let params = if *svc == "service:bundle/install" {
             json!({"name": "x", "source_path": "/tmp/nope"})

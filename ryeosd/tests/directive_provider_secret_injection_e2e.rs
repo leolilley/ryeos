@@ -35,54 +35,10 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
+use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
-
-fn e2e_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x77u8; 32])
-}
-
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-category = "keys/trusted"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
-
-fn register_standard_bundle(state_path: &Path) -> anyhow::Result<()> {
-    let standard = common::workspace_root().join("ryeos-bundles/standard");
-    if !standard.is_dir() {
-        anyhow::bail!(
-            "ryeos-bundles/standard does not exist at {}",
-            standard.display()
-        );
-    }
-    let abs = standard.canonicalize()?;
-    let dir = state_path.join(".ai/node/bundles");
-    std::fs::create_dir_all(&dir)?;
-    let body = format!("section: bundles\npath: {}\n", abs.display());
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
-    std::fs::write(dir.join("standard.yaml"), signed)?;
-    Ok(())
-}
 
 /// Plant a mock model_provider config with a fully-specified `auth`
 /// block. `env_var` names the env var the runtime will read; the
@@ -93,6 +49,7 @@ fn plant_mock_provider_with_auth(
     env_var: &str,
     header_name: Option<&str>,
     prefix: Option<&str>,
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/rye-runtime/model_providers");
     std::fs::create_dir_all(&dir)?;
@@ -112,12 +69,12 @@ pricing:
   output_per_million: 0.0
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("mock.yaml"), signed)?;
     Ok(())
 }
 
-fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
+fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/rye-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
@@ -126,13 +83,18 @@ fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
     model: mock-model
     context_window: 200000
 "#;
-    let signed = lillux::signature::sign_content(body, &e2e_signing_key(), "#", None);
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(dir.join("model_routing.yaml"), signed)?;
     Ok(())
 }
 
-fn plant_directive(user_space: &Path, rel_path: &str, body_text: &str) -> anyhow::Result<()> {
-    plant_directive_with_secrets(user_space, rel_path, body_text, &[])
+fn plant_directive(
+    user_space: &Path,
+    rel_path: &str,
+    body_text: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    plant_directive_with_secrets(user_space, rel_path, body_text, &[], signer)
 }
 
 /// Plant a directive that declares `required_secrets` in its frontmatter.
@@ -146,6 +108,7 @@ fn plant_directive_with_secrets(
     rel_path: &str,
     body_text: &str,
     required_secrets: &[&str],
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
     let dir_relative = Path::new(rel_path)
@@ -182,7 +145,7 @@ model:
 {body_text}
 "#
     );
-    let signed = lillux::signature::sign_content(&body, &e2e_signing_key(), "<!--", Some("-->"));
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(&path, signed)?;
     Ok(())
 }
@@ -205,26 +168,29 @@ async fn run_directive_and_capture_first_request_headers(
     let header_name_owned = header_name.map(|s| s.to_string());
     let prefix_owned = prefix.map(|s| s.to_string());
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
         plant_mock_provider_with_auth(
             user,
             &mock_url,
             &env_var_owned,
             header_name_owned.as_deref(),
             prefix_owned.as_deref(),
+            &fixture.publisher,
         )?;
-        plant_model_routing(user)?;
-        plant_directive(user, "test/secret_injection", "Say hello to {{ name }}.")?;
+        plant_model_routing(user, &fixture.publisher)?;
+        plant_directive(
+            user,
+            "test/secret_injection",
+            "Say hello to {{ name }}.",
+            &fixture.publisher,
+        )?;
         Ok(())
     };
 
     let env_var_for_daemon = env_var.to_string();
     let secret_for_daemon = secret_value.to_string();
-    let h = DaemonHarness::start_with_pre_init(pre_init, move |cmd| {
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         // The daemon spawns the directive-runtime via
         // `lillux::SubprocessRequest`, whose `set_envs` *adds* to the
         // parent's environment without clearing. So setting the env
@@ -399,19 +365,17 @@ async fn run_directive_with_vault_secret(
     let header_name_owned = header_name.map(|s| s.to_string());
     let prefix_owned = prefix.map(|s| s.to_string());
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
         plant_mock_provider_with_auth(
             user,
             &mock_url,
             &env_var_owned,
             header_name_owned.as_deref(),
             prefix_owned.as_deref(),
+            &fixture.publisher,
         )?;
-        plant_model_routing(user)?;
+        plant_model_routing(user, &fixture.publisher)?;
         // Declare the env var as a required secret so the dispatcher
         // reads it out of the vault and injects it into the runtime
         // subprocess. Without this declaration, dispatch ignores the
@@ -421,6 +385,7 @@ async fn run_directive_with_vault_secret(
             "test/vault_secret",
             "Hello {{ name }}.",
             &[&env_var_owned],
+            &fixture.publisher,
         )?;
         // Crucial: secret comes from the sealed vault store, NOT
         // cmd.env(...). Pre-generate the daemon's vault keypair so we
@@ -432,7 +397,7 @@ async fn run_directive_with_vault_secret(
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, move |cmd| {
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
@@ -523,18 +488,23 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // routing + directive (declaring the secret). Then we create
     // the project tempdir, drop the `.env` into it, and dispatch.
     let env_var_owned = env_var.to_string();
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider_with_auth(user, &mock_url, &env_var_owned, None, None)?;
-        plant_model_routing(user)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider_with_auth(
+            user,
+            &mock_url,
+            &env_var_owned,
+            None,
+            None,
+            &fixture.publisher,
+        )?;
+        plant_model_routing(user, &fixture.publisher)?;
         plant_directive_with_secrets(
             user,
             "test/dotenv_secret",
             "Hello {{ name }}.",
             &[&env_var_owned],
+            &fixture.publisher,
         )?;
         // Pre-generate vault keypair so the daemon boots cleanly,
         // but DO NOT seal any secret — the .env overlay must be the
@@ -544,7 +514,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
@@ -644,13 +614,17 @@ async fn vault_blocked_name_fails_request_loud() {
     let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
-        std::fs::create_dir_all(state_path)?;
-        let sk = e2e_signing_key();
-        write_trusted_signer(user, &sk.verifying_key())?;
-        register_standard_bundle(state_path)?;
-        plant_mock_provider_with_auth(user, &mock_url, "RYE_TEST_VAULT_BLOCKED", None, None)?;
-        plant_model_routing(user)?;
+    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_mock_provider_with_auth(
+            user,
+            &mock_url,
+            "RYE_TEST_VAULT_BLOCKED",
+            None,
+            None,
+            &fixture.publisher,
+        )?;
+        plant_model_routing(user, &fixture.publisher)?;
         // Directive declares a required secret so the vault is
         // actually read at dispatch time. Without a declared secret
         // the post-step-7a dispatcher skips the vault read entirely
@@ -660,6 +634,7 @@ async fn vault_blocked_name_fails_request_loud() {
             "test/vault_blocked",
             "noop",
             &["RYE_TEST_VAULT_BLOCKED"],
+            &fixture.publisher,
         )?;
 
         // Poisoned sealed store: PATH is on the blocked list, but we
@@ -674,7 +649,7 @@ async fn vault_blocked_name_fails_request_loud() {
         Ok(())
     };
 
-    let h = DaemonHarness::start_with_pre_init(pre_init, move |cmd| {
+    let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
