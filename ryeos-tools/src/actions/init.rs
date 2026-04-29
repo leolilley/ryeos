@@ -76,6 +76,10 @@ pub struct InitReport {
     pub core_installed_at: PathBuf,
     pub standard_installed_at: Option<PathBuf>,
     pub vault_dir: PathBuf,
+    /// SHA-256 fingerprint of the X25519 vault public key. Surfaced
+    /// so operators can sanity-check that subsequent vault writes are
+    /// being sealed to the right key (and so audit logs can pin it).
+    pub vault_pubkey_fingerprint: String,
     pub trust_dir: PathBuf,
     pub next_steps: Vec<String>,
 }
@@ -255,6 +259,23 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let vault_dir = opts.state_dir.join(ryeos_engine::AI_DIR).join("node").join("vault");
     fs::create_dir_all(&vault_dir)
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
+    // Vault X25519 keypair — separate from the Ed25519 node identity
+    // so that node-key rotation does NOT brick the vault. Idempotent:
+    // load if present, generate otherwise. Public sidecar is regenerated
+    // from the secret on every run for resilience against drift.
+    let vault_secret_path = vault_dir.join("private_key.pem");
+    let vault_public_path = vault_dir.join("public_key.pem");
+    let vault_sk = if vault_secret_path.exists() {
+        lillux::vault::read_secret_key(&vault_secret_path)
+            .with_context(|| format!("load vault key {}", vault_secret_path.display()))?
+    } else {
+        let sk = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&vault_secret_path, &sk)
+            .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
+        sk
+    };
+    lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
+        .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
     let mut next_steps = vec![
         format!(
@@ -279,6 +300,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         core_installed_at: opts.system_data_dir.clone(),
         standard_installed_at,
         vault_dir,
+        vault_pubkey_fingerprint: vault_sk.public_key().fingerprint(),
         trust_dir,
         next_steps,
     })
@@ -558,6 +580,57 @@ mod tests {
             .join(".ai/config/keys/trusted")
             .join(format!("{}.toml", PLATFORM_AUTHOR_FP))
             .exists());
+    }
+
+    #[test]
+    fn run_init_generates_vault_keypair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = InitOptions {
+            state_dir: state.clone(),
+            user_root: user,
+            system_data_dir: tmp.path().join("system"),
+            core_source: workspace_root().join("ryeos-bundles/core"),
+            standard_source: None,
+            core_only: true,
+            force_node_key: false,
+        };
+        let report = run_init(&opts).expect("init");
+        let vault_priv = state.join(".ai/node/vault/private_key.pem");
+        let vault_pub = state.join(".ai/node/vault/public_key.pem");
+        assert!(vault_priv.exists(), "vault private key must exist");
+        assert!(vault_pub.exists(), "vault public key must exist");
+        // Fingerprint surfaced in report matches the one derivable from the
+        // on-disk secret key.
+        let sk = lillux::vault::read_secret_key(&vault_priv).unwrap();
+        assert_eq!(report.vault_pubkey_fingerprint, sk.public_key().fingerprint());
+        assert_eq!(report.vault_pubkey_fingerprint.len(), 64);
+        // Sealed envelope round-trip with the on-disk key works.
+        let env = lillux::vault::seal(&sk.public_key(), b"hello").unwrap();
+        let out = lillux::vault::open(&sk, &env).unwrap();
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn run_init_vault_key_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let opts = InitOptions {
+            state_dir: state.clone(),
+            user_root: tmp.path().join("home"),
+            system_data_dir: tmp.path().join("system"),
+            core_source: workspace_root().join("ryeos-bundles/core"),
+            standard_source: None,
+            core_only: true,
+            force_node_key: false,
+        };
+        let r1 = run_init(&opts).expect("init #1");
+        let r2 = run_init(&opts).expect("init #2");
+        assert_eq!(
+            r1.vault_pubkey_fingerprint, r2.vault_pubkey_fingerprint,
+            "vault key must persist across reinits"
+        );
     }
 
     #[test]

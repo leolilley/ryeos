@@ -4,6 +4,7 @@ pub mod exec;
 pub mod identity;
 pub mod signature;
 pub mod time;
+pub mod vault;
 
 pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
 
