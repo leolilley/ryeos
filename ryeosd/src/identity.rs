@@ -73,12 +73,19 @@ impl NodeIdentity {
         })
     }
 
-    /// Write a stable public identity document to disk.
+    /// Write a stable public identity document to disk. Uses
+    /// `iso8601_now()` for `created_at`/`signed_at`.
     pub fn write_public_identity(&self, path: &Path) -> Result<()> {
+        self.write_public_identity_at(path, &lillux::time::iso8601_now())
+    }
+
+    /// Like [`write_public_identity`] but takes the timestamp explicitly,
+    /// for byte-deterministic test fixtures.
+    pub fn write_public_identity_at(&self, path: &Path, now: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let doc = self.build_public_identity()?;
+        let doc = self.build_public_identity_at(now)?;
         let json = serde_json::to_vec_pretty(&doc)?;
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, &json)?;
@@ -97,8 +104,7 @@ impl NodeIdentity {
         serde_json::from_slice(&data).context("failed to parse public identity document")
     }
 
-    fn build_public_identity(&self) -> Result<PublicIdentityDoc> {
-        let created_at = lillux::time::iso8601_now();
+    fn build_public_identity_at(&self, now: &str) -> Result<PublicIdentityDoc> {
         let principal_id = format!("fp:{}", self.fingerprint);
         let signing_key_str = format!(
             "ed25519:{}",
@@ -108,7 +114,7 @@ impl NodeIdentity {
             "kind": "identity/v1",
             "principal_id": principal_id,
             "signing_key": signing_key_str,
-            "created_at": created_at,
+            "created_at": now,
         });
         let payload = serde_json::to_vec(&unsigned)?;
         let signature: Signature = self.signing_key.sign(&payload);
@@ -116,11 +122,11 @@ impl NodeIdentity {
             kind: "identity/v1".to_string(),
             principal_id,
             signing_key: signing_key_str,
-            created_at: created_at.clone(),
+            created_at: now.to_string(),
             signature: SignatureDoc {
                 signer: format!("fp:{}", self.fingerprint),
                 sig: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
-                signed_at: created_at,
+                signed_at: now.to_string(),
             },
         })
     }

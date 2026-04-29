@@ -24,24 +24,39 @@ pub fn content_hash(content: &str) -> String {
     crate::cas::sha256_hex(content.as_bytes())
 }
 
+/// Like [`sign_content`] but takes the signed-at timestamp explicitly,
+/// for byte-deterministic test fixtures and snapshot golden files.
+///
+/// Production code paths should keep using [`sign_content`] which fills
+/// in `iso8601_now()`. Only test support and reproducible-build tools
+/// should call this.
+pub fn sign_content_at(
+    body: &str,
+    signing_key: &SigningKey,
+    prefix: &str,
+    suffix: Option<&str>,
+    signed_at: &str,
+) -> String {
+    let hash = content_hash(body);
+    let signature: ed25519_dalek::Signature = signing_key.sign(hash.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+    let fp = compute_fingerprint(&signing_key.verifying_key());
+
+    let sig_line = match suffix {
+        Some(s) => format!("{prefix} rye:signed:{signed_at}:{hash}:{sig_b64}:{fp} {s}"),
+        None => format!("{prefix} rye:signed:{signed_at}:{hash}:{sig_b64}:{fp}"),
+    };
+
+    format!("{sig_line}\n{body}")
+}
+
 pub fn sign_content(
     body: &str,
     signing_key: &SigningKey,
     prefix: &str,
     suffix: Option<&str>,
 ) -> String {
-    let hash = content_hash(body);
-    let signature: ed25519_dalek::Signature = signing_key.sign(hash.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
-    let fp = compute_fingerprint(&signing_key.verifying_key());
-    let timestamp = crate::time::iso8601_now();
-
-    let sig_line = match suffix {
-        Some(s) => format!("{prefix} rye:signed:{timestamp}:{hash}:{sig_b64}:{fp} {s}"),
-        None => format!("{prefix} rye:signed:{timestamp}:{hash}:{sig_b64}:{fp}"),
-    };
-
-    format!("{sig_line}\n{body}")
+    sign_content_at(body, signing_key, prefix, suffix, &crate::time::iso8601_now())
 }
 
 pub fn parse_signature_line(
@@ -314,5 +329,14 @@ mod tests {
     fn strip_signature_lines_preserves_normal_lines() {
         let content = "# normal comment\ncode here\n";
         assert_eq!(strip_signature_lines(content), content);
+    }
+
+    #[test]
+    fn sign_content_at_is_byte_deterministic() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let body = "deterministic body\n";
+        let a = sign_content_at(body, &sk, "#", None, "2026-01-01T00:00:00Z");
+        let b = sign_content_at(body, &sk, "#", None, "2026-01-01T00:00:00Z");
+        assert_eq!(a, b, "same inputs must produce identical bytes");
     }
 }
