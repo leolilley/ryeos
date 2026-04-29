@@ -501,6 +501,105 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn dotenv_overlay_supplies_declared_secret_to_provider() {
+    // End-to-end: secret is provisioned via a project-local `.env`
+    // file (no vault entry, no `cmd.env(...)`). This exercises the
+    // step 7c overlay: dispatcher walks `[user_home, project_root]`
+    // for `.env`, parses KEY=VALUE, layers it under the (empty)
+    // vault, then projects to the directive's declared
+    // `required_secrets` and threads the result through
+    // `vault_bindings` → spec.env → directive-runtime subprocess →
+    // outbound auth header.
+    let env_var = "RYE_TEST_DOTENV_AUTH";
+    let secret = "sk-dotenv-only-feedfacefeedface";
+
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    // We need to write the project `.env` under the project tempdir
+    // chosen by the test, but the tempdir is created AFTER pre_init
+    // runs. So: pre-init plants only signer + bundle + provider +
+    // routing + directive (declaring the secret). Then we create
+    // the project tempdir, drop the `.env` into it, and dispatch.
+    let env_var_owned = env_var.to_string();
+    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
+        std::fs::create_dir_all(state_path)?;
+        let sk = e2e_signing_key();
+        write_trusted_signer(user, &sk.verifying_key())?;
+        register_standard_bundle(state_path)?;
+        plant_mock_provider_with_auth(user, &mock_url, &env_var_owned, None, None)?;
+        plant_model_routing(user)?;
+        plant_directive_with_secrets(
+            user,
+            "test/dotenv_secret",
+            "Hello {{ name }}.",
+            &[&env_var_owned],
+        )?;
+        // Pre-generate vault keypair so the daemon boots cleanly,
+        // but DO NOT seal any secret — the .env overlay must be the
+        // sole source of the declared secret.
+        let secrets = std::collections::HashMap::new();
+        plant_sealed_vault_secrets(state_path, &secrets)?;
+        Ok(())
+    };
+
+    let h = DaemonHarness::start_with_pre_init(pre_init, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
+            }),
+        );
+    })
+    .await
+    .expect("start daemon with empty vault but .env-backed secret");
+
+    // Plant the `.env` file inside the project root the dispatcher
+    // will see. The harness sets HOME to user_space and the project
+    // path is what we POST in; we use a fresh project tempdir.
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::write(
+        project.path().join(".env"),
+        format!("{env_var}={secret}\n"),
+    )
+    .expect("write project .env");
+
+    let post_fut = h.post_execute(
+        "directive:test/dotenv_secret",
+        project.path().to_str().unwrap(),
+        serde_json::json!({"name": "World"}),
+    );
+    let (status, body) = tokio::time::timeout(Duration::from_secs(30), post_fut)
+        .await
+        .expect("/execute timed out")
+        .expect("/execute send failed");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "/execute should succeed; body={body:#}"
+    );
+
+    let captured = mock.captured_headers().await;
+    assert!(
+        !captured.is_empty(),
+        ".env → vault_bindings → spec.env path is broken; mock got 0 requests"
+    );
+    let headers = captured.into_iter().next().unwrap();
+    let actual = headers.get("authorization").unwrap_or_else(|| {
+        panic!("expected Authorization from .env-backed secret; got: {headers:#?}")
+    });
+    let expected = format!("Bearer {secret}");
+    assert_eq!(
+        actual, &expected,
+        ".env → subprocess env → auth header mismatch — project `.env` must \
+         supply declared `required_secrets` when the vault is empty",
+    );
+
+    drop(project);
+    drop(mock);
+}
+
 /// Seal a poisoned plaintext (containing a key like `PATH` that would
 /// normally be rejected) directly via `lillux::vault::seal`,
 /// bypassing `write_sealed_secrets`'s pre-encryption blocklist check.

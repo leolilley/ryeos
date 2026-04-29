@@ -15,3 +15,4 @@ pub mod publish;
 pub mod sign;
 pub mod sign_bundle;
 pub mod trust;
+pub mod vault;

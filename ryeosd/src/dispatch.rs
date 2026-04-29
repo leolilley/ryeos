@@ -711,10 +711,12 @@ pub(crate) async fn dispatch_native_runtime(
     // `services::thread_lifecycle::spawn_item`). Daemon stays vendor-
     // agnostic — it ferries opaque `String -> String` pairs and never
     // enumerates provider names.
+    let dotenv_dirs = crate::vault::dotenv_search_dirs(Some(project_path));
     let vault_bindings = crate::vault::read_required_secrets(
         state.vault.as_ref(),
         acting_principal,
         &resolved.resolved_item.metadata.required_secrets,
+        &dotenv_dirs,
     )
     .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
 
@@ -856,10 +858,12 @@ pub async fn dispatch_subprocess(
     // directive path: tools get exactly what they declare, never the
     // full operator vault. Refuse to spawn if a declared secret isn't
     // provisioned.
+    let dotenv_dirs = crate::vault::dotenv_search_dirs(Some(&request.original_project_path));
     let vault_bindings = crate::vault::read_required_secrets(
         state.vault.as_ref(),
         request.acting_principal,
         &resolved.resolved_item.metadata.required_secrets,
+        &dotenv_dirs,
     )
     .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
 

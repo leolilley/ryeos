@@ -22,6 +22,11 @@ use lillux::crypto::{DecodePrivateKey, SigningKey};
 use ryeos_tools::actions::init::{run_init, InitOptions};
 use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 use ryeos_tools::actions::trust::{run_pin, PinOptions};
+use ryeos_tools::actions::vault::{
+    run_list as run_vault_list, run_put as run_vault_put,
+    run_remove as run_vault_remove, run_rewrap as run_vault_rewrap, ListOptions,
+    PutOptions, RemoveOptions, RewrapOptions,
+};
 
 use crate::error::CliError;
 
@@ -49,6 +54,24 @@ pub fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
                 return Ok(false);
             }
             run_trust_pin_verb(&argv[2..]).map_err(map_local_err)?;
+            Ok(true)
+        }
+        "vault" => {
+            // `rye vault {put,list,remove,rewrap}` are local verbs.
+            // Vault state is daemon-side, but rotation must work even
+            // when the daemon is down — these verbs read the on-disk
+            // vault secret key directly. Anything else under `vault`
+            // falls through to the verb table.
+            if argv.len() < 2 {
+                return Ok(false);
+            }
+            match argv[1].as_str() {
+                "put" => run_vault_put_verb(&argv[2..]).map_err(map_local_err)?,
+                "list" => run_vault_list_verb(&argv[2..]).map_err(map_local_err)?,
+                "remove" => run_vault_remove_verb(&argv[2..]).map_err(map_local_err)?,
+                "rewrap" => run_vault_rewrap_verb(&argv[2..]).map_err(map_local_err)?,
+                _ => return Ok(false),
+            }
             Ok(true)
         }
         _ => Ok(false),
@@ -156,6 +179,107 @@ fn run_trust_pin_verb(argv: &[String]) -> Result<()> {
         owner: args.owner,
     })
     .context("rye trust pin failed")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+// ── rye vault {put,list,remove,rewrap} ──────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "rye vault put",
+    about = "Add or overwrite KEY=VALUE entries in the sealed secret store",
+    no_binary_name = true
+)]
+struct VaultPutArgs {
+    /// `KEY=VALUE` pairs. The key must match `[A-Za-z0-9_]+` and must
+    /// not be on the OS-protected blocked list (PATH, HOME, …).
+    #[arg(required = true)]
+    assignments: Vec<String>,
+
+    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+}
+
+fn run_vault_put_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<VaultPutArgs>(argv)?;
+    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let report = run_vault_put(&PutOptions {
+        state_dir,
+        assignments: args.assignments,
+    })
+    .context("rye vault put failed")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "rye vault list",
+    about = "List the keys currently in the sealed secret store (values are NOT printed)",
+    no_binary_name = true
+)]
+struct VaultListArgs {
+    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+}
+
+fn run_vault_list_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<VaultListArgs>(argv)?;
+    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let report = run_vault_list(&ListOptions { state_dir })
+        .context("rye vault list failed")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "rye vault remove",
+    about = "Remove KEYs from the sealed secret store (idempotent on missing keys)",
+    no_binary_name = true
+)]
+struct VaultRemoveArgs {
+    /// Keys to remove.
+    #[arg(required = true)]
+    keys: Vec<String>,
+
+    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+}
+
+fn run_vault_remove_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<VaultRemoveArgs>(argv)?;
+    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let report = run_vault_remove(&RemoveOptions {
+        state_dir,
+        keys: args.keys,
+    })
+    .context("rye vault remove failed")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "rye vault rewrap",
+    about = "Rotate the vault X25519 keypair and re-seal the store under the new identity",
+    no_binary_name = true
+)]
+struct VaultRewrapArgs {
+    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+}
+
+fn run_vault_rewrap_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<VaultRewrapArgs>(argv)?;
+    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let report = run_vault_rewrap(&RewrapOptions { state_dir })
+        .context("rye vault rewrap failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }

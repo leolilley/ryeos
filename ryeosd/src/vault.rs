@@ -55,23 +55,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 
-/// Names that the OS or process-bootstrap pre-sets and that no vault
-/// is allowed to override. Matches the Python `validate_env_map()`
-/// blocked list (`ryeos-node/ryeos_node/vault.py`). A secrets file
-/// containing one of these aborts the read with a typed error.
-const BLOCKED_NAMES: &[&str] = &[
-    "PATH",
-    "HOME",
-    "PWD",
-    "USER",
-    "SHELL",
-    "TERM",
-    "PYTHONPATH",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-];
+// Vault key-name policy + write helpers live in
+// `ryeos_tools::actions::vault` so they can be shared with the CLI
+// `rye vault {put,list,remove,rewrap}` verbs without a circular
+// crate dependency. We re-export the pieces public callers (tests,
+// fixtures, dispatch) need so this module's surface is unchanged.
+pub use ryeos_tools::actions::vault::{
+    default_sealed_store_path, validate_decrypted_keys, write_sealed_secrets,
+    BLOCKED_NAMES,
+};
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
@@ -93,43 +85,85 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
 /// vault into a subprocess env was the v0 leak pattern: every spawn,
 /// regardless of what the item actually needed, got every secret the
 /// operator owned. Items now declare what they need; this function
-/// projects the vault to that subset.
+/// projects the source(s) to that subset.
 ///
-/// Refuses on any missing declared secret — that's a misconfiguration
-/// the caller wants surfaced, not silently absorbed (the alternative
-/// is a tool calling a provider with `None` and emitting an opaque
-/// upstream auth error).
+/// ## Sources, in precedence order (highest wins)
 ///
-/// Empty `required_secrets` ⇒ empty map (no vault read happens).
+/// 1. The sealed-envelope vault (`vault.read_all(principal)`).
+/// 2. `.env` files under each entry of `dotenv_search_dirs`, with
+///    later directories overriding earlier ones (typical caller
+///    passes `[user_home, project_root]` so project beats user).
+///
+/// `.env` is intentionally lower precedence than the vault — the
+/// vault is the operator's authoritative store, the project's
+/// `.env` is convenience for declared secrets the operator hasn't
+/// (yet) baked into the vault. Vault entries always win.
+///
+/// ## Refusal semantics
+///
+/// Refuses on any declared secret missing from BOTH sources — that's
+/// a misconfiguration the caller wants surfaced, not silently
+/// absorbed (the alternative is a tool calling a provider with
+/// `None` and emitting an opaque upstream auth error).
+///
+/// Empty `required_secrets` ⇒ empty map. Neither vault nor `.env`
+/// files are read in that case (the dispatch fast-path).
 pub fn read_required_secrets(
     vault: &dyn NodeVault,
     principal: &str,
     required_secrets: &[String],
+    dotenv_search_dirs: &[PathBuf],
 ) -> Result<HashMap<String, String>> {
     if required_secrets.is_empty() {
         return Ok(HashMap::new());
     }
-    let all = vault.read_all(principal)?;
+    let vault_map = vault.read_all(principal)?;
+    let dotenv_map = ryeos_tools::actions::vault::read_dotenv_overlay(dotenv_search_dirs)
+        .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     let mut out = HashMap::with_capacity(required_secrets.len());
     let mut missing: Vec<&str> = Vec::new();
     for key in required_secrets {
-        match all.get(key.as_str()) {
-            Some(v) => {
-                out.insert(key.clone(), v.clone());
-            }
-            None => missing.push(key.as_str()),
+        // Vault wins on conflict; .env is the fallback source.
+        if let Some(v) = vault_map.get(key.as_str()) {
+            out.insert(key.clone(), v.clone());
+        } else if let Some(v) = dotenv_map.get(key.as_str()) {
+            out.insert(key.clone(), v.clone());
+        } else {
+            missing.push(key.as_str());
         }
     }
     if !missing.is_empty() {
         bail!(
             "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
-             The item declares these in `required_secrets` but the operator vault \
-             does not provide them. Add them to the secrets file or remove the \
-             declaration.",
+             The item declares these in `required_secrets` but neither the \
+             operator vault nor any `.env` overlay provides them. Add them via \
+             `rye vault put`, drop them into a `.env` next to the project, or \
+             remove the declaration.",
             missing.join(", ")
         );
     }
     Ok(out)
+}
+
+/// Compute the conventional `.env` search directories for the
+/// dispatch path: `[user_home, project_root]` when both are
+/// available, falling back to whichever is present.
+///
+/// Order matters — later entries win on key collision (see
+/// [`read_required_secrets`]). The operator's user-wide `.env` is
+/// loaded first; the project's `.env` overrides on top.
+///
+/// Returns an empty vector when neither is resolvable. The dispatch
+/// path then degenerates to vault-only (the pre-step-7c behavior).
+pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) {
+        dirs.push(home);
+    }
+    if let Some(p) = project_path {
+        dirs.push(p.to_path_buf());
+    }
+    dirs
 }
 
 /// Stub vault — used only when the daemon is constructed for a unit
@@ -145,15 +179,6 @@ impl NodeVault for EmptyVault {
 }
 
 // ── V1 sealed-envelope vault ────────────────────────────────────────
-
-/// Default sealed-envelope store path: `<state_dir>/.ai/state/secrets/store.enc`.
-pub fn default_sealed_store_path(state_dir: &Path) -> PathBuf {
-    state_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("secrets")
-        .join("store.enc")
-}
 
 /// V1: encrypted secret store backed by an X25519 sealed envelope.
 ///
@@ -237,109 +262,6 @@ impl NodeVault for SealedEnvelopeVault {
     }
 }
 
-/// Apply the same key-name policy to decrypted secret-store contents
-/// that [`parse_secrets`] applies to plaintext `secrets.env`. A
-/// poisoned sealed store is just as dangerous as a poisoned env file.
-fn validate_decrypted_keys(map: &HashMap<String, String>, store_path: &Path) -> Result<()> {
-    for key in map.keys() {
-        if key.is_empty() {
-            bail!(
-                "vault: empty key in sealed store {}",
-                store_path.display()
-            );
-        }
-        if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-            bail!(
-                "vault: invalid key `{key}` in sealed store {} (must match [A-Za-z0-9_]+)",
-                store_path.display()
-            );
-        }
-        if BLOCKED_NAMES.contains(&key.as_str()) {
-            bail!(
-                "vault: key `{key}` in sealed store {} is on the OS-protected \
-                 blocked list and would shadow inherited environment",
-                store_path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Atomically write a sealed envelope containing `secrets` to
-/// `store_path`, sealing to `vault_pk`. Used by CLI verbs (e.g.
-/// `rye vault put`) and by tests; the daemon NEVER writes the store.
-///
-/// Refuses on any key that fails [`validate_decrypted_keys`] so a bad
-/// write at authoring time fails before the secrets are encrypted.
-pub fn write_sealed_secrets(
-    store_path: &Path,
-    vault_pk: &lillux::vault::VaultPublicKey,
-    secrets: &HashMap<String, String>,
-) -> Result<()> {
-    validate_decrypted_keys(secrets, store_path)?;
-
-    // Serialize the secret map deterministically: sorted keys.
-    let mut sorted: Vec<(&String, &String)> = secrets.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-    let mut plaintext_toml = String::new();
-    for (k, v) in &sorted {
-        // toml-rs would also work, but a direct format avoids a
-        // round-trip and keeps the on-the-wire format obvious.
-        plaintext_toml.push_str(&format!(
-            "{k} = {}\n",
-            toml_quote(v)
-        ));
-    }
-
-    let envelope = lillux::vault::seal(vault_pk, plaintext_toml.as_bytes())
-        .map_err(|e| anyhow!("vault: seal failed: {e:#}"))?;
-    let envelope_toml = toml::to_string(&envelope)
-        .map_err(|e| anyhow!("vault: serialize envelope: {e}"))?;
-
-    if let Some(parent) = store_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow!("vault: create parent {}: {e}", parent.display()))?;
-    }
-    let tmp = store_path.with_extension("tmp");
-    std::fs::write(&tmp, envelope_toml.as_bytes())
-        .map_err(|e| anyhow!("vault: write tmp {}: {e}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow!("vault: chmod 0600 {}: {e}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, store_path)
-        .map_err(|e| anyhow!("vault: rename tmp -> {}: {e}", store_path.display()))?;
-    Ok(())
-}
-
-/// Quote a TOML string value. We deliberately keep this minimal: the
-/// secret-store plaintext is always written by us, so we don't need
-/// to handle every TOML edge case — only the ones our values can
-/// contain. Strings with backslashes, double-quotes, control chars,
-/// or non-ASCII fall back to escaped form via toml-rs.
-fn toml_quote(s: &str) -> String {
-    if s.bytes().all(|b| {
-        b.is_ascii() && b != b'"' && b != b'\\' && !b.is_ascii_control()
-    }) {
-        format!("\"{s}\"")
-    } else {
-        // Safe escape via toml-rs: serialize a single-key table and
-        // pull out the value side. Slightly heavyweight but correct.
-        let mut tmp = std::collections::BTreeMap::new();
-        tmp.insert("v", s);
-        let serialized = toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\""));
-        // Format is `v = "..."`; strip the `v = ` prefix and trailing
-        // newline.
-        serialized
-            .trim()
-            .strip_prefix("v = ")
-            .unwrap_or(&serialized)
-            .to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,7 +290,7 @@ mod tests {
                 panic!("read_all should not be called when required is empty");
             }
         }
-        let bindings = read_required_secrets(&PanicVault, "op", &[]).unwrap();
+        let bindings = read_required_secrets(&PanicVault, "op", &[], &[]).unwrap();
         assert!(bindings.is_empty());
     }
 
@@ -381,7 +303,7 @@ mod tests {
         let v = FixedVault(all);
 
         let required = vec!["OPENAI_API_KEY".to_string()];
-        let bindings = read_required_secrets(&v, "op", &required).unwrap();
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings.get("OPENAI_API_KEY"), Some(&"sk-1".to_string()));
         assert!(!bindings.contains_key("DATABASE_URL"));
@@ -395,7 +317,7 @@ mod tests {
         let v = FixedVault(all);
 
         let required = vec!["FOO".to_string(), "MISSING_KEY".to_string()];
-        let err = read_required_secrets(&v, "op", &required).unwrap_err();
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("MISSING_KEY"), "expected MISSING_KEY in error: {msg}");
         assert!(
@@ -532,10 +454,98 @@ mod tests {
     fn read_required_fails_on_multiple_missing_listed_together() {
         let v = FixedVault(HashMap::new());
         let required = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let err = read_required_secrets(&v, "op", &required).unwrap_err();
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
         let msg = format!("{err:#}");
         for k in &["A", "B", "C"] {
             assert!(msg.contains(k), "expected {k} in error: {msg}");
         }
+    }
+
+    // ── .env overlay layering ────────────────────────────────────
+
+    #[test]
+    fn dotenv_overlay_supplies_missing_declared_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "FROM_DOTENV=hello\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let required = vec!["FROM_DOTENV".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(bindings.get("FROM_DOTENV"), Some(&"hello".to_string()));
+    }
+
+    #[test]
+    fn dotenv_overlay_loses_to_vault_on_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "FOO=from-dotenv\n").unwrap();
+
+        let mut all = HashMap::new();
+        all.insert("FOO".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["FOO".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(
+            bindings.get("FOO"),
+            Some(&"from-vault".to_string()),
+            "vault must win on key collision with .env"
+        );
+    }
+
+    #[test]
+    fn project_dotenv_overrides_user_dotenv() {
+        let user = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join(".env"), "API_KEY=user-default\n").unwrap();
+        std::fs::write(project.path().join(".env"), "API_KEY=project-override\n")
+            .unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let required = vec!["API_KEY".to_string()];
+        let dirs = vec![user.path().to_path_buf(), project.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(
+            bindings.get("API_KEY"),
+            Some(&"project-override".to_string()),
+            "later (project) .env must override earlier (user) .env"
+        );
+    }
+
+    #[test]
+    fn dotenv_overlay_rejects_blocked_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "PATH=/evil\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        // Even with no required_secrets touching PATH, the parser
+        // bails because the file itself is poisoned. The dispatcher
+        // should not silently absorb a project's attempt to shadow
+        // PATH. (Empty required_secrets short-circuits before the
+        // .env read, so we declare a different secret to force the
+        // .env walk.)
+        let required = vec!["UNRELATED".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let err = read_required_secrets(&v, "op", &required, &dirs).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("PATH") && msg.contains("blocked"),
+            "expected blocked PATH error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dotenv_overlay_skipped_when_required_empty() {
+        // `read_required_secrets` short-circuits on empty required;
+        // no .env walk happens, so a poisoned .env doesn't trip the
+        // parser when nothing was declared.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "PATH=/evil\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &[], &dirs).unwrap();
+        assert!(bindings.is_empty());
     }
 }

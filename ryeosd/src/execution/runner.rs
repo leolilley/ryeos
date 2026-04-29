@@ -1159,10 +1159,12 @@ pub fn execution_params_from_resume_context(
     // If a previously-declared required secret has been removed from
     // the operator vault, resume fails-loud (better than a silent
     // upstream auth error).
+    let dotenv_dirs = crate::vault::dotenv_search_dirs(project_path.as_deref());
     let vault_bindings = crate::vault::read_required_secrets(
         state.vault.as_ref(),
         &acting_principal,
         &resolved.resolved_item.metadata.required_secrets,
+        &dotenv_dirs,
     )
     .map_err(|e| anyhow::anyhow!("resume: vault read failed: {e}"))?;
 
