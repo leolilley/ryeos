@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:7912663f20de9a0cf3aa406d82351dec0058a6151239fa9323f3d580bab462f7:0YCPxJUAglgN6Dj35arA5KCCd/JJYoffbk2Vd5QnqqPeWulo0dRtLXbvembQBsqe415Ws4veL5CkmTBhtJx3CA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:e021397d26bf21b327a872eff56571bd27a0524d8d49618da26e31d224a062cd:JFzVHAqIKk7CWt79492bPmK9mmU4KQkeZ5C90D7cPaGxHEsgfzTd+HCPSvYNODOtmJUnA9YwfvgvFz4/GQIFCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """JavaScript/TypeScript parser for extracting metadata from JS/TS tools.
 
 Extracts exported constants and CONFIG_SCHEMA using regex.
@@ -8,7 +8,7 @@ Handles both `export const` and bare `const` declarations.
 __version__ = "1.0.0"
 __tool_type__ = "parser"
 __category__ = "rye/core/parsers/javascript"
-__tool_description__ = (
+__description__ = (
     "JavaScript/TypeScript parser - extracts metadata from JS/TS source code"
 )
 

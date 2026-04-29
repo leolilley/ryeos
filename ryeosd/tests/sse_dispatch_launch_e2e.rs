@@ -116,11 +116,21 @@ fn plant_directive(
     body_text: &str,
 ) -> anyhow::Result<()> {
     let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
+    let dir_relative = Path::new(rel_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel_path);
     std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
     let body = format!(
         r#"---
-__category__: "{rel_path}"
-__directive_description__: "SSE dispatch_launch e2e test fixture"
+name: {stem}
+category: "{dir_relative}"
+description: "SSE dispatch_launch e2e test fixture"
 inputs:
   name:
     type: string
@@ -188,10 +198,10 @@ label = "directive-launch-e2e-test"
 }
 
 fn pre_create_node_key_from(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
-    let key_dir = state_path.join(".ai").join("identity");
+    let key_dir = state_path.join(".ai").join("node").join("identity");
     std::fs::create_dir_all(&key_dir)?;
     let pem = sk.to_pkcs8_pem(Default::default())?;
-    std::fs::write(key_dir.join("node-key.pem"), pem.as_bytes())?;
+    std::fs::write(key_dir.join("private_key.pem"), pem.as_bytes())?;
     Ok(())
 }
 

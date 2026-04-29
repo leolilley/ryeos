@@ -19,6 +19,8 @@ base64 = "0.22"
 sha2 = "0.10"
 serde_yaml = "0.9"
 rmp-serde = "1"
+dirs = "5"
+glob = "0.3"
 
 # Engine + state
 ryeos-engine = { path = "../ryeos-engine" }
@@ -32,3 +34,15 @@ tempfile = "3"
 
 [features]
 default = []
+
+# ── Operator-side sign binary ──────────────────────────────────────
+# Resolves a canonical ref → file path via the engine kind registry,
+# enforces the path-anchoring validator, then signs in place using
+# the user signing key.
+[[bin]]
+name = "rye-sign"
+path = "src/bin/rye-sign.rs"
+
+[[example]]
+name = "bootstrap_sign_core_kind_schemas"
+path = "examples/bootstrap_sign_core_kind_schemas.rs"

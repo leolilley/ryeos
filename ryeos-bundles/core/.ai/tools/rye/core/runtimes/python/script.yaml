@@ -1,7 +1,7 @@
-# rye:signed:2026-04-26T09:49:06Z:a9beda58202d1f526cf9ed6a4ec25194e7197e28539fbd03d6aa2c1bdaf7297b:Fxx0a5KNchPUh6lnWR4GZSV/y7Jxk7gdh7A2GB55butjl/bCZEWfNsaTu2sP9DLVbSFXOsy3oKmrOf3kqsQqBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:78755325bfb7c66e3de58c85a7c1e5055078d38186f3a8bdf28021cd05888538:R9dyXYF6TxMATIpdJ4rJ7/XOq06krvV2+sPWBmPkyCX+PuAPXC0QSdmNch1oEvWKFWrqQaPP62XUpJHJ8VVQBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "rye/core/runtimes/python"
 version: "1.0.0"
-__executor_id__: "@subprocess"
-category: rye/core/runtimes/python
+executor_id: "@subprocess"
 description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
 
 env_config:

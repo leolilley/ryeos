@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:f85a01cf9d4b0a72075820b4d59ed9a5e50f78ab961dc5180250894495350e4f:O3Gp2dadQJGEyLjB3g6ZInv+fX/bsMgbihLU46A+NLiNTW4rxnA8fMiW4nZTjJsDfhFFcZDqqTCWNQSQMUrVDQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:0b3a8f1e427e78cc09b122fb7e21335857967c688df69c3bb42cecf39a96ad59:SXp8FY6sWi/QHUJOU9uHgGJmwpTIyUBZkUhTkoMnYx9uXf6vS8sL2tChZd4kw/5K4QCqwX9Y1QELnhsCQwFbBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """
 state_graph_walker.py: Graph traversal engine for state graph tools.
 
@@ -13,7 +13,7 @@ Entry point: same pattern as thread_directive.py — argparse + asyncio.run().
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/core/runtimes/state-graph"
-__tool_description__ = "State graph walker — traverses graph YAML tools"
+__description__ = "State graph walker — traverses graph YAML tools"
 __execution_owner__ = "callee"
 __native_async__ = True
 __native_resume__ = True
@@ -528,7 +528,6 @@ def _load_graph_yaml(graph_path: str) -> Dict:
     content = path.read_text(encoding="utf-8")
     # Strip rye signature lines before parsing YAML
     lines = content.split("\n")
-    clean = [l for l in lines if not l.strip().startswith("# rye:signed:")]
     return yaml.safe_load("\n".join(clean))
 
 

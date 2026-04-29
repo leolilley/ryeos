@@ -47,8 +47,8 @@ fn synth_project_with_schema_tool() -> PathBuf {
     fs::create_dir_all(&tools_dir).unwrap();
 
     let body = r#"version: "1.0.0"
-__executor_id__: "tool:rye/core/subprocess/execute"
-category: test/demo
+executor_id: "tool:rye/core/subprocess/execute"
+category: ""
 description: "schema-checked demo"
 
 config_schema:
@@ -72,7 +72,7 @@ fn build_engine_against_bundle() -> Engine {
         TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("ryeos-bundles/core");
-    let kinds_dir = bundle_root.join(".ai/config/engine/kinds");
+    let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("kinds load");
 
     let (parser_tools, _dups) =

@@ -55,14 +55,16 @@ fn synth_project_with_hello() -> PathBuf {
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
 __executor_id__ = "tool:rye/core/runtimes/python/script"
-__category__ = "test/demo"
-__tool_description__ = "Hello world demo"
+__category__ = "hello"
+__description__ = "Hello world demo"
 
 import sys
 print("hello world")
 sys.exit(0)
 "#;
-    fs::write(tools_dir.join("hello.py"), body).unwrap();
+    let tool_dir = tools_dir.join("hello");
+    fs::create_dir_all(&tool_dir).unwrap();
+    fs::write(tool_dir.join("hello.py"), body).unwrap();
     project_dir
 }
 
@@ -72,7 +74,7 @@ fn build_engine_against_bundle() -> Engine {
         TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("ryeos-bundles/core");
-    let kinds_dir = bundle_root.join(".ai/config/engine/kinds");
+    let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store)
         .expect("live bundle kinds load");
 
@@ -111,7 +113,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         validate_only: false,
     };
 
-    let item = CanonicalRef::parse("tool:hello").expect("canonical ref parses");
+    let item = CanonicalRef::parse("tool:hello/hello").expect("canonical ref parses");
 
     // Mirror spawn_item: resolve → verify → build_plan → execute_plan
     let resolved = engine
@@ -224,7 +226,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
         execution_hints: ExecutionHints::default(),
         validate_only: false,
     };
-    let item = CanonicalRef::parse("tool:hello").expect("canonical ref parses");
+    let item = CanonicalRef::parse("tool:hello/hello").expect("canonical ref parses");
 
     let (_, spans) = ryeos_tracing::test::capture_traces(|| {
         let resolved = engine.resolve(&plan_ctx, &item).expect("resolve");
@@ -256,7 +258,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
         .unwrap_or_else(|| panic!("expected engine:resolve_ref in {:?}", names));
     assert_eq!(
         resolve_span.field("ref"),
-        Some("tool:hello"),
+        Some("tool:hello/hello"),
         "engine:resolve_ref should carry the original ref field"
     );
 

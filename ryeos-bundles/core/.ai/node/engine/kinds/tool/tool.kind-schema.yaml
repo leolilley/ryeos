@@ -1,0 +1,97 @@
+# rye:signed:2026-04-29T02:47:29Z:08fec292597fe4249b971c51ba46bcf1178ac521f278e51d1a3fad7a8622f9ed:7uhIDNBjkRqjxDYzWpu7sIDM+UzACvOpkkhRSDEq5ltFwfTBRJECXLE7aLqph/Dlh6f/x+zoOj4EKJWWycQRDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/tool"
+version: "1.0.0"
+location:
+  directory: tools
+execution:
+  terminator: subprocess
+  thread_profile: tool_run
+  aliases:
+    "@subprocess": "tool:rye/core/subprocess/execute"
+  resolution: []
+formats:
+  - extensions: [".py"]
+    parser: parser:rye/core/python/ast
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+  - extensions: [".js", ".ts", ".mjs", ".cjs"]
+    parser: parser:rye/core/javascript/javascript
+    signature:
+      prefix: "//"
+  - extensions: [".json"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Empty by design — tool fields (executor_id, tool_type, etc.) are
+# extracted via metadata.rules from kind-specific keys in parser_config,
+# not enforced at the kind-level shape.
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+inventory_schema_keys: [input_schema, parameters, config_schema]
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+runtime:
+  handlers:
+    - type: config
+    - type: env_config
+    - type: config_resolve
+    - type: verify_deps
+    - type: execution_params
+    - type: native_async
+    - type: native_resume
+  # Keys that are NOT runtime blocks (metadata fields, header). Engine
+  # ignores these during runtime block dispatch. Anything else not
+  # claimed by a registered handler is a hard `UnknownRuntimeBlock`
+  # error.
+  ignored_keys:
+    - version
+    - category
+    - description
+    - executor_id
+    - tool_type
+    - required_secrets
+    - name
+    # `config_schema` is validated as a pre-pass against the user's
+    # ROOT tool item (see plan_builder.rs::build_plan and
+    # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare
+    # their own `config_schema` for documentation — the engine
+    # deliberately does not enforce them at chain compile time.
+    - config_schema
+    # TODO: handlers for these blocks land in subsequent phases.
+    - execution_owner
+    - native_resume
+metadata:
+  # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
+  # Python files use Python's dunder convention (`__category__`,
+  # `__version__`, ...); the `parser:rye/core/python/ast` regex_kv
+  # config strips the `__` framing so the parsed dict has the same
+  # plain keys as the YAML case. Downstream rules — and the path
+  # validator — therefore see ONE shape regardless of source format.
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    executor_id:
+      from: path
+      key: executor_id
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    required_secrets:
+      from: path_string_seq
+      key: required_secrets

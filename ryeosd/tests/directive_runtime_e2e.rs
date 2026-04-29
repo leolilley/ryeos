@@ -146,10 +146,20 @@ fn plant_directive(
             .collect::<String>();
         format!("permissions:\n  execute:\n{lines}")
     };
+    let dir_relative = Path::new(rel_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel_path);
     let body = format!(
         r#"---
-__category__: "{rel_path}"
-__directive_description__: "P3b directive-runtime e2e fixture"
+name: {stem}
+category: "{dir_relative}"
+description: "P3b directive-runtime e2e fixture"
 inputs:
   name:
     type: string
@@ -175,13 +185,19 @@ model:
 /// LLM-visible tool name. Unsigned is fine — `verified_loader` accepts
 /// missing signatures and returns the content as-is.
 fn plant_python_echo_tool(user_space: &Path, rel: &str) -> anyhow::Result<()> {
-    let path = user_space.join(format!(".ai/tools/{rel}.py"));
-    std::fs::create_dir_all(path.parent().expect("tool parent dir"))?;
+    let dir_relative = Path::new(rel)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(rel);
+    let dir = user_space.join(format!(".ai/tools/{dir_relative}"));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{rel}.py"));
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
 __executor_id__ = "tool:rye/core/runtimes/python/script"
-__category__ = "test/p3b"
-__tool_description__ = "P3b echo tool — prints its single arg back"
+__category__ = "{dir_relative}"
+__description__ = "P3b echo tool — prints its single arg back"
 
 import json
 import sys

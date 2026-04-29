@@ -1,6 +1,6 @@
-# rye:signed:2026-04-27T23:42:35Z:b26b619c437afcc5f5f52c36a5d96b2fdf9e42bb46b7eeef357b9cf4e45850f7:50I8Yq53Z1dMa1XXtMRhhLd0wCfkua6ypMjJIHgKNRyLge3DeRVXInHiR+X3RvWo4d11DEtAUhAGkSgkIXeaAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:8ee88ccbaf3ceb92b5794b657a808a5f0f89e79593fe69a09ffff87441e0095e:be7e+sTshyWj6NlCwlyD/MkgeRfx9dYDGGSv+dkeSa7wBIhtSiIEWD4Pvv7+zqBZi+QhYjA47ofy3BhXDgjNBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: config
-category: cli
+category: "cli"
 tokens: ["bundle", "install"]
 description: "Install a bundle into the daemon's state."
 execute: service:bundle/install

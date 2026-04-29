@@ -479,8 +479,8 @@ metadata:
         fs::create_dir_all(&project_ai).unwrap();
 
         // Kind schema lives only in the system tier (loader scans
-        // `<root>/config/engine/kinds`).
-        let kinds_dir = system_ai.join("config").join("engine").join("kinds");
+        // `<root>/node/engine/kinds`).
+        let kinds_dir = system_ai.join("node").join("engine").join("kinds");
         fs::create_dir_all(&kinds_dir).unwrap();
         write_config_kind_schema(&kinds_dir);
 

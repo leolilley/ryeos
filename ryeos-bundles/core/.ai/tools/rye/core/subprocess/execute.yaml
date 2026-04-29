@@ -1,7 +1,7 @@
-# rye:signed:2026-04-26T09:49:05Z:acd4147c3d47541816d26cf5e99799537be8540c9a82f8f17fbae99409362089:kxWBzui0Jx2kawBt/je+L0HbAgKZl81zlWBSUEt1uNaVWZLBhVwNBlnL6/jd1YGJt3IKU+/RJt4Ifkteh7uhBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:b35015400ecf0244cdc14dee9316795e2a23ca2949ed24f64ee594b14da6ef01:n8OsiXN+/vrFTVQMXCGv1ltiFmX7T2tXe3ZjyAnPCEaqxH0KuCYUQkF1vuyFt/pX4mt3U4raDkB/0Fj8SySCDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "rye/core/subprocess"
 version: "1.0.0"
-__executor_id__: null
-category: rye/core/subprocess
+executor_id: null
 description: "Subprocess execute - run commands with configurable arguments (terminal node)"
 
 config_schema:

@@ -1,6 +1,6 @@
-# rye:signed:2026-04-27T16:06:34Z:d805ae0a7a70a726a4d9d57291ed3e39decabdf8d5ce378abb9d0806179d0f05:MA5G1WylgyvnG2Qdii/wpBRu+4JdzEHKUtmlesbrhynBk3k9i5v/RDfwJCtN0YMcGjZpmP/jVrhqI2rFCiDkAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:19a8ebd1872e6fdec3475d850dd4bc875f26566b757ac9fba3fe3adb03352f04:FeDshuGLrRL9nGteBQQ8dSJs7kWGKwTGpbJ2kgEl8V8Gm0oEy9rt15McN7B56GNHB7knnZyWmu8AJ6fmH0IWCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: config
-category: cli
+category: "cli"
 tokens: ["fetch"]
 description: "Resolve and read an item via the engine."
 execute: service:fetch

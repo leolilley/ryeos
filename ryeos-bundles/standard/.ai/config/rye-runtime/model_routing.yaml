@@ -1,0 +1,19 @@
+# rye:signed:2026-04-29T02:47:24Z:f2ad4cdbf32435952193d92eb232eb69e39a350f7f9683e38486d7f38c2a67a2:eC3bVlFIP+f0uTWZcAMPXWx8P8fE9KyZYyk8ntnoPUIXtBTMUfcWVhGX0SOSOYDpuq9GmC9AVj7F0So/fLvjBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "rye-runtime"
+tiers:
+  general:
+    provider: zen
+    model: kimi-k2.5-free
+    context_window: 128000
+  fast:
+    provider: zen
+    model: kimi-k2.5-free
+    context_window: 128000
+  high:
+    provider: zen
+    model: claude-sonnet-4-6
+    context_window: 200000
+  orchestrator:
+    provider: zen
+    model: claude-sonnet-4-6
+    context_window: 200000

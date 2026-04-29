@@ -27,4 +27,4 @@ pub const AI_DIR: &str = ".ai";
 pub const TRUST_KEYS_DIR: &str = "config/keys/trusted";
 
 /// Path under `AI_DIR` where kind schema YAML files live.
-pub const KIND_SCHEMAS_DIR: &str = "config/engine/kinds";
+pub const KIND_SCHEMAS_DIR: &str = "node/engine/kinds";

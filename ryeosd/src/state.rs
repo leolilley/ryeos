@@ -54,6 +54,12 @@ pub struct AppState {
     /// Process-wide webhook delivery-id dedupe store. Configured per
     /// route by the `hmac` verifier; constructed once at startup.
     pub webhook_dedupe: Arc<crate::routes::webhook_dedupe::WebhookDedupeStore>,
+    /// Operator-secret store. Read at request-build time and merged
+    /// into the spawned subprocess env via the `vault_bindings`
+    /// pipeline (see `services::thread_lifecycle::spawn_item`). The
+    /// daemon stays vendor-agnostic — this trait moves opaque
+    /// `String -> String` pairs and never enumerates provider names.
+    pub vault: Arc<dyn crate::vault::NodeVault>,
 }
 
 #[derive(Debug, Serialize)]

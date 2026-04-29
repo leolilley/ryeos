@@ -48,7 +48,7 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
         "fixture trust store has no signers — fixture is empty"
     );
 
-    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/config/engine/kinds");
+    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/node/engine/kinds");
     assert!(
         kinds_dir.is_dir(),
         "live bundle kinds dir missing at {}",
@@ -140,7 +140,7 @@ fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution
     let trust_store =
         TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
-    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/config/engine/kinds");
+    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store)
         .expect("live bundle kinds load");
     let parsers = live_parser_dispatcher(&trust_store, &kinds);
@@ -163,7 +163,7 @@ fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution
 /// composer registry. Form A (YAML frontmatter `---`) variant.
 #[test]
 fn pipeline_runs_against_live_bundle_kinds_form_a() {
-    let body = "---\nname: test/sample\n---\n\nHello from Form A.\n";
+    let body = "---\ncategory: \"test\"\nname: sample\n---\n\nHello from Form A.\n";
     let output = run_pipeline_against_bundle(body);
     let composed_body = output
         .composed
@@ -185,7 +185,7 @@ fn pipeline_runs_against_live_bundle_kinds_form_a() {
 /// both forms via the live bundle descriptor.
 #[test]
 fn pipeline_runs_against_live_bundle_kinds_form_b() {
-    let body = "```yaml\nname: test/sample\n```\n\nHello from Form B.\n";
+    let body = "```yaml\ncategory: \"test\"\nname: sample\n```\n\nHello from Form B.\n";
     let output = run_pipeline_against_bundle(body);
     let composed_body = output
         .composed

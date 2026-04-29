@@ -1,6 +1,6 @@
-# rye:signed:2026-04-27T16:06:34Z:d669f3cc82d05933c2066950e19a3b1fea6768d2cf4a778f20ff114a3edcfccf:WsKeFdGxef8D46U1+hl62BoYMiPep4ojE5TtHY03QFyLrWWLHZrceCkI21R4gj+xZ1gbADhkWWTeG0U3D9NqBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:ba129fcfcfe67dba3c9a6f6e91ab53c26dbe59b6fa36aac0eb97c08b3f55f93f:sQnxgEYcTzuYicA6zh86+VLYB7WG8DkE4IviOpLUvmLTmT/pykvUwL5pv2+ddZs9wJmPVKyIpNfPo1uymtx+CQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: config
-category: cli
+category: "cli"
 tokens: ["identity", "public-key"]
 description: "Print the daemon's node identity (fingerprint + public key)."
 execute: service:identity/public_key

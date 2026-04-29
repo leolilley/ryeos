@@ -2,11 +2,10 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
-use crate::adapter;
 use crate::budget::BudgetTracker;
 use ryeos_runtime::callback_client::CallbackClient;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ProviderMessage, StreamEvent, ToolSchema};
+use crate::directive::{ExecutionConfig, ProviderMessage, StreamEvent, ToolSchema};
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{HookAction, Harness};
 use ryeos_runtime::envelope::RuntimeResult;
@@ -19,9 +18,12 @@ pub enum State {
     CheckingLimits,
     CallingProvider,
     Streaming {
+        // The full sequence of streamed events, kept for diagnostic
+        // counts. Real per-delta `cognition_out` persistence already
+        // happened inside `provider_adapter::call_provider_streaming`,
+        // and the typed assistant message (text + tool_calls) was
+        // pushed onto `self.messages` before this state runs.
         events: Vec<StreamEvent>,
-        accumulated_text: String,
-        tool_calls: Vec<crate::directive::ToolCall>,
     },
     ParsingResponse,
     DispatchingTools {
@@ -62,6 +64,7 @@ pub struct Runner {
     continuation: ContinuationCheck,
     result_guard: ResultGuard,
     provider_config: crate::directive::ProviderConfig,
+    execution: ExecutionConfig,
     model_name: String,
     thread_id: String,
     initial_turn: u32,
@@ -103,6 +106,7 @@ impl Runner {
         callback: CallbackClient,
         context_window: u64,
         provider_config: crate::directive::ProviderConfig,
+        execution: ExecutionConfig,
         model_name: String,
         thread_id: String,
         hooks: Vec<ryeos_runtime::HookDefinition>,
@@ -133,6 +137,7 @@ impl Runner {
             continuation: ContinuationCheck::new(context_window),
             result_guard: ResultGuard::new(),
             provider_config,
+            execution,
             model_name,
             thread_id,
             initial_turn: 0,
@@ -149,6 +154,7 @@ impl Runner {
         callback: CallbackClient,
         context_window: u64,
         provider_config: crate::directive::ProviderConfig,
+        execution: ExecutionConfig,
         model_name: String,
         thread_id: String,
         hooks: Vec<ryeos_runtime::HookDefinition>,
@@ -166,6 +172,7 @@ impl Runner {
             callback,
             context_window,
             provider_config,
+            execution,
             model_name,
             thread_id,
             hooks,
@@ -239,16 +246,27 @@ impl Runner {
                     }
 
                     let client = reqwest::Client::new();
-                    match adapter::call_provider(
+                    // Persistence-first streaming: each provider delta
+                    // and tool_use is appended as a `cognition_out`
+                    // event INSIDE call_provider_streaming before the
+                    // next chunk is pulled. The runner here only sees
+                    // the accumulated AdapterResponse + the full event
+                    // sequence after the stream finishes. Live SSE
+                    // broadcast on the daemon side then re-publishes
+                    // these durable events.
+                    match crate::provider_adapter::call_provider_streaming(
                         &client,
                         &self.provider_config,
+                        &self.execution,
                         &self.model_name,
                         &self.messages,
                         &self.tools,
+                        &self.callback,
+                        turn,
                     )
                     .await
                     {
-                        Ok(resp) => {
+                        Ok((resp, events)) => {
                             let input_tok = resp.usage.as_ref().map_or(0, |u| u.input_tokens);
                             let output_tok = resp.usage.as_ref().map_or(0, |u| u.output_tokens);
                             let usd = self.compute_cost(input_tok, output_tok);
@@ -290,13 +308,12 @@ impl Runner {
                                 tracing::debug!(finish_reason = %reason, "provider response");
                             }
 
-                            // Convert response to StreamEvents for unified processing
-                            let events = adapter::response_to_stream_events(&resp);
-                            State::Streaming {
-                                events,
-                                accumulated_text: String::new(),
-                                tool_calls: Vec::new(),
-                            }
+                            // Real StreamEvents already persisted as
+                            // cognition_out events during streaming.
+                            // The runner's State::Streaming pass is now
+                            // diagnostic-only — message.tool_calls and
+                            // message.content are the source of truth.
+                            State::Streaming { events }
                         }
                         Err(e) => State::Errored {
                             error: e.to_string(),
@@ -304,7 +321,7 @@ impl Runner {
                     }
                 }
 
-                State::Streaming { mut events, mut accumulated_text, mut tool_calls } => {
+                State::Streaming { events } => {
                     record_callback_warning(
                         &mut warnings,
                         "stream_opened",
@@ -313,33 +330,28 @@ impl Runner {
                             .await,
                     );
 
-                    // Process StreamEvents
-                    while let Some(event) = events.pop() {
-                        match event {
-                            StreamEvent::Delta(text) => {
-                                accumulated_text.push_str(&text);
-                            }
-                            StreamEvent::ToolUse { id, name, arguments } => {
-                                let args = crate::adapter::parse_tool_arguments(&arguments);
-                                tool_calls.push(crate::directive::ToolCall {
-                                    id: Some(id),
-                                    name,
-                                    arguments: args,
-                                });
-                            }
-                            StreamEvent::Done => {
-                                // Terminal event — stop processing
-                                break;
-                            }
+                    // Streaming-only diagnostic: count what arrived. The
+                    // typed accumulation lives on the AdapterResponse
+                    // message that CallingProvider already pushed onto
+                    // self.messages — message.content has the merged
+                    // text and message.tool_calls has the typed
+                    // ToolCall list. State::Streaming exists to (a)
+                    // emit the `stream_opened` marker and (b) record
+                    // diagnostics for the trace span.
+                    let mut delta_count = 0u32;
+                    let mut tool_use_count = 0u32;
+                    let mut done_seen = false;
+                    for ev in &events {
+                        match ev {
+                            StreamEvent::Delta(_) => delta_count += 1,
+                            StreamEvent::ToolUse { .. } => tool_use_count += 1,
+                            StreamEvent::Done => done_seen = true,
                         }
                     }
-
-                    // StreamEvents have been processed into accumulated_text and tool_calls.
-                    // The real message was already pushed in CallingProvider from the
-                    // non-streaming adapter path, so no additional message push needed.
                     tracing::debug!(
-                        text_len = accumulated_text.len(),
-                        tool_call_count = tool_calls.len(),
+                        delta_count,
+                        tool_use_count,
+                        done_seen,
                         "stream events processed"
                     );
 
@@ -850,6 +862,7 @@ mod tests {
             make_callback(),
             200_000,
             provider,
+            ExecutionConfig::default(),
             "test-model".to_string(),
             "T-test".to_string(),
             vec![],
@@ -879,6 +892,7 @@ mod tests {
             make_callback(),
             200_000,
             provider,
+            ExecutionConfig::default(),
             "test-model".to_string(),
             "T-test".to_string(),
             vec![],
@@ -915,6 +929,7 @@ mod tests {
             make_callback(),
             200_000,
             provider,
+            ExecutionConfig::default(),
             "test-model".to_string(),
             "T-test".to_string(),
             vec![],

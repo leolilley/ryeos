@@ -180,7 +180,7 @@ fn resolve_provider(
         })
         .unwrap_or("anthropic");
 
-    let config_id = format!("model_providers/{provider_id}");
+    let config_id = format!("model-providers/{provider_id}");
 
     loader.load_config::<ProviderConfig>(&config_id)
         .ok_or_else(|| anyhow::anyhow!("provider config not found: {}", config_id))
@@ -204,13 +204,18 @@ fn resolve_model(
 
     if let Some(ref routing) = routing {
         if let Some(tier_cfg) = routing.tiers.get(tier) {
-            let model_name = format!("{}/{}", tier_cfg.provider, tier_cfg.model);
+            // The bare provider model id goes on the wire — the
+            // routing's `provider` field selects WHICH
+            // `model-providers/<id>.yaml` to load, not which prefix to
+            // prepend to the model name. Pre-V5.5 code emitted
+            // `<provider>/<model>` which only matched OpenRouter-style
+            // gateways and broke direct OpenAI / Anthropic / Zen.
             let ctx = tier_cfg.context_window.unwrap_or(200_000);
-            return (model_name, ctx);
+            return (tier_cfg.model.clone(), ctx);
         }
     }
 
-    (format!("anthropic/claude-sonnet-4-20250514"), 200_000)
+    ("claude-sonnet-4-6".to_string(), 200_000)
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in
@@ -354,14 +359,15 @@ mod tests {
             },
         };
         let (name, ctx) = resolve_model(&header, &Some(routing));
-        assert_eq!(name, "openai/gpt-4o-mini");
+        assert_eq!(name, "gpt-4o-mini");
         assert_eq!(ctx, 128_000);
     }
 
     #[test]
     fn resolve_model_default() {
         let header = DirectiveHeader::default();
-        let (name, _) = resolve_model(&header, &None);
-        assert!(name.contains("anthropic"));
+        let (name, ctx) = resolve_model(&header, &None);
+        assert!(name.contains("claude"));
+        assert_eq!(ctx, 200_000);
     }
 }

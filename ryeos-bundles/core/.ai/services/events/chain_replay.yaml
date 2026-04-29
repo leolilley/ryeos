@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T06:36:31Z:fc2a06d5f9f13f2fe75711ba3a804a438d40b9c1b9cb4ba687d568619d459073:9mAldT3nTwH/A0KET4Vt0+KUuOmzEJ5z7SwbQprg6NxYvv6MLMk/y1M3/Er3cgx3EETa7SKsSh6ywaANZK0kAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:e65950636b2e76026e0e8e6ecbd0f9eb3568dca23e39f5c39d9a22be8e5ced86:ArRwjFGDPbVKvTmoHzADa/MsT20gZnfwsG1MXShPsy6vZXVkbd7S/tM3el+TdO40Q8eEYcOyQDL+r0wwTAXLDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "events"
+name: "chain_replay"
 kind: service
 endpoint: events.chain_replay
 required_caps: []

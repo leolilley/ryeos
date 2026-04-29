@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:36e9f7ef3a834ad70c1ec813ce3f5133ab45d79ff4bd9a08db11deb384810711:9qfsidVj+bv+iabXGEQAn/Asmabei6JGz69jtDlVfb7GEK0ZUl2T1dKXpfKdRsVrZ++tfYdczyWysp6bQwfyAQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:27b460e277e33c791f75925599884b90ce19395c0b6ff641f8abd378d14933ba:EFVvABIjNc0ASJXZI3NrskKSet9Mn5StEV/Mx1XEaUi504fmNxidsqWgOM8YaJCHSFYTmZz1go2ltoPaRQ97Ag==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Condition evaluator and path resolver.
 
 Shared runtime library — evaluates conditions against documents
@@ -10,7 +10,7 @@ Used by: state-graph walker, agent thread hooks, safety harness.
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/core/runtimes/python/lib"
-__tool_description__ = "Condition evaluator and path resolver"
+__description__ = "Condition evaluator and path resolver"
 
 import re
 from typing import Any, Dict

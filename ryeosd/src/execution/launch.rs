@@ -514,6 +514,15 @@ pub async fn build_and_launch(
     let callback_owned = envelope.callback.clone();
     let thread_id_owned = thread_id.to_string();
     let duration = hard_limits.duration_seconds;
+    // The native-runtime spawn pipe must include vault_bindings the
+    // same way `services::thread_lifecycle::spawn_item` does for
+    // generic plan-node subprocesses. Without this, operator secrets
+    // never reach the runtime — the trait machinery in `vault.rs`
+    // gets called and discarded.
+    let vault_owned: Vec<(String, String)> = vault_bindings
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(
             &binary_path,
@@ -522,6 +531,7 @@ pub async fn build_and_launch(
             duration,
             &callback_owned,
             &thread_id_owned,
+            &vault_owned,
         )
     })
     .await
@@ -594,7 +604,23 @@ fn spawn_runtime(
     timeout_secs: u64,
     callback: &EnvelopeCallback,
     thread_id: &str,
+    vault_bindings: &[(String, String)],
 ) -> Result<RuntimeResult> {
+    // Vault first, daemon-callback env appended afterwards. lillux's
+    // `set_envs` applies in order and a later assignment overwrites an
+    // earlier one — so a poisoned vault containing `RYEOSD_THREAD_ID`
+    // (or any other daemon-callback name) cannot shadow the real
+    // value the runtime needs to call back home. The vault is still
+    // the "outer" layer that flows into provider auth, db creds,
+    // etc.; the inner layer is non-negotiable runtime infrastructure.
+    let mut envs: Vec<(String, String)> = vault_bindings.to_vec();
+    envs.extend([
+        ("RYEOSD_SOCKET_PATH".to_string(), callback.socket_path.to_string_lossy().to_string()),
+        ("RYEOSD_CALLBACK_TOKEN".to_string(), callback.token.clone()),
+        ("RYEOSD_THREAD_ID".to_string(), thread_id.to_string()),
+        ("RYEOSD_PROJECT_PATH".to_string(), project_path.to_string_lossy().to_string()),
+    ]);
+
     let request = lillux::SubprocessRequest {
         cmd: binary.to_string(),
         args: vec![
@@ -602,13 +628,7 @@ fn spawn_runtime(
             project_path.to_string_lossy().to_string(),
         ],
         cwd: Some(project_path.to_string_lossy().to_string()),
-        envs: vec![
-            ("RYEOSD_SOCKET_PATH".to_string(), callback.socket_path.to_string_lossy().to_string()),
-            ("RYEOSD_CALLBACK_TOKEN".to_string(), callback.token.clone()),
-            ("RYEOSD_THREAD_ID".to_string(), thread_id.to_string()),
-            ("RYEOSD_PROJECT_PATH".to_string(),
-             project_path.to_string_lossy().to_string()),
-        ],
+        envs,
         stdin_data: Some(envelope_json.to_string()),
         timeout: timeout_secs as f64,
     };

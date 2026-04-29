@@ -1,6 +1,6 @@
-# rye:signed:2026-04-27T16:06:35Z:f90ae4fc32e84d5ce3b216335790a9cc901bc1bab72c4a9a8f3e36763990d256:kS0KXt+SkP9oBF7yRY3rR3YHwOH8je88AT6t5snPhWoy7ObUm6gp4LJ4gYsVj41zq41t1Yi/+X6tZSOdOqwxCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:8f63f08ecb12d4ce2832ab40737378712a0bb2ad25430df75c7430371863f0bf:ktfLGiFhXdwqTJsKmupGd4YgRLQk68ZFmxeXRnmt2m0AdaWntRZQ3JqmGsYHe4bV43Cc7Cn/P0iUXb4vF9bqAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: config
-category: cli
+category: "cli"
 tokens: ["thread", "list"]
 description: "List threads (audit + runtime), optionally limited."
 execute: service:threads/list

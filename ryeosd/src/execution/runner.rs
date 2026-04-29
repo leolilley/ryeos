@@ -1144,13 +1144,25 @@ pub fn execution_params_from_resume_context(
         _ => None,
     };
 
+    let acting_principal = resume
+        .requested_by_name()
+        .unwrap_or_else(|| "fp:resume".to_string());
+
+    // Resume must see the same operator-secret view as the original
+    // spawn so the resumed subprocess can re-establish provider
+    // connections, db handles, etc. Vault is read fresh — if the
+    // operator has rotated a secret since the original spawn, the
+    // new value flows through.
+    let vault_bindings = state
+        .vault
+        .read_all(&acting_principal)
+        .map_err(|e| anyhow::anyhow!("resume: vault read failed: {e}"))?;
+
     Ok(ExecutionParams {
         resolved,
-        acting_principal: resume
-            .requested_by_name()
-            .unwrap_or_else(|| "fp:resume".to_string()),
+        acting_principal,
         project_path,
-        vault_bindings: HashMap::new(),
+        vault_bindings,
         snapshot_hash: resume.original_snapshot_hash.clone(),
         parameters: resume.parameters.clone(),
         temp_dir: None,

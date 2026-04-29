@@ -44,7 +44,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
 
     let workspace = workspace_root();
-    let kinds_dir = workspace.join("ryeos-bundles/core/.ai/config/engine/kinds");
+    let kinds_dir = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
     let kinds =
         KindRegistry::load_base(&[kinds_dir.clone()], &trust_store).expect("load kind registry");
 
@@ -289,7 +289,7 @@ fn gate_service_kind_in_bundle() {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
 
-    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/config/engine/kinds");
+    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("load kinds");
 
     assert!(

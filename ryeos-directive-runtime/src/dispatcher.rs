@@ -54,7 +54,9 @@ impl Dispatcher {
 
     #[tracing::instrument(name = "tool:resolve", skip(self, raw_args), fields(tool_name = %tool_name))]
     pub fn resolve(&self, tool_name: &str, raw_args: &str, call_id: Option<String>) -> Result<ToolDispatchResult, String> {
-        let arguments = parse_tool_arguments(raw_args);
+        // Typed-fail-loud per remediation: malformed tool-call args
+        // bail at the dispatcher rather than dispatching with `{}`.
+        let arguments = parse_tool_arguments(raw_args)?;
 
         if tool_name == "directive_return" {
             return self.handle_directive_return(&arguments, call_id);
@@ -238,12 +240,15 @@ mod tests {
     }
 
     #[test]
-    fn arg_repair_on_invalid_json() {
+    fn arg_repair_on_invalid_json_bails_typed() {
         let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()], None);
-        let result = d
+        let err = d
             .resolve("read_file", r#"{path: "/tmp"}"#, None)
-            .unwrap();
-        assert!(result.arguments.is_object());
+            .unwrap_err();
+        assert!(
+            err.contains("malformed tool-call arguments JSON"),
+            "expected typed dispatcher bail, got: {err}"
+        );
     }
 
     #[test]

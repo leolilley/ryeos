@@ -85,6 +85,11 @@ pub struct ResolutionResult {
     pub winner_space: ItemSpace,
     pub winner_label: String,
     pub matched_ext: String,
+    /// `.ai/` root directory under which the winner was found.
+    /// Needed by the path-anchoring validator so it can compute the
+    /// expected `<ai_root>/<kind.directory>` base for `match: path`
+    /// rules without re-deriving it by walking parent components.
+    pub winner_ai_root: PathBuf,
     pub shadowed: Vec<ShadowedCandidate>,
 }
 
@@ -103,7 +108,7 @@ pub fn resolve_item_full(
     kind_schema: &KindSchema,
     ref_: &CanonicalRef,
 ) -> Result<ResolutionResult, EngineError> {
-    let mut winner: Option<(PathBuf, ItemSpace, String, String)> = None;
+    let mut winner: Option<(PathBuf, ItemSpace, String, String, PathBuf)> = None;
     let mut shadowed = Vec::new();
     let mut searched_spaces = Vec::new();
 
@@ -119,7 +124,13 @@ pub fn resolve_item_full(
             tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
             if path.is_file() {
                 if winner.is_none() {
-                    winner = Some((path, root.space, root.label.clone(), ext_spec.ext.clone()));
+                    winner = Some((
+                        path,
+                        root.space,
+                        root.label.clone(),
+                        ext_spec.ext.clone(),
+                        root.ai_root.clone(),
+                    ));
                 } else {
                     shadowed.push(ShadowedCandidate {
                         label: root.label.clone(),
@@ -133,7 +144,7 @@ pub fn resolve_item_full(
     }
 
     match winner {
-        Some((path, space, label, ext)) => {
+        Some((path, space, label, ext, ai_root)) => {
             if !shadowed.is_empty() {
                 tracing::debug!(
                     item_ref = %ref_,
@@ -147,6 +158,7 @@ pub fn resolve_item_full(
                 winner_space: space,
                 winner_label: label,
                 matched_ext: ext,
+                winner_ai_root: ai_root,
                 shadowed,
             })
         }

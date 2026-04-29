@@ -81,7 +81,13 @@ pub struct Config {
     pub db_path: PathBuf,
     pub uds_path: PathBuf,
     pub state_dir: PathBuf,
-    pub signing_key_path: PathBuf,
+    /// Daemon-internal signing key — used for CAS state writes, node-config
+    /// writes, and all `.ai/node/**` daemon-authored state.
+    /// Defaults to `<state_dir>/.ai/node/identity/private_key.pem`.
+    pub node_signing_key_path: PathBuf,
+    /// Operator signing key — used for operator edits in project + user space.
+    /// Defaults to `~/.ai/config/keys/signing/private_key.pem`.
+    pub user_signing_key_path: PathBuf,
     pub system_data_dir: PathBuf,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
@@ -94,7 +100,8 @@ struct PartialConfig {
     db_path: Option<PathBuf>,
     uds_path: Option<PathBuf>,
     state_dir: Option<PathBuf>,
-    signing_key_path: Option<PathBuf>,
+    node_signing_key_path: Option<PathBuf>,
+    user_signing_key_path: Option<PathBuf>,
     system_data_dir: Option<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
@@ -166,10 +173,17 @@ impl Config {
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone()))
                 .unwrap_or_else(|| defaults.uds_path.clone()),
             state_dir: state_dir.clone(),
-            signing_key_path: file_cfg
+            node_signing_key_path: file_cfg
                 .as_ref()
-                .and_then(|cfg| cfg.signing_key_path.clone())
-                .unwrap_or_else(|| state_dir.join(".ai").join("identity").join("node-key.pem")),
+                .and_then(|cfg| cfg.node_signing_key_path.clone())
+                .unwrap_or_else(|| {
+                    state_dir.join(".ai").join("node").join("identity").join("private_key.pem")
+                }),
+            user_signing_key_path: file_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.user_signing_key_path.clone())
+                .or_else(|| env::var_os("RYE_SIGNING_KEY_PATH").map(PathBuf::from))
+                .unwrap_or_else(|| defaults.user_signing_key_path.clone()),
             system_data_dir: env::var_os("RYE_SYSTEM_SPACE")
                 .map(PathBuf::from)
                 .or_else(|| cli.system_data_dir.clone())
@@ -236,18 +250,24 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| env::temp_dir().join(format!("ryeosd-{}", current_uid())));
 
+        let home = base_dirs.home_dir();
+
         Ok(Self {
             bind,
             db_path: state_dir.join("db").join("ryeosd.sqlite3"),
             uds_path: runtime_root.join("ryeosd.sock"),
             state_dir: state_dir.clone(),
-            signing_key_path: env::var_os("RYE_SIGNING_KEY_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    // Look for user's signing key in ~/.ai/
-                    let home = base_dirs.home_dir();
-                    home.join(".ai/config/keys/signing/private_key.pem")
-                }),
+            node_signing_key_path: state_dir
+                .join(".ai")
+                .join("node")
+                .join("identity")
+                .join("private_key.pem"),
+            user_signing_key_path: home
+                .join(".ai")
+                .join("config")
+                .join("keys")
+                .join("signing")
+                .join("private_key.pem"),
             system_data_dir: data_dir,
             require_auth: false,
             authorized_keys_dir: state_dir.join("auth").join("authorized_keys"),

@@ -16,7 +16,7 @@ pub mod fetch;
 pub mod identity_public_key;
 pub mod maintenance_gc;
 pub mod rebuild;
-pub mod sign;
+pub mod node_sign;
 pub mod system_status;
 pub mod threads_chain;
 pub mod threads_children;
@@ -44,5 +44,5 @@ pub const ALL: &[ServiceDescriptor] = &[
     rebuild::DESCRIPTOR,
     verify::DESCRIPTOR,
     fetch::DESCRIPTOR,
-    sign::DESCRIPTOR,
+    node_sign::DESCRIPTOR,
 ];

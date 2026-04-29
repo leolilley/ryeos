@@ -103,7 +103,7 @@ The daemon does not branch on `"knowledge"`. It reads `execution.aliases["@knowl
 ### Kind Schema
 
 ```yaml
-# .ai/config/engine/kinds/knowledge/knowledge.kind-schema.yaml
+# .ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml
 location:
   directory: knowledge
 execution:

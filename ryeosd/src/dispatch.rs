@@ -43,7 +43,7 @@
 //!   alternatives so an operator can fix the schema/cap/registry
 //!   without spelunking the source.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -702,6 +702,16 @@ pub(crate) async fn dispatch_native_runtime(
         plan_context: ctx.plan_ctx.clone(),
     };
 
+    // Read the operator vault for THIS request's principal. Vault
+    // entries flow through `vault_bindings` → `spec.env` →
+    // subprocess inheritance (see `services::thread_lifecycle::spawn_item`).
+    // Daemon stays vendor-agnostic — it ferries opaque
+    // `String -> String` pairs and never enumerates provider names.
+    let vault_bindings = state
+        .vault
+        .read_all(acting_principal)
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+
     let result = launch::build_and_launch(
         state,
         &executor_ref,
@@ -709,7 +719,7 @@ pub(crate) async fn dispatch_native_runtime(
         &resolved,
         project_path,
         &params,
-        &HashMap::new(),
+        &vault_bindings,
         request.pre_minted_thread_id.as_deref(),
     ).await.map_err(|e| match e {
         launch::BuildAndLaunchError::Materialization(me) => {
@@ -835,6 +845,16 @@ pub async fn dispatch_subprocess(
 
     let item_ref_for_error = resolved.item_ref.clone();
 
+    // Read the operator vault for THIS request's principal. The
+    // raw-tool path needs vault injection for the same reason
+    // directives do: tools call providers, hit databases, etc., and
+    // those credentials live in the vault, not in the daemon's own
+    // env.
+    let vault_bindings = state
+        .vault
+        .read_all(request.acting_principal)
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+
     // V5.5 P2 — subprocess (raw tool) terminator: no permissions
     // composition step exists, so the callback token carries no caps
     // (deny-all). Tools that need to call back into the daemon must
@@ -844,7 +864,7 @@ pub async fn dispatch_subprocess(
         resolved,
         acting_principal: request.acting_principal.to_string(),
         project_path: Some(request.original_project_path.clone()),
-        vault_bindings: HashMap::new(),
+        vault_bindings,
         snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
         temp_dir: request.temp_dir.clone(),

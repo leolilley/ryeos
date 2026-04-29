@@ -100,7 +100,7 @@ impl ParserRegistry {
     /// `.ai/` dir), matching the convention `KindRegistry::load_base`
     /// uses for kind schema search roots — except here we descend into
     /// `.ai/parsers/**` (or whatever `directory` the `parser` kind
-    /// schema declares) rather than `.ai/config/engine/kinds/**`.
+    /// schema declares) rather than `.ai/node/engine/kinds/**`.
     ///
     /// **Contract: base canonical refs MUST be unique.** Returns the
     /// loaded registry and a `Vec<DuplicateRef>` listing every
@@ -635,7 +635,7 @@ mod tests {
     /// The default parser kind schema used by most tests — directory
     /// `parsers`, accepts `.yaml`/`.yml`, signature envelope `#`.
     /// Mirrors the live bundle at
-    /// `ryeos-bundles/core/.ai/config/engine/kinds/parser/`.
+    /// `ryeos-bundles/core/.ai/node/engine/kinds/parser/`.
     const DEFAULT_PARSER_KIND_SCHEMA: &str = "\
 location:
   directory: parsers

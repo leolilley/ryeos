@@ -1,0 +1,34 @@
+# rye:signed:2026-04-29T02:47:29Z:014b869bf197487c84516d9ed2a6423a726eeba5e0f75268b1f3dec05fac7120:8xzMk41NsCjnP0IPcJuP4DM8YWHSoptQ/dY1m9UcH25inMgvkfE7w0cW7/KuGQZkNXWiuiEkefr5kv7GzkkdDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/config"
+version: "1.0.0"
+location:
+  directory: config
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Each config consumer enforces its own schema — config kind is an
+# escape hatch for per-domain configs (execution.yaml, etc.).
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path

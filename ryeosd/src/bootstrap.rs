@@ -18,8 +18,10 @@ pub struct InitOptions {
 
 /// One-time idempotent filesystem bootstrap.
 ///
-/// Creates the node space layout, generates or loads the signing key,
-/// writes the public identity document, and bootstraps self-trust.
+/// Creates the node space layout, generates or loads BOTH the node signing
+/// key (daemon-internal state) and the user signing key (operator edits),
+/// writes the public identity document for the node, and bootstraps
+/// self-trust for both keys.
 #[tracing::instrument(name = "engine:lifecycle", skip(config), fields(event = "bootstrap"))]
 pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 1. Create directory layout
@@ -35,39 +37,65 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 3. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
 
-    // 4. Generate or load the user signing key
-    let key_path = &config.signing_key_path;
-    let identity = if options.force && key_path.exists() {
-        // Force: regenerate the signing key
-        tracing::info!(path = %key_path.display(), "regenerating signing key (--force)");
-        fs::remove_file(key_path)
-            .with_context(|| format!("failed to remove old key {}", key_path.display()))?;
-        NodeIdentity::create(key_path)?
-    } else if key_path.exists() {
-        NodeIdentity::load(key_path)?
+    // 4. Generate or load the NODE signing key (daemon-internal state)
+    let node_key_path = &config.node_signing_key_path;
+    let node_identity = if options.force && node_key_path.exists() {
+        tracing::info!(path = %node_key_path.display(), "regenerating node signing key (--force)");
+        fs::remove_file(node_key_path)
+            .with_context(|| format!("failed to remove old node key {}", node_key_path.display()))?;
+        NodeIdentity::create(node_key_path)?
+    } else if node_key_path.exists() {
+        NodeIdentity::load(node_key_path)?
     } else {
-        NodeIdentity::create(key_path)?
+        NodeIdentity::create(node_key_path)?
     };
 
     tracing::info!(
-        fingerprint = %identity.fingerprint(),
-        path = %key_path.display(),
-        "signing key ready"
+        fingerprint = %node_identity.fingerprint(),
+        path = %node_key_path.display(),
+        "node signing key ready"
     );
 
-    // 5. Write public identity document
-    let identity_path = config.state_dir.join(".ai").join("identity").join("public-identity.json");
+    // 5. Generate or load the USER signing key (operator edits in project/user space)
+    let user_key_path = &config.user_signing_key_path;
+    let user_identity = if options.force && user_key_path.exists() {
+        tracing::info!(path = %user_key_path.display(), "regenerating user signing key (--force)");
+        fs::remove_file(user_key_path)
+            .with_context(|| format!("failed to remove old user key {}", user_key_path.display()))?;
+        NodeIdentity::create(user_key_path)?
+    } else if user_key_path.exists() {
+        NodeIdentity::load(user_key_path)?
+    } else {
+        NodeIdentity::create(user_key_path)?
+    };
+
+    tracing::info!(
+        fingerprint = %user_identity.fingerprint(),
+        path = %user_key_path.display(),
+        "user signing key ready"
+    );
+
+    // 6. Write public identity document (node only)
+    let identity_path = config.state_dir.join(".ai").join("node").join("identity").join("public-identity.json");
     if options.force || !identity_path.exists() {
-        identity.write_public_identity(&identity_path)?;
-        tracing::info!(path = %identity_path.display(), "wrote public identity");
+        node_identity.write_public_identity(&identity_path)?;
+        tracing::info!(path = %identity_path.display(), "wrote node public identity");
     }
 
-    // 6. Bootstrap self-trust: write the user's verifying key as a trusted key
+    // 7. Bootstrap self-trust: write verifying keys as trusted key docs
     let user_space = discover_user_root().unwrap_or_else(|| PathBuf::from("/tmp/missing-home"));
     let trust_dir = user_space.join(".ai").join("config").join("keys").join("trusted");
-    let trust_entry = trust_dir.join(format!("{}.toml", identity.fingerprint()));
-    if options.force || !trust_entry.exists() {
-        write_self_trust(&trust_dir, &trust_entry, identity.verifying_key())?;
+
+    // Node key trust doc
+    let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
+    if options.force || !node_trust_entry.exists() {
+        write_self_trust(&trust_dir, &node_trust_entry, node_identity.verifying_key(), node_identity.signing_key())?;
+    }
+
+    // User key trust doc
+    let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
+    if options.force || !user_trust_entry.exists() {
+        write_self_trust(&trust_dir, &user_trust_entry, user_identity.verifying_key(), user_identity.signing_key())?;
     }
 
     // NOTE: We intentionally do NOT write a node-config registration for the
@@ -82,28 +110,29 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     Ok(())
 }
 
-/// Write a self-trust TOML entry so the user's own signed items verify.
+/// Write a self-signed trusted-key TOML entry so the key's own signed items verify.
+///
+/// The document is signed by the key it declares (self-signature), using the
+/// `# rye:signed:...` envelope format consumed by `TrustStore::load_three_tier`.
 fn write_self_trust(
     trust_dir: &Path,
     trust_entry: &Path,
     verifying_key: &lillux::crypto::VerifyingKey,
+    signing_key: &lillux::crypto::SigningKey,
 ) -> Result<()> {
     fs::create_dir_all(trust_dir)
         .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
     let fingerprint = lillux::cas::sha256_hex(verifying_key.as_bytes());
-    // Use single-line `ed25519:<base64>` form — matches `TrustedKeyDoc::to_toml`
-    // in ryeos-engine and avoids fragile multiline TOML quoting at write time.
     let key_b64 = base64::engine::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         verifying_key.as_bytes(),
     );
 
-    let toml_content = format!(
-        r#"version = "1.0.0"
-category = "keys/trusted"
-fingerprint = "{fingerprint}"
+    let body = format!(
+        r#"fingerprint = "{fingerprint}"
 owner = "self"
+version = "1.0.0"
 attestation = ""
 
 [public_key]
@@ -111,13 +140,19 @@ pem = "ed25519:{key_b64}"
 "#
     );
 
-    fs::write(trust_entry, toml_content.as_bytes())
+    // Self-sign using the `# rye:signed:...` envelope
+    let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
+
+    let tmp = trust_entry.with_extension("tmp");
+    fs::write(&tmp, signed.as_bytes())
         .with_context(|| format!("failed to write trust entry {}", trust_entry.display()))?;
+    fs::rename(&tmp, trust_entry)
+        .with_context(|| format!("failed to rename {} → {}", tmp.display(), trust_entry.display()))?;
 
     tracing::info!(
         path = %trust_entry.display(),
         fingerprint = %fingerprint,
-        "wrote self-trust entry"
+        "wrote self-signed trust entry"
     );
 
     Ok(())
@@ -172,8 +207,11 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
             state_dir.display()
         );
     }
-    if !config.signing_key_path.exists() {
-        tracing::warn!("no user signing key found — signed items will fail to verify");
+    if !config.node_signing_key_path.exists() {
+        tracing::warn!("no node signing key found — signed items will fail to verify");
+    }
+    if !config.user_signing_key_path.exists() {
+        tracing::warn!("no user signing key found — operator-signed items will fail to verify");
     }
     Ok(())
 }

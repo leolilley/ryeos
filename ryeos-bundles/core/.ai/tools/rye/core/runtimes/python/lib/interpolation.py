@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:fa4fffdcadb4c8a350fd37e578e4a3f8613ef3167e928d7a976c45a9bcdeefe4:SHhQgv2y6CaONKcHrDF6VE8L5yA8UZKsCytN4rLTtL73a/ppZT+/SZaEsxm5mg96Mvlmngg0KuFqRa+7+yGRBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:899fac5618145541b6ddf0130e1d6e31cc380c8edba8f5824b6d23306ba805a5:zIsCFrByDHQNLVDFQL0t+oUXa6HiP6Z3cU3ZOwAUW+u4x3OnNjj4ys5phC43GSNSou8dHxjjvWAe708RIBOeAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Template interpolation for ${...} and {input:...} expressions.
 
 Shared runtime library — resolves template expressions against
@@ -10,7 +10,7 @@ Used by: state-graph walker, agent thread hooks, safety harness.
 __version__ = "1.0.0"
 __tool_type__ = "python"
 __category__ = "rye/core/runtimes/python/lib"
-__tool_description__ = "Template interpolation for parameter expressions"
+__description__ = "Template interpolation for parameter expressions"
 
 import json as _json
 import logging

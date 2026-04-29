@@ -75,37 +75,38 @@ fn register_standard_bundle(state_path: &Path) -> anyhow::Result<()> {
 /// reproduce in tests; unsigned is the documented test path.
 fn plant_echo_tool(project_dir: &Path) -> anyhow::Result<()> {
     let tools_dir = project_dir.join(".ai").join("tools");
-    std::fs::create_dir_all(&tools_dir)?;
+    let tool_dir = tools_dir.join("echo");
+    std::fs::create_dir_all(&tool_dir)?;
 
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
 __executor_id__ = "tool:rye/core/runtimes/python/script"
-__category__ = "test/e2e"
-__tool_description__ = "echo input as json"
+__category__ = "echo"
+__description__ = "echo input as json"
 
 import json, sys
 raw = sys.stdin.read()
 params = json.loads(raw) if raw.strip() else {}
 print(json.dumps({"msg": params.get("msg", "default")}))
 "#;
-    std::fs::write(tools_dir.join("echo.py"), body)?;
+    std::fs::write(tool_dir.join("echo.py"), body)?;
     Ok(())
 }
 
-/// Plant a graph with permissions that allow tool:echo.
+/// Plant a graph with permissions that allow tool:echo/echo.
 fn plant_permitted_graph(project_dir: &Path) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: test
+    let body = r#"category: ""
 version: "1.0.0"
 permissions:
-  - rye.execute.tool.echo
+  - rye.execute.tool.echo.echo
 config:
   start: greet
   nodes:
     greet:
       action:
-        item_id: "tool:echo"
+        item_id: "tool:echo/echo"
         params:
           msg: "hello"
       assign:
@@ -123,7 +124,7 @@ config:
 fn plant_denied_graph(project_dir: &Path) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: test
+    let body = r#"category: ""
 version: "1.0.0"
 permissions: []
 config:
@@ -131,7 +132,7 @@ config:
   nodes:
     greet:
       action:
-        item_id: "tool:echo"
+        item_id: "tool:echo/echo"
         params:
           msg: "hello"
       assign:

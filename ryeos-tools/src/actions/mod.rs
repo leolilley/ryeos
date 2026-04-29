@@ -9,3 +9,4 @@
 
 pub mod build_bundle;
 pub mod sign;
+pub mod sign_bundle;

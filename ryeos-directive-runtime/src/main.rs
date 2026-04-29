@@ -11,6 +11,7 @@ mod directive;
 mod dispatcher;
 mod harness;
 mod knowledge;
+mod provider_adapter;
 mod result_guard;
 mod resume;
 mod runner;
@@ -111,6 +112,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let provider = bootstrap_output.provider.clone();
     let model_name = bootstrap_output.model_name.clone();
     let context_window = bootstrap_output.context_window;
+    let execution = bootstrap_output.config.execution.clone();
 
     let harness = harness::Harness::new(&envelope.policy, envelope.request.depth, bootstrap_output.config.risk_policy.clone());
 
@@ -171,6 +173,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             callback,
             context_window,
             provider,
+            execution,
             model_name,
             envelope.thread_id.clone(),
             hooks,
@@ -248,6 +251,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             callback,
             context_window,
             provider,
+            execution,
             model_name,
             envelope.thread_id.clone(),
             hooks,
@@ -256,18 +260,47 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     let result = runner_inst.run().await;
 
-    let _ = crate::knowledge::write_thread_transcript(
+    // Persistence-first: the markdown transcript and capabilities
+    // manifest are part of the durable output of a directive run. A
+    // silent `let _ = …` swallowed I/O failure leaves the daemon
+    // believing a thread completed successfully while the on-disk
+    // transcript is missing — exactly the silent-fallback class of
+    // bug remediation R4/R7 closed elsewhere. Surface any transcript
+    // write failure as a non-success RuntimeResult; the daemon then
+    // routes it through the same finalize-as-failed path as any
+    // other terminal error.
+    if let Err(e) = crate::knowledge::write_thread_transcript(
         &project_root,
         &envelope.thread_id,
         &envelope.resolution.root.source_path.to_string_lossy(),
         runner_inst.messages(),
-    );
-    let _ = crate::knowledge::write_capabilities(
+    ) {
+        return Ok(RuntimeResult {
+            success: false,
+            status: "errored".to_string(),
+            thread_id: envelope.thread_id.clone(),
+            result: Some(json!(format!("transcript write failed: {e:#}"))),
+            outputs: json!({}),
+            cost: result.cost.clone(),
+            warnings: result.warnings.clone(),
+        });
+    }
+    if let Err(e) = crate::knowledge::write_capabilities(
         &project_root,
         &envelope.thread_id,
         runner_inst.tools(),
         None,
-    );
+    ) {
+        return Ok(RuntimeResult {
+            success: false,
+            status: "errored".to_string(),
+            thread_id: envelope.thread_id.clone(),
+            result: Some(json!(format!("capabilities write failed: {e:#}"))),
+            outputs: json!({}),
+            cost: result.cost.clone(),
+            warnings: result.warnings.clone(),
+        });
+    }
 
     Ok(result)
 }

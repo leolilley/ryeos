@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T06:36:31Z:8998d62985a5f75bf4d0d9f3aa1cf2371af026c4b08c109bae36a421cef52e3d:a788CthmxwTx3D7tS3wecwywhzS9Ah5za7+kqHHrl6uXEEuoCqrUkCWRG0+lNweMQPGsN80BbG4sr2BKhsrMAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:c3d5b173cbff7674fc0cc168651c8aa30b9ec0871346a60d7926c9d2a55fcd5d:PxHE/pkrwM9sO/O3cLkLNW5SMtGWApVXzLeIxTvwdFIUfpIvJbNq1vq/IwISUTr5ttlQjRVckPOEdz8xdFPGAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: ""
+name: "verify"
 kind: service
 endpoint: verify
 required_caps: ["bundle.read"]

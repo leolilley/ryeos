@@ -245,7 +245,7 @@ mod tests {
             ("directive:x", "directive"),
             ("graph:x", "graph"),
             ("knowledge:x", "knowledge"),
-            ("config:x", "config"),
+            ("node:x", "node"),
             ("custom_kind:x", "custom_kind"),
         ] {
             let r = CanonicalRef::parse(input).unwrap();

@@ -58,7 +58,8 @@ mod tests {
             db_path: runtime_db_path.clone(),
             uds_path: tmpdir.path().join("test.sock"),
             state_dir: tmpdir.path().to_path_buf(),
-            signing_key_path: key_path.clone(),
+            node_signing_key_path: key_path.clone(),
+            user_signing_key_path: tmpdir.path().join("user-key.pem"),
             system_data_dir: tmpdir.path().join("system"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
@@ -141,6 +142,7 @@ mod tests {
                 crate::routes::build_route_table_or_bail(&snapshot).unwrap(),
             )),
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
+            vault: Arc::new(crate::vault::EmptyVault),
         };
 
         (tmpdir, state)

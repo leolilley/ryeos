@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:42fc89569e4472755c503e196900248c50ce6a933582c9d3244ba1468255f0c0:eDjLRRNNY0qOTzWav7VPxPThY2XKHUhHUziTeBPIELF6Vv6Olo2iafmls57dlYCNao9Y0kNMdHA2oaDoEpzLDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:88f5f157dfe6884739572ad7c4f4c0092638e92c2112db3b64100ffa8f6a4233:F5XSK2wbRSJlJd6k3aCLZWlo7AkvQpyXkeAedM5V9c9ks/4JlbU1Lwbgni8qaZHWdoWQJUScBLqjHKirszOiDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Runtime library — shared module loader for Python-based tools.
 
 Handles the Python-specific concern of registering packages in
@@ -13,7 +13,7 @@ the runtime YAML verify_deps config (language-agnostic, data-driven).
 __tool_type__ = "python"
 __version__ = "1.0.0"
 __category__ = "rye/core/runtimes/python/lib"
-__tool_description__ = "Python module loader for anchor imports"
+__description__ = "Python module loader for anchor imports"
 
 import importlib.util
 import logging

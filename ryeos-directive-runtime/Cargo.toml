@@ -14,7 +14,9 @@ clap = { version = "4", features = ["derive"] }
 lillux = { path = "../lillux" }
 quick-xml = "0.36"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = "0.3"
+bytes = "1"
 ryeos-engine = { path = "../ryeos-engine" }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-state = { path = "../ryeos-state" }

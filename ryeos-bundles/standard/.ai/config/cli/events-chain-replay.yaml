@@ -1,6 +1,6 @@
-# rye:signed:2026-04-27T16:06:33Z:45f44486e50cabb0946a0aa92a6bc81c8e305f406d40c66b68e44571906ccc17:cFhvYbRrUNyYM/QVFIp1c0M8wRlVV/bc4EZ8P3x1ysLyapo85YueA5zDnvkzhIETx8P40npI726+WYH8BlMKCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:9fbedb2e5df13ed3846cfe26d78e153f8a8f58346860fe5f13bcef418e9c5385:xaqTj37GIt71Y4Dp7bpRBeX6Be4Ub6c1l3fNSLWhIsXsFc6gOPwUlWBaQ/t4igh2VzYKcq5Z5a1BkiGgZP2fDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: config
-category: cli
+category: "cli"
 tokens: ["events", "chain-replay"]
 description: "Replay events across an entire chain (root and descendants)."
 execute: service:events/chain_replay

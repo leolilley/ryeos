@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T09:30:26Z:ad0846e9261fec87d8671aac74b5f5ccb54c8b3e05d66188bdf561087198344d:3C9Mj3FVkVffCPgMWbDmglQNls9IlzvGLb6OPvRrB/aq5W0LlxDys3R78Dr31uN8rGxF+sE9TzL31g+lXoteCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:d650eb6782917099b880514f751d11057c50add304e34fd3d365a305c8a9299d:EzL9RskPoLvNQQYSk6aJAGZpYq65CJjEVw0xaWPN+p72692LAMloV11Wn2yYln88+uvFHmAqt1P92EnuYP9mBg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: ""
+name: "knowledge-runtime"
 kind: runtime
 serves: knowledge
 default: true

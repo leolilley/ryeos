@@ -256,6 +256,15 @@ pub enum ResolutionError {
         item_ref: String,
         reason: String,
     },
+    /// Path-anchoring validator caught a mismatch between metadata
+    /// and on-disk location, OR a `required: true` rule found no
+    /// value. Distinct from `IntegrityFailure` (signature/hash) and
+    /// `StepFailed` (other resolution-step failure) so triage points
+    /// at the metadata.rules schema, not at the signature path.
+    MetadataAnchoringFailed {
+        item_ref: String,
+        source: crate::kind_registry::MetadataAnchoringError,
+    },
     /// Kind has no execution block (not executable).
     KindNotExecutable {
         kind: String,
@@ -302,6 +311,9 @@ impl std::fmt::Display for ResolutionError {
             }
             ResolutionError::IntegrityFailure { item_ref, reason } => {
                 write!(f, "integrity check failed for {}: {}", item_ref, reason)
+            }
+            ResolutionError::MetadataAnchoringFailed { item_ref, source } => {
+                write!(f, "metadata anchoring failed for {}: {}", item_ref, source)
             }
             ResolutionError::KindNotExecutable { kind } => {
                 write!(f, "kind {} has no execution block (not executable)", kind)

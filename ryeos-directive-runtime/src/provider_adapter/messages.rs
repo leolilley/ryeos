@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use serde_json::{json, Value};
 
-use crate::directive::{MessageSchemas, ProviderMessage, ToolCall};
+use crate::directive::{MessageSchemas, ProviderMessage};
 
 #[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas), fields(count = messages.len()))]
 pub fn convert_messages(
@@ -12,16 +10,6 @@ pub fn convert_messages(
     match schemas {
         None => convert_openai(messages),
         Some(s) => convert_with_schemas(messages, s),
-    }
-}
-
-pub fn convert_response_message(
-    provider_response: &Value,
-    schemas: &Option<MessageSchemas>,
-) -> ProviderMessage {
-    match schemas {
-        None => parse_openai_response(provider_response),
-        Some(s) => parse_response_with_schemas(provider_response, s),
     }
 }
 
@@ -154,7 +142,7 @@ fn convert_with_schemas(
     (converted, extracted_system)
 }
 
-fn wrap_content(content: Value, content_key: &str, wrap_key: &str) -> Value {
+fn wrap_content(content: Value, content_key: &str, _wrap_key: &str) -> Value {
     match &content {
         Value::String(s) => json!([{ content_key: s }]),
         Value::Null => json!([{ content_key: null }]),
@@ -176,157 +164,6 @@ fn wrap_content(content: Value, content_key: &str, wrap_key: &str) -> Value {
             }
         }
         other => json!([{ content_key: other }]),
-    }
-}
-
-fn unwrap_content(val: &Value, content_key: &str, content_wrap: &str) -> Value {
-    if let Some(parts) = val.get(content_wrap).and_then(|v| v.as_array()) {
-        let strings: Vec<String> = parts
-            .iter()
-            .filter_map(|p| p.get(content_key).and_then(|v| v.as_str()).map(String::from))
-            .collect();
-        if strings.len() == 1 {
-            json!(strings[0])
-        } else if strings.is_empty() {
-            Value::Null
-        } else {
-            json!(strings.join(""))
-        }
-    } else if let Some(s) = val.get(content_key) {
-        s.clone()
-    } else {
-        Value::Null
-    }
-}
-
-fn parse_openai_response(resp: &Value) -> ProviderMessage {
-    let choice = resp
-        .get("choices")
-        .and_then(|c| c.get(0));
-    let message_val = choice
-        .and_then(|c| c.get("message"))
-        .unwrap_or(resp);
-
-    let role = message_val
-        .get("role")
-        .and_then(|r| r.as_str())
-        .unwrap_or("assistant")
-        .to_string();
-
-    let content = message_val.get("content").cloned();
-
-    let tool_calls = message_val.get("tool_calls").and_then(|tc| tc.as_array()).map(|arr| {
-        arr.iter()
-            .filter_map(|tc| {
-                let id = tc.get("id").and_then(|v| v.as_str()).map(String::from);
-                let func = tc.get("function")?;
-                let name = func
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let arguments = func
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}")
-                    .to_string();
-                Some(ToolCall {
-                    id,
-                    name,
-                    arguments: crate::provider_adapter::http::parse_tool_arguments(&arguments),
-                })
-            })
-            .collect::<Vec<_>>()
-    });
-
-    ProviderMessage {
-        role,
-        content,
-        tool_calls,
-        tool_call_id: None,
-    }
-}
-
-fn parse_response_with_schemas(
-    resp: &Value,
-    schemas: &MessageSchemas,
-) -> ProviderMessage {
-    let content_key = schemas.content_key.as_deref().unwrap_or("content");
-    let content_wrap = schemas.content_wrap.as_deref();
-
-    let inverse_role_map: HashMap<String, String> = schemas
-        .role_map
-        .as_ref()
-        .map(|rm| {
-            rm.iter()
-                .map(|(k, v)| (v.clone(), k.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let message_val = resp
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .unwrap_or(resp);
-
-    let raw_role = message_val
-        .get("role")
-        .and_then(|r| r.as_str())
-        .unwrap_or("assistant");
-    let role = inverse_role_map
-        .get(raw_role)
-        .cloned()
-        .unwrap_or_else(|| raw_role.to_string());
-
-    let content = if let Some(wrap) = content_wrap {
-        Some(unwrap_content(message_val, content_key, wrap))
-    } else {
-        message_val.get(content_key).cloned()
-    };
-
-    let tool_calls = message_val
-        .get("tool_calls")
-        .or_else(|| message_val.get("function_call"))
-        .and_then(|tc| {
-            if tc.is_array() {
-                Some(tc.as_array().unwrap().clone())
-            } else {
-                Some(vec![tc.clone()])
-            }
-        })
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|tc| {
-                    let id = tc.get("id").and_then(|v| v.as_str()).map(String::from);
-                    let name = tc
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| tc.get("function").and_then(|f| f.get("name").and_then(|v| v.as_str())))
-                        .unwrap_or("")
-                        .to_string();
-                    let arguments = tc
-                        .get("arguments")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            tc.get("function")
-                                .and_then(|f| f.get("arguments").and_then(|v| v.as_str()))
-                        })
-                        .unwrap_or("{}");
-                    Some(ToolCall {
-                        id,
-                        name,
-                        arguments: crate::provider_adapter::http::parse_tool_arguments(arguments),
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
-
-    ProviderMessage {
-        role,
-        content,
-        tool_calls,
-        tool_call_id: None,
     }
 }
 
@@ -496,45 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_openai() {
-        let msgs = vec![ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(json!("Hello!")),
-            tool_calls: Some(vec![ToolCall {
-                id: Some("call_1".to_string()),
-                name: "bash".to_string(),
-                arguments: json!({"cmd": "ls"}),
-            }]),
-            tool_call_id: None,
-        }];
-        let (converted, _) = convert_messages(&msgs, &None);
-        let resp = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello!",
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "bash",
-                            "arguments": "{\"cmd\":\"ls\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "stop"
-            }]
-        });
-        let parsed = convert_response_message(&resp, &None);
-        assert_eq!(parsed.role, "assistant");
-        assert_eq!(parsed.content.unwrap(), "Hello!");
-        let calls = parsed.tool_calls.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "bash");
-        assert_eq!(calls[0].arguments["cmd"], "ls");
-    }
-
-    #[test]
     fn content_key_custom() {
         let msgs = vec![ProviderMessage {
             role: "user".to_string(),
@@ -554,31 +352,6 @@ mod tests {
         assert_eq!(converted[0]["text"], "test");
     }
 
-    #[test]
-    fn response_parsing_with_inverse_role_map() {
-        let schemas = MessageSchemas {
-            role_map: Some(
-                vec![("assistant".to_string(), "model".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-            content_key: None,
-            content_wrap: None,
-            system_message: None,
-            tool_result: None,
-            tool_list_wrap: None,
-        };
-        let resp = json!({
-            "choices": [{
-                "message": { "role": "model", "content": "Hi!" },
-                "finish_reason": "stop"
-            }]
-        });
-        let parsed = convert_response_message(&resp, &Some(schemas));
-        assert_eq!(parsed.role, "assistant");
-        assert_eq!(parsed.content.unwrap(), "Hi!");
-    }
-
     // ── Trace-capture tests ──────────────────────────────────────
 
     #[test]
@@ -595,6 +368,6 @@ mod tests {
         let field_val = |name: &str| -> Option<&str> {
             span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
         };
-        assert_eq!(field_val("count"), Some(&msgs.len().to_string()));
+        assert_eq!(field_val("count"), Some(msgs.len().to_string().as_str()));
     }
 }

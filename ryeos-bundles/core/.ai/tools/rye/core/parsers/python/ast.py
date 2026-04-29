@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:c37a8b96280d5c5904f0b9606858f04b5be6550abe3e0c40799ba2fce4776490:kW69BuCsS674Ef8br9hPvwkxj8fh1XPho1ZJL4FZNKAPN0pA2MdbDi4TXYAEDsaeinZZS0fqXH++c75AYprMCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:89e62ca704311c56cd16bd9fb91f1f5ff9586327d7610727c7a33a9ac472f2a2:lDfzxgQTZVCYUPp2g7oShighQGfQep92If5+YDE/aNLRQ8UikEsKeqe+yX3aJPyOjSMOfdwLDgTxCCgCpsYMAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Python AST parser for extracting metadata from Python tools.
 
 Extracts module-level variables and docstring using AST parsing.
@@ -7,7 +7,7 @@ Extracts module-level variables and docstring using AST parsing.
 __version__ = "1.0.0"
 __tool_type__ = "parser"
 __category__ = "rye/core/parsers/python"
-__tool_description__ = "Python AST parser - extracts metadata from Python source code"
+__description__ = "Python AST parser - extracts metadata from Python source code"
 
 import ast
 from typing import Any, Dict

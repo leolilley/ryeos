@@ -136,17 +136,19 @@ async fn synth_tool_request(
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
 __executor_id__ = "tool:rye/core/runtimes/python/script"
-__category__ = "test/dispatch_pin"
-__tool_description__ = "V5.3 dispatch_pin tool"
+__category__ = "hello_pin"
+__description__ = "V5.3 dispatch_pin tool"
 
 import sys
 print("pin")
 sys.exit(0)
 "#;
-    std::fs::write(tools_dir.join("hello_pin.py"), body).expect("write tool");
+    let tool_dir = tools_dir.join("hello_pin");
+    std::fs::create_dir_all(&tool_dir).expect("mkdir tool dir");
+    std::fs::write(tool_dir.join("hello_pin.py"), body).expect("write tool");
     let (status, value) = post_execute_with_extras(
         h,
-        "tool:hello_pin",
+        "tool:hello_pin/hello_pin",
         project.path().to_str().unwrap(),
         serde_json::json!({}),
         serde_json::json!({}),
@@ -412,7 +414,7 @@ async fn pin_subprocess_via_unified_dispatch_succeeds_for_tool_ref() {
     );
     assert_eq!(
         thread.get("item_ref").and_then(|v| v.as_str()),
-        Some("tool:hello_pin"),
+        Some("tool:hello_pin/hello_pin"),
         "thread.item_ref echoes the original ref (alias chain not followed for tool/Subprocess): {body}"
     );
     assert!(
@@ -456,7 +458,7 @@ async fn pin_tool_over_tcp_succeeds() {
     );
     assert_eq!(
         thread.get("item_ref").and_then(|v| v.as_str()),
-        Some("tool:hello_pin"),
+        Some("tool:hello_pin/hello_pin"),
         "thread.item_ref echo: {body}"
     );
     assert_eq!(

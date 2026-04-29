@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T09:30:14Z:7c5f3a74be0ed67e4d56857b21ee481d841de047663fa8d002290bfda163e313:36TUvw6wXVujzHnerex8bs+Q9fzo7DkfxKc0r9oeiHG9qJhl36Cl8vu3rxXuuFXA014DxvTS5IL42YZlYQdvAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:34396d56c1c242db7f377db6ebe1b313198fa4158a3c1d7990919f4b44c1d079:3F5YnXYpP+JTFhBwzohXKL/DUuFY7vNG6QFNwjGL6gt4qj7zC3F1RCFAoWJLE5MWFPI9eI3ZKsL+6BXbgsrmBw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: ""
+name: "directive-runtime"
 kind: runtime
 serves: directive
 default: true

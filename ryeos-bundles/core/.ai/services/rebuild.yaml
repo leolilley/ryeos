@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T06:36:29Z:c33489b6f73b534af5e8332da5c31813d0dde166492a2683e16913ea761e6b71:Ol6J12Smmq8tjCeZundPYqb+uaizjGt/5S4LqO02G89cwqmAhWptLpgsS7NaI29qjbVBSBVx5UFtmXe4PFG4AQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:cbf1724cbe47a2f15491e1846b22a57143b225d7782e8fcf174f4f9ce67e1aed:7DE5Iu8VJwtIqF0CJqCCdnYTuH11p7zX6nAKfObflcEqfyAJD47d525Q/zIlwKaziRBwTTL+nSW27/fMPsXsCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: ""
+name: "rebuild"
 kind: service
 endpoint: rebuild
 required_caps: ["node.maintenance"]

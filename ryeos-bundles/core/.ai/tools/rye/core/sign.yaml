@@ -1,0 +1,28 @@
+# rye:signed:2026-04-29T02:47:29Z:395394a7d5b6da6893c199a32052a2c113cc9eb6792c7652b6773b5a9a526bd8:Jt7gsss40J+CzYE80Gp9an+qRYnPQfJUcQAnWVEA8b7pRXIBky7clF7KXxdHQC2yCWRdjxMdOcHatdlsW2ocAw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "rye/core"
+description: "Sign a Rye item by canonical ref after running the path-anchoring validator."
+
+config:
+  command: "rye-sign"
+  args:
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    item_ref:
+      type: string
+      description: "Canonical ref of the item to sign, e.g. directive:hello"
+    project_path:
+      type: string
+      description: "Project root (parent of .ai/). Defaults to caller cwd."
+    source:
+      type: string
+      enum: [project, user]
+      description: "Where to look for the item. `system` is rejected (bundle items are signed by their author key)."
+      default: project
+  required: [item_ref]

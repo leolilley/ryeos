@@ -1,0 +1,9 @@
+# rye:signed:2026-04-29T02:47:24Z:d88f6e31e3a1dcad04486c1bf2fe32500f17c0e61280e9569cebccaffa72411c:D6Xia/XwMGMtEC8X5KUYonIDEVK6faieAwhE8NHYKGwKEl71rqyIteuAslN7AxN2kyas2LD4vOPCu8Ow6xcjDQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "rye-runtime"
+retries: 2
+retry_status_codes: [429, 500, 502, 503]
+never_retry: ["401", "403", "404"]
+backoff_base_ms: 1000
+timeout_seconds: 300
+tool_preload: false
+retry_on_timeout: true

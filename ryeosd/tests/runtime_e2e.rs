@@ -368,8 +368,9 @@ async fn e2e_directive_via_registry_does_not_require_runtime_execute() {
         let dir = user.join(".ai/directives/e2e_b1");
         std::fs::create_dir_all(&dir)?;
         let body = r#"---
-__category__: "test/e2e_b1"
-__directive_description__: "B1 indirect-alias e2e"
+name: flow
+category: "e2e_b1"
+description: "B1 indirect-alias e2e"
 inputs: {}
 ---
 # E2E B1
@@ -455,8 +456,9 @@ async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
         let dir = user.join(".ai/directives/p15");
         std::fs::create_dir_all(&dir)?;
         let body = r#"---
-__category__: "test/p15"
-__directive_description__: "P1.5 reach-past-B1 e2e"
+name: flow
+category: "p15"
+description: "P1.5 reach-past-B1 e2e"
 inputs: {}
 ---
 # P1.5
@@ -552,8 +554,9 @@ async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
         let dir = user.join(".ai/directives/p16");
         std::fs::create_dir_all(&dir)?;
         let body = r#"---
-__category__: "test/p16"
-__directive_description__: "P1.6 root/runtime split pin"
+name: flow
+category: "p16"
+description: "P1.6 root/runtime split pin"
 inputs: {}
 ---
 # P1.6
@@ -678,7 +681,7 @@ async fn e2e_indirect_graph_records_graph_thread_profile() {
         install_runtime(user, "p4-graph-runtime", "graph", true, "v1")?;
         let dir = user.join(".ai/graphs/p4");
         std::fs::create_dir_all(&dir)?;
-        let body = r#"category: "test/p4-graph"
+        let body = r#"category: "p4"
 description: "P4 B2 graph subject/runtime split pin"
 config:
   start: done

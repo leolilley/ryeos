@@ -1,10 +1,10 @@
-# rye:signed:2026-04-23T23:06:25Z:72eb70e34d07eb466071a74357fbed98529e14e68947fe2909bf500cf2e41c96:bXLjlypwj3jWNpQo/IDLArn732JW/FTnOzAN782YgsjULimsbi2EWvmziHln93sG3BhqKhtHEAWTXTPB213/Ag==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:7351ff144821e1a2b1b46afb86fd9ff149c758411f2e6a748be5d2c6b6bb43a8:XLLtgIF+PlvzJ2UAw6ihnIWFyb25amZbfjW1xC6nLsPAqNF53GOx3ckxjQZ34GkEvzq4/hOHftOz9wEA5qeMDQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """YAML parser for RYE."""
 
 __version__ = "1.0.0"
 __tool_type__ = "parser"
 __category__ = "rye/core/parsers/yaml"
-__tool_description__ = "YAML parser - parse YAML content into Python dictionaries"
+__description__ = "YAML parser - parse YAML content into Python dictionaries"
 
 import yaml
 

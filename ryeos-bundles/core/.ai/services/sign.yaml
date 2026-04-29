@@ -1,7 +1,0 @@
-# rye:signed:2026-04-26T06:36:30Z:75a856d8da1f1a6527f603199e49aca7e9bacf7018cf2dc7390a59980cc7f22c:Vr58i3cXTMeg5Xg7lOCcODO0Eje2XU0LT+koXhiexefQvfjvDjye04ogpxecE/XTkb42Zx2vbzg+Sigu0u35BA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
-kind: service
-endpoint: sign
-required_caps: ["node.maintenance"]
-schema:
-  path: string
-description: "Sign (or re-sign) a file in place using the daemon's node key"

@@ -28,6 +28,7 @@ pub mod state;
 pub mod state_lock;
 pub mod state_store;
 pub mod uds;
+pub mod vault;
 pub mod write_barrier;
 
 // ── Service descriptor surface ──────────────────────────────────────

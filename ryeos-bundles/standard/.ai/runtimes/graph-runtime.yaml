@@ -1,4 +1,6 @@
-# rye:signed:2026-04-27T13:34:36Z:704a0dd240f5626ed582fa1642dbce98d193a683208e86606e1fb25d66f71202:rc8bu8H1hZI2wB7NLQHE96Z/aBKUDpMHy3IdEN+9hAeShRJN/iNyETC+TIWlpZIA6msH12lUDaiZbUN/KMlTCQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:6dfd679a60dbcd91e9f97c45ed9795c741f7d159fabf1533d1f14b6e8f6ab660:SWRhHaWAGugg4KfeBzwE0Oiaaipw/0wdCQ++nNQC4tzWx940EKIbhnKi5sX9QF+bov1ytkRCTTXFJwxpOjxVCg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: ""
+name: "graph-runtime"
 kind: runtime
 serves: graph
 default: true

@@ -133,11 +133,21 @@ fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
 
 fn plant_directive(user_space: &Path, rel_path: &str, body_text: &str) -> anyhow::Result<()> {
     let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
+    let dir_relative = Path::new(rel_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel_path);
     std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
     let body = format!(
         r#"---
-__category__: "{rel_path}"
-__directive_description__: "Provider secret-injection e2e fixture"
+name: {stem}
+category: "{dir_relative}"
+description: "Provider secret-injection e2e fixture"
 inputs:
   name:
     type: string
@@ -298,4 +308,197 @@ async fn secret_injection_with_default_authorization_bearer() {
         "default Authorization header value mismatch — `auth.env_var` only (no \
          header_name/prefix overrides) should produce `Authorization: Bearer <secret>`",
     );
+}
+
+// ── Vault-backed secret injection ─────────────────────────────────────
+//
+// The tests above set the secret on the daemon process directly via
+// `cmd.env(...)`. Production operators don't do that — they put their
+// API keys in `<HOME>/.ai/secrets.env` and let the daemon's `NodeVault`
+// read them at request-build time. The vault populates
+// `vault_bindings`, which `services::thread_lifecycle::spawn_item`
+// merges into the spawned subprocess's `spec.env`. The subprocess
+// then sees `std::env::var("FOO_API_KEY")` as if it had been exported
+// in the daemon's own env.
+//
+// The harness already overrides `HOME` to the per-test `user_space`
+// tempdir, so writing `<user_space>/.ai/secrets.env` is exactly the
+// production path through `vault::default_vault_path`.
+
+/// Write a single `KEY=VALUE` to `<user_space>/.ai/secrets.env`. The
+/// daemon's `PlaintextFileVault::at(default_vault_path(...))` reads
+/// from `<HOME>/.ai/secrets.env`, and the harness sets `HOME` to
+/// `user_space`, so this is the operator-facing path.
+fn plant_vault_secret(user_space: &Path, key: &str, value: &str) -> anyhow::Result<()> {
+    let dir = user_space.join(".ai");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("secrets.env");
+    let body = format!("{key}={value}\n");
+    std::fs::write(&path, body)?;
+    Ok(())
+}
+
+async fn run_directive_with_vault_secret(
+    env_var: &str,
+    secret_value: &str,
+    header_name: Option<&str>,
+    prefix: Option<&str>,
+) -> std::collections::HashMap<String, String> {
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let env_var_owned = env_var.to_string();
+    let secret_owned = secret_value.to_string();
+    let header_name_owned = header_name.map(|s| s.to_string());
+    let prefix_owned = prefix.map(|s| s.to_string());
+
+    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
+        std::fs::create_dir_all(state_path)?;
+        let sk = e2e_signing_key();
+        write_trusted_signer(user, &sk.verifying_key())?;
+        register_standard_bundle(state_path)?;
+        plant_mock_provider_with_auth(
+            user,
+            &mock_url,
+            &env_var_owned,
+            header_name_owned.as_deref(),
+            prefix_owned.as_deref(),
+        )?;
+        plant_model_routing(user)?;
+        plant_directive(user, "test/vault_secret", "Hello {{ name }}.")?;
+        // Crucial: secret comes from the vault file, NOT cmd.env(...).
+        plant_vault_secret(user, &env_var_owned, &secret_owned)?;
+        Ok(())
+    };
+
+    let h = DaemonHarness::start_with_pre_init(pre_init, move |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
+            }),
+        );
+    })
+    .await
+    .expect("start daemon with vault-backed secret");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let post_fut = h.post_execute(
+        "directive:test/vault_secret",
+        project.path().to_str().unwrap(),
+        serde_json::json!({"name": "World"}),
+    );
+    let (status, body) = tokio::time::timeout(Duration::from_secs(30), post_fut)
+        .await
+        .expect("/execute timed out")
+        .expect("/execute send failed");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "/execute should succeed; body={body:#}"
+    );
+
+    let captured = mock.captured_headers().await;
+    assert!(
+        !captured.is_empty(),
+        "mock provider received zero requests; vault → vault_bindings → spec.env path \
+         is broken"
+    );
+
+    drop(project);
+    drop(mock);
+    captured.into_iter().next().expect("at least one captured request")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vault_secret_reaches_provider_with_default_bearer() {
+    // End-to-end: secret only exists in `<HOME>/.ai/secrets.env`.
+    // Nothing on the daemon's command line, nothing in `cmd.env()`.
+    // If the header arrives at the mock provider with the expected
+    // value, the full pipe works:
+    //   secrets.env → PlaintextFileVault::read_all → dispatch.rs →
+    //   ExecutionParams.vault_bindings → spawn_item spec.env →
+    //   Command::env() → directive-runtime subprocess →
+    //   std::env::var(provider.auth.env_var) → outbound auth header.
+    let env_var = "RYE_TEST_VAULT_DEFAULT";
+    let secret = "sk-vault-default-cafef00dbaadf00d";
+
+    let headers = run_directive_with_vault_secret(env_var, secret, None, None).await;
+
+    let actual = headers.get("authorization").unwrap_or_else(|| {
+        panic!(
+            "expected default Authorization header from vault-backed secret; \
+             got headers: {headers:#?}"
+        )
+    });
+    let expected = format!("Bearer {secret}");
+    assert_eq!(
+        actual, &expected,
+        "vault → subprocess env → auth header mismatch — vault file at \
+         `<HOME>/.ai/secrets.env` must reach the provider HTTP request via \
+         the existing vault_bindings plumbing",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vault_blocked_name_fails_request_loud() {
+    // Operator-protection: a vault file containing `PATH=...` MUST NOT
+    // silently shadow the OS-inherited PATH for spawned subprocesses.
+    // The vault parser bails at read time with a typed error; the
+    // dispatch path maps that to a 5xx so the operator notices
+    // immediately rather than discovering the corruption later.
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let pre_init = move |state_path: &Path, user: &Path| -> anyhow::Result<()> {
+        std::fs::create_dir_all(state_path)?;
+        let sk = e2e_signing_key();
+        write_trusted_signer(user, &sk.verifying_key())?;
+        register_standard_bundle(state_path)?;
+        plant_mock_provider_with_auth(user, &mock_url, "RYE_TEST_VAULT_BLOCKED", None, None)?;
+        plant_model_routing(user)?;
+        plant_directive(user, "test/vault_blocked", "noop")?;
+
+        // Poisoned vault file: PATH is on the blocked list.
+        let dir = user.join(".ai");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("secrets.env"), "PATH=/evil:/path\n")?;
+        Ok(())
+    };
+
+    let h = DaemonHarness::start_with_pre_init(pre_init, move |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
+            }),
+        );
+    })
+    .await
+    .expect("daemon starts even with poisoned vault — vault is read at request time, not boot");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let post_fut = h.post_execute(
+        "directive:test/vault_blocked",
+        project.path().to_str().unwrap(),
+        serde_json::json!({}),
+    );
+    let (status, body) = tokio::time::timeout(Duration::from_secs(30), post_fut)
+        .await
+        .expect("/execute timed out")
+        .expect("/execute send failed");
+
+    assert!(
+        status.is_server_error(),
+        "poisoned vault must fail the request (5xx); got status={status} body={body:#}"
+    );
+    let body_str = body.to_string();
+    assert!(
+        body_str.contains("vault") && body_str.contains("PATH") && body_str.contains("blocked"),
+        "5xx response should name the vault, the offending key, and the blocked-list \
+         policy; got: {body_str}"
+    );
+
+    drop(project);
+    drop(mock);
 }

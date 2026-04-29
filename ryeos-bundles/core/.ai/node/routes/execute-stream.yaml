@@ -1,4 +1,5 @@
-# rye:signed:2026-04-27T14:54:12Z:c17eee860453b70a2a8e1359a0de445377f0b05ffcada167dabcdf2d63bdbd60:NdiczGrbMO4vDLgL0bEu+jHxZ2/3j4f/YJEBH/mIjrWXRAfN2dGaNs6kfMGphFWEjvYhUb1Ryc1gzPU82x+uBQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:e3691a80c8529628bc7ecfa194b7021ecc74cd17b518826758aa897ffb52ddac:fVlwuaNVcgD4/NR4YJjtEV1o2deKMSx5zM0SkHkq5mWb5yt3S4R2jajTdvxc6vfZJR6Uq81ZDSyTFKEZN+STDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "routes"
 section: routes
 id: execute/stream
 path: /execute/stream

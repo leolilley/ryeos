@@ -1,6 +1,6 @@
-# rye:signed:2026-04-27T16:06:34Z:765aef23eb9c11d61ff605c2bb8fded0a488a4f73c03da0fd150d4f56017548d:4/Dua7R7NirCdZLS3vND22LUWa5U3iQPNv1qvxe477CKgn7/W0RdjYpJWPm9j66SDtLDntzI1poacCe8UQ1FCQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:24Z:2969d218b53b830db9ad77ea596e6a5b3a9745fe1f9dc7e4bab028cb9a01cbbe:/aA/XaOtqSg6cUza+LW3IWomapX9OtzbceamwONf19CZC5kcUbeW+HZF1bp6wjINsQzgzXd3YG+nSn3k8HZeDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 kind: config
-category: cli
+category: "cli"
 tokens: ["maintenance", "gc"]
 description: "Run GC: prune unreachable CAS objects, optionally compact."
 execute: service:maintenance/gc

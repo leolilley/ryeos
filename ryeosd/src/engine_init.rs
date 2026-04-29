@@ -3,7 +3,7 @@
 //! Constructs a `ryeos_engine::engine::Engine` at daemon startup using
 //! the daemon's config-driven system data directory and user space.
 //! The engine crate is kind-agnostic — all kind definitions come from
-//! `*.kind-schema.yaml` files found under `{AI_DIR}/config/engine/kinds/`.
+//! `*.kind-schema.yaml` files found under `{AI_DIR}/node/engine/kinds/`.
 
 use std::path::PathBuf;
 

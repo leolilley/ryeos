@@ -1,7 +1,7 @@
-# rye:signed:2026-04-26T09:49:05Z:2789713ac782b825130ac61387e7bd38fe966c060a78aa457a8363af9103593e:+DBfQuxNtYoxJIGaMNrKJmCrPjfTSWWgn7zDOaJkeBmhxOzNdiEN7eO1P+o/3ZX5d9Lhf3L8XgqVF7RgjRSaDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:f021134db6af9c2626682ee8b0e1960146186f6aab76d59b100608563460d28f:Ii+Z2bxZb2EgSzSd23mC2oa5Vv1qQLHMme/QKPqNs2AHUzHb87cdlldoG3cZM+ncePfaZJkytddUHRGWFM9jCw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "rye/core/runtimes/state-graph"
 version: "1.0.0"
-__executor_id__: "@subprocess"
-category: rye/core/runtimes/state-graph
+executor_id: "@subprocess"
 description: "State graph runtime — walks graph YAML tools, dispatching RYE for each node"
 execution_owner: callee
 native_async: true

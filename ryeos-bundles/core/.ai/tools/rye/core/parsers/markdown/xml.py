@@ -1,4 +1,4 @@
-# rye:signed:2026-04-23T23:06:25Z:dc338879686319a961b8a1e3e21ee0463f050dc86e49100269ede0e1adda13e0:NxX+Y1TLHzIawrJM2bObVi4orqPvRuh1MZZByppCqhzD010FjdLErDkYaE8FZR3tUIruF2SlZmI3UbHHTUi+Cg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:e498b5478de35fc499f4f2b3d56d64e69a589a43b8371c49a9c9b35b09e478e3:RvBFD9157iuJqKnssVEG+eHXnNmrhefRQNCveFq6tPMXL6NgT0/JDwB6jYPZNYP52OYZ7zfmB800tQ4WgtIdCQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing
@@ -8,7 +8,7 @@ with support for opaque sections (template, example, raw tags).
 __version__ = "1.1.0"
 __tool_type__ = "parser"
 __category__ = "rye/core/parsers/markdown"
-__tool_description__ = (
+__description__ = (
     "Markdown XML parser - extracts and parses XML from markdown code fences"
 )
 

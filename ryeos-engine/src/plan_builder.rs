@@ -570,7 +570,7 @@ runtime:
     - description
     - __executor_id__
     - __version__
-    - __tool_description__
+    - __description__
     - __category__
     - required_secrets
     - name

@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T06:36:29Z:f2c3412d3ae4d88067405f448ffadc40d01d1ac6702129c171603922d80043a9:mAjhPlT/wx+BBKo+1GjZSekhD8D57JMp2ZnWoqmPSOZGMvhNGH2JP58kJtSDj6FE4hKmZN4BALgVQLVahbY/AA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:a89ca3029988cec4294f9ed053be1ea808f6ec851310316c8f020043326f6d15:tilVIOilWkOPwB1/0pBJn47vMe3qBGMnJXMPGdkmikw5JBLmko7k34J7XbPN+supqMGp4ItoKaae7X0PSVBfAA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "bundle"
+name: "remove"
 kind: service
 endpoint: bundle.remove
 required_caps: ["node.maintenance"]

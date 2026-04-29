@@ -1,0 +1,70 @@
+# rye:signed:2026-04-29T02:47:29Z:ac1fbaebc8714402e1aee28470b356aa0c983b4869895914960dde6e296973b0:SsmUGSxHNCGINMhD8WSmjYb7mWifBIXhy90G89eacxaoY5wLTKS6+6TuRgMqQ65xEx0bOCCE4mIK0GW1ncvjCQ==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/directive"
+version: "1.0.0"
+location:
+  directory: directives
+execution:
+  # Explicit delegation to the runtime registry. The dispatcher will
+  # call `RuntimeRegistry::lookup_for("directive")` to find the
+  # default runtime serving this kind (today: `runtime:directive-runtime`).
+  # Without this `delegate` block the dispatcher refuses to consult
+  # the registry — there is no implicit fallback.
+  delegate:
+    via: runtime_registry
+  thread_profile: directive_run
+  resolution:
+    - step: resolve_extends_chain
+formats:
+  - extensions: [".md"]
+    parser: parser:rye/core/markdown/directive
+    signature:
+      prefix: "<!--"
+      suffix: "-->"
+inventory_kinds: [tool]
+composer: rye/core/extends_chain
+composer_config:
+  extends_field: extends
+  fields:
+    - name: body
+      strategy: root_verbatim
+      required: true
+      expect_value_type: string
+      derive_as: body
+    - name: permissions
+      strategy: inherit_from_topmost
+      expect_value_type: mapping
+    - name: context
+      strategy: dict_merge_string_seq_root_last
+      expect_value_type: mapping
+      derive_as: composed_context
+      derived_dict_string_seq: true
+  policy_facts:
+    - name: effective_caps
+      path: [permissions, execute]
+      expect: array_of_strings
+composed_value_contract:
+  root_type: mapping
+  required:
+    body: string
+  optional:
+    extends: [string, "null"]
+    permissions: mapping
+    context: mapping
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path

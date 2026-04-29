@@ -96,6 +96,17 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// Path-anchoring validator caught a mismatch between metadata
+    /// and on-disk location (or a missing required field). The inner
+    /// `MetadataAnchoringError` carries the structured detail; the
+    /// canonical ref pins which item triggered the failure.
+    #[error("metadata anchoring failed for `{canonical_ref}`: {source}")]
+    MetadataAnchoringFailed {
+        canonical_ref: String,
+        #[source]
+        source: crate::kind_registry::MetadataAnchoringError,
+    },
+
     #[error("unresolved nested ref `{nested_ref}` during planning of `{parent_ref}`: {reason}")]
     UnresolvedNestedRef {
         parent_ref: String,

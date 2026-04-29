@@ -320,10 +320,10 @@ async fn service_verify_returns_trusted_for_core_service() {
         "verify status should be SUCCESS: {result}");
 }
 
-// ── 3.16 sign — sign a temp file with the node key ──────────────────────
+// ── 3.16 node-sign — sign a temp file with the node key ────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_sign_signs_a_file_in_place() {
+async fn service_node_sign_signs_a_file_in_place() {
     use std::io::Write;
     let h = DaemonHarness::start().await.expect("start daemon");
     // Create a non-empty temp file the daemon can sign.
@@ -335,11 +335,11 @@ async fn service_sign_signs_a_file_in_place() {
     let path_str = tmp.path().to_str().unwrap().to_string();
 
     let (status, body) = exec(
-        &h, "service:sign",
+        &h, "service:node-sign",
         json!({"path": path_str}),
     ).await;
-    let result = unwrap_result(status, &body, "sign");
-    let obj = result.as_object().expect("sign returns object");
+    let result = unwrap_result(status, &body, "node-sign");
+    let obj = result.as_object().expect("node-sign returns object");
     assert_eq!(obj.get("file").and_then(|v| v.as_str()), Some(path_str.as_str()));
     let sig_line = obj.get("signature_line").and_then(|v| v.as_str())
         .expect("signature_line present");

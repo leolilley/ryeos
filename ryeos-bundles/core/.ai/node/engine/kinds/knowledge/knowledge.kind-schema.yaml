@@ -1,0 +1,38 @@
+# rye:signed:2026-04-29T02:47:29Z:42130dc34b2e1de0108839c3ae6449531672d6e8717edec737786c8e876487a4:Zngek0x8UZWZGlnPvRZJr3Hh4V9YqIg/kPaj33S3S9xx25UX+g4ER6eADY7GV/zg7yt5b9Bx0dqO8Vhz4XxoBA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "engine/kinds/knowledge"
+version: "1.0.0"
+location:
+  directory: knowledge
+formats:
+  - extensions: [".md"]
+    parser: parser:rye/core/markdown/frontmatter
+    signature:
+      prefix: "<!--"
+      suffix: "-->"
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Knowledge items have no structural shape requirement at the kind
+# level — consumers pull arbitrary structured data from markdown
+# frontmatter or yaml documents.
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+composer: rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    category:
+      from: path
+      key: category
+      required: true
+      match: path

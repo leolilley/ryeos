@@ -150,6 +150,22 @@ impl Engine {
             Some(&result.winner_path),
             &source_format.signature,
         )?;
+        // Path-anchoring validator runs BEFORE metadata extraction
+        // populates the typed slots — a failure here is a structural
+        // mismatch between metadata and on-disk location, not a parse
+        // error. Item rejected at load time, daemon stays kind-agnostic.
+        crate::kind_registry::validate_metadata_anchoring(
+            &parsed,
+            &kind_schema.extraction_rules,
+            &kind_schema.directory,
+            &result.winner_ai_root,
+            &result.winner_path,
+        )
+        .map_err(|source| EngineError::MetadataAnchoringFailed {
+            canonical_ref: item_ref.to_string(),
+            source,
+        })?;
+
         let metadata = crate::kind_registry::apply_extraction_rules(
             &parsed,
             &kind_schema.extraction_rules,

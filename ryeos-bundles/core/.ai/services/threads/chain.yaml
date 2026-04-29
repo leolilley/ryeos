@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T06:36:30Z:60c146e3790725017c07b4011d25357952c0a305daeaf6b68c2df13115b668c2:QVpuGcie5AW4jCDHRmJqVYtM2j73hvch8enb58M0zMdaAhIAxt7msFSvUqAzRcJ3rp/1rGgk98YBgfoerhsnAg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:828be30750dfca0207d7c8e1bc9fe1e1b1b9635f3c14eb1705b30ae2fbdb6067:cvyz/I/Ja5BAH/J4jOJXYspiS32ftaCc9cbrKVtnIkQmFpw1aXHfbDU4slEa3OjFqQUeA8bpHahP/hdU0f6FCA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "threads"
+name: "chain"
 kind: service
 endpoint: threads.chain
 required_caps: []

@@ -331,6 +331,23 @@ pub(crate) fn load_item_at(
             reason: format!("parse {}: {e}", result.winner_path.display()),
         })?;
 
+    // Path-anchoring validator. Runs at every load point — same
+    // contract as `Engine::resolve`. Daemon stays kind-agnostic; the
+    // schema declares which fields are required and anchored.
+    crate::kind_registry::validate_metadata_anchoring(
+        &parsed,
+        &kind_schema.extraction_rules,
+        &kind_schema.directory,
+        &result.winner_ai_root,
+        &result.winner_path,
+    )
+    .map_err(
+        |source| ResolutionError::MetadataAnchoringFailed {
+            item_ref: ref_.to_string(),
+            source,
+        },
+    )?;
+
     // Strip the signature line so the envelope ships clean bytes —
     // runtimes don't need (or trust) the daemon-stripped signature.
     //

@@ -70,8 +70,8 @@ fn synth_project_with_async_tool(native_async_yaml: &str) -> PathBuf {
     // claims it and propagates into SubprocessSpec.execution.native_async.
     let runtime_body = format!(
         r#"version: "1.0.0"
-__executor_id__: "@subprocess"
-category: test/native_async/runtime
+executor_id: "@subprocess"
+category: local_async_runtime
 description: "test runtime with native_async block under test"
 
 native_async: {native_async_yaml}
@@ -84,8 +84,8 @@ config:
 
     // The user-facing tool just routes to the custom runtime above.
     let tool_body = r#"version: "1.0.0"
-__executor_id__: "tool:local_async_runtime/runtime"
-category: test/native_async
+executor_id: "tool:local_async_runtime/runtime"
+category: ""
 description: "native_async demo"
 "#;
     fs::write(tools_dir.join("async_demo.yaml"), tool_body).unwrap();
@@ -98,7 +98,7 @@ fn build_engine_against_bundle() -> Engine {
         TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("ryeos-bundles/core");
-    let kinds_dir = bundle_root.join(".ai/config/engine/kinds");
+    let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("kinds load");
 
     let (parser_tools, _dups) =

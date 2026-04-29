@@ -48,10 +48,10 @@ async fn main() -> Result<()> {
     // standalone `run-service` subcommand. Done before subcommand dispatch
     // so standalone callers don't need a separate init step.
     //
-    // We check for `signing_key_path` rather than `state_dir.exists()`
+    // We check for `node_signing_key_path` rather than `state_dir.exists()`
     // because the tracing subscriber pre-creates `<state_dir>/.ai/state/`
     // before this code runs, which would otherwise defeat the predicate.
-    if cli.init_if_missing && !config.signing_key_path.exists() {
+    if cli.init_if_missing && !config.node_signing_key_path.exists() {
         bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
     }
 
@@ -190,7 +190,7 @@ async fn main() -> Result<()> {
 
     // These must be initialized after the self-check (which only needs engine + services).
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
-    let identity = NodeIdentity::load(&config.signing_key_path)?;
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
     
     let state_root = config.state_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
@@ -221,6 +221,17 @@ async fn main() -> Result<()> {
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
     // `services` already built above for self-check
 
+    // Operator-secret store. V0 is a plaintext file at
+    // `<HOME>/.ai/secrets.env`; subprocesses inherit secrets via the
+    // existing `vault_bindings` plumbing in
+    // `services::thread_lifecycle::spawn_item`. Daemon stays vendor-
+    // agnostic — `vault.rs` only moves opaque `String -> String` pairs.
+    let vault: Arc<dyn ryeosd::vault::NodeVault> = Arc::new(
+        ryeosd::vault::PlaintextFileVault::at(
+            ryeosd::vault::default_vault_path(&config.state_dir),
+        ),
+    );
+
     let app_state = AppState {
         config: Arc::new(config.clone()),
         state_store,
@@ -239,6 +250,7 @@ async fn main() -> Result<()> {
         node_config: node_config_snapshot,
         route_table,
         webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
+        vault,
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -520,7 +532,7 @@ async fn run_service_standalone(
 
     // Minimal bootstrap (subset of daemon startup)
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(config));
-    let identity = NodeIdentity::load(&config.signing_key_path)?;
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     // Two-phase node-config bootstrap (same as daemon-start path)
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
@@ -575,6 +587,9 @@ async fn run_service_standalone(
             routes::build_route_table_or_bail(&node_config_snapshot)?,
         )),
         webhook_dedupe: Arc::new(routes::webhook_dedupe::WebhookDedupeStore::new()),
+        vault: Arc::new(ryeosd::vault::PlaintextFileVault::at(
+            ryeosd::vault::default_vault_path(&config.state_dir),
+        )),
     };
 
     let params: serde_json::Value = match params_json {

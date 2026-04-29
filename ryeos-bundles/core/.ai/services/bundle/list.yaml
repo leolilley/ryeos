@@ -1,4 +1,6 @@
-# rye:signed:2026-04-26T06:36:29Z:e96932b95c2fb81cd88fddbf66fecce90e870ba795954184e494d8ecf920b55f:28xwiXx/NnO33nbc2ObMuU7+jJOCZ59z0fudPI0gq+tHhYhwru5pPPLwP7QvtWaRsn90VvCkpDpDbRcap4MhDg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T02:47:29Z:bfdce6e02e042f66916a070d7213ad8d9b446ddfae7b1de1edc454d71fd2338d:XxYIzNh43YDvsxMfXEVWy0+JGep13oR7dKKwhNVBO+hg+UXNojjpR3Wa1OGuTfdHw+KSV/tY3xCVWmuUEWIRDw==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+category: "bundle"
+name: "list"
 kind: service
 endpoint: bundle.list
 required_caps: []

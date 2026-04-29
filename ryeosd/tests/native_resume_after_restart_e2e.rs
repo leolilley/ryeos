@@ -65,8 +65,8 @@ fn synth_project_with_resume_tool() -> PathBuf {
     // shorthand → engine default policy). Sits in the chain so the
     // FirstWins handler claims the block.
     let runtime_body = r#"version: "1.0.0"
-__executor_id__: "@subprocess"
-category: test/native_resume/runtime
+executor_id: "@subprocess"
+category: local_resume_runtime
 description: "test runtime with native_resume"
 
 native_resume: true
@@ -77,8 +77,8 @@ config:
     fs::write(runtime_dir.join("runtime.yaml"), runtime_body).unwrap();
 
     let tool_body = r#"version: "1.0.0"
-__executor_id__: "tool:local_resume_runtime/runtime"
-category: test/native_resume
+executor_id: "tool:local_resume_runtime/runtime"
+category: ""
 description: "native_resume demo"
 "#;
     fs::write(tools_dir.join("resume_demo.yaml"), tool_body).unwrap();
@@ -91,7 +91,7 @@ fn build_engine_against_bundle() -> Engine {
         TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("ryeos-bundles/core");
-    let kinds_dir = bundle_root.join(".ai/config/engine/kinds");
+    let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("kinds load");
 
     let (parser_tools, _dups) =
