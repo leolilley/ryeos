@@ -1,4 +1,4 @@
-# rye:signed:2026-04-29T05:50:26Z:425e9f3e98946cf9ba06adea13cdc507097029314b3ebdd6719e2d0f80a05e77:6pXacqUASrYV3i79gWvFRRSj0zn+CAL3nL/kw+aLR7gMbrm8jYihDgj5O79mJGK20stG9YIJyTWC65Jfp3NjCg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-04-29T08:29:45Z:425e9f3e98946cf9ba06adea13cdc507097029314b3ebdd6719e2d0f80a05e77:6pXacqUASrYV3i79gWvFRRSj0zn+CAL3nL/kw+aLR7gMbrm8jYihDgj5O79mJGK20stG9YIJyTWC65Jfp3NjCg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 version: "1.0.0"
 category: "rye/core/javascript"
 description: "JavaScript/TypeScript dunder metadata parser: extracts const __name__ = \"value\" declarations"

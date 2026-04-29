@@ -1153,14 +1153,18 @@ pub fn execution_params_from_resume_context(
         .unwrap_or_else(|| "fp:resume".to_string());
 
     // Resume must see the same operator-secret view as the original
-    // spawn so the resumed subprocess can re-establish provider
-    // connections, db handles, etc. Vault is read fresh — if the
-    // operator has rotated a secret since the original spawn, the
-    // new value flows through.
-    let vault_bindings = state
-        .vault
-        .read_all(&acting_principal)
-        .map_err(|e| anyhow::anyhow!("resume: vault read failed: {e}"))?;
+    // spawn — but scoped to what the item declares, not the entire
+    // vault. Vault is read fresh — if the operator has rotated a
+    // secret since the original spawn, the new value flows through.
+    // If a previously-declared required secret has been removed from
+    // the operator vault, resume fails-loud (better than a silent
+    // upstream auth error).
+    let vault_bindings = crate::vault::read_required_secrets(
+        state.vault.as_ref(),
+        &acting_principal,
+        &resolved.resolved_item.metadata.required_secrets,
+    )
+    .map_err(|e| anyhow::anyhow!("resume: vault read failed: {e}"))?;
 
     Ok(ExecutionParams {
         resolved,

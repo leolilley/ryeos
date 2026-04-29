@@ -702,15 +702,21 @@ pub(crate) async fn dispatch_native_runtime(
         plan_context: ctx.plan_ctx.clone(),
     };
 
-    // Read the operator vault for THIS request's principal. Vault
-    // entries flow through `vault_bindings` → `spec.env` →
-    // subprocess inheritance (see `services::thread_lifecycle::spawn_item`).
-    // Daemon stays vendor-agnostic — it ferries opaque
-    // `String -> String` pairs and never enumerates provider names.
-    let vault_bindings = state
-        .vault
-        .read_all(acting_principal)
-        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+    // Read only the secrets declared on the resolved item's
+    // `ItemMetadata.required_secrets`. The dispatcher MUST NOT pour
+    // the full operator vault into a subprocess env — items get
+    // exactly what they declare, and we refuse to spawn if a declared
+    // secret isn't provisioned. Vault entries flow through
+    // `vault_bindings` → `spec.env` → subprocess inheritance (see
+    // `services::thread_lifecycle::spawn_item`). Daemon stays vendor-
+    // agnostic — it ferries opaque `String -> String` pairs and never
+    // enumerates provider names.
+    let vault_bindings = crate::vault::read_required_secrets(
+        state.vault.as_ref(),
+        acting_principal,
+        &resolved.resolved_item.metadata.required_secrets,
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
 
     let result = launch::build_and_launch(
         state,
@@ -845,15 +851,17 @@ pub async fn dispatch_subprocess(
 
     let item_ref_for_error = resolved.item_ref.clone();
 
-    // Read the operator vault for THIS request's principal. The
-    // raw-tool path needs vault injection for the same reason
-    // directives do: tools call providers, hit databases, etc., and
-    // those credentials live in the vault, not in the daemon's own
-    // env.
-    let vault_bindings = state
-        .vault
-        .read_all(request.acting_principal)
-        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+    // Read only the secrets declared on the resolved item's
+    // `ItemMetadata.required_secrets`. Same scoping rule as the
+    // directive path: tools get exactly what they declare, never the
+    // full operator vault. Refuse to spawn if a declared secret isn't
+    // provisioned.
+    let vault_bindings = crate::vault::read_required_secrets(
+        state.vault.as_ref(),
+        request.acting_principal,
+        &resolved.resolved_item.metadata.required_secrets,
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
 
     // V5.5 P2 — subprocess (raw tool) terminator: no permissions
     // composition step exists, so the callback token carries no caps

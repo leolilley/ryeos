@@ -132,6 +132,21 @@ fn plant_model_routing(user_space: &Path) -> anyhow::Result<()> {
 }
 
 fn plant_directive(user_space: &Path, rel_path: &str, body_text: &str) -> anyhow::Result<()> {
+    plant_directive_with_secrets(user_space, rel_path, body_text, &[])
+}
+
+/// Plant a directive that declares `required_secrets` in its frontmatter.
+///
+/// The dispatcher reads only declared secrets out of the operator vault
+/// (`required_secrets` plumbing in `dispatch.rs`). Tests that need the
+/// vault path exercised must pass the list of secret env vars they
+/// expect to flow through.
+fn plant_directive_with_secrets(
+    user_space: &Path,
+    rel_path: &str,
+    body_text: &str,
+    required_secrets: &[&str],
+) -> anyhow::Result<()> {
     let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
     let dir_relative = Path::new(rel_path)
         .parent()
@@ -143,6 +158,15 @@ fn plant_directive(user_space: &Path, rel_path: &str, body_text: &str) -> anyhow
         .and_then(|s| s.to_str())
         .unwrap_or(rel_path);
     std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
+    let required_secrets_yaml = if required_secrets.is_empty() {
+        String::new()
+    } else {
+        let mut s = String::from("required_secrets:\n");
+        for k in required_secrets {
+            s.push_str(&format!("  - {k}\n"));
+        }
+        s
+    };
     let body = format!(
         r#"---
 name: {stem}
@@ -154,7 +178,7 @@ inputs:
     required: true
 model:
   tier: general
----
+{required_secrets_yaml}---
 {body_text}
 "#
     );
@@ -365,7 +389,16 @@ async fn run_directive_with_vault_secret(
             prefix_owned.as_deref(),
         )?;
         plant_model_routing(user)?;
-        plant_directive(user, "test/vault_secret", "Hello {{ name }}.")?;
+        // Declare the env var as a required secret so the dispatcher
+        // reads it out of the vault and injects it into the runtime
+        // subprocess. Without this declaration, dispatch ignores the
+        // vault entirely (post-step-7a scoping).
+        plant_directive_with_secrets(
+            user,
+            "test/vault_secret",
+            "Hello {{ name }}.",
+            &[&env_var_owned],
+        )?;
         // Crucial: secret comes from the vault file, NOT cmd.env(...).
         plant_vault_secret(user, &env_var_owned, &secret_owned)?;
         Ok(())
@@ -457,12 +490,26 @@ async fn vault_blocked_name_fails_request_loud() {
         register_standard_bundle(state_path)?;
         plant_mock_provider_with_auth(user, &mock_url, "RYE_TEST_VAULT_BLOCKED", None, None)?;
         plant_model_routing(user)?;
-        plant_directive(user, "test/vault_blocked", "noop")?;
+        // Directive declares a required secret so the vault is
+        // actually read at dispatch time. Without a declared secret
+        // the post-step-7a dispatcher skips the vault read entirely
+        // and a poisoned PATH= line never trips.
+        plant_directive_with_secrets(
+            user,
+            "test/vault_blocked",
+            "noop",
+            &["RYE_TEST_VAULT_BLOCKED"],
+        )?;
 
-        // Poisoned vault file: PATH is on the blocked list.
+        // Poisoned vault file: PATH is on the blocked list. We still
+        // include the declared secret so the test isolates the
+        // blocked-name failure rather than a "missing required" error.
         let dir = user.join(".ai");
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("secrets.env"), "PATH=/evil:/path\n")?;
+        std::fs::write(
+            dir.join("secrets.env"),
+            "RYE_TEST_VAULT_BLOCKED=ok\nPATH=/evil:/path\n",
+        )?;
         Ok(())
     };
 

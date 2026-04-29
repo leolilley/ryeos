@@ -88,6 +88,54 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
     fn read_all(&self, principal: &str) -> Result<HashMap<String, String>>;
 }
 
+/// Read only the secrets declared on the spawning item's
+/// `ItemMetadata.required_secrets`, refusing if any declared secret
+/// is missing.
+///
+/// This is the **only** vault entry point the dispatcher should use.
+/// Calling [`NodeVault::read_all`] directly and pouring the entire
+/// vault into a subprocess env was the v0 leak pattern: every spawn,
+/// regardless of what the item actually needed, got every secret the
+/// operator owned. Items now declare what they need; this function
+/// projects the vault to that subset.
+///
+/// Refuses on any missing declared secret — that's a misconfiguration
+/// the caller wants surfaced, not silently absorbed (the alternative
+/// is a tool calling a provider with `None` and emitting an opaque
+/// upstream auth error).
+///
+/// Empty `required_secrets` ⇒ empty map (no vault read happens).
+pub fn read_required_secrets(
+    vault: &dyn NodeVault,
+    principal: &str,
+    required_secrets: &[String],
+) -> Result<HashMap<String, String>> {
+    if required_secrets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let all = vault.read_all(principal)?;
+    let mut out = HashMap::with_capacity(required_secrets.len());
+    let mut missing: Vec<&str> = Vec::new();
+    for key in required_secrets {
+        match all.get(key.as_str()) {
+            Some(v) => {
+                out.insert(key.clone(), v.clone());
+            }
+            None => missing.push(key.as_str()),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
+             The item declares these in `required_secrets` but the operator vault \
+             does not provide them. Add them to the secrets file or remove the \
+             declaration.",
+            missing.join(", ")
+        );
+    }
+    Ok(out)
+}
+
 /// Stub vault — used only when the daemon is constructed for a unit
 /// test that doesn't want to depend on the operator's filesystem.
 /// Always returns an empty map.
@@ -322,5 +370,71 @@ mod tests {
     #[test]
     fn empty_vault_trait_returns_empty() {
         assert!(EmptyVault.read_all("op").unwrap().is_empty());
+    }
+
+    /// Test fixture: a vault that returns a fixed map.
+    #[derive(Debug)]
+    struct FixedVault(HashMap<String, String>);
+    impl NodeVault for FixedVault {
+        fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn read_required_empty_required_skips_vault_read() {
+        // Use a vault that would panic if read; assert no read happens.
+        #[derive(Debug)]
+        struct PanicVault;
+        impl NodeVault for PanicVault {
+            fn read_all(&self, _: &str) -> Result<HashMap<String, String>> {
+                panic!("read_all should not be called when required is empty");
+            }
+        }
+        let bindings = read_required_secrets(&PanicVault, "op", &[]).unwrap();
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn read_required_returns_only_declared_keys() {
+        let mut all = HashMap::new();
+        all.insert("OPENAI_API_KEY".to_string(), "sk-1".to_string());
+        all.insert("DATABASE_URL".to_string(), "postgres://".to_string());
+        all.insert("UNRELATED".to_string(), "secret-not-declared".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["OPENAI_API_KEY".to_string()];
+        let bindings = read_required_secrets(&v, "op", &required).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings.get("OPENAI_API_KEY"), Some(&"sk-1".to_string()));
+        assert!(!bindings.contains_key("DATABASE_URL"));
+        assert!(!bindings.contains_key("UNRELATED"));
+    }
+
+    #[test]
+    fn read_required_fails_on_missing_declared_secret() {
+        let mut all = HashMap::new();
+        all.insert("FOO".to_string(), "bar".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["FOO".to_string(), "MISSING_KEY".to_string()];
+        let err = read_required_secrets(&v, "op", &required).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("MISSING_KEY"), "expected MISSING_KEY in error: {msg}");
+        assert!(
+            msg.contains("missing declared secret"),
+            "expected scoping note in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_required_fails_on_multiple_missing_listed_together() {
+        let v = FixedVault(HashMap::new());
+        let required = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let err = read_required_secrets(&v, "op", &required).unwrap_err();
+        let msg = format!("{err:#}");
+        for k in &["A", "B", "C"] {
+            assert!(msg.contains(k), "expected {k} in error: {msg}");
+        }
     }
 }
