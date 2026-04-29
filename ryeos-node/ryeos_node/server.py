@@ -103,7 +103,39 @@ from rye.constants import AI_DIR
 from rye.actions.execute import ExecuteTool
 from rye.utils.execution_context import ExecutionContext
 
+# Configure ryeos_node package logging once, in the uvicorn process.
+# init.py runs in a separate process so its basicConfig doesn't apply here;
+# without this, all ryeos_node.* logs are silently dropped because uvicorn
+# only configures handlers for the `uvicorn.*` loggers.
+_pkg_logger = logging.getLogger("ryeos_node")
+if not _pkg_logger.handlers:
+    _handler = logging.StreamHandler()  # stderr by default
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    _pkg_logger.addHandler(_handler)
+    _pkg_logger.setLevel(logging.INFO)
+    _pkg_logger.propagate = False
+
 logger = logging.getLogger(__name__)
+
+
+# Strong references to fire-and-forget background tasks so the event loop's
+# weak-ref tracking doesn't GC them mid-execution. See:
+# https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background_task(task: asyncio.Task, label: str) -> None:
+    """Track a fire-and-forget asyncio Task and log lifecycle anomalies."""
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if t.cancelled():
+            logger.warning("Background task cancelled: %s", label)
+
+    task.add_done_callback(_done)
 
 
 class _ExecutionCounter:
@@ -1259,10 +1291,16 @@ async def execute(
         # Generate thread_id early so we can return it immediately
         item_slug = resolved.item_id.replace("/", "-")
         thread_id = f"rye-remote-{item_slug}-{int(__import__('time').time() * 1000)}"
+        logger.info(
+            "Accepted async execution %s (%s)", thread_id, resolved.item_id
+        )
 
         async def _bg_execute():
+            logger.info(
+                "Starting async execution %s (%s)", thread_id, resolved.item_id
+            )
             try:
-                await _execute_from_head(
+                result = await _execute_from_head(
                     principal=resolved.principal,
                     settings=settings,
                     project_path=resolved.project_path,
@@ -1273,13 +1311,23 @@ async def execute(
                     vault_keys=resolved.vault_keys,
                     thread_id_override=thread_id,
                 )
+                status_val = (
+                    result.get("status") if isinstance(result, dict) else "ok"
+                )
+                logger.info(
+                    "Async execution finished for %s (%s): %s",
+                    thread_id, resolved.item_id, status_val,
+                )
             except Exception:
                 logger.error(
                     "Async execution failed for %s (%s)",
                     thread_id, resolved.item_id, exc_info=True,
                 )
 
-        asyncio.create_task(_bg_execute())
+        # Track the task so the event loop's weak-ref tracking doesn't GC it
+        # before/during execution. Without this the task can vanish silently.
+        task = asyncio.create_task(_bg_execute())
+        _spawn_background_task(task, f"execute {thread_id}")
         return {
             "status": "accepted",
             "thread_id": thread_id,

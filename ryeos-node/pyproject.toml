@@ -1,6 +1,6 @@
 [project]
 name = "ryeos-node"
-version = "0.1.14"
+version = "0.1.15"
 description = "RYE Remote Execution Server — CAS-native"
 requires-python = ">=3.11"
 dependencies = [
