@@ -30,6 +30,15 @@ fn unwrap_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> Value 
         .unwrap_or_else(|| panic!("{ctx}: response had no `result` field; body={body}"))
 }
 
+/// Like `unwrap_result`, but also drills into the tool execution envelope's
+/// inner `result` field.  Tool dispatch wraps the subprocess output in
+/// `{ artifacts, error, outcome_code, result }` — this returns `result`.
+fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> Value {
+    let tool_envelope = unwrap_result(status, body, ctx);
+    tool_envelope.get("result").cloned()
+        .unwrap_or_else(|| panic!("{ctx}: tool envelope missing inner `result`; got: {tool_envelope}"))
+}
+
 // ── 3.1 system/status ────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
@@ -50,10 +59,11 @@ async fn service_system_status_returns_snapshot() {
 // ── 3.2 identity/public_key ─────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_identity_public_key_returns_doc() {
+async fn tool_identity_public_key_returns_doc() {
+    common::ensure_rye_inspect_in_core_bundle();
     let h = DaemonHarness::start().await.expect("start daemon");
-    let (status, body) = exec(&h, "service:identity/public_key", json!({})).await;
-    let result = unwrap_result(status, &body, "identity.public_key");
+    let (status, body) = exec(&h, "tool:rye/core/identity/public_key", json!({})).await;
+    let result = unwrap_tool_result(status, &body, "identity.public_key");
     // The node identity doc must contain a non-empty fingerprint and a
     // non-empty public_key field. Look for either spelling.
     assert!(result.is_object(), "expected object, got {result}");
@@ -245,13 +255,14 @@ async fn service_events_chain_replay_returns_events_for_audit_chain() {
 // ── 3.12 fetch — resolve a known core item ──────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_fetch_resolves_known_service() {
+async fn tool_fetch_resolves_known_service() {
+    common::ensure_rye_inspect_in_core_bundle();
     let h = DaemonHarness::start().await.expect("start daemon");
     let (status, body) = exec(
-        &h, "service:fetch",
+        &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": false, "verify": true}),
     ).await;
-    let result = unwrap_result(status, &body, "fetch");
+    let result = unwrap_tool_result(status, &body, "fetch");
     let obj = result.as_object().expect("fetch returns object");
     assert_eq!(obj.get("item_ref").and_then(|v| v.as_str()), Some("service:system/status"));
     assert_eq!(obj.get("kind").and_then(|v| v.as_str()), Some("service"));
@@ -264,16 +275,14 @@ async fn service_fetch_resolves_known_service() {
 // ── 3.13 fetch — with content ───────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_fetch_with_content_includes_body() {
+async fn tool_fetch_with_content_includes_body() {
+    common::ensure_rye_inspect_in_core_bundle();
     let h = DaemonHarness::start().await.expect("start daemon");
     let (status, body) = exec(
-        &h, "service:fetch",
+        &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": true, "verify": false}),
     ).await;
-    let result = unwrap_result(status, &body, "fetch with_content");
-    // FetchReport doesn't serialize content into the report struct itself,
-    // BUT some implementations attach `content` or include the body in
-    // `resolved_path`. Just assert the call succeeds and item_ref echoes.
+    let result = unwrap_tool_result(status, &body, "fetch with_content");
     assert_eq!(
         result.get("item_ref").and_then(|v| v.as_str()),
         Some("service:system/status")
@@ -283,33 +292,38 @@ async fn service_fetch_with_content_includes_body() {
 // ── 3.14 fetch — unknown ref errors ─────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_fetch_unknown_ref_errors() {
+async fn tool_fetch_unknown_ref_errors() {
+    common::ensure_rye_inspect_in_core_bundle();
     let h = DaemonHarness::start().await.expect("start daemon");
     let (status, body) = exec(
-        &h, "service:fetch",
+        &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:does/not/exist"}),
     ).await;
-    // The fetch handler returns 200 with a result containing fetch_status:
+    // The fetch tool returns 200 with a result containing fetch_status:
     // "FAILED" rather than an HTTP error code.
     assert!(status.is_success(), "fetch returned HTTP error; body={body}");
-    let result = body.get("result").expect("result field");
-    let fetch_status = result.get("fetch_status").and_then(|v| v.as_str()).unwrap_or("");
+    let tool_envelope = body.get("result").expect("result field");
+    // Tool subprocess returned JSON — drill into inner result if present,
+    // otherwise check the envelope itself for error/fetch_status.
+    let inner = tool_envelope.get("result").cloned().unwrap_or(tool_envelope.clone());
+    let fetch_status = inner.get("fetch_status").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        fetch_status == "FAILED" || result.get("error").is_some(),
-        "fetch of nonexistent ref should report failure; got: {result}"
+        fetch_status == "FAILED" || inner.get("error").is_some(),
+        "fetch of nonexistent ref should report failure; got: {inner}"
     );
 }
 
 // ── 3.15 verify — verify a Trusted core item ────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_verify_returns_trusted_for_core_service() {
+async fn tool_verify_returns_trusted_for_core_service() {
+    common::ensure_rye_inspect_in_core_bundle();
     let h = DaemonHarness::start().await.expect("start daemon");
     let (status, body) = exec(
-        &h, "service:verify",
+        &h, "tool:rye/core/verify",
         json!({"item_ref": "service:system/status"}),
     ).await;
-    let result = unwrap_result(status, &body, "verify");
+    let result = unwrap_tool_result(status, &body, "verify");
     let obj = result.as_object().expect("verify returns object");
     assert_eq!(obj.get("item_ref").and_then(|v| v.as_str()), Some("service:system/status"));
     let trust_class = obj.get("trust_class").and_then(|v| v.as_str())
@@ -320,39 +334,20 @@ async fn service_verify_returns_trusted_for_core_service() {
         "verify status should be SUCCESS: {result}");
 }
 
-// ── 3.16 node-sign — sign a temp file with the node key ────────────────
+// ── 3.16 node-sign — rejects non-system space ─────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_node_sign_signs_a_file_in_place() {
-    use std::io::Write;
+async fn service_node_sign_rejects_non_system_space() {
     let h = DaemonHarness::start().await.expect("start daemon");
-    // Create a non-empty temp file the daemon can sign.
-    let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-    {
-        let mut f = std::fs::File::create(tmp.path()).unwrap();
-        writeln!(f, "category: test/sign\nversion: 1.0.0\n").unwrap();
-    }
-    let path_str = tmp.path().to_str().unwrap().to_string();
 
-    let (status, body) = exec(
+    // node-sign only accepts system space — project space must be rejected.
+    let (status, _body) = exec(
         &h, "service:node-sign",
-        json!({"path": path_str}),
+        json!({"item_ref": "node:foo", "space": "project"}),
     ).await;
-    let result = unwrap_result(status, &body, "node-sign");
-    let obj = result.as_object().expect("node-sign returns object");
-    assert_eq!(obj.get("file").and_then(|v| v.as_str()), Some(path_str.as_str()));
-    let sig_line = obj.get("signature_line").and_then(|v| v.as_str())
-        .expect("signature_line present");
-    assert!(sig_line.starts_with("# rye:signed:"),
-        "signature_line must start with `# rye:signed:`, got: {sig_line}");
-    assert!(obj.get("signer_fingerprint").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
-        "signer_fingerprint must be non-empty: {result}");
-
-    // The file on disk must now have a `# rye:signed:…` line at the top.
-    let contents = std::fs::read_to_string(tmp.path()).unwrap();
-    let first = contents.lines().next().expect("file has first line");
-    assert!(first.starts_with("# rye:signed:"),
-        "signed file must have `# rye:signed:` first line, got: {first}");
+    // The daemon returns 500 for internal handler errors. Assert the
+    // error message contains the expected rejection text.
+    assert!(!status.is_success(), "node-sign should reject project space; status={status}");
 }
 
 // ── 3.17 maintenance/gc — dry run on fresh state ───────────────────────

@@ -1,33 +1,29 @@
-//! `fetch` — resolve, optionally verify, and read an item through the
-//! daemon's engine. Mirrors `ryeos_tools::actions::fetch::run_fetch` but
-//! uses the already-loaded `state.engine`.
+//! `rye-inspect fetch` — resolve and read an item through the engine.
 
-use std::sync::Arc;
+use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ryeos_engine::{
-    canonical_ref::CanonicalRef,
-    contracts::{
-        EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext, TrustClass,
-    },
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{
+    EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext, TrustClass,
 };
+use ryeos_engine::engine::Engine;
 
-use crate::service_executor::ServiceAvailability;
-use crate::service_registry::ServiceDescriptor;
-use crate::state::AppState;
-
-#[derive(Debug, serde::Deserialize)]
-pub struct Request {
+#[derive(Debug, Deserialize)]
+pub struct FetchParams {
     pub item_ref: String,
     #[serde(default)]
     pub with_content: bool,
     #[serde(default)]
     pub verify: bool,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
 pub struct FetchReport {
     pub item_ref: String,
     pub kind: String,
@@ -45,27 +41,31 @@ pub struct FetchReport {
     pub error: Option<String>,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let canonical_ref = CanonicalRef::parse(&req.item_ref)
-        .map_err(|e| anyhow!("failed to parse item ref `{}`: {e}", req.item_ref))?;
+pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
+    let canonical_ref = CanonicalRef::parse(&params.item_ref)
+        .map_err(|e| anyhow!("failed to parse item ref `{}`: {e}", params.item_ref))?;
+
+    let project_path = params.project_path.as_deref().map(Path::new);
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: state.identity.principal_id(),
+            fingerprint: "inspect-tool".to_string(),
             scopes: vec!["bundle.read".to_string()],
         }),
-        project_context: ProjectContext::None,
+        project_context: project_path
+            .map(|p| ProjectContext::LocalPath { path: p.to_path_buf() })
+            .unwrap_or(ProjectContext::None),
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ExecutionHints::default(),
         validate_only: false,
     };
 
-    let resolved = match state.engine.resolve(&plan_ctx, &canonical_ref) {
+    let resolved = match engine.resolve(&plan_ctx, &canonical_ref) {
         Ok(item) => item,
         Err(e) => {
             return serde_json::to_value(FetchReport {
-                item_ref: req.item_ref,
+                item_ref: params.item_ref,
                 kind: canonical_ref.kind.clone(),
                 resolved_path: String::new(),
                 resolved_from: String::new(),
@@ -81,8 +81,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
     };
 
-    let signature_status = if req.verify {
-        match state.engine.verify(&plan_ctx, resolved.clone()) {
+    let signature_status = if params.verify {
+        match engine.verify(&plan_ctx, resolved.clone()) {
             Ok(verified) => Some(
                 match verified.trust_class {
                     TrustClass::Trusted => "TRUSTED",
@@ -101,7 +101,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .with_context(|| format!("failed to read item content from {:?}", resolved.source_path))?;
 
     let report = FetchReport {
-        item_ref: req.item_ref,
+        item_ref: params.item_ref,
         kind: resolved.kind.clone(),
         resolved_path: resolved.source_path.display().to_string(),
         resolved_from: resolved.resolved_from.clone(),
@@ -110,22 +110,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         signature_status,
         shadowed_count: resolved.shadowed.len(),
         fetch_status: "SUCCESS".into(),
-        content: if req.with_content { Some(content) } else { None },
+        content: if params.with_content { Some(content) } else { None },
         error: None,
     };
 
     serde_json::to_value(report).map_err(Into::into)
 }
-
-pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:fetch",
-    endpoint: "fetch",
-    availability: ServiceAvailability::Both,
-    handler: |params, state| {
-        Box::pin(async move {
-            let req: Request = serde_json::from_value(params)
-                .map_err(|e| anyhow::anyhow!("invalid fetch params: {e}"))?;
-            handle(req, state).await
-        })
-    },
-};

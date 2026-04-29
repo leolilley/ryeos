@@ -60,6 +60,70 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Ensure `rye-inspect` binary exists in the build output and symlink it
+/// into the core bundle's `.ai/bin/<triple>/` so `bin:rye-inspect` resolves
+/// during integration tests.  Returns the path to the symlink.
+///
+/// Safe to call multiple times — idempotent.
+pub fn ensure_rye_inspect_in_core_bundle() -> PathBuf {
+    let ryeosd = ryeosd_binary();
+    let bin_dir = ryeosd
+        .parent()
+        .expect("ryeosd binary has parent dir");
+    let inspect_bin = bin_dir.join("rye-inspect");
+    if !inspect_bin.exists() {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = std::process::Command::new(&cargo)
+            .args(["build", "-p", "ryeos-tools", "--bin", "rye-inspect"])
+            .status()
+            .expect("failed to invoke `cargo build -p ryeos-tools --bin rye-inspect`");
+        assert!(status.success(), "cargo build -p ryeos-tools --bin rye-inspect failed");
+    }
+    assert!(inspect_bin.exists(), "rye-inspect not found at {}", inspect_bin.display());
+
+    let triple = detect_target_triple();
+
+    let bundle_bin_dir = system_data_dir()
+        .join(".ai")
+        .join("bin")
+        .join(&triple);
+    std::fs::create_dir_all(&bundle_bin_dir)
+        .expect("create .ai/bin/<triple> in core bundle");
+
+    let link = bundle_bin_dir.join("rye-inspect");
+    // Remove stale symlink if it exists (pointing at old build).
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&inspect_bin, &link)
+        .unwrap_or_else(|e| panic!("symlink {} -> {}: {e}", inspect_bin.display(), link.display()));
+    link
+}
+
+/// Detect the target triple from the build profile directory name,
+/// falling back to cfg-based detection.
+fn detect_target_triple() -> String {
+    // Try: `target/<triple>/debug/` layout (cross-compile or explicit target).
+    let ryeosd = ryeosd_binary();
+    let bin_dir = ryeosd
+        .parent()
+        .expect("parent");
+    if let Some(profile_dir) = bin_dir.parent() {
+        if let Some(name) = profile_dir.file_name() {
+            let name = name.to_string_lossy();
+            if name.contains('-') && name != "debug" && name != "release" {
+                return name.into_owned();
+            }
+        }
+    }
+    // Fallback: native host detection via cfg.
+    let arch = if cfg!(target_arch = "x86_64") { "x86_64" }
+               else if cfg!(target_arch = "aarch64") { "aarch64" }
+               else { "unknown" };
+    let os = if cfg!(target_os = "linux") { "unknown-linux-gnu" }
+             else if cfg!(target_os = "macos") { "apple-darwin" }
+             else { "unknown" };
+    format!("{arch}-{os}")
+}
+
 /// Path to the system data dir we hand to the daemon (the bundled
 /// `ryeos-bundles/core` tree, which is signed by the fixture key).
 pub fn system_data_dir() -> PathBuf {

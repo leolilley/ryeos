@@ -179,7 +179,7 @@ response:
 fn write_authorized_key(state_path: &Path, sk: &SigningKey) -> anyhow::Result<()> {
     let vk = sk.verifying_key();
     let fp = lillux::signature::compute_fingerprint(&vk);
-    let auth_dir = state_path.join("auth").join("authorized_keys");
+    let auth_dir = state_path.join(".ai").join("node").join("auth").join("authorized_keys");
     std::fs::create_dir_all(&auth_dir)?;
 
     use base64::engine::Engine as _;

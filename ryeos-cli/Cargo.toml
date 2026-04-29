@@ -8,10 +8,6 @@ description = "CLI for Rye OS"
 name = "rye"
 path = "src/main.rs"
 
-[[bin]]
-name = "rye-bundle-tool"
-path = "src/bin/rye-bundle-tool.rs"
-
 [dependencies]
 anyhow      = "1"
 base64      = "0.22"

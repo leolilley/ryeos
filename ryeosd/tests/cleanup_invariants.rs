@@ -281,7 +281,7 @@ fn gate_07_both_services_count() {
         .filter(|d| d.availability == ServiceAvailability::Both)
         .count();
 
-    assert_eq!(both_count, 13, "expected 13 Both-availability services");
+    assert_eq!(both_count, 10, "expected 10 Both-availability services");
 }
 
 // ── Gate 8: State lock prevents concurrent ───────────────────────────
@@ -587,7 +587,7 @@ fn gate_17_trust_store_loads() {
         "trust store should have at least 1 entry"
     );
     assert!(
-        trust_store.is_trusted("8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb"),
+        trust_store.is_trusted("09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c"),
         "fixture trust store must contain the known test signer fingerprint"
     );
 }

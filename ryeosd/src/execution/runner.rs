@@ -490,6 +490,10 @@ fn mint_callback_env(
     );
     bindings.insert("RYEOSD_CALLBACK_TOKEN".to_string(), cap.token.clone());
     bindings.insert("RYEOSD_THREAD_ID".to_string(), thread_id.to_string());
+    bindings.insert(
+        "RYEOS_STATE_DIR".to_string(),
+        state.config.state_dir.to_string_lossy().to_string(),
+    );
     if let Some(pp) = project_path {
         bindings.insert(
             "RYEOSD_PROJECT_PATH".to_string(),

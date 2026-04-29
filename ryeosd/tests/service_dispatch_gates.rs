@@ -188,7 +188,6 @@ fn gate_cap_consistency() {
     // Services that MUST have empty caps (public)
     let cap_free = [
         "service:system/status",
-        "service:identity/public_key",
         "service:threads/list",
         "service:threads/get",
         "service:bundle/list",
@@ -310,13 +309,18 @@ fn gate_service_kind_in_bundle() {
     );
 }
 
-/// Gate 7: Service descriptor table has exactly 17 entries.
+/// Gate 7: Service descriptor table has exactly 14 entries.
+///
+/// Was 17 prior to the service→tool conversion of `fetch`,
+/// `verify`, and `identity/public_key`. Each of those is now an
+/// external tool (`tool:rye/core/...`) invoked via `bin:rye-inspect`,
+/// not an in-process daemon handler.
 #[test]
 fn gate_service_count_matches_expected() {
     let services = service_refs();
     assert_eq!(
         services.len(),
-        17,
-        "service descriptor table count drifted from expected 17"
+        14,
+        "service descriptor table count drifted from expected 14"
     );
 }

@@ -11,8 +11,16 @@ use crate::config::Config;
 use crate::identity::NodeIdentity;
 use crate::node_config::{NodeConfigSnapshot, SectionTable};
 
+/// Bootstrap options.
+///
+/// `force` controls node-key regeneration ONLY. The user signing key is
+/// never overwritten by init — it is always load-or-create. Node-key
+/// rotation is a daemon-internal operation; user-key rotation requires
+/// explicit operator action.
 #[derive(Debug)]
 pub struct InitOptions {
+    /// If true, regenerate the node signing key even if one already exists.
+    /// Does NOT affect the user signing key.
     pub force: bool,
 }
 
@@ -28,7 +36,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     create_directory_layout(config)?;
 
     // 2. Write default config file if missing (or force rewrite)
-    let config_path = config.state_dir.join("config.yaml");
+    let config_path = config.state_dir.join(".ai").join("node").join("config.yaml");
     if options.force || !config_path.exists() {
         write_default_config(&config_path, config)?;
         tracing::info!(path = %config_path.display(), "wrote default config");
@@ -37,9 +45,29 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 3. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
 
+    // Discover trust directory early — needed for stale-entry cleanup during
+    // node-key regeneration.
+    let user_space = discover_user_root().unwrap_or_else(|| PathBuf::from("/tmp/missing-home"));
+    let trust_dir = user_space.join(".ai").join("config").join("keys").join("trusted");
+
     // 4. Generate or load the NODE signing key (daemon-internal state)
     let node_key_path = &config.node_signing_key_path;
     let node_identity = if options.force && node_key_path.exists() {
+        // Before regenerating, clean up stale trust entries from old keys.
+        // The trust entry path includes the fingerprint, so old entries become
+        // orphans. We remove the known file; any other orphan cleanup is
+        // deferred to explicit operator action.
+        let old_identity = NodeIdentity::load(node_key_path)?;
+        let old_trust = trust_dir.join(format!("{}.toml", old_identity.fingerprint()));
+        if old_trust.exists() {
+            tracing::info!(
+                path = %old_trust.display(),
+                old_fingerprint = %old_identity.fingerprint(),
+                "removing stale node trust entry before regeneration"
+            );
+            fs::remove_file(&old_trust)
+                .with_context(|| format!("failed to remove stale trust entry {}", old_trust.display()))?;
+        }
         tracing::info!(path = %node_key_path.display(), "regenerating node signing key (--force)");
         fs::remove_file(node_key_path)
             .with_context(|| format!("failed to remove old node key {}", node_key_path.display()))?;
@@ -56,14 +84,11 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         "node signing key ready"
     );
 
-    // 5. Generate or load the USER signing key (operator edits in project/user space)
+    // 5. Generate or load the USER signing key (operator edits in project/user space).
+    //    NEVER force-regenerate: the user key is the operator's persistent identity.
+    //    Rotation is an explicit out-of-band action.
     let user_key_path = &config.user_signing_key_path;
-    let user_identity = if options.force && user_key_path.exists() {
-        tracing::info!(path = %user_key_path.display(), "regenerating user signing key (--force)");
-        fs::remove_file(user_key_path)
-            .with_context(|| format!("failed to remove old user key {}", user_key_path.display()))?;
-        NodeIdentity::create(user_key_path)?
-    } else if user_key_path.exists() {
+    let user_identity = if user_key_path.exists() {
         NodeIdentity::load(user_key_path)?
     } else {
         NodeIdentity::create(user_key_path)?
@@ -83,8 +108,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     }
 
     // 7. Bootstrap self-trust: write verifying keys as trusted key docs
-    let user_space = discover_user_root().unwrap_or_else(|| PathBuf::from("/tmp/missing-home"));
-    let trust_dir = user_space.join(".ai").join("config").join("keys").join("trusted");
+    // (trust_dir computed above, before node-key regeneration)
 
     // Node key trust doc
     let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
@@ -172,13 +196,11 @@ fn discover_user_root() -> Option<PathBuf> {
 
 
 fn create_directory_layout(config: &Config) -> Result<()> {
-    // Canonical paths — one CAS root under .ai/state/objects
-    let state_root = config.state_dir.join(".ai").join("state");
+    // Node root layout: config, auth, and CAS state live under .ai/
     let dirs = [
-        config.state_dir.join("auth").join("authorized_keys"),
-        config.state_dir.join("db"),
-        state_root.join("objects"),
-        state_root.join("refs"),
+        config.state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+        config.state_dir.join(".ai").join("state").join("objects"),
+        config.state_dir.join(".ai").join("state").join("refs"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)
@@ -294,4 +316,160 @@ pub fn load_node_config_two_phase(
     );
 
     Ok((engine, snapshot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::NodeIdentity;
+
+    /// Build a minimal Config for testing with all paths under a tempdir.
+    fn test_config(tmp: &std::path::Path) -> Config {
+        let state_dir = tmp.join("state");
+        let user_keys = tmp.join("user_keys");
+        std::fs::create_dir_all(state_dir.join(".ai").join("node").join("auth").join("authorized_keys")).unwrap();
+        std::fs::create_dir_all(state_dir.join(".ai").join("state")).unwrap();
+        std::fs::create_dir_all(user_keys.join("signing")).unwrap();
+        Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            db_path: state_dir.join(".ai").join("state").join("runtime.sqlite3"),
+            uds_path: state_dir.join("ryeosd.sock"),
+            state_dir: state_dir.clone(),
+            node_signing_key_path: state_dir
+                .join(".ai")
+                .join("node")
+                .join("identity")
+                .join("private_key.pem"),
+            user_signing_key_path: user_keys.join("signing").join("private_key.pem"),
+            authorized_keys_dir: state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+            system_data_dir: tmp.join("system"),
+            require_auth: false,
+        }
+    }
+
+    /// Helper: extract the fingerprint from a PEM key file.
+    fn fingerprint_at(path: &std::path::Path) -> String {
+        let id = NodeIdentity::load(path).unwrap();
+        id.fingerprint().to_string()
+    }
+
+    /// Process-wide mutex for tests that mutate the `USER_SPACE` env var.
+    /// Without this, parallel tests in this module race on the shared env
+    /// and observe each other's `USER_SPACE` values, producing trust-dir
+    /// paths under the wrong tempdir and bogus "stale entry not removed"
+    /// failures.
+    static USER_SPACE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that holds `USER_SPACE_MUTEX`, sets `USER_SPACE` for the
+    /// duration of the test, and unsets it on drop (not restore — avoids
+    /// inheriting stale values from previous tests).
+    struct UserSpaceGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl UserSpaceGuard {
+        fn new(tmp: &std::path::Path) -> Self {
+            // Recover from prior panics: PoisonError still exposes the guard.
+            let lock = USER_SPACE_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::env::set_var("USER_SPACE", tmp);
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for UserSpaceGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("USER_SPACE");
+        }
+    }
+
+    #[test]
+    fn init_creates_both_keys_on_fresh_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        init(&config, &InitOptions { force: false }).unwrap();
+
+        assert!(config.node_signing_key_path.exists(), "node key should be created");
+        assert!(config.user_signing_key_path.exists(), "user key should be created");
+
+        // Trust entries for both keys — trust_dir = <USER_SPACE>/.ai/config/keys/trusted/
+        let trust_dir = tmp.path().join(".ai").join("config").join("keys").join("trusted");
+        let node_fp = fingerprint_at(&config.node_signing_key_path);
+        let user_fp = fingerprint_at(&config.user_signing_key_path);
+        assert!(trust_dir.join(format!("{}.toml", node_fp)).exists(), "node trust entry");
+        assert!(trust_dir.join(format!("{}.toml", user_fp)).exists(), "user trust entry");
+    }
+
+    #[test]
+    fn init_idempotent_reuses_existing_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        init(&config, &InitOptions { force: false }).unwrap();
+        let node_fp1 = fingerprint_at(&config.node_signing_key_path);
+        let user_fp1 = fingerprint_at(&config.user_signing_key_path);
+
+        // Second init without force — keys should be the same
+        init(&config, &InitOptions { force: false }).unwrap();
+        let node_fp2 = fingerprint_at(&config.node_signing_key_path);
+        let user_fp2 = fingerprint_at(&config.user_signing_key_path);
+
+        assert_eq!(node_fp1, node_fp2, "node key should not change on idempotent init");
+        assert_eq!(user_fp1, user_fp2, "user key should not change on idempotent init");
+    }
+
+    #[test]
+    fn force_regenerates_node_key_but_preserves_user_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        init(&config, &InitOptions { force: false }).unwrap();
+        let user_fp_before = fingerprint_at(&config.user_signing_key_path);
+        let node_fp_before = fingerprint_at(&config.node_signing_key_path);
+
+        // Force regenerate
+        init(&config, &InitOptions { force: true }).unwrap();
+        let user_fp_after = fingerprint_at(&config.user_signing_key_path);
+        let node_fp_after = fingerprint_at(&config.node_signing_key_path);
+
+        assert_ne!(
+            node_fp_before, node_fp_after,
+            "node key SHOULD change with --force"
+        );
+        assert_eq!(
+            user_fp_before, user_fp_after,
+            "user key MUST NOT change with --force"
+        );
+
+        // Trust dir
+        let trust_dir = tmp.path().join(".ai").join("config").join("keys").join("trusted");
+
+        // Old node trust entry should be cleaned up
+        assert!(
+            !trust_dir.join(format!("{}.toml", node_fp_before)).exists(),
+            "stale node trust entry should be removed after force regeneration"
+        );
+        // New node trust entry should exist
+        assert!(
+            trust_dir.join(format!("{}.toml", node_fp_after)).exists(),
+            "new node trust entry should exist after force regeneration"
+        );
+    }
+
+    #[test]
+    fn force_creates_fresh_keys_when_none_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        init(&config, &InitOptions { force: true }).unwrap();
+
+        assert!(config.node_signing_key_path.exists(), "node key should be created even with --force on fresh state");
+        assert!(config.user_signing_key_path.exists(), "user key should be created on fresh state");
+    }
 }

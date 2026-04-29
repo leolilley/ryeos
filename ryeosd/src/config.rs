@@ -57,7 +57,8 @@ pub struct Cli {
     #[arg(long)]
     pub init_only: bool,
 
-    /// Force overwrite during init
+    /// Force regenerate the node signing key during init.
+    /// Does NOT affect the user signing key.
     #[arg(long)]
     pub force: bool,
 }
@@ -114,7 +115,7 @@ impl Config {
         let file_cfg = if let Some(path) = &cli.config {
             Some(Self::load_file(path)?)
         } else {
-            let default_config = defaults.state_dir.join("config.yaml");
+            let default_config = defaults.state_dir.join(".ai").join("node").join("config.yaml");
             if default_config.exists() {
                 Some(Self::load_file(&default_config)
                     .with_context(|| format!("failed to load existing config at {}", default_config.display()))?)
@@ -166,7 +167,7 @@ impl Config {
                 .db_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.db_path.clone()))
-                .unwrap_or_else(|| state_dir.join("db").join("ryeosd.sqlite3")),
+                .unwrap_or_else(|| state_dir.join(".ai").join("state").join("runtime.sqlite3")),
             uds_path: cli
                 .uds_path
                 .clone()
@@ -206,7 +207,7 @@ impl Config {
                         .as_ref()
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
-                .unwrap_or_else(|| state_dir.join("auth").join("authorized_keys")),
+                .unwrap_or_else(|| state_dir.join(".ai").join("node").join("auth").join("authorized_keys")),
         };
 
         // Only create minimal runtime directories (db parent, socket parent).
@@ -254,7 +255,7 @@ impl Config {
 
         Ok(Self {
             bind,
-            db_path: state_dir.join("db").join("ryeosd.sqlite3"),
+            db_path: state_dir.join(".ai").join("state").join("runtime.sqlite3"),
             uds_path: runtime_root.join("ryeosd.sock"),
             state_dir: state_dir.clone(),
             node_signing_key_path: state_dir
@@ -270,7 +271,7 @@ impl Config {
                 .join("private_key.pem"),
             system_data_dir: data_dir,
             require_auth: false,
-            authorized_keys_dir: state_dir.join("auth").join("authorized_keys"),
+            authorized_keys_dir: state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
         })
     }
 }

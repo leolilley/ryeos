@@ -1,4 +1,4 @@
-# rye:signed:2026-04-29T02:47:29Z:b0489c8ba3e2e792627e8952e624c66fe114d209484098fd88bd8f637ba2b128:6X2A7KEo3z+0IkwvlS97EJEq1QZh+51/nEP15b+KpuISMDI8wmxyCoOcAZo0Fdk8MtRp9N+lwkw5CcOFePD0Bg==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T05:50:26Z:b0489c8ba3e2e792627e8952e624c66fe114d209484098fd88bd8f637ba2b128:3SfNLb5aiaxRGOsdY/J4trfPj4H5nyMvJYezDe8FaTXHyvcZWCrkrRQ5hEkE4Eb5EgxmyfFUfh4I1qG7iNBuAQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 version: "1.0.0"
 category: "rye/core/python"
 description: "Python dunder metadata parser: extracts __name__ = \"value\" assignments"

@@ -1,4 +1,4 @@
-# rye:signed:2026-04-29T02:47:29Z:88f5f157dfe6884739572ad7c4f4c0092638e92c2112db3b64100ffa8f6a4233:F5XSK2wbRSJlJd6k3aCLZWlo7AkvQpyXkeAedM5V9c9ks/4JlbU1Lwbgni8qaZHWdoWQJUScBLqjHKirszOiDA==:8f4c002347bcb25b80e32a9f5ba7064638f0d372b8dd5cfbff3da765f94ef4bb
+# rye:signed:2026-04-29T05:50:26Z:88f5f157dfe6884739572ad7c4f4c0092638e92c2112db3b64100ffa8f6a4233:syvPphWe3yESZlCwoShMH5ikxRfetMiGGWS0YWruqM2NgSj0osAQnjvWGRIvqhHvWtYnQ2x+CLsdVV9EtsFCCA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 """Runtime library — shared module loader for Python-based tools.
 
 Handles the Python-specific concern of registering packages in

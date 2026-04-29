@@ -267,10 +267,17 @@ fn bundle_tools_dir_has_13_signed_yamls() {
     let mut yaml_files = Vec::new();
     walk_yaml_files(&tools_dir, &mut yaml_files);
 
+    // Standard bundle's `tools/rye/` directory now only houses the
+    // three agent provider tool descriptors (anthropic, openai, zen).
+    // Everything else got moved out: runtimes (directive/graph/
+    // knowledge) live under `.ai/runtimes/`, the agent harness is
+    // gone, and `verify`/`fetch`/`identity/public_key` were converted
+    // to core-bundle tools when those services were toolified.
     assert_eq!(
         yaml_files.len(),
-        13,
-        "expected exactly 13 tool YAMLs (V5.1: verify carved out), found {}: {:?}",
+        3,
+        "expected exactly 3 tool YAMLs in standard bundle's tools/rye/ \
+         (the agent providers), found {}: {:?}",
         yaml_files.len(),
         yaml_files
     );

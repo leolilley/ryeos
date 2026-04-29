@@ -43,6 +43,20 @@ default = []
 name = "rye-sign"
 path = "src/bin/rye-sign.rs"
 
+# ── Publisher-side bundle manifest tool ────────────────────────────
+# Rebuilds CAS manifests and batch-signs bundle items.
+# Not part of the rye CLI verb plane.
+[[bin]]
+name = "rye-bundle-tool"
+path = "src/bin/rye-bundle-tool.rs"
+
+# ── Unified inspection binary ──────────────────────────────────────
+# Subcommands: fetch, verify, identity. Invoked by tool YAMLs via
+# `bin:rye-inspect <subcommand>`.
+[[bin]]
+name = "rye-inspect"
+path = "src/bin/rye-inspect.rs"
+
 [[example]]
 name = "bootstrap_sign_core_kind_schemas"
 path = "examples/bootstrap_sign_core_kind_schemas.rs"

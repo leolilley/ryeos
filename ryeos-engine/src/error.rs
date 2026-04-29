@@ -138,6 +138,12 @@ pub enum EngineError {
     #[error("no runtime config found in executor chain: {chain:?}")]
     NoRuntimeConfig { chain: Vec<String> },
 
+    #[error("invalid `bin:` prefix in command `{raw}`: {detail}")]
+    InvalidBinPrefix { raw: String, detail: String },
+
+    #[error("binary `{bin}` not found in bundle (searched: {searched})")]
+    BinNotFound { bin: String, searched: String },
+
     #[error("unknown template token: {{{token}}}")]
     UnknownTemplateToken { token: String },
 

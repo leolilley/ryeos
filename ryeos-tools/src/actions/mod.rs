@@ -8,5 +8,6 @@
 //! logic in-process so callers get typed errors and a single audit path.
 
 pub mod build_bundle;
+pub mod inspect;
 pub mod sign;
 pub mod sign_bundle;

@@ -17,7 +17,7 @@ pub mod config_schema;
 pub mod handlers;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -458,7 +458,11 @@ pub fn compile_with_handlers(
     let command = spec_overrides.command.ok_or_else(|| EngineError::NoRuntimeConfig {
         chain: chain_str.to_vec(),
     })?;
-    let cmd = expand_template(&command, &template_ctx)?;
+    let cmd_expanded = expand_template(&command, &template_ctx)?;
+
+    // Resolve `bin:` prefix — look up the binary from the bundle's
+    // `.ai/bin/<triple>/` directory instead of PATH.
+    let cmd = resolve_bin_prefix(&cmd_expanded, root_source_path)?;
 
     let args_template = spec_overrides.args.unwrap_or_default();
     let args: Result<Vec<String>, EngineError> = args_template
@@ -491,4 +495,97 @@ pub fn compile_with_handlers(
         timeout_secs,
         execution: spec_overrides.execution,
     })
+}
+
+/// Resolve the `bin:` executor prefix.
+///
+/// When `cmd` starts with `bin:`, the remainder is the binary name
+/// (must be a single token — subcommand args go in the YAML's `args`
+/// list, not in `command`). We walk up from `root_source_path` to
+/// find the bundle root (the directory containing `.ai/`), then
+/// resolve the binary at `<bundle-root>/.ai/bin/<target-triple>/<name>`.
+///
+/// If `cmd` does not start with `bin:`, it is returned unchanged.
+fn resolve_bin_prefix(cmd: &str, root_source_path: &Path) -> Result<String, EngineError> {
+    let bin_name = match cmd.strip_prefix("bin:") {
+        Some(r) => r.trim(),
+        None => return Ok(cmd.to_string()),
+    };
+
+    if bin_name.is_empty() {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: cmd.to_string(),
+            detail: "no binary name after `bin:`".into(),
+        });
+    }
+    if bin_name.contains(' ') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: cmd.to_string(),
+            detail: "binary name must not contain spaces — put subcommand args in the YAML's `args` list".into(),
+        });
+    }
+
+    // Walk up from root_source_path to find .ai/ parent (= bundle root).
+    let bundle_root = find_bundle_root(root_source_path).ok_or_else(|| {
+        EngineError::InvalidBinPrefix {
+            raw: cmd.to_string(),
+            detail: format!(
+                "cannot find bundle root (no .ai/ ancestor of {})",
+                root_source_path.display()
+            ),
+        }
+    })?;
+
+    let triple = resolve_target_triple(&bundle_root).ok_or_else(|| {
+        EngineError::InvalidBinPrefix {
+            raw: cmd.to_string(),
+            detail: format!(
+                "no target triple directory found under {}/.ai/bin/",
+                bundle_root.display()
+            ),
+        }
+    })?;
+    let bin_path = bundle_root
+        .join(".ai")
+        .join("bin")
+        .join(&triple)
+        .join(bin_name);
+
+    if !bin_path.exists() {
+        return Err(EngineError::BinNotFound {
+            bin: bin_name.to_string(),
+            searched: bin_path.display().to_string(),
+        });
+    }
+
+    Ok(bin_path.to_string_lossy().into_owned())
+}
+
+/// Walk up from `path` to find the first ancestor containing `.ai/`.
+fn find_bundle_root(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.join(".ai").is_dir() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+/// Return the target triple to use for `bin:` resolution.
+///
+/// Scans `<bundle-root>/.ai/bin/` for the first subdirectory — the
+/// directory name IS the target triple. This is simpler and more
+/// robust than trying to determine the compile-time triple, and
+/// handles cross-compile scenarios naturally (the bundle's bin
+/// directory contains the right triple for the target platform).
+fn resolve_target_triple(bundle_root: &Path) -> Option<String> {
+    let bin_dir = bundle_root.join(".ai").join("bin");
+    let entries = std::fs::read_dir(&bin_dir).ok()?;
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            return Some(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    None
 }

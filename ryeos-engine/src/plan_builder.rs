@@ -310,15 +310,11 @@ pub fn build_plan(
         })?
         .to_owned();
 
-    // Step 1a: Caller-param validation against the user tool's
-    // `config_schema`, if it declares one. Runs BEFORE chain
-    // resolution so a bad input fails loud without spinning up the
-    // executor pipeline. Wrapper / runtime YAMLs further down the
-    // chain may declare their own `config_schema` for documentation
-    // — those describe internal contracts, not the caller-facing
-    // interface, and are deliberately ignored here. See
-    // `runtime/config_schema.rs` for the rationale.
-    {
+    // Step 1a: Parse the root tool's content. Used for caller-param
+    // validation (config_schema) AND for constructing the root chain
+    // intermediate (Step 2a below). Kept outside the inner scope so
+    // `root_parsed` is available after validation.
+    let root_parsed = {
         let content =
             std::fs::read_to_string(&resolved.source_path).map_err(|e| {
                 EngineError::Internal(format!(
@@ -337,10 +333,11 @@ pub fn build_plan(
             parameters,
             &canonical_ref,
         )?;
-    }
+        tool_block
+    };
 
     // Step 2: Follow the executor chain to a terminal
-    let terminal = resolve_executor_chain(
+    let mut terminal = resolve_executor_chain(
         &executor_id,
         &resolved.source_path,
         &resolved.kind,
@@ -349,6 +346,22 @@ pub fn build_plan(
         roots,
         trust_store,
     )?;
+
+    // Step 2a: Prepend the root item as the first chain intermediate.
+    // `resolve_executor_chain` starts from the root's executor_id, so
+    // the root item itself is NOT included. But the root may declare
+    // runtime blocks (`config:`, `env_config:`, etc.) that handlers
+    // must process. Prepending ensures the root participates in the
+    // same handler dispatch loop as the rest of the chain.
+    let root_intermediate = ChainIntermediate {
+        executor_id: executor_id.clone(),
+        resolved_ref: canonical_ref.clone(),
+        kind: resolved.kind.clone(),
+        source_path: resolved.source_path.clone(),
+        parsed: root_parsed,
+    };
+    terminal.intermediates.insert(0, root_intermediate);
+    terminal.chain.insert(0, canonical_ref.clone());
 
     // Log chain trust status
     for (id, trust) in &terminal.verified_chain {
