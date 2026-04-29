@@ -338,27 +338,50 @@ async fn secret_injection_with_default_authorization_bearer() {
 //
 // The tests above set the secret on the daemon process directly via
 // `cmd.env(...)`. Production operators don't do that — they put their
-// API keys in `<HOME>/.ai/secrets.env` and let the daemon's `NodeVault`
-// read them at request-build time. The vault populates
-// `vault_bindings`, which `services::thread_lifecycle::spawn_item`
-// merges into the spawned subprocess's `spec.env`. The subprocess
-// then sees `std::env::var("FOO_API_KEY")` as if it had been exported
-// in the daemon's own env.
+// API keys in the sealed-envelope store at
+// `<state>/.ai/state/secrets/store.enc` and let the daemon's
+// `SealedEnvelopeVault` decrypt them at request-build time. The vault
+// populates `vault_bindings`, which
+// `services::thread_lifecycle::spawn_item` merges into the spawned
+// subprocess's `spec.env`. The subprocess then sees
+// `std::env::var("FOO_API_KEY")` as if it had been exported in the
+// daemon's own env.
 //
-// The harness already overrides `HOME` to the per-test `user_space`
-// tempdir, so writing `<user_space>/.ai/secrets.env` is exactly the
-// production path through `vault::default_vault_path`.
+// Because the daemon auto-generates the vault X25519 keypair at boot
+// (in `bootstrap::init`), the test fixture pre-generates the same
+// keypair in `pre_init` (which runs before daemon start) and writes
+// the sealed store using its public key. The daemon then loads the
+// existing private key on boot and decrypts the planted store.
 
-/// Write a single `KEY=VALUE` to `<user_space>/.ai/secrets.env`. The
-/// daemon's `PlaintextFileVault::at(default_vault_path(...))` reads
-/// from `<HOME>/.ai/secrets.env`, and the harness sets `HOME` to
-/// `user_space`, so this is the operator-facing path.
-fn plant_vault_secret(user_space: &Path, key: &str, value: &str) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("secrets.env");
-    let body = format!("{key}={value}\n");
-    std::fs::write(&path, body)?;
+/// Pre-generate the daemon's vault X25519 keypair and seal `secrets`
+/// into `<state>/.ai/state/secrets/store.enc`.
+///
+/// `pre_init` runs before daemon start, so writing the secret key
+/// here means the daemon's `bootstrap::init` will see the existing
+/// key and skip generation, then `SealedEnvelopeVault::load` picks
+/// up our pre-placed key and decrypts the sealed store we've planted.
+fn plant_sealed_vault_secrets(
+    state_path: &Path,
+    secrets: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let secret_key_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("private_key.pem");
+    let sk = lillux::vault::VaultSecretKey::generate();
+    lillux::vault::write_secret_key(&secret_key_path, &sk)?;
+    let pk = sk.public_key();
+    // Mirror bootstrap.rs which also writes the public_key.pem alongside.
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    lillux::vault::write_public_key(&pub_path, &pk)?;
+
+    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
+    ryeosd::vault::write_sealed_secrets(&store_path, &pk, secrets)?;
     Ok(())
 }
 
@@ -399,8 +422,13 @@ async fn run_directive_with_vault_secret(
             "Hello {{ name }}.",
             &[&env_var_owned],
         )?;
-        // Crucial: secret comes from the vault file, NOT cmd.env(...).
-        plant_vault_secret(user, &env_var_owned, &secret_owned)?;
+        // Crucial: secret comes from the sealed vault store, NOT
+        // cmd.env(...). Pre-generate the daemon's vault keypair so we
+        // can seal the store before daemon boot picks the key up.
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert(env_var_owned.clone(), secret_owned.clone());
+        plant_sealed_vault_secrets(state_path, &secrets)?;
+        let _ = user; // user_space unused for vault now (kept for trust + bundles).
         Ok(())
     };
 
@@ -445,11 +473,11 @@ async fn run_directive_with_vault_secret(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn vault_secret_reaches_provider_with_default_bearer() {
-    // End-to-end: secret only exists in `<HOME>/.ai/secrets.env`.
-    // Nothing on the daemon's command line, nothing in `cmd.env()`.
-    // If the header arrives at the mock provider with the expected
-    // value, the full pipe works:
-    //   secrets.env → PlaintextFileVault::read_all → dispatch.rs →
+    // End-to-end: secret only exists in the sealed vault store at
+    // `<state>/.ai/state/secrets/store.enc`. Nothing on the daemon's
+    // command line, nothing in `cmd.env()`. If the header arrives at
+    // the mock provider with the expected value, the full pipe works:
+    //   store.enc → SealedEnvelopeVault::read_all → dispatch.rs →
     //   ExecutionParams.vault_bindings → spawn_item spec.env →
     //   Command::env() → directive-runtime subprocess →
     //   std::env::var(provider.auth.env_var) → outbound auth header.
@@ -467,18 +495,52 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
     let expected = format!("Bearer {secret}");
     assert_eq!(
         actual, &expected,
-        "vault → subprocess env → auth header mismatch — vault file at \
-         `<HOME>/.ai/secrets.env` must reach the provider HTTP request via \
-         the existing vault_bindings plumbing",
+        "vault → subprocess env → auth header mismatch — sealed vault store at \
+         `<state>/.ai/state/secrets/store.enc` must reach the provider HTTP \
+         request via the existing vault_bindings plumbing",
     );
+}
+
+/// Seal a poisoned plaintext (containing a key like `PATH` that would
+/// normally be rejected) directly via `lillux::vault::seal`,
+/// bypassing `write_sealed_secrets`'s pre-encryption blocklist check.
+/// This simulates a corrupt or malicious sealed store on disk so the
+/// daemon's `validate_decrypted_keys` post-decrypt check fires.
+fn plant_poisoned_sealed_store(
+    state_path: &Path,
+    plaintext_toml: &str,
+) -> anyhow::Result<()> {
+    let secret_key_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("private_key.pem");
+    let sk = lillux::vault::VaultSecretKey::generate();
+    lillux::vault::write_secret_key(&secret_key_path, &sk)?;
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    lillux::vault::write_public_key(&pub_path, &sk.public_key())?;
+
+    let envelope = lillux::vault::seal(&sk.public_key(), plaintext_toml.as_bytes())?;
+    let envelope_toml = toml::to_string(&envelope)?;
+    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
+    if let Some(parent) = store_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&store_path, envelope_toml.as_bytes())?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn vault_blocked_name_fails_request_loud() {
-    // Operator-protection: a vault file containing `PATH=...` MUST NOT
-    // silently shadow the OS-inherited PATH for spawned subprocesses.
-    // The vault parser bails at read time with a typed error; the
-    // dispatch path maps that to a 5xx so the operator notices
+    // Operator-protection: a sealed vault store containing `PATH=...`
+    // (e.g. corrupt / tampered / pre-policy) MUST NOT silently shadow
+    // the OS-inherited PATH for spawned subprocesses. The daemon's
+    // `validate_decrypted_keys` bails at read time with a typed error;
+    // the dispatch path maps that to a 5xx so the operator notices
     // immediately rather than discovering the corruption later.
     let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
     let mock_url = mock.base_url.clone();
@@ -493,7 +555,7 @@ async fn vault_blocked_name_fails_request_loud() {
         // Directive declares a required secret so the vault is
         // actually read at dispatch time. Without a declared secret
         // the post-step-7a dispatcher skips the vault read entirely
-        // and a poisoned PATH= line never trips.
+        // and a poisoned PATH key in the store never trips.
         plant_directive_with_secrets(
             user,
             "test/vault_blocked",
@@ -501,14 +563,14 @@ async fn vault_blocked_name_fails_request_loud() {
             &["RYE_TEST_VAULT_BLOCKED"],
         )?;
 
-        // Poisoned vault file: PATH is on the blocked list. We still
-        // include the declared secret so the test isolates the
-        // blocked-name failure rather than a "missing required" error.
-        let dir = user.join(".ai");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(
-            dir.join("secrets.env"),
-            "RYE_TEST_VAULT_BLOCKED=ok\nPATH=/evil:/path\n",
+        // Poisoned sealed store: PATH is on the blocked list, but we
+        // bypass write-time validation by sealing the plaintext
+        // directly. The declared secret is included so the test
+        // isolates the blocked-name failure rather than a "missing
+        // required" error.
+        plant_poisoned_sealed_store(
+            state_path,
+            "RYE_TEST_VAULT_BLOCKED = \"ok\"\nPATH = \"/evil:/path\"\n",
         )?;
         Ok(())
     };

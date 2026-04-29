@@ -107,6 +107,34 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         tracing::info!(path = %identity_path.display(), "wrote node public identity");
     }
 
+    // 6b. Vault X25519 keypair. Separate from the Ed25519 node identity
+    // so node-key rotation does NOT brick the vault. Auto-generated on
+    // first boot if missing (parallel to user/node keys above); never
+    // force-rotated by daemon bootstrap (rotation is `rye vault rewrap`).
+    let vault_dir = config
+        .state_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault");
+    let vault_secret_path = vault_dir.join("private_key.pem");
+    let vault_public_path = vault_dir.join("public_key.pem");
+    let vault_sk = if vault_secret_path.exists() {
+        lillux::vault::read_secret_key(&vault_secret_path)
+            .with_context(|| format!("load vault key {}", vault_secret_path.display()))?
+    } else {
+        let sk = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&vault_secret_path, &sk)
+            .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
+        sk
+    };
+    lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
+        .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
+    tracing::info!(
+        fingerprint = %vault_sk.public_key().fingerprint(),
+        path = %vault_secret_path.display(),
+        "vault X25519 keypair ready"
+    );
+
     // 7. Bootstrap self-trust: write verifying keys as trusted key docs
     // (trust_dir computed above, before node-key regeneration)
 
