@@ -9,6 +9,7 @@
 
 #![allow(dead_code)] // helpers are only used by some integration test bins
 
+pub mod fast_fixture;
 pub mod mock_provider;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
@@ -306,6 +307,126 @@ impl DaemonHarness {
             child,
             stderr_buf: None,
         })
+    }
+
+    /// Spawn a fresh daemon using the fast fixture: state and user-space
+    /// are pre-populated with deterministic keys, vault keypair, and
+    /// self-signed trust docs (mirrors `bootstrap::init` byte-equivalent
+    /// state). Daemon launches WITHOUT `--init-if-missing` since
+    /// initialization is already complete — any drift surfaces as a
+    /// loud failure rather than silent re-init.
+    ///
+    /// Returns the harness paired with the deterministic
+    /// [`fast_fixture::FastFixture`] keys so callers can sign their own
+    /// items (directives, routes, providers, …) with
+    /// `fixture.publisher`.
+    pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with(|_, _, _| Ok(()), |_| {}).await
+    }
+
+    /// Like [`start_fast`] but with two hooks:
+    ///
+    /// * `plant`: runs after `populate_initialized_state` and receives
+    ///   `(state_path, user_space, &FastFixture)` — sign and place
+    ///   bundle/directive/route content with `fixture.publisher`.
+    /// * `tweak`: mutates the `Command` (env, args, …) before spawn.
+    pub async fn start_fast_with<S, F>(
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
+        let state_dir_outer = tempfile::tempdir()?;
+        let user_space = tempfile::tempdir()?;
+
+        // NON-EXISTENT subdir so the fast fixture writes the daemon's
+        // state from scratch — matches the layout the daemon expects
+        // when launched without `--init-if-missing`.
+        let state_path = state_dir_outer.path().join("state");
+
+        let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
+        plant(&state_path, user_space.path(), &fixture)?;
+
+        let port = pick_free_port();
+        let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let uds_path = state_path.join("ryeosd.sock");
+
+        let mut cmd = Command::new(ryeosd_binary());
+        // NOTE: NO --init-if-missing. The fast fixture is the init.
+        cmd.arg("--state-dir").arg(&state_path)
+            .arg("--bind").arg(bind.to_string())
+            .arg("--uds-path").arg(&uds_path)
+            .env("RYE_SYSTEM_SPACE", system_data_dir())
+            .env("USER_SPACE", user_space.path())
+            .env("HOME", user_space.path())
+            .stdout(Stdio::null())
+            .stderr(
+                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+                    .and_then(|d| {
+                        let path = std::path::PathBuf::from(d)
+                            .join(format!("daemon-{port}.stderr.log"));
+                        std::fs::File::create(&path).ok().map(Stdio::from)
+                    })
+                    .unwrap_or_else(|| Stdio::piped())
+            )
+            .kill_on_drop(true);
+
+        tweak(&mut cmd);
+
+        let child = cmd.spawn()?;
+
+        let daemon_json = state_path.join("daemon.json");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if daemon_json.exists() {
+                break;
+            }
+            if Instant::now() > deadline {
+                let mut child = child;
+                child.start_kill().ok();
+                let mut buf = String::new();
+                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
+                    let path = std::path::PathBuf::from(dir)
+                        .join(format!("daemon-{port}.stderr.log"));
+                    buf = std::fs::read_to_string(&path).unwrap_or_default();
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    stderr.read_to_string(&mut buf).await.ok();
+                }
+                anyhow::bail!(
+                    "daemon.json never appeared at {} (fast fixture path) — daemon stderr:\n{}",
+                    daemon_json.display(),
+                    buf
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{bind}/health");
+        let connect_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if client.get(&url).timeout(Duration::from_millis(200)).send().await.is_ok() {
+                break;
+            }
+            if Instant::now() > connect_deadline {
+                anyhow::bail!("daemon /health never became reachable at {url} (fast fixture path)");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let harness = Self {
+            _state_dir_outer: state_dir_outer,
+            state_path,
+            user_space,
+            bind,
+            uds_path,
+            child,
+            stderr_buf: None,
+        };
+        Ok((harness, fixture))
     }
 
     /// POST `/execute` to the daemon and return (status, json body).
