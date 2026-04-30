@@ -1,0 +1,240 @@
+//! Unified bundle binary resolution for runtimes + handlers.
+//!
+//! Accepts BOTH legacy `bin:<name>` refs (used by tool YAMLs that
+//! reference rye-inspect etc.) AND path-style `bin/<triple>/<name>`
+//! refs (used by runtime YAMLs and handler descriptors).
+//!
+//! Verifies manifest hash and signer trust in both cases.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+
+use crate::error::EngineError;
+
+/// Result of resolving a binary reference.
+pub struct ResolvedBinary {
+    pub absolute_path: PathBuf,
+    pub manifest_hash: String,
+    pub signer_fingerprint: String,
+}
+
+/// Resolve a binary reference relative to a bundle root.
+///
+/// Accepted shapes:
+///   - `bin:<name>` — name resolved against `<bundle>/.ai/bin/<host_triple>/`
+///   - `bin/<triple>/<name>` — explicit triple path (must equal host triple)
+///
+/// Verification:
+///   - The file must exist at the resolved path.
+///   - The bundle's manifest must contain an entry for the binary
+///     whose hash matches the on-disk content.
+///   - The manifest's signer must be present in the trust store.
+///
+/// Errors are EngineError variants — InvalidBinPrefix, BinNotFound,
+/// BinHashMismatch, BinUntrusted (existing variants from foundation
+/// wave).
+pub fn resolve_bundle_binary_ref(
+    binary_ref: &str,
+    bundle_root: &Path,
+    trust_store_has_fingerprint: impl Fn(&str) -> bool,
+) -> Result<ResolvedBinary, EngineError> {
+    let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+
+    // Determine the binary name and item_ref based on ref shape.
+    let (bin_name, item_ref, bin_path) = if let Some(name) = binary_ref.strip_prefix("bin:") {
+        // Legacy shape: bin:<name>
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::InvalidBinPrefix {
+                raw: binary_ref.to_string(),
+                detail: "no binary name after `bin:`".into(),
+            });
+        }
+        if name.contains(' ') {
+            return Err(EngineError::InvalidBinPrefix {
+                raw: binary_ref.to_string(),
+                detail: "binary name must not contain spaces — put subcommand args in the YAML's `args` list".into(),
+            });
+        }
+        let path = bundle_root
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(triple)
+            .join(name);
+        let iref = format!("bin/{triple}/{name}");
+        (name.to_string(), iref, path)
+    } else if binary_ref.starts_with("bin/") {
+        // Path-style shape: bin/<triple>/<name>
+        let parts: Vec<&str> = binary_ref.splitn(4, '/').collect();
+        if parts.len() != 3 {
+            return Err(EngineError::InvalidBinPrefix {
+                raw: binary_ref.to_string(),
+                detail: "path-style binary_ref must be `bin/<triple>/<name>`".into(),
+            });
+        }
+        let ref_triple = parts[1];
+        let name = parts[2];
+
+        if ref_triple != triple {
+            return Err(EngineError::InvalidBinPrefix {
+                raw: binary_ref.to_string(),
+                detail: format!(
+                    "binary_ref triple `{ref_triple}` doesn't match host triple `{triple}`"
+                ),
+            });
+        }
+
+        // Path traversal check.
+        if name.contains("..") || name.contains('/') {
+            return Err(EngineError::InvalidBinPrefix {
+                raw: binary_ref.to_string(),
+                detail: "binary name must not contain path traversal or slashes".into(),
+            });
+        }
+
+        let path = bundle_root
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(triple)
+            .join(name);
+        (name.to_string(), binary_ref.to_string(), path)
+    } else {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: binary_ref.to_string(),
+            detail: "binary_ref must start with `bin:` or `bin/<triple>/`".into(),
+        });
+    };
+
+    // --- Common verification path ---
+
+    let bin_dir = bin_path.parent().ok_or_else(|| EngineError::BinNotFound {
+        bin: bin_name.clone(),
+        searched: "cannot determine binary directory".into(),
+    })?;
+
+    if !bin_dir.is_dir() {
+        return Err(EngineError::BinNotFound {
+            bin: bin_name.clone(),
+            searched: format!("expected triple dir {}", bin_dir.display()),
+        });
+    }
+
+    if !bin_path.exists() {
+        return Err(EngineError::BinNotFound {
+            bin: bin_name.clone(),
+            searched: bin_path.display().to_string(),
+        });
+    }
+
+    let manifest_ref_path = bundle_root
+        .join(crate::AI_DIR)
+        .join("refs")
+        .join("bundles")
+        .join("manifest");
+
+    if !manifest_ref_path.exists() {
+        return Err(EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        });
+    }
+
+    let manifest_hash = std::fs::read_to_string(&manifest_ref_path)
+        .map_err(|_| EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        })?
+        .trim()
+        .to_string();
+
+    let objects_dir = bundle_root.join(crate::AI_DIR).join("objects");
+    let cas = lillux::cas::CasStore::new(objects_dir);
+
+    let manifest_value = cas
+        .get_object(&manifest_hash)
+        .map_err(|e| {
+            EngineError::Internal(format!(
+                "CAS read error for manifest {manifest_hash}: {e}"
+            ))
+        })?
+        .ok_or_else(|| EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        })?;
+
+    let item_source_hashes: HashMap<String, String> = manifest_value
+        .get("item_source_hashes")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let item_source_hash = item_source_hashes
+        .get(&item_ref)
+        .ok_or_else(|| EngineError::BinNotInManifest {
+            bin: bin_name.clone(),
+            triple: triple.to_string(),
+        })?;
+
+    let item_source = cas
+        .get_object(item_source_hash)
+        .map_err(|e| {
+            EngineError::Internal(format!(
+                "CAS read error for item_source {item_source_hash}: {e}"
+            ))
+        })?
+        .ok_or_else(|| {
+            EngineError::Internal(format!(
+                "item_source {item_source_hash} for {item_ref} not found in CAS"
+            ))
+        })?;
+
+    let content_blob_hash = item_source
+        .get("content_blob_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let bin_bytes = std::fs::read(&bin_path).map_err(|e| {
+        EngineError::Internal(format!(
+            "failed to read binary {}: {e}",
+            bin_path.display()
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bin_bytes);
+    let computed_hash = format!("{:x}", hasher.finalize());
+
+    if computed_hash != content_blob_hash {
+        return Err(EngineError::BinHashMismatch {
+            bin: bin_name.clone(),
+            declared: content_blob_hash,
+            computed: computed_hash,
+        });
+    }
+
+    let (trust_class, fingerprint) =
+        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint);
+
+    let signer_fingerprint = match trust_class {
+        crate::resolution::TrustClass::TrustedSystem => {
+            fingerprint.unwrap_or_default()
+        }
+        crate::resolution::TrustClass::TrustedUser
+        | crate::resolution::TrustClass::UntrustedUserSpace
+        | crate::resolution::TrustClass::Unsigned => {
+            return Err(EngineError::BinUntrusted {
+                bin: bin_name,
+                fingerprint: fingerprint.unwrap_or_default(),
+            });
+        }
+    };
+
+    Ok(ResolvedBinary {
+        absolute_path: bin_path,
+        manifest_hash,
+        signer_fingerprint,
+    })
+}

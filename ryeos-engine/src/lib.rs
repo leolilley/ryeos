@@ -1,4 +1,5 @@
 pub mod canonical_ref;
+pub mod binary_resolver;
 pub mod composers;
 pub mod contracts;
 pub mod delegation;
