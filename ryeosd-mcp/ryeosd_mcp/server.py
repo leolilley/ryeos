@@ -1,3 +1,30 @@
+"""
+THREAT MODEL — MCP SERVER
+
+The MCP server is intended for LOCAL SINGLE-USER use:
+
+  * Transport: stdio over a process owned by the operator's OS user.
+  * Caller authentication: assumed (the OS user IS the operator).
+  * Capability gating: none at the MCP layer — every CLI verb that
+    the wrapped `rye` binary exposes is available to any caller
+    that reaches the transport.
+
+This means:
+
+  * Do NOT expose the MCP server over the network without a separate
+    auth-terminating proxy.
+  * Do NOT run the MCP server as a system service available to other
+    OS users.
+  * DO use it from a single-operator IDE harness (Claude Code,
+    Cursor, etc.) on the operator's own machine.
+
+The proper auth design (signed-request from delegated principal,
+audience binding, replay protection) is tracked in
+`docs/future/mcp-server-auth.md`. It is NOT yet implemented.
+
+See also: `.tmp/STRATEGY-AND-GAPS/02-ENFORCEMENT-GAPS.md` §4.
+"""
+
 """MCP server for RYE OS — thin wrapper over the `rye` CLI.
 
 Exposes a single tool `rye` that shells to the data-driven CLI binary.
