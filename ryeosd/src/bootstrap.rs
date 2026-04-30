@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use ryeos_engine::engine::Engine;
 use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
+use ryeos_engine::AI_DIR;
 
 use crate::config::Config;
 use crate::identity::NodeIdentity;
@@ -23,6 +24,59 @@ pub struct InitOptions {
     /// If true, regenerate the node signing key even if one already exists.
     /// Does NOT affect the user signing key.
     pub force: bool,
+}
+
+/// Collect signed node-config items under `state_dir/<AI_DIR>/node/`
+/// that would become unverifiable if the node signing key is
+/// regenerated.
+///
+/// A file is considered signed if its first non-empty line begins
+/// with `# rye:signed:`. Returns sorted, deduplicated absolute paths.
+fn find_signed_node_config_items(state_dir: &Path) -> Result<Vec<PathBuf>> {
+    let node_dir = state_dir.join(AI_DIR).join("node");
+    if !node_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut hits = Vec::new();
+    collect_signed_yaml_recursive(&node_dir, &mut hits)?;
+    hits.sort();
+    hits.dedup();
+    Ok(hits)
+}
+
+/// Recursive helper: walk a directory tree looking for signed YAMLs.
+fn collect_signed_yaml_recursive(dir: &Path, hits: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.context("dir entry")?;
+        let path = entry.path();
+        let ft = entry.file_type().context("file type")?;
+        if ft.is_dir() {
+            collect_signed_yaml_recursive(&path, hits)?;
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        if !matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("yaml") | Some("yml")
+        ) {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let first_non_empty = content
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        if first_non_empty.starts_with("# rye:signed:") {
+            hits.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// One-time idempotent filesystem bootstrap.
@@ -54,6 +108,25 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 4. Generate or load the NODE signing key (daemon-internal state)
     let node_key_path = &config.node_signing_key_path;
     let node_identity = if options.force && node_key_path.exists() {
+        // γ: refuse --force if signed node-config items exist — rotating
+        // the node key would make them unverifiable. The operator must
+        // use `rye daemon rotate-key` instead, which re-signs first.
+        let signed_items = find_signed_node_config_items(&config.state_dir)?;
+        if !signed_items.is_empty() {
+            let lines: Vec<String> = signed_items
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect();
+            bail!(
+                "refusing --force: existing signed node-config items would become \
+                 unverifiable after node-key regeneration:\n\n{}\n\n\
+                 run `rye daemon rotate-key` to safely rotate the node key \
+                 (re-signs all existing items + transition trust store). \
+                 `--force` is only safe on a fresh install.",
+                lines.join("\n")
+            );
+        }
+
         // Before regenerating, clean up stale trust entries from old keys.
         // The trust entry path includes the fingerprint, so old entries become
         // orphans. We remove the known file; any other orphan cleanup is
@@ -502,5 +575,75 @@ mod tests {
 
         assert!(config.node_signing_key_path.exists(), "node key should be created even with --force on fresh state");
         assert!(config.user_signing_key_path.exists(), "user key should be created on fresh state");
+    }
+
+    // ── γ: --force refusal when signed node-config items exist ───────
+
+    #[test]
+    fn force_refuses_when_signed_node_config_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        // Run init once normally to create node key.
+        init(&config, &InitOptions { force: false }).unwrap();
+        assert!(config.node_signing_key_path.exists());
+
+        // Plant a signed YAML in the node dir.
+        let node_bundles = config.state_dir.join(".ai").join("node").join("bundles");
+        fs::create_dir_all(&node_bundles).unwrap();
+        let signed_yaml = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
+        fs::write(node_bundles.join("test.yaml"), signed_yaml).unwrap();
+
+        // Now try --force — should be refused.
+        let err = init(&config, &InitOptions { force: true }).expect_err("expected refusal");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing --force"), "got: {msg}");
+        assert!(msg.contains("test.yaml"), "got: {msg}");
+        assert!(msg.contains("rotate-key"), "got: {msg}");
+    }
+
+    #[test]
+    fn force_succeeds_on_fresh_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        // Fresh state, --force should succeed (no signed items to protect).
+        init(&config, &InitOptions { force: true })
+            .expect("fresh install should succeed under --force");
+    }
+
+    #[test]
+    fn force_succeeds_when_node_dir_has_only_unsigned_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = UserSpaceGuard::new(tmp.path());
+
+        // Run init once to create keys and node dir.
+        init(&config, &InitOptions { force: false }).unwrap();
+
+        // Plant an unsigned YAML.
+        let node_bundles = config.state_dir.join(".ai").join("node").join("bundles");
+        fs::create_dir_all(&node_bundles).unwrap();
+        fs::write(node_bundles.join("unsigned.yaml"), "name: unsigned-bundle\n").unwrap();
+
+        // --force should succeed — no signed items.
+        init(&config, &InitOptions { force: true })
+            .expect("unsigned files should not block --force");
+    }
+
+    #[test]
+    fn find_signed_node_config_items_detects_nested_signed_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai").join("node").join("deep").join("sub");
+        fs::create_dir_all(&node_dir).unwrap();
+
+        let signed_yaml = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nkey: value\n";
+        fs::write(node_dir.join("nested.yaml"), signed_yaml).unwrap();
+
+        let items = find_signed_node_config_items(tmp.path()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].ends_with("nested.yaml"));
     }
 }
