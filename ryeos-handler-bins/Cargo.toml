@@ -1,0 +1,39 @@
+[package]
+name = "ryeos-handler-bins"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ryeos-handler-protocol = { path = "../ryeos-handler-protocol" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+regex = "1"
+anyhow = "1"
+
+[[bin]]
+name = "rye-parser-yaml-document"
+path = "src/bin/parser_yaml_document.rs"
+
+[[bin]]
+name = "rye-parser-yaml-header-document"
+path = "src/bin/parser_yaml_header_document.rs"
+
+[[bin]]
+name = "rye-parser-regex-kv"
+path = "src/bin/parser_regex_kv.rs"
+
+[[bin]]
+name = "rye-composer-extends-chain"
+path = "src/bin/composer_extends_chain.rs"
+
+[[bin]]
+name = "rye-composer-graph-permissions"
+path = "src/bin/composer_graph_permissions.rs"
+
+[[bin]]
+name = "rye-composer-identity"
+path = "src/bin/composer_identity.rs"
+
+[lib]
+path = "src/lib.rs"
