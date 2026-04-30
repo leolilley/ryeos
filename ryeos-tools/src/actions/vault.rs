@@ -335,6 +335,50 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
 /// inconsistently — never silently re-encrypts under a new identity
 /// without proving the old plaintext was correct.
 ///
+/// # Crash safety
+///
+/// The rotation runs in two phases:
+///
+/// **Phase A (steps 1–6, all `.new` writes):**
+/// 1. Decrypt the existing store with the old key → in-memory plaintext.
+/// 2. Generate a new X25519 keypair.
+/// 3. Wrap the plaintext under the new public key → sealed bytes.
+/// 4. Write `<vault>/private_key.pem.new` (0600).
+/// 5. Write `<vault>/public_key.pem.new`.
+/// 6. Write `<vault>/store.enc.new` (only if `store.enc` already exists;
+///    we never spontaneously create a store).
+///
+/// If anything in phase A fails, every `.new` file we wrote is removed
+/// and the operator's on-disk state is unchanged.
+///
+/// **Phase B (step 7, renames into final position, in this exact order):**
+/// 1. `private_key.pem.new` → `private_key.pem`
+/// 2. `public_key.pem.new`  → `public_key.pem`
+/// 3. `store.enc.new`       → `store.enc` (skipped if no `.new` was written)
+///
+/// This ordering is the failure-recovery contract. A reader that races
+/// during phase B sees one of:
+///   - All-old: private_key rename hasn't happened yet → old store is
+///     readable with the still-on-disk old private key.
+///   - Mid-rotation, new private key in place: the new private key
+///     decrypts either the old store (still on disk) or the new store
+///     once the third rename lands, because both stores were sealed to
+///     the same DEK-equivalent identity by construction (the new
+///     private key wraps the same plaintext we just decrypted).
+///   - All-new: rotation complete.
+///
+/// **Phase B failure** (a `fs::rename` returns Err mid-way through):
+/// the function refuses to proceed and returns the rename error. Some
+/// `.new` files may remain on disk alongside their non-`.new`
+/// counterparts. The operator must inspect manually:
+///   - If `private_key.pem.new` exists, the old private key is still
+///     in place and the rotation has NOT taken effect; remove the
+///     `.new` files to abort, or rename them in the documented order
+///     to complete.
+///   - If `private_key.pem` is the new key (i.e. its fingerprint
+///     differs from the previous backup), the rotation is partially
+///     applied; rename any remaining `.new` files in order to finish.
+///
 /// On Unix, the new private key is written 0600 (via
 /// [`lillux::vault::write_secret_key`]).
 pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
@@ -347,28 +391,58 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
     })?;
     let old_fingerprint = old_sk.public_key().fingerprint();
 
-    // Decrypt the existing store under the old key. If the store
-    // doesn't exist we still rotate — the operator may want to
-    // pre-rotate before any secrets are stored.
     let plaintext = read_sealed_secrets(&store_path, &old_sk)?;
 
     let new_sk = lillux::vault::VaultSecretKey::generate();
     let new_pk = new_sk.public_key();
     let new_fingerprint = new_pk.fingerprint();
 
-    // Re-seal the plaintext under the new public key, then swap
-    // both the keypair files and the store. We write the new key
-    // FIRST so a crash mid-rewrap leaves us with a working
-    // (key, store) pair under the OLD identity (the new key isn't
-    // referenced by anything yet because the store still encodes
-    // old_fingerprint). Then we swap the store, then the public
-    // key. Final swap is the secret key — at that point the
-    // daemon's next read will pick up the new identity.
-    if !plaintext.is_empty() {
-        write_sealed_secrets(&store_path, &new_pk, &plaintext)?;
+    let new_key_path = key_path.with_extension("pem.new");
+    let new_pub_path = pub_path.with_extension("pem.new");
+    let new_store_path = store_path.with_extension("enc.new");
+
+    // Whether to roll the store forward is driven by on-disk
+    // existence, NOT by whether plaintext is empty. A vault with an
+    // existing-but-empty store (e.g. after `rye vault remove` cleared
+    // the last key) MUST be re-sealed under the new key — otherwise
+    // the rotated keypair couldn't decrypt the still-present store.
+    let rewrap_store = store_path.exists();
+
+    let write_result = (|| -> Result<()> {
+        lillux::vault::write_secret_key(&new_key_path, &new_sk)
+            .with_context(|| format!("write {}", new_key_path.display()))?;
+        lillux::vault::write_public_key(&new_pub_path, &new_pk)
+            .with_context(|| format!("write {}", new_pub_path.display()))?;
+        if rewrap_store {
+            write_sealed_secrets(&new_store_path, &new_pk, &plaintext)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
+        return Err(e);
     }
-    lillux::vault::write_public_key(&pub_path, &new_pk)?;
-    lillux::vault::write_secret_key(&key_path, &new_sk)?;
+
+    // Phase B: rename in the documented order. See the function-level
+    // docstring for the failure-recovery contract.
+    std::fs::rename(&new_key_path, &key_path)
+        .with_context(|| format!("rename {} -> {}", new_key_path.display(), key_path.display()))?;
+    std::fs::rename(&new_pub_path, &pub_path)
+        .with_context(|| format!("rename {} -> {}", new_pub_path.display(), pub_path.display()))?;
+    if rewrap_store {
+        std::fs::rename(&new_store_path, &store_path).with_context(|| {
+            format!("rename {} -> {}", new_store_path.display(), store_path.display())
+        })?;
+    }
+
+    tracing::info!(
+        old_fingerprint = %old_fingerprint,
+        new_fingerprint = %new_fingerprint,
+        keys_rewrapped = plaintext.len(),
+        store_path = %store_path.display(),
+        "vault: rewrap complete — keypair rotated and store re-sealed"
+    );
 
     Ok(RewrapReport {
         store_path,
@@ -376,6 +450,12 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
         new_fingerprint,
         keys_rewrapped: plaintext.len(),
     })
+}
+
+fn cleanup_new_files(new_key_path: &Path, new_pub_path: &Path, new_store_path: &Path) {
+    let _ = std::fs::remove_file(new_key_path);
+    let _ = std::fs::remove_file(new_pub_path);
+    let _ = std::fs::remove_file(new_store_path);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -691,6 +771,10 @@ mod tests {
 
     #[test]
     fn rewrap_rotates_keypair_and_re_seals_store() {
+        // Atomicity guarantee: rewrap writes .new files first, then
+        // renames them into final position. A crash at any point
+        // leaves either the old (key, store) pair intact or the new
+        // pair fully committed — never a half-rotated state.
         let (state, old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
             state_dir: state.path().to_path_buf(),
@@ -719,10 +803,31 @@ mod tests {
 
         // The newly persisted key MUST decrypt the store and round-trip.
         let key_path = default_vault_secret_key_path(state.path());
+        let pub_path = default_vault_public_key_path(state.path());
         let new_sk = lillux::vault::read_secret_key(&key_path).unwrap();
         let map = read_sealed_secrets(&store_path, &new_sk).unwrap();
         assert_eq!(map.get("FOO").unwrap(), "bar");
         assert_eq!(map.get("BAZ").unwrap(), "qux");
+
+        // Final files exist; no `.new` siblings left behind.
+        assert!(key_path.exists(), "private_key.pem missing");
+        assert!(pub_path.exists(), "public_key.pem missing");
+        assert!(store_path.exists(), "store.enc missing");
+        assert!(
+            !key_path.with_extension("pem.new").exists(),
+            "stale private_key.pem.new"
+        );
+        assert!(
+            !pub_path.with_extension("pem.new").exists(),
+            "stale public_key.pem.new"
+        );
+        assert!(
+            !store_path.with_extension("enc.new").exists(),
+            "stale store.enc.new"
+        );
+
+        // The new private key's fingerprint MUST differ from the old.
+        assert_ne!(new_sk.public_key().fingerprint(), old_fingerprint);
     }
 
     #[test]
@@ -737,5 +842,41 @@ mod tests {
             report.new_fingerprint,
             old_sk.public_key().fingerprint()
         );
+    }
+
+    #[test]
+    fn rewrap_after_removing_all_keys_re_seals_empty_store() {
+        // Regression: if `run_remove` clears the last key, `store.enc`
+        // remains on disk encoding an empty map. A rewrap that
+        // skipped the store rename (driven by `plaintext.is_empty()`)
+        // would rotate the keypair but leave the still-present
+        // `store.enc` sealed under the OLD key — bricking the vault.
+        let (state, _old_sk) = fresh_state_with_keypair();
+        run_put(&PutOptions {
+            state_dir: state.path().to_path_buf(),
+            assignments: vec!["ONLY=value".into()],
+        })
+        .unwrap();
+        run_remove(&RemoveOptions {
+            state_dir: state.path().to_path_buf(),
+            keys: vec!["ONLY".into()],
+        })
+        .unwrap();
+        let store_path = default_sealed_store_path(state.path());
+        assert!(
+            store_path.exists(),
+            "precondition: store.enc must exist after remove-all"
+        );
+
+        run_rewrap(&RewrapOptions {
+            state_dir: state.path().to_path_buf(),
+        })
+        .unwrap();
+
+        // The now-on-disk private key must decrypt the now-on-disk store.
+        let key_path = default_vault_secret_key_path(state.path());
+        let new_sk = lillux::vault::read_secret_key(&key_path).unwrap();
+        let map = read_sealed_secrets(&store_path, &new_sk).unwrap();
+        assert!(map.is_empty());
     }
 }

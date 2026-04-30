@@ -14,12 +14,15 @@
 //!    `auth.env_var`, calls `std::env::var(...)`, and adds
 //!    `<header_name>: <prefix><secret>` to the outbound request.
 //! 5. The daemon's runtime spawn (`execution/launch.rs::spawn_runtime`)
-//!    inherits the parent process's environment, so an env var set on
-//!    the daemon is visible to the runtime subprocess.
+//!    builds a closed env: an allowlisted parent snapshot + declared
+//!    secrets pulled from the sealed vault. After lillux's
+//!    `env_clear()` contract change the subprocess sees ONLY this
+//!    env, so secrets MUST be declared in the directive's
+//!    `required_secrets` AND present in the operator vault.
 //!
 //! These tests prove that chain end-to-end by capturing the headers
-//! the mock provider receives and asserting both the value AND that
-//! the daemon → runtime env-inheritance path works.
+//! the mock provider receives and asserting the value flows from
+//! vault → vault_bindings → spec.env → directive-runtime subprocess.
 //!
 //! Two scenarios:
 //! - `secret_injection_with_custom_header_and_prefix` —
@@ -88,15 +91,6 @@ fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result
     Ok(())
 }
 
-fn plant_directive(
-    user_space: &Path,
-    rel_path: &str,
-    body_text: &str,
-    signer: &SigningKey,
-) -> anyhow::Result<()> {
-    plant_directive_with_secrets(user_space, rel_path, body_text, &[], signer)
-}
-
 /// Plant a directive that declares `required_secrets` in its frontmatter.
 ///
 /// The dispatcher reads only declared secrets out of the operator vault
@@ -150,11 +144,18 @@ model:
     Ok(())
 }
 
-/// Run a directive end-to-end with a configured env-var secret and
-/// return the headers the mock provider observed on its first
-/// `/chat/completions` request. The daemon process has `env_var` set
-/// to `secret_value`, so the runtime subprocess inherits it via
-/// `lillux::set_envs` (parent env is NOT cleared).
+/// Run a directive end-to-end with a vault-backed secret and return
+/// the headers the mock provider observed on its first
+/// `/chat/completions` request.
+///
+/// After lillux's `env_clear()` contract change, the directive
+/// runtime subprocess no longer inherits the daemon process's env.
+/// Secrets MUST be declared in the directive's `required_secrets`
+/// AND present in the operator's sealed vault store at
+/// `<state>/.ai/state/secrets/store.enc`. The dispatcher reads the
+/// declared secrets out of the vault, threads them through
+/// `vault_bindings`, and the directive-runtime subprocess sees them
+/// as `std::env::var(env_var)`.
 async fn run_directive_and_capture_first_request_headers(
     env_var: &str,
     secret_value: &str,
@@ -165,6 +166,7 @@ async fn run_directive_and_capture_first_request_headers(
     let mock_url = mock.base_url.clone();
 
     let env_var_owned = env_var.to_string();
+    let secret_owned = secret_value.to_string();
     let header_name_owned = header_name.map(|s| s.to_string());
     let prefix_owned = prefix.map(|s| s.to_string());
 
@@ -179,23 +181,26 @@ async fn run_directive_and_capture_first_request_headers(
             &fixture.publisher,
         )?;
         plant_model_routing(user, &fixture.publisher)?;
-        plant_directive(
+        // Declare the env var as a required secret so the dispatcher
+        // reads it out of the vault and injects it into the runtime
+        // subprocess. Without this declaration, dispatch ignores the
+        // vault entirely (post-step-7a scoping).
+        plant_directive_with_secrets(
             user,
             "test/secret_injection",
             "Say hello to {{ name }}.",
+            &[&env_var_owned],
             &fixture.publisher,
         )?;
+        // Seal the secret into the daemon's vault store BEFORE boot
+        // so `SealedEnvelopeVault::load` decrypts it at request time.
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert(env_var_owned.clone(), secret_owned.clone());
+        plant_sealed_vault_secrets(state_path, &secrets)?;
         Ok(())
     };
 
-    let env_var_for_daemon = env_var.to_string();
-    let secret_for_daemon = secret_value.to_string();
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
-        // The daemon spawns the directive-runtime via
-        // `lillux::SubprocessRequest`, whose `set_envs` *adds* to the
-        // parent's environment without clearing. So setting the env
-        // var on the daemon process makes it visible to the runtime.
-        cmd.env(&env_var_for_daemon, &secret_for_daemon);
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| {
@@ -204,7 +209,7 @@ async fn run_directive_and_capture_first_request_headers(
         );
     })
     .await
-    .expect("start daemon with mock provider + auth env_var");
+    .expect("start daemon with mock provider + vault-backed secret");
 
     let project = tempfile::tempdir().expect("project tempdir");
     let post_fut = h.post_execute(
@@ -302,16 +307,16 @@ async fn secret_injection_with_default_authorization_bearer() {
 
 // ── Vault-backed secret injection ─────────────────────────────────────
 //
-// The tests above set the secret on the daemon process directly via
-// `cmd.env(...)`. Production operators don't do that — they put their
-// API keys in the sealed-envelope store at
-// `<state>/.ai/state/secrets/store.enc` and let the daemon's
-// `SealedEnvelopeVault` decrypt them at request-build time. The vault
-// populates `vault_bindings`, which
+// All secret-injection tests in this file go through the sealed
+// vault. Operators put their API keys in the sealed-envelope store
+// at `<state>/.ai/state/secrets/store.enc`, the daemon's
+// `SealedEnvelopeVault` decrypts them at request-build time, and the
+// vault populates `vault_bindings`, which
 // `services::thread_lifecycle::spawn_item` merges into the spawned
-// subprocess's `spec.env`. The subprocess then sees
-// `std::env::var("FOO_API_KEY")` as if it had been exported in the
-// daemon's own env.
+// subprocess's `spec.env`. After lillux's `env_clear()` contract
+// change this is the only path that delivers a secret into the
+// directive runtime — the parent process's env is no longer
+// inherited.
 //
 // Because the daemon auto-generates the vault X25519 keypair at boot
 // (in `bootstrap::init`), the test fixture pre-generates the same

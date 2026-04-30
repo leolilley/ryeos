@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::contracts::{ExecutionDecorations, SubprocessSpec};
 use crate::error::EngineError;
@@ -448,6 +449,8 @@ pub fn compile_with_handlers(
     // that must appear in the params JSON passed to the subprocess.
     ctx.template_ctx.params_json = ctx.params.to_string();
 
+    let trust_ref = ctx.trust_store;
+
     let CompileContext {
         template_ctx,
         env,
@@ -462,7 +465,7 @@ pub fn compile_with_handlers(
 
     // Resolve `bin:` prefix — look up the binary from the bundle's
     // `.ai/bin/<triple>/` directory instead of PATH.
-    let cmd = resolve_bin_prefix(&cmd_expanded, root_source_path)?;
+    let cmd = resolve_bin_prefix(&cmd_expanded, root_source_path, |fp| trust_ref.get(fp).is_some())?;
 
     let args_template = spec_overrides.args.unwrap_or_default();
     let args: Result<Vec<String>, EngineError> = args_template
@@ -502,11 +505,15 @@ pub fn compile_with_handlers(
 /// When `cmd` starts with `bin:`, the remainder is the binary name
 /// (must be a single token — subcommand args go in the YAML's `args`
 /// list, not in `command`). We walk up from `root_source_path` to
-/// find the bundle root (the directory containing `.ai/`), then
-/// resolve the binary at `<bundle-root>/.ai/bin/<target-triple>/<name>`.
+/// find the bundle root, load the CAS manifest, verify the binary's
+/// hash and trust record, and return the absolute path.
 ///
 /// If `cmd` does not start with `bin:`, it is returned unchanged.
-fn resolve_bin_prefix(cmd: &str, root_source_path: &Path) -> Result<String, EngineError> {
+fn resolve_bin_prefix(
+    cmd: &str,
+    root_source_path: &Path,
+    trust_store_has_fingerprint: impl Fn(&str) -> bool,
+) -> Result<String, EngineError> {
     let bin_name = match cmd.strip_prefix("bin:") {
         Some(r) => r.trim(),
         None => return Ok(cmd.to_string()),
@@ -525,7 +532,6 @@ fn resolve_bin_prefix(cmd: &str, root_source_path: &Path) -> Result<String, Engi
         });
     }
 
-    // Walk up from root_source_path to find .ai/ parent (= bundle root).
     let bundle_root = find_bundle_root(root_source_path).ok_or_else(|| {
         EngineError::InvalidBinPrefix {
             raw: cmd.to_string(),
@@ -536,26 +542,132 @@ fn resolve_bin_prefix(cmd: &str, root_source_path: &Path) -> Result<String, Engi
         }
     })?;
 
-    let triple = resolve_target_triple(&bundle_root).ok_or_else(|| {
-        EngineError::InvalidBinPrefix {
-            raw: cmd.to_string(),
-            detail: format!(
-                "no target triple directory found under {}/.ai/bin/",
-                bundle_root.display()
-            ),
-        }
-    })?;
-    let bin_path = bundle_root
-        .join(".ai")
+    let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+    let bin_dir = bundle_root
+        .join(crate::AI_DIR)
         .join("bin")
-        .join(&triple)
-        .join(bin_name);
+        .join(triple);
+    if !bin_dir.is_dir() {
+        return Err(EngineError::BinNotFound {
+            bin: bin_name.to_string(),
+            searched: format!("expected triple dir {}", bin_dir.display()),
+        });
+    }
 
+    let bin_path = bin_dir.join(bin_name);
     if !bin_path.exists() {
         return Err(EngineError::BinNotFound {
             bin: bin_name.to_string(),
             searched: bin_path.display().to_string(),
         });
+    }
+
+    let manifest_ref_path = bundle_root
+        .join(crate::AI_DIR)
+        .join("refs")
+        .join("bundles")
+        .join("manifest");
+
+    // Manifest is part of the bundle's contract. A bundle that ships
+    // `bin:` items MUST also ship `refs/bundles/manifest`; absence is
+    // a hard error, never a fallback to an exists-only check. This
+    // closes the soft-fallback that violated the wave's "no migration
+    // shims" rule.
+    if !manifest_ref_path.exists() {
+        return Err(EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        });
+    }
+
+    let manifest_hash = std::fs::read_to_string(&manifest_ref_path)
+        .map_err(|_| EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        })?
+        .trim()
+        .to_string();
+
+    let objects_dir = bundle_root.join(crate::AI_DIR).join("objects");
+    let cas = lillux::cas::CasStore::new(objects_dir);
+
+    let manifest_value = cas
+        .get_object(&manifest_hash)
+        .map_err(|e| {
+            EngineError::Internal(format!(
+                "CAS read error for manifest {manifest_hash}: {e}"
+            ))
+        })?
+        .ok_or_else(|| EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        })?;
+
+    let item_source_hashes: HashMap<String, String> = manifest_value
+        .get("item_source_hashes")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let item_ref = format!("bin/{triple}/{bin_name}");
+    let item_source_hash = item_source_hashes
+        .get(&item_ref)
+        .ok_or_else(|| EngineError::BinNotInManifest {
+            bin: bin_name.to_string(),
+            triple: triple.to_string(),
+        })?;
+
+    let item_source = cas
+        .get_object(item_source_hash)
+        .map_err(|e| {
+            EngineError::Internal(format!(
+                "CAS read error for item_source {item_source_hash}: {e}"
+            ))
+        })?
+        .ok_or_else(|| {
+            EngineError::Internal(format!(
+                "item_source {item_source_hash} for {item_ref} not found in CAS"
+            ))
+        })?;
+
+    let content_blob_hash = item_source
+        .get("content_blob_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let bin_bytes = std::fs::read(&bin_path).map_err(|e| {
+        EngineError::Internal(format!(
+            "failed to read binary {}: {e}",
+            bin_path.display()
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bin_bytes);
+    let computed_hash = format!("{:x}", hasher.finalize());
+
+    if computed_hash != content_blob_hash {
+        return Err(EngineError::BinHashMismatch {
+            bin: bin_name.to_string(),
+            declared: content_blob_hash,
+            computed: computed_hash,
+        });
+    }
+
+    let (trust_class, fingerprint) =
+        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint);
+
+    match trust_class {
+        crate::resolution::TrustClass::TrustedSystem => {}
+        crate::resolution::TrustClass::TrustedUser
+        | crate::resolution::TrustClass::UntrustedUserSpace
+        | crate::resolution::TrustClass::Unsigned => {
+            return Err(EngineError::BinUntrusted {
+                bin: bin_name.to_string(),
+                fingerprint: fingerprint.unwrap_or_default(),
+            });
+        }
     }
 
     Ok(bin_path.to_string_lossy().into_owned())
@@ -572,20 +684,3 @@ fn find_bundle_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Return the target triple to use for `bin:` resolution.
-///
-/// Scans `<bundle-root>/.ai/bin/` for the first subdirectory — the
-/// directory name IS the target triple. This is simpler and more
-/// robust than trying to determine the compile-time triple, and
-/// handles cross-compile scenarios naturally (the bundle's bin
-/// directory contains the right triple for the target platform).
-fn resolve_target_triple(bundle_root: &Path) -> Option<String> {
-    let bin_dir = bundle_root.join(".ai").join("bin");
-    let entries = std::fs::read_dir(&bin_dir).ok()?;
-    for entry in entries.flatten() {
-        if entry.path().is_dir() {
-            return Some(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-    None
-}

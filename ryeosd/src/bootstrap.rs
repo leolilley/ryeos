@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use ryeos_engine::engine::Engine;
+use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
@@ -47,7 +48,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // Discover trust directory early — needed for stale-entry cleanup during
     // node-key regeneration.
-    let user_space = discover_user_root().unwrap_or_else(|| PathBuf::from("/tmp/missing-home"));
+    let user_space = roots::user_root().context("resolve user root for bootstrap")?;
     let trust_dir = user_space.join(".ai").join("config").join("keys").join("trusted");
 
     // 4. Generate or load the NODE signing key (daemon-internal state)
@@ -210,12 +211,6 @@ pem = "ed25519:{key_b64}"
     Ok(())
 }
 
-/// Discover the user-space root (parent of `~/.ai/`).
-fn discover_user_root() -> Option<PathBuf> {
-    std::env::var_os("USER_SPACE")
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
-}
 
 // V5.2-CLOSEOUT: sign_unsigned_items + walk helpers deleted.
 // Daemon bootstrap is bootstrap-only — must NEVER mutate
@@ -294,7 +289,7 @@ pub fn load_node_config_two_phase(
     let state_dir = &config.state_dir;
 
     // Discover user root (same logic as engine_init)
-    let user_root = discover_user_root();
+    let user_root = roots::user_root().ok();
     let system_roots_phase1 = vec![system_data_dir.to_path_buf()];
 
     // ── Phase 1: bootstrap trust store + bundle section ──

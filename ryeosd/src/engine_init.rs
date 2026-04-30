@@ -8,13 +8,13 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use directories::BaseDirs;
 
 use ryeos_engine::boot_validation::validate_boot;
 use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use ryeos_engine::roots;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
@@ -39,7 +39,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     // 2. Collect all system roots (system_data_dir + bundle_roots, ordered)
     let mut system_roots = vec![config.system_data_dir.clone()];
     system_roots.extend(bundle_roots.iter().cloned());
-    let user_root = discover_user_root();
+    let user_root = roots::user_root().ok();
 
     // 3. Collect kind schema search roots from all system roots + user space
     let mut schema_roots = Vec::new();
@@ -172,9 +172,3 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     Ok(engine)
 }
 
-/// Discover the user-space root (parent of `~/.ai/`).
-fn discover_user_root() -> Option<PathBuf> {
-    std::env::var_os("USER_SPACE")
-        .map(PathBuf::from)
-        .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
-}

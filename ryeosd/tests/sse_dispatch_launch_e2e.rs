@@ -260,7 +260,7 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String, String) {
 /// lifecycle event from `thread_started` onward.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_e2e_round_trip() {
-    let (h, node_sk, node_fp) = boot_daemon().await;
+    let (h, node_sk, _user_fp, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -517,9 +517,9 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
-        "item_ref": "directive:test/launch_e2e",
+        "item_ref": "knowledge:any/thing",
         "project_path": project_path,
-        "parameters": {"name": "World"},
+        "parameters": {},
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 

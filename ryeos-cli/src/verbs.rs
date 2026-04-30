@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use ryeos_engine::roots;
+
 use crate::error::CliConfigError;
 
 /// A parsed verb entry ready for matching and dispatch.
@@ -59,8 +61,9 @@ impl VerbTable {
 /// `TrustStore::load_three_tier` joins `.ai/config/keys/trusted/` itself,
 /// and we explicitly join `.ai/config/cli/` for verb-YAML discovery.
 pub fn load_verbs(project_root: &Path) -> Result<VerbTable, crate::error::CliError> {
-    let system_roots = discover_system_roots();
-    let user_root = dirs::home_dir();
+    let bundle_roots = discover_bundle_roots();
+    let system_roots = roots::system_roots(&bundle_roots);
+    let user_root = roots::user_root().ok();
 
     let trust_store = ryeos_engine::trust::TrustStore::load_three_tier(
         Some(project_root),
@@ -301,23 +304,8 @@ fn parse_verb_yaml(path: &Path, content: &str) -> Result<VerbEntry, crate::error
     })
 }
 
-/// Discover system bundle roots used to source verb YAMLs and trust data.
-///
-/// Returned paths are "bare" bundle roots — callers join `.ai/...`
-/// subpaths themselves (for trust-store: `.ai/config/keys/trusted/`;
-/// for verb YAMLs: `.ai/config/cli/`).
-///
-/// Resolution order (both sources appended, in order):
-///   1. `RYE_SYSTEM_SPACE` — a bundle source tree (e.g. `ryeos-bundles/standard`).
-///   2. `RYEOS_STATE_DIR` (else `dirs::state_dir()/ryeosd`) — iterates
-///      `<state>/.ai/bundles/<name>/` and returns each installed bundle root.
-fn discover_system_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-
-    if let Ok(p) = std::env::var("RYE_SYSTEM_SPACE") {
-        roots.push(PathBuf::from(p));
-    }
-
+/// Discover installed bundle roots from the daemon state directory.
+fn discover_bundle_roots() -> Vec<PathBuf> {
     let state_dir = match std::env::var("RYEOS_STATE_DIR") {
         Ok(p) => PathBuf::from(p),
         Err(_) => dirs::state_dir()
@@ -325,7 +313,7 @@ fn discover_system_roots() -> Vec<PathBuf> {
             .unwrap_or_else(|| PathBuf::from(".ryeosd")),
     };
     let bundles_dir = state_dir.join(".ai").join("bundles");
-
+    let mut roots = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
@@ -333,6 +321,5 @@ fn discover_system_roots() -> Vec<PathBuf> {
             }
         }
     }
-    roots.sort();
     roots
 }

@@ -32,6 +32,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindRegistry, KindSchema};
 use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
 /// Where to look for the item to sign. The system tier is intentionally
@@ -90,8 +91,25 @@ pub fn run_sign(
     let canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| anyhow!("malformed canonical ref `{item_ref}`: {e}"))?;
 
-    let user_root = dirs::home_dir();
-    let system_roots = discover_system_roots();
+    let user_root = roots::user_root().ok();
+    let system_roots = {
+        let state_dir = match std::env::var("RYEOS_STATE_DIR") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => dirs::state_dir()
+                .map(|d| d.join("ryeosd"))
+                .unwrap_or_else(|| PathBuf::from(".ryeosd")),
+        };
+        let bundles_dir = state_dir.join(ryeos_engine::AI_DIR).join("bundles");
+        let mut additional: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    additional.push(entry.path());
+                }
+            }
+        }
+        roots::system_roots(&additional)
+    };
 
     let trust_store = TrustStore::load_three_tier(
         project_path,
@@ -405,32 +423,6 @@ fn build_parser_dispatcher(
         .with_context(|| "load parser tool descriptors")?;
     let native_handlers = NativeParserHandlerRegistry::with_builtins();
     Ok(ParserDispatcher::new(parser_tools, native_handlers))
-}
-
-fn discover_system_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-
-    if let Ok(p) = std::env::var("RYE_SYSTEM_SPACE") {
-        roots.push(PathBuf::from(p));
-    }
-
-    let state_dir = match std::env::var("RYEOS_STATE_DIR") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => dirs::state_dir()
-            .map(|d| d.join("ryeosd"))
-            .unwrap_or_else(|| PathBuf::from(".ryeosd")),
-    };
-    let bundles_dir = state_dir.join(".ai").join("bundles");
-
-    if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                roots.push(entry.path());
-            }
-        }
-    }
-    roots.sort();
-    roots
 }
 
 /// Sign a file in place using the kind's signature envelope. Loads

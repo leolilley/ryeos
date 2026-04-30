@@ -71,6 +71,7 @@ static REPLAY_GUARD: LazyLock<Mutex<ReplayGuard>> =
 // Authorized key file loading
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct AuthorizedKey {
     public_key: VerifyingKey,
     scopes: Vec<String>,
@@ -202,6 +203,17 @@ fn load_authorized_key(
         .try_into()
         .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
     let public_key = VerifyingKey::from_bytes(&key_array)?;
+
+    let computed_fp = lillux::signature::compute_fingerprint(&public_key);
+    if computed_fp != fingerprint {
+        bail!(
+            "authorized-key file {} declares fingerprint {} but \
+             its public_key fingerprint computes to {} — refusing to load",
+            key_file.display(),
+            fingerprint,
+            computed_fp
+        );
+    }
 
     let scopes = parse_toml_string_array(body, "scopes");
     let owner = values
@@ -396,5 +408,62 @@ pub async fn auth_middleware(
             axum::Json(json!({ "error": msg })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::identity::NodeIdentity;
+
+    fn make_node_identity(sk: &SigningKey, dir: &std::path::Path) -> NodeIdentity {
+        let pem = sk.to_pkcs8_pem(Default::default()).unwrap();
+        let key_path = dir.join("node_key.pem");
+        std::fs::write(&key_path, pem.as_bytes()).unwrap();
+        NodeIdentity::load(&key_path).unwrap()
+    }
+
+    #[test]
+    fn load_authorized_key_rejects_fingerprint_public_key_mismatch() {
+        let real_subject = SigningKey::from_bytes(&[1u8; 32]);
+        let attacker_subject = SigningKey::from_bytes(&[2u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[3u8; 32]);
+
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+
+        let real_fp = lillux::signature::compute_fingerprint(&real_subject.verifying_key());
+        let attacker_vk = attacker_subject.verifying_key();
+        let attacker_key_b64 = base64::engine::general_purpose::STANDARD
+            .encode(attacker_vk.as_bytes());
+
+        let toml_body = format!(
+            "fingerprint = \"{real_fp}\"\npublic_key = \"ed25519:{attacker_key_b64}\"\nscopes = [\"*\"]\nlabel = \"evil\"\n"
+        );
+
+        let signed = lillux::signature::sign_content_at(
+            &toml_body,
+            &node_signer,
+            "#",
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+
+        let file_path = auth_dir.join(format!("{real_fp}.toml"));
+        std::fs::write(&file_path, signed).unwrap();
+
+        let result = load_authorized_key(&real_fp, &auth_dir, &node_identity);
+        let err = result.expect_err("should reject mismatched fingerprint/public_key");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fingerprint"),
+            "error message should mention 'fingerprint', got: {msg}"
+        );
     }
 }

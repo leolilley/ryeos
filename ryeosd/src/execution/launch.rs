@@ -35,6 +35,12 @@ pub enum MaterializationError {
     ArchCheckFailed { executor_ref: String, detail: String },
     #[error("executor materialization failed for '{executor_ref}': {detail}")]
     MaterializationFailed { executor_ref: String, detail: String },
+    #[error("executor '{executor_ref}' failed trust check (class={trust_class:?}, fp={fingerprint:?})")]
+    ExecutorUntrusted {
+        executor_ref: String,
+        trust_class: ryeos_engine::resolution::TrustClass,
+        fingerprint: Option<String>,
+    },
 }
 
 /// Typed error returned by [`build_and_launch`]. Materialization
@@ -108,98 +114,131 @@ pub fn resolve_native_executor_path(
 
     let triple = host_triple();
 
-    // 1. Find a system root with a valid CAS
-    let mut found_root: Option<PathBuf> = None;
-    let mut manifest_hash: Option<String> = None;
+    // Iterate every system root that ships a manifest, and use the
+    // first one whose manifest contains the requested executor. This
+    // matches the kind/parser-discovery model: each bundle owns a
+    // disjoint slice of the executor namespace (core ships utility
+    // bins like `rye-inspect`; standard ships runtime drivers like
+    // `ryeos-directive-runtime`). Picking the first manifest blindly
+    // would cause core to shadow standard for runtimes that only
+    // standard ships.
+    let mut tried_roots: Vec<PathBuf> = Vec::new();
+    let mut last_resolution_error: Option<String> = None;
+    let mut resolved_with: Option<(
+        lillux::cas::CasStore,
+        ryeos_engine::executor_resolution::ResolvedExecutor,
+    )> = None;
 
     for system_root in system_roots {
-        let ai_dir = system_root.join(".ai");
+        let ai_dir = system_root.join(ryeos_engine::AI_DIR);
         let objects_dir = ai_dir.join("objects");
 
-        // Check CAS exists
         if !objects_dir.join("blobs").is_dir() || !objects_dir.join("objects").is_dir() {
             continue;
         }
 
-        // Read the bundle manifest ref
         let ref_path = ai_dir.join(BUNDLE_MANIFEST_REF);
-        if let Ok(ref_content) = std::fs::read_to_string(&ref_path) {
-            // Ref files contain the hash as the first line
-            let hash = ref_content.trim().lines().next().unwrap_or("").trim();
-            if lillux::cas::valid_hash(hash) {
-                found_root = Some(objects_dir);
-                manifest_hash = Some(hash.to_string());
-                break;
-            }
+        let ref_content = match std::fs::read_to_string(&ref_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let hash = ref_content.trim().lines().next().unwrap_or("").trim();
+        if !lillux::cas::valid_hash(hash) {
+            continue;
         }
-    }
+        let mhash = hash.to_string();
 
-    let (cas_root, mhash) = match (found_root, manifest_hash) {
-        (Some(root), Some(hash)) => (root, hash),
-        _ => {
-            return Err(MaterializationError::ExecutorUnavailable {
-                executor_ref: bare.to_string(),
-                detail: format!(
-                    "system bundle manifest not found ({BUNDLE_MANIFEST_REF}). \
-                     The bundle pipeline (PR1b2) must ship binaries for host triple '{triple}'."
-                ),
-            })
-        }
-    };
+        tried_roots.push(system_root.clone());
 
-    let cas = lillux::cas::CasStore::new(cas_root);
+        let cas = lillux::cas::CasStore::new(objects_dir);
 
-    // 2. Load the manifest
-    let manifest_value = cas
-        .get_object(&mhash)
-        .map_err(|e| MaterializationError::ManifestError(format!(
-            "failed to read bundle manifest object {mhash}: {e}"
-        )))?
-        .ok_or_else(|| MaterializationError::ManifestError(
-            format!("bundle manifest object {mhash} not found in system CAS")
-        ))?;
+        let manifest_value = cas
+            .get_object(&mhash)
+            .map_err(|e| MaterializationError::ManifestError(format!(
+                "failed to read bundle manifest object {mhash}: {e}"
+            )))?
+            .ok_or_else(|| MaterializationError::ManifestError(
+                format!("bundle manifest object {mhash} not found in system CAS")
+            ))?;
 
-    let manifest =
-        ryeos_state::objects::SourceManifest::from_value(&manifest_value)
+        let manifest = ryeos_state::objects::SourceManifest::from_value(&manifest_value)
             .map_err(|e| MaterializationError::ManifestError(format!(
                 "failed to parse bundle manifest: {e}"
             )))?;
 
-    tracing::debug!(
-        executor_ref,
-        host_triple = %triple,
-        manifest_entries = manifest.item_source_hashes.len(),
-        "loaded bundle manifest for native executor resolution"
-    );
+        tracing::debug!(
+            executor_ref,
+            host_triple = %triple,
+            bundle_root = %system_root.display(),
+            manifest_entries = manifest.item_source_hashes.len(),
+            "scanning bundle manifest for native executor"
+        );
 
-    // 3. Resolve the executor from the manifest
-    let resolved = ryeos_engine::executor_resolution::resolve_native_executor(
-        &manifest.item_source_hashes,
-        executor_ref,
-        &triple,
-        |hash| {
-            cas.get_object(hash)
-                .map_err(|e| e.to_string())
-        },
-    )
-    .map_err(|e| MaterializationError::ResolutionFailed {
+        match ryeos_engine::executor_resolution::resolve_native_executor(
+            &manifest.item_source_hashes,
+            executor_ref,
+            &triple,
+            |h| cas.get_object(h).map_err(|e| e.to_string()),
+        ) {
+            Ok(resolved) => {
+                resolved_with = Some((cas, resolved));
+                break;
+            }
+            Err(e) => {
+                last_resolution_error = Some(e.to_string());
+                continue;
+            }
+        }
+    }
+
+    if tried_roots.is_empty() {
+        return Err(MaterializationError::ExecutorUnavailable {
+            executor_ref: bare.to_string(),
+            detail: format!(
+                "no system bundle manifest found ({BUNDLE_MANIFEST_REF}). \
+                 The bundle pipeline must ship binaries for host triple '{triple}'."
+            ),
+        });
+    }
+
+    let (cas, resolved) = resolved_with.ok_or_else(|| MaterializationError::ResolutionFailed {
         executor_ref: bare.to_string(),
-        detail: e.to_string(),
+        detail: last_resolution_error.unwrap_or_else(|| {
+            format!(
+                "no manifest among {} system bundle root(s) lists '{executor_ref}' for triple '{triple}'",
+                tried_roots.len()
+            )
+        }),
     })?;
 
     // 4. Verify trust on the binary's item_source record
-    let (_trust_class, _fingerprint) =
+    let (trust_class, fingerprint) =
         ryeos_engine::executor_resolution::verify_executor_trust(
             &resolved.item_source,
             |fp| trust_store.get(fp).is_some(),
         );
 
-    tracing::info!(
-        executor_ref,
-        host_triple = %triple,
-        blob_hash = %resolved.blob_hash,
-        "native executor resolved and trust-verified"
-    );
+    match trust_class {
+        ryeos_engine::resolution::TrustClass::TrustedSystem
+        | ryeos_engine::resolution::TrustClass::TrustedUser => {
+            tracing::info!(
+                executor_ref,
+                host_triple = %triple,
+                blob_hash = %resolved.blob_hash,
+                signer_fp = ?fingerprint,
+                trust_class = ?trust_class,
+                "native executor resolved and trust-verified"
+            );
+        }
+        ryeos_engine::resolution::TrustClass::UntrustedUserSpace
+        | ryeos_engine::resolution::TrustClass::Unsigned => {
+            return Err(MaterializationError::ExecutorUntrusted {
+                executor_ref: bare.to_string(),
+                trust_class,
+                fingerprint,
+            });
+        }
+    }
 
     // 5. Fetch the binary blob from CAS
     let blob_bytes = cas
@@ -606,14 +645,13 @@ fn spawn_runtime(
     thread_id: &str,
     vault_bindings: &[(String, String)],
 ) -> Result<RuntimeResult> {
-    // Vault first, daemon-callback env appended afterwards. lillux's
-    // `set_envs` applies in order and a later assignment overwrites an
-    // earlier one — so a poisoned vault containing `RYEOSD_THREAD_ID`
-    // (or any other daemon-callback name) cannot shadow the real
-    // value the runtime needs to call back home. The vault is still
-    // the "outer" layer that flows into provider auth, db creds,
-    // etc.; the inner layer is non-negotiable runtime infrastructure.
-    let mut envs: Vec<(String, String)> = vault_bindings.to_vec();
+    // Build the subprocess env: allowlisted parent vars + daemon-resolved
+    // roots + declared secrets (vault_bindings) + daemon-callback infra.
+    // After B's lillux contract change, the subprocess sees ONLY these
+    // entries — inherited parent env is no longer available.
+    let secret_map: std::collections::BTreeMap<String, String> =
+        vault_bindings.iter().cloned().collect();
+    let mut envs = crate::process::build_spawn_env(&secret_map)?;
     envs.extend([
         ("RYEOSD_SOCKET_PATH".to_string(), callback.socket_path.to_string_lossy().to_string()),
         ("RYEOSD_CALLBACK_TOKEN".to_string(), callback.token.clone()),

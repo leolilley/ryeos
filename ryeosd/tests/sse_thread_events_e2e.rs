@@ -213,7 +213,19 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
         plant_model_routing(user, &fixture.publisher)?;
         plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
         plant_route_yaml(state_path, &fixture.publisher)?;
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+        // The hardcoded `/execute` route runs through
+        // `auth::auth_middleware`, which only extracts a `Principal`
+        // when the daemon was started with `--require-auth`. Tests
+        // here don't enable that flag (it would double-replay-check
+        // every request because both the middleware AND the
+        // `rye_signed` route verifier record nonces in the same
+        // `REPLAY_GUARD`). So the unauthenticated POST `/execute`
+        // gets the daemon's own identity as the caller principal,
+        // and the SSE GET — verified by the route's `rye_signed`
+        // verifier — must be signed by that same identity for the
+        // thread_events source's `principal_id == requested_by`
+        // ownership check to pass.
+        write_authorized_key_signed_by(state_path, &fixture.node, &fixture.node)?;
         Ok(())
     };
 
@@ -229,7 +241,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     .expect("start daemon with mock + route YAML");
 
     let node_fp = fixture.node_fp();
-    let user_sk = fixture.user;
+    let node_sk = fixture.node;
 
     let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = match tokio::time::timeout(
@@ -282,7 +294,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
     let headers =
-        build_rye_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
+        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
 
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
@@ -373,9 +385,16 @@ async fn boot_and_run_directive_with_extra_keys(
         plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
         plant_route_yaml(state_path, &fixture.publisher)?;
 
-        // Authorize the user key (HTTP caller principal). The file
-        // must be signed by the node identity (daemon requirement).
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+        // The hardcoded `/execute` route runs through
+        // `auth::auth_middleware`, which only extracts a `Principal`
+        // when `--require-auth` is on. The tests here can't enable
+        // it (the global middleware + per-route `rye_signed`
+        // verifier would record the same nonce twice and 401 the
+        // second check). So /execute runs as the daemon's identity
+        // and the SSE GET below — verified by the route's
+        // `rye_signed` verifier — must be signed by that same
+        // identity for `principal_id == requested_by` to pass.
+        write_authorized_key_signed_by(state_path, &fixture.node, &fixture.node)?;
         for bytes in &extra_key_bytes {
             let extra = SigningKey::from_bytes(bytes);
             // Authorized-key files MUST be signed by the node
@@ -397,7 +416,7 @@ async fn boot_and_run_directive_with_extra_keys(
     .expect("start daemon with mock + route YAML");
 
     let node_fp = fixture.node_fp();
-    let user_sk = fixture.user;
+    let node_sk = fixture.node;
 
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
@@ -426,7 +445,7 @@ async fn boot_and_run_directive_with_extra_keys(
     std::mem::forget(project);
     std::mem::forget(mock);
 
-    (h, user_sk, node_fp, thread_id)
+    (h, node_sk, node_fp, thread_id)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -436,7 +455,7 @@ async fn sse_thread_events_returns_404_for_non_owner() {
     // request through the source's principal-mismatch branch, which
     // is the path we want to assert returns 404 (not 401).
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let (h, _user_sk, node_fp, thread_id) =
+    let (h, _node_sk, node_fp, thread_id) =
         boot_and_run_directive_with_extra_keys(std::slice::from_ref(&other_sk)).await;
 
     // Sign the SSE GET with the OTHER (authorized) key. The
@@ -468,14 +487,14 @@ async fn sse_thread_events_returns_404_for_non_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
-    let (h, user_sk, node_fp, thread_id) = boot_and_run_directive().await;
+    let (h, node_sk, node_fp, thread_id) = boot_and_run_directive().await;
 
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
 
     // First connect: drain all events, capture their IDs.
     let headers_1 =
-        build_rye_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
+        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
 
@@ -510,7 +529,7 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
 
     // Second connect: same path, with Last-Event-ID = resume_from.
     let headers_2 =
-        build_rye_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
+        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
     let mut req2 = client.get(&url);
     for (k, v) in &headers_2 {
         req2 = req2.header(k.as_str(), v.as_str());

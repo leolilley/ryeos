@@ -144,6 +144,22 @@ pub enum EngineError {
     #[error("binary `{bin}` not found in bundle (searched: {searched})")]
     BinNotFound { bin: String, searched: String },
 
+    #[error("bundle manifest missing: no refs/bundles/manifest under bundle root at {bundle_root}")]
+    BinManifestMissing { bundle_root: String },
+
+    #[error("binary `{bin}` not in manifest (triple {triple})")]
+    BinNotInManifest { bin: String, triple: String },
+
+    #[error("binary `{bin}` hash mismatch: manifest declares {declared}, on-disk computed {computed}")]
+    BinHashMismatch {
+        bin: String,
+        declared: String,
+        computed: String,
+    },
+
+    #[error("binary `{bin}` not trusted: signature from fingerprint `{fingerprint}` not in trust store")]
+    BinUntrusted { bin: String, fingerprint: String },
+
     #[error("unknown template token: {{{token}}}")]
     UnknownTemplateToken { token: String },
 

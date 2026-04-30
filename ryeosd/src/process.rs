@@ -106,6 +106,58 @@ pub fn hard_kill_process_group(pgid: i64) -> KillResult {
     }
 }
 
+/// Allowlist of env keys the daemon propagates to subprocesses.
+/// Plus declared secrets injected separately by the dispatch path.
+const SPAWN_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",                  // libc/linker bootstrap
+    "HOME",                  // libc/lib lookup
+    "LANG", "LC_ALL", "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "USER_SPACE",            // root discovery (set by daemon)
+    "RYE_SYSTEM_SPACE",      // root discovery (set by daemon)
+    "RUST_LOG", "RUST_BACKTRACE",
+    "RYEOSD_TEST_STDERR_DIR",
+];
+
+/// Build the env map for a daemon-spawned subprocess.
+///
+/// Composition:
+///   * Allowlisted parent env, snapshotted at call time.
+///   * Daemon-resolved roots (overrides allowlisted snapshot if
+///     the daemon resolved a different value than the parent env
+///     held).
+///   * Declared secrets injected by the caller (e.g. dispatch from
+///     `ItemMetadata.required_secrets`).
+///
+/// The result is meant to be passed verbatim into
+/// `SubprocessRequest::envs`. After B's lillux contract change,
+/// the subprocess sees ONLY these env entries — inherited parent
+/// env is no longer available.
+pub fn build_spawn_env(
+    declared_secrets: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut env: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+
+    for k in SPAWN_ENV_ALLOWLIST {
+        if let Some(v) = std::env::var_os(k) {
+            env.insert((*k).to_string(), v.to_string_lossy().into_owned());
+        }
+    }
+
+    // Daemon-resolved roots override whatever the parent env held.
+    let user_root = ryeos_engine::roots::user_root()
+        .context("resolve user root for subprocess env")?;
+    env.insert("USER_SPACE".to_string(), user_root.display().to_string());
+
+    for (k, v) in declared_secrets {
+        env.insert(k.clone(), v.clone());
+    }
+
+    Ok(env.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

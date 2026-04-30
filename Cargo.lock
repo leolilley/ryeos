@@ -1888,6 +1888,7 @@ name = "ryeos-engine"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "directories",
  "jsonschema",
  "lillux",
  "regex",

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+use ryeos_engine::roots;
 use ryeos_tools::actions::install::preflight_verify_bundle;
 
 use crate::service_executor::ServiceAvailability;
@@ -78,7 +79,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // (`system_data_dir`) contribute kind schemas + parser tools, never
     // trust docs. Bundles whose signers aren't already trusted are
     // rejected — operators must `rye trust pin <fingerprint>` first.
-    let user_root = discover_user_root();
+    let user_root = roots::user_root().ok();
     preflight_verify_bundle(
         &req.source_path,
         &state.config.system_data_dir,
@@ -120,13 +121,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "config_item": config_item_path.display().to_string(),
     });
     Ok(report)
-}
-
-/// Discover the user-space root (parent of `~/.ai/`).
-fn discover_user_root() -> Option<PathBuf> {
-    std::env::var_os("USER_SPACE")
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {

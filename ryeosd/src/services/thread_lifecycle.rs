@@ -763,10 +763,35 @@ pub fn spawn_item(
         )
         .map_err(|e| anyhow!("plan build failed: {e}"))?;
 
-    // Inject vault bindings + daemon callback env into every subprocess node.
+    // Inject the daemon's subprocess env contract into every subprocess
+    // node: allowlisted parent env (PATH/HOME/...) + daemon-resolved
+    // roots (USER_SPACE/RYE_SYSTEM_SPACE) + declared secrets, then
+    // layer the daemon callback infra (socket path, callback token,
+    // thread id, project path) on top. Mirrors `execution::launch::
+    // spawn_runtime`'s composition so engine-dispatched `bin:` items
+    // (e.g. `bin:rye-inspect`) see the same env contract as runtime-
+    // binary spawns. Without this, `lillux::run`'s post-Part-B
+    // `env_clear()` would leave the subprocess with only a handful of
+    // RYEOSD_* vars and `ryeos_engine::roots::user_root()` would fail
+    // to resolve in the child.
+    let secret_map: std::collections::BTreeMap<String, String> = vault_bindings
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let base_env = crate::process::build_spawn_env(&secret_map)
+        .map_err(|e| anyhow!("build subprocess env contract: {e}"))?;
     for node in &mut plan.nodes {
         if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
-            spec.env.extend(vault_bindings.iter().map(|(k, v)| (k.clone(), v.clone())));
+            // Seed allowlisted parent env + daemon-resolved roots +
+            // declared secrets. `insert` overwrites parent-snapshotted
+            // values with daemon-resolved values; plan-builder-set
+            // RYE_* vars (RYE_ITEM_KIND, RYE_SITE_ID, ...) are
+            // preserved because they don't collide with the allowlist.
+            for (k, v) in &base_env {
+                spec.env.insert(k.clone(), v.clone());
+            }
+            // Layer daemon callback env last — daemon-controlled infra
+            // must always win over anything else.
             spec.env.extend(daemon_callback_env.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
     }

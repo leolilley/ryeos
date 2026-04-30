@@ -238,6 +238,7 @@ fn unix_mode(path: &Path) -> Result<u32> {
     Ok(meta.permissions().mode() & 0o7777)
 }
 
+
 #[cfg(not(unix))]
 fn unix_mode(_path: &Path) -> Result<u32> {
     Ok(0o755)

@@ -14,6 +14,7 @@ pub mod parsers;
 pub mod boot_validation;
 pub mod plan_builder;
 pub mod resolution;
+pub mod roots;
 pub mod runtime;
 pub mod runtime_registry;
 pub mod scope;

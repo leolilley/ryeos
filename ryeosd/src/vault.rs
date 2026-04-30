@@ -55,6 +55,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 
+use ryeos_engine::roots;
+
 // Vault key-name policy + write helpers live in
 // `ryeos_tools::actions::vault` so they can be shared with the CLI
 // `rye vault {put,list,remove,rewrap}` verbs without a circular
@@ -157,8 +159,8 @@ pub fn read_required_secrets(
 /// path then degenerates to vault-only (the pre-step-7c behavior).
 pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) {
-        dirs.push(home);
+    if let Ok(p) = roots::user_dotenv_path() {
+        dirs.push(p.parent().unwrap().to_path_buf());
     }
     if let Some(p) = project_path {
         dirs.push(p.to_path_buf());

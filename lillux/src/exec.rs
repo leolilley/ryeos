@@ -10,6 +10,13 @@ use clap::Subcommand;
 // ---------------------------------------------------------------------------
 
 /// Request to run a subprocess synchronously.
+///
+/// Env handling: `envs` is **authoritative**. The runner clears the
+/// subprocess environment with `Command::env_clear()` before applying
+/// `envs`, so callers MUST populate every env var the subprocess
+/// needs. Inheriting parent env is not supported. This contract
+/// closes the secret-leak hole where shell-exported variables on the
+/// daemon process bypassed `required_secrets` scoping.
 pub struct SubprocessRequest {
     pub cmd: String,
     pub args: Vec<String>,
@@ -141,6 +148,7 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
 
     let mut command = process::Command::new(&request.cmd);
     command.args(&request.args);
+    command.env_clear();
     set_envs(&mut command, &envs_str);
     if let Some(ref dir) = request.cwd {
         command.current_dir(dir);
@@ -327,6 +335,8 @@ fn resolve_stdin(stdin_arg: Option<String>, stdin_pipe: bool) -> Option<String> 
     None
 }
 
+/// Apply env key=value pairs to a Command. Callers should call
+/// `command.env_clear()` before this to ensure `envs` is authoritative.
 fn set_envs(command: &mut process::Command, envs: &[String]) {
     for env in envs {
         if let Some((k, v)) = env.split_once('=') {
@@ -465,6 +475,7 @@ fn do_stream(
 ) -> i32 {
     let mut command = process::Command::new(cmd);
     command.args(args);
+    command.env_clear();
     set_envs(&mut command, envs);
     // Set PYTHONUNBUFFERED for Python children to ensure streaming latency
     command.env("PYTHONUNBUFFERED", "1");
@@ -571,6 +582,7 @@ fn spawn_detached(
     use std::os::unix::process::CommandExt;
     let mut command = process::Command::new(cmd);
     command.args(args);
+    command.env_clear();
     set_envs(&mut command, envs);
     command.stdin(if stdin_data.is_some() {
         Stdio::piped()
@@ -602,6 +614,7 @@ fn spawn_detached(
     use std::os::windows::process::CommandExt;
     let mut command = process::Command::new(cmd);
     command.args(args);
+    command.env_clear();
     set_envs(&mut command, envs);
     command.stdin(if stdin_data.is_some() {
         Stdio::piped()

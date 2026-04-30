@@ -16,12 +16,14 @@ use anyhow::{Context, Result};
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
 /// Boot the engine from the same sources the daemon uses.
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
-    let user_root = dirs::home_dir();
-    let system_roots = discover_system_roots();
+    let user_root = roots::user_root().ok();
+    let bundle_roots = discover_bundle_roots();
+    let system_roots = roots::system_roots(&bundle_roots);
 
     let trust_store = TrustStore::load_three_tier(
         project_path,
@@ -72,14 +74,8 @@ fn build_parser_dispatcher(
     Ok(ParserDispatcher::new(parser_tools, native_handlers))
 }
 
-/// Discover system bundle roots. Mirrors `sign.rs::discover_system_roots`.
-fn discover_system_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-
-    if let Ok(p) = std::env::var("RYE_SYSTEM_SPACE") {
-        roots.push(PathBuf::from(p));
-    }
-
+/// Discover installed bundle roots from the daemon state directory.
+fn discover_bundle_roots() -> Vec<PathBuf> {
     let state_dir = match std::env::var("RYEOS_STATE_DIR") {
         Ok(p) => PathBuf::from(p),
         Err(_) => dirs::state_dir()
@@ -87,7 +83,7 @@ fn discover_system_roots() -> Vec<PathBuf> {
             .unwrap_or_else(|| PathBuf::from(".ryeosd")),
     };
     let bundles_dir = state_dir.join(".ai").join("bundles");
-
+    let mut roots = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
@@ -95,6 +91,5 @@ fn discover_system_roots() -> Vec<PathBuf> {
             }
         }
     }
-    roots.sort();
     roots
 }

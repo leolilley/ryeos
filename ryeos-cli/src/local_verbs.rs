@@ -19,6 +19,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use lillux::crypto::{DecodePrivateKey, SigningKey};
 
+use ryeos_engine::roots;
 use ryeos_tools::actions::init::{run_init, InitOptions};
 use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 use ryeos_tools::actions::trust::{run_pin, PinOptions};
@@ -375,17 +376,12 @@ fn default_state_dir() -> PathBuf {
 }
 
 fn default_user_root() -> PathBuf {
-    if let Ok(p) = std::env::var("USER_SPACE") {
-        return PathBuf::from(p);
-    }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    roots::user_root().ok().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn default_system_data_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("RYE_SYSTEM_SPACE") {
-        return PathBuf::from(p);
-    }
-    dirs::data_dir()
-        .map(|d| d.join("ryeos"))
+    roots::system_roots(&[])
+        .into_iter()
+        .next()
         .unwrap_or_else(|| PathBuf::from(".ryeos-data"))
 }
