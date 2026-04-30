@@ -236,6 +236,13 @@ pub enum EngineError {
     #[error("runtime YAML invalid at {path}: {reason}")]
     RuntimeYamlInvalid { path: PathBuf, reason: String },
 
+    #[error("runtime `{runtime}` declares abi_version `{found}` but daemon supports `{expected}`")]
+    AbiVersionMismatch {
+        runtime: String,
+        expected: String,
+        found: String,
+    },
+
     #[error("no runtime registered for kind `{kind}`")]
     NoRuntimeFor { kind: String },
 

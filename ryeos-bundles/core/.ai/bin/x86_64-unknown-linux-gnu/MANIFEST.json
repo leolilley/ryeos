@@ -1,9 +1,9 @@
 {
   "rye-inspect": {
-    "blob_hash": "48683e86f75144c59d9d7fcda2baa9bbff351acfb39a8ce577bf71335c6ab0d3",
-    "content_blob_hash": "48683e86f75144c59d9d7fcda2baa9bbff351acfb39a8ce577bf71335c6ab0d3",
-    "item_source_hash": "fc78ad3abc148880541ab55067482d855c7fcec0f27ca79869de8038ccc19322",
-    "manifest_hash": "5a7cb79f20af88ed1e852acb8d23db3b11619ddb82e10b4e8e2030d16494672a",
-    "source_checksum": "48683e86f75144c59d9d7fcda2baa9bbff351acfb39a8ce577bf71335c6ab0d3"
+    "blob_hash": "1b67af92fcbdeaff0fbe40497a2dbe3ebb084e08c6d280d41069cc3a255bd702",
+    "content_blob_hash": "1b67af92fcbdeaff0fbe40497a2dbe3ebb084e08c6d280d41069cc3a255bd702",
+    "item_source_hash": "923eed01e6de2dc2ba5047f8943cfb8989a8b722fba119e479b0a15e4637aeb8",
+    "manifest_hash": "4507510863c8d32c6b15ba32f3434388ee00d69dea6a3513c839d762c1eb982b",
+    "source_checksum": "1b67af92fcbdeaff0fbe40497a2dbe3ebb084e08c6d280d41069cc3a255bd702"
   }
 }

@@ -25,6 +25,15 @@ use crate::contracts::TrustClass;
 use crate::error::EngineError;
 use crate::trust::TrustStore;
 
+/// ABI version this daemon understands for runtime binaries.
+/// Bundles shipping a different `abi_version` in their runtime YAML
+/// are rejected at registry load — we fail closed at load, not at
+/// dispatch.
+///
+/// Bump when the LaunchEnvelope, callback ABI, or any other
+/// daemon↔runtime contract surface changes incompatibly.
+pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v1";
+
 // ── Public types ─────────────────────────────────────────────────────
 
 /// Typed view over a parsed `kind: runtime` YAML.
@@ -317,5 +326,65 @@ pub(crate) fn validate_runtime_yaml(
             reason: "`abi_version` must be non-empty".to_owned(),
         });
     }
+    if yaml.abi_version != SUPPORTED_RUNTIME_ABI_VERSION {
+        return Err(EngineError::AbiVersionMismatch {
+            runtime: yaml_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("(unknown)")
+                .to_owned(),
+            expected: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
+            found: yaml.abi_version.clone(),
+        });
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn minimal_yaml() -> RuntimeYaml {
+        RuntimeYaml {
+            kind: "runtime".to_owned(),
+            serves: "test_kind".to_owned(),
+            default: None,
+            binary_ref: "bin/x86_64-unknown-linux-gnu/test-runtime".to_owned(),
+            abi_version: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
+            required_caps: vec![],
+            description: None,
+            schema: None,
+        }
+    }
+
+    fn test_path() -> PathBuf {
+        PathBuf::from("/tmp/test-runtime.yaml")
+    }
+
+    #[test]
+    fn accepts_runtime_with_supported_abi_version() {
+        let yaml = minimal_yaml();
+        assert!(
+            validate_runtime_yaml(&test_path(), &yaml).is_ok(),
+            "v1 abi_version should be accepted"
+        );
+    }
+
+    #[test]
+    fn refuses_runtime_with_unsupported_abi_version() {
+        let mut yaml = minimal_yaml();
+        yaml.abi_version = "v999".to_owned();
+        let result = validate_runtime_yaml(&test_path(), &yaml);
+        let err = result.expect_err("expected AbiVersionMismatch");
+        match err {
+            EngineError::AbiVersionMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, "v1");
+                assert_eq!(found, "v999");
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
 }
