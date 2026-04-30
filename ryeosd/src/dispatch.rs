@@ -530,12 +530,12 @@ fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
     Ok(parts[2..].join("/"))
 }
 
-/// **B1**: cap gate factored out for unit testing.
+/// Core cap-enforcement logic, shared by runtime and subprocess paths.
 ///
 /// Returns `Err(DispatchError::InsufficientCaps)` so `api/execute.rs`
 /// maps it to 403 via `http_status()`. There is no substring matching
 /// anywhere on this path.
-fn enforce_runtime_caps(
+fn enforce_caps(
     item_ref: &str,
     required_caps: &[String],
     caller_scopes: &[String],
@@ -557,6 +557,15 @@ fn enforce_runtime_caps(
             caller_scopes: caller_scopes.to_vec(),
         })
     }
+}
+
+/// **B1**: cap gate for runtime dispatch. Delegates to `enforce_caps`.
+fn enforce_runtime_caps(
+    item_ref: &str,
+    required_caps: &[String],
+    caller_scopes: &[String],
+) -> Result<(), DispatchError> {
+    enforce_caps(item_ref, required_caps, caller_scopes)
 }
 
 /// Dispatch a `runtime:*` ref through the schema-declared
@@ -852,6 +861,16 @@ pub async fn dispatch_subprocess(
     }
 
     let item_ref_for_error = resolved.item_ref.clone();
+
+    // α: enforce required_caps before spawn (V5.5 P2 closure).
+    // Mirrors enforce_runtime_caps semantics via the shared enforce_caps
+    // helper. The deny-all callback token below is a separate boundary.
+    let required_caps = crate::service_registry::extract_required_caps(
+        &resolved.resolved_item.metadata.extra,
+    );
+    if !required_caps.is_empty() {
+        enforce_caps(&item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
+    }
 
     // Read only the secrets declared on the resolved item's
     // `ItemMetadata.required_secrets`. Same scoping rule as the

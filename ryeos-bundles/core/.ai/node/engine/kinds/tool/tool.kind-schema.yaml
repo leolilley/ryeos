@@ -1,4 +1,4 @@
-# rye:signed:2026-04-29T08:29:45Z:2acb99d4edb807fc1bed1165f4fa4a731650597c1507cceec79e3c9c6a557269:z7X/KwDEbaFwXRBD99Va3JR9FyInXZJXRn1Ghz2ofoL05XuAhWiAO9+M81ColK1QSAe42EJro40iKSu+95HFBw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-04-30T08:26:31Z:93a1554c271cf900e15599700111ebe669459cbabe98e28f3cd18dd5ac3714ea:SHEpiqehbrMRcCrVGp6dAOH6xU/WSQBfQTnmDFujFaqR0S3kI9qCXP9ZQAPPo2mV5j6hOYUVNeszj5Iae09EDw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -57,11 +57,10 @@ runtime:
     - tool_type
     - required_secrets
     - name
-    # `required_caps` is extracted into metadata and enforced by the
-    # service/native-runtime dispatch paths. The subprocess (tool)
-    # dispatch path does not yet enforce it (V5.5 P2: no permissions
-    # model for raw tools). Ignored here so tool YAMLs may declare it
-    # without triggering UnknownRuntimeBlock.
+    # `required_caps` is extracted into metadata and enforced by
+    # the service/native-runtime/subprocess dispatch paths.
+    # Ignored here (runtime block parser) so tool YAMLs may declare
+    # it without triggering UnknownRuntimeBlock.
     - required_caps
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
@@ -101,3 +100,6 @@ metadata:
     required_secrets:
       from: path_string_seq
       key: required_secrets
+    required_caps:
+      from: path_string_seq
+      key: required_caps
