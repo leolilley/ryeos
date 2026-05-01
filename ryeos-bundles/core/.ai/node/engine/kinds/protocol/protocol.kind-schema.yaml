@@ -1,0 +1,44 @@
+# rye:signed:2026-05-01T04:49:10Z:e7810769e88e8e214bc05f1605e6540e477c01d4dc3c9df1397525a20f7b2538:Rqq3F4JuRTdw0fP9dW2AUCCzvrFcwzPkom7bMbfLJ1Gx6Z6zQxzTkBf3RfbUd2nEmCd7xzK7gnI6Bx++ZJBZBQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "engine/kinds/protocol"
+version: "1.0.0"
+location:
+  directory: protocols
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Protocol descriptors are NOT root-executable. They are an
+# engine-internal extension-point registry describing wire contracts
+# for subprocess terminators. Therefore: NO `execution:` block, NO
+# terminator. The protocol kind is config-only metadata.
+#
+# Items of this kind are loaded by the Layer-1 raw signed-YAML loader
+# (ProtocolRegistry::load_base) BEFORE kind-schema dispatch is wired
+# up. This breaks the bootstrap cycle, mirroring the handler kind.
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    description:
+      from: path
+      key: description
+    abi_version:
+      from: path
+      key: abi_version
+      required: true

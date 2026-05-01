@@ -12,6 +12,7 @@ use crate::error::EngineError;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::item_resolution::ResolutionRoots;
+use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
 use crate::AI_DIR;
@@ -38,6 +39,11 @@ pub struct Engine {
     /// a runtimes scan still compile.
     pub runtimes: RuntimeRegistry,
 
+    /// Protocol registry — loaded from base roots at engine init.
+    /// Protocol descriptors declare wire contracts for subprocess
+    /// terminators. Empty by default for test compatibility.
+    pub protocols: ProtocolRegistry,
+
     /// User-space root (parent of `AI_DIR`)
     pub user_root: Option<PathBuf>,
     /// System bundle roots (parents of `AI_DIR`)
@@ -57,6 +63,7 @@ impl Engine {
             trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
             runtimes: RuntimeRegistry::default(),
+            protocols: ProtocolRegistry::empty(),
             user_root,
             system_roots,
         }
@@ -81,6 +88,13 @@ impl Engine {
     /// can never diverge.
     pub fn with_composers(mut self, composers: ComposerRegistry) -> Self {
         self.composers = composers;
+        self
+    }
+
+    /// Install the protocol registry, loaded from base roots at engine
+    /// init. Empty by default for test compatibility.
+    pub fn with_protocols(mut self, protocols: ProtocolRegistry) -> Self {
+        self.protocols = protocols;
         self
     }
 

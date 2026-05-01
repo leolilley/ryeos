@@ -15,6 +15,7 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
+use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::roots;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
@@ -129,6 +130,20 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     );
     let handler_registry = std::sync::Arc::new(handler_registry);
 
+    // 7b. Load protocol registry from bundle roots. Hard-error on any
+    //     failure: dispatch routes through protocol descriptors for
+    //     subprocess wire contracts, and silently degrading to an empty
+    //     registry produces confusing errors downstream.
+    let protocol_registry = ProtocolRegistry::load_base(
+        &system_roots.iter().chain(user_root.iter()).cloned().collect::<Vec<_>>(),
+        &trust_store,
+    )
+    .context("failed to load protocol descriptors from bundle roots")?;
+    tracing::info!(
+        count = protocol_registry.iter().count(),
+        "loaded protocol descriptors"
+    );
+
     // 8. Derive the per-kind composer registry data-drivenly from
     //    the loaded kind schemas (each schema declares its
     //    `composer:` handler ref; the engine never names a kind in
@@ -183,6 +198,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     let engine = Engine::new(kinds, parser_dispatcher, user_root, system_roots)
         .with_trust_store(trust_store)
         .with_composers(composers)
+        .with_protocols(protocol_registry)
         .with_runtimes(runtimes);
 
     Ok(engine)

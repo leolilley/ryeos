@@ -11,20 +11,20 @@ pub mod handlers;
 pub mod inventory;
 pub mod item_resolution;
 pub mod kind_registry;
+pub mod launch_envelope_types;
 pub mod lifecycle;
 pub mod parsers;
 pub mod boot_validation;
 pub mod plan_builder;
+pub mod protocol_vocabulary;
+pub mod protocols;
 pub mod resolution;
 pub mod roots;
 pub mod runtime;
 pub mod runtime_registry;
 pub mod scope;
-pub mod trust;
-
-pub mod launch_envelope_types;
-pub mod protocol_vocabulary;
 pub mod subprocess_spec;
+pub mod trust;
 
 #[doc(hidden)]
 pub mod test_support;

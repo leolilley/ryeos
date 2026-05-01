@@ -15,7 +15,7 @@ pub use stdout_mode::{is_compatible_shape_mode, StdoutMode};
 
 mod env_injection;
 pub use env_injection::{
-    is_reserved_env_name, produce_env_value,
+    is_reserved_env_name, produce_env_value, validate_env_name,
     EnvInjection, EnvInjectionSource, RESERVED_ENV_NAMES,
 };
 

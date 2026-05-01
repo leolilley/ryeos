@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum VocabularyError {
     #[error("unknown stdin shape `{0}`; known: [{1}]")]
