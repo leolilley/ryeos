@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::contracts::{ExecutionDecorations, SubprocessSpec};
+use crate::contracts::{ExecutionDecorations, PlanSubprocessSpec};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -315,7 +315,7 @@ pub fn compile_with_handlers(
     trust_store: &TrustStore,
     roots: &ResolutionRoots,
     root_trust_class: TrustClass,
-) -> Result<SubprocessSpec, EngineError> {
+) -> Result<PlanSubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
         env: plan_env.clone(),
@@ -511,7 +511,7 @@ pub fn compile_with_handlers(
         expanded_env.insert(k, expanded);
     }
 
-    Ok(SubprocessSpec {
+    Ok(PlanSubprocessSpec {
         cmd,
         args,
         cwd: spec_overrides.cwd.or_else(|| project_root.map(|p| p.to_path_buf())),

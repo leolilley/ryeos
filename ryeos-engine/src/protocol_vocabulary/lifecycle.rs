@@ -5,9 +5,6 @@ use crate::protocol_vocabulary::error::VocabularyError;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LifecycleMode {
-    /// Daemon spawns child, awaits exit, returns ExecutionCompletion.
-    /// Tool-style.
-    Oneshot,
     /// Daemon spawns child with a callback channel, child reports state
     /// via the channel, daemon awaits final result.
     /// Runtime-style.
@@ -21,7 +18,6 @@ pub enum LifecycleMode {
 ///
 /// | LifecycleMode | allows_detached MUST be |
 /// | ------------- | ----------------------- |
-/// | Oneshot       | false                   |
 /// | Managed       | false                   |
 /// | DetachedOk    | true                    |
 pub fn is_compatible_lifecycle_detached(
@@ -46,7 +42,6 @@ mod tests {
     #[test]
     fn round_trip_all_variants() {
         for mode in [
-            LifecycleMode::Oneshot,
             LifecycleMode::Managed,
             LifecycleMode::DetachedOk,
         ] {
@@ -65,8 +60,6 @@ mod tests {
     #[test]
     fn lifecycle_detached_matrix() {
         let cases: Vec<(LifecycleMode, bool, bool)> = vec![
-            (LifecycleMode::Oneshot, false, true),
-            (LifecycleMode::Oneshot, true, false),
             (LifecycleMode::Managed, false, true),
             (LifecycleMode::Managed, true, false),
             (LifecycleMode::DetachedOk, true, true),

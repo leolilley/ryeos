@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T13:29:21Z:d94491f039154843009266e21dcef7b3e06484364efe98257d64fbe92317649d:6Y8yOwQwrcV2s5rvIVEfVCr48cNzqXmugmmcZNrsk+QqPYbMPQPS7a+49lktqts7JNE2RwGagbv0yA5lZJB4Dw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T23:24:08Z:4da62cd3011b0c8b9f60801ea2828ed80f5fdc0598b6414b9cbe3380eec58dfd:Vrn05F0UPASXej0UsgMJzB8Om/ouUwhMafIiL0Q6QV4zcfBfVCmUpGQLEtshFguaIV8AhIYplYLUp4HZQkfoCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -45,11 +45,19 @@ composer_config:
 composed_value_contract:
   root_type: mapping
   required:
-    body: string
+    body:
+      type: single
+      prim: string
   optional:
-    extends: [string, "null"]
-    permissions: mapping
-    context: mapping
+    extends:
+      type: union
+      prims: [string, "null"]
+    permissions:
+      type: single
+      prim: mapping
+    context:
+      type: single
+      prim: mapping
 metadata:
   rules:
     name:

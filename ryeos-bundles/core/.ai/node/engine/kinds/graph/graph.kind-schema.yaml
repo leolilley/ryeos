@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T13:29:21Z:bf2696f826c618dbe2b4ff005f2271786ec2f8e59dc83081eba00e5f7406ae73:GD4FxwMS8zXV9jx2J+aiwgIJKyC2ak/Sa82T9uJJ1ckvacVqBAwSaJnPSpb12qC6KESRT6daelOh9wTf/hoHCA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T23:24:08Z:cad7dae6ad788f4e508ce3f73b3a919beefe1c0668bc874e35794fcc9e58c33e:miWxv9qSYU0wNbG/ZzBQNgdS4CftvAQMrYlqDJmL2/7giCJDEYZjbpEwlphhd11jOArAJr5Imkpy25HaStIsAA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -29,8 +29,12 @@ composed_value_contract:
   root_type: mapping
   required: {}
   optional:
-    config: mapping
-    permissions: sequence
+    config:
+      type: single
+      prim: mapping
+    permissions:
+      type: single
+      prim: sequence
 metadata:
   rules:
     name:

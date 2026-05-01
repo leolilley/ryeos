@@ -66,11 +66,10 @@ pub enum ResolveMode {
 /// `config_resolve` block accepts either a single spec or a list of
 /// specs (Python parity — `_resolve_tool_config` switches on type).
 #[derive(Debug, Clone, Deserialize)]
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfigResolveSpec {
-    Single(ConfigSpec),
-    Multi(Vec<ConfigSpec>),
+    Single { spec: ConfigSpec },
+    Multi { specs: Vec<ConfigSpec> },
 }
 
 pub struct ConfigResolveHandler;
@@ -110,7 +109,7 @@ impl RuntimeHandler for ConfigResolveHandler {
         // returns `{path: resolved}`; a single-form returns the
         // resolved config directly. Matches Python lines 1138-1146.
         let resolved: Value = match &spec {
-            ConfigResolveSpec::Multi(specs) => {
+            ConfigResolveSpec::Multi { specs } => {
                 let mut map = Map::new();
                 for s in specs {
                     let r = resolve_single(s, ctx)?;
@@ -118,7 +117,7 @@ impl RuntimeHandler for ConfigResolveHandler {
                 }
                 Value::Object(map)
             }
-            ConfigResolveSpec::Single(s) => resolve_single(s, ctx)?,
+            ConfigResolveSpec::Single { spec: s } => resolve_single(s, ctx)?,
         };
 
         // Driver wiring (Python primitive_executor.py:257-285).
@@ -606,7 +605,7 @@ metadata:
         );
 
         let chain = vec![fake_intermediate("git", json!({}))];
-        let block = json!({ "path": "execution/execution.yaml" });
+        let block = json!({ "type": "single", "spec": { "path": "execution/execution.yaml" } });
 
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         let resolved = params.get("resolved_config").unwrap();
@@ -632,7 +631,7 @@ metadata:
         write_signed_config(&rig.project_ai, "alpha.yaml", "winner: project\n");
 
         let chain = vec![fake_intermediate("git", json!({}))];
-        let block = json!({ "path": "alpha.yaml", "mode": "first_match" });
+        let block = json!({ "type": "single", "spec": { "path": "alpha.yaml", "mode": "first_match" } });
 
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         assert_eq!(
@@ -657,7 +656,7 @@ metadata:
         fs::write(&path, tampered).unwrap();
 
         let chain = vec![fake_intermediate("git", json!({}))];
-        let block = json!({ "path": "tamper.yaml" });
+        let block = json!({ "type": "single", "spec": { "path": "tamper.yaml" } });
 
         let err = run_handler(&rig, chain, 0, block, json!({})).unwrap_err();
         assert!(
@@ -673,10 +672,10 @@ metadata:
         write_signed_config(&rig.project_ai, "sub/b.yaml", "from: b\n");
 
         let chain = vec![fake_intermediate("git", json!({}))];
-        let block = json!([
+        let block = json!({ "type": "multi", "specs": [
             { "path": "a.yaml" },
             { "path": "sub/b.yaml", "mode": "first_match" },
-        ]);
+        ] });
 
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         let resolved = params.get("resolved_config").unwrap();
@@ -690,7 +689,7 @@ metadata:
         write_signed_config(&rig.project_ai, "x.yaml", "k: v\n");
 
         let chain = vec![fake_intermediate("mytool", json!({}))];
-        let block = json!({ "path": "x.yaml" });
+        let block = json!({ "type": "single", "spec": { "path": "x.yaml" } });
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         assert!(params.get("resolved_config").is_some());
         assert_eq!(params["resolved_config"]["k"], json!("v"));
@@ -721,7 +720,7 @@ metadata:
                 }),
             ),
         ];
-        let block = json!({ "path": "exec.yaml" });
+        let block = json!({ "type": "single", "spec": { "path": "exec.yaml" } });
 
         let params = run_handler(&rig, chain, 1, block, json!({})).unwrap();
         // Per-tool override wins for timeout.
@@ -753,7 +752,7 @@ metadata:
                 json!({ "execution_params": ["max_steps"] }),
             ),
         ];
-        let block = json!({ "path": "exec.yaml" });
+        let block = json!({ "type": "single", "spec": { "path": "exec.yaml" } });
 
         // Caller already specified timeout=7 and max_steps=2 — these
         // must win over the resolved config (Python's `if not in
@@ -776,7 +775,7 @@ metadata:
         fs::write(&path, "k: v\n").unwrap();
 
         let chain = vec![fake_intermediate("git", json!({}))];
-        let block = json!({ "path": "plain.yaml" });
+        let block = json!({ "type": "single", "spec": { "path": "plain.yaml" } });
 
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         assert_eq!(params["resolved_config"]["k"], json!("v"));

@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T13:29:22Z:78755325bfb7c66e3de58c85a7c1e5055078d38186f3a8bdf28021cd05888538:diTWwcc8GZGHzA6FD1irzFtg/v5uPYML1jjlWWxBkHBfgkimxG6r8UZUfDQ46fdBN9f9so60YN4dPxyt9BDYDA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T23:24:09Z:1c2131e4d3bbd799eaa07fceb703e4235f01878804f0dd44eca14af997783a1f:+GDb7V2JksPVyy4r8TZurtJDSvLE5w7k0sAHcxKPupZT+CtzQZjqGGZ7Dl+eBPeOEivFMMHYOFMg+QKDvioQDQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "rye/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -27,8 +27,10 @@ verify_deps:
   exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
 
 config_resolve:
-  path: "execution/execution.yaml"
-  mode: "deep_merge"
+  type: single
+  spec:
+    path: "execution/execution.yaml"
+    mode: "deep_merge"
 
 config:
   command: "{interpreter}"

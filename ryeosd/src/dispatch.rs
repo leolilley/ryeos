@@ -672,13 +672,6 @@ pub async fn dispatch_subprocess(
             )
             .await
         }
-        LifecycleMode::Oneshot => {
-            // Not yet used — placeholder for future protocol.
-            Err(DispatchError::SchemaMisconfigured {
-                kind: current_ref.kind.clone(),
-                detail: "Oneshot lifecycle not yet implemented".into(),
-            })
-        }
     }
 }
 

@@ -213,10 +213,10 @@ fn launch_metadata_from_spec_carries_cancellation_mode() {
     // RuntimeLaunchMetadata, which is what
     // `resolve_shutdown_action` consults at shutdown to decide
     // between SIGKILL-only and SIGTERM-then-SIGKILL.
-    use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec, SubprocessSpec};
+    use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec, PlanSubprocessSpec};
     use std::collections::HashMap;
 
-    let spec = SubprocessSpec {
+    let spec = PlanSubprocessSpec {
         cmd: "/bin/true".into(),
         args: vec![],
         cwd: None,

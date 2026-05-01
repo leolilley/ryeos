@@ -94,12 +94,11 @@ pub enum NodeType {
 }
 
 
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EdgeSpec {
-    Unconditional(String),
-    Conditional(Vec<ConditionalEdge>),
+    Unconditional { to: String },
+    Conditional { branches: Vec<ConditionalEdge> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

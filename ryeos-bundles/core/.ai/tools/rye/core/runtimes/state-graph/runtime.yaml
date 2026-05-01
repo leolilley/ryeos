@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T13:29:22Z:f021134db6af9c2626682ee8b0e1960146186f6aab76d59b100608563460d28f:aCqCw5dIdbA1rBrCgRKT/We+SX7nibR+1AQUlu/BuCl9RfR+WwH+7T+4Kl9pH6YMQipVRtxVNR7xa9gocnrqAQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T23:24:09Z:45cca68f96b356cff67491361d8166643efd2f8605f839b32cb8871158d3b5d7:VBjajFexXO0RP850e3tUTWkg4w78Q3m30CLjsZUrY3YG6ZVQ3uUhO31K195rHI1YBbsoVqIJuqOBNcqzdr84Dw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "rye/core/runtimes/state-graph"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -30,8 +30,10 @@ verify_deps:
   exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
 
 config_resolve:
-  path: "execution/execution.yaml"
-  mode: "deep_merge"
+  type: single
+  spec:
+    path: "execution/execution.yaml"
+    mode: "deep_merge"
 
 execution_params:
   - max_steps

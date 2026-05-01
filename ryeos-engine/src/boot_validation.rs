@@ -955,7 +955,7 @@ composed_value_contract:
 
     fn shape_with_required_body() -> ValueShape {
         let mut required = BTreeMap::new();
-        required.insert("body".to_string(), FieldType::Single(PrimType::String));
+        required.insert("body".to_string(), FieldType::Single { prim: PrimType::String });
         ValueShape {
             root_type: ShapeType::Mapping,
             required,
@@ -968,7 +968,7 @@ composed_value_contract:
         let parser_ref = "parser:rye/core/markdown/directive";
         let kinds = kinds_with_directive_contract(
             parser_ref,
-            "  root_type: mapping\n  required:\n    body: string\n",
+            "  root_type: mapping\n  required:\n    body:\n      type: single\n      prim: string\n",
         );
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
@@ -1108,8 +1108,8 @@ composed_value_contract:
     fn aggregates_all_contract_violations() {
         let parser_ref = "parser:rye/core/markdown/directive";
         let mut required = BTreeMap::new();
-        required.insert("body".to_string(), FieldType::Single(PrimType::String));
-        required.insert("name".to_string(), FieldType::Single(PrimType::String));
+        required.insert("body".to_string(), FieldType::Single { prim: PrimType::String });
+        required.insert("name".to_string(), FieldType::Single { prim: PrimType::String });
         let _kind_shape = ValueShape {
             root_type: ShapeType::Mapping,
             required,
@@ -1117,10 +1117,10 @@ composed_value_contract:
         };
         let kinds = kinds_with_directive_contract(
             parser_ref,
-            "  root_type: mapping\n  required:\n    body: string\n    name: string\n",
+            "  root_type: mapping\n  required:\n    body:\n      type: single\n      prim: string\n    name:\n      type: single\n      prim: string\n",
         );
         let mut p_required = BTreeMap::new();
-        p_required.insert("body".to_string(), FieldType::Single(PrimType::Integer));
+        p_required.insert("body".to_string(), FieldType::Single { prim: PrimType::Integer });
         let bad_producer = ValueShape {
             root_type: ShapeType::Sequence,
             required: p_required,

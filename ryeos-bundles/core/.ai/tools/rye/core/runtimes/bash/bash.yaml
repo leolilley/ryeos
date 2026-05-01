@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T13:29:22Z:3bc9d5e2e44308b67210e496788109842c2fc60a7309b935186f6474d6521c97:JlVFTCfsYRl+Jw2uhC/gm6lKsesaVBNHKkUgbpnLoS7+yamavRErolWJF2pl3p+DAT9XjnuqTaTYC6i1n32BCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T23:24:09Z:c099b7a311941de9b41a2c47cf07a3ff1f7260fd6d8269f72f7dbfd461c6b189:cv4GNkrhpclTxappIhH1D+ugwhvTQVzaG5TcAw6sij8c1+XbpGLG3HIN83OGbQYOT9SoxcOtKQD/ogJAKww2CQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "rye/core/runtimes/bash"
 # rye:unsigned
 version: "1.0.0"
@@ -10,8 +10,10 @@ env_config:
     PATH: "${PATH}"
 
 config_resolve:
-  path: "execution/execution.yaml"
-  mode: "deep_merge"
+  type: single
+  spec:
+    path: "execution/execution.yaml"
+    mode: "deep_merge"
 
 config:
   command: "/bin/bash"

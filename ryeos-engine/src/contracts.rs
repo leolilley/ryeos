@@ -65,8 +65,8 @@ impl<'de> Deserialize<'de> for ValueShape {
             )));
         }
         for (name, ft) in raw.required.iter().chain(raw.optional.iter()) {
-            if let FieldType::Union(ps) = ft {
-                if ps.is_empty() {
+            if let FieldType::Union { prims } = ft {
+                if prims.is_empty() {
                     return Err(serde::de::Error::custom(format!(
                         "field `{name}`: empty union is not a valid type"
                     )));
@@ -93,11 +93,10 @@ pub enum ShapeType {
 /// Per-field type. Use a Vec to allow union types (`[string, "null"]`).
 /// `Any` permits anything. Keep it tiny.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FieldType {
-    Single(PrimType),
-    Union(Vec<PrimType>),
+    Single { prim: PrimType },
+    Union { prims: Vec<PrimType> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,12 +224,12 @@ impl ValueShape {
 ///     `string|null`) can't trust the wiring.
 fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
     let consumer_set: Vec<PrimType> = match consumer {
-        FieldType::Single(p) => vec![*p],
-        FieldType::Union(ps) => ps.clone(),
+        FieldType::Single { prim } => vec![*prim],
+        FieldType::Union { prims } => prims.clone(),
     };
     let producer_set: Vec<PrimType> = match producer {
-        FieldType::Single(p) => vec![*p],
-        FieldType::Union(ps) => ps.clone(),
+        FieldType::Single { prim } => vec![*prim],
+        FieldType::Union { prims } => prims.clone(),
     };
     if consumer_set.contains(&PrimType::Any) {
         return true;
@@ -264,14 +263,14 @@ mod value_shape_tests {
 
     #[test]
     fn identical_shapes_pass() {
-        let a = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let a = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
         let b = a.clone();
         assert!(a.is_satisfied_by(&b).is_empty());
     }
 
     #[test]
     fn missing_required_field_detected() {
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
         let producer = shape_mapping(&[], &[]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
@@ -287,8 +286,8 @@ mod value_shape_tests {
         // optional producer emission: the producer is allowed to
         // skip the field entirely. Reported as MissingRequiredField
         // with a hint that it was found as optional.
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
-        let producer = shape_mapping(&[], &[("body", FieldType::Single(PrimType::String))]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let producer = shape_mapping(&[], &[("body", FieldType::Single { prim: PrimType::String })]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1, "expected one missing-required violation, got {v:?}");
         match &v[0] {
@@ -300,7 +299,7 @@ mod value_shape_tests {
                 assert_eq!(name, "body");
                 assert_eq!(
                     produced_as_optional,
-                    &Some(FieldType::Single(PrimType::String)),
+                    &Some(FieldType::Single { prim: PrimType::String }),
                     "hint should indicate the producer declared the field as optional"
                 );
             }
@@ -312,14 +311,14 @@ mod value_shape_tests {
     fn required_consumer_satisfied_by_required_producer() {
         // Sanity: identical required-on-both is fine. Used to be the
         // misleading "required satisfied by optional" test.
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
-        let producer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let producer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
         assert!(consumer.is_satisfied_by(&producer).is_empty());
     }
 
     #[test]
     fn missing_required_with_no_optional_hint() {
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
         let producer = shape_mapping(&[], &[]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
@@ -338,8 +337,8 @@ mod value_shape_tests {
 
     #[test]
     fn type_mismatch_detected() {
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
-        let producer = shape_mapping(&[("body", FieldType::Single(PrimType::Integer))], &[]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let producer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Integer })], &[]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
         assert!(matches!(v[0], ContractViolation::FieldTypeMismatch { .. }));
@@ -354,7 +353,7 @@ mod value_shape_tests {
             optional: Default::default(),
         };
         let producer_mapping = shape_mapping(
-            &[("body", FieldType::Single(PrimType::String))],
+            &[("body", FieldType::Single { prim: PrimType::String })],
             &[],
         );
         let producer_seq = ValueShape {
@@ -372,10 +371,10 @@ mod value_shape_tests {
         assert!(consumer_root_any.is_satisfied_by(&producer_root_any).is_empty());
 
         // Consumer field-level Any: accepts any producer field type.
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::Any))], &[]);
-        let producer_str = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
-        let producer_int = shape_mapping(&[("body", FieldType::Single(PrimType::Integer))], &[]);
-        let producer_any = shape_mapping(&[("body", FieldType::Single(PrimType::Any))], &[]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Any })], &[]);
+        let producer_str = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let producer_int = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Integer })], &[]);
+        let producer_any = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Any })], &[]);
         assert!(consumer.is_satisfied_by(&producer_str).is_empty());
         assert!(consumer.is_satisfied_by(&producer_int).is_empty());
         assert!(consumer.is_satisfied_by(&producer_any).is_empty());
@@ -384,7 +383,7 @@ mod value_shape_tests {
     #[test]
     fn producer_any_does_not_satisfy_specific_consumer() {
         // Specific consumer + producer Any at root → RootTypeMismatch.
-        let consumer = shape_mapping(&[("body", FieldType::Single(PrimType::String))], &[]);
+        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
         let producer_root_any = ValueShape {
             root_type: ShapeType::Any,
             required: Default::default(),
@@ -400,7 +399,7 @@ mod value_shape_tests {
         );
 
         // Specific consumer field + producer Any field → FieldTypeMismatch.
-        let producer = shape_mapping(&[("body", FieldType::Single(PrimType::Any))], &[]);
+        let producer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Any })], &[]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
         assert!(
@@ -410,7 +409,7 @@ mod value_shape_tests {
 
         // Producer Any inside a union also rejected by specific consumer.
         let producer_union_any = shape_mapping(
-            &[("body", FieldType::Union(vec![PrimType::String, PrimType::Any]))],
+            &[("body", FieldType::Union { prims: vec![PrimType::String, PrimType::Any] })],
             &[],
         );
         let v = consumer.is_satisfied_by(&producer_union_any);
@@ -425,14 +424,14 @@ mod value_shape_tests {
         let consumer = shape_mapping(
             &[(
                 "extends",
-                FieldType::Union(vec![PrimType::String, PrimType::Null]),
+                FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
             )],
             &[],
         );
         let producer_string =
-            shape_mapping(&[("extends", FieldType::Single(PrimType::String))], &[]);
-        let producer_null = shape_mapping(&[("extends", FieldType::Single(PrimType::Null))], &[]);
-        let producer_int = shape_mapping(&[("extends", FieldType::Single(PrimType::Integer))], &[]);
+            shape_mapping(&[("extends", FieldType::Single { prim: PrimType::String })], &[]);
+        let producer_null = shape_mapping(&[("extends", FieldType::Single { prim: PrimType::Null })], &[]);
+        let producer_int = shape_mapping(&[("extends", FieldType::Single { prim: PrimType::Integer })], &[]);
         assert!(consumer.is_satisfied_by(&producer_string).is_empty());
         assert!(consumer.is_satisfied_by(&producer_null).is_empty());
         assert!(!consumer.is_satisfied_by(&producer_int).is_empty());
@@ -443,14 +442,14 @@ mod value_shape_tests {
         let consumer = shape_mapping(
             &[(
                 "x",
-                FieldType::Union(vec![PrimType::String, PrimType::Null]),
+                FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
             )],
             &[],
         );
         let producer = shape_mapping(
             &[(
                 "x",
-                FieldType::Union(vec![PrimType::String, PrimType::Null]),
+                FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
             )],
             &[],
         );
@@ -460,7 +459,7 @@ mod value_shape_tests {
         let producer_wider = shape_mapping(
             &[(
                 "x",
-                FieldType::Union(vec![PrimType::String, PrimType::Null, PrimType::Integer]),
+                FieldType::Union { prims: vec![PrimType::String, PrimType::Null, PrimType::Integer] },
             )],
             &[],
         );
@@ -489,9 +488,9 @@ mod value_shape_tests {
     fn all_violations_returned_not_bailing_on_first() {
         let consumer = shape_mapping(
             &[
-                ("a", FieldType::Single(PrimType::String)),
-                ("b", FieldType::Single(PrimType::String)),
-                ("c", FieldType::Single(PrimType::String)),
+                ("a", FieldType::Single { prim: PrimType::String }),
+                ("b", FieldType::Single { prim: PrimType::String }),
+                ("c", FieldType::Single { prim: PrimType::String }),
             ],
             &[],
         );
@@ -515,7 +514,7 @@ mod value_shape_tests {
         let yaml = "\
 root_type: mapping
 requierd:
-  body: string
+  body: { type: single, prim: string }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
         assert!(
@@ -529,7 +528,7 @@ requierd:
         let yaml = "\
 root_type: sequence
 required:
-  body: string
+  body: { type: single, prim: string }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
         assert!(
@@ -543,7 +542,7 @@ required:
         let yaml = "\
 root_type: scalar
 optional:
-  body: string
+  body: { type: single, prim: string }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
         assert!(
@@ -557,7 +556,7 @@ optional:
         let yaml = "\
 root_type: mapping
 required:
-  body: []
+  body: { type: union, prims: [] }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
         assert!(
@@ -571,7 +570,7 @@ required:
         let yaml = "\
 root_type: mapping
 optional:
-  extends: []
+  extends: { type: union, prims: [] }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
         assert!(
@@ -587,21 +586,21 @@ optional:
         let yaml = "\
 root_type: mapping
 required:
-  body: string
+  body: { type: single, prim: string }
 optional:
-  extends: [string, \"null\"]
-  permissions: mapping
-  context: mapping
+  extends: { type: union, prims: [string, \"null\"] }
+  permissions: { type: single, prim: mapping }
+  context: { type: single, prim: mapping }
 ";
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("well-formed shape parses");
         assert_eq!(shape.root_type, ShapeType::Mapping);
         assert_eq!(
             shape.required.get("body").unwrap(),
-            &FieldType::Single(PrimType::String)
+            &FieldType::Single { prim: PrimType::String }
         );
         assert_eq!(
             shape.optional.get("extends").unwrap(),
-            &FieldType::Union(vec![PrimType::String, PrimType::Null])
+            &FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
         );
     }
 }
@@ -803,12 +802,13 @@ pub enum LaunchMode {
 
 // ── Execution hints ──────────────────────────────────────────────────
 
-/// Open map passed through to executors. The engine does not interpret
-/// its contents.
+/// Executor-specific hints forwarded verbatim through the pipeline.
+/// The engine does not interpret contents; used only for cache-key
+/// hashing and resume-context persistence.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
+#[serde(deny_unknown_fields)]
 pub struct ExecutionHints {
-    #[serde(flatten)]
+    #[serde(default)]
     pub values: HashMap<String, Value>,
 }
 
@@ -913,7 +913,7 @@ pub struct MaterializationRequirement {
 /// the plan builder. The dispatch layer just runs this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SubprocessSpec {
+pub struct PlanSubprocessSpec {
     pub cmd: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -1009,7 +1009,7 @@ pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
         /// The fully resolved subprocess specification.
-        spec: SubprocessSpec,
+        spec: PlanSubprocessSpec,
         /// Audit: the root item's source path.
         #[serde(default)]
         tool_path: Option<PathBuf>,

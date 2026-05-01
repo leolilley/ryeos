@@ -86,12 +86,12 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             // the gate always goes to the same place — that's an action
             // node, not a gate. Reject it.
             match &node.next {
-                None | Some(EdgeSpec::Unconditional(_)) => {
+                None | Some(EdgeSpec::Unconditional { .. }) => {
                     result
                         .errors
                         .push(format!("gate node '{name}' must declare conditional 'next' (a sequence of conditions)"));
                 }
-                Some(EdgeSpec::Conditional(edges)) => {
+                Some(EdgeSpec::Conditional { branches: edges }) => {
                     if edges.is_empty() {
                         result
                             .errors
@@ -128,14 +128,14 @@ fn validate_edges(
     result: &mut ValidationResult,
 ) {
     match edge {
-        EdgeSpec::Unconditional(target) => {
+        EdgeSpec::Unconditional { to: target } => {
             if !cfg.nodes.contains_key(target) {
                 result.errors.push(format!(
                     "edge target '{target}' from node '{node_name}' does not exist"
                 ));
             }
         }
-        EdgeSpec::Conditional(edges) => {
+        EdgeSpec::Conditional { branches: edges } => {
             for ce in edges {
                 if !cfg.nodes.contains_key(&ce.to) {
                     result.errors.push(format!(
@@ -225,14 +225,14 @@ fn collect_path_refs(template: &str, refs: &mut HashSet<String>) {
 
 fn collect_edge_refs(edge: &EdgeSpec, refs: &mut HashSet<String>) {
     match edge {
-        EdgeSpec::Conditional(edges) => {
+        EdgeSpec::Conditional { branches: edges } => {
             for ce in edges {
                 if let Some(ref when) = ce.when {
                     collect_state_refs(when, refs);
                 }
             }
         }
-        EdgeSpec::Unconditional(_) => {}
+        EdgeSpec::Unconditional { .. } => {}
     }
 }
 
@@ -268,8 +268,8 @@ fn bfs_reachable(start: &str, nodes: &HashMap<String, GraphNode>) -> HashSet<Str
 
 pub fn edge_targets(edge: &EdgeSpec) -> Vec<String> {
     match edge {
-        EdgeSpec::Unconditional(t) => vec![t.clone()],
-        EdgeSpec::Conditional(edges) => edges.iter().map(|e| e.to.clone()).collect(),
+        EdgeSpec::Unconditional { to: t } => vec![t.clone()],
+        EdgeSpec::Conditional { branches: edges } => edges.iter().map(|e| e.to.clone()).collect(),
     }
 }
 
@@ -292,7 +292,9 @@ config:
   start: step1
   nodes:
     step1:
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
     orphan:
@@ -315,7 +317,9 @@ config:
   nodes:
     step1:
       assign: {out: "${state.undef_key}"}
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -369,7 +373,9 @@ config:
       over: "${state.items}"
       action: {item_id: "tool:test/echo"}
       collect: "results"
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -394,7 +400,9 @@ config:
   nodes:
     check:
       node_type: gate
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -418,7 +426,9 @@ config:
   start: step1
   nodes:
     step1:
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
     orphan:

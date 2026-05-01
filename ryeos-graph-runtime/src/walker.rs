@@ -1510,7 +1510,9 @@ config:
     step1:
       action: {item_id: "tool:test/echo", params: {msg: hello}}
       assign: {echo_result: "${result}"}
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -1534,9 +1536,11 @@ config:
       node_type: gate
       assign: {mode: fast}
       next:
-        - when: {path: state.mode, op: eq, value: fast}
-          to: fast_path
-        - to: slow_path
+        type: conditional
+        branches:
+          - when: {path: state.mode, op: eq, value: fast}
+            to: fast_path
+          - to: slow_path
     fast_path:
       node_type: return
     slow_path:
@@ -1559,7 +1563,9 @@ config:
   nodes:
     loop:
       action: {item_id: "tool:test/noop"}
-      next: loop
+      next:
+        type: unconditional
+        to: loop
 "#;
         let graph = make_graph(yaml);
         let w = make_walker(graph, vec![
@@ -1603,7 +1609,9 @@ config:
       as: "elem"
       action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
       collect: "results"
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -1630,7 +1638,9 @@ config:
   nodes:
     step1:
       action: {item_id: "tool:test/fail"}
-      next: step2
+      next:
+        type: unconditional
+        to: step2
     step2:
       node_type: return
 "#;
@@ -1995,7 +2005,9 @@ config:
     step1:
       action: {item_id: "tool:test/echo", params: {msg: hello}}
       assign: {echo_result: "${result}"}
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -2043,10 +2055,14 @@ config:
   nodes:
     step1:
       action: {item_id: "tool:test/echo", params: {msg: hello}}
-      next: step2
+      next:
+        type: unconditional
+        to: step2
     step2:
       action: {item_id: "tool:test/echo", params: {msg: world}}
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -2085,9 +2101,11 @@ config:
       node_type: gate
       assign: {mode: fast}
       next:
-        - when: {path: state.mode, op: eq, value: fast}
-          to: fast_path
-        - to: slow_path
+        type: conditional
+        branches:
+          - when: {path: state.mode, op: eq, value: fast}
+            to: fast_path
+          - to: slow_path
     fast_path:
       node_type: return
     slow_path:
@@ -2138,7 +2156,9 @@ config:
       as: "elem"
       action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
       collect: "results"
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -2189,7 +2209,9 @@ config:
   nodes:
     step1:
       action: {item_id: "tool:test/echo", params: {msg: hi}}
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -2213,7 +2235,9 @@ config:
   nodes:
     step1:
       action: {item_id: "tool:test/fail"}
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;

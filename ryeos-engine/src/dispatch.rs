@@ -4,14 +4,14 @@
 //! to Lillux. All OS-level process mechanics (setsid, process groups,
 //! cross-platform handling, timeout enforcement) are Lillux's responsibility.
 //!
-//! The dispatch layer consumes `SubprocessSpec` from the plan builder —
+//! The dispatch layer consumes `PlanSubprocessSpec` from the plan builder —
 //! a fully resolved, template-expanded spawn description. No interpreter
 //! branching or script_path construction happens here.
 
 use serde_json::Value;
 
 use crate::contracts::{
-    EngineContext, ExecutionCompletion, ExecutionPlan, PlanNode, SubprocessSpec,
+    EngineContext, ExecutionCompletion, ExecutionPlan, PlanNode, PlanSubprocessSpec,
     ThreadTerminalStatus,
 };
 use crate::error::EngineError;
@@ -72,10 +72,11 @@ pub fn execute_plan(
 
 /// Dispatch a subprocess plan node via Lillux.
 ///
-/// Converts a `SubprocessSpec` into a `lillux::SubprocessRequest`,
+/// Converts a `PlanSubprocessSpec` into a `lillux::SubprocessRequest`,
 /// injecting daemon context bindings (RYE_THREAD_ID, RYE_CHAIN_ROOT_ID).
 fn dispatch_subprocess(
-    spec: &SubprocessSpec,
+    spec: &PlanSubprocessSpec,
+
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
     let request = spec_to_request(spec, ctx)?;
@@ -83,9 +84,9 @@ fn dispatch_subprocess(
     Ok(translate_result(result))
 }
 
-/// Convert a `SubprocessSpec` + daemon context into a `lillux::SubprocessRequest`.
+/// Convert a `PlanSubprocessSpec` + daemon context into a `lillux::SubprocessRequest`.
 fn spec_to_request(
-    spec: &SubprocessSpec,
+    spec: &PlanSubprocessSpec,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
     // Build env: spec.env + daemon context bindings
@@ -209,7 +210,7 @@ pub fn spawn_plan(
 }
 
 fn spawn_subprocess(
-    spec: &SubprocessSpec,
+    spec: &PlanSubprocessSpec,
     ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
     let request = spec_to_request(spec, ctx)?;
@@ -288,7 +289,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: SubprocessSpec {
+                spec: PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello world".into()],
                     cwd: None,
@@ -320,7 +321,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: SubprocessSpec {
+                spec: PlanSubprocessSpec {
                     cmd: "python3".into(),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -349,7 +350,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: SubprocessSpec {
+                spec: PlanSubprocessSpec {
                     cmd: "/bin/false".into(),
                     args: Vec::new(),
                     cwd: None,
@@ -388,7 +389,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: SubprocessSpec {
+                spec: PlanSubprocessSpec {
                     cmd: "python3".into(),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -418,7 +419,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: SubprocessSpec {
+                spec: PlanSubprocessSpec {
                     cmd: "/nonexistent/binary".into(),
                     args: Vec::new(),
                     cwd: None,
@@ -455,7 +456,7 @@ mod tests {
 
     #[test]
     fn spec_to_request_injects_context_bindings() {
-        let spec = SubprocessSpec {
+        let spec = PlanSubprocessSpec {
             cmd: "/bin/echo".into(),
             args: vec!["hello".into()],
             cwd: None,

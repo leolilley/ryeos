@@ -338,7 +338,7 @@ mod tests {
                 allows_detached: false,
             },
             lifecycle: ProtocolLifecycle {
-                mode: LifecycleMode::Oneshot,
+                mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
         }

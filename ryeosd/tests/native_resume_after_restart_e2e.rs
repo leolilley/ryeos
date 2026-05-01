@@ -25,7 +25,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::contracts::{
     EffectivePrincipal, ExecutionHints, PlanContext, PlanNode, Principal, ProjectContext,
-    SubprocessSpec,
+    PlanSubprocessSpec,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
@@ -125,7 +125,7 @@ fn plan_ctx(project_dir: &Path) -> PlanContext {
     }
 }
 
-fn build_subprocess_spec(project_dir: &Path) -> SubprocessSpec {
+fn build_subprocess_spec(project_dir: &Path) -> PlanSubprocessSpec {
     let engine = build_engine_against_bundle();
     let ctx = plan_ctx(project_dir);
 

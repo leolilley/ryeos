@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use ryeos_engine::contracts::{
     CancellationMode, EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal,
-    ProjectContext, SubprocessSpec,
+    ProjectContext, PlanSubprocessSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -183,7 +183,7 @@ impl RuntimeLaunchMetadata {
     /// path that depends on the spawn-time thread state directory. The
     /// runner fills it in via [`Self::with_checkpoint_dir`] after
     /// allocation.
-    pub fn from_spec(spec: &SubprocessSpec) -> Self {
+    pub fn from_spec(spec: &PlanSubprocessSpec) -> Self {
         Self {
             schema_version: LAUNCH_METADATA_SCHEMA_VERSION,
             cancellation_mode: spec
@@ -225,8 +225,8 @@ mod tests {
     use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec};
     use std::collections::HashMap;
 
-    fn empty_spec() -> SubprocessSpec {
-        SubprocessSpec {
+    fn empty_spec() -> PlanSubprocessSpec {
+        PlanSubprocessSpec {
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             cwd: None,

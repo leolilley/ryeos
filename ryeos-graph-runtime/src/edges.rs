@@ -4,8 +4,8 @@ use crate::model::{ConditionalEdge, EdgeSpec, GraphNode, WalkContext};
 
 pub fn evaluate_next(node: &GraphNode, state: &Value, inputs: &Value) -> Option<String> {
     match &node.next {
-        Some(EdgeSpec::Unconditional(target)) => Some(target.clone()),
-        Some(EdgeSpec::Conditional(edges)) => {
+        Some(EdgeSpec::Unconditional { to: target }) => Some(target.clone()),
+        Some(EdgeSpec::Conditional { branches: edges }) => {
             let ctx = WalkContext {
                 state: state.clone(),
                 inputs: inputs.clone(),
@@ -24,8 +24,8 @@ pub fn evaluate_next_with_result(
     result: &Value,
 ) -> Option<String> {
     match &node.next {
-        Some(EdgeSpec::Unconditional(target)) => Some(target.clone()),
-        Some(EdgeSpec::Conditional(edges)) => {
+        Some(EdgeSpec::Unconditional { to: target }) => Some(target.clone()),
+        Some(EdgeSpec::Conditional { branches: edges }) => {
             let ctx = WalkContext {
                 state: state.clone(),
                 inputs: inputs.clone(),
