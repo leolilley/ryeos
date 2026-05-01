@@ -23,6 +23,7 @@ pub mod scope;
 pub mod trust;
 
 pub mod launch_envelope_types;
+pub mod protocol_vocabulary;
 pub mod subprocess_spec;
 
 #[doc(hidden)]

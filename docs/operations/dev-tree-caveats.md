@@ -18,17 +18,46 @@ The trust store the test harness pins (`ryeos_engine::test_support::live_trust_s
 
 Because `bin:` resolution requires a hash match (Part C of the foundation-hardening wave — no soft fallback), every `tool:rye/core/{fetch,verify,identity}` invocation will fail with `BinHashMismatch` until the manifest is rebuilt.
 
-### Symptom
+### Symptom — primary
+
+The error message is the giveaway. Look for `rye-inspect` hash mismatch in HTTP body or panic output:
 
 ```
-test tool_fetch_resolves_known_service ... FAILED
+binary `rye-inspect` hash mismatch: manifest declares <hash-A>,
+on-disk computed <hash-B>
+```
+
+This surfaces in many test files via 502 Bad Gateway responses. Common failing tests:
+
+```
+test tool_fetch_resolves_known_service          ... FAILED
 test tool_verify_returns_trusted_for_core_service ... FAILED
-test tool_fetch_with_content_includes_body ... FAILED
-test tool_fetch_unknown_ref_errors ... FAILED
-test tool_identity_public_key_returns_doc ... FAILED
+test tool_fetch_with_content_includes_body      ... FAILED
+test tool_fetch_unknown_ref_errors              ... FAILED
+test tool_identity_public_key_returns_doc       ... FAILED
 ```
 
 (or any other test that routes through `bin:rye-inspect`.)
+
+### Symptom — also caused by this issue
+
+If the dev tree's `core` bundle is invalid for ANY reason (stale manifest, mismatched signer fingerprint, missing CAS object), tests that spin up a real daemon will fail with messages like:
+
+```
+start daemon: daemon.json never appeared at /tmp/.tmpXXX/state/daemon.json
+```
+
+The daemon either fails its boot consistency check or gets stuck partway through bootstrap. Most `cleanup_e2e.rs`, `service_data_e2e.rs`, and `bundle_parity.rs` tests exhibit this.
+
+If you see the daemon-startup symptom and the test is one that spins up a real daemon, **first** confirm the `rye-inspect` symlink hash matches the manifest:
+
+```bash
+sha256sum ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/rye-inspect
+# Compare to the entry in:
+cat ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/MANIFEST.json | grep -A1 rye-inspect
+```
+
+If they differ, this is the root cause regardless of which test is failing.
 
 ### Fix
 
@@ -39,6 +68,22 @@ cargo run --bin rye-bundle-tool -- rebuild-manifest \
 ```
 
 That re-hashes the on-disk binary, regenerates `MANIFEST.json` + the CAS-stored `SourceManifest` object + the signed `rye-inspect.item_source.json` sidecar, and updates `refs/bundles/manifest` to point at the new manifest hash. Signs everything with the platform-author key (the single key the engine test harness trusts).
+
+### Common LLM mistake — DO NOT use `--seed 42`
+
+Older docs may reference `--seed 42` for `rebuild-manifest`. **Do not use it for the `core` bundle.** The seed-42 key is NOT in the engine test trust store. Rebuilding with `--seed 42` produces a manifest signed by the wrong fingerprint and breaks ~130 tests workspace-wide with "signature from fingerprint X not in trust store" errors.
+
+If you accidentally rebuilt with `--seed 42`:
+
+```bash
+git checkout ryeos-bundles/                       # revert manifest + item_source.json sidecars
+rm -rf ryeos-bundles/core/.ai/objects/blobs/*/    # remove orphan CAS blobs the seed-key rebuild created
+rm -rf ryeos-bundles/core/.ai/objects/objects/*/  # (clean up only the directories git status reports as untracked)
+```
+
+Then rebuild correctly with `--key ~/.ai/config/keys/signing/private_key.pem`.
+
+The `--seed` flag exists only for self-signed daemon `fast_fixture` content (directives, routes, providers inside daemon test fixtures) — never for bundle artifacts the engine trust store has to verify.
 
 Run the workspace gate after to confirm:
 
