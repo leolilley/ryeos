@@ -27,6 +27,7 @@ use crate::handlers::HandlerRegistry;
 use crate::parsers::descriptor::ParserDescriptor;
 use crate::parsers::dispatcher::ParserDispatcher;
 use crate::parsers::ParserRegistry;
+use crate::resolution::TrustClass;
 use crate::trust::{TrustStore, TrustedSigner};
 
 /// The repo workspace root (parent of `ryeos-engine/`).
@@ -85,7 +86,7 @@ pub fn live_trust_store() -> TrustStore {
 pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
     let root = core_bundle_root();
     let trust_store = live_trust_store();
-    let registry = HandlerRegistry::load_base(&[root], &trust_store)
+    let registry = HandlerRegistry::load_base(&[(root, TrustClass::TrustedSystem)], &trust_store)
         .expect("live HandlerRegistry must load from ryeos-bundles/core/");
     Arc::new(registry)
 }

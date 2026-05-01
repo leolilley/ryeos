@@ -110,21 +110,22 @@ pub fn preflight_verify_bundle(
     //    (e.g. preflight verifying core in place during `rye init`) the
     //    same root must not be walked twice — `HandlerRegistry::load_base`
     //    rejects duplicate handler refs across roots.
-    let mut parser_search_roots: Vec<PathBuf> = Vec::new();
+    let mut parser_search_roots: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = Vec::new();
     let mut seen_roots: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let push_unique = |path: PathBuf,
-                           roots: &mut Vec<PathBuf>,
+                           trust: ryeos_engine::resolution::TrustClass,
+                           roots: &mut Vec<(PathBuf, ryeos_engine::resolution::TrustClass)>,
                            seen: &mut std::collections::HashSet<PathBuf>| {
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());
         if seen.insert(key) {
-            roots.push(path);
+            roots.push((path, trust));
         }
     };
-    push_unique(system_data_dir.to_path_buf(), &mut parser_search_roots, &mut seen_roots);
+    push_unique(system_data_dir.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem, &mut parser_search_roots, &mut seen_roots);
     if let Some(ur) = user_root {
-        push_unique(ur.to_path_buf(), &mut parser_search_roots, &mut seen_roots);
+        push_unique(ur.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
     }
-    push_unique(source_path.to_path_buf(), &mut parser_search_roots, &mut seen_roots);
+    push_unique(source_path.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
 
     // Diagnostic: warn if the source ships a legacy bundle-internal
     // trust dir, which the engine no longer treats as a trust source.
@@ -140,7 +141,7 @@ pub fn preflight_verify_bundle(
         );
     }
     let (parser_tools, _dups) =
-        ParserRegistry::load_base(&parser_search_roots, &trust_store, &kinds)
+        ParserRegistry::load_base(&parser_search_roots.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), &trust_store, &kinds)
             .context("preflight: load parser tools")?;
     let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store)
         .context("preflight: load handler descriptors")?;

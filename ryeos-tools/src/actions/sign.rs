@@ -419,12 +419,17 @@ fn build_parser_dispatcher(
     trust_store: &TrustStore,
 ) -> Result<ParserDispatcher> {
     let mut search: Vec<PathBuf> = system_roots.to_vec();
+    let mut tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = system_roots
+        .iter()
+        .map(|r| (r.clone(), ryeos_engine::resolution::TrustClass::TrustedSystem))
+        .collect();
     if let Some(u) = user_root {
         search.push(u.to_path_buf());
+        tagged_search.push((u.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser));
     }
     let (parser_tools, _duplicates) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
-    let handlers = HandlerRegistry::load_base(&search, trust_store)
+    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store)
         .with_context(|| "load handler descriptors")?;
     Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
 }

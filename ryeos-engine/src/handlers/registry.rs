@@ -85,13 +85,13 @@ impl HandlerRegistry {
     /// Descriptors must be signed; the signature is verified against
     /// the trust store.
     pub fn load_base(
-        roots: &[PathBuf],
+        roots: &[(PathBuf, TrustClass)],
         trust_store: &TrustStore,
     ) -> Result<Self, HandlerError> {
         let mut entries: HashMap<String, VerifiedHandler> = HashMap::new();
         let mut fingerprint_parts: Vec<String> = Vec::new();
 
-        for root in roots {
+        for (root, root_trust) in roots {
             let handlers_dir = root.join(AI_DIR).join("handlers");
             if !handlers_dir.is_dir() {
                 continue;
@@ -101,7 +101,7 @@ impl HandlerRegistry {
             yaml_paths.sort();
 
             for path in &yaml_paths {
-                let verified = load_and_verify_handler(path, root, trust_store)?;
+                let verified = load_and_verify_handler(path, root, *root_trust, trust_store)?;
 
                 // Check for duplicates across roots.
                 if let Some(existing) = entries.get(&verified.canonical_ref) {
@@ -207,6 +207,7 @@ fn collect_yaml_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HandlerE
 fn load_and_verify_handler(
     yaml_path: &Path,
     bundle_root: &Path,
+    trust_class: TrustClass,
     trust_store: &TrustStore,
 ) -> Result<VerifiedHandler, HandlerError> {
     let content = std::fs::read_to_string(yaml_path).map_err(|e| HandlerError::Io {
@@ -285,13 +286,7 @@ fn load_and_verify_handler(
     Ok(VerifiedHandler {
         canonical_ref,
         descriptor,
-        // TODO: derive from TrustStore tier (project/user/system) once
-        // TrustStore tracks per-key origin. Currently TrustStore.get()
-        // only returns the verifying key, not which trust tier it came
-        // from. All bundle-sourced handlers are signed by trusted keys
-        // (verified above at line 240), so TrustedSystem is the correct
-        // class for the current loading path. Tracked in 04-FUTURE-WORK.md.
-        trust_class: TrustClass::TrustedSystem,
+        trust_class,
         bundle_root: bundle_root.to_owned(),
         descriptor_path: yaml_path.to_owned(),
         resolved_binary_path: resolved.absolute_path,

@@ -134,7 +134,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         .collect();
 
     let handler_registry = HandlerRegistry::load_base(
-        &system_roots.iter().chain(user_root.iter()).cloned().collect::<Vec<_>>(),
+        &tagged_roots,
         &trust_store,
     )
     .context("failed to load handler descriptors from bundle roots")?;

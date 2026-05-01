@@ -93,7 +93,7 @@ pub fn sign_bundle_items(
     let (parser_tools, _dups) =
         ParserRegistry::load_base(&[registry_root.to_path_buf()], &trust_store, &kinds)
             .context("load parser tools")?;
-    let handlers = HandlerRegistry::load_base(&[registry_root.to_path_buf()], &trust_store)
+    let handlers = HandlerRegistry::load_base(&[(registry_root.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem)], &trust_store)
         .context("load handler descriptors")?;
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handlers));
 
