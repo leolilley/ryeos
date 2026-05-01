@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use ryeos_engine::boot_validation::validate_boot;
+use ryeos_engine::boot_validation::{validate_boot, validate_protocol_builder};
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
@@ -174,6 +174,18 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         &parser_duplicates,
     ) {
         let mut msg = String::from("boot validation failed:\n");
+        for issue in &issues {
+            msg.push_str(&format!("  - {issue:?}\n"));
+        }
+        anyhow::bail!("{msg}");
+    }
+
+    // 9d. Protocol builder validation: exercise every protocol descriptor
+    //    with synthetic inputs to catch descriptor regressions (unknown
+    //    env sources, duplicate keys, stdin-serialize failures) at boot
+    //    time. Also verifies runtime/streaming_tool kind↔protocol coupling.
+    if let Err(issues) = validate_protocol_builder(&kinds, &protocol_registry) {
+        let mut msg = String::from("protocol builder validation failed:\n");
         for issue in &issues {
             msg.push_str(&format!("  - {issue:?}\n"));
         }
