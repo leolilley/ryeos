@@ -1,0 +1,22 @@
+# rye:signed:2026-05-01T04:58:53Z:cf4ba9774f16096eb38921bafbe2a8591805e81d3ad716a09f1dd85ea9b264c3:+gSTZn+n4gT09mSDYrS293XG4wDx7ea51oZpE+2+4OZm5siKju+p0aAUFlzy0e8MoETTWoX6cn6uDw45ikZcAg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+kind: protocol
+name: tool_streaming_v1
+category: rye/core
+abi_version: v1
+description: Tool with streaming stdout chunks; daemon reads length-prefixed JSON frames during execution.
+stdin:
+  shape: parameters_json
+stdout:
+  shape: streaming_chunks_v1
+  mode: streaming
+env_injections:
+  - { name: RYE_CALLBACK_URL, source: callback_token_url }
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+capabilities:
+  allows_pushed_head: true
+  allows_target_site: true
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: http_v1
