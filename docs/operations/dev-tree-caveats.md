@@ -59,7 +59,23 @@ cat ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/MANIFEST.json | grep -A1
 
 If they differ, this is the root cause regardless of which test is failing.
 
-### Fix
+### Fix — preferred
+
+Run the gate wrapper. It detects the drift, runs `rebuild-manifest` with the correct platform-author key, then runs nextest:
+
+```bash
+./scripts/gate.sh
+```
+
+To sync the manifest without running tests:
+
+```bash
+./scripts/gate.sh --no-tests
+```
+
+The script is idempotent — when on-disk and manifest hashes already match it prints `rye-inspect hash matches manifest (<hash>)` and skips the rebuild.
+
+### Fix — manual
 
 ```bash
 cargo run --bin rye-bundle-tool -- rebuild-manifest \
@@ -88,7 +104,7 @@ The `--seed` flag exists only for self-signed daemon `fast_fixture` content (dir
 Run the workspace gate after to confirm:
 
 ```bash
-cargo test --workspace --no-fail-fast 2>&1 | grep -c FAILED   # → 0
+cargo nextest run --workspace --no-fail-fast 2>&1 | grep -c FAIL   # → 0
 ```
 
 ### Why the symlink at all
@@ -99,9 +115,12 @@ Convenience for development. The dev tree's "core" bundle is a working bundle th
 
 The standard bundle (`ryeos-bundles/standard/.ai/bin/<host-triple>/`) ships with **real binary files** committed to the repo (no symlinks). Its manifest only invalidates if those committed binaries are intentionally replaced. Don't replace them casually — if you do, run `rebuild-manifest --source ryeos-bundles/standard --key ~/.ai/config/keys/signing/private_key.pem` and commit the resulting manifest + item_source changes alongside.
 
+### Workspace gate
+
+The canonical gate is `./scripts/gate.sh`. It auto-syncs the manifest if drift is detected, then runs `cargo nextest run --workspace --no-fail-fast`. Direct `cargo nextest run` invocations are fine but skip the auto-sync.
+
 ### Future work
 
-Two cleanups on the radar (not yet scheduled):
+One cleanup remains on the radar (not yet scheduled): investigate making the manifest verification tolerant of "dev-tree symlink → just-rebuilt binary" without weakening the production trust contract. Probably a config flag the test harness opts into, never enabled in production builds.
 
-1. Replace the symlink with a copy step in a `cargo xtask` or pre-test hook that runs `rebuild-manifest` automatically when the binary content changes.
-2. Investigate making the manifest verification tolerant of "dev-tree symlink → just-rebuilt binary" without weakening the production trust contract. Probably a config flag the test harness opts into, never enabled in production builds.
+(The "auto rebuild-manifest before tests" cleanup is now handled by `scripts/gate.sh`.)
