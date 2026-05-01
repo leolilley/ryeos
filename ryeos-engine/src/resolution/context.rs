@@ -22,7 +22,7 @@ use crate::trust::TrustStore;
 use super::alias::AliasResolver;
 use super::decl::ResolutionStepDecl;
 use super::types::{
-    execution_trust, KindComposedView, ResolutionEdge, ResolutionError, ResolutionOutput,
+    execution_trust, ResolutionEdge, ResolutionError, ResolutionOutput,
     ResolutionStepName, ResolvedAncestor, TrustClass,
 };
 
@@ -178,21 +178,13 @@ impl<'a> ResolutionContext<'a> {
         let executor_trust_class =
             execution_trust(self.root_ancestor.trust_class, &self.ancestors);
 
-        let composed = match composers.get(kind) {
-            Some((c, cfg)) => c.compose(
-                cfg,
-                &self.root_ancestor,
-                &self.root_loaded.parsed,
-                &self.ancestors,
-                &self.ancestor_parsed,
-            )?,
-            // Test-only escape hatch: if no composer is bound for the
-            // kind, surface an identity view so downstream consumers
-            // see a uniform shape. Production paths go through
-            // `ComposerRegistry::from_kinds`, which fails loud at
-            // boot when a kind has no composer.
-            None => KindComposedView::identity(self.root_loaded.parsed.clone()),
-        };
+        let composed = composers.compose(
+            kind,
+            &self.root_ancestor,
+            &self.root_loaded.parsed,
+            &self.ancestors,
+            &self.ancestor_parsed,
+        )?;
 
         Ok(ResolutionOutput {
             root: self.root_ancestor,

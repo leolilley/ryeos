@@ -84,7 +84,8 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let system_roots = envelope.roots.system_roots.clone();
 
     // The runtime no longer parses the directive body or walks extends.
-    // The daemon-side `ExtendsChainComposer` has already produced
+    // The daemon-side extends-chain composer (handler:rye/core/extends-chain)
+    // has already produced
     // `envelope.resolution.composed = KindComposedView::ExtendsChain(...)`
     // — we hand that view straight into bootstrap.
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(

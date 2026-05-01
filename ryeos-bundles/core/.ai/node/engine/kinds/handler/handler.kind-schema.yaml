@@ -1,4 +1,4 @@
-# rye:signed:2026-04-30T21:58:30Z:579c3692d56260fa06bfcacd30285b7cf520af396257713cd4dc1a783baa7472:jdfkk9qnb4ApbC5cNcZB6axhsZixDeWI74FjQq03caM7XvQiBra8TwCaND+K9NJYv+KPVMtpG+B5mPyxG0ZvCA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T01:02:53Z:ce7a2ff9d445e96e46b1e2a719796462cd53715fcbe440ac6807079f9a13f735:0xD7TlfJHZSVPPiXlC95o/JHm4nCL7fsL2mTfRnIpzUlNPwRuhtTid0TwewhUODT6MOezbgP8tuuzUJ4w+wnDQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/handler"
 version: "1.0.0"
 location:
@@ -16,7 +16,7 @@ formats:
 # Items of this kind are loaded by the Layer-1 raw signed-YAML loader
 # (HandlerRegistry::load_base) BEFORE parser/composer dispatch is
 # wired up. This breaks the bootstrap cycle.
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

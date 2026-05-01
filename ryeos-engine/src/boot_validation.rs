@@ -23,12 +23,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
+use std::time::Duration;
+
+use crate::composers::ComposerRegistry;
 use crate::contracts::ContractViolation;
+use crate::error::EngineError;
+use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes};
 use crate::kind_registry::KindRegistry;
 use crate::parsers::{DuplicateRef, ParserRegistry};
-use ryeos_handler_protocol::{HandlerRequest, HandlerResponse, ValidateParserConfigRequest};
+use ryeos_handler_protocol::{
+    HandlerRequest, HandlerResponse, ValidateComposerConfigRequest, ValidateParserConfigRequest,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootIssue {
@@ -62,20 +68,30 @@ pub enum BootIssue {
     ComposerForUnknownKind {
         kind: String,
     },
-    /// A kind schema's `composer` field names a handler ID that is
-    /// not registered in `NativeComposerHandlerRegistry`. The
-    /// kind→handler mapping is data-driven; an unknown handler ID
-    /// is the composer-side equivalent of `DanglingParserRef`.
+    /// A kind schema's `composer` field names a handler ref that is
+    /// not registered in the `HandlerRegistry`. The kind→handler
+    /// mapping is data-driven; an unknown handler ref is the
+    /// composer-side equivalent of `DanglingParserRef`.
     UnknownComposerHandler {
         kind: String,
         handler_id: String,
     },
-    /// A kind schema's `composer_config` failed handler validation.
+    /// A kind schema's `composer_config` failed subprocess
+    /// validation by the composer handler binary.
     /// Composer-side equivalent of `InvalidParserConfig`.
     InvalidComposerConfig {
         kind: String,
         handler_id: String,
         reason: String,
+    },
+    /// Composer handler binary could not be spawned, returned
+    /// non-zero, or emitted a malformed response during
+    /// `composer_config` validation. Composer-side equivalent of
+    /// `HandlerUnusable`.
+    ComposerHandlerUnusable {
+        kind: String,
+        handler_id: String,
+        detail: String,
     },
     /// Two parser tool YAMLs collapsed onto the same canonical ref
     /// across distinct loader roots. Loader keeps first-found-wins
@@ -106,7 +122,6 @@ pub fn validate_boot(
     kinds: &KindRegistry,
     parser_tools: &ParserRegistry,
     handler_registry: &Arc<HandlerRegistry>,
-    native_composers: &NativeComposerHandlerRegistry,
     composers: &ComposerRegistry,
     dup_refs: &[DuplicateRef],
 ) -> Result<(), Vec<BootIssue>> {
@@ -162,71 +177,50 @@ pub fn validate_boot(
                         HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
                             parser_config: descriptor.parser_config.clone(),
                         });
-                    let request_json = match serde_json::to_string(&request) {
-                        Ok(j) => j,
-                        Err(e) => {
+                    match run_handler_subprocess(h, &request, Duration::from_secs(30)) {
+                        Ok(HandlerResponse::ValidateOk) => {}
+                        Ok(HandlerResponse::ValidateErr { message }) => {
+                            issues.push(BootIssue::InvalidParserConfig {
+                                parser_ref: parser_ref.clone(),
+                                reason: message,
+                            });
+                        }
+                        Ok(other) => {
                             issues.push(BootIssue::HandlerUnusable {
                                 parser_ref: parser_ref.clone(),
                                 handler: descriptor.handler.clone(),
-                                detail: format!("encode request: {e}"),
+                                detail: format!("unexpected response: {other:?}"),
                             });
-                            config_checked.insert(parser_ref.clone(), ());
-                            // Still fall through to contract check
-                            schedule_contract_check(
-                                &mut issues,
-                                &kind,
-                                ext,
-                                parser_ref,
-                                &schema,
-                                &descriptor,
-                            );
-                            continue;
                         }
-                    };
-
-                    let req = lillux::exec::SubprocessRequest {
-                        cmd: h.resolved_binary_path.display().to_string(),
-                        args: vec![],
-                        cwd: None,
-                        envs: vec![],
-                        stdin_data: Some(request_json),
-                        timeout: 30.0,
-                    };
-
-                    let output = lillux::exec::lib_run(req);
-                    if !output.success {
-                        issues.push(BootIssue::HandlerUnusable {
-                            parser_ref: parser_ref.clone(),
-                            handler: descriptor.handler.clone(),
-                            detail: format!(
-                                "exit code {}: {}",
-                                output.exit_code,
-                                output.stderr.trim()
-                            ),
-                        });
-                    } else {
-                        match serde_json::from_str::<HandlerResponse>(&output.stdout) {
-                            Ok(HandlerResponse::ValidateOk) => {}
-                            Ok(HandlerResponse::ValidateErr { message }) => {
-                                issues.push(BootIssue::InvalidParserConfig {
-                                    parser_ref: parser_ref.clone(),
-                                    reason: message,
-                                });
-                            }
-                            Ok(other) => {
-                                issues.push(BootIssue::HandlerUnusable {
-                                    parser_ref: parser_ref.clone(),
-                                    handler: descriptor.handler.clone(),
-                                    detail: format!("unexpected response: {other:?}"),
-                                });
-                            }
-                            Err(e) => {
-                                issues.push(BootIssue::HandlerUnusable {
-                                    parser_ref: parser_ref.clone(),
-                                    handler: descriptor.handler.clone(),
-                                    detail: format!("malformed response: {e}"),
-                                });
-                            }
+                        Err(EngineError::HandlerExitNonZero {
+                            exit_code, stderr, ..
+                        }) => {
+                            issues.push(BootIssue::HandlerUnusable {
+                                parser_ref: parser_ref.clone(),
+                                handler: descriptor.handler.clone(),
+                                detail: format!("exit {exit_code}: {}", stderr.trim()),
+                            });
+                        }
+                        Err(EngineError::HandlerSpawnFailed { detail, .. }) => {
+                            issues.push(BootIssue::HandlerUnusable {
+                                parser_ref: parser_ref.clone(),
+                                handler: descriptor.handler.clone(),
+                                detail,
+                            });
+                        }
+                        Err(EngineError::HandlerProtocolViolation { detail, .. }) => {
+                            issues.push(BootIssue::HandlerUnusable {
+                                parser_ref: parser_ref.clone(),
+                                handler: descriptor.handler.clone(),
+                                detail: format!("malformed response: {detail}"),
+                            });
+                        }
+                        Err(other) => {
+                            issues.push(BootIssue::HandlerUnusable {
+                                parser_ref: parser_ref.clone(),
+                                handler: descriptor.handler.clone(),
+                                detail: other.to_string(),
+                            });
                         }
                     }
                     config_checked.insert(parser_ref.clone(), ());
@@ -238,26 +232,95 @@ pub fn validate_boot(
         }
     }
 
-    // Each kind's declared composer handler ID must resolve to a
-    // registered native composer handler. Aggregate every offender.
+    // Each kind's declared composer handler ref must resolve to a
+    // registered handler that serves `composer`, and the kind's
+    // `composer_config` blob must pass the handler's
+    // `ValidateComposerConfig` subprocess check. Aggregate every
+    // offender — symmetric to the parser handler / parser_config
+    // walk above.
     let mut sorted_kinds: Vec<&str> = kinds.kinds().collect();
     sorted_kinds.sort();
+    let mut composer_config_checked: HashMap<String, ()> = HashMap::new();
     for kind in sorted_kinds {
         let schema = match kinds.get(kind) {
             Some(s) => s,
             None => continue,
         };
-        if !native_composers.contains(&schema.composer) {
-            issues.push(BootIssue::UnknownComposerHandler {
-                kind: kind.to_string(),
-                handler_id: schema.composer.clone(),
+        let handler = match handler_registry
+            .ensure_serves(&schema.composer, HandlerServes::Composer)
+        {
+            Ok(h) => h,
+            Err(_) => {
+                issues.push(BootIssue::UnknownComposerHandler {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                });
+                continue;
+            }
+        };
+
+        // Cache key: (handler_ref, JSON config) so two kinds that
+        // bind the same handler with identical configs only spawn
+        // once. Different configs spawn independently because the
+        // handler's verdict depends on the config bytes.
+        let cache_key = format!(
+            "{}|{}",
+            schema.composer,
+            serde_json::to_string(&schema.composer_config).unwrap_or_default()
+        );
+        if composer_config_checked.contains_key(&cache_key) {
+            continue;
+        }
+        composer_config_checked.insert(cache_key, ());
+
+        let request =
+            HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
+                composer_config: schema.composer_config.clone(),
             });
-        } else if let Some(handler) = native_composers.get(&schema.composer) {
-            if let Err(reason) = handler.validate_config(&schema.composer_config) {
+        match run_handler_subprocess(&handler, &request, Duration::from_secs(30)) {
+            Ok(HandlerResponse::ValidateOk) => {}
+            Ok(HandlerResponse::ValidateErr { message }) => {
                 issues.push(BootIssue::InvalidComposerConfig {
                     kind: kind.to_string(),
                     handler_id: schema.composer.clone(),
-                    reason,
+                    reason: message,
+                });
+            }
+            Ok(other) => {
+                issues.push(BootIssue::ComposerHandlerUnusable {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    detail: format!("unexpected response: {other:?}"),
+                });
+            }
+            Err(EngineError::HandlerExitNonZero {
+                exit_code, stderr, ..
+            }) => {
+                issues.push(BootIssue::ComposerHandlerUnusable {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    detail: format!("exit {exit_code}: {}", stderr.trim()),
+                });
+            }
+            Err(EngineError::HandlerSpawnFailed { detail, .. }) => {
+                issues.push(BootIssue::ComposerHandlerUnusable {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    detail,
+                });
+            }
+            Err(EngineError::HandlerProtocolViolation { detail, .. }) => {
+                issues.push(BootIssue::ComposerHandlerUnusable {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    detail: format!("malformed response: {detail}"),
+                });
+            }
+            Err(other) => {
+                issues.push(BootIssue::ComposerHandlerUnusable {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    detail: other.to_string(),
                 });
             }
         }
@@ -311,28 +374,54 @@ fn schedule_contract_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composers::{
-        ComposerRegistry, IdentityComposer, NativeComposerHandlerRegistry,
-    };
+    use crate::composers::ComposerRegistry;
     use crate::kind_registry::KindRegistry;
     use crate::parsers::descriptor::ParserDescriptor;
     use crate::parsers::ParserRegistry;
+    use crate::test_support::load_live_handler_registry;
     use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use serde_json::Value;
     use std::fs;
     use std::sync::Arc;
 
+    /// Empty registry — preserves the historical default for tests
+    /// that exercise parser-side validation paths. Tests that drive
+    /// composer-side checks (`UnknownComposerHandler`,
+    /// `InvalidComposerConfig`, `ComposerHandlerUnusable`) need to
+    /// substitute `live_handler_registry()` so the composer handler
+    /// refs in their schemas resolve.
     fn handler_registry() -> Arc<HandlerRegistry> {
         Arc::new(HandlerRegistry::empty())
     }
 
-    fn native_composers() -> NativeComposerHandlerRegistry {
-        NativeComposerHandlerRegistry::with_builtins()
+    /// Live handler registry — used by tests that depend on real
+    /// composer/parser binaries. The composer registry built via
+    /// `composers_from` uses this so the schemas' composer refs
+    /// resolve to verified handlers.
+    fn live_handler_registry() -> Arc<HandlerRegistry> {
+        load_live_handler_registry()
     }
 
+    /// Build a composer registry from `kinds` using the live handler
+    /// registry — necessary because every kind schema written by these
+    /// tests now declares `composer: handler:rye/core/identity` (or
+    /// extends-chain / graph-permissions) which only resolves through
+    /// the live registry.
     fn composers_from(kinds: &KindRegistry) -> ComposerRegistry {
-        ComposerRegistry::from_kinds(kinds, &native_composers()).unwrap()
+        ComposerRegistry::from_kinds(kinds, &live_handler_registry()).unwrap()
+    }
+
+    /// Fetch the verified `handler:rye/core/identity` composer from
+    /// the live registry so tests can construct synthetic
+    /// `BoundComposer` entries via `ComposerRegistry::register` after
+    /// migration to subprocess composers.
+    fn identity_composer_handler() -> Arc<crate::handlers::VerifiedHandler> {
+        let registry = load_live_handler_registry();
+        let h = registry
+            .ensure_serves("handler:rye/core/identity", HandlerServes::Composer)
+            .expect("live registry must contain handler:rye/core/identity composer");
+        Arc::new(h.clone())
     }
 
     fn tempdir() -> std::path::PathBuf {
@@ -372,7 +461,7 @@ formats:
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {{}}
@@ -412,7 +501,7 @@ formats:
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
 {contract_yaml_indented}
 "
@@ -479,7 +568,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::UnknownHandler { .. }
@@ -498,7 +587,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DanglingParserRef { parser_ref: pr, kind, .. }
@@ -518,7 +607,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::UnknownHandler { handler, .. }
@@ -538,7 +627,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::UnknownHandler { handler, .. } if handler == "subprocess:python"
@@ -560,7 +649,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::UnknownHandler { parser_ref: pr, .. } if pr == parser_ref
@@ -573,10 +662,10 @@ composed_value_contract:
         let parsers = ParserRegistry::empty();
         let hr = handler_registry();
         let mut composers = ComposerRegistry::new();
-        composers.register("directive", Arc::new(IdentityComposer), Value::Null);
-        composers.register("graph", Arc::new(IdentityComposer), Value::Null);
+        composers.register("directive", identity_composer_handler(), Value::Null);
+        composers.register("graph", identity_composer_handler(), Value::Null);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         let unknown_kinds: Vec<&str> = issues
             .iter()
             .filter_map(|i| match i {
@@ -602,9 +691,9 @@ composed_value_contract:
         )]);
         let hr = handler_registry();
         let mut composers = composers_from(&kinds);
-        composers.register("ghost_kind", Arc::new(IdentityComposer), Value::Null);
+        composers.register("ghost_kind", identity_composer_handler(), Value::Null);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         let has_unknown = issues
             .iter()
             .any(|i| matches!(i, BootIssue::UnknownHandler { .. }));
@@ -647,7 +736,7 @@ composed_value_contract:
             ],
         }];
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &dup_refs).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &dup_refs).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DuplicateParserRef { parser_ref: pr, paths }
@@ -665,7 +754,7 @@ formats:
     parser: {parser_ref}
     signature:
       prefix: \"#\"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {{}}
@@ -689,7 +778,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DanglingParserRef { kind, parser_ref, .. }
@@ -716,7 +805,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = ComposerRegistry::new();
 
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(!issues.iter().any(|i| matches!(
             i,
             BootIssue::DanglingParserRef { .. }
@@ -763,7 +852,7 @@ composed_value_contract:
         )]);
         let hr = handler_registry();
         let composers = composers_from(&kinds);
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(
             !issues.iter().any(|i| matches!(
                 i,
@@ -871,7 +960,7 @@ composed_value_contract:
         let hr = handler_registry();
         let composers = ComposerRegistry::new();
         let issues =
-            validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[])
+            validate_boot(&kinds, &parsers, &hr, &composers, &[])
                 .unwrap_err();
         assert!(
             issues.iter().any(|i| matches!(
@@ -919,7 +1008,7 @@ composed_value_contract:
         )]);
         let hr = handler_registry();
         let composers = composers_from(&kinds);
-        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
 
         let viols: Vec<&ContractViolation> = issues
             .iter()
@@ -962,7 +1051,7 @@ formats:
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composer_config:
 {junk}
 composed_value_contract:
@@ -988,10 +1077,16 @@ composed_value_contract:
                 }),
             ),
         )]);
-        let hr = handler_registry();
+        // Composer-config validation now runs through the live
+        // composer handler subprocess; we MUST use the live handler
+        // registry so the `handler:rye/core/identity` ref resolves
+        // AND the binary actually runs to reject the bad
+        // `composer_config` blob (identity composer rejects any
+        // non-empty mapping).
+        let hr = live_handler_registry();
         let composers = ComposerRegistry::new();
         let issues =
-            validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[])
+            validate_boot(&kinds, &parsers, &hr, &composers, &[])
                 .unwrap_err();
 
         let bad: Vec<&str> = issues

@@ -132,7 +132,8 @@ pub struct KindComposedView {
 }
 
 impl KindComposedView {
-    /// View used by composers (e.g. `IdentityComposer`) that perform
+    /// View used by composers (e.g. the `handler:rye/core/identity`
+    /// composer binary) that perform
     /// no merge: `composed` is the root parser output verbatim.
     pub fn identity(composed: serde_json::Value) -> Self {
         Self {

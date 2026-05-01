@@ -22,7 +22,7 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
 pub fn compose(
     _config: &Value,
     request: &ComposeRequest,
-) -> Result<ComposeSuccess, ResolutionStepNameWire> {
+) -> Result<ComposeSuccess, (ResolutionStepNameWire, String)> {
     let root_parsed = &request.root.parsed;
 
     let mut policy_facts = HashMap::new();

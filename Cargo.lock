@@ -1891,7 +1891,6 @@ dependencies = [
  "directories",
  "jsonschema",
  "lillux",
- "regex",
  "ryeos-handler-protocol",
  "ryeos-tracing",
  "serde",

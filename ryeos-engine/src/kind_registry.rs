@@ -604,10 +604,11 @@ pub struct KindSchema {
     /// violations.
     pub composed_value_contract: ValueShape,
     /// Native composer handler ID this kind binds to (e.g.
-    /// `"rye/core/extends_chain"`, `"rye/core/identity"`). REQUIRED
+    /// `"handler:rye/core/extends-chain"`,
+    /// `"handler:rye/core/identity"`). REQUIRED
     /// on every kind schema — there is no silent "no composer" path.
     /// The boot validator guarantees this resolves through
-    /// `NativeComposerHandlerRegistry`; `ComposerRegistry::from_kinds`
+    /// the `HandlerRegistry`; `ComposerRegistry::from_kinds`
     /// uses this to bind kind→composer data-drivenly.
     pub composer: String,
     /// Opaque-to-the-engine composer-config blob, mirroring how
@@ -615,7 +616,7 @@ pub struct KindSchema {
     /// dispatcher. The kind's composer handler validates and consumes
     /// it. REQUIRED at the schema layer but defaults to `Value::Null`
     /// when the YAML omits the block — composers that take no config
-    /// (e.g. `IdentityComposer`) accept Null.
+    /// (e.g. the `handler:rye/core/identity` composer binary) accept Null.
     pub composer_config: Value,
     /// Runtime-handler dispatch declaration (which YAML blocks on
     /// items of this kind are runtime blocks, plus the ignore list).
@@ -1087,14 +1088,14 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             reason: format!(
                 "{display}: kind schema missing required field `composer` \
                  (declare a native composer handler ID, e.g. \
-                 `composer: rye/core/identity` for kinds with no \
-                 composition, or `composer: rye/core/extends_chain`)"
+                 `composer: handler:rye/core/identity` for kinds with no \
+                 composition, or `composer: handler:rye/core/extends-chain`)"
             ),
         })?;
 
     // `composer_config` is opaque to the engine — composer handlers
     // own validation. Absence ⇒ Value::Null (handlers like
-    // `IdentityComposer` explicitly accept Null).
+    // the `handler:rye/core/identity` composer binary explicitly accept Null).
     let composer_config = match data.get("composer_config") {
         Some(v) => yaml_to_json(v.clone()).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("{display}: invalid `composer_config`: {e}"),
@@ -1736,7 +1737,7 @@ formats:
         let yaml = if yaml.contains("composer:") {
             yaml
         } else {
-            format!("{yaml}composer: rye/core/identity\n")
+            format!("{yaml}composer: handler:rye/core/identity\n")
         };
         let signed = lillux::signature::sign_content(&yaml, sk, "#", None);
         fs::write(
@@ -1762,7 +1763,7 @@ formats:
     parser: parser:rye/core/yaml/yaml
     signature:
       prefix: \"#\"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

@@ -1188,7 +1188,7 @@ formats:
     parser: parser:rye/core/yaml/yaml
     signature:
       prefix: "#"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

@@ -3,6 +3,7 @@
 
 pub mod descriptor;
 pub mod registry;
+pub(crate) mod subprocess;
 
 pub use descriptor::{HandlerDescriptor, HandlerServes};
 pub use registry::{HandlerError, HandlerRegistry, VerifiedHandler};

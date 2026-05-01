@@ -81,9 +81,9 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
 pub fn compose(
     config: &Value,
     request: &ComposeRequest,
-) -> Result<ComposeSuccess, ResolutionStepNameWire> {
-    let cfg: ExtendsChainConfig = serde_json::from_value(config.clone()).map_err(|_| {
-        ResolutionStepNameWire::PipelineInit
+) -> Result<ComposeSuccess, (ResolutionStepNameWire, String)> {
+    let cfg: ExtendsChainConfig = serde_json::from_value(config.clone()).map_err(|e| {
+        (ResolutionStepNameWire::PipelineInit, format!("invalid composer_config: {e}"))
     })?;
 
     let root_parsed = &request.root.parsed;
@@ -97,20 +97,24 @@ pub fn compose(
 
     match (root_has_extends, ancestor_parsed.is_empty()) {
         (true, true) => {
-            eprintln!(
-                "extends_chain composer: root {root_ref} declares `{}` but resolution produced an empty ancestor chain",
-                cfg.extends_field
-            );
-            return Err(ResolutionStepNameWire::PipelineInit);
+            return Err((
+                ResolutionStepNameWire::PipelineInit,
+                format!(
+                    "root {root_ref} declares `{}` but resolution produced an empty ancestor chain",
+                    cfg.extends_field
+                ),
+            ));
         }
         (false, false) => {
-            eprintln!(
-                "extends_chain composer: root {root_ref} declares no `{}` but resolution produced {} ancestors — \
-                 pipeline state is inconsistent",
-                cfg.extends_field,
-                ancestor_parsed.len()
-            );
-            return Err(ResolutionStepNameWire::PipelineInit);
+            return Err((
+                ResolutionStepNameWire::PipelineInit,
+                format!(
+                    "root {root_ref} declares no `{}` but resolution produced {} ancestors — \
+                     pipeline state is inconsistent",
+                    cfg.extends_field,
+                    ancestor_parsed.len()
+                ),
+            ));
         }
         _ => {}
     }
@@ -149,19 +153,21 @@ fn validate_field_shape(
     parsed: &Value,
     ref_label: &str,
     is_root: bool,
-) -> Result<(), ResolutionStepNameWire> {
+) -> Result<(), (ResolutionStepNameWire, String)> {
     let value = parsed.get(&rule.name);
     let present = value.map(|v| !v.is_null()).unwrap_or(false);
 
     if !present {
         if rule.required && is_root {
-            eprintln!(
-                "extends_chain composer: {ref_label}: parser handler emitted no `{field}` field \
-                 but the kind's composer_config marks it as required — \
-                 parser handler/declared-schema disagreement",
-                field = rule.name,
-            );
-            return Err(ResolutionStepNameWire::PipelineInit);
+            return Err((
+                ResolutionStepNameWire::PipelineInit,
+                format!(
+                    "{ref_label}: parser handler emitted no `{field}` field \
+                     but the kind's composer_config marks it as required — \
+                     parser handler/declared-schema disagreement",
+                    field = rule.name,
+                ),
+            ));
         }
         return Ok(());
     }
@@ -169,40 +175,48 @@ fn validate_field_shape(
     let value = value.unwrap();
     if let Some(expected) = rule.expect_value_type {
         if !expected.matches(value) {
-            eprintln!(
-                "extends_chain composer: {ref_label}: `{}` of type {actual} but composer_config expects {expected_str} — \
-                 parser handler/declared-schema disagreement",
-                rule.name,
-                actual = json_value_type(value),
-                expected_str = expected.as_str(),
-            );
-            return Err(ResolutionStepNameWire::PipelineInit);
+            return Err((
+                ResolutionStepNameWire::PipelineInit,
+                format!(
+                    "{ref_label}: `{}` of type {actual} but composer_config expects {expected_str} — \
+                     parser handler/declared-schema disagreement",
+                    rule.name,
+                    actual = json_value_type(value),
+                    expected_str = expected.as_str(),
+                ),
+            ));
         }
     }
 
     if rule.strategy == ComposerStrategy::DictMergeStringSeqRootLast {
         let obj = value.as_object().ok_or_else(|| {
-            eprintln!(
-                "extends_chain composer: {ref_label}: `{}` must be a mapping for dict_merge_string_seq_root_last",
-                rule.name
-            );
-            ResolutionStepNameWire::PipelineInit
+            (
+                ResolutionStepNameWire::PipelineInit,
+                format!(
+                    "{ref_label}: `{}` must be a mapping for dict_merge_string_seq_root_last",
+                    rule.name
+                ),
+            )
         })?;
         for (key, items) in obj {
             let arr = items.as_array().ok_or_else(|| {
-                eprintln!(
-                    "extends_chain composer: {ref_label}: `{}.{key}` must be an array",
-                    rule.name
-                );
-                ResolutionStepNameWire::PipelineInit
+                (
+                    ResolutionStepNameWire::PipelineInit,
+                    format!(
+                        "{ref_label}: `{}.{key}` must be an array",
+                        rule.name
+                    ),
+                )
             })?;
             for (i, v) in arr.iter().enumerate() {
                 if !v.is_string() {
-                    eprintln!(
-                        "extends_chain composer: {ref_label}: `{}.{key}[{i}]` must be a string",
-                        rule.name
-                    );
-                    return Err(ResolutionStepNameWire::PipelineInit);
+                    return Err((
+                        ResolutionStepNameWire::PipelineInit,
+                        format!(
+                            "{ref_label}: `{}.{key}[{i}]` must be a string",
+                            rule.name
+                        ),
+                    ));
                 }
             }
         }
@@ -215,7 +229,7 @@ fn apply_strategy(
     composed: &mut Value,
     ancestor_parsed: &[&Value],
     root_parsed: &Value,
-) -> Result<(), ResolutionStepNameWire> {
+) -> Result<(), (ResolutionStepNameWire, String)> {
     match rule.strategy {
         ComposerStrategy::RootVerbatim => {}
         ComposerStrategy::InheritFromTopmost => {
@@ -457,7 +471,7 @@ mod tests {
         cfg: Value,
         root: Value,
         ancestors: Vec<ComposeInput>,
-    ) -> Result<ComposeSuccess, ResolutionStepNameWire> {
+    ) -> Result<ComposeSuccess, (ResolutionStepNameWire, String)> {
         compose(
             &cfg,
             &ComposeRequest {

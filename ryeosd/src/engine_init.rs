@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use ryeos_engine::boot_validation::validate_boot;
-use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
+use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::KindRegistry;
@@ -129,24 +129,25 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     );
     let handler_registry = std::sync::Arc::new(handler_registry);
 
-    // 8. Build native composer handler registry, then derive the
-    //    per-kind composer registry data-drivenly from the loaded
-    //    kind schemas (each schema declares its `composer:` handler
-    //    ID; the engine never names a kind in Rust).
-    let native_composers = NativeComposerHandlerRegistry::with_builtins();
-    let composers = ComposerRegistry::from_kinds(&kinds, &native_composers)
+    // 8. Derive the per-kind composer registry data-drivenly from
+    //    the loaded kind schemas (each schema declares its
+    //    `composer:` handler ref; the engine never names a kind in
+    //    Rust). Composer dispatch resolves through the same
+    //    `HandlerRegistry` that parser dispatch uses — composers and
+    //    parsers are both subprocess handlers.
+    let composers = ComposerRegistry::from_kinds(&kinds, &handler_registry)
         .context("failed to derive composer registry from kind schemas")?;
 
     // 9. Cross-registry boot validation: every parser ref a kind extension
     //    cites must resolve to a known descriptor + handler + valid config,
-    //    every kind's declared composer handler ID must resolve, and every
-    //    registered composer must point at a known kind. Collect ALL
-    //    issues, then bail with a single block listing them.
+    //    every kind's declared composer handler ref must resolve and its
+    //    composer_config must pass the handler's subprocess validation,
+    //    and every registered composer must point at a known kind. Collect
+    //    ALL issues, then bail with a single block listing them.
     if let Err(issues) = validate_boot(
         &kinds,
         &parser_tools,
         &handler_registry,
-        &native_composers,
         &composers,
         &parser_duplicates,
     ) {

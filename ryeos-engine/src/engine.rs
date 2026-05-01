@@ -434,7 +434,7 @@ mod tests {
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: rye/core/identity\n") } }
+            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:rye/core/identity\n") } }
         };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }

@@ -22,7 +22,7 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
 pub fn compose(
     _config: &Value,
     request: &ComposeRequest,
-) -> Result<ComposeSuccess, ResolutionStepNameWire> {
+) -> Result<ComposeSuccess, (ResolutionStepNameWire, String)> {
     Ok(ComposeSuccess {
         composed: request.root.parsed.clone(),
         derived: HashMap::new(),

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
+use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionHints, LaunchMode, PlanContext, Principal,
     ProjectContext, ThreadTerminalStatus,
@@ -82,10 +82,10 @@ fn build_engine_against_bundle() -> Engine {
         ParserRegistry::load_base(&[bundle_root.clone()], &trust_store, &kinds)
             .expect("live bundle parser tools load");
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
+    let parser_dispatcher =
+        ParserDispatcher::new(parser_tools, std::sync::Arc::clone(&native_handlers));
 
-    let native_composers = NativeComposerHandlerRegistry::with_builtins();
-    let composers = ComposerRegistry::from_kinds(&kinds, &native_composers)
+    let composers = ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("composer registry derives from live bundle kinds");
 
     Engine::new(kinds, parser_dispatcher, None, vec![bundle_root])

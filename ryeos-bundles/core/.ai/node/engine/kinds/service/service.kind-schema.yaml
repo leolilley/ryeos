@@ -1,4 +1,4 @@
-# rye:signed:2026-04-29T08:29:45Z:ddcbd3524269681c3e34486083732d10eecf3b6f0b2a6092ee703ecdbf4ea6d3:qyShUkVy4GdNQDI5GGWzlghw+XE8q29YJAZrKo5aWa9EXyyzlunu01pJ0RQFyb65WHD9W4Nww2/WlvBSBFdFCQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T01:02:53Z:3ccc591cf8d867159976c4977e3ff21a3d0872b3040ba193d8bace55f505c0d0:H3ec7xi5AahumLAvEnfU9Gl8LLQ5Oga7KECZ+F971dEflLVT/fUEuVhUNxdxfZtRCz8gAlRIe3CGpBmYyhyjDg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -14,7 +14,7 @@ formats:
     signature:
       prefix: "#"
 # Identity composer — service items are loaded as-is.
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

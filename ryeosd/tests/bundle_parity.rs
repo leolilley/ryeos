@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 
-use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
+use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::item_resolution::ResolutionRoots;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{
@@ -148,8 +148,11 @@ fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store)
         .expect("live bundle kinds load");
     let parsers = live_parser_dispatcher(&trust_store, &kinds);
-    let composers = ComposerRegistry::from_kinds(&kinds, &NativeComposerHandlerRegistry::with_builtins())
-        .expect("composer registry derives from live bundle kinds");
+    let composers = ComposerRegistry::from_kinds(
+        &kinds,
+        &ryeos_engine::test_support::load_live_handler_registry(),
+    )
+    .expect("composer registry derives from live bundle kinds");
 
     let project_dir = synth_project_with_directive("inline", directive_body);
     let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
@@ -172,7 +175,7 @@ fn pipeline_runs_against_live_bundle_kinds_form_a() {
     let composed_body = output
         .composed
         .derived_string("body")
-        .expect("ExtendsChainComposer must populate `body` derived field");
+        .expect("the extends-chain composer must populate `body` derived field");
     assert!(
         composed_body.contains("Hello from Form A"),
         "composed body lost: {:?}",
@@ -194,7 +197,7 @@ fn pipeline_runs_against_live_bundle_kinds_form_b() {
     let composed_body = output
         .composed
         .derived_string("body")
-        .expect("ExtendsChainComposer must populate `body` derived field");
+        .expect("the extends-chain composer must populate `body` derived field");
     assert!(
         composed_body.contains("Hello from Form B"),
         "composed body lost: {:?}",

@@ -39,12 +39,13 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     .expect("load parser tools");
 
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
-    let parser_dispatcher =
-        ryeos_engine::parsers::ParserDispatcher::new(parser_tools, native_handlers);
+    let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(
+        parser_tools,
+        std::sync::Arc::clone(&native_handlers),
+    );
 
-    let native_composers = ryeos_engine::composers::NativeComposerHandlerRegistry::with_builtins();
     let composers =
-        ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_composers)
+        ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
             .expect("derive composers");
 
     ryeos_engine::engine::Engine::new(

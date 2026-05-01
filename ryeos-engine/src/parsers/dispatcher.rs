@@ -15,7 +15,8 @@ use serde_json::Value;
 
 use crate::contracts::SignatureEnvelope;
 use crate::error::EngineError;
-use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
+use crate::handlers::subprocess::run_handler_subprocess;
+use crate::handlers::{HandlerRegistry, HandlerServes};
 
 use super::registry::ParserRegistry;
 
@@ -128,40 +129,4 @@ impl ParserDispatcher {
     }
 }
 
-fn run_handler_subprocess(
-    handler: &VerifiedHandler,
-    request: &HandlerRequest,
-    timeout: Duration,
-) -> Result<HandlerResponse, EngineError> {
-    let request_json = serde_json::to_string(request)
-        .map_err(|e| EngineError::Internal(format!("encode handler request: {e}")))?;
 
-    let req = lillux::exec::SubprocessRequest {
-        cmd: handler.resolved_binary_path.display().to_string(),
-        args: vec![],
-        cwd: None,
-        envs: vec![],
-        stdin_data: Some(request_json),
-        timeout: timeout.as_secs_f64(),
-    };
-
-    let output = lillux::exec::lib_run(req);
-    if !output.success {
-        if output.timed_out {
-            return Err(EngineError::HandlerSpawnFailed {
-                handler: handler.canonical_ref.clone(),
-                detail: format!("timed out after {}s", output.duration_ms / 1000.0),
-            });
-        }
-        return Err(EngineError::HandlerExitNonZero {
-            handler: handler.canonical_ref.clone(),
-            exit_code: output.exit_code,
-            stderr: output.stderr,
-        });
-    }
-
-    serde_json::from_str(&output.stdout).map_err(|e| EngineError::HandlerProtocolViolation {
-        handler: handler.canonical_ref.clone(),
-        detail: e.to_string(),
-    })
-}

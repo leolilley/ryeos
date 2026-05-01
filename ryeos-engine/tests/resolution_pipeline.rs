@@ -15,6 +15,7 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::resolution::run_resolution_pipeline;
+use ryeos_engine::test_support::load_live_handler_registry;
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 use ryeos_engine::{contracts::ItemSpace, item_resolution::ResolutionRoots};
 
@@ -97,7 +98,7 @@ fn sign_yaml(yaml: &str) -> String {
             );
         }
         if !yaml_owned.contains("composer:") {
-            yaml_owned.push_str("composer: rye/core/identity\n");
+            yaml_owned.push_str("composer: handler:rye/core/identity\n");
         }
     }
     lillux::signature::sign_content(&yaml_owned, &signing_key(), "#", None)
@@ -176,7 +177,9 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
     let trust = trust_store();
     let item = CanonicalRef::parse("node:root").unwrap();
 
-    let composers = ComposerRegistry::new();
+    let handlers = load_live_handler_registry();
+    let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
+        .expect("from_kinds must bind node kind");
     let output = run_resolution_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
         .expect("resolution pipeline succeeded");
 
@@ -260,7 +263,9 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
     let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
-    let composers = ComposerRegistry::new();
+    let handlers = load_live_handler_registry();
+    let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
+        .expect("from_kinds must bind directive kind");
     let item = CanonicalRef::parse("directive:test/sample").unwrap();
 
     let output = run_resolution_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)

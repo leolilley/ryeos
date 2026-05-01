@@ -389,7 +389,7 @@ mod tests {
                 })
                 .collect(),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
-            composer: "rye/core/identity".to_owned(),
+            composer: "handler:rye/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,
             runtime: None,
             inventory_kinds: Vec::new(),
