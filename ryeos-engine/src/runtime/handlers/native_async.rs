@@ -111,7 +111,7 @@ struct RichForm {
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum CancelModeChoice {
     #[default]
     Graceful,

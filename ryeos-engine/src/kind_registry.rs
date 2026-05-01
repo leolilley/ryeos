@@ -411,7 +411,7 @@ pub struct RuntimeSpec {
 /// child binary. The child's envelope shape is determined by the
 /// `protocol_ref` field, which points into the `ProtocolRegistry`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminatorDecl {
     /// Daemon calls a registered Rust fn in a named registry.
     InProcess {
@@ -431,7 +431,7 @@ pub enum TerminatorDecl {
 /// — additional registries (parsers, composers) are deferred per
 /// docs/future/resolution-pipeline-advanced.md.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum InProcessRegistryKind {
     Services,
 }
@@ -443,7 +443,7 @@ pub enum InProcessRegistryKind {
 /// for the default runtime serving this kind, then continue the
 /// dispatch loop on the returned canonical ref.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(tag = "via", rename_all = "snake_case")]
+#[serde(tag = "via", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DelegationVia {
     /// Look the next hop up in the runtime registry by `serves_kind`
     /// (defaulting to this schema's own kind name when omitted on the
@@ -464,7 +464,7 @@ pub enum DelegationVia {
 /// dispatcher will NEVER consult the runtime registry on behalf of
 /// this kind — silent fallback is gone.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)] on field `via`. Tracked in 04-FUTURE-WORK.md.
 pub struct DelegationSpec {
     #[serde(flatten)]
     pub via: DelegationVia,

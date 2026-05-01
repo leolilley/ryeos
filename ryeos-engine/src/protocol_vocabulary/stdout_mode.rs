@@ -4,7 +4,7 @@ use crate::protocol_vocabulary::error::VocabularyError;
 use crate::protocol_vocabulary::StdoutShape;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StdoutMode {
     Terminal,
     Streaming,

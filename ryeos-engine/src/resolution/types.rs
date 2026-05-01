@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 /// Trust classification for resolved items (for sandbox profile enforcement and audit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrustClass {
     /// Item from immutable system bundle.
     TrustedSystem,
@@ -18,6 +18,7 @@ pub enum TrustClass {
 
 /// Record of alias expansion chain for audit and trust analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AliasHop {
     /// Ordered chain of alias expansions: ["@core", "@base", "directive:rye/agent/core/base"]
     pub expansion: Vec<String>,
@@ -41,6 +42,7 @@ pub struct AliasHop {
 /// payload" representable; the merged struct makes the invariant
 /// structural.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedAncestor {
     /// What the parent asked for (raw, possibly an `@alias`).
     pub requested_id: String,
@@ -66,6 +68,7 @@ pub struct ResolvedAncestor {
 
 /// Edge in the references DAG (not hierarchical like extends).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolutionEdge {
     /// Source item's resolved canonical ref.
     pub from_ref: String,
@@ -83,7 +86,7 @@ pub struct ResolutionEdge {
 
 /// Name of a resolution step (used for tracking and error messages).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolutionStepName {
     /// Pseudo-step for failures raised before any declared step has run
     /// (e.g. root load, kind lookup). Keeps step attribution honest:
@@ -123,6 +126,7 @@ impl std::fmt::Display for ResolutionStepName {
 ///     that the launcher and other policy-side consumers read by name.
 ///     Path-extracted from `composed` per `composer_config`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KindComposedView {
     pub composed: serde_json::Value,
     #[serde(default)]

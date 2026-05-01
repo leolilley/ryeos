@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Tagged enum of declared resolution steps.
 /// Unknown step → parse error at schema load time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "step", rename_all = "snake_case")]
+#[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolutionStepDecl {
     /// Resolve extends field as a DAG, topologically order bottom-up.
     ResolveExtendsChain {

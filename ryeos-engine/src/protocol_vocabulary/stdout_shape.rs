@@ -14,7 +14,7 @@ use crate::launch_envelope_types::RuntimeResult;
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StdoutShape {
     /// Captured verbatim. Daemon does no parsing. Returned as part of
     /// the ExecutionCompletion.
@@ -31,7 +31,7 @@ pub enum StdoutShape {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StreamingChunkKind {
     Stdout,
     Stderr,
@@ -39,6 +39,7 @@ pub enum StreamingChunkKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StreamingChunk {
     pub seq: u64,
     pub kind: StreamingChunkKind,
@@ -112,6 +113,7 @@ pub enum FrameReadError {
 /// Permissive intermediate parse so we can surface `UnknownKind` as a
 /// typed variant instead of a serde enum-deserialization error string.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawFrame {
     seq: u64,
     kind: String,

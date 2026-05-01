@@ -36,7 +36,7 @@ pub struct HandlerDescriptor {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum HandlerServes {
     Parser,
     Composer,

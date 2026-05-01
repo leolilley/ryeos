@@ -47,7 +47,6 @@ fn write_trusted_signer(user_space: &Path, vk: &lillux::crypto::VerifyingKey) ->
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
     let toml = format!(
         r#"version = "1.0.0"
-category = "keys/trusted"
 fingerprint = "{fp}"
 owner = "self"
 attestation = ""

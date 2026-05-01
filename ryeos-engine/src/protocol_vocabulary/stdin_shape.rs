@@ -10,7 +10,7 @@ use crate::subprocess_spec::SubprocessBuildRequest;
 /// handles the `ParametersJson` case; `Opaque` and `LaunchEnvelopeV1`
 /// are handled by the builder directly (see builder.rs for details).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StdinShape {
     /// JSON serialization of dispatch parameters (tool path).
     /// `params` from DispatchRequest is written verbatim as the stdin body.

@@ -82,7 +82,7 @@ impl<'de> Deserialize<'de> for ValueShape {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShapeType {
     Mapping,
     Sequence,
@@ -93,6 +93,7 @@ pub enum ShapeType {
 /// Per-field type. Use a Vec to allow union types (`[string, "null"]`).
 /// `Any` permits anything. Keep it tiny.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[serde(untagged)]
 pub enum FieldType {
     Single(PrimType),
@@ -100,7 +101,7 @@ pub enum FieldType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrimType {
     String,
     Integer,
@@ -611,6 +612,7 @@ optional:
 ///
 /// Varies by file type — loaded from extractor YAML, never hardcoded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignatureEnvelope {
     /// Comment prefix character(s), e.g. `"#"`, `"//"`, `"<!--"`
     pub prefix: String,
@@ -626,6 +628,7 @@ pub struct SignatureEnvelope {
 /// resolution. Downstream consumers (trust verification, chain builder)
 /// use this instead of consulting the full registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedSourceFormat {
     /// The matched file extension, e.g. `".py"`, `".md"`
     pub extension: String,
@@ -641,6 +644,7 @@ pub struct ResolvedSourceFormat {
 
 /// The three-tier resolution space where an item was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ItemSpace {
     Project,
     User,
@@ -663,7 +667,7 @@ impl ItemSpace {
 ///
 /// Always present on requests. `None` is the explicit "no project" variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectContext {
     None,
     LocalPath { path: PathBuf },
@@ -683,6 +687,7 @@ pub struct MaterializedProjectContext {
 
 /// Parsed canonical signed payload extracted from a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignatureHeader {
     pub timestamp: String,
     pub content_hash: String,
@@ -697,6 +702,7 @@ pub struct SignatureHeader {
 /// Contains enough to discover the executor and build a dispatch plan.
 /// Full body parsing is the executor/adapter's responsibility.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 pub struct ItemMetadata {
     /// Executor ID from `__executor_id__` or frontmatter
     pub executor_id: Option<String>,
@@ -746,6 +752,7 @@ pub struct ResolvedItem {
 // ── Trust classes ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum TrustClass {
     /// Signed by a trusted signer
     Trusted,
@@ -757,10 +764,12 @@ pub enum TrustClass {
 
 /// Signer identity from the signature header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignerFingerprint(pub String);
 
 /// Pinned version reference for signed/temporal resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PinnedVersion {
     pub content_hash: String,
     pub signature: String,
@@ -780,7 +789,7 @@ pub struct VerifiedItem {
 // ── Launch mode ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaunchMode {
     Inline,
     Detached,
@@ -791,6 +800,7 @@ pub enum LaunchMode {
 /// Open map passed through to executors. The engine does not interpret
 /// its contents.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 pub struct ExecutionHints {
     #[serde(flatten)]
     pub values: HashMap<String, Value>,
@@ -799,12 +809,14 @@ pub struct ExecutionHints {
 // ── Principal ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Principal {
     pub fingerprint: String,
     pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DelegatedPrincipal {
     pub protocol_version: String,
     pub delegation_id: String,
@@ -822,7 +834,7 @@ pub struct DelegatedPrincipal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectivePrincipal {
     Local(Principal),
     Delegated(DelegatedPrincipal),
@@ -869,10 +881,12 @@ pub struct EngineContext {
 
 /// Unique identifier for a plan node.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanNodeId(pub String);
 
 /// Plan capabilities declared by the execution plan.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanCapabilities {
     pub requires_model: bool,
     pub requires_subprocess: bool,
@@ -882,6 +896,7 @@ pub struct PlanCapabilities {
 
 /// Materialization requirement for plan execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterializationRequirement {
     pub kind: String,
     pub ref_string: String,
@@ -891,6 +906,7 @@ pub struct MaterializationRequirement {
 /// what to spawn. Compiled from the executor chain's runtime config by
 /// the plan builder. The dispatch layer just runs this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubprocessSpec {
     pub cmd: String,
     #[serde(default)]
@@ -913,6 +929,7 @@ pub struct SubprocessSpec {
 /// so absence ⇒ "preserve current default". Future decorate handlers
 /// add siblings here without breaking the top-level spec shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionDecorations {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_async: Option<NativeAsyncSpec>,
@@ -929,6 +946,7 @@ pub struct ExecutionDecorations {
 /// supplied directory and for being idempotent / replay-safe on
 /// startup (`RYE_RESUME=1` is injected on resume spawns).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NativeResumeSpec {
     /// Hint to the tool for how often to checkpoint. Engine and daemon
     /// do not enforce this — purely advisory.
@@ -953,13 +971,14 @@ impl Default for NativeResumeSpec {
 /// event stream (the runner injects `RYE_NATIVE_ASYNC=1`) and the
 /// daemon cancellation routes through `cancellation_mode`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeAsyncSpec {
     pub cancellation_mode: CancellationMode,
 }
 
 /// How the runner terminates the subprocess on cancellation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CancellationMode {
     /// SIGKILL the process group immediately.
     Hard,
@@ -979,7 +998,7 @@ fn default_timeout_secs() -> u64 {
 
 /// A node in the execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "node_type", rename_all = "snake_case")]
+#[serde(tag = "node_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
@@ -1015,6 +1034,7 @@ impl PlanNode {
 
 /// Normalized execution plan — the engine's output from `build_plan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
     pub plan_id: String,
     pub root_executor_id: String,
@@ -1036,7 +1056,7 @@ pub struct ExecutionPlan {
 // ── Execution completion ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ThreadTerminalStatus {
     Completed,
     Failed,
@@ -1046,6 +1066,7 @@ pub enum ThreadTerminalStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionArtifact {
     pub artifact_type: String,
     pub uri: String,
@@ -1056,6 +1077,7 @@ pub struct ExecutionArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FinalCost {
     #[serde(default)]
     pub turns: i64,
@@ -1072,6 +1094,7 @@ pub struct FinalCost {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContinuationRequest {
     pub reason: String,
     pub successor_parameters: Option<Value>,
@@ -1079,6 +1102,7 @@ pub struct ContinuationRequest {
 
 /// Structured completion returned from plan execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionCompletion {
     pub status: ThreadTerminalStatus,
     #[serde(default)]
@@ -1100,6 +1124,7 @@ pub struct ExecutionCompletion {
 // ── Budget lease / settlement (daemon-to-daemon) ─────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetLease {
     pub lease_id: String,
     pub issuer_site_id: String,
@@ -1110,6 +1135,7 @@ pub struct BudgetLease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpendReport {
     pub lease_id: String,
     pub spend_report_id: String,
@@ -1120,6 +1146,7 @@ pub struct SpendReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FinalSettlement {
     pub lease_id: String,
     pub settlement_id: String,
@@ -1130,6 +1157,7 @@ pub struct FinalSettlement {
 // ── Capability lease / settlement ────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityLease {
     pub lease_id: String,
     pub capability_id: String,
@@ -1142,6 +1170,7 @@ pub struct CapabilityLease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityUseReport {
     pub lease_id: String,
     pub use_report_id: String,
@@ -1152,6 +1181,7 @@ pub struct CapabilityUseReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityFinalSettlement {
     pub lease_id: String,
     pub settlement_id: String,
@@ -1163,6 +1193,7 @@ pub struct CapabilityFinalSettlement {
 
 /// What adapters and the engine send to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventAppendRequest {
     pub event_type: String,
     pub payload: Value,
@@ -1170,6 +1201,7 @@ pub struct EventAppendRequest {
 
 /// What the daemon persists and streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventEnvelope {
     pub event_id: String,
     pub thread_id: String,

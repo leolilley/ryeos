@@ -71,6 +71,7 @@ pub struct TrustedKeyDoc {
 
 /// Raw TOML structure for deserialization.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrustedKeyToml {
     fingerprint: String,
     #[serde(default = "default_owner")]
@@ -83,6 +84,7 @@ struct TrustedKeyToml {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicKeySection {
     /// PEM-encoded Ed25519 public key, or `ed25519:<base64>` format
     pem: String,

@@ -52,7 +52,7 @@ pub struct ConfigSpec {
 
 /// Resolution strategy for a single `ConfigSpec`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolveMode {
     /// system → user → project; deep-merge each layer (later wins).
     /// `extends` is excluded from merging (Python parity).
@@ -66,6 +66,7 @@ pub enum ResolveMode {
 /// `config_resolve` block accepts either a single spec or a list of
 /// specs (Python parity — `_resolve_tool_config` switches on type).
 #[derive(Debug, Clone, Deserialize)]
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[serde(untagged)]
 pub enum ConfigResolveSpec {
     Single(ConfigSpec),

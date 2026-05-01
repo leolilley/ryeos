@@ -5,7 +5,7 @@ use crate::protocol_vocabulary::error::VocabularyError;
 use crate::subprocess_spec::SubprocessBuildRequest;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnvInjectionSource {
     /// Full URL the child posts callbacks to. Requires
     /// CallbackChannel != None.
