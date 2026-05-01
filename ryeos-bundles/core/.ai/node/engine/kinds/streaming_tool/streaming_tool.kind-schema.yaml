@@ -1,0 +1,84 @@
+# rye:signed:2026-05-01T08:08:08Z:bb07d6a446a0270606bf3e9219e4ebb5cdd2d0aa0961170378e8a158ae3d679c:UbNWlCx6GScArHkdwxgwAFmqO+RyvkAM9ZH3sC4QL5FpfD4aSc7SplQXlF2l1r6/ZexFTWCaAVjKou4SAMFOBQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "engine/kinds/streaming_tool"
+version: "1.0.0"
+location:
+  directory: tools
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/tool_streaming_v1
+  thread_profile: streaming_tool_run
+  aliases:
+    "@subprocess": "tool:rye/core/subprocess/execute"
+  resolution: []
+formats:
+  - extensions: [".py"]
+    parser: parser:rye/core/python/ast
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".yaml", ".yml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+  - extensions: [".js", ".ts", ".mjs", ".cjs"]
+    parser: parser:rye/core/javascript/javascript
+    signature:
+      prefix: "//"
+  - extensions: [".json"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Streaming tools use the same identity composer as regular tools.
+inventory_schema_keys: [input_schema, parameters, config_schema]
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+runtime:
+  handlers:
+    - type: config
+    - type: env_config
+    - type: config_resolve
+    - type: verify_deps
+    - type: execution_params
+    - type: native_async
+    - type: native_resume
+  ignored_keys:
+    - version
+    - category
+    - description
+    - executor_id
+    - tool_type
+    - required_secrets
+    - name
+    - required_caps
+    - config_schema
+    - execution_owner
+    - native_resume
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    executor_id:
+      from: path
+      key: executor_id
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    required_secrets:
+      from: path_string_seq
+      key: required_secrets
+    required_caps:
+      from: path_string_seq
+      key: required_caps

@@ -10,6 +10,7 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 regex = "1"
 anyhow = "1"
+base64 = "0.22"
 
 [[bin]]
 name = "rye-parser-yaml-document"
@@ -34,6 +35,10 @@ path = "src/bin/composer_graph_permissions.rs"
 [[bin]]
 name = "rye-composer-identity"
 path = "src/bin/composer_identity.rs"
+
+[[bin]]
+name = "rye-tool-streaming-demo"
+path = "src/bin/tool_streaming_demo.rs"
 
 [lib]
 path = "src/lib.rs"

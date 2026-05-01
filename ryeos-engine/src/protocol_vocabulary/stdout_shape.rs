@@ -338,13 +338,9 @@ mod tests {
             terminal: false,
         }));
         // Stream ends abruptly (no more data) — reader gets UnexpectedEof.
-        // read_all_frames returns Ok with the single non-terminal chunk,
-        // but the loop breaks on UnexpectedEof without seeing terminal.
-        // Actually let's test: the reader reads the frame, then tries to
-        // read the next length header, gets UnexpectedEof, breaks the loop.
-        // Then seen_terminal is false and chunks is non-empty → error.
-        // Wait — the break happens on UnexpectedEof, then we check below.
-        // Let me verify by running.
+        // The reader reads the frame, then tries to read the next length
+        // header, gets UnexpectedEof, breaks the loop. Then seen_terminal
+        // is false and chunks is non-empty → error.
         let result = read_all_frames(&mut &buf[..]);
         match result {
             Err(VocabularyError::StreamingProtocolViolation { detail }) => {
@@ -352,5 +348,55 @@ mod tests {
             }
             other => panic!("expected StreamingProtocolViolation, got {:?}", other),
         }
+    }
+
+    /// θ: Round-trip test matching the rye-tool-streaming-demo binary
+    /// output: 5 stdout chunks with base64-encoded data + terminal exit.
+    #[test]
+    fn demo_binary_frame_round_trip() {
+        use base64::Engine;
+
+        let mut buf = Vec::new();
+        for i in 0..5u64 {
+            let payload = base64::engine::general_purpose::STANDARD
+                .encode(format!("chunk {i}\n"));
+            buf.extend_from_slice(&write_frame(&StreamingChunk {
+                seq: i,
+                kind: StreamingChunkKind::Stdout,
+                data: Some(payload),
+                exit_code: None,
+                terminal: false,
+            }));
+        }
+        buf.extend_from_slice(&write_frame(&StreamingChunk {
+            seq: 5,
+            kind: StreamingChunkKind::Exit,
+            data: None,
+            exit_code: Some(0),
+            terminal: true,
+        }));
+
+        let chunks = read_all_frames(&mut &buf[..]).unwrap();
+        assert_eq!(chunks.len(), 6);
+
+        // Verify each stdout chunk decodes correctly.
+        for i in 0..5 {
+            assert_eq!(chunks[i].seq, i as u64);
+            assert_eq!(chunks[i].kind, StreamingChunkKind::Stdout);
+            assert!(!chunks[i].terminal);
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(chunks[i].data.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(decoded).unwrap(),
+                format!("chunk {i}\n")
+            );
+        }
+
+        // Verify terminal exit frame.
+        assert_eq!(chunks[5].seq, 5);
+        assert_eq!(chunks[5].kind, StreamingChunkKind::Exit);
+        assert_eq!(chunks[5].exit_code, Some(0));
+        assert!(chunks[5].terminal);
     }
 }
