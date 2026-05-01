@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 /// summary; `percent` is a 0.0–100.0 value when meaningful, or `None`
 /// for indeterminate progress.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProgressEvent {
     pub phase: String,
     pub message: String,
@@ -54,6 +55,7 @@ impl ProgressEvent {
 /// Distinct from `ProgressEvent` so consumers can render them
 /// differently (status = sticky banner; progress = scrolling bar).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatusEvent {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

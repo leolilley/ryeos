@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// Wire form is `snake_case` so daemon-side serialization stays
 /// stable across the producer/consumer boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorageClass {
     /// Append to the indexed event store; queryable, replayable,
     /// retained for the life of the chain.
@@ -59,7 +59,7 @@ impl StorageClass {
 /// Wire form is `snake_case`, matching the legacy string vocabulary
 /// so existing persisted events round-trip unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeEventType {
     // ── Thread lifecycle ────────────────────────────────────────
     ThreadCreated,

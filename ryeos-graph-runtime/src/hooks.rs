@@ -11,6 +11,7 @@ pub struct HookContext<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookEvent {
     pub event: String,
     pub graph_id: String,

@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityParams {
     #[serde(default)]
     pub state_dir: Option<String>,

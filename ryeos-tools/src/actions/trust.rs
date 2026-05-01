@@ -130,6 +130,7 @@ fn has_public_key_assignment(text: &str) -> bool {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublisherTrustToml {
     public_key: String,
     #[serde(default)]

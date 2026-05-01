@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookDefinition {
     pub id: String,
@@ -16,6 +17,7 @@ pub struct HookDefinition {
     pub extra: Map<String, Value>,
 }
 
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HookConditionsConfig {
     #[serde(default)]
@@ -29,6 +31,7 @@ pub struct HookConditionsConfig {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HooksFile {
     #[serde(default)]
     pub hooks: Vec<HookDefinition>,

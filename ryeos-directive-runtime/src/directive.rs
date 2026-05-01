@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DirectiveHeader {
     #[serde(default)]
@@ -26,6 +27,7 @@ pub struct DirectiveHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelSpec {
     #[serde(default)]
     pub tier: Option<String>,
@@ -36,6 +38,7 @@ pub struct ModelSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionsSpec {
     #[serde(default)]
     pub execute: Vec<String>,
@@ -46,6 +49,7 @@ pub struct PermissionsSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LimitsSpec {
     #[serde(default)]
     pub turns: Option<u32>,
@@ -62,6 +66,7 @@ pub struct LimitsSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputSpec {
     pub name: String,
     #[serde(default)]
@@ -71,6 +76,7 @@ pub struct OutputSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolSchema {
     pub name: String,
     pub item_id: String,
@@ -81,6 +87,7 @@ pub struct ToolSchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub base_url: String,
     #[serde(default)]
@@ -96,6 +103,7 @@ pub struct ProviderConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     #[serde(default)]
     pub env_var: Option<String>,
@@ -106,6 +114,7 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchemasConfig {
     #[serde(default)]
     pub messages: Option<MessageSchemas>,
@@ -114,6 +123,7 @@ pub struct SchemasConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessageSchemas {
     #[serde(default)]
     pub role_map: Option<HashMap<String, String>>,
@@ -130,24 +140,28 @@ pub struct MessageSchemas {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SystemMessageConfig {
     #[serde(default)]
     pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolResultConfig {
     #[serde(default)]
     pub wrap_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StreamingConfig {
     #[serde(default)]
     pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PricingConfig {
     #[serde(default)]
     pub input_per_million: Option<f64>,
@@ -156,6 +170,7 @@ pub struct PricingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
     #[serde(default)]
     pub retries: u32,
@@ -190,6 +205,7 @@ impl Default for ExecutionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
     pub execution: ExecutionConfig,
     pub model_routing: Option<ModelRoutingConfig>,
@@ -206,12 +222,14 @@ pub struct BootstrapConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRoutingConfig {
     #[serde(default)]
     pub tiers: HashMap<String, TierConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TierConfig {
     pub provider: String,
     pub model: String,
@@ -220,6 +238,7 @@ pub struct TierConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
     pub id: Option<String>,
     pub name: String,
@@ -227,6 +246,7 @@ pub struct ToolCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderMessage {
     pub role: String,
     pub content: Option<Value>,

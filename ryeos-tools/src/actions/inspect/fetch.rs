@@ -13,6 +13,7 @@ use ryeos_engine::contracts::{
 use ryeos_engine::engine::Engine;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FetchParams {
     pub item_ref: String,
     #[serde(default)]

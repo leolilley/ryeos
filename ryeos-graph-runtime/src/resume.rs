@@ -30,6 +30,7 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::ReplayedEventRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResumeState {
     pub current_node: String,
     pub step_count: u32,

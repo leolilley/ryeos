@@ -42,6 +42,7 @@ struct RpcRequestFrame<'a> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RpcResponseFrame {
     request_id: Option<u64>,
     result: Option<Value>,
@@ -49,6 +50,7 @@ struct RpcResponseFrame {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RpcErrorPayload {
     code: String,
     message: String,

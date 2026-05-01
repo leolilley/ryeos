@@ -21,7 +21,7 @@ use std::collections::HashMap;
 // ── Request / Response envelope ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HandlerRequest {
     Parse(ParseRequest),
     ValidateParserConfig(ValidateParserConfigRequest),
@@ -30,7 +30,7 @@ pub enum HandlerRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HandlerResponse {
     ParseOk { value: Value },
     ParseErr { kind: ParseErrKind, message: String },
@@ -43,6 +43,7 @@ pub enum HandlerResponse {
 // ── Parser ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParseRequest {
     pub parser_config: Value,
     pub content: String,
@@ -53,12 +54,13 @@ pub struct ParseRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateParserConfigRequest {
     pub parser_config: Value,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ParseErrKind {
     Syntax,
     Schema,
@@ -68,6 +70,7 @@ pub enum ParseErrKind {
 // ── Composer ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeRequest {
     pub composer_config: Value,
     pub root: ComposeInput,
@@ -81,12 +84,14 @@ pub struct ComposeRequest {
 /// alias_resolution / added_by / source_path from ResolvedAncestor —
 /// composers only need identity + trust + parsed value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeInput {
     pub item: ComposeItemContext,
     pub parsed: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeItemContext {
     pub requested_id: String,
     pub resolved_ref: String,
@@ -94,7 +99,7 @@ pub struct ComposeItemContext {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrustClassWire {
     TrustedSystem,
     TrustedUser,
@@ -103,11 +108,13 @@ pub enum TrustClassWire {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateComposerConfigRequest {
     pub composer_config: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeSuccess {
     pub composed: Value,
     #[serde(default)]
@@ -117,7 +124,7 @@ pub struct ComposeSuccess {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolutionStepNameWire {
     PipelineInit,
     ResolveExtendsChain,

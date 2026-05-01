@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphConfig {
     pub start: String,
     #[serde(default = "default_max_steps")]
@@ -29,7 +30,7 @@ fn default_max_steps() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ErrorMode {
     Fail,
     Continue,
@@ -42,6 +43,7 @@ impl Default for ErrorMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphNode {
     #[serde(default)]
     pub node_type: NodeType,
@@ -84,7 +86,7 @@ impl GraphNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeType {
     Action,
     Return,
@@ -98,6 +100,7 @@ impl Default for NodeType {
     }
 }
 
+// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EdgeSpec {
@@ -106,6 +109,7 @@ pub enum EdgeSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConditionalEdge {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Value>,
@@ -169,6 +173,7 @@ impl GraphDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphResult {
     pub success: bool,
     pub graph_id: String,
@@ -187,6 +192,7 @@ pub struct GraphResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ErrorRecord {
     pub step: u32,
     pub node: String,
@@ -194,6 +200,7 @@ pub struct ErrorRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeReceipt {
     pub node: String,
     pub step: u32,

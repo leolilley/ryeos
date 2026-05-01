@@ -30,6 +30,7 @@ use ryeos_engine::AI_DIR;
 
 /// Report returned by [`sign_bundle_items`].
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignBundleReport {
     pub signed: Vec<ItemOutcome>,
     pub failed: Vec<ItemOutcome>,
@@ -46,6 +47,7 @@ impl SignBundleReport {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ItemOutcome {
     pub item_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]

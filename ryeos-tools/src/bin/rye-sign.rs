@@ -55,6 +55,7 @@ struct Args {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StdinParams {
     item_ref: String,
     #[serde(default)]

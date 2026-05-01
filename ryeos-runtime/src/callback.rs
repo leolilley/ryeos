@@ -28,6 +28,7 @@ pub enum CallbackError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DispatchActionRequest {
     pub thread_id: String,
     pub project_path: String,
@@ -35,6 +36,7 @@ pub struct DispatchActionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionPayload {
     pub item_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
