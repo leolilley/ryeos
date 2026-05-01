@@ -659,18 +659,29 @@ fn spawn_runtime(
         ("RYEOSD_PROJECT_PATH".to_string(), project_path.to_string_lossy().to_string()),
     ]);
 
-    let request = lillux::SubprocessRequest {
-        cmd: binary.to_string(),
+    // Build the unified SubprocessSpec — both tool and runtime paths
+    // converge on this struct before translating to lillux.
+    let spec = ryeos_engine::subprocess_spec::SubprocessSpec {
+        cmd: PathBuf::from(binary),
         args: vec![
             "--project-path".to_string(),
             project_path.to_string_lossy().to_string(),
         ],
-        cwd: Some(project_path.to_string_lossy().to_string()),
-        envs,
-        stdin_data: Some(envelope_json.to_string()),
-        timeout: timeout_secs as f64,
+        cwd: project_path.to_path_buf(),
+        env: envs,
+        stdin: envelope_json.as_bytes().to_vec(),
+        timeout: std::time::Duration::from_secs(timeout_secs),
+        item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
+            .expect("hardcoded runtime:spawn ref is valid"),
+        thread_id: thread_id.to_string(),
+        project_path: project_path.to_path_buf(),
     };
 
+    // sandbox_wrap is identity today; the sandbox wave fills it in.
+    let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec)
+        .map_err(|e| anyhow::anyhow!("sandbox_wrap failed: {e}"))?;
+
+    let request = super::lillux_bridge::to_lillux_request(&spec);
     let result = lillux::run(request);
 
     if !result.success {

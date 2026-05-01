@@ -22,6 +22,9 @@ pub mod runtime_registry;
 pub mod scope;
 pub mod trust;
 
+pub mod launch_envelope_types;
+pub mod subprocess_spec;
+
 #[doc(hidden)]
 pub mod test_support;
 

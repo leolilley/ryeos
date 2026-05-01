@@ -10,10 +10,7 @@ pub mod callback_token;
 pub mod ingest;
 pub mod launch;
 pub mod launch_envelope;
-// Note: `launch_metadata` is declared at the crate root (see lib.rs /
-// main.rs) so `lib`-only modules (`runtime_db`, `state_store`,
-// `services`) can reference it without pulling the whole `execution`
-// tree (which is `main`-only) into the library target.
+pub mod lillux_bridge;
 pub mod limits;
 pub mod project_source;
 pub mod runtime_dispatch;
