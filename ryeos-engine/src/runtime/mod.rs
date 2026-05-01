@@ -28,6 +28,7 @@ use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::trust::TrustStore;
+use crate::resolution::TrustClass;
 
 /// Reserved env key prefix — runtime configs may not override
 /// daemon-injected bindings.
@@ -160,6 +161,7 @@ pub struct CompileContext<'a> {
     pub kinds: &'a KindRegistry,
     pub trust_store: &'a TrustStore,
     pub project_root: Option<&'a Path>,
+    pub root_trust_class: TrustClass,
 }
 
 // ── Handler phasing & cardinality ────────────────────────────────────────
@@ -312,6 +314,7 @@ pub fn compile_with_handlers(
     kinds: &KindRegistry,
     trust_store: &TrustStore,
     roots: &ResolutionRoots,
+    root_trust_class: TrustClass,
 ) -> Result<SubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
@@ -326,6 +329,7 @@ pub fn compile_with_handlers(
         kinds,
         trust_store,
         project_root,
+        root_trust_class,
     };
     ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
     ctx.template_ctx.params_json = params.to_string();
@@ -478,6 +482,7 @@ pub fn compile_with_handlers(
             &cmd_expanded,
             &bundle_root,
             |fp| trust_ref.get(fp).is_some(),
+            ctx.root_trust_class,
         )?;
         resolved.absolute_path.to_string_lossy().into_owned()
     } else {

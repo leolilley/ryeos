@@ -902,7 +902,7 @@ async fn dispatch_streaming_subprocess(
         &executor_ref,
         request.project_path,
         &ctx.engine.trust_store,
-        None,
+        ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
         executor_ref: executor_ref.clone(),

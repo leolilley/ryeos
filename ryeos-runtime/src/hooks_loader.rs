@@ -51,8 +51,12 @@ impl HooksLoader {
     }
 
     pub fn load(&self) -> anyhow::Result<HookConditionsConfig> {
-        let content =
-            std::fs::read_to_string(&self.system_hook_conditions_path).unwrap_or_default();
+        let content = std::fs::read_to_string(&self.system_hook_conditions_path)
+            .map_err(|e| anyhow::anyhow!(
+                "failed to read system hook conditions {}: {}",
+                self.system_hook_conditions_path.display(),
+                e
+            ))?;
         let cleaned = lillux::signature::strip_signature_lines(&content);
         let config: HookConditionsConfig = serde_yaml::from_str(&cleaned)?;
         Ok(config)
@@ -142,10 +146,10 @@ mod tests {
     }
 
     #[test]
-    fn load_missing_file_returns_default() {
+    fn load_missing_file_returns_error() {
         let loader = HooksLoader::new(PathBuf::from("/nonexistent/file.yaml"), None);
-        let config = loader.load().unwrap();
-        assert!(config.builtin_hooks.is_empty());
+        let err = loader.load().unwrap_err();
+        assert!(err.to_string().contains("failed to read system hook conditions"));
     }
 
     #[test]

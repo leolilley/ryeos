@@ -104,7 +104,7 @@ pub fn resolve_native_executor_path(
     executor_ref: &str,
     materialize_dir: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
-    root_trust_class: Option<ryeos_engine::resolution::TrustClass>,
+    root_trust_class: ryeos_engine::resolution::TrustClass,
 ) -> Result<PathBuf, MaterializationError> {
     let bare = executor_ref
         .strip_prefix("native:")
@@ -519,7 +519,7 @@ pub async fn build_and_launch(
         executor_ref,
         project_path,
         &state.engine.trust_store,
-        None, // executor binary trust stands on its own; not capped by item trust class
+        ryeos_engine::resolution::TrustClass::TrustedSystem, // executor binaries ship in system bundles
     )?;
 
     // 8. Build envelope

@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{
     ExecutionHints, ExecutionPlan, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
-    TrustClass, VerifiedItem,
+    VerifiedItem,
 };
+use crate::contracts::TrustClass as ContractTrustClass;
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -25,6 +26,7 @@ use crate::runtime::{
     compile_with_handlers, ChainIntermediate, RuntimeHandlerRegistry,
 };
 use crate::trust::TrustStore;
+use crate::resolution::TrustClass;
 
 /// Maximum executor chain depth before we assume a cycle or misconfiguration.
 const MAX_CHAIN_DEPTH: usize = 16;
@@ -37,7 +39,7 @@ const MAX_CHAIN_DEPTH: usize = 16;
 struct ChainTerminal {
     root_source_path: PathBuf,
     chain: Vec<String>,
-    verified_chain: Vec<(String, TrustClass)>,
+    verified_chain: Vec<(String, ContractTrustClass)>,
     chain_content_hashes: Vec<String>,
     intermediates: Vec<ChainIntermediate>,
 }
@@ -63,7 +65,7 @@ fn resolve_executor_chain(
 ) -> Result<ChainTerminal, EngineError> {
     let mut current_id = starting_executor_id.to_owned();
     let mut visited: Vec<String> = Vec::new();
-    let mut verified_chain: Vec<(String, TrustClass)> = Vec::new();
+    let mut verified_chain: Vec<(String, ContractTrustClass)> = Vec::new();
     let mut chain_content_hashes: Vec<String> = Vec::new();
     let mut intermediates: Vec<ChainIntermediate> = Vec::new();
 
@@ -159,12 +161,12 @@ fn resolve_executor_chain(
                     }
                 }
                 if trust_store.is_trusted(&header.signer_fingerprint) {
-                    TrustClass::Trusted
+                    ContractTrustClass::Trusted
                 } else {
-                    TrustClass::Untrusted
+                    ContractTrustClass::Untrusted
                 }
             }
-            None => TrustClass::Unsigned,
+            None => ContractTrustClass::Unsigned,
         };
         verified_chain.push((current_id.clone(), trust_class));
 
@@ -411,6 +413,11 @@ pub fn build_plan(
         }
     })?;
     let registry = build_runtime_registry(runtime_spec)?;
+    let root_trust_class = match item.trust_class {
+        ContractTrustClass::Trusted => TrustClass::TrustedSystem,
+        ContractTrustClass::Untrusted => TrustClass::UntrustedUserSpace,
+        ContractTrustClass::Unsigned => TrustClass::Unsigned,
+    };
     let spec = compile_with_handlers(
         &terminal.intermediates,
         &terminal.root_source_path,
@@ -424,6 +431,7 @@ pub fn build_plan(
         kinds,
         trust_store,
         roots,
+        root_trust_class,
     )?;
 
     // Step 5: Build plan node
@@ -510,6 +518,7 @@ mod tests {
     use super::*;
     use crate::contracts::*;
     use crate::kind_registry::KindRegistry;
+    use crate::resolution::TrustClass as ResolutionTrustClass;
     use crate::trust::{TrustedSigner, TrustStore};
     use lillux::crypto::SigningKey;
     use serde_json::json;
@@ -639,7 +648,7 @@ metadata:
 
         VerifiedItem {
             resolved,
-            trust_class: TrustClass::Trusted,
+            trust_class: ContractTrustClass::Trusted,
             signer: None,
             pinned_version: None,
         }
@@ -975,6 +984,7 @@ config:
             &kinds,
             &ts,
             &roots,
+            ResolutionTrustClass::TrustedSystem,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::NoRuntimeConfig { .. }));
@@ -1023,6 +1033,7 @@ config:
             &kinds,
             &ts,
             &roots,
+            ResolutionTrustClass::TrustedSystem,
         )
         .unwrap_err();
         // Cardinality::Singleton on RuntimeConfigHandler catches this
@@ -1071,6 +1082,7 @@ config:
             &kinds,
             &ts,
             &roots,
+            ResolutionTrustClass::TrustedSystem,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::ReservedEnvKey { .. }));
@@ -1113,6 +1125,7 @@ config:
             &kinds,
             &ts,
             &roots,
+            ResolutionTrustClass::TrustedSystem,
         )
         .unwrap();
 
@@ -1155,6 +1168,7 @@ config:
             &kinds,
             &ts,
             &roots,
+            ResolutionTrustClass::TrustedSystem,
         )
         .unwrap_err();
         assert!(

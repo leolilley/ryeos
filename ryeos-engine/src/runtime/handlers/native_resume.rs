@@ -171,6 +171,7 @@ mod tests {
             kinds: &kinds,
             trust_store: &trust,
             project_root: None,
+            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
         };
         NativeResumeHandler.apply(&block, &mut ctx)?;
         Ok(ctx.spec_overrides)
@@ -254,6 +255,7 @@ mod tests {
             kinds: &kinds,
             trust_store: &trust,
             project_root: None,
+            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
         };
         NativeResumeHandler.apply(&json!(true), &mut ctx).unwrap();
         assert!(

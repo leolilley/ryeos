@@ -544,6 +544,7 @@ metadata:
             kinds: &rig.kinds,
             trust_store: &rig.trust,
             project_root: None,
+            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
         };
         ConfigResolveHandler.apply(&block, &mut ctx)?;
         Ok(ctx.params)

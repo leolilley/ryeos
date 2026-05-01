@@ -274,6 +274,7 @@ fn load_and_verify_handler(
         &descriptor.binary_ref,
         bundle_root,
         |fp| trust_store.get(fp).is_some(),
+        trust_class,
     )
     .map_err(|e| HandlerError::BinaryResolution {
         name: descriptor.name.clone(),

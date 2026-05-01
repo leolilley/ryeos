@@ -122,6 +122,7 @@ mod tests {
             kinds: &kinds,
             trust_store: &trust,
             project_root: None,
+            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
         };
         ExecutionParamsHandler.apply(&block, &mut ctx)
     }

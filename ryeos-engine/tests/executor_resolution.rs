@@ -270,7 +270,7 @@ fn empty_native_prefix_errors() {
 fn trusted_binary_passes() {
     let item_source = make_signed_item_source_value("aa".repeat(32).as_str(), 0o755, "trusted-fp");
 
-    let (trust_class, fp) = verify_executor_trust(&item_source, |f| f == "trusted-fp", None);
+    let (trust_class, fp) = verify_executor_trust(&item_source, |f| f == "trusted-fp", ryeos_engine::resolution::TrustClass::TrustedSystem);
 
     assert_eq!(trust_class, ryeos_engine::resolution::TrustClass::TrustedSystem);
     assert_eq!(fp.as_deref(), Some("trusted-fp"));
@@ -280,7 +280,7 @@ fn trusted_binary_passes() {
 fn untrusted_binary_with_unknown_signer() {
     let item_source = make_signed_item_source_value("aa".repeat(32).as_str(), 0o755, "unknown-fp");
 
-    let (trust_class, fp) = verify_executor_trust(&item_source, |_f| false, None);
+    let (trust_class, fp) = verify_executor_trust(&item_source, |_f| false, ryeos_engine::resolution::TrustClass::TrustedSystem);
 
     assert_eq!(trust_class, ryeos_engine::resolution::TrustClass::UntrustedUserSpace);
     assert_eq!(fp.as_deref(), Some("unknown-fp"));
@@ -290,7 +290,7 @@ fn untrusted_binary_with_unknown_signer() {
 fn unsigned_binary_is_unsigned() {
     let item_source = make_item_source_value("aa".repeat(32).as_str(), 0o755);
 
-    let (trust_class, fp) = verify_executor_trust(&item_source, |_f| false, None);
+    let (trust_class, fp) = verify_executor_trust(&item_source, |_f| false, ryeos_engine::resolution::TrustClass::TrustedSystem);
 
     assert_eq!(trust_class, ryeos_engine::resolution::TrustClass::Unsigned);
     assert!(fp.is_none());
@@ -309,7 +309,7 @@ fn empty_fingerprint_is_untrusted() {
         },
     });
 
-    let (trust_class, fp) = verify_executor_trust(&item_source, |_f| false, None);
+    let (trust_class, fp) = verify_executor_trust(&item_source, |_f| false, ryeos_engine::resolution::TrustClass::TrustedSystem);
 
     assert_eq!(trust_class, ryeos_engine::resolution::TrustClass::UntrustedUserSpace);
     assert!(fp.is_none());

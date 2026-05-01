@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::error::EngineError;
+use crate::resolution::TrustClass;
 
 /// Result of resolving a binary reference.
 pub struct ResolvedBinary {
@@ -51,6 +52,7 @@ pub fn resolve_bundle_binary_ref(
     binary_ref: &str,
     bundle_root: &Path,
     trust_store_has_fingerprint: impl Fn(&str) -> bool,
+    root_trust_class: TrustClass,
 ) -> Result<ResolvedBinary, EngineError> {
     let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
 
@@ -228,7 +230,7 @@ pub fn resolve_bundle_binary_ref(
     }
 
     let (trust_class, fingerprint) =
-        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint, None);
+        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint, root_trust_class);
 
     let signer_fingerprint = match trust_class {
         crate::resolution::TrustClass::TrustedSystem => {
