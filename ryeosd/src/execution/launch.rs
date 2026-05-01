@@ -104,6 +104,7 @@ pub fn resolve_native_executor_path(
     executor_ref: &str,
     materialize_dir: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
+    root_trust_class: Option<ryeos_engine::resolution::TrustClass>,
 ) -> Result<PathBuf, MaterializationError> {
     let bare = executor_ref
         .strip_prefix("native:")
@@ -216,6 +217,7 @@ pub fn resolve_native_executor_path(
         ryeos_engine::executor_resolution::verify_executor_trust(
             &resolved.item_source,
             |fp| trust_store.get(fp).is_some(),
+            root_trust_class,
         );
 
     match trust_class {
@@ -465,7 +467,8 @@ pub async fn build_and_launch(
             ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol_ref } => {
                 Some(protocol_ref.clone())
             }
-            _ => None,
+            // InProcess terminators don't carry a protocol ref.
+            ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => None,
         })
         .ok_or_else(|| anyhow::anyhow!(
             "build_and_launch: `runtime` kind has no subprocess terminator with protocol ref"
@@ -516,6 +519,7 @@ pub async fn build_and_launch(
         executor_ref,
         project_path,
         &state.engine.trust_store,
+        None, // executor binary trust stands on its own; not capped by item trust class
     )?;
 
     // 8. Build envelope

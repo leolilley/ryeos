@@ -176,23 +176,101 @@ pub struct VerifiedExecutor {
 pub fn verify_executor_trust(
     item_source_value: &Value,
     trust_store_has_fingerprint: impl Fn(&str) -> bool,
+    root_trust_class: Option<TrustClass>,
 ) -> (TrustClass, Option<String>) {
-    if let Some(sig_info) = item_source_value.get("signature_info") {
+    let raw_trust = if let Some(sig_info) = item_source_value.get("signature_info") {
         let fingerprint = sig_info
             .get("fingerprint")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
         if fingerprint.is_empty() {
-            return (TrustClass::UntrustedUserSpace, None);
-        }
-
-        if trust_store_has_fingerprint(fingerprint) {
-            (TrustClass::TrustedSystem, Some(fingerprint.to_string()))
+            TrustClass::UntrustedUserSpace
+        } else if trust_store_has_fingerprint(fingerprint) {
+            TrustClass::TrustedSystem
         } else {
-            (TrustClass::UntrustedUserSpace, Some(fingerprint.to_string()))
+            TrustClass::UntrustedUserSpace
         }
     } else {
-        (TrustClass::Unsigned, None)
+        TrustClass::Unsigned
+    };
+
+    let effective = match root_trust_class {
+        Some(root) => raw_trust.min(root),
+        None => raw_trust,
+    };
+
+    let fingerprint = item_source_value
+        .get("signature_info")
+        .and_then(|s| s.get("fingerprint"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    (effective, fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn verify_trust_capped_by_root_tier() {
+        let item_source = json!({
+            "signature_info": {
+                "fingerprint": "sys-fp"
+            }
+        });
+        let (tc, fp) = verify_executor_trust(&item_source, |_| true, Some(TrustClass::TrustedUser));
+        assert_eq!(tc, TrustClass::TrustedUser);
+        assert_eq!(fp.as_deref(), Some("sys-fp"));
+    }
+
+    #[test]
+    fn verify_trust_system_root_system_binary() {
+        let item_source = json!({
+            "signature_info": {
+                "fingerprint": "sys-fp"
+            }
+        });
+        let (tc, _) = verify_executor_trust(&item_source, |_| true, Some(TrustClass::TrustedSystem));
+        assert_eq!(tc, TrustClass::TrustedSystem);
+    }
+
+    #[test]
+    fn verify_trust_user_root_system_binary() {
+        let item_source = json!({
+            "signature_info": {
+                "fingerprint": "sys-fp"
+            }
+        });
+        let (tc, _) = verify_executor_trust(&item_source, |_| true, Some(TrustClass::TrustedUser));
+        assert_eq!(tc, TrustClass::TrustedUser);
+    }
+
+    #[test]
+    fn min_returns_weaker() {
+        assert_eq!(
+            TrustClass::TrustedSystem.min(TrustClass::TrustedUser),
+            TrustClass::TrustedUser
+        );
+        assert_eq!(
+            TrustClass::TrustedUser.min(TrustClass::TrustedSystem),
+            TrustClass::TrustedUser
+        );
+        assert_eq!(TrustClass::Unsigned.min(TrustClass::TrustedUser), TrustClass::Unsigned);
+    }
+
+    #[test]
+    fn verify_trust_backward_compat_none_root() {
+        let item_source = json!({
+            "signature_info": {
+                "fingerprint": "sys-fp"
+            }
+        });
+        let (tc, fp) = verify_executor_trust(&item_source, |_| true, None);
+        assert_eq!(tc, TrustClass::TrustedSystem);
+        assert_eq!(fp.as_deref(), Some("sys-fp"));
     }
 }

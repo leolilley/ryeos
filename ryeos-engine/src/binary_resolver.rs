@@ -228,7 +228,7 @@ pub fn resolve_bundle_binary_ref(
     }
 
     let (trust_class, fingerprint) =
-        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint);
+        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint, None);
 
     let signer_fingerprint = match trust_class {
         crate::resolution::TrustClass::TrustedSystem => {

@@ -335,12 +335,20 @@ impl std::error::Error for ResolutionError {}
 impl TrustClass {
     /// Strict ranking, strongest → weakest. Used by `execution_trust`
     /// to fold an extends chain into a single executor scalar.
-    fn strength(self) -> u8 {
+    pub fn strength(self) -> u8 {
         match self {
             TrustClass::TrustedSystem => 3,
             TrustClass::TrustedUser => 2,
             TrustClass::UntrustedUserSpace => 1,
             TrustClass::Unsigned => 0,
+        }
+    }
+
+    pub fn min(self, other: TrustClass) -> TrustClass {
+        if self.strength() <= other.strength() {
+            self
+        } else {
+            other
         }
     }
 }
