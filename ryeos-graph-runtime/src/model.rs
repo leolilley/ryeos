@@ -110,58 +110,40 @@ pub struct ConditionalEdge {
     pub to: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphFile {
+    version: String,
+    category: String,
+    config: GraphConfig,
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphDefinition {
     pub version: String,
     pub graph_id: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
-    /// Graph-level permissions. Consumed by the graph_permissions
-    /// composer at the daemon layer to produce effective_caps. No
-    /// longer read by the walker (D15).
-    #[allow(dead_code)]
-    pub permissions: Vec<String>,
 }
 
 impl GraphDefinition {
     pub fn from_yaml(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
         let cleaned = lillux::signature::strip_signature_lines(raw);
-        let doc: serde_yaml::Value = serde_yaml::from_str(&cleaned)?;
-        let category = doc.get("category").and_then(|v| v.as_str()).unwrap_or("");
+        let file: GraphFile = serde_yaml::from_str(&cleaned)?;
         let graph_id = if let Some(fp) = file_path {
             let stem = std::path::Path::new(fp)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
-            format!("{category}/{stem}")
+            format!("{}/{}", file.category, stem)
         } else {
-            category.to_string()
+            file.category
         };
-        let config: GraphConfig = serde_yaml::from_value(
-            doc.get("config")
-                .cloned()
-                .unwrap_or(serde_yaml::Value::Null),
-        )?;
-        let permissions = doc
-            .get("permissions")
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let version = doc
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("1.0.0")
-            .to_string();
         Ok(Self {
-            version,
+            version: file.version,
             graph_id,
             file_path: file_path.map(String::from),
-            config,
-            permissions,
+            config: file.config,
         })
     }
 }
@@ -234,5 +216,52 @@ impl WalkContext {
             map.insert(var.to_string(), item.clone());
         }
         ctx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_top_level_field_rejects() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+cattegory: typo
+config:
+  start: a
+"#;
+        let err = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(err.to_string().contains("cattegory"), "error should mention unknown field: {}", err);
+    }
+
+    #[test]
+    fn missing_version_rejects() {
+        let yaml = r#"
+category: test
+config:
+  start: a
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
+    }
+
+    #[test]
+    fn missing_category_rejects() {
+        let yaml = r#"
+version: "1.0.0"
+config:
+  start: a
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
+    }
+
+    #[test]
+    fn missing_config_rejects() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 }

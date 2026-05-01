@@ -1502,9 +1502,8 @@ mod tests {
     #[tokio::test]
     async fn simple_action_to_return() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: step1
   nodes:
@@ -1526,6 +1525,7 @@ config:
     #[tokio::test]
     async fn gate_node_conditional_routing() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: check
@@ -1551,9 +1551,8 @@ config:
     #[tokio::test]
     async fn max_steps_exceeded() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: loop
   max_steps: 3
@@ -1576,6 +1575,7 @@ config:
     #[test]
     fn validation_rejects_missing_start() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: nonexistent
@@ -1592,9 +1592,8 @@ config:
     #[tokio::test]
     async fn foreach_sequential_collects_results() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: iterate
   nodes:
@@ -1623,9 +1622,8 @@ config:
     #[tokio::test]
     async fn on_error_continue_mode() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: step1
   on_error: continue
@@ -1675,6 +1673,7 @@ config:
     #[test]
     fn record_callback_warning_pushes_when_result_is_err() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: done
@@ -1706,6 +1705,7 @@ config:
     #[test]
     fn record_callback_warning_no_op_when_result_is_ok() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: done
@@ -1728,6 +1728,7 @@ config:
     #[test]
     fn record_callback_warning_accumulates_multiple_errors() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: done
@@ -1986,9 +1987,8 @@ config:
     #[tokio::test]
     async fn commit_step_emits_events_in_fence_order() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: step1
   nodes:
@@ -2035,9 +2035,8 @@ config:
     #[tokio::test]
     async fn commit_step_writes_checkpoint_on_every_advance() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: step1
   max_steps: 10
@@ -2077,6 +2076,7 @@ config:
     #[tokio::test]
     async fn gate_step_emits_lifecycle_and_checkpoint() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: check
@@ -2127,9 +2127,8 @@ config:
     #[tokio::test]
     async fn foreach_step_emits_iteration_events() {
         let yaml = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: iterate
   nodes:
@@ -2183,9 +2182,8 @@ config:
     async fn commit_step_terminates_emit_graph_completed_exactly_once() {
         // Success path
         let yaml_ok = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: step1
   nodes:
@@ -2207,9 +2205,8 @@ config:
 
         // Error path: on_error: fail with a leaf that returns status=error
         let yaml_err = r#"
+version: "1.0.0"
 category: test
-permissions:
-  - rye.execute.*
 config:
   start: step1
   on_error: fail

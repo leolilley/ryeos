@@ -286,6 +286,7 @@ mod tests {
     #[test]
     fn validate_graph_warns_unreachable_nodes() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: step1
@@ -307,6 +308,7 @@ config:
     #[test]
     fn validate_graph_warns_missing_state_assignments() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: step1
@@ -325,6 +327,7 @@ config:
     #[test]
     fn validate_graph_rejects_empty_nodes() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: step1
@@ -338,6 +341,7 @@ config:
     #[test]
     fn validate_graph_rejects_missing_config_start_node() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: nonexistent
@@ -355,6 +359,7 @@ config:
     #[test]
     fn validate_graph_rejects_foreach_missing_as() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: iterate
@@ -382,6 +387,7 @@ config:
     #[test]
     fn validate_graph_rejects_gate_with_unconditional_next() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: check
@@ -406,6 +412,7 @@ config:
     #[test]
     fn validate_graph_rejects_node_with_no_action_or_type() {
         let yaml = r#"
+version: "1.0.0"
 category: test
 config:
   start: step1
