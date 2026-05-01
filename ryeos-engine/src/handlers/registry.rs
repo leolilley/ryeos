@@ -285,6 +285,12 @@ fn load_and_verify_handler(
     Ok(VerifiedHandler {
         canonical_ref,
         descriptor,
+        // TODO: derive from TrustStore tier (project/user/system) once
+        // TrustStore tracks per-key origin. Currently TrustStore.get()
+        // only returns the verifying key, not which trust tier it came
+        // from. All bundle-sourced handlers are signed by trusted keys
+        // (verified above at line 240), so TrustedSystem is the correct
+        // class for the current loading path. Tracked in 04-FUTURE-WORK.md.
         trust_class: TrustClass::TrustedSystem,
         bundle_root: bundle_root.to_owned(),
         descriptor_path: yaml_path.to_owned(),

@@ -184,7 +184,7 @@ pub fn build_subprocess_spec(
             EnvInjectionSource::CallbackTokenUrl => {
                 request
                     .callback
-                    .and_then(|cb| cb.token.parse::<String>().ok())
+                    .map(|cb| cb.token.clone())
                     .ok_or_else(|| {
                         VocabularyError::UnknownEnvInjection(
                             injection.name.clone(),

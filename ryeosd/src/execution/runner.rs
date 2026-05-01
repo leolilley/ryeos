@@ -483,6 +483,11 @@ fn mint_callback_env(
         effective_caps,
     );
 
+    // Transport-level env bindings injected by the daemon for callback
+    // plumbing. These are NOT user-controllable and bypass the runtime's
+    // env_requires system by design — the subprocess cannot call back
+    // without them. User-facing env injection goes through the runtime's
+    // own env_requires → EnvInjection pipeline.
     let mut bindings = HashMap::new();
     bindings.insert(
         "RYEOSD_SOCKET_PATH".to_string(),
