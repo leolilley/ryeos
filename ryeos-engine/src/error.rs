@@ -273,6 +273,23 @@ pub enum EngineError {
         found: String,
     },
 
+    #[error("runtime `{runtime}` serves unknown kind `{kind}`")]
+    RuntimeServesUnknownKind {
+        kind: String,
+        runtime: String,
+    },
+
+    #[error("runtime `{runtime}` serves kind `{kind}` which has no `execution:` block")]
+    RuntimeServesKindNoExecution {
+        kind: String,
+        runtime: String,
+    },
+
+    #[error("duplicate runtime canonical ref `{canonical_ref}` across bundle roots")]
+    DuplicateRuntimeRef {
+        canonical_ref: String,
+    },
+
     // ── Inventory ────────────────────────────────────────────────────
 
     /// A per-item failure during inventory construction. The inner

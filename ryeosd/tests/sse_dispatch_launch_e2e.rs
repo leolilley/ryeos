@@ -502,11 +502,15 @@ fn new_thread_id_format_and_uniqueness() {
 
 /// F.1 — non-root-executable negative path.
 ///
-/// Posts `knowledge:any/thing` as `item_ref`. The `knowledge` kind
-/// has no `execution:` block in the kind schema, so `dispatch::dispatch`
+/// Posts `config:any/thing` as `item_ref`. The `config` kind has no
+/// `execution:` block in the kind schema, so `dispatch::dispatch`
 /// returns `DispatchError::NotRootExecutable`. The SSE source surfaces
 /// this as a structured `stream_error` event with `code =
 /// "not_root_executable"`.
+///
+/// (Was `knowledge:` pre-ε; the `knowledge` kind acquired an
+/// `execution:` block in ε.2 so the daemon can satisfy
+/// `runtime:knowledge-runtime`'s `serves: knowledge` invariant.)
 ///
 /// The `code` field is the contract; the `error` message is
 /// informational and may change.
@@ -517,7 +521,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
-        "item_ref": "knowledge:any/thing",
+        "item_ref": "config:any/thing",
         "project_path": project_path,
         "parameters": {},
     });

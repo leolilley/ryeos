@@ -78,6 +78,37 @@ fn install_pin_runtime(_state_path: &Path, user_space: &Path) -> anyhow::Result<
     let vk = sk.verifying_key();
     write_trusted_signer(user_space, &vk)?;
 
+    // ε.2: synth runtimes serve a kind that must be registered. Install
+    // a minimal `pin_fake_kind` schema delegating to the runtime registry.
+    let kind_dir = user_space.join(".ai/node/engine/kinds/pin_fake_kind");
+    std::fs::create_dir_all(&kind_dir)?;
+    let kind_body = r##"category: "engine/kinds/pin_fake_kind"
+version: "1.0.0"
+location:
+  directory: pin_fake_items
+execution:
+  delegate:
+    via: runtime_registry
+  thread_profile: pin_fake_run
+  resolution: []
+formats:
+  - extensions: [".yaml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules: {}
+"##;
+    let signed_kind = lillux::signature::sign_content(kind_body, &sk, "#", None);
+    std::fs::write(
+        kind_dir.join("pin_fake_kind.kind-schema.yaml"),
+        signed_kind,
+    )?;
+
     let runtimes_dir = user_space.join(".ai/runtimes");
     std::fs::create_dir_all(&runtimes_dir)?;
     let body = r#"kind: runtime

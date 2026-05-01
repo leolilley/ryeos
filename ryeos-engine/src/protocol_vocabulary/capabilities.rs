@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Protocol dispatch capability bits. Sourced from the verified
 /// protocol descriptor, not a hardcoded table.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct ProtocolCapabilities {
     pub allows_pushed_head: bool,
     pub allows_target_site: bool,

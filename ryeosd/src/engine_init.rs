@@ -16,6 +16,7 @@ use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::protocols::ProtocolRegistry;
+use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::roots;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
@@ -119,6 +120,19 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     //    "parser not registered" failures downstream instead of pointing
     //    at the real load problem (no signed descriptors, bad manifest,
     //    untrusted publisher, etc.).
+    // Build a tier-tagged root list. System roots are TrustedSystem;
+    // the optional user root is TrustedUser. Registries that record a
+    // per-item trust class derive it from the originating root tier.
+    let tagged_roots: Vec<(PathBuf, TrustClass)> = system_roots
+        .iter()
+        .map(|r| (r.clone(), TrustClass::TrustedSystem))
+        .chain(
+            user_root
+                .iter()
+                .map(|r| (r.clone(), TrustClass::TrustedUser)),
+        )
+        .collect();
+
     let handler_registry = HandlerRegistry::load_base(
         &system_roots.iter().chain(user_root.iter()).cloned().collect::<Vec<_>>(),
         &trust_store,
@@ -135,7 +149,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     //     subprocess wire contracts, and silently degrading to an empty
     //     registry produces confusing errors downstream.
     let protocol_registry = ProtocolRegistry::load_base(
-        &system_roots.iter().chain(user_root.iter()).cloned().collect::<Vec<_>>(),
+        &tagged_roots,
         &trust_store,
     )
     .context("failed to load protocol descriptors from bundle roots")?;
@@ -202,15 +216,11 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     // `kind: runtime` YAMLs. Fail-closed on any verification error or
     // multi-default conflict — runtime catalog drift is a startup-time
     // problem, not a per-request one.
-    let mut runtime_scan_roots: Vec<PathBuf> = system_roots.clone();
-    if let Some(ref ur) = user_root {
-        runtime_scan_roots.push(ur.clone());
-    }
-    let runtimes = RuntimeRegistry::build_from_bundles(&runtime_scan_roots, &trust_store, &kinds, &protocol_registry)
+    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &trust_store, &kinds)
         .context("failed to build runtime registry")?;
     tracing::info!(
         count = runtimes.all().count(),
-        roots = runtime_scan_roots.len(),
+        roots = tagged_roots.len(),
         "loaded runtime registry"
     );
 

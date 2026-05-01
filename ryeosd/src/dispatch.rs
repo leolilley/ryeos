@@ -499,11 +499,9 @@ pub async fn dispatch_service(
             });
             Ok(envelope)
         }
-        other => Err(DispatchError::SchemaMisconfigured {
+        TerminatorDecl::Subprocess { .. } => Err(DispatchError::SchemaMisconfigured {
             kind: canonical.kind.clone(),
-            detail: format!(
-                "dispatch_service called on schema declaring terminator {other:?}, not InProcess {{ registry: Services }}"
-            ),
+            detail: "dispatch_service called on schema declaring Subprocess terminator, not InProcess".into(),
         }),
     }
 }
@@ -612,12 +610,10 @@ pub async fn dispatch_subprocess(
     })?;
     let protocol_ref = match terminator {
         TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.as_str(),
-        _ => {
+        TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
-                detail: format!(
-                    "dispatch_subprocess called on schema declaring terminator {terminator:?}, not Subprocess"
-                ),
+                detail: "dispatch_subprocess called on schema declaring InProcess terminator, not Subprocess".into(),
             });
         }
     };

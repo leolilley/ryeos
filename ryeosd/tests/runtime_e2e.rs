@@ -88,6 +88,45 @@ description: "synth runtime for runtime_e2e"
     Ok(())
 }
 
+/// Install a minimal kind schema for `kind` under user space so the
+/// engine's RuntimeRegistry boot validation (ε.2) accepts a runtime
+/// that serves it. The schema declares an executable kind that
+/// delegates to the runtime registry — exactly the contract a synth
+/// `install_runtime` line implies.
+fn install_kind_schema(user_space: &Path, kind: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let kinds_dir = user_space.join(format!(".ai/node/engine/kinds/{kind}"));
+    std::fs::create_dir_all(&kinds_dir)?;
+    let body = format!(
+        r##"category: "engine/kinds/{kind}"
+version: "1.0.0"
+location:
+  directory: {kind}_items
+execution:
+  delegate:
+    via: runtime_registry
+  thread_profile: {kind}_run
+  resolution: []
+formats:
+  - extensions: [".yaml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {{}}
+metadata:
+  rules: {{}}
+"##
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(
+        kinds_dir.join(format!("{kind}.kind-schema.yaml")),
+        signed,
+    )?;
+    Ok(())
+}
+
 // ── 1. config: ref → 501 (no `execution:` block) ───────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
@@ -168,6 +207,7 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // reaches the materialization step and surfaces a clean lookup
     // error rather than a silent fallthrough.
     let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        install_kind_schema(user, "e2e_kind", &fixture.publisher)?;
         install_runtime(user, "e2e-direct-runtime", "e2e_kind", true, "v1", &fixture.publisher)
     };
 

@@ -1,8 +1,18 @@
-# rye:signed:2026-05-01T09:45:40Z:3271e5d00f6c70bf65bd222d8e419b91334fb5a4ec6b7d2044ee75e9669e6aaf:VuBxoByztVdibqm2c4N3rsQ4lUclWiO62sdE51hM2mitVuE868y+hZZnxU4IqexD3PMkixacP9BvvTq3sXYkDg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T11:38:26Z:93095f4408501fcd52bc13ffc00f17a02a234e64435eead4db155ebe99b36073:deunwcAXcv02fJJgGRezshQhq7zJdr/h3M1dRbtXu7EqLPfnr5j5lV3Ia+SphQNWMgjNN5tZyEzehsSLAdQ6Cg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
   directory: knowledge
+execution:
+  # Explicit delegation to the runtime registry. The dispatcher will
+  # call `RuntimeRegistry::lookup_for("knowledge")` to find the default
+  # runtime serving this kind (today: `runtime:knowledge-runtime`).
+  # Without this `delegate` block the dispatcher refuses to consult
+  # the registry — there is no implicit fallback.
+  delegate:
+    via: runtime_registry
+  thread_profile: knowledge_run
+  resolution: []
 formats:
   - extensions: [".md"]
     parser: parser:rye/core/markdown/frontmatter

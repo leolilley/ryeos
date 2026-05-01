@@ -21,10 +21,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_ref::CanonicalRef;
-use crate::contracts::TrustClass;
 use crate::error::EngineError;
 use crate::kind_registry::{KindRegistry, TerminatorDecl};
-use crate::protocols::ProtocolRegistry;
+use crate::resolution::TrustClass;
 use crate::trust::TrustStore;
 
 /// ABI version this daemon understands for runtime binaries.
@@ -39,6 +38,12 @@ pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v1";
 // ── Public types ─────────────────────────────────────────────────────
 
 /// Typed view over a parsed `kind: runtime` YAML.
+///
+/// NOTE: this struct does NOT carry `#[serde(deny_unknown_fields)]`
+/// today. Several legacy bundle YAMLs still ship undocumented top-level
+/// keys (e.g. `category`, `name`, `native_resume`) that were never
+/// consumed by `RuntimeRegistry`. Tightening the contract requires a
+/// bundle-side cleanup pass first; tracked in `04-FUTURE-WORK.md`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuntimeYaml {
     /// Always the literal string `"runtime"`. Mismatch is a hard error.
@@ -62,6 +67,7 @@ pub struct RuntimeYaml {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeSchema {
     pub envelope: String,
     pub result: String,
@@ -88,15 +94,14 @@ impl RuntimeRegistry {
     /// root. Parse + verify each via the trust store, group by `serves`.
     /// Multi-default conflict per kind = fail-closed Err.
     pub fn build_from_bundles(
-        bundle_roots: &[PathBuf],
+        bundle_roots: &[(PathBuf, TrustClass)],
         trust: &TrustStore,
         kinds: &KindRegistry,
-        protocols: &ProtocolRegistry,
     ) -> Result<Self, EngineError> {
         let mut by_kind: HashMap<String, Vec<VerifiedRuntime>> = HashMap::new();
         let mut by_ref: HashMap<CanonicalRef, VerifiedRuntime> = HashMap::new();
 
-        for bundle_root in bundle_roots {
+        for (bundle_root, root_trust) in bundle_roots {
             let runtimes_dir = bundle_root.join(crate::AI_DIR).join("runtimes");
             if !runtimes_dir.is_dir() {
                 continue;
@@ -121,7 +126,12 @@ impl RuntimeRegistry {
             paths.sort();
 
             for path in &paths {
-                let verified = load_and_verify_runtime_yaml(path, bundle_root, trust)?;
+                let verified = load_and_verify_runtime_yaml(path, bundle_root, *root_trust, trust)?;
+                if by_ref.contains_key(&verified.canonical_ref) {
+                    return Err(EngineError::DuplicateRuntimeRef {
+                        canonical_ref: verified.canonical_ref.to_string(),
+                    });
+                }
                 by_kind
                     .entry(verified.yaml.serves.clone())
                     .or_default()
@@ -158,16 +168,20 @@ impl RuntimeRegistry {
             let schema = match kinds.get(kind) {
                 Some(s) => s,
                 None => {
-                    // Kind not registered — this runtime's serves field
-                    // points at a non-existent kind. Let it through; the
-                    // dispatch loop will fail with a clear error when
-                    // someone tries to use it.
-                    continue;
+                    return Err(EngineError::RuntimeServesUnknownKind {
+                        kind: kind.clone(),
+                        runtime: list[0].canonical_ref.to_string(),
+                    });
                 }
             };
             let exec = match schema.execution() {
                 Some(e) => e,
-                None => continue,
+                None => {
+                    return Err(EngineError::RuntimeServesKindNoExecution {
+                        kind: kind.clone(),
+                        runtime: list[0].canonical_ref.to_string(),
+                    });
+                }
             };
             // If the kind delegates to the runtime registry (no terminator),
             // it's inherently compatible with any runtime.
@@ -255,6 +269,7 @@ impl RuntimeRegistry {
 fn load_and_verify_runtime_yaml(
     yaml_path: &Path,
     bundle_root: &Path,
+    root_trust: TrustClass,
     trust: &TrustStore,
 ) -> Result<VerifiedRuntime, EngineError> {
     let content = std::fs::read_to_string(yaml_path).map_err(|e| {
@@ -328,7 +343,7 @@ fn load_and_verify_runtime_yaml(
     Ok(VerifiedRuntime {
         canonical_ref: canonical,
         yaml,
-        trust_class: TrustClass::Trusted,
+        trust_class: root_trust,
         bundle_root: bundle_root.to_owned(),
     })
 }

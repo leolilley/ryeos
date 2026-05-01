@@ -12,7 +12,7 @@ use lillux::crypto::SigningKey;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::error::EngineError;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::protocols::ProtocolRegistry;
+use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::runtime_registry::{RuntimeRegistry, RuntimeYaml};
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
@@ -55,6 +55,45 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
     fs::write(runtimes_dir.join(format!("{name}.yaml")), signed).unwrap();
 }
 
+/// Build a `KindRegistry` containing a single executable `directive`
+/// kind whose execution block delegates to the runtime registry. Used
+/// by parser tests so the post-parse `RuntimeServesUnknownKind` /
+/// `RuntimeServesKindNoExecution` cross-checks (ε.2) accept the
+/// fixture runtime YAMLs that all serve `directive`.
+fn directive_kind_registry(bundle_root: &Path) -> KindRegistry {
+    let kinds_dir = bundle_root.join(".ai/node/engine/kinds/directive");
+    fs::create_dir_all(&kinds_dir).unwrap();
+    let schema_body = r##"category: "engine/kinds/directive"
+version: "1.0.0"
+location:
+  directory: directives
+execution:
+  delegate:
+    via: runtime_registry
+  thread_profile: directive_run
+  resolution: []
+formats:
+  - extensions: [".yaml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules: {}
+"##;
+    let signed = lillux::signature::sign_content(schema_body, &signing_key(), "#", None);
+    fs::write(
+        kinds_dir.join("directive.kind-schema.yaml"),
+        signed,
+    )
+    .unwrap();
+    let kinds_search = bundle_root.join(".ai/node/engine/kinds");
+    KindRegistry::load_base(&[kinds_search], &trust_store()).unwrap()
+}
+
 const FULL_RUNTIME_YAML: &str = "\
 kind: runtime
 serves: directive
@@ -91,7 +130,8 @@ abi_version: v1
 fn parse_via_registry(body: &str) -> Result<RuntimeYaml, EngineError> {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "rt", body);
-    let registry = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty())?;
+    let kinds = directive_kind_registry(&bundle);
+    let registry = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &kinds)?;
     let rt = registry
         .all()
         .next()
@@ -181,7 +221,7 @@ abi_version: v1
 #[test]
 fn registry_empty_when_no_bundles_have_runtimes() {
     let bundle = tempdir(); // no .ai/runtimes/ subdir
-    let registry = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
     assert_eq!(registry.all().count(), 0);
     let err = registry.lookup_for("directive").unwrap_err();
     assert!(matches!(err, EngineError::NoRuntimeFor { .. }));
@@ -192,7 +232,7 @@ fn registry_one_runtime_serving_kind_returned() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
 
     let rt = registry.lookup_for("directive").unwrap();
     assert_eq!(rt.canonical_ref.to_string(), "runtime:default");
@@ -225,7 +265,7 @@ abi_version: v1
     );
 
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
     let rt = registry.lookup_for("directive").unwrap();
     assert_eq!(rt.canonical_ref.to_string(), "runtime:fast");
     assert_eq!(rt.yaml.default, Some(true));
@@ -257,7 +297,7 @@ abi_version: v1
 ",
     );
 
-    let err = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap_err();
+    let err = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap_err();
     match err {
         EngineError::MultipleRuntimeDefaults { kind, defaults } => {
             assert_eq!(kind, "directive");
@@ -292,7 +332,7 @@ abi_version: v1
     );
 
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
     let err = registry.lookup_for("directive").unwrap_err();
     match err {
         EngineError::RuntimeDefaultRequired { kind, candidates } => {
@@ -308,7 +348,7 @@ fn registry_lookup_by_ref_returns_runtime() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
 
     let canonical = CanonicalRef::parse("runtime:default").unwrap();
     let rt = registry.lookup_by_ref(&canonical).expect("lookup hit");
@@ -330,7 +370,7 @@ fn registry_tampered_yaml_aborts_build() {
     let tampered = format!("{content}# tampered\n");
     fs::write(&path, tampered).unwrap();
 
-    let err = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap_err();
+    let err = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap_err();
     match err {
         EngineError::RuntimeYamlInvalid { reason, .. } => {
             assert!(
@@ -402,10 +442,9 @@ abi_version: "v1"
     );
 
     let err = RuntimeRegistry::build_from_bundles(
-        &[bundle],
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
         &trust_store(),
         &kinds,
-        &ProtocolRegistry::empty(),
     )
     .unwrap_err();
     match err {
@@ -424,10 +463,11 @@ abi_version: "v1"
     }
 }
 
-/// η: runtime YAML whose `serves` kind has no execution block at all
-/// should succeed (the dispatch loop will error at runtime, not at boot).
+/// ε: runtime YAML whose `serves` kind has no execution block at all
+/// must fail boot — a runtime that serves a non-executable kind is a
+/// catalog mistake the daemon refuses to silently carry forward.
 #[test]
-fn runtime_serves_kind_without_execution_succeeds() {
+fn runtime_serves_kind_without_execution_fails() {
     let bundle = tempdir();
 
     // Write a kind schema for "no_exec_kind" with no execution block.
@@ -473,12 +513,17 @@ abi_version: "v1"
 "#,
     );
 
-    let registry = RuntimeRegistry::build_from_bundles(
-        &[bundle],
+    let err = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
         &trust_store(),
         &kinds,
-        &ProtocolRegistry::empty(),
     )
-    .unwrap();
-    assert_eq!(registry.all().count(), 1);
+    .unwrap_err();
+    match err {
+        EngineError::RuntimeServesKindNoExecution { kind, runtime } => {
+            assert_eq!(kind, "no_exec_kind");
+            assert!(runtime.contains("no-exec-rt"));
+        }
+        other => panic!("expected RuntimeServesKindNoExecution, got: {other:?}"),
+    }
 }

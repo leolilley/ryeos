@@ -81,13 +81,13 @@ impl ProtocolRegistry {
     /// Descriptors must be signed; the signature is verified against
     /// the trust store.
     pub fn load_base(
-        roots: &[PathBuf],
+        roots: &[(PathBuf, TrustClass)],
         trust_store: &TrustStore,
     ) -> Result<Self, ProtocolError> {
         let mut entries: HashMap<String, VerifiedProtocol> = HashMap::new();
         let mut fingerprint_parts: Vec<String> = Vec::new();
 
-        for root in roots {
+        for (root, root_trust) in roots {
             let protocols_dir = root.join(AI_DIR).join("protocols");
             if !protocols_dir.is_dir() {
                 continue;
@@ -97,7 +97,7 @@ impl ProtocolRegistry {
             yaml_paths.sort();
 
             for path in &yaml_paths {
-                let verified = load_and_verify_protocol(path, root, trust_store)?;
+                let verified = load_and_verify_protocol(path, root, *root_trust, trust_store)?;
 
                 if let Some(existing) = entries.get(&verified.canonical_ref) {
                     return Err(ProtocolError::DuplicateRef {
@@ -203,6 +203,7 @@ fn collect_yaml_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Protocol
 fn load_and_verify_protocol(
     yaml_path: &Path,
     bundle_root: &Path,
+    root_trust: TrustClass,
     trust_store: &TrustStore,
 ) -> Result<VerifiedProtocol, ProtocolError> {
     let content = std::fs::read_to_string(yaml_path).map_err(|e| ProtocolError::Io {
@@ -270,7 +271,7 @@ fn load_and_verify_protocol(
     Ok(VerifiedProtocol {
         canonical_ref,
         descriptor,
-        trust_class: TrustClass::TrustedSystem,
+        trust_class: root_trust,
         bundle_root: bundle_root.to_owned(),
         descriptor_path: yaml_path.to_owned(),
     })

@@ -37,8 +37,7 @@ use thiserror::Error;
 use crate::canonical_ref::CanonicalRef;
 use crate::launch_envelope_types::LaunchEnvelope;
 use crate::protocol_vocabulary::{
-    produce_env_value, validate_env_name, CallbackChannel, EnvInjectionSource, StdinShape,
-    StdoutShape, VocabularyError,
+    validate_env_name, EnvInjectionSource, StdinShape, VocabularyError,
 };
 use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::subprocess_spec::SubprocessSpec;
@@ -263,7 +262,9 @@ pub fn build_subprocess_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol_vocabulary::{EnvInjection, LifecycleMode, ProtocolCapabilities};
+    use crate::protocol_vocabulary::{
+        CallbackChannel, EnvInjection, LifecycleMode, ProtocolCapabilities, StdoutShape,
+    };
     use crate::protocols::descriptor::{ProtocolLifecycle, ProtocolStdin, ProtocolStdout};
     use std::path::PathBuf;
 
