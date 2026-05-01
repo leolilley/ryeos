@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T09:45:27Z:cf4ba9774f16096eb38921bafbe2a8591805e81d3ad716a09f1dd85ea9b264c3:+gSTZn+n4gT09mSDYrS293XG4wDx7ea51oZpE+2+4OZm5siKju+p0aAUFlzy0e8MoETTWoX6cn6uDw45ikZcAg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-01T10:34:18Z:2ba257377e67e3091bcb27fb94791151486c54b92630df6abf3b4616c9def160:EiSTVII/N+fpTaJrTp3haDw04TvYIjoFINf7GPtt6OHfARAgRBkGQYl9gEZyR3NSft59mvDT0mzV1SLx3NfkBA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 kind: protocol
 name: tool_streaming_v1
 category: rye/core
@@ -10,7 +10,6 @@ stdout:
   shape: streaming_chunks_v1
   mode: streaming
 env_injections:
-  - { name: RYE_CALLBACK_URL, source: callback_token_url }
   - { name: RYE_THREAD_ID, source: thread_id }
   - { name: RYE_PROJECT_PATH, source: project_path }
 capabilities:
@@ -19,4 +18,4 @@ capabilities:
   allows_detached: false
 lifecycle:
   mode: managed
-callback_channel: http_v1
+callback_channel: none

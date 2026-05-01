@@ -116,6 +116,20 @@ impl KindProfileRegistry {
                 supports_continuation: false,
             },
         );
+        // `streaming_tool_run` is the schema-declared thread_profile
+        // for `kind: streaming_tool` items. Streaming tools use the
+        // managed lifecycle (like runtimes) but are not runtimes —
+        // they write length-prefixed StreamingChunk frames to stdout
+        // instead of using UDS callbacks. The profile mirrors
+        // `tool_run` (no interrupt, no continuation).
+        profiles.insert(
+            "streaming_tool_run".to_string(),
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
         Self { profiles }
     }
 
@@ -204,5 +218,16 @@ mod tests {
         // Completed: no continuation
         let actions = reg.allowed_actions("service_run", "completed", false);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn kind_profile_default_streaming_tool_run_exists() {
+        let reg = KindProfileRegistry::load_defaults();
+        let profile = reg
+            .get("streaming_tool_run")
+            .expect("`streaming_tool_run` must be a default profile");
+        assert!(profile.root_executable);
+        assert!(!profile.supports_interrupt);
+        assert!(!profile.supports_continuation);
     }
 }

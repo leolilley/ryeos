@@ -648,7 +648,8 @@ pub async fn dispatch_subprocess(
     use ryeos_engine::protocol_vocabulary::LifecycleMode;
     match protocol.descriptor.lifecycle.mode {
         LifecycleMode::Managed => {
-            // Runtime-style dispatch via launch::build_and_launch.
+            // Managed-lifecycle dispatch: runtime (callback-driven) or
+            // streaming tool (builder-driven). Role determines the path.
             dispatch_managed_subprocess(
                 current_ref,
                 verified,
@@ -659,6 +660,7 @@ pub async fn dispatch_subprocess(
                 ctx,
                 state,
                 role,
+                &protocol,
             )
             .await
         }
@@ -684,25 +686,56 @@ pub async fn dispatch_subprocess(
     }
 }
 
-/// Managed-lifecycle subprocess dispatch (runtime_v1 protocol).
-/// Uses `launch::build_and_launch` for callback-driven execution.
+/// Managed-lifecycle subprocess dispatch.
+///
+/// Routes based on `SubprocessRole`:
+/// - `RuntimeTarget` → callback-driven execution via `launch::build_and_launch`
+/// - `Regular` → synchronous streaming tool execution via the protocol builder
 async fn dispatch_managed_subprocess(
     canonical_ref: &CanonicalRef,
     hop_verified: Option<&VerifiedItem>,
     hop_thread_profile: &str,
-    hop_runtime: Option<VerifiedRuntime>,
+    _hop_runtime: Option<VerifiedRuntime>,
     root_subject: Option<RootSubject>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
     role: &SubprocessRole,
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
+    // Streaming tools (callback_channel: none) use the protocol builder +
+    // lillux directly, without the callback/thread infrastructure. All
+    // other managed-lifecycle items (callback_channel: http_v1) go through
+    // build_and_launch regardless of role — directive→runtime alias chains
+    // arrive here with role=Regular but still need the callback path.
+    use ryeos_engine::protocol_vocabulary::CallbackChannel;
+    if protocol.descriptor.callback_channel == CallbackChannel::None {
+        return dispatch_streaming_subprocess(
+            canonical_ref,
+            hop_verified,
+            request,
+            ctx,
+            state,
+            protocol,
+        )
+        .await;
+    }
+
     let runtime_ref = canonical_ref.to_string();
 
-    // Extract the verified runtime from the role or hop.
+    // Extract the verified runtime from the role. For indirect dispatch
+    // (e.g., directive→runtime alias chain), the role is Regular but
+    // the canonical ref still identifies a registered runtime — look it
+    // up by ref so callback-driven execution can proceed.
     let verified_runtime = match role {
         SubprocessRole::RuntimeTarget { verified_runtime } => Some(verified_runtime.clone()),
-        SubprocessRole::Regular => hop_runtime,
+        SubprocessRole::Regular => {
+            state
+                .engine
+                .runtimes
+                .lookup_by_ref(canonical_ref)
+                .cloned()
+        }
     };
 
     let verified_runtime = verified_runtime.ok_or_else(|| {
@@ -821,6 +854,162 @@ async fn dispatch_managed_subprocess(
         "thread": result.thread,
         "result": result.result,
     }))
+}
+
+/// Streaming-lifecycle subprocess dispatch (tool_streaming_v1 protocol).
+///
+/// Runs a managed-lifecycle non-runtime subprocess through the protocol
+/// builder, collects stdout fully, then parses length-prefixed
+/// StreamingChunk frames via `read_all_frames`. No threads, no
+/// callbacks, no event store — just run, read, return.
+///
+/// This is the dispatch path for `kind: streaming_tool` items whose
+/// protocol declares `lifecycle.mode: managed` but are NOT runtimes.
+/// The directive LLM SSE use case goes through the runtime path (which
+/// persists events via UDS callbacks); this path is for simpler
+/// subprocess tools that stream frames over stdout.
+async fn dispatch_streaming_subprocess(
+    canonical_ref: &CanonicalRef,
+    verified: Option<&VerifiedItem>,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+) -> Result<Value, DispatchError> {
+    let item_ref_str = canonical_ref.to_string();
+
+    // 1. Require a verified item (the dispatch loop resolves before
+    //    dispatching; this should always be populated).
+    let verified_item = verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
+        kind: canonical_ref.kind.clone(),
+        detail: format!(
+            "streaming tool '{item_ref_str}' dispatched without a verified item"
+        ),
+    })?;
+
+    // 2. Resolve the executor binary via the bundle manifest.
+    let executor_id = verified_item
+        .resolved
+        .metadata
+        .executor_id
+        .as_ref()
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+            kind: canonical_ref.kind.clone(),
+            detail: format!(
+                "streaming tool '{item_ref_str}' has no executor_id in metadata"
+            ),
+        })?;
+    let executor_ref = format!("native:{executor_id}");
+
+    let binary = launch::resolve_native_executor_path(
+        &state.engine.system_roots,
+        &executor_ref,
+        request.project_path,
+        &ctx.engine.trust_store,
+    )
+    .map_err(|e| DispatchError::RuntimeMaterializationFailed {
+        executor_ref: executor_ref.clone(),
+        detail: e.to_string(),
+    })?;
+
+    // 3. Base env (allowlisted parent vars + daemon roots).
+    let base_env = crate::process::build_spawn_env(
+        &std::collections::BTreeMap::new(),
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("build_spawn_env: {e}")))?;
+
+    // 4. Vault secrets.
+    let vault_bindings_map = crate::vault::read_required_secrets(
+        state.vault.as_ref(),
+        request.acting_principal,
+        &verified_item.resolved.metadata.required_secrets,
+        &crate::vault::dotenv_search_dirs(Some(request.project_path)),
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault: {e}")))?;
+    let vault_bindings: Vec<(String, String)> = vault_bindings_map.into_iter().collect();
+
+    // 5. Build SubprocessSpec via the protocol builder.
+    let thread_id = request
+        .pre_minted_thread_id
+        .as_deref()
+        .unwrap_or("T-streaming-inline");
+    let build_request = ryeos_engine::protocols::BuildRequest {
+        item_ref: canonical_ref,
+        binary_path: binary.as_path(),
+        args: &[],
+        cwd: request.project_path,
+        project_path: request.project_path,
+        thread_id,
+        callback: None,
+        vault_bindings: &vault_bindings,
+        launch_envelope: None,
+        timeout: std::time::Duration::from_secs(300),
+        acting_principal: request.acting_principal,
+        cas_root: Path::new("/"),
+    };
+
+    let mut spec = ryeos_engine::protocols::build_subprocess_spec(
+        &protocol.descriptor,
+        &build_request,
+    )
+    .map_err(|e| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "builder failed for streaming tool '{item_ref_str}': {e}"
+        ))
+    })?;
+
+    // 6. Set params as stdin (ParametersJson → builder produces empty
+    //    stdin; the caller serializes params directly).
+    spec.stdin = serde_json::to_vec(&request.params)
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("params serialize: {e}")))?;
+
+    // 7. Merge builder-produced injected env on top of base env.
+    let mut merged_env: std::collections::BTreeMap<String, String> =
+        base_env.into_iter().collect();
+    for (k, v) in &spec.env {
+        merged_env.insert(k.clone(), v.clone());
+    }
+    spec.env = merged_env.into_iter().collect();
+
+    // 8. sandbox_wrap (identity today; the sandbox wave fills it in).
+    let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec)
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("sandbox_wrap: {e}")))?;
+
+    // 9. Run via lillux (blocking call, so use spawn_blocking).
+    let lillux_request = crate::execution::lillux_bridge::to_lillux_request(&spec);
+    let item_ref_for_error = item_ref_str.clone();
+    let result = tokio::task::spawn_blocking(move || lillux::run(lillux_request))
+        .await
+        .map_err(|e| DispatchError::SubprocessRunFailed {
+            item_ref: item_ref_for_error.clone(),
+            detail: format!("spawn_blocking join: {e}"),
+        })?;
+
+    if !result.success {
+        return Err(DispatchError::SubprocessRunFailed {
+            item_ref: item_ref_str,
+            detail: format!(
+                "streaming tool exited with code {}: {}",
+                result.exit_code,
+                &result.stderr[..result.stderr.len().min(500)]
+            ),
+        });
+    }
+
+    // 10. Parse length-prefixed StreamingChunk frames from stdout.
+    let frames = ryeos_engine::protocol_vocabulary::read_all_frames(
+        std::io::Cursor::new(result.stdout.as_bytes()),
+    )
+    .map_err(|e| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "frame read failed for streaming tool: {e}"
+        ))
+    })?;
+
+    // 11. Return frames as a structured Value.
+    Ok(serde_json::to_value(&frames).map_err(|e| {
+        DispatchError::Internal(anyhow::anyhow!("frame serialize: {e}"))
+    })?)
 }
 
 /// DetachedOk-lifecycle subprocess dispatch (opaque protocol, tools).
