@@ -717,6 +717,7 @@ fn spawn_runtime(
         timeout: std::time::Duration::from_secs(timeout_secs),
         acting_principal: "", // not needed for env injection in runtime path
         cas_root: Path::new("/"), // not needed for env injection in runtime path
+        state_dir: Path::new("/"), // not needed for env injection in runtime path
     };
 
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)

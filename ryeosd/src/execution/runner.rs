@@ -17,6 +17,10 @@ use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, PlanContext, ProjectContext};
+use ryeos_engine::protocol_vocabulary::{
+    produce_env_value, EnvInjectionSource,
+};
+use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use crate::launch_metadata::ResumeContext;
 use crate::state_store::ThreadDetail;
@@ -474,7 +478,7 @@ fn mint_callback_env(
     project_path: Option<&std::path::Path>,
     duration_seconds: Option<u64>,
     effective_caps: Vec<String>,
-) -> (HashMap<String, String>, String) {
+) -> Result<(HashMap<String, String>, String)> {
     let ttl = compute_ttl(duration_seconds);
     let cap = state.callback_tokens.generate(
         thread_id,
@@ -483,30 +487,47 @@ fn mint_callback_env(
         effective_caps,
     );
 
-    // Transport-level env bindings injected by the daemon for callback
-    // plumbing. These are NOT user-controllable and bypass the runtime's
-    // env_requires system by design — the subprocess cannot call back
-    // without them. User-facing env injection goes through the runtime's
-    // own env_requires → EnvInjection pipeline.
+    let request = SubprocessBuildRequest {
+        cmd: PathBuf::new(),
+        args: Vec::new(),
+        cwd: project_path.unwrap_or_else(|| std::path::Path::new("/")).to_path_buf(),
+        timeout: std::time::Duration::from_secs(0),
+        item_ref: CanonicalRef::parse("runtime:spawn")
+            .map_err(|e| anyhow::anyhow!("canonical ref parse: {e}"))?,
+        thread_id: thread_id.to_string(),
+        project_path: project_path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(PathBuf::new),
+        acting_principal: String::new(),
+        cas_root: state.config.state_dir.join("cas"),
+        callback_token: Some(cap.token.clone()),
+        callback_socket_path: Some(state.config.uds_path.to_string_lossy().to_string()),
+        vault_handle: None,
+        state_dir: state.config.state_dir.clone(),
+        params: json!({}),
+        resolution_output: None,
+    };
+
+    let injections: &[(EnvInjectionSource, &str)] = &[
+        (EnvInjectionSource::CallbackSocketPath, "RYEOSD_SOCKET_PATH"),
+        (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN"),
+        (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID"),
+        (EnvInjectionSource::StateDir, "RYEOS_STATE_DIR"),
+    ];
+
     let mut bindings = HashMap::new();
-    bindings.insert(
-        "RYEOSD_SOCKET_PATH".to_string(),
-        state.config.uds_path.to_string_lossy().to_string(),
-    );
-    bindings.insert("RYEOSD_CALLBACK_TOKEN".to_string(), cap.token.clone());
-    bindings.insert("RYEOSD_THREAD_ID".to_string(), thread_id.to_string());
-    bindings.insert(
-        "RYEOS_STATE_DIR".to_string(),
-        state.config.state_dir.to_string_lossy().to_string(),
-    );
-    if let Some(pp) = project_path {
-        bindings.insert(
-            "RYEOSD_PROJECT_PATH".to_string(),
-            pp.to_string_lossy().to_string(),
-        );
+    for (source, name) in injections {
+        let value = produce_env_value(*source, &request)
+            .map_err(|e| anyhow::anyhow!("daemon env injection '{name}': {e}"))?;
+        bindings.insert(name.to_string(), value);
+    }
+    if project_path.is_some() {
+        let value = produce_env_value(EnvInjectionSource::ProjectPath, &request)
+            .map_err(|e| anyhow::anyhow!("daemon env injection 'RYEOSD_PROJECT_PATH': {e}"))?;
+        bindings.insert("RYEOSD_PROJECT_PATH".to_string(), value);
     }
 
-    (bindings, cap.token)
+    Ok((bindings, cap.token))
 }
 
 /// Run an execution inline (blocking until completion).
@@ -577,7 +598,7 @@ pub async fn run_inline(
     let (cb_bindings, _cb_token) = mint_callback_env(
         &state, &tid, Some(&effective_path), None,
         params.effective_caps.clone(),
-    );
+    )?;
 
     // Daemon-owned per-thread state dir under config.state_dir — does
     // NOT live under the (ephemeral, CAS-checkout) working directory,
@@ -763,7 +784,7 @@ pub async fn run_detached(
     let (cb_bindings, cb_token) = mint_callback_env(
         &state, &running.thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
-    );
+    )?;
     guard.track_callback_token(cb_token);
 
     // Move guard parts into the background task
@@ -1259,7 +1280,7 @@ pub async fn run_existing_detached(
     let (cb_bindings, cb_token) = mint_callback_env(
         &state, &thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
-    );
+    )?;
     guard.track_callback_token(cb_token);
 
     let (bg_state, _bg_thread_id, bg_temp_dir, bg_cb_token) = guard.into_detached_parts();

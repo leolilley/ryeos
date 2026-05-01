@@ -25,6 +25,8 @@ pub enum EnvInjectionSource {
     CasRoot,
     /// Vault handle the child uses to fetch decrypted secrets.
     VaultHandle,
+    /// Daemon-wide state directory (e.g. `RYEOS_STATE_DIR`).
+    StateDir,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +86,7 @@ pub fn produce_env_value(
                 )
             })
         }
+        EnvInjectionSource::StateDir => Ok(request.state_dir.to_string_lossy().to_string()),
     }
 }
 
@@ -120,6 +123,7 @@ mod tests {
             callback_token: Some("tok-abc".to_string()),
             callback_socket_path: Some("/tmp/ryeos-callback.sock".to_string()),
             vault_handle: Some("vault-handle-1".to_string()),
+            state_dir: PathBuf::from("/var/lib/ryeos"),
             params: serde_json::json!({}),
             resolution_output: None,
         }
@@ -136,6 +140,7 @@ mod tests {
             EnvInjectionSource::ActingPrincipal,
             EnvInjectionSource::CasRoot,
             EnvInjectionSource::VaultHandle,
+            EnvInjectionSource::StateDir,
         ] {
             let yaml = serde_yaml::to_string(&src).unwrap();
             let parsed: EnvInjectionSource = serde_yaml::from_str(&yaml).unwrap();

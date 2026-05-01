@@ -936,6 +936,7 @@ async fn dispatch_streaming_subprocess(
         timeout: std::time::Duration::from_secs(300),
         acting_principal: request.acting_principal,
         cas_root: Path::new("/"),
+        state_dir: Path::new("/"),
     };
 
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(

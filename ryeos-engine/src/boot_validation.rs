@@ -416,6 +416,7 @@ pub fn validate_protocol_builder(
             timeout: Duration::from_secs(30),
             acting_principal: "boot-check",
             cas_root: dummy_path,
+            state_dir: dummy_path,
         };
 
         match build_subprocess_spec(&verified.descriptor, &request) {
@@ -1308,6 +1309,7 @@ composed_value_contract:
             timeout: Duration::from_secs(30),
             acting_principal: "test",
             cas_root: dummy,
+            state_dir: dummy,
         };
 
         let result = build_subprocess_spec(&desc, &request);
@@ -1363,6 +1365,7 @@ composed_value_contract:
             timeout: Duration::from_secs(30),
             acting_principal: "test",
             cas_root: dummy,
+            state_dir: dummy,
         };
 
         match build_subprocess_spec(&desc, &request) {

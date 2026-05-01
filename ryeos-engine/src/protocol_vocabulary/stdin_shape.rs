@@ -77,6 +77,7 @@ mod tests {
             callback_token: None,
             callback_socket_path: None,
             vault_handle: None,
+            state_dir: PathBuf::from("/var/lib/ryeos"),
             params,
             resolution_output: None,
         }

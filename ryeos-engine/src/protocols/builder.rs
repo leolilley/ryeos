@@ -98,6 +98,9 @@ pub struct BuildRequest<'a> {
 
     /// Path to the daemon's CAS root.
     pub cas_root: &'a Path,
+
+    /// Path to the daemon's state directory.
+    pub state_dir: &'a Path,
 }
 
 /// Errors produced by the builder.
@@ -219,6 +222,7 @@ pub fn build_subprocess_spec(
             }
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request.cas_root.to_string_lossy().to_string(),
+            EnvInjectionSource::StateDir => request.state_dir.to_string_lossy().to_string(),
             EnvInjectionSource::VaultHandle => {
                 // Look up the vault handle from vault_bindings.
                 // For now, vault_handle injection is not yet wired through
@@ -389,6 +393,7 @@ mod tests {
             timeout: Duration::from_secs(120),
             acting_principal: "fp:abc123",
             cas_root: Path::new("/cas/root"),
+            state_dir: Path::new("/var/lib/ryeos"),
         }
     }
 
