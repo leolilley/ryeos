@@ -26,6 +26,4 @@ pub enum VocabularyError {
     HttpV1WithoutCallbackInjection,
     #[error("env injection `{name}` has a callback source but callback_channel is none")]
     CallbackInjectionWithoutChannel { name: String },
-    #[error("streaming protocol violation: {detail}")]
-    StreamingProtocolViolation { detail: String },
 }

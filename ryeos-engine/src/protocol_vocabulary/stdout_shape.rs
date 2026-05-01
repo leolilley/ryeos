@@ -4,7 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 use crate::launch_envelope_types::RuntimeResult;
-use crate::protocol_vocabulary::error::VocabularyError;
+
+/// Maximum permitted size of a single streaming frame body.
+///
+/// Per-frame guard, not per-stream: cumulative-stream guards belong at
+/// the pipe level (e.g. lillux's subprocess bridge). 1 MiB is large
+/// enough for any reasonable structured chunk and small enough that a
+/// runaway producer can't OOM the daemon.
+pub const MAX_FRAME_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -23,7 +30,7 @@ pub enum StdoutShape {
     StreamingChunksV1,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamingChunkKind {
     Stdout,
@@ -52,6 +59,68 @@ pub enum DecodedStdout {
 #[derive(Debug)]
 pub enum DecodedFrame {
     Streaming(StreamingChunk),
+}
+
+/// Typed errors surfaced by the streaming frame reader.
+///
+/// Replaces the predecessor wave's `VocabularyError::StreamingProtocolViolation`
+/// catch-all string. Production callers (the dispatch_streaming_subprocess
+/// path in ryeosd) match on these variants for structured logging and
+/// targeted recovery; tests assert on variants instead of substring.
+#[derive(Debug, thiserror::Error)]
+pub enum FrameReadError {
+    #[error("io error reading frame length at offset {offset}: {source}")]
+    IoLength {
+        offset: usize,
+        #[source]
+        source: io::Error,
+    },
+    #[error("io error reading frame body at offset {offset}: {source}")]
+    IoBody {
+        offset: usize,
+        #[source]
+        source: io::Error,
+    },
+    #[error("frame at offset {offset} exceeds max length {max} (got {got})")]
+    FrameTooLarge {
+        offset: usize,
+        max: usize,
+        got: usize,
+    },
+    #[error("frame body at offset {offset} is not valid JSON: {source}")]
+    InvalidJson {
+        offset: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("expected seq {expected}, got {actual}")]
+    SeqOutOfOrder { expected: u64, actual: u64 },
+    #[error("frame after terminal frame")]
+    FrameAfterTerminal,
+    #[error("terminal frame at seq {seq} has kind {kind:?}, expected Exit")]
+    NonExitTerminal { seq: u64, kind: StreamingChunkKind },
+    #[error("Exit frame at seq {seq} missing required `exit_code` field")]
+    ExitMissingCode { seq: u64 },
+    #[error("{kind:?} frame at seq {seq} missing required `data` field")]
+    ChunkMissingData { kind: StreamingChunkKind, seq: u64 },
+    #[error("unknown frame kind `{kind}` at seq {seq}")]
+    UnknownKind { kind: String, seq: u64 },
+    #[error("stream ended without a terminal Exit frame ({frames_seen} frames seen)")]
+    StreamMissingExit { frames_seen: usize },
+}
+
+/// Permissive intermediate parse so we can surface `UnknownKind` as a
+/// typed variant instead of a serde enum-deserialization error string.
+#[derive(Debug, Deserialize)]
+struct RawFrame {
+    seq: u64,
+    kind: String,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    terminal: bool,
 }
 
 /// Terminal decode (called on child exit when StdoutMode == Terminal).
@@ -99,77 +168,131 @@ pub fn decode_stdout_frame(
 }
 
 /// Read all length-prefixed frames from a reader, enforcing the
-/// streaming protocol invariants.
+/// streaming protocol invariants:
+///
+/// * Each frame body is at most [`MAX_FRAME_BYTES`].
+/// * Sequence numbers begin at 0 and increment by 1.
+/// * Stdout/Stderr frames MUST carry a `data` field (may be empty,
+///   must be present).
+/// * Exit frames MUST carry an `exit_code` field.
+/// * Unknown `kind` strings surface as [`FrameReadError::UnknownKind`]
+///   rather than being collapsed into a serde error string.
+/// * The stream MUST terminate with exactly one `Exit` frame whose
+///   `terminal` flag is set; streams that close without an `Exit`
+///   frame fail with [`FrameReadError::StreamMissingExit`].
+/// * No frames may appear after the terminal `Exit` frame.
+///
+/// A stream MAY emit zero `Stdout`/`Stderr` frames before its terminal
+/// `Exit` — that is "succeed silently" and is permitted.
 pub fn read_all_frames<R: Read>(
     mut reader: R,
-) -> Result<Vec<StreamingChunk>, VocabularyError> {
+) -> Result<Vec<StreamingChunk>, FrameReadError> {
     let mut chunks = Vec::new();
     let mut expected_seq: u64 = 0;
     let mut seen_terminal = false;
+    let mut offset: usize = 0;
 
     loop {
         let mut len_buf = [0u8; 4];
         match reader.read_exact(&mut len_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(VocabularyError::StreamingProtocolViolation {
-                detail: format!("io error reading frame length: {e}"),
-            }),
+            Err(e) => return Err(FrameReadError::IoLength { offset, source: e }),
         }
         let frame_len = u32::from_be_bytes(len_buf) as usize;
+        if frame_len > MAX_FRAME_BYTES {
+            return Err(FrameReadError::FrameTooLarge {
+                offset,
+                max: MAX_FRAME_BYTES,
+                got: frame_len,
+            });
+        }
+        let body_offset = offset + 4;
         let mut frame_buf = vec![0u8; frame_len];
-        reader.read_exact(&mut frame_buf).map_err(|e| {
-            VocabularyError::StreamingProtocolViolation {
-                detail: format!("io error reading frame body: {e}"),
-            }
-        })?;
+        reader
+            .read_exact(&mut frame_buf)
+            .map_err(|e| FrameReadError::IoBody {
+                offset: body_offset,
+                source: e,
+            })?;
 
-        let chunk: StreamingChunk = serde_json::from_slice(&frame_buf).map_err(|e| {
-            VocabularyError::StreamingProtocolViolation {
-                detail: format!("frame body is not valid JSON StreamingChunk: {e}"),
-            }
-        })?;
+        let raw: RawFrame =
+            serde_json::from_slice(&frame_buf).map_err(|e| FrameReadError::InvalidJson {
+                offset: body_offset,
+                source: e,
+            })?;
 
-        // Enforce seq monotonicity from 0.
-        if chunk.seq != expected_seq {
-            return Err(VocabularyError::StreamingProtocolViolation {
-                detail: format!(
-                    "expected seq {}, got {}",
-                    expected_seq, chunk.seq
-                ),
+        // Per-kind validation, surfacing unknown kinds as typed errors.
+        let kind = match raw.kind.as_str() {
+            "stdout" => StreamingChunkKind::Stdout,
+            "stderr" => StreamingChunkKind::Stderr,
+            "exit" => StreamingChunkKind::Exit,
+            other => {
+                return Err(FrameReadError::UnknownKind {
+                    kind: other.to_string(),
+                    seq: raw.seq,
+                });
+            }
+        };
+
+        // Field invariants per kind.
+        match kind {
+            StreamingChunkKind::Stdout | StreamingChunkKind::Stderr => {
+                if raw.data.is_none() {
+                    return Err(FrameReadError::ChunkMissingData {
+                        kind,
+                        seq: raw.seq,
+                    });
+                }
+            }
+            StreamingChunkKind::Exit => {
+                if raw.exit_code.is_none() {
+                    return Err(FrameReadError::ExitMissingCode { seq: raw.seq });
+                }
+            }
+        }
+
+        // Seq monotonicity from 0.
+        if raw.seq != expected_seq {
+            return Err(FrameReadError::SeqOutOfOrder {
+                expected: expected_seq,
+                actual: raw.seq,
             });
         }
         expected_seq += 1;
 
         if seen_terminal {
-            return Err(VocabularyError::StreamingProtocolViolation {
-                detail: "frame after terminal frame".into(),
-            });
+            return Err(FrameReadError::FrameAfterTerminal);
         }
 
-        if chunk.terminal {
-            // The terminal frame must be an exit frame.
-            if chunk.kind != StreamingChunkKind::Exit {
-                return Err(VocabularyError::StreamingProtocolViolation {
-                    detail: format!(
-                        "terminal frame has kind {:?}, expected Exit",
-                        chunk.kind
-                    ),
+        if raw.terminal {
+            if kind != StreamingChunkKind::Exit {
+                return Err(FrameReadError::NonExitTerminal {
+                    seq: raw.seq,
+                    kind,
                 });
             }
             seen_terminal = true;
         }
 
-        chunks.push(chunk);
+        chunks.push(StreamingChunk {
+            seq: raw.seq,
+            kind,
+            data: raw.data,
+            exit_code: raw.exit_code,
+            terminal: raw.terminal,
+        });
+
+        offset = body_offset + frame_len;
 
         if seen_terminal {
             break;
         }
     }
 
-    if !seen_terminal && !chunks.is_empty() {
-        return Err(VocabularyError::StreamingProtocolViolation {
-            detail: "stream ended without a terminal frame".into(),
+    if !seen_terminal {
+        return Err(FrameReadError::StreamMissingExit {
+            frames_seen: chunks.len(),
         });
     }
 
@@ -245,6 +368,18 @@ mod tests {
         out
     }
 
+    /// Helper that emits a frame from raw JSON, bypassing the
+    /// `StreamingChunk` serializer so negative-path tests can construct
+    /// shape-incomplete bodies (missing `data`, missing `exit_code`,
+    /// unknown `kind`) that the strict parser must reject.
+    fn write_raw_frame(body: &serde_json::Value) -> Vec<u8> {
+        let bytes = serde_json::to_vec(body).unwrap();
+        let len = (bytes.len() as u32).to_be_bytes();
+        let mut out = len.to_vec();
+        out.extend_from_slice(&bytes);
+        out
+    }
+
     #[test]
     fn frame_reader_valid_sequence() {
         let mut buf = Vec::new();
@@ -278,14 +413,18 @@ mod tests {
         buf.extend_from_slice(&write_frame(&StreamingChunk {
             seq: 1, // should be 0
             kind: StreamingChunkKind::Stdout,
-            data: None,
+            data: Some(String::new()),
             exit_code: None,
             terminal: false,
         }));
         let result = read_all_frames(&mut &buf[..]);
-        assert!(result.is_err());
-        let msg = format!("{:?}", result.unwrap_err());
-        assert!(msg.contains("expected seq 0"));
+        match result {
+            Err(FrameReadError::SeqOutOfOrder { expected, actual }) => {
+                assert_eq!(expected, 0);
+                assert_eq!(actual, 1);
+            }
+            other => panic!("expected SeqOutOfOrder, got {other:?}"),
+        }
     }
 
     #[test]
@@ -294,14 +433,18 @@ mod tests {
         buf.extend_from_slice(&write_frame(&StreamingChunk {
             seq: 0,
             kind: StreamingChunkKind::Stdout,
-            data: None,
+            data: Some(String::new()),
             exit_code: None,
             terminal: true, // terminal but not exit
         }));
         let result = read_all_frames(&mut &buf[..]);
-        assert!(result.is_err());
-        let msg = format!("{:?}", result.unwrap_err());
-        assert!(msg.contains("expected Exit"));
+        match result {
+            Err(FrameReadError::NonExitTerminal { seq, kind }) => {
+                assert_eq!(seq, 0);
+                assert_eq!(kind, StreamingChunkKind::Stdout);
+            }
+            other => panic!("expected NonExitTerminal, got {other:?}"),
+        }
     }
 
     #[test]
@@ -317,14 +460,16 @@ mod tests {
         buf.extend_from_slice(&write_frame(&StreamingChunk {
             seq: 1,
             kind: StreamingChunkKind::Stdout,
-            data: None,
+            data: Some(String::new()),
             exit_code: None,
             terminal: false,
         }));
-        let result = read_all_frames(&mut &buf[..]);
-        // With only 4 bytes remaining for the second frame length, we'll
-        // get an EOF or a violation. Either way, it must fail.
-        assert!(result.is_err() || result.unwrap().len() == 1);
+        // The reader stops after the terminal frame; trailing bytes are
+        // ignored. Callers that need to detect bytes-after-exit should
+        // check the underlying reader's remaining bytes themselves.
+        let chunks = read_all_frames(&mut &buf[..]).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].terminal);
     }
 
     #[test]
@@ -333,25 +478,172 @@ mod tests {
         buf.extend_from_slice(&write_frame(&StreamingChunk {
             seq: 0,
             kind: StreamingChunkKind::Stdout,
-            data: None,
+            data: Some(String::new()),
             exit_code: None,
             terminal: false,
         }));
-        // Stream ends abruptly (no more data) — reader gets UnexpectedEof.
-        // The reader reads the frame, then tries to read the next length
-        // header, gets UnexpectedEof, breaks the loop. Then seen_terminal
-        // is false and chunks is non-empty → error.
         let result = read_all_frames(&mut &buf[..]);
         match result {
-            Err(VocabularyError::StreamingProtocolViolation { detail }) => {
-                assert!(detail.contains("stream ended without a terminal frame"));
+            Err(FrameReadError::StreamMissingExit { frames_seen }) => {
+                assert_eq!(frames_seen, 1);
             }
-            other => panic!("expected StreamingProtocolViolation, got {:?}", other),
+            other => panic!("expected StreamMissingExit, got {other:?}"),
         }
     }
 
-    /// θ: Round-trip test matching the rye-tool-streaming-demo binary
-    /// output: 5 stdout chunks with base64-encoded data + terminal exit.
+    /// η: Empty stream (zero bytes) is also a missing-exit violation,
+    /// not a silent success. A streaming subprocess that produces no
+    /// frames at all is ambiguous and must be flagged.
+    #[test]
+    fn frame_reader_empty_stream_fails_loud() {
+        let buf: Vec<u8> = Vec::new();
+        let result = read_all_frames(&mut &buf[..]);
+        match result {
+            Err(FrameReadError::StreamMissingExit { frames_seen }) => {
+                assert_eq!(frames_seen, 0);
+            }
+            other => panic!("expected StreamMissingExit (frames_seen=0), got {other:?}"),
+        }
+    }
+
+    /// η: Per-frame max length guard. A length prefix above
+    /// `MAX_FRAME_BYTES` must abort before allocating the frame body.
+    #[test]
+    fn frame_too_large_fails_loud() {
+        let mut buf = Vec::new();
+        let oversized = (MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
+        buf.extend_from_slice(&oversized);
+        let result = read_all_frames(&mut &buf[..]);
+        match result {
+            Err(FrameReadError::FrameTooLarge { offset, max, got }) => {
+                assert_eq!(offset, 0);
+                assert_eq!(max, MAX_FRAME_BYTES);
+                assert_eq!(got, MAX_FRAME_BYTES + 1);
+            }
+            other => panic!("expected FrameTooLarge, got {other:?}"),
+        }
+    }
+
+    /// η: Exit frame missing `exit_code` is a typed violation.
+    #[test]
+    fn exit_missing_code_fails_loud() {
+        let body = serde_json::json!({
+            "seq": 0,
+            "kind": "exit",
+            "terminal": true,
+        });
+        let buf = write_raw_frame(&body);
+        let result = read_all_frames(&mut &buf[..]);
+        match result {
+            Err(FrameReadError::ExitMissingCode { seq }) => assert_eq!(seq, 0),
+            other => panic!("expected ExitMissingCode, got {other:?}"),
+        }
+    }
+
+    /// η: Stdout frame missing `data` is a typed violation. Empty
+    /// string `data: ""` would be valid; absence of the field is not.
+    #[test]
+    fn chunk_missing_data_fails_loud_for_stdout() {
+        let body = serde_json::json!({
+            "seq": 0,
+            "kind": "stdout",
+            "terminal": false,
+        });
+        let buf = write_raw_frame(&body);
+        let result = read_all_frames(&mut &buf[..]);
+        match result {
+            Err(FrameReadError::ChunkMissingData { kind, seq }) => {
+                assert_eq!(kind, StreamingChunkKind::Stdout);
+                assert_eq!(seq, 0);
+            }
+            other => panic!("expected ChunkMissingData(Stdout), got {other:?}"),
+        }
+    }
+
+    /// η: Stderr frame missing `data` is a typed violation.
+    #[test]
+    fn chunk_missing_data_fails_loud_for_stderr() {
+        let body = serde_json::json!({
+            "seq": 0,
+            "kind": "stderr",
+            "terminal": false,
+        });
+        let buf = write_raw_frame(&body);
+        let result = read_all_frames(&mut &buf[..]);
+        match result {
+            Err(FrameReadError::ChunkMissingData { kind, seq }) => {
+                assert_eq!(kind, StreamingChunkKind::Stderr);
+                assert_eq!(seq, 0);
+            }
+            other => panic!("expected ChunkMissingData(Stderr), got {other:?}"),
+        }
+    }
+
+    /// η: Empty-string `data` is permitted (succeed-silently chunk).
+    #[test]
+    fn chunk_with_empty_data_is_accepted() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&write_frame(&StreamingChunk {
+            seq: 0,
+            kind: StreamingChunkKind::Stdout,
+            data: Some(String::new()),
+            exit_code: None,
+            terminal: false,
+        }));
+        buf.extend_from_slice(&write_frame(&StreamingChunk {
+            seq: 1,
+            kind: StreamingChunkKind::Exit,
+            data: None,
+            exit_code: Some(0),
+            terminal: true,
+        }));
+        let chunks = read_all_frames(&mut &buf[..]).unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].data.as_deref(), Some(""));
+    }
+
+    /// η: Unknown frame kind surfaces as a typed variant, not as a
+    /// serde enum-deserialization string.
+    #[test]
+    fn unknown_kind_fails_loud() {
+        let body = serde_json::json!({
+            "seq": 0,
+            "kind": "warning",
+            "data": "something",
+            "terminal": false,
+        });
+        let buf = write_raw_frame(&body);
+        let result = read_all_frames(&mut &buf[..]);
+        match result {
+            Err(FrameReadError::UnknownKind { kind, seq }) => {
+                assert_eq!(kind, "warning");
+                assert_eq!(seq, 0);
+            }
+            other => panic!("expected UnknownKind, got {other:?}"),
+        }
+    }
+
+    /// η: A stream that emits only an Exit frame ("succeed silently")
+    /// is the explicit empty-stream policy: zero Stdout/Stderr frames
+    /// before Exit is allowed.
+    #[test]
+    fn stream_with_only_exit_frame_succeeds() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&write_frame(&StreamingChunk {
+            seq: 0,
+            kind: StreamingChunkKind::Exit,
+            data: None,
+            exit_code: Some(0),
+            terminal: true,
+        }));
+        let chunks = read_all_frames(&mut &buf[..]).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, StreamingChunkKind::Exit);
+    }
+
+    /// η: The streaming demo binary emits 5 stdout chunks, 1 stderr
+    /// chunk, and a terminal exit. Round-trip the wire format here so
+    /// the demo's wire contract is pinned outside the e2e test.
     #[test]
     fn demo_binary_frame_round_trip() {
         use base64::Engine;
@@ -368,8 +660,19 @@ mod tests {
                 terminal: false,
             }));
         }
+        // Stderr chunk emitted alongside stdout to exercise the Stderr
+        // variant in the production frame path.
+        let stderr_payload = base64::engine::general_purpose::STANDARD
+            .encode("done\n");
         buf.extend_from_slice(&write_frame(&StreamingChunk {
             seq: 5,
+            kind: StreamingChunkKind::Stderr,
+            data: Some(stderr_payload),
+            exit_code: None,
+            terminal: false,
+        }));
+        buf.extend_from_slice(&write_frame(&StreamingChunk {
+            seq: 6,
             kind: StreamingChunkKind::Exit,
             data: None,
             exit_code: Some(0),
@@ -377,9 +680,8 @@ mod tests {
         }));
 
         let chunks = read_all_frames(&mut &buf[..]).unwrap();
-        assert_eq!(chunks.len(), 6);
+        assert_eq!(chunks.len(), 7);
 
-        // Verify each stdout chunk decodes correctly.
         for i in 0..5 {
             assert_eq!(chunks[i].seq, i as u64);
             assert_eq!(chunks[i].kind, StreamingChunkKind::Stdout);
@@ -393,10 +695,16 @@ mod tests {
             );
         }
 
-        // Verify terminal exit frame.
-        assert_eq!(chunks[5].seq, 5);
-        assert_eq!(chunks[5].kind, StreamingChunkKind::Exit);
-        assert_eq!(chunks[5].exit_code, Some(0));
-        assert!(chunks[5].terminal);
+        assert_eq!(chunks[5].kind, StreamingChunkKind::Stderr);
+        assert!(!chunks[5].terminal);
+        let stderr_decoded = base64::engine::general_purpose::STANDARD
+            .decode(chunks[5].data.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(String::from_utf8(stderr_decoded).unwrap(), "done\n");
+
+        assert_eq!(chunks[6].seq, 6);
+        assert_eq!(chunks[6].kind, StreamingChunkKind::Exit);
+        assert_eq!(chunks[6].exit_code, Some(0));
+        assert!(chunks[6].terminal);
     }
 }

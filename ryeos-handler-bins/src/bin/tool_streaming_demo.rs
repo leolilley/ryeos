@@ -1,9 +1,9 @@
 //! Streaming tool demonstrator binary.
 //!
-//! Reads `parameters_json` on stdin (ignored), then writes 6
-//! length-prefixed JSON frames to stdout: 5 stdout chunks followed by a
-//! terminal exit frame. This exercises the `tool_streaming_v1` protocol
-//! end-to-end.
+//! Reads `parameters_json` on stdin (ignored), then writes 7
+//! length-prefixed JSON frames to stdout: 5 stdout chunks, 1 stderr
+//! chunk, and a terminal exit frame. This exercises the
+//! `tool_streaming_v1` protocol end-to-end including the Stderr kind.
 
 use std::io::{Read, Write};
 
@@ -59,9 +59,20 @@ fn main() {
         });
     }
 
-    // Terminal exit frame.
+    // 1 stderr chunk so the demo exercises every non-terminal frame
+    // kind in the `tool_streaming_v1` protocol.
     emit_frame(&StreamingChunk {
         seq: 5,
+        kind: StreamingChunkKind::Stderr,
+        data: Some(base64::engine::general_purpose::STANDARD
+            .encode("done\n")),
+        exit_code: None,
+        terminal: false,
+    });
+
+    // Terminal exit frame.
+    emit_frame(&StreamingChunk {
+        seq: 6,
         kind: StreamingChunkKind::Exit,
         data: None,
         exit_code: Some(0),
