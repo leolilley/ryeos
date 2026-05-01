@@ -37,7 +37,7 @@ async fn standalone_rebuild_runs_on_fresh_state() {
         .join("\n");
     let parsed: serde_json::Value = serde_json::from_str(&json_str)
         .unwrap_or_else(|e| panic!("rebuild stdout not JSON: {e}\nextracted: {json_str}\nfull stdout: {stdout}"));
-    let result = parsed.get("result").or_else(|| Some(&parsed)).cloned().unwrap();
+    let result = parsed.get("result").or(Some(&parsed)).cloned().unwrap();
     // RebuildReport has chains_rebuilt/threads_restored/events_projected.
     assert!(result.get("chains_rebuilt").is_some()
         || result.get("threads_restored").is_some(),

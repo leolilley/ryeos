@@ -159,7 +159,7 @@ pub struct CompileContext<'a> {
     pub parsers: &'a ParserDispatcher,
     pub kinds: &'a KindRegistry,
     pub trust_store: &'a TrustStore,
-    pub project_root: Option<&'a PathBuf>,
+    pub project_root: Option<&'a Path>,
 }
 
 // ── Handler phasing & cardinality ────────────────────────────────────────
@@ -301,20 +301,20 @@ impl std::fmt::Debug for RuntimeHandlerRegistry {
 #[allow(clippy::too_many_arguments)]
 pub fn compile_with_handlers(
     chain: &[ChainIntermediate],
-    root_source_path: &PathBuf,
+    root_source_path: &Path,
     chain_str: &[String],
     ignored_keys: &[String],
     registry: &RuntimeHandlerRegistry,
     params: &Value,
     plan_env: &HashMap<String, String>,
-    project_root: Option<&PathBuf>,
+    project_root: Option<&Path>,
     parsers: &ParserDispatcher,
     kinds: &KindRegistry,
     trust_store: &TrustStore,
     roots: &ResolutionRoots,
 ) -> Result<SubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
-        template_ctx: TemplateContext::new(root_source_path.clone()),
+        template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
         env: plan_env.clone(),
         spec_overrides: SpecOverrides::default(),
         params: params.clone(),
@@ -327,7 +327,7 @@ pub fn compile_with_handlers(
         trust_store,
         project_root,
     };
-    ctx.template_ctx.project_path = project_root.cloned();
+    ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
     ctx.template_ctx.params_json = params.to_string();
 
     // Seed always-present template tokens computed from the chain
@@ -509,7 +509,7 @@ pub fn compile_with_handlers(
     Ok(SubprocessSpec {
         cmd,
         args,
-        cwd: spec_overrides.cwd.or_else(|| project_root.cloned()),
+        cwd: spec_overrides.cwd.or_else(|| project_root.map(|p| p.to_path_buf())),
         env: expanded_env,
         stdin_data,
         timeout_secs,

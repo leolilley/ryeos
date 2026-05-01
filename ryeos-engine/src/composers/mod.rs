@@ -444,7 +444,7 @@ composer: {composer}
             Some(cfg),
             &sk,
         );
-        let kinds = KindRegistry::load_base(&[root.clone()], &ts).unwrap();
+        let kinds = KindRegistry::load_base(std::slice::from_ref(&root), &ts).unwrap();
 
         let handlers = load_live_handler_registry();
         let reg = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();

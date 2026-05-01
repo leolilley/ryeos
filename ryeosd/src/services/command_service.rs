@@ -54,7 +54,7 @@ impl CommandService {
         kind_profiles: Arc<KindProfileRegistry>,
         _events: Arc<EventStoreService>,
     ) -> Self {
-        Self { state_store, kind_profiles, _events: _events }
+        Self { state_store, kind_profiles, _events }
     }
 
     #[tracing::instrument(

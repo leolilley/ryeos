@@ -32,11 +32,9 @@ pub fn expand_capabilities(caps: &[String]) -> BTreeSet<String> {
             to_add.push("rye.execute.*".to_string());
             to_add.push("rye.fetch.*".to_string());
             to_add.push("rye.sign.*".to_string());
-        } else if cap.starts_with("rye.execute.") {
-            let suffix = &cap["rye.execute.".len()..];
+        } else if let Some(suffix) = cap.strip_prefix("rye.execute.") {
             to_add.push(format!("rye.fetch.{suffix}"));
-        } else if cap.starts_with("rye.sign.") {
-            let suffix = &cap["rye.sign.".len()..];
+        } else if let Some(suffix) = cap.strip_prefix("rye.sign.") {
             to_add.push(format!("rye.fetch.{suffix}"));
         }
     }

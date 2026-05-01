@@ -323,8 +323,9 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             }
             None => {
                 if daemon_json.exists() {
-                    // Daemon shouldn't have started — kill and fail.
+                    // Daemon shouldn't have started — kill and reap.
                     child.kill().ok();
+                    let _ = child.wait();
                     panic!(
                         "daemon started despite multi-default runtime conflict at {}",
                         daemon_json.display()

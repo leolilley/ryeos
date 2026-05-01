@@ -10,6 +10,12 @@ pub struct AuthVerifierRegistry {
     verifiers: Vec<Arc<dyn AuthVerifier>>,
 }
 
+impl Default for AuthVerifierRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthVerifierRegistry {
     pub fn new() -> Self {
         Self {

@@ -10,6 +10,12 @@ pub struct ResponseModeRegistry {
     modes: Vec<Arc<dyn ResponseMode>>,
 }
 
+impl Default for ResponseModeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResponseModeRegistry {
     pub fn new() -> Self {
         Self { modes: Vec::new() }

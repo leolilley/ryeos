@@ -159,7 +159,7 @@ fn sweep_sharded_dir(
         }
 
         for shard2 in std::fs::read_dir(shard1.path())
-            .with_context(|| format!("failed to read shard subdirectory"))?
+            .with_context(|| "failed to read shard subdirectory".to_string())?
         {
             let shard2 = shard2.context("failed to read shard sub-entry")?;
             if !shard2.file_type()?.is_dir() {
@@ -167,7 +167,7 @@ fn sweep_sharded_dir(
             }
 
             for file_entry in std::fs::read_dir(shard2.path())
-                .with_context(|| format!("failed to read shard leaf directory"))?
+                .with_context(|| "failed to read shard leaf directory".to_string())?
             {
                 let file_entry = file_entry.context("failed to read shard leaf entry")?;
                 if !file_entry.file_type()?.is_file() {

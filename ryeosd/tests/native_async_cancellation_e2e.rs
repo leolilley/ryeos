@@ -16,7 +16,7 @@
 //! `false`-rejection from the engine handler.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -55,10 +55,9 @@ fn unique_project_dir(label: &str) -> PathBuf {
 
 fn synth_project_with_async_tool(native_async_yaml: &str) -> PathBuf {
     let project_dir = unique_project_dir(
-        &native_async_yaml
+        native_async_yaml
             .replace([':', ' ', '\n', '"', '{', '}'], "_")
-            .trim_matches('_')
-            .to_string(),
+            .trim_matches('_'),
     );
     let tools_dir = project_dir.join(".ai").join("tools");
     let runtime_dir = tools_dir.join("local_async_runtime");
@@ -102,7 +101,7 @@ fn build_engine_against_bundle() -> Engine {
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("kinds load");
 
     let (parser_tools, _dups) =
-        ParserRegistry::load_base(&[bundle_root.clone()], &trust_store, &kinds)
+        ParserRegistry::load_base(std::slice::from_ref(&bundle_root), &trust_store, &kinds)
             .expect("parser tools load");
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher =
@@ -116,14 +115,14 @@ fn build_engine_against_bundle() -> Engine {
         .with_composers(composers)
 }
 
-fn plan_ctx(project_dir: &PathBuf) -> PlanContext {
+fn plan_ctx(project_dir: &Path) -> PlanContext {
     PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
         }),
         project_context: ProjectContext::LocalPath {
-            path: project_dir.clone(),
+            path: project_dir.to_path_buf(),
         },
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),

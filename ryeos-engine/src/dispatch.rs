@@ -188,7 +188,7 @@ pub fn spawn_plan(
     plan: &ExecutionPlan,
     ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    for node in &plan.nodes {
+    if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
                 return spawn_subprocess(spec, ctx);

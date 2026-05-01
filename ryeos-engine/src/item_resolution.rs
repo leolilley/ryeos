@@ -44,9 +44,7 @@ impl ResolutionRoots {
         let mut ordered = Vec::new();
 
         for (i, sys_root) in system.iter().enumerate() {
-            let label = if system.len() == 1 {
-                "system(node)".to_owned()
-            } else if i == 0 {
+            let label = if i == 0 {
                 "system(node)".to_owned()
             } else {
                 format!("system(bundle:{i})")
@@ -362,6 +360,7 @@ mod tests {
     use super::*;
     use crate::kind_registry::ExtensionSpec;
     use std::fs;
+    use std::path::Path;
     use ryeos_tracing::test as trace_test;
 
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
@@ -412,7 +411,7 @@ mod tests {
         dir
     }
 
-    fn write_item(root: &PathBuf, kind_dir: &str, bare_id: &str, ext: &str, content: &str) {
+    fn write_item(root: &Path, kind_dir: &str, bare_id: &str, ext: &str, content: &str) {
         let dir = root.join(kind_dir);
         // Handle nested bare_ids like "rye/bash/bash"
         let file_path = dir.join(format!("{bare_id}{ext}"));

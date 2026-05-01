@@ -183,7 +183,7 @@ fn extract_fenced_block(content: &str, language: &str) -> Result<Option<Extracte
 
     let mut header_lines: Vec<&str> = Vec::new();
     let mut found_close = false;
-    while let Some(line) = iter.next() {
+    for line in iter.by_ref() {
         if line.trim() == "```" {
             found_close = true;
             break;

@@ -574,10 +574,10 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     drop(project);
 }
 
-/// Tool happy-path SSE test: skipped. The standard bundle ships no
-/// launchable tool fixture with a trivial body (tool kind requires
-/// subprocess executor). Adding one would modify production bundle
-/// content solely for test enablement — out of scope per plan.
+// Tool happy-path SSE test: skipped. The standard bundle ships no
+// launchable tool fixture with a trivial body (tool kind requires
+// subprocess executor). Adding one would modify production bundle
+// content solely for test enablement — out of scope per plan.
 
 /// `/execute/stream` rejects a relative `project_path` with 400.
 ///

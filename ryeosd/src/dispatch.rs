@@ -283,7 +283,7 @@ pub(crate) fn resolve_dispatch_hop(
     // **P1.1**: extract thread_profile from the schema's execution
     // block at every hop — even non-terminator hops. The dispatch loop
     // captures this from the first hop as the root subject profile.
-    let thread_profile: Option<String>;
+    
 
     let schema = ctx.engine.kinds.get(&schema_kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx
@@ -309,7 +309,7 @@ pub(crate) fn resolve_dispatch_hop(
         }
     })?;
 
-    thread_profile = exec.thread_profile.clone();
+    let thread_profile: Option<String> = exec.thread_profile.clone();
 
     // **P1.4**: for runtime-kind refs, also look up the runtime
     // registry. This provides binary_ref, required_caps, and the
@@ -656,7 +656,7 @@ pub async fn dispatch_subprocess(
                 ctx,
                 state,
                 role,
-                &protocol,
+                protocol,
             )
             .await
         }
@@ -1003,9 +1003,9 @@ async fn dispatch_streaming_subprocess(
     })?;
 
     // 11. Return frames as a structured Value.
-    Ok(serde_json::to_value(&frames).map_err(|e| {
+    serde_json::to_value(&frames).map_err(|e| {
         DispatchError::Internal(anyhow::anyhow!("frame serialize: {e}"))
-    })?)
+    })
 }
 
 /// DetachedOk-lifecycle subprocess dispatch (opaque protocol, tools).
@@ -1137,7 +1137,7 @@ async fn dispatch_tool_subprocess(
 /// composition use the subject's identity — the runtime is just the
 /// executor.
 #[derive(Debug, Clone)]
-pub(crate) struct RootSubject {
+pub struct RootSubject {
     /// The item ref of the subject (e.g. `directive:my/agent`).
     pub item_ref: String,
     /// The thread_profile from the subject's kind schema
@@ -1416,7 +1416,7 @@ metadata:
       key: name
 "##;
 
-    fn write_runtime_kind_schema(kinds_dir: &PathBuf) {
+    fn write_runtime_kind_schema(kinds_dir: &Path) {
         let runtime_dir = kinds_dir.join("runtime");
         fs::create_dir_all(&runtime_dir).unwrap();
         let signed = lillux::signature::sign_content(

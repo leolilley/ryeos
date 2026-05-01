@@ -178,8 +178,8 @@ pub fn content_hash_after_signature(
     for idx in candidates {
         if is_signature_line(lines[idx], prefix, suffix) {
             let mut offset = 0;
-            for i in 0..=idx {
-                offset += lines[i].len();
+            for line in lines.iter().take(idx + 1) {
+                offset += line.len();
                 let pos = offset;
                 if pos < content.len() {
                     let byte = content.as_bytes()[pos];

@@ -74,19 +74,16 @@ impl Drop for TempDirGuard {
 /// like `snapshot` or `named_ref`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum ProjectSource {
     /// Execute against the live filesystem project path.
+    #[default]
     LiveFs,
     /// Resolve the acting principal's HEAD ref for the project
     /// and checkout from CAS.
     PushedHead,
 }
 
-impl Default for ProjectSource {
-    fn default() -> Self {
-        Self::LiveFs
-    }
-}
 
 /// Request-scoped project execution context.
 ///

@@ -169,7 +169,7 @@ mod tests {
     /// Spawn a shell that:
     ///   1. Installs a SIGTERM trap which writes a marker file then exits 0.
     ///   2. Sleeps long enough that, absent any signal, the test would time out.
-    /// Returns (child, pgid, marker_path).
+    ///      Returns (child, pgid, marker_path).
     fn spawn_signal_target(tmp: &TempDir) -> (std::process::Child, i64, std::path::PathBuf) {
         let marker = tmp.path().join("got_term");
         let marker_str = marker.display().to_string();

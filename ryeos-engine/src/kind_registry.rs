@@ -1685,7 +1685,7 @@ metadata:
         let ts = test_trust_store(&sk);
         write_service_schema(&tmp, &sk);
 
-        let reg = KindRegistry::load_base(&[tmp.clone()], &ts).unwrap();
+        let reg = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts).unwrap();
 
         let svc = reg.get("service").expect("service kind should be registered");
         assert_eq!(svc.directory, "services");
@@ -1708,12 +1708,12 @@ metadata:
         write_tool_schema(&tmp, &sk);
         write_directive_schema(&tmp, &sk);
 
-        let reg = KindRegistry::load_base(&[tmp.clone()], &ts).unwrap();
+        let reg = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts).unwrap();
 
         // Tool schema
         let tool = reg.get("tool").unwrap();
         assert_eq!(tool.directory, "tools");
-        assert!(tool.execution.as_ref().map_or(true, |e| e.aliases.is_empty()));
+        assert!(tool.execution.as_ref().is_none_or(|e| e.aliases.is_empty()));
         let tool_exts = tool.extension_strs();
         assert!(tool_exts.contains(&".py"));
         assert!(tool_exts.contains(&".ts"));
@@ -2083,7 +2083,7 @@ formats:
 
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let tool = reg.get("tool").unwrap();
-        assert!(tool.execution.as_ref().map_or(true, |e| e.resolution.is_empty()));
+        assert!(tool.execution.as_ref().is_none_or(|e| e.resolution.is_empty()));
     }
 
     // Removed: `project_overlay_replaces_resolution` — kind schemas are

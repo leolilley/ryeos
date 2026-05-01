@@ -6,7 +6,7 @@
 //! like `{interpreter}` resolve.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -67,7 +67,7 @@ pub enum InterpreterConfig {
 
 pub fn resolve_interpreter(
     config: &InterpreterConfig,
-    project_root: Option<&PathBuf>,
+    project_root: Option<&Path>,
 ) -> Result<String, EngineError> {
     match config {
         InterpreterConfig::LocalBinary {

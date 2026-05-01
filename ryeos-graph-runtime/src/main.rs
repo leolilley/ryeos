@@ -493,7 +493,7 @@ mod tests {
         };
         let json_str = serde_json::to_string(&rr).unwrap();
         let parsed: RuntimeResult = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed.success, true);
+        assert!(parsed.success);
         assert_eq!(parsed.status, "completed");
         assert_eq!(parsed.result, Some(graph_result_value));
         assert!(parsed.result.is_some());

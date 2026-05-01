@@ -26,11 +26,11 @@ pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<
     // Detect Unix exec bit on the source file.
     let mode = fs::metadata(file_path)
         .ok()
-        .and_then(|m| {
+        .map(|m| {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                Some(m.permissions().mode())
+                m.permissions().mode()
             }
             #[cfg(not(unix))]
             None

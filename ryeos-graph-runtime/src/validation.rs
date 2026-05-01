@@ -53,7 +53,7 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
     // The parser defaults to NodeType::Action, so a bare `{name: {}}`
     // becomes an action node with no action — a no-op that masks
     // typos. Reject it.
-    if node.node_type == NodeType::Action && node.action.is_none() && name != &cfg.start {
+    if node.node_type == NodeType::Action && node.action.is_none() && name != cfg.start {
         result
             .errors
             .push(format!("node '{name}' has no 'action' and no explicit 'node_type' — this is ambiguous"));
@@ -102,7 +102,7 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         }
         NodeType::Return => {}
         NodeType::Action => {
-            if node.action.is_none() && name != &cfg.start {
+            if node.action.is_none() && name != cfg.start {
                 // Already caught above — skip the redundant warning.
             }
         }

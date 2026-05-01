@@ -103,7 +103,7 @@ fn file_sink_survives_daemon_restart() {
     // Each daemon start writes multiple JSON lines. We had 2 starts.
     // The file persists across restarts, so line count should be >= contents_after_run1.
     assert!(
-        lines.len() > 0,
+        !lines.is_empty(),
         "expected ndjson lines from daemon runs"
     );
 

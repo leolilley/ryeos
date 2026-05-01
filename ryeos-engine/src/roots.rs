@@ -90,6 +90,7 @@ pub fn user_dotenv_path() -> Result<PathBuf, RootError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Mutex;
 
     // Process-wide mutex; USER_SPACE / RYE_SYSTEM_SPACE are shared global state.
@@ -145,7 +146,7 @@ mod tests {
         assert_eq!(r[0], PathBuf::from("/tmp/sys-a"));
         assert!(r.iter().any(|p| p == &PathBuf::from("/tmp/sys-b")));
         // No duplicate /tmp/sys-a.
-        let count = r.iter().filter(|p| **p == PathBuf::from("/tmp/sys-a")).count();
+        let count = r.iter().filter(|p| **p == Path::new("/tmp/sys-a")).count();
         assert_eq!(count, 1);
         std::env::remove_var("RYE_SYSTEM_SPACE");
     }

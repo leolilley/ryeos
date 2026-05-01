@@ -256,7 +256,7 @@ pub fn validate_boot(
             }
 
             // Contract check always runs regardless of handler availability.
-            schedule_contract_check(&mut issues, &kind, ext, parser_ref, &schema, &descriptor);
+            schedule_contract_check(&mut issues, &kind, ext, parser_ref, schema, descriptor);
         }
     }
 
@@ -305,7 +305,7 @@ pub fn validate_boot(
             HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
                 composer_config: schema.composer_config.clone(),
             });
-        match run_handler_subprocess(&handler, &request, Duration::from_secs(30)) {
+        match run_handler_subprocess(handler, &request, Duration::from_secs(30)) {
             Ok(HandlerResponse::ValidateOk) => {}
             Ok(HandlerResponse::ValidateErr { message }) => {
                 issues.push(BootIssue::InvalidComposerConfig {
@@ -453,24 +453,22 @@ pub fn validate_protocol_builder(
 
         if let crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref } = terminator {
             match kind_name {
-                "runtime" => {
-                    if protocol_ref != "protocol:rye/core/runtime_v1" {
+                "runtime"
+                    if protocol_ref != "protocol:rye/core/runtime_v1" => {
                         issues.push(BootIssue::RuntimeProtocolMismatch {
                             kind: kind_name.to_string(),
                             protocol_ref: protocol_ref.clone(),
                             expected: "protocol:rye/core/runtime_v1".to_string(),
                         });
                     }
-                }
-                "streaming_tool" => {
-                    if protocol_ref != "protocol:rye/core/tool_streaming_v1" {
+                "streaming_tool"
+                    if protocol_ref != "protocol:rye/core/tool_streaming_v1" => {
                         issues.push(BootIssue::StreamingToolProtocolMismatch {
                             kind: kind_name.to_string(),
                             protocol_ref: protocol_ref.clone(),
                             expected: "protocol:rye/core/tool_streaming_v1".to_string(),
                         });
                     }
-                }
                 _ => {}
             }
         }

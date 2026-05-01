@@ -79,7 +79,7 @@ fn build_engine_against_bundle() -> Engine {
         .expect("live bundle kinds load");
 
     let (parser_tools, _dups) =
-        ParserRegistry::load_base(&[bundle_root.clone()], &trust_store, &kinds)
+        ParserRegistry::load_base(std::slice::from_ref(&bundle_root), &trust_store, &kinds)
             .expect("live bundle parser tools load");
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher =

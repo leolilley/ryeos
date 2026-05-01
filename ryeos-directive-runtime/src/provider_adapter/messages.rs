@@ -105,9 +105,9 @@ fn convert_with_schemas(
                 Some(content) => content.clone(),
                 None => Value::Null,
             };
-            if content_wrap.is_some() {
-                let wrapped = wrap_content(nested_content, content_key, content_wrap.unwrap());
-                obj[content_wrap.unwrap()] = wrapped;
+            if let Some(wrap_key) = content_wrap {
+                let wrapped = wrap_content(nested_content, content_key, wrap_key);
+                obj[wrap_key] = wrapped;
             } else {
                 obj[content_key] = nested_content;
             }

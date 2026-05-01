@@ -108,7 +108,7 @@ pub fn load_verbs(project_root: &Path) -> Result<VerbTable, crate::error::CliErr
 
     // Build sorted table
     let mut sorted: Vec<_> = by_tokens.into_values().collect();
-    sorted.sort_by(|a, b| b.verb_tokens.len().cmp(&a.verb_tokens.len()));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.verb_tokens.len()));
 
     Ok(VerbTable { sorted })
 }

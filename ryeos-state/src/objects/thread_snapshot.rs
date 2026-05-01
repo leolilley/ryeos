@@ -670,7 +670,7 @@ mod tests {
             ThreadStatus::TimedOut,
             ThreadStatus::Continued,
         ] {
-            let json = serde_json::to_value(&status).unwrap();
+            let json = serde_json::to_value(status).unwrap();
             let back: ThreadStatus = serde_json::from_value(json).unwrap();
             assert_eq!(status, back);
         }

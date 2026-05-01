@@ -43,6 +43,7 @@ impl GcLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("failed to open GC lock file: {}", lock_path.display()))?;
 

@@ -18,7 +18,7 @@
 //! checkpoint and a daemon-side reader that loads the latest.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -95,7 +95,7 @@ fn build_engine_against_bundle() -> Engine {
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("kinds load");
 
     let (parser_tools, _dups) =
-        ParserRegistry::load_base(&[bundle_root.clone()], &trust_store, &kinds)
+        ParserRegistry::load_base(std::slice::from_ref(&bundle_root), &trust_store, &kinds)
             .expect("parser tools load");
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher =
@@ -109,14 +109,14 @@ fn build_engine_against_bundle() -> Engine {
         .with_composers(composers)
 }
 
-fn plan_ctx(project_dir: &PathBuf) -> PlanContext {
+fn plan_ctx(project_dir: &Path) -> PlanContext {
     PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
         }),
         project_context: ProjectContext::LocalPath {
-            path: project_dir.clone(),
+            path: project_dir.to_path_buf(),
         },
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
@@ -125,7 +125,7 @@ fn plan_ctx(project_dir: &PathBuf) -> PlanContext {
     }
 }
 
-fn build_subprocess_spec(project_dir: &PathBuf) -> SubprocessSpec {
+fn build_subprocess_spec(project_dir: &Path) -> SubprocessSpec {
     let engine = build_engine_against_bundle();
     let ctx = plan_ctx(project_dir);
 

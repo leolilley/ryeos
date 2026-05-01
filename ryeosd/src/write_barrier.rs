@@ -47,6 +47,12 @@ pub struct WriteBarrier {
     inner: std::sync::Arc<WriteBarrierInner>,
 }
 
+impl Default for WriteBarrier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WriteBarrier {
     pub fn new() -> Self {
         Self {

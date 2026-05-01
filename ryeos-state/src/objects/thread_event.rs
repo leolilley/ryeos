@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn durability_serde_roundtrip() {
         for d in [EventDurability::Durable, EventDurability::Journal, EventDurability::Ephemeral] {
-            let json = serde_json::to_value(&d).unwrap();
+            let json = serde_json::to_value(d).unwrap();
             let back: EventDurability = serde_json::from_value(json).unwrap();
             assert_eq!(d, back);
         }

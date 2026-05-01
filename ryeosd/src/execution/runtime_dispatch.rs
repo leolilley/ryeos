@@ -6,6 +6,7 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct DispatchActionParams {
     callback_token: String,
     thread_id: String,
@@ -15,6 +16,7 @@ struct DispatchActionParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct ActionPayload {
     item_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

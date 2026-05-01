@@ -192,7 +192,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             user_prompt
         };
 
-        let prompt = if inputs.is_object() && !inputs.as_object().map_or(true, |o| o.is_empty()) {
+        let prompt = if inputs.is_object() && !inputs.as_object().is_none_or(|o| o.is_empty()) {
             format!(
                 "{}\n\nInputs:\n{}",
                 interpolated_prompt,

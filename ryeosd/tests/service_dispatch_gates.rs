@@ -46,11 +46,11 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let workspace = workspace_root();
     let kinds_dir = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
     let kinds =
-        KindRegistry::load_base(&[kinds_dir.clone()], &trust_store).expect("load kind registry");
+        KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store).expect("load kind registry");
 
     let bundle_root = workspace.join("ryeos-bundles/core");
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &[bundle_root.clone()],
+        std::slice::from_ref(&bundle_root),
         &trust_store,
         &kinds,
     )
@@ -99,7 +99,7 @@ fn gate_all_services_resolve() {
 
     let mut missing = Vec::new();
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(*svc_ref).unwrap_or_else(|e| {
+        let canonical = CanonicalRef::parse(svc_ref).unwrap_or_else(|e| {
             panic!("descriptor table contains unparseable ref `{svc_ref}`: {e}")
         });
         if engine.resolve(&ctx, &canonical).is_err() {
@@ -122,7 +122,7 @@ fn gate_all_services_verify() {
 
     let mut failed = Vec::new();
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(*svc_ref).unwrap();
+        let canonical = CanonicalRef::parse(svc_ref).unwrap();
         let resolved = engine.resolve(&ctx, &canonical).unwrap_or_else(|e| {
             panic!("service `{svc_ref}` should resolve (gate_all_services_resolve covers this): {e}")
         });

@@ -168,7 +168,7 @@ impl ThreadLifecycleService {
         Self {
             state_store,
             kind_profiles,
-            _events: _events,
+            _events,
             current_site_id: format!("site:{hostname}"),
         }
     }
@@ -217,7 +217,7 @@ impl ThreadLifecycleService {
 
         let _persisted = self.state_store.create_thread(&thread_record)?;
 
-        self.get_thread(&thread_id)?
+        self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
     }
 

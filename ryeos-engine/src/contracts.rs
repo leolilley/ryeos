@@ -232,7 +232,7 @@ fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
         FieldType::Single(p) => vec![*p],
         FieldType::Union(ps) => ps.clone(),
     };
-    if consumer_set.iter().any(|p| *p == PrimType::Any) {
+    if consumer_set.contains(&PrimType::Any) {
         return true;
     }
     // Every producer possibility (including `Any`) must be a member

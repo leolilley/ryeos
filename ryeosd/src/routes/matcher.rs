@@ -48,7 +48,7 @@ impl PathMatcher {
                 let shared_methods: Vec<&Method> = entries[i].route.methods.iter()
                     .filter(|m| entries[j].route.methods.contains(m))
                     .collect();
-                for method in shared_methods {
+                if let Some(method) = shared_methods.into_iter().next() {
                     return Err(crate::dispatch_error::RouteConfigError::PathCollision {
                         id_a: entries[i].route.id.clone(),
                         id_b: entries[j].route.id.clone(),

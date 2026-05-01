@@ -310,7 +310,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             );
         }
         for (i, actual_col) in index_info_rows.iter().enumerate() {
-            if actual_col != &idx.columns[i] {
+            if actual_col != idx.columns[i] {
                 bail!(
                     "index '{}' on table '{}': column[{}] is '{}' but expected '{}'; \
                      this file ({}) was not created by this daemon. \

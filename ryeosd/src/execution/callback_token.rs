@@ -23,6 +23,12 @@ pub struct CallbackCapabilityStore {
     capabilities: Mutex<HashMap<String, CallbackCapability>>,
 }
 
+impl Default for CallbackCapabilityStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CallbackCapabilityStore {
     pub fn new() -> Self {
         Self {

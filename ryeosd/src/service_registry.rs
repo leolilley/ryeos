@@ -65,6 +65,12 @@ pub struct ServiceRegistry {
     handlers: HashMap<String, HandlerFn>,
 }
 
+impl Default for ServiceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServiceRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {

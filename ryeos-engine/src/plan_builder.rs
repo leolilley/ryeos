@@ -8,7 +8,7 @@
 //! the subprocess.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -54,7 +54,7 @@ struct ChainTerminal {
 /// of the *previous* intermediate (or `root_kind` for the first hop).
 fn resolve_executor_chain(
     starting_executor_id: &str,
-    root_source_path: &PathBuf,
+    root_source_path: &Path,
     root_kind: &str,
     kinds: &KindRegistry,
     parsers: &ParserDispatcher,
@@ -201,7 +201,7 @@ fn resolve_executor_chain(
     }
 
     Ok(ChainTerminal {
-        root_source_path: root_source_path.clone(),
+        root_source_path: root_source_path.to_path_buf(),
         chain: visited,
         verified_chain,
         chain_content_hashes,
@@ -419,7 +419,7 @@ pub fn build_plan(
         &registry,
         parameters,
         &plan_env,
-        project_root.as_ref(),
+        project_root.as_deref(),
         parsers,
         kinds,
         trust_store,
@@ -1301,7 +1301,7 @@ config:
             .join("python");
         fs::create_dir_all(&runtime_dir).unwrap();
 
-        let runtime_content = format!(r#"__executor_id__: "@subprocess"
+        let runtime_content = r#"__executor_id__: "@subprocess"
 category: rye/core/runtimes/python
 env_config:
   interpreter:
@@ -1313,14 +1313,14 @@ env_config:
   env:
     PYTHONUNBUFFERED: "1"
 config:
-  command: "{{interpreter}}"
+  command: "{interpreter}"
   args:
-    - "{{tool_path}}"
+    - "{tool_path}"
     - "--project-path"
-    - "{{project_path}}"
-  input_data: "{{params_json}}"
+    - "{project_path}"
+  input_data: "{params_json}"
   timeout_secs: 120
-"#);
+"#.to_string();
         let runtime_path = runtime_dir.join("script.yaml");
         fs::write(&runtime_path, &runtime_content).unwrap();
 
@@ -1335,7 +1335,7 @@ config:
         let terminal_content = "\
 __executor_id__: null\n\
 category: rye/core/subprocess\n";
-        fs::write(terminal_dir.join("execute.yaml"), &terminal_content).unwrap();
+        fs::write(terminal_dir.join("execute.yaml"), terminal_content).unwrap();
 
         // 4. Write root tool: my_tool.py
         let tool_path = write_chain_tool(

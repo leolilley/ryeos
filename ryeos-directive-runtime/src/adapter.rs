@@ -27,8 +27,8 @@ pub fn parse_tool_arguments(args_str: &str) -> Result<Value, String> {
 
 fn fix_json_string(s: &str) -> String {
     let s = s.replace("\\\"", "\"");
-    let s = s.replace("\\n", "\n");
-    s
+    
+    s.replace("\\n", "\n")
 }
 
 #[cfg(test)]

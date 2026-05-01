@@ -103,20 +103,20 @@ impl TrustStore {
                 continue;
             }
             if let Some(val) = trimmed.strip_prefix("fingerprint") {
-                let val = val.trim_start_matches(|c: char| c == '=' || c == ' ')
+                let val = val.trim_start_matches(['=', ' '])
                     .trim()
                     .trim_matches('"');
                 fingerprint = Some(val.to_string());
             }
             if let Some(val) = trimmed.strip_prefix("owner") {
-                let val = val.trim_start_matches(|c: char| c == '=' || c == ' ')
+                let val = val.trim_start_matches(['=', ' '])
                     .trim()
                     .trim_matches('"');
                 owner = val.to_string();
             }
             if let Some(val) = trimmed.strip_prefix("pem") {
                 let val = val
-                    .trim_start_matches(|c: char| c == '=' || c == ' ')
+                    .trim_start_matches(['=', ' '])
                     .trim()
                     .trim_matches('"');
                 if let Some(b64) = val.strip_prefix("ed25519:") {
@@ -505,7 +505,7 @@ mod tests {
 
     fn create_file(dir: &Path, relative: &str, content: &str) -> PathBuf {
         let p = dir.join(relative);
-        p.parent().map(|d| fs::create_dir_all(d).unwrap());
+        if let Some(d) = p.parent() { fs::create_dir_all(d).unwrap() }
         fs::write(&p, content).unwrap();
         p
     }

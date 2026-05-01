@@ -147,7 +147,7 @@ fn trim_to_token_budget(mut messages: Vec<ProviderMessage>, max_tokens: u64) -> 
         return messages;
     }
 
-    let mut total: u64 = messages.iter().map(|m| estimate_tokens(m)).sum();
+    let mut total: u64 = messages.iter().map(estimate_tokens).sum();
     while total > max_tokens && messages.len() > 1 {
         let removed = messages.remove(1);
         total -= estimate_tokens_from_value(&removed.content);

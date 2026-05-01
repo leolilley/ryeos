@@ -352,7 +352,7 @@ pub async fn build_and_launch(
     let thread_id = &thread.thread_id;
 
     // 2. Compute limits (root execution: depth = 0)
-    let limits_config = load_limits_config(&project_path.to_path_buf());
+    let limits_config = load_limits_config(project_path);
     let hard_limits = compute_effective_limits(
         None,
         &limits_config.defaults,
@@ -568,7 +568,7 @@ pub async fn build_and_launch(
     };
     let identity = &state.identity;
     super::thread_meta::write_thread_meta(
-        &project_path.to_path_buf(), thread_id, &meta, identity,
+        project_path, thread_id, &meta, identity,
     )?;
 
     // 9. Spawn runtime (env vars + stdin envelope)
@@ -645,7 +645,7 @@ pub async fn build_and_launch(
                 ..meta
             };
             let _ = super::thread_meta::write_thread_meta(
-                &project_path.to_path_buf(), thread_id, &failed_meta, identity,
+                project_path, thread_id, &failed_meta, identity,
             );
             return Err(BuildAndLaunchError::Internal(err));
         }

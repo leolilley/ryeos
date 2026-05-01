@@ -85,7 +85,7 @@ pub fn apply_operator(actual: Option<&Value>, op: &str, expected: &Value) -> any
 }
 
 pub fn matches(doc: &Value, condition: &Value) -> anyhow::Result<bool> {
-    if condition.is_null() || condition.as_object().map_or(false, |o| o.is_empty()) {
+    if condition.is_null() || condition.as_object().is_some_and(|o| o.is_empty()) {
         return Ok(true);
     }
 

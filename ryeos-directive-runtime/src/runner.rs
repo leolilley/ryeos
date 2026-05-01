@@ -365,11 +365,11 @@ impl Runner {
                             let has_tool_calls = msg
                                 .tool_calls
                                 .as_ref()
-                                .map_or(false, |tc| !tc.is_empty());
+                                .is_some_and(|tc| !tc.is_empty());
                             let has_content = msg
                                 .content
                                 .as_ref()
-                                .map_or(false, |c| !c.is_null() && c.as_str().map_or(true, |s| !s.is_empty()));
+                                .is_some_and(|c| !c.is_null() && c.as_str().is_none_or(|s| !s.is_empty()));
 
                             if has_tool_calls {
                                 if let Some(ref tool_calls) = msg.tool_calls {

@@ -146,14 +146,14 @@ impl SharedFileWriter {
 impl std::io::Write for &SharedFileWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut file = self.0.lock().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}"))
+            std::io::Error::other(format!("lock poisoned: {e}"))
         })?;
         file.write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         let mut file = self.0.lock().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}"))
+            std::io::Error::other(format!("lock poisoned: {e}"))
         })?;
         file.flush()
     }

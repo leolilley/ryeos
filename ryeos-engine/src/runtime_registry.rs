@@ -189,7 +189,7 @@ impl RuntimeRegistry {
                 TerminatorDecl::InProcess { .. } => String::new(),
             };
             if found_protocol != EXPECTED_PROTOCOL {
-                for _rt in list {
+                if let Some(_rt) = list.iter().next() {
                     return Err(EngineError::RuntimeProtocolMismatch {
                         runtime: list[0].canonical_ref.to_string(),
                         kind: kind.clone(),

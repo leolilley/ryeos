@@ -40,12 +40,12 @@ pub fn fire_hook(
     let mut results = Vec::new();
     for hook in hooks {
         let hook_event = hook.get("event").and_then(|e| e.as_str());
-        let matches_event = hook_event.map_or(false, |e| e == event || e == "*");
+        let matches_event = hook_event.is_some_and(|e| e == event || e == "*");
 
         let hook_events = hook.get("events").and_then(|e| e.as_array());
-        let matches_any = hook_events.map_or(false, |events| {
+        let matches_any = hook_events.is_some_and(|events| {
             events.iter().any(|e| {
-                e.as_str().map_or(false, |s| s == event || s == "*")
+                e.as_str().is_some_and(|s| s == event || s == "*")
             })
         });
 

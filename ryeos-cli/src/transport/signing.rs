@@ -17,7 +17,7 @@ impl Signer {
     ///   1. RYEOS_CLI_KEY_PATH env var
     ///   2. <state_dir>/.ai/node/identity/private_key.pem
     ///      (matches `Config::node_signing_key_path` defaults in
-    ///       `ryeosd/src/config.rs` and `ryeosd/src/bootstrap.rs`)
+    ///      `ryeosd/src/config.rs` and `ryeosd/src/bootstrap.rs`)
     ///   3. Fail
     pub fn resolve(state_dir: &Path) -> Result<Self, CliTransportError> {
         if let Ok(p) = std::env::var("RYEOS_CLI_KEY_PATH") {

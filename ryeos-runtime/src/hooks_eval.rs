@@ -43,11 +43,10 @@ pub async fn run_hooks(
             continue;
         }
 
-        if control_result.is_none() {
-            if !result.is_null() && result != serde_json::json!({"success": true}) {
+        if control_result.is_none()
+            && !result.is_null() && result != serde_json::json!({"success": true}) {
                 control_result = Some(result);
             }
-        }
     }
 
     control_result

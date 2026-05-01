@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -49,7 +48,7 @@ pub async fn custom_route_dispatcher(
 
     let (parts, body) = request.into_parts();
 
-    let body_bytes = match limiter.read_bounded_body(Body::from(body)).await {
+    let body_bytes = match limiter.read_bounded_body(body).await {
         Ok(b) => b,
         Err(resp) => return resp,
     };

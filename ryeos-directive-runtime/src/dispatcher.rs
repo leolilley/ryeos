@@ -112,7 +112,7 @@ impl Dispatcher {
     fn handle_directive_return(&self, args: &Value, call_id: Option<String>) -> Result<ToolDispatchResult, String> {
         if let Some(ref outputs) = self.outputs {
             for output in outputs {
-                if !args.get(&output.name).map_or(false, |v| !v.is_null()) {
+                if args.get(&output.name).is_none_or(|v| v.is_null()) {
                     return Err(format!(
                         "directive_return: missing required output '{}'",
                         output.name

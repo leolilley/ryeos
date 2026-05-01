@@ -28,11 +28,11 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let workspace = workspace_root();
     let kinds_dir = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
     let kinds =
-        KindRegistry::load_base(&[kinds_dir.clone()], &trust_store).expect("load kind registry");
+        KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store).expect("load kind registry");
 
     let bundle_root = workspace.join("ryeos-bundles/core");
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &[bundle_root.clone()],
+        std::slice::from_ref(&bundle_root),
         &trust_store,
         &kinds,
     )
@@ -113,8 +113,8 @@ fn tool_metadata_extracts_required_caps() {
 /// enforce_caps against caller scopes.
 #[test]
 fn cap_enforcement_denies_when_caller_lacks_required_cap() {
-    let required_caps = vec!["test.cap".to_string()];
-    let caller_scopes = vec!["execute".to_string()];
+    let required_caps = ["test.cap".to_string()];
+    let caller_scopes = ["execute".to_string()];
 
     // Missing cap → the required cap is not in caller scopes
     let missing: Vec<String> = required_caps
@@ -125,7 +125,7 @@ fn cap_enforcement_denies_when_caller_lacks_required_cap() {
     assert!(!missing.is_empty(), "test.cap must be missing from caller scopes");
 
     // When caller has the required cap → no missing caps
-    let matching_scopes = vec!["execute".to_string(), "test.cap".to_string()];
+    let matching_scopes = ["execute".to_string(), "test.cap".to_string()];
     let missing_matching: Vec<String> = required_caps
         .iter()
         .filter(|cap| !matching_scopes.contains(cap))
@@ -141,7 +141,7 @@ fn cap_enforcement_denies_when_caller_lacks_required_cap() {
     // the missing-caps vec is never computed in production. Here we
     // verify the underlying logic would find no missing caps if we
     // pretend the wildcard check is not there:
-    let wildcard_scopes = vec!["*".to_string()];
+    let wildcard_scopes = ["*".to_string()];
     assert!(
         wildcard_scopes.iter().any(|s| s == "*"),
         "wildcard scope must be present"

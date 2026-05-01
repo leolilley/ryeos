@@ -401,7 +401,7 @@ mod tests {
         let verifier_registry = AuthVerifierRegistry::with_builtins();
         let mode_registry = ResponseModeRegistry::with_builtins();
         let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let t1 = build_route_table(&[raw.clone()], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
+        let t1 = build_route_table(std::slice::from_ref(&raw), &verifier_registry, &mode_registry, &streaming_sources).unwrap();
         let t2 = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
         assert_eq!(t1.fingerprint, t2.fingerprint);
     }

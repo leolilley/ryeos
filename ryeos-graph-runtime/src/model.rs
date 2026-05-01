@@ -31,16 +31,13 @@ fn default_max_steps() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum ErrorMode {
+    #[default]
     Fail,
     Continue,
 }
 
-impl Default for ErrorMode {
-    fn default() -> Self {
-        ErrorMode::Fail
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,18 +84,15 @@ impl GraphNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum NodeType {
+    #[default]
     Action,
     Return,
     Foreach,
     Gate,
 }
 
-impl Default for NodeType {
-    fn default() -> Self {
-        NodeType::Action
-    }
-}
 
 // NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]

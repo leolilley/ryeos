@@ -267,7 +267,7 @@ impl Walker {
         let inputs = params.get("inputs").cloned().unwrap_or(json!({}));
         let mut state = json!({});
 
-        if let Some(ref defaults) = params.get("inject_state") {
+        if let Some(defaults) = params.get("inject_state") {
             merge_into(&mut state, defaults);
         }
 
@@ -352,7 +352,7 @@ impl Walker {
             let outcome = self.run_node_body(
                 &current,
                 node,
-                &cfg,
+                cfg,
                 step,
                 &state,
                 &inputs,
@@ -423,7 +423,7 @@ impl Walker {
         match node.node_type {
             NodeType::Return => {
                 StepOutcome::Terminal {
-                    status: if /* checked below */ true { "completed" } else { "completed" },
+                    status: "completed",
                     error: None,
                 }
             }
@@ -464,15 +464,15 @@ impl Walker {
 
                 let results = if parallel {
                     foreach::run_foreach_parallel(
-                        &items, &var, &node, &state, &inputs,
+                        &items, &var, node, state, inputs,
                         &self.thread_id, &self.project_path,
                         self.client.clone(), Arc::new(exec_ctx.clone()),
                     ).await
                 } else {
                     foreach::run_foreach_sequential(
-                        &items, &var, &node, &mut state.clone(), &inputs,
+                        &items, &var, node, &mut state.clone(), inputs,
                         &self.thread_id, &self.project_path,
-                        &self.client, Some(&exec_ctx),
+                        &self.client, Some(exec_ctx),
                     ).await
                 };
 
@@ -583,7 +583,7 @@ impl Walker {
                     &stripped_action,
                     &self.thread_id,
                     &self.project_path,
-                    Some(&exec_ctx),
+                    Some(exec_ctx),
                 ).await;
                 if let Ok(ref val) = res {
                     let is_error = val.get("status")
@@ -602,7 +602,7 @@ impl Walker {
                 &stripped_action,
                 &self.thread_id,
                 &self.project_path,
-                Some(&exec_ctx),
+                Some(exec_ctx),
             ).await.ok()
         };
 
@@ -772,7 +772,7 @@ impl Walker {
                         let next_step = step + 1;
                         self.write_checkpoint_or_error(
                             graph_run_id,
-                            &next_node,
+                            next_node,
                             next_step,
                             state,
                             guard,
@@ -810,7 +810,7 @@ impl Walker {
                 self.emit_tool_call_result(graph_run_id, step, current, item_id, "ok").await;
 
                 // State mutation
-                if let Some(ref node) = self.graph.config.nodes.get(current) {
+                if let Some(node) = self.graph.config.nodes.get(current) {
                     if let Some(ref assign) = node.assign {
                         let assign_ctx = WalkContext {
                             state: state.clone(),
@@ -848,7 +848,7 @@ impl Walker {
                         let next_step = step + 1;
                         self.write_checkpoint_or_error(
                             graph_run_id,
-                            &next_node,
+                            next_node,
                             next_step,
                             state,
                             guard,

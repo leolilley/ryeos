@@ -485,7 +485,7 @@ metadata:
         fs::create_dir_all(&kinds_dir).unwrap();
         write_config_kind_schema(&kinds_dir);
 
-        let kinds = KindRegistry::load_base(&[kinds_dir.clone()], &trust).unwrap();
+        let kinds = KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust).unwrap();
         assert!(kinds.contains("config"), "config kind must be registered");
 
         let parsers = dispatcher_with_canonical_bundle_descriptors();

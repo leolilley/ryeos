@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn deref_works() {
         let p = AbsolutePathBuf::try_from_str("/a/b").unwrap();
-        let _: &Path = &*p;
+        let _: &Path = &p;
         assert!(p.is_absolute());
     }
 

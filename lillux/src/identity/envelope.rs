@@ -553,12 +553,14 @@ pub fn inspect_envelope(raw: &serde_json::Value) -> InspectResult {
         well_formed = false;
     }
 
-    if enc_bytes.is_some() && enc_bytes != Some(32) {
-        warnings.push(format!(
-            "enc decoded to {} bytes, expected 32",
-            enc_bytes.unwrap()
-        ));
-        well_formed = false;
+    if let Some(bytes) = enc_bytes {
+        if bytes != 32 {
+            warnings.push(format!(
+                "enc decoded to {} bytes, expected 32",
+                bytes
+            ));
+            well_formed = false;
+        }
     }
 
     // Check top-level vs AAD recipient mismatch

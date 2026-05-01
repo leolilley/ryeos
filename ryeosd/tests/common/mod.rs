@@ -192,7 +192,7 @@ impl DaemonHarness {
                             .join(format!("daemon-{port}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
-                    .unwrap_or_else(|| Stdio::piped())
+                    .unwrap_or_else(Stdio::piped)
             )
             .kill_on_drop(true);
 
@@ -315,7 +315,7 @@ impl DaemonHarness {
                             .join(format!("daemon-{port}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
-                    .unwrap_or_else(|| Stdio::piped())
+                    .unwrap_or_else(Stdio::piped)
             )
             .kill_on_drop(true);
 

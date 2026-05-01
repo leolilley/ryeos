@@ -14,7 +14,7 @@
 //!       - `tool_siblings`: chain[0].source_path.parent(), non-recursive.
 //!       - `tool_dir`     : chain[0].source_path.parent(), respects
 //!         `recursive`. **Default scope.**
-//!     Prune `exclude_dirs`, filter by `extensions`, verify each file.
+//!         Prune `exclude_dirs`, filter by `extensions`, verify each file.
 //!   * Per-file verification: read content, parse signature header
 //!     using the kind whose `formats` declares this extension, then
 //!     check `content_hash`. Mismatch → `EngineError::ContentHashMismatch`.

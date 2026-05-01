@@ -15,7 +15,7 @@
 //! before the shorter `root→B→C` branch can recurse into C's own edges).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
@@ -68,7 +68,7 @@ pub(crate) fn run(
 #[allow(clippy::too_many_arguments)]
 fn walk(
     ctx: &mut ResolutionContext<'_>,
-    from_path: &PathBuf,
+    from_path: &Path,
     from_ref: &CanonicalRef,
     requested_id: &str,
     parent_kind: &str,
@@ -94,7 +94,7 @@ fn walk(
 
     let edge = ResolutionEdge {
         from_ref: from_ref.to_string(),
-        from_source_path: from_path.clone(),
+        from_source_path: from_path.to_path_buf(),
         to_ref: ref_.to_string(),
         to_source_path: to_path.clone(),
         trust_class,

@@ -684,12 +684,12 @@ mod tests {
         let chunks = read_all_frames(&mut &buf[..]).unwrap();
         assert_eq!(chunks.len(), 7);
 
-        for i in 0..5 {
-            assert_eq!(chunks[i].seq, i as u64);
-            assert_eq!(chunks[i].kind, StreamingChunkKind::Stdout);
-            assert!(!chunks[i].terminal);
+        for (i, chunk) in chunks.iter().enumerate().take(5) {
+            assert_eq!(chunk.seq, i as u64);
+            assert_eq!(chunk.kind, StreamingChunkKind::Stdout);
+            assert!(!chunk.terminal);
             let decoded = base64::engine::general_purpose::STANDARD
-                .decode(chunks[i].data.as_ref().unwrap())
+                .decode(chunk.data.as_ref().unwrap())
                 .unwrap();
             assert_eq!(
                 String::from_utf8(decoded).unwrap(),

@@ -1174,7 +1174,7 @@ fn extract_pair_value<'a>(header_value: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-fn extract_body_json_string<'a>(body: &'a [u8], path: &str) -> Result<String, String> {
+fn extract_body_json_string(body: &[u8], path: &str) -> Result<String, String> {
     let v: Value = serde_json::from_slice(body)
         .map_err(|e| format!("body is not valid JSON: {e}"))?;
     let obj = v
@@ -1221,7 +1221,7 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 }
 
 fn check_timestamp_window(ts: u64, now: u64, tolerance: u64) -> Result<(), String> {
-    let drift = if now >= ts { now - ts } else { ts - now };
+    let drift = now.abs_diff(ts);
     if drift > tolerance {
         return Err(format!(
             "timestamp drift {drift}s exceeds tolerance {tolerance}s"

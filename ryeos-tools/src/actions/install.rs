@@ -112,7 +112,7 @@ pub fn preflight_verify_bundle(
     //    rejects duplicate handler refs across roots.
     let mut parser_search_roots: Vec<PathBuf> = Vec::new();
     let mut seen_roots: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut push_unique = |path: PathBuf,
+    let push_unique = |path: PathBuf,
                            roots: &mut Vec<PathBuf>,
                            seen: &mut std::collections::HashSet<PathBuf>| {
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());

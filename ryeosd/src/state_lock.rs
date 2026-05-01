@@ -49,7 +49,7 @@ impl StateLock {
         #[cfg(unix)]
         {
             use std::io::Write;
-            let _ = write!(&file, "{}\n", std::process::id());
+            let _ = writeln!(&file, "{}", std::process::id());
         }
 
         // Non-blocking exclusive lock

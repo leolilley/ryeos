@@ -284,7 +284,7 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
     let facets = state.state_store.get_facets(thread_id)?;
     let facets_map: std::collections::HashMap<&str, &str> =
         facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    Ok(serde_json::to_value(facets_map).context("failed to encode facets")?)
+    serde_json::to_value(facets_map).context("failed to encode facets")
 }
 
 fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {

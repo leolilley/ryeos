@@ -158,6 +158,11 @@ impl WebhookDedupeStore {
         };
         g.seen.len()
     }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 fn purge_expired(g: &mut Inner, now_unix: u64, ttl_secs: u64) {

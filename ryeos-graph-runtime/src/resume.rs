@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(rs.step_count, 1);
         assert_eq!(rs.graph_run_id, "gr-target");
         // V1 limitation: state is empty on replay-resume.
-        assert!(rs.state.as_object().map_or(false, |m| m.is_empty()));
+        assert!(rs.state.as_object().is_some_and(|m| m.is_empty()));
     }
 
     /// D12: replay picks the latest graph_step_started for the thread,

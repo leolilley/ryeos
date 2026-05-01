@@ -143,8 +143,8 @@ fn parse_event_typed(
                 }
             }
         }
-        "content_block_stop" => {
-            if tool_call_state.contains_key("current_tool_id") {
+        "content_block_stop"
+            if tool_call_state.contains_key("current_tool_id") => {
                 let id = tool_call_state
                     .get("current_tool_id")
                     .cloned()
@@ -162,7 +162,6 @@ fn parse_event_typed(
                 tool_call_state.remove("current_tool_name");
                 tool_call_state.remove("current_tool_args");
             }
-        }
         "message_stop" => {
             events.push(StreamEvent::Done);
         }

@@ -43,11 +43,11 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let workspace = workspace_root();
     let kinds_dir = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
     let kinds =
-        KindRegistry::load_base(&[kinds_dir.clone()], &trust_store).expect("load kind registry");
+        KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store).expect("load kind registry");
 
     let bundle_root = workspace.join("ryeos-bundles/core");
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &[bundle_root.clone()],
+        std::slice::from_ref(&bundle_root),
         &trust_store,
         &kinds,
     )
@@ -113,7 +113,7 @@ fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
     let services = service_refs();
 
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(*svc_ref).unwrap_or_else(|e| {
+        let canonical = CanonicalRef::parse(svc_ref).unwrap_or_else(|e| {
             panic!("unparseable ref `{svc_ref}`: {e}")
         });
         let resolved = engine
@@ -154,7 +154,7 @@ fn gate_02_all_service_refs_resolve_and_verify() {
 
     let mut failed = Vec::new();
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(*svc_ref).unwrap();
+        let canonical = CanonicalRef::parse(svc_ref).unwrap();
         let resolved = engine.resolve(&ctx, &canonical).unwrap();
         if engine.verify(&ctx, resolved).is_err() {
             failed.push(*svc_ref);
@@ -340,7 +340,7 @@ fn gate_10_every_descriptor_resolves() {
 
     let mut missing = Vec::new();
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(*svc_ref).unwrap();
+        let canonical = CanonicalRef::parse(svc_ref).unwrap();
         if engine.resolve(&ctx, &canonical).is_err() {
             missing.push(*svc_ref);
         }
@@ -369,7 +369,7 @@ fn gate_11_every_service_has_required_caps_field() {
     let mut empty_when_required = Vec::new();
 
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(*svc_ref).unwrap();
+        let canonical = CanonicalRef::parse(svc_ref).unwrap();
         let resolved = engine.resolve(&ctx, &canonical).unwrap();
         let verified = engine.verify(&ctx, resolved).unwrap();
         let extra = &verified.resolved.metadata.extra;
@@ -584,7 +584,7 @@ fn gate_17_trust_store_loads() {
         "trust store should contain at least one trusted signer"
     );
     assert!(
-        trust_store.len() >= 1,
+        !trust_store.is_empty(),
         "trust store should have at least 1 entry"
     );
     assert!(

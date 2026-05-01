@@ -83,6 +83,7 @@ impl ChainLock {
 
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&lock_path)
             .context("failed to open lock file")?;

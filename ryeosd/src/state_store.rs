@@ -365,7 +365,7 @@ impl StateStore {
             }),
         };
 
-        let te = convert_events(&[create_event.clone()], &thread.chain_root_id, &thread.thread_id);
+        let te = convert_events(std::slice::from_ref(&create_event), &thread.chain_root_id, &thread.thread_id);
         let result = g.state_db.append_events(
             &thread.chain_root_id,
             &thread.thread_id,
@@ -443,7 +443,7 @@ impl StateStore {
             payload: json!({}),
         };
 
-        let te = convert_events(&[event.clone()], &thread_row.chain_root_id, thread_id);
+        let te = convert_events(std::slice::from_ref(&event), &thread_row.chain_root_id, thread_id);
         let result = g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
@@ -676,7 +676,7 @@ impl StateStore {
             }),
         };
 
-        let ste = convert_events(&[source_event.clone()], chain_root_id, source_thread_id);
+        let ste = convert_events(std::slice::from_ref(&source_event), chain_root_id, source_thread_id);
         let source_result = g.state_db.append_events(
             chain_root_id,
             source_thread_id,
@@ -695,7 +695,7 @@ impl StateStore {
             }),
         };
 
-        let sste = convert_events(&[successor_event.clone()], chain_root_id, &successor.thread_id);
+        let sste = convert_events(std::slice::from_ref(&successor_event), chain_root_id, &successor.thread_id);
         let successor_result = g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
@@ -826,7 +826,7 @@ impl StateStore {
             }),
         };
 
-        let te = convert_events(&[event.clone()], &thread_row.chain_root_id, thread_id);
+        let te = convert_events(std::slice::from_ref(&event), &thread_row.chain_root_id, thread_id);
         let result = g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
@@ -989,8 +989,7 @@ impl StateStore {
 
     pub fn active_thread_count(&self) -> Result<i64> {
         let g = self.lock()?;
-        queries::active_thread_count(g.state_db.projection()).map_err(Into::into)
-    }
+        queries::active_thread_count(g.state_db.projection())}
 
     #[tracing::instrument(
         name = "state:attach_thread_process",
@@ -1059,7 +1058,7 @@ impl StateStore {
     ) -> Result<Vec<PersistedEventRecord>> {
         let g = self.lock()?;
         let event_rows = queries::replay_events(g.state_db.projection(), chain_root_id, thread_id, after_seq, limit)?;
-        Ok(event_rows
+        event_rows
             .into_iter()
             .map(|row| {
                 let payload: Value = serde_json::from_slice(&row.payload)
@@ -1081,7 +1080,7 @@ impl StateStore {
                     payload,
                 })
             })
-            .collect::<Result<Vec<_>>>()?)
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn submit_command(

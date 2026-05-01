@@ -7,12 +7,12 @@
 //! using the user signing key.
 //!
 //! Two input modes:
-//!   * argv (clap) — direct CLI invocation:
-//!       `rye-sign <ITEM_REF> [--project PATH] [--source project|user]`
-//!   * stdin JSON — used by `tool:rye/core/sign` which passes
-//!       `{params_json}` on stdin: an object with keys
-//!       `item_ref`, optional `project_path`, optional `source`.
-//!     Selected by `--stdin-json` so argv parsing is never ambiguous.
+//!  * argv (clap) — direct CLI invocation:
+//!    `rye-sign <ITEM_REF> [--project PATH] [--source project|user]`
+//!  * stdin JSON — used by `tool:rye/core/sign` which passes
+//!    `{params_json}` on stdin: an object with keys
+//!    `item_ref`, optional `project_path`, optional `source`.
+//!    Selected by `--stdin-json` so argv parsing is never ambiguous.
 //!
 //! Distinct from the daemon's `service:node-sign` (node-key, no
 //! validator) — see `ryeosd/src/services/handlers/node_sign.rs`.

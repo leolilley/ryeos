@@ -260,7 +260,7 @@ pub fn active_thread_count(db: &ProjectionDb) -> anyhow::Result<i64> {
         .collect();
     let count: i64 = db
         .connection()
-        .query_row(&sql, params.as_slice(), |row| row.get(0))
+        .query_row(sql, params.as_slice(), |row| row.get(0))
         .context("query active_thread_count")?;
     Ok(count)
 }

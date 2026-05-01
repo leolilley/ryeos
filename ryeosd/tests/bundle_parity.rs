@@ -56,7 +56,7 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
         kinds_dir.display()
     );
 
-    let registry = KindRegistry::load_base(&[kinds_dir.clone()], &trust_store)
+    let registry = KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store)
         .unwrap_or_else(|e| {
             panic!(
                 "live bundle kind registry failed to load from {}: {e}",

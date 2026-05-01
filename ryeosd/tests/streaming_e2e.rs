@@ -57,7 +57,7 @@ async fn streaming_demo_dispatch_returns_frame_array() {
         let seq = frame
             .get("seq")
             .and_then(|v| v.as_u64())
-            .expect(&format!("frame {i} missing seq"));
+            .unwrap_or_else(|| panic!("frame {i} missing seq"));
         assert_eq!(
             seq, i as u64,
             "frame {i} has seq {seq}, expected {i}"

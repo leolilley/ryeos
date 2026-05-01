@@ -228,7 +228,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let post_trust = TrustStore::load_three_tier(
         None,
         Some(opts.user_root.as_path()),
-        &[opts.system_data_dir.clone()],
+        std::slice::from_ref(&opts.system_data_dir),
     )
     .context("load post-init trust store")?;
     if !post_trust.is_trusted(PLATFORM_AUTHOR_FP) {

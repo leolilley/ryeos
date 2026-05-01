@@ -541,13 +541,13 @@ pub async fn run_inline(
         Some(id) => state.threads.create_root_thread_with_id(id, &params.resolved),
         None => state.threads.create_root_thread(&params.resolved),
     }
-    .map_err(|e| { guard.cleanup(); e })?;
+    .inspect_err(|_e| { guard.cleanup(); })?;
     let running = state
         .threads
         .mark_running(&created.thread_id)
-        .map_err(|e| { guard.fail_thread("create_failed"); guard.cleanup(); e })?;
+        .inspect_err(|_e| { guard.fail_thread("create_failed"); guard.cleanup(); })?;
     guard.track_thread(&running.thread_id);
-    tracing::Span::current().record("thread_id", &running.thread_id.as_str());
+    tracing::Span::current().record("thread_id", running.thread_id.as_str());
 
     // Prepare CAS context — if this fails, finalize thread as failed
     let (effective_path, pre_manifest_hash, mut base_snapshot_hash) =
@@ -730,13 +730,13 @@ pub async fn run_detached(
         Some(id) => state.threads.create_root_thread_with_id(id, &params.resolved),
         None => state.threads.create_root_thread(&params.resolved),
     }
-    .map_err(|e| { guard.cleanup(); e })?;
+    .inspect_err(|_e| { guard.cleanup(); })?;
     let running = state
         .threads
         .mark_running(&created.thread_id)
-        .map_err(|e| { guard.fail_thread("create_failed"); guard.cleanup(); e })?;
+        .inspect_err(|_e| { guard.fail_thread("create_failed"); guard.cleanup(); })?;
     guard.track_thread(&running.thread_id);
-    tracing::Span::current().record("thread_id", &running.thread_id.as_str());
+    tracing::Span::current().record("thread_id", running.thread_id.as_str());
 
     // Prepare CAS context
     let (effective_path, pre_manifest_hash, base_snapshot_hash) =
@@ -864,7 +864,7 @@ async fn dispatch_detached_bg_task(
     let _cb_guard = defer_cb_token_revocation(&bg_state, &bg_thread_id, &bg_cb_token);
 
     if let Some(ref s) = prior_status_for_mark_running {
-        tracing::Span::current().record("prior_status", &s.as_str());
+        tracing::Span::current().record("prior_status", s.as_str());
     }
     let log_phase = if is_resume { "resume" } else { "detached" };
     let attach_outcome_code = if is_resume {

@@ -96,11 +96,10 @@ impl Transcript {
                 .map_err(|e| anyhow::anyhow!("daemon replay failed: {e}"))?;
             return result
                 .get("events")
-                .and_then(|e| e.as_array())
-                .map(|a| a.clone())
+                .and_then(|e| e.as_array()).cloned()
                 .map_or_else(
                     || Err(anyhow::anyhow!("malformed daemon response")),
-                    |v| Ok(v),
+                    Ok,
                 );
         }
 
@@ -311,7 +310,7 @@ fn flush_tool_calls(messages: &mut Vec<Value>, pending: &mut Vec<Value>) {
     if pending.is_empty() {
         return;
     }
-    let calls: Vec<Value> = pending.drain(..).collect();
+    let calls: Vec<Value> = std::mem::take(pending);
     if let Some(last) = messages.last_mut() {
         if last.get("role").and_then(|r| r.as_str()) == Some("assistant") {
             last.as_object_mut()
