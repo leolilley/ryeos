@@ -559,15 +559,6 @@ fn enforce_caps(
     }
 }
 
-/// **B1**: cap gate for runtime dispatch. Delegates to `enforce_caps`.
-fn enforce_runtime_caps(
-    item_ref: &str,
-    required_caps: &[String],
-    caller_scopes: &[String],
-) -> Result<(), DispatchError> {
-    enforce_caps(item_ref, required_caps, caller_scopes)
-}
-
 // ── Unified subprocess terminator ─────────────────────────────────────
 
 /// Unified subprocess dispatch. Handles both tool-style (opaque protocol,
@@ -730,6 +721,19 @@ async fn dispatch_managed_subprocess(
             ),
         }
     })?;
+
+    // Per-runtime required_caps enforcement. The VerifiedRuntime.yaml may
+    // declare additional caps beyond the role-keyed `runtime.execute`
+    // (already checked in dispatch_subprocess via enforce_runtime_target_caps).
+    // This is the item-level gate — without it, runtime YAMLs that declare
+    // required_caps are silently ignored in production.
+    if !verified_runtime.yaml.required_caps.is_empty() {
+        enforce_caps(
+            &verified_runtime.canonical_ref.to_string(),
+            &verified_runtime.yaml.required_caps,
+            &ctx.caller_scopes,
+        )?;
+    }
 
     let params = request.params.clone();
     let acting_principal = request.acting_principal;
@@ -1286,10 +1290,10 @@ metadata:
     /// in `runtime_e2e.rs` (which exercises the actual gate end-to-end),
     /// this fully covers B1.
     #[test]
-    fn enforce_runtime_caps_skipped_for_indirect_alias_chain() {
+    fn enforce_runtime_target_caps_skipped_for_indirect_alias_chain() {
         // If `dispatch_managed_subprocess` skips the call entirely (B1
         // gate), then a missing cap does NOT translate to an error.
-        // We model this by simply never calling `enforce_runtime_caps`
+        // We model this by simply never calling `enforce_caps`
         // and asserting the synthetic outcome is `Ok`.
         let required = vec!["runtime.execute".to_string()];
         let caller_scopes: Vec<String> = vec![]; // would normally fail
@@ -1297,7 +1301,7 @@ metadata:
         // SIMULATED indirect path — gate skips the call.
         let original_root_kind = "directive";
         let outcome: Result<(), DispatchError> = if original_root_kind == "runtime" {
-            enforce_runtime_caps("runtime:directive-runtime", &required, &caller_scopes)
+            enforce_caps("runtime:directive-runtime", &required, &caller_scopes)
         } else {
             Ok(())
         };
@@ -1310,7 +1314,7 @@ metadata:
         // SIMULATED direct path — gate fires.
         let original_root_kind = "runtime";
         let outcome: Result<(), DispatchError> = if original_root_kind == "runtime" {
-            enforce_runtime_caps("runtime:directive-runtime", &required, &caller_scopes)
+            enforce_caps("runtime:directive-runtime", &required, &caller_scopes)
         } else {
             Ok(())
         };
@@ -1322,24 +1326,24 @@ metadata:
     }
 
     #[test]
-    fn enforce_runtime_caps_allows_when_caller_has_required_cap() {
+    fn enforce_caps_allows_when_caller_has_required_cap() {
         let req = vec!["runtime.execute".to_string()];
         let caller = vec!["runtime.execute".to_string(), "execute".to_string()];
-        assert!(enforce_runtime_caps("runtime:directive-runtime", &req, &caller).is_ok());
+        assert!(enforce_caps("runtime:directive-runtime", &req, &caller).is_ok());
     }
 
     #[test]
-    fn enforce_runtime_caps_allows_wildcard_scope() {
+    fn enforce_caps_allows_wildcard_scope() {
         let req = vec!["runtime.execute".to_string()];
         let caller = vec!["*".to_string()];
-        assert!(enforce_runtime_caps("runtime:directive-runtime", &req, &caller).is_ok());
+        assert!(enforce_caps("runtime:directive-runtime", &req, &caller).is_ok());
     }
 
     #[test]
-    fn enforce_runtime_caps_denies_when_caller_lacks_required_cap() {
+    fn enforce_caps_denies_when_caller_lacks_required_cap() {
         let req = vec!["runtime.execute".to_string()];
         let caller = vec!["execute".to_string()];
-        let err = enforce_runtime_caps("runtime:directive-runtime", &req, &caller)
+        let err = enforce_caps("runtime:directive-runtime", &req, &caller)
             .expect_err("missing cap must error");
         // DispatchError::InsufficientCaps maps to 403 via http_status();
         // its Display also contains "insufficient capabilities".
@@ -1359,10 +1363,29 @@ metadata:
     }
 
     #[test]
-    fn enforce_runtime_caps_no_op_when_runtime_yaml_declares_no_required_caps() {
+    fn enforce_caps_no_op_when_runtime_yaml_declares_no_required_caps() {
         let req: Vec<String> = vec![];
         let caller = vec!["execute".to_string()];
-        assert!(enforce_runtime_caps("runtime:test", &req, &caller).is_ok());
+        assert!(enforce_caps("runtime:test", &req, &caller).is_ok());
+    }
+
+    /// Per-runtime required_caps test: a runtime that declares a custom
+    /// cap beyond `runtime.execute` must have that cap satisfied by the
+    /// caller's scopes. This is the enforcement that was missing before
+    /// this commit — `enforce_runtime_target_caps` only checked the
+    /// role-keyed `runtime.execute` cap, not the YAML's `required_caps`.
+    #[test]
+    fn enforce_caps_runtime_yaml_required_caps_enforced() {
+        // Runtime declares "custom.runtime.thing" but caller only has
+        // "runtime.execute". Must fail.
+        let required = vec!["custom.runtime.thing".to_string()];
+        let caller = vec!["runtime.execute".to_string()];
+        let err = enforce_caps("runtime:directive-runtime", &required, &caller)
+            .expect_err("missing custom cap must error");
+        assert!(
+            matches!(err, DispatchError::InsufficientCaps { .. }),
+            "must be InsufficientCaps, got: {err:?}"
+        );
     }
 
     // ── B2 unit test ────────────────────────────────────────────────────

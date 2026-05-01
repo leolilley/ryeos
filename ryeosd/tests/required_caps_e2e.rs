@@ -2,7 +2,7 @@
 //!
 //! Tests that `dispatch_subprocess` enforces `required_caps` from
 //! tool metadata before spawning the subprocess. Mirrors the existing
-//! `enforce_runtime_caps` test pattern.
+//! `enforce_caps` test pattern.
 
 mod common;
 

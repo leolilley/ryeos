@@ -419,7 +419,7 @@ inputs: {}
 // strip_binary_ref_prefix.
 //
 // The "direct must 403 without cap" half of the pair lives in
-// dispatch.rs's unit tests (`enforce_runtime_caps_*` — covers the
+// dispatch.rs's unit tests (`enforce_caps_*` — covers the
 // gate-fires-when-cap-missing contract) because the e2e harness has
 // no facility to install a Principal with limited scopes. When the
 // daemon gains an auth-on test harness (post-P2.x), this comment
