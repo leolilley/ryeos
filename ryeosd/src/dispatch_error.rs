@@ -105,6 +105,23 @@ pub enum DispatchError {
     /// could not be checked out from CAS.
     #[error("project source checkout failed: {0}")]
     ProjectSourceCheckoutFailed(String),
+    /// Caller lacks a required capability for the dispatch role.
+    /// Mapped to 403 by the HTTP layer with body `{ "required_cap": "..." }`.
+    #[error("missing required capability: {required}")]
+    MissingCap { required: String },
+    /// Protocol descriptor not found in the protocol registry.
+    #[error("protocol `{0}` not registered")]
+    ProtocolNotRegistered(String),
+    /// Subprocess spec build failed (vocabulary violation).
+    #[error("subprocess spec build failed: {0}")]
+    SpecBuild(#[source] ryeos_engine::error::EngineError),
+    /// Streaming protocol cannot be invoked with launch_mode=detached.
+    /// Pin-test-pinned wording.
+    #[error("streaming protocols cannot be invoked with launch_mode=detached")]
+    StreamingNotDetachable,
+    /// Invalid launch_mode value.
+    #[error("invalid launch_mode: {other}")]
+    InvalidLaunchMode { other: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -193,9 +210,12 @@ impl DispatchError {
             | Self::AliasCycle { .. }
             | Self::AliasChainTooLong { .. }
             | Self::CapabilityRejected { .. }
-            | Self::SchemaMisconfigured { .. } => StatusCode::BAD_REQUEST,
+            | Self::SchemaMisconfigured { .. }
+            | Self::StreamingNotDetachable
+            | Self::InvalidLaunchMode { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
-            | Self::ServiceCapDenied { .. } => StatusCode::FORBIDDEN,
+            | Self::ServiceCapDenied { .. }
+            | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
@@ -210,7 +230,9 @@ impl DispatchError {
             | Self::SubprocessExecutorMissing { .. }
             | Self::SubprocessRunFailed { .. }
             | Self::RuntimeMaterializationFailed { .. }
-            | Self::ProjectSourceCheckoutFailed(_) => StatusCode::BAD_GATEWAY,
+            | Self::ProjectSourceCheckoutFailed(_)
+            | Self::ProtocolNotRegistered(_)
+            | Self::SpecBuild(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -239,6 +261,11 @@ impl DispatchError {
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
             Self::ProjectSourcePushFirst(_) => "project_source_push_first",
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
+            Self::MissingCap { .. } => "missing_cap",
+            Self::ProtocolNotRegistered(_) => "protocol_not_registered",
+            Self::SpecBuild(_) => "spec_build",
+            Self::StreamingNotDetachable => "streaming_not_detachable",
+            Self::InvalidLaunchMode { .. } => "invalid_launch_mode",
             Self::Internal(_) => "internal",
         }
     }

@@ -104,8 +104,16 @@ The `--seed` flag exists only for self-signed daemon `fast_fixture` content (dir
 Run the workspace gate after to confirm:
 
 ```bash
-cargo nextest run --workspace --no-fail-fast 2>&1 | grep -c FAIL   # → 0
+./scripts/gate.sh
 ```
+
+Or manually:
+
+```bash
+cargo nextest run --workspace --no-fail-fast
+```
+
+Do NOT pipe through `grep -c FAIL` — that swallows error output and forces a full rebuild just to see which tests failed. nextest's exit code is 0 on success.
 
 ### Why the symlink at all
 
@@ -117,7 +125,7 @@ The standard bundle (`ryeos-bundles/standard/.ai/bin/<host-triple>/`) ships with
 
 ### Workspace gate
 
-The canonical gate is `./scripts/gate.sh`. It auto-syncs the manifest if drift is detected, then runs `cargo nextest run --workspace --no-fail-fast`. Direct `cargo nextest run` invocations are fine but skip the auto-sync.
+The canonical gate is `./scripts/gate.sh`. It auto-syncs the manifest if drift is detected, then runs `cargo nextest run --workspace --no-fail-fast`. Direct `cargo nextest run` invocations are fine but skip the auto-sync. Do NOT pipe the output through `grep -c FAIL` — that hides which tests failed and forces a rebuild to see them.
 
 ### Future work
 

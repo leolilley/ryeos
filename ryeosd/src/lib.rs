@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod dispatch;
 pub mod dispatch_error;
+pub mod dispatch_role;
 pub mod engine_init;
 pub mod event_stream;
 pub mod execution;
