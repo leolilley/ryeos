@@ -61,6 +61,7 @@ mod types {
 
 /// File lock for a chain.
 pub struct ChainLock {
+    /// Held only for RAII; Drop releases the file lock via closed fd.
     #[allow(dead_code)]
     lock_file: File,
     chain_root_id: String,

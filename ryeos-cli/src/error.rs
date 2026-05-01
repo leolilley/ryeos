@@ -5,15 +5,17 @@ use std::path::PathBuf;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum CliConfigError {
     #[error("unsigned verb YAML: {path}")]
+    #[allow(dead_code)]
     UnsignedYaml { path: PathBuf },
 
     #[error("bad signature in {path}: {detail}")]
+    #[allow(dead_code)]
     BadSignature { path: PathBuf, detail: String },
 
     #[error("untrusted signer {fingerprint} in {path}")]
+    #[allow(dead_code)]
     UntrustedSigner { path: PathBuf, fingerprint: String },
 
     #[error("wrong kind in {path}: expected \"config\", got \"{got}\"")]
@@ -26,6 +28,7 @@ pub enum CliConfigError {
     SchemaError { path: PathBuf, detail: String },
 
     #[error("IO error reading {path}: {detail}")]
+    #[allow(dead_code)]
     IoError { path: PathBuf, detail: String },
 
     #[error("duplicate verb_tokens {tokens:?} in {paths:?}")]
@@ -35,6 +38,7 @@ pub enum CliConfigError {
     },
 
     #[error("prefix-overlap: {a:?} vs {b:?} in {paths:?}")]
+    #[allow(dead_code)]
     PrefixOverlap {
         a: Vec<String>,
         b: Vec<String>,
@@ -58,6 +62,7 @@ pub enum CliConfigError {
     TrustStoreLoad { detail: String },
 
     #[error("failed to load kind registry: {detail}")]
+    #[allow(dead_code)]
     KindRegistryLoad { detail: String },
 }
 
@@ -94,15 +99,16 @@ pub enum CliTransportError {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum CliDispatchError {
     #[error("bad arguments: {0}")]
+    #[allow(dead_code)]
     BadArgs(String),
 
     #[error(transparent)]
     Transport(#[from] CliTransportError),
 
     #[error("internal error: {0}")]
+    #[allow(dead_code)]
     Internal(String),
 }
 
@@ -111,7 +117,6 @@ pub enum CliDispatchError {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum CliError {
     #[error(transparent)]
     Config(#[from] CliConfigError),
@@ -126,6 +131,7 @@ pub enum CliError {
     UnknownVerb { argv: Vec<String> },
 
     #[error("interrupted")]
+    #[allow(dead_code)]
     Interrupted,
 
     #[error(transparent)]
