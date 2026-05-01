@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::TrustClass;
 use crate::error::EngineError;
+use crate::kind_registry::{KindRegistry, TerminatorDecl};
+use crate::protocols::ProtocolRegistry;
 use crate::trust::TrustStore;
 
 /// ABI version this daemon understands for runtime binaries.
@@ -88,6 +90,8 @@ impl RuntimeRegistry {
     pub fn build_from_bundles(
         bundle_roots: &[PathBuf],
         trust: &TrustStore,
+        kinds: &KindRegistry,
+        protocols: &ProtocolRegistry,
     ) -> Result<Self, EngineError> {
         let mut by_kind: HashMap<String, Vec<VerifiedRuntime>> = HashMap::new();
         let mut by_ref: HashMap<CanonicalRef, VerifiedRuntime> = HashMap::new();
@@ -139,6 +143,51 @@ impl RuntimeRegistry {
                     kind: kind.clone(),
                     defaults,
                 });
+            }
+        }
+
+        // Typed-view validation: when a runtime's `serves` kind declares
+        // an explicit terminator (not a delegate), that terminator MUST be
+        // Subprocess with protocol `protocol:rye/core/runtime_v1`.
+        // Kinds that use `delegate: via: runtime_registry` (no terminator)
+        // are inherently compatible — they explicitly delegate to the
+        // runtime registry. Kinds with an incompatible terminator would
+        // produce confusing dispatch errors downstream.
+        const EXPECTED_PROTOCOL: &str = "protocol:rye/core/runtime_v1";
+        for (kind, list) in &by_kind {
+            let schema = match kinds.get(kind) {
+                Some(s) => s,
+                None => {
+                    // Kind not registered — this runtime's serves field
+                    // points at a non-existent kind. Let it through; the
+                    // dispatch loop will fail with a clear error when
+                    // someone tries to use it.
+                    continue;
+                }
+            };
+            let exec = match schema.execution() {
+                Some(e) => e,
+                None => continue,
+            };
+            // If the kind delegates to the runtime registry (no terminator),
+            // it's inherently compatible with any runtime.
+            let terminator = match exec.terminator.as_ref() {
+                Some(t) => t,
+                None => continue, // delegate-based or alias-based — valid
+            };
+            let found_protocol = match terminator {
+                TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.clone(),
+                TerminatorDecl::InProcess { .. } => String::new(),
+            };
+            if found_protocol != EXPECTED_PROTOCOL {
+                for _rt in list {
+                    return Err(EngineError::RuntimeProtocolMismatch {
+                        runtime: list[0].canonical_ref.to_string(),
+                        kind: kind.clone(),
+                        expected: EXPECTED_PROTOCOL.to_string(),
+                        found: found_protocol.clone(),
+                    });
+                }
             }
         }
 

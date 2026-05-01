@@ -11,6 +11,8 @@ use lillux::crypto::SigningKey;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::error::EngineError;
+use ryeos_engine::kind_registry::KindRegistry;
+use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::runtime_registry::{RuntimeRegistry, RuntimeYaml};
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
@@ -89,7 +91,7 @@ abi_version: v1
 fn parse_via_registry(body: &str) -> Result<RuntimeYaml, EngineError> {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "rt", body);
-    let registry = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store())?;
+    let registry = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty())?;
     let rt = registry
         .all()
         .next()
@@ -179,7 +181,7 @@ abi_version: v1
 #[test]
 fn registry_empty_when_no_bundles_have_runtimes() {
     let bundle = tempdir(); // no .ai/runtimes/ subdir
-    let registry = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
     assert_eq!(registry.all().count(), 0);
     let err = registry.lookup_for("directive").unwrap_err();
     assert!(matches!(err, EngineError::NoRuntimeFor { .. }));
@@ -190,7 +192,7 @@ fn registry_one_runtime_serving_kind_returned() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
 
     let rt = registry.lookup_for("directive").unwrap();
     assert_eq!(rt.canonical_ref.to_string(), "runtime:default");
@@ -223,7 +225,7 @@ abi_version: v1
     );
 
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
     let rt = registry.lookup_for("directive").unwrap();
     assert_eq!(rt.canonical_ref.to_string(), "runtime:fast");
     assert_eq!(rt.yaml.default, Some(true));
@@ -255,7 +257,7 @@ abi_version: v1
 ",
     );
 
-    let err = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap_err();
+    let err = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap_err();
     match err {
         EngineError::MultipleRuntimeDefaults { kind, defaults } => {
             assert_eq!(kind, "directive");
@@ -290,7 +292,7 @@ abi_version: v1
     );
 
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
     let err = registry.lookup_for("directive").unwrap_err();
     match err {
         EngineError::RuntimeDefaultRequired { kind, candidates } => {
@@ -306,7 +308,7 @@ fn registry_lookup_by_ref_returns_runtime() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
     let registry =
-        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap();
+        RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap();
 
     let canonical = CanonicalRef::parse("runtime:default").unwrap();
     let rt = registry.lookup_by_ref(&canonical).expect("lookup hit");
@@ -328,7 +330,7 @@ fn registry_tampered_yaml_aborts_build() {
     let tampered = format!("{content}# tampered\n");
     fs::write(&path, tampered).unwrap();
 
-    let err = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store()).unwrap_err();
+    let err = RuntimeRegistry::build_from_bundles(&[bundle], &trust_store(), &KindRegistry::empty(), &ProtocolRegistry::empty()).unwrap_err();
     match err {
         EngineError::RuntimeYamlInvalid { reason, .. } => {
             assert!(
@@ -338,4 +340,145 @@ fn registry_tampered_yaml_aborts_build() {
         }
         other => panic!("expected RuntimeYamlInvalid, got: {other:?}"),
     }
+}
+
+/// η: runtime YAML whose `serves` kind has a terminator pointing at a
+/// different protocol (opaque instead of runtime_v1) must fail boot with
+/// `RuntimeProtocolMismatch`.
+#[test]
+fn runtime_serves_kind_with_wrong_protocol_fails() {
+    let bundle = tempdir();
+
+    // Write a kind schema for "fake_kind" that uses opaque protocol,
+    // NOT runtime_v1.
+    let kinds_dir = bundle.join(".ai/node/engine/kinds/fake_kind");
+    fs::create_dir_all(&kinds_dir).unwrap();
+    let schema_body = r##"category: "engine/kinds/fake_kind"
+version: "1.0.0"
+location:
+  directory: fake_items
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/opaque
+  thread_profile: fake_run
+  resolution: []
+formats:
+  - extensions: [".yaml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules: {}
+"##;
+    let sk = signing_key();
+    let vk = sk.verifying_key();
+    let fp = compute_fingerprint(&vk);
+    let signed = lillux::signature::sign_content(schema_body, &sk, "#", None);
+    fs::write(kinds_dir.join("fake_kind.kind-schema.yaml"), signed).unwrap();
+
+    // Trust the test signing key for kind-schema loading.
+    let kinds_ts = TrustStore::from_signers(vec![TrustedSigner {
+        fingerprint: fp,
+        verifying_key: vk,
+        label: None,
+    }]);
+    let kinds_search = bundle.join(".ai/node/engine/kinds");
+    let kinds = KindRegistry::load_base(&[kinds_search], &kinds_ts).unwrap();
+
+    // Write a runtime YAML that serves "fake_kind".
+    write_signed_runtime(
+        &bundle,
+        "wrong-protocol-rt",
+        r#"kind: runtime
+serves: fake_kind
+binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
+abi_version: "v1"
+"#,
+    );
+
+    let err = RuntimeRegistry::build_from_bundles(
+        &[bundle],
+        &trust_store(),
+        &kinds,
+        &ProtocolRegistry::empty(),
+    )
+    .unwrap_err();
+    match err {
+        EngineError::RuntimeProtocolMismatch {
+            runtime,
+            kind,
+            expected,
+            found,
+        } => {
+            assert_eq!(kind, "fake_kind");
+            assert_eq!(expected, "protocol:rye/core/runtime_v1");
+            assert_eq!(found, "protocol:rye/core/opaque");
+            assert!(runtime.contains("wrong-protocol-rt"));
+        }
+        other => panic!("expected RuntimeProtocolMismatch, got: {other:?}"),
+    }
+}
+
+/// η: runtime YAML whose `serves` kind has no execution block at all
+/// should succeed (the dispatch loop will error at runtime, not at boot).
+#[test]
+fn runtime_serves_kind_without_execution_succeeds() {
+    let bundle = tempdir();
+
+    // Write a kind schema for "no_exec_kind" with no execution block.
+    let kinds_dir = bundle.join(".ai/node/engine/kinds/no_exec_kind");
+    fs::create_dir_all(&kinds_dir).unwrap();
+    let schema_body = r##"category: "engine/kinds/no_exec_kind"
+version: "1.0.0"
+location:
+  directory: no_exec_items
+formats:
+  - extensions: [".yaml"]
+    parser: parser:rye/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:rye/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules: {}
+"##;
+    let sk = signing_key();
+    let vk = sk.verifying_key();
+    let fp = compute_fingerprint(&vk);
+    let signed = lillux::signature::sign_content(schema_body, &sk, "#", None);
+    fs::write(kinds_dir.join("no_exec_kind.kind-schema.yaml"), signed).unwrap();
+
+    let kinds_ts = TrustStore::from_signers(vec![TrustedSigner {
+        fingerprint: fp,
+        verifying_key: vk,
+        label: None,
+    }]);
+    let kinds_search = bundle.join(".ai/node/engine/kinds");
+    let kinds = KindRegistry::load_base(&[kinds_search], &kinds_ts).unwrap();
+
+    write_signed_runtime(
+        &bundle,
+        "no-exec-rt",
+        r#"kind: runtime
+serves: no_exec_kind
+binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
+abi_version: "v1"
+"#,
+    );
+
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[bundle],
+        &trust_store(),
+        &kinds,
+        &ProtocolRegistry::empty(),
+    )
+    .unwrap();
+    assert_eq!(registry.all().count(), 1);
 }

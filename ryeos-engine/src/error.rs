@@ -265,6 +265,14 @@ pub enum EngineError {
         defaults: Vec<String>,
     },
 
+    #[error("runtime `{runtime}` serves kind `{kind}` whose terminator declares protocol `{found}`, expected `{expected}`")]
+    RuntimeProtocolMismatch {
+        runtime: String,
+        kind: String,
+        expected: String,
+        found: String,
+    },
+
     // ── Inventory ────────────────────────────────────────────────────
 
     /// A per-item failure during inventory construction. The inner

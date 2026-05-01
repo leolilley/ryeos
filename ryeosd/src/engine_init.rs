@@ -194,7 +194,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     if let Some(ref ur) = user_root {
         runtime_scan_roots.push(ur.clone());
     }
-    let runtimes = RuntimeRegistry::build_from_bundles(&runtime_scan_roots, &trust_store)
+    let runtimes = RuntimeRegistry::build_from_bundles(&runtime_scan_roots, &trust_store, &kinds, &protocol_registry)
         .context("failed to build runtime registry")?;
     tracing::info!(
         count = runtimes.all().count(),
