@@ -1,12 +1,10 @@
-# rye:signed:2026-04-29T06:14:33Z:6dfd679a60dbcd91e9f97c45ed9795c741f7d159fabf1533d1f14b6e8f6ab660:UVj9rhaZGbicQ/goXhq/HVTpFCz3givopsZUZnbhWxyuVbbGm4AwEgUDSf5P1Uy7aTA/AcMi4PSfwdtDcgE3BQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
-category: ""
-name: "graph-runtime"
+# rye:signed:2026-05-01T13:29:30Z:5c8a4adba820a7426134c62f62e6cb00270d16320fc83c3d959dd6e7d5a998eb:/1sKp0h3taymZC9KsmXew3gq+3HPeR10EAeak76+gmu8la8tdtpsOslLwmYfbVNekW5ju7IkonDbpA6nUChnAg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:unsigned
 kind: runtime
 serves: graph
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-runtime
 abi_version: "v1"
-native_resume: true
 required_caps:
   - runtime.execute
 description: "Interprets graph workflows"

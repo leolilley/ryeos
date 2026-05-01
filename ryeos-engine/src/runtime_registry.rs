@@ -38,13 +38,8 @@ pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v1";
 // ── Public types ─────────────────────────────────────────────────────
 
 /// Typed view over a parsed `kind: runtime` YAML.
-///
-/// NOTE: this struct does NOT carry `#[serde(deny_unknown_fields)]`
-/// today. Several legacy bundle YAMLs still ship undocumented top-level
-/// keys (e.g. `category`, `name`, `native_resume`) that were never
-/// consumed by `RuntimeRegistry`. Tightening the contract requires a
-/// bundle-side cleanup pass first; tracked in `04-FUTURE-WORK.md`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeYaml {
     /// Always the literal string `"runtime"`. Mismatch is a hard error.
     pub kind: String,
