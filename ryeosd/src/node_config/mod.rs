@@ -36,6 +36,7 @@ pub enum SectionSourcePolicy {
 
 /// A single parsed bundle registration record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleRecord {
     /// Bundle name (filename without extension).
     pub name: String,

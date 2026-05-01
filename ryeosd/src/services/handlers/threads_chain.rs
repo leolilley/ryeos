@@ -10,10 +10,10 @@ use crate::service_registry::ServiceDescriptor;
 use crate::state::AppState;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
 }
-
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     match state.threads.get_chain(&req.thread_id)? {
         Some(chain) => serde_json::to_value(chain).map_err(Into::into),

@@ -26,7 +26,7 @@ pub struct ThreadUsage {
 /// Thread status enum — must match the CHECK constraint in db.rs exactly:
 /// created, running, completed, failed, cancelled, killed, timed_out, continued
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ThreadStatus {
     Created,
     Running,
@@ -116,6 +116,7 @@ impl std::fmt::Display for ThreadStatus {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadSnapshot {
     pub schema: u32,
     pub kind: String,

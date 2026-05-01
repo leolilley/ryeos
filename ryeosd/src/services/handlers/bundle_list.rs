@@ -10,7 +10,7 @@ use crate::service_registry::ServiceDescriptor;
 use crate::state::AppState;
 
 #[derive(serde::Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {

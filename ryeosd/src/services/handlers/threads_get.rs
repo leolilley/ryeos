@@ -10,6 +10,7 @@ use crate::service_registry::ServiceDescriptor;
 use crate::state::AppState;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
 }

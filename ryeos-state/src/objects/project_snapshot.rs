@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 /// Stored in CAS as an immutable object. Linked from thread snapshots
 /// via `base_project_snapshot_hash` and `result_project_snapshot_hash`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSnapshot {
     /// Hash of the project manifest (root descriptor).
     pub project_manifest_hash: String,

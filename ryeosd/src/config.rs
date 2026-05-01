@@ -77,6 +77,7 @@ pub enum DaemonCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub bind: SocketAddr,
     pub db_path: PathBuf,

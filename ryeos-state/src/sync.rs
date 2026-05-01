@@ -21,6 +21,7 @@ use crate::StateDb;
 
 /// A single entry in a sync payload (object or blob).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SyncEntry {
     /// SHA-256 hash of the content.
     pub hash: String,
@@ -32,6 +33,7 @@ pub struct SyncEntry {
 
 /// Payload for exporting / importing objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportPayload {
     /// The chain root ID this export covers.
     pub chain_root_id: String,

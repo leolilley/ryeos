@@ -235,6 +235,7 @@ pub fn read_public_key(path: &Path) -> Result<VaultPublicKey> {
 /// safe TOML/JSON nesting. The envelope is opaque to the engine: it
 /// only knows how to seal and open with a key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SealedEnvelope {
     pub version: u32,
     pub vault_pubkey_fingerprint: String,

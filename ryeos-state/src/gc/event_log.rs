@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// A single GC run event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcEvent {
     pub timestamp: String,
     pub dry_run: bool,

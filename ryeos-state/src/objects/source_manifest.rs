@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 ///
 /// Maps item reference → content blob hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceManifest {
     /// Map of item_ref to content blob hash.
     pub item_source_hashes: HashMap<String, String>,

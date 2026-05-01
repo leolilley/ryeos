@@ -55,7 +55,7 @@ pub fn daemon_thread_state_dir(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RuntimeLaunchMetadata {
     /// Persisted schema version. Defaults via serde to the current
     /// `LAUNCH_METADATA_SCHEMA_VERSION` so rows written before this
@@ -117,6 +117,7 @@ impl Default for RuntimeLaunchMetadata {
 /// time the checkpoint was written, NOT the current head of the
 /// working directory. See `docs/future/RESUME-ADVANCED-PATH.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResumeContext {
     pub kind: String,
     pub item_ref: String,

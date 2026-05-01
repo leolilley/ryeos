@@ -73,7 +73,7 @@ impl Drop for TempDirGuard {
 /// `{ "kind": "pushed_head" }`. Extensible to future variants
 /// like `snapshot` or `named_ref`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectSource {
     /// Execute against the live filesystem project path.
     LiveFs,

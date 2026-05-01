@@ -31,6 +31,7 @@ const SIGNED_REF_KIND: &str = "signed_ref";
 
 /// A signed reference — an authoritative mutable pointer to a CAS object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignedRef {
     pub schema: u32,
     pub kind: String,

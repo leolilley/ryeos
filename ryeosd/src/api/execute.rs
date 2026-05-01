@@ -10,6 +10,7 @@ use crate::policy;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteRequest {
     pub item_ref: String,
     /// Project root path for three-tier resolution. Required when the caller

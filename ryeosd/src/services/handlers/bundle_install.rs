@@ -23,6 +23,7 @@ use crate::service_registry::ServiceDescriptor;
 use crate::state::AppState;
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     /// Bundle name; becomes the install directory name.
     pub name: String,

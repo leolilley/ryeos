@@ -17,6 +17,7 @@ use crate::objects::thread_snapshot::ThreadStatus;
 
 /// Entry for a single thread within a ChainState.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainThreadEntry {
     /// CAS hash of the thread's latest snapshot.
     pub snapshot_hash: String,
@@ -69,6 +70,7 @@ impl ChainThreadEntry {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainState {
     pub schema: u32,
     pub kind: String,

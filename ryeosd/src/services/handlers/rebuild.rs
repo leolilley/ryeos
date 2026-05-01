@@ -13,7 +13,7 @@ use crate::service_registry::ServiceDescriptor;
 use crate::state::AppState;
 
 #[derive(Debug, serde::Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Request {
     /// When true, follow up the rebuild with a reachability sweep so
     /// callers can sanity-check object/blob counts.

@@ -33,6 +33,7 @@ pub use lock::GcLock;
 
 /// GC parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcParams {
     /// Don't delete anything, just report.
     pub dry_run: bool,
@@ -44,6 +45,7 @@ pub struct GcParams {
 
 /// Full GC result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcResult {
     pub roots_walked: usize,
     pub reachable_objects: usize,

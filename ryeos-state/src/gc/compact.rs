@@ -25,6 +25,7 @@ use crate::signer::Signer;
 /// Two categories: manual pushes and auto snapshots (fold-back).
 /// HEAD is always kept regardless of policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetentionPolicy {
     /// Max snapshots with source="push" or "manual" to keep per project.
     pub manual_pushes: usize,
@@ -43,6 +44,7 @@ impl Default for RetentionPolicy {
 
 /// Result of compacting project snapshot DAGs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactionResult {
     pub projects_scanned: usize,
     pub snapshots_removed: usize,

@@ -78,12 +78,14 @@ const RESERVED_ENV_PREFIXES: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AadFields {
     pub kind: String,
     pub recipient: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Envelope {
     pub version: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

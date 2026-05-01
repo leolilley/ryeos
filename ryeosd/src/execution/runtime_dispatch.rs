@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DispatchActionParams {
     callback_token: String,
     thread_id: String,
@@ -13,8 +14,11 @@ struct DispatchActionParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ActionPayload {
     item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     #[serde(default)]
     params: Value,
     #[serde(default = "default_thread")]

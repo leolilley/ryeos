@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::identity::NodeIdentity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadMeta {
     pub thread_id: String,
     pub status: String,

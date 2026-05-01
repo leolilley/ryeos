@@ -13,6 +13,7 @@ use std::path::Path;
 
 /// A thread locator hint — maps a thread_id to its chain_root_id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadLocator {
     pub chain_root_id: String,
 }

@@ -12,6 +12,7 @@ use crate::state::AppState;
 use super::default_list_limit;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     #[serde(default = "default_list_limit")]
     pub limit: usize,

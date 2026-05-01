@@ -27,7 +27,7 @@ use crate::state::AppState;
 /// Where to look for the item to sign. Restricted to `system` for
 /// daemon-internal `kind: node` items only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum SignSpace {
     System,
     User,
@@ -45,6 +45,7 @@ impl SignSpace {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     /// Canonical ref of the item to sign, e.g. `directive:hello`,
     /// `node:engine/kinds/config/config`, or a glob like

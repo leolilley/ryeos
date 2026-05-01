@@ -16,6 +16,7 @@ use crate::service_registry::ServiceDescriptor;
 use crate::state::AppState;
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     /// Bundle name (directory under `<state_dir>/.ai/bundles/`).
     pub name: String,

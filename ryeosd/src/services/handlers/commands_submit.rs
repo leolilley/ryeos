@@ -11,6 +11,7 @@ use crate::services::command_service::CommandSubmitParams;
 use crate::state::AppState;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
     pub command_type: String,

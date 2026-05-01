@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 /// A single item loaded into a project (directive, tool, knowledge, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ItemSource {
     /// The item reference (e.g. "directive:test/simple").
     pub item_ref: String,

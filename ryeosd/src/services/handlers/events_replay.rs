@@ -18,6 +18,7 @@ use crate::state::AppState;
 use super::default_replay_limit;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
     #[serde(default)]

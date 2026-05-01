@@ -16,6 +16,7 @@ pub struct NodeIdentity {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignatureDoc {
     pub signer: String,
     pub sig: String,
@@ -23,6 +24,7 @@ pub struct SignatureDoc {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublicIdentityDoc {
     pub kind: String,
     pub principal_id: String,

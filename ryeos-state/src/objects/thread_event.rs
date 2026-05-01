@@ -17,7 +17,7 @@ use super::{validate_object_kind, SCHEMA_VERSION};
 /// | `Journal`  | Yes        | No                 | Yes            | Audit trail, tool calls     |
 /// | `Ephemeral`| No         | No                 | No             | Token deltas, streaming logs|
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum EventDurability {
     Durable,
     Journal,
@@ -66,6 +66,7 @@ impl EventDurability {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadEvent {
     pub schema: u32,
     pub kind: String,

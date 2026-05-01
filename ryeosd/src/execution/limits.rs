@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::launch_envelope::HardLimits;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
     #[serde(default)]
     pub defaults: LimitValues,
@@ -13,6 +14,7 @@ pub struct LimitsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LimitValues {
     #[serde(default = "default_turns")]
     pub turns: u32,

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadKindProfile {
     pub root_executable: bool,
     pub supports_interrupt: bool,
