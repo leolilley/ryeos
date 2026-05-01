@@ -702,7 +702,7 @@ pub struct SignatureHeader {
 /// Contains enough to discover the executor and build a dispatch plan.
 /// Full body parsing is the executor/adapter's responsibility.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
+#[serde(deny_unknown_fields)]
 pub struct ItemMetadata {
     /// Executor ID from `__executor_id__` or frontmatter
     pub executor_id: Option<String>,
@@ -716,8 +716,14 @@ pub struct ItemMetadata {
     /// The daemon resolves these per-principal and injects as `RYE_VAULT_*` env vars.
     #[serde(default)]
     pub required_secrets: Vec<String>,
-    /// Arbitrary additional metadata fields (kind-specific fields live here)
-    #[serde(flatten)]
+    /// Kind-specific metadata fields routed here by the metadata extraction
+    /// pipeline (assign_extracted_field in kind_registry.rs). Producers
+    /// populate this deliberately via the catch-all arms; it is NOT an
+    /// automatic serde pass-through from flatten.
+    ///
+    /// Known keys: endpoint, required_caps, handler, serves, default,
+    /// binary_ref, abi_version, name, section.
+    #[serde(default)]
     pub extra: HashMap<String, Value>,
 }
 

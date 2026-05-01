@@ -464,9 +464,8 @@ pub enum DelegationVia {
 /// dispatcher will NEVER consult the runtime registry on behalf of
 /// this kind — silent fallback is gone.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)] on field `via`. Tracked in 04-FUTURE-WORK.md.
+#[serde(deny_unknown_fields)]
 pub struct DelegationSpec {
-    #[serde(flatten)]
     pub via: DelegationVia,
 }
 

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// NOTE: deny_unknown_fields blocked by #[serde(flatten)]/#[serde(untagged)]. Tracked in 04-FUTURE-WORK.md.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectiveHeader {
     #[serde(default)]
     pub name: Option<String>,
@@ -22,8 +22,6 @@ pub struct DirectiveHeader {
     pub context: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub hooks: Option<Vec<Value>>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

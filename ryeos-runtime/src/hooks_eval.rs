@@ -96,7 +96,6 @@ mod tests {
             layer: Some(layer),
             condition: None,
             action: json!({"primary": "execute", "item_id": "tool:test/noop", "params": {}}),
-            extra: Default::default(),
         }
     }
 
