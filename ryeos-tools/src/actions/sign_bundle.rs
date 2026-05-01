@@ -21,7 +21,10 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindRegistry};
-use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use std::sync::Arc;
+
+use ryeos_engine::handlers::HandlerRegistry;
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::{TrustedSigner, TrustStore};
 use ryeos_engine::AI_DIR;
 
@@ -88,8 +91,9 @@ pub fn sign_bundle_items(
     let (parser_tools, _dups) =
         ParserRegistry::load_base(&[registry_root.to_path_buf()], &trust_store, &kinds)
             .context("load parser tools")?;
-    let native_handlers = NativeParserHandlerRegistry::with_builtins();
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
+    let handlers = HandlerRegistry::load_base(&[registry_root.to_path_buf()], &trust_store)
+        .context("load handler descriptors")?;
+    let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handlers));
 
     // 4. Walk every kind's directory under source/.ai/<kind_dir>/
     let ai_dir = source.join(AI_DIR);

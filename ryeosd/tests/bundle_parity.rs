@@ -15,11 +15,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
+
 use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
 use ryeos_engine::item_resolution::ResolutionRoots;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{
-    NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry,
+    ParserDispatcher, ParserRegistry,
 };
 use ryeos_engine::resolution::run_resolution_pipeline;
 use ryeos_engine::trust::TrustStore;
@@ -114,7 +115,10 @@ fn live_parser_dispatcher(trust_store: &TrustStore, kinds: &KindRegistry) -> Par
     let bundle_root = workspace_root().join("ryeos-bundles/core");
     let (parsers, _dups) = ParserRegistry::load_base(&[bundle_root], trust_store, kinds)
         .expect("live bundle parser tools load");
-    ParserDispatcher::new(parsers, NativeParserHandlerRegistry::with_builtins())
+    ParserDispatcher::new(
+        parsers,
+        ryeos_engine::test_support::load_live_handler_registry(),
+    )
 }
 
 fn synth_project_with_directive(name: &str, body: &str) -> PathBuf {

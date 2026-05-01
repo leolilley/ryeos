@@ -1,4 +1,4 @@
-# rye:signed:2026-04-29T08:29:45Z:5363b1f8c6142561fae2f3cde5636a877f8ddb4cafbc662acb122d421dc73a0e:5OdPo+X0AQ3xLAA4JaIVjRO31Y6C91bXuE+ORdGzEWghcjoAw8guJaimlETZTwwke+/uvH1pvBvgIcmNTRvoCg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-04-30T23:05:42Z:11c4ec7d68d9be86372f90c257ebc68eaf6f8ad82edcb8fb44bcdb13f0e30d8d:2G6eqj+gQqTvdZbqG1BjCpsuAnwz0if1Cr27B1jDhJq6ZtrJi66AvTu7bl7XQswyT/kYYV1m4qpwKCRU23xQAg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/parser"
 version: "1.0.0"
 location:
@@ -12,7 +12,7 @@ formats:
 # Parser descriptors ARE strongly typed (`ParserDescriptor` struct
 # with `#[serde(deny_unknown_fields)]` enforces shape at deserialize
 # time). The "honest" kind-level contract would require version /
-# executor_id / parser_api_version / output_schema, but the producer
+# handler / parser_api_version / output_schema, but the producer
 # is the GENERIC `parser:rye/core/yaml/yaml` parser whose
 # `output_schema` is `required: {}` — it parses any YAML mapping and
 # can't pre-declare per-consumer fields. Forcing a strict contract
@@ -44,7 +44,7 @@ metadata:
       key: category
       required: true
       match: path
-    executor_id:
+    handler:
       from: path
-      key: executor_id
+      key: handler
 # no execution block — parsers are not launcher-executable

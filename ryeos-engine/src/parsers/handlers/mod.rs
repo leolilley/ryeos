@@ -23,7 +23,7 @@ pub struct ParseInput<'a> {
 /// A native, in-process parser implementation.
 ///
 /// Handlers live in the engine. A handler is selected by the
-/// dispatcher via the descriptor's `executor_id` (`native:<handler>`).
+/// dispatcher via the descriptor's `handler` (`handler:<ref>`).
 pub trait NativeParserHandler: Send + Sync {
     /// Validate `parser_config` shape ahead of time. Returning an
     /// error here surfaces in `boot_validation` so misconfigured

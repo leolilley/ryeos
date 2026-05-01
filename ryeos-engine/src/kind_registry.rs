@@ -86,6 +86,12 @@ enum RuleResult {
 fn assign_extracted_field(metadata: &mut ItemMetadata, field: &str, result: RuleResult) {
     match (field, result) {
         ("executor_id", RuleResult::String(Some(v))) => metadata.executor_id = Some(v),
+        // The parser kind schema's `handler:` field is the canonical
+        // ref to a HandlerRegistry entry — semantically distinct from
+        // the tool/runtime executor-chain `executor_id` slot used by
+        // inventory/plan_builder/dispatch. Route it generically into
+        // `extra["handler"]`; the parser descriptor loader does its
+        // own typed deserialization of the field at parse time.
         ("version", RuleResult::String(Some(v))) => metadata.version = Some(v),
         ("description", RuleResult::String(Some(v))) => metadata.description = Some(v),
         ("category", RuleResult::String(Some(v))) => metadata.category = Some(v),

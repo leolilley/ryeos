@@ -1,8 +1,8 @@
-# rye:signed:2026-04-29T08:29:45Z:d5745199e74c48878f2da7b37a5fdda7602b7d1fb5034466d2c1a0b1f8c0117e:76Q0rbQ3TniUs+V64BU4gjJusUUIAheMLgiereweewkM+OnL+jn30/oMACJiI1/W8qXkvbZyIOr1Lnc6l8uADw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-04-30T23:05:42Z:9c864799fb21a30ff5d850aa9f7967d10d9339a96c5942873d63fb3e87911570:gQO3C4fTE5SFoBW/y3wz44hS/s9UA6Jo66giuyfWT/tSEmDhJHQxvC5C+/mmZHHH7D6upQ07CPGyy9CS5d6iBw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 version: "1.0.0"
 category: "rye/core/markdown"
 description: "Frontmatter parser: extracts optional YAML fenced block from markdown knowledge"
-executor_id: "native:parser_yaml_header_document"
+handler: "handler:rye/core/yaml-header-document"
 parser_api_version: 1
 parser_config:
   require_header: false

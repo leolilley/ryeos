@@ -1,23 +1,26 @@
 //! Test-only seam for building a `ParserDispatcher` without going
-//! through disk I/O. Production code MUST load `ParserRegistry` via
-//! `ParserRegistry::load_base` from real bundle YAML on disk.
+//! through descriptor disk I/O. Production code MUST load
+//! `ParserRegistry` via `ParserRegistry::load_base` from real bundle
+//! YAML on disk.
 //!
 //! Configs intentionally mirror the live bundle
 //! (`ryeos-bundles/core/.ai/parsers/...`) so unit tests don't drift
-//! from production semantics. This module is `pub(crate)` and gated
-//! `#[cfg(test)]` — no out-of-crate caller can reach it.
+//! from production semantics. The `HandlerRegistry` is loaded from
+//! `ryeos-bundles/core/` so dispatch routes through the real signed
+//! handler binaries — there is NO native-handler fallback in the
+//! dispatcher and NO empty-registry shortcut here.
 
 use serde_json::json;
 
 use super::descriptor::ParserDescriptor;
 use super::dispatcher::ParserDispatcher;
 
-fn mk(executor_id: &str, parser_config: serde_json::Value) -> ParserDescriptor {
+fn mk(handler: &str, parser_config: serde_json::Value) -> ParserDescriptor {
     ParserDescriptor {
         version: "1.0.0".into(),
         category: None,
         description: None,
-        executor_id: executor_id.into(),
+        handler: handler.into(),
         parser_api_version: 1,
         parser_config,
         output_schema: crate::contracts::ValueShape::any_mapping(),
@@ -35,7 +38,7 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
         (
             "parser:rye/core/python/ast".to_string(),
             mk(
-                "native:parser_regex_kv",
+                "handler:rye/core/regex-kv",
                 json!({
                     "patterns": [{
                         "regex": r#"(?m)^(__\w+__)\s*=\s*"([^"]+)""#,
@@ -48,14 +51,14 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
         (
             "parser:rye/core/yaml/yaml".to_string(),
             mk(
-                "native:parser_yaml_document",
+                "handler:rye/core/yaml-document",
                 json!({ "require_mapping": true }),
             ),
         ),
         (
             "parser:rye/core/markdown/directive".to_string(),
             mk(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 json!({
                     "require_header": true,
                     "body_field": "body",
@@ -69,7 +72,7 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
         (
             "parser:rye/core/markdown/frontmatter".to_string(),
             mk(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 json!({
                     "require_header": false,
                     "body_field": null,
@@ -82,7 +85,7 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
         (
             "parser:rye/core/javascript/javascript".to_string(),
             mk(
-                "native:parser_regex_kv",
+                "handler:rye/core/regex-kv",
                 json!({
                     "patterns": [{
                         "regex": r#"(?m)^const\s+(__\w+__)\s*=\s*"([^"]+)""#,
@@ -93,5 +96,5 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
             ),
         ),
     ];
-    ParserDispatcher::from_descriptors(entries)
+    crate::test_support::build_parser_dispatcher_from_roots(entries)
 }

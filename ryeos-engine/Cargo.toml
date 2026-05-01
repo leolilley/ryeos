@@ -15,9 +15,16 @@ serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 regex = "1"
+ryeos-handler-protocol = { path = "../ryeos-handler-protocol" }
 thiserror = "2"
 toml = "0.8"
 tracing = "0.1"
+
+[features]
+# Exposes `ryeos_engine::test_support` for downstream test crates that
+# need the live HandlerRegistry / ParserDispatcher wiring against the
+# core bundle (see `ryeos-engine/src/test_support.rs`).
+test-support = []
 
 [dev-dependencies]
 tempfile = "3"

@@ -38,7 +38,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     )
     .expect("load parser tools");
 
-    let native_handlers = ryeos_engine::parsers::NativeParserHandlerRegistry::with_builtins();
+    let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher =
         ryeos_engine::parsers::ParserDispatcher::new(parser_tools, native_handlers);
 

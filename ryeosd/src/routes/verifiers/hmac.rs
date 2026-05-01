@@ -1327,7 +1327,7 @@ mod tests {
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
                 ryeos_engine::parsers::ParserRegistry::empty(),
-                ryeos_engine::parsers::NativeParserHandlerRegistry::with_builtins(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
             ),
             None,
             Vec::new(),

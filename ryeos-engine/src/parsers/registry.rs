@@ -678,7 +678,7 @@ formats:
         let yaml = "\
 version: \"1.0.0\"
 description: \"yaml document parser\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config:
   require_mapping: true
@@ -690,7 +690,7 @@ parser_config:
         let (reg, dups) = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
         assert!(dups.is_empty());
         let d = reg.get("parser:rye/core/yaml/yaml").unwrap();
-        assert_eq!(d.executor_id, "native:parser_yaml_document");
+        assert_eq!(d.handler, "handler:rye/core/yaml-document");
         assert_eq!(d.parser_api_version, 1);
         assert!(!reg.fingerprint().is_empty());
     }
@@ -708,7 +708,7 @@ parser_config:
 
         let yaml = "\
 version: \"1.0.0\"
-executor_id: \"native:bash\"
+handler: \"handler:rye/core/yaml-document\"
 ";
         let p = root.join(".ai/parsers/rye/core/something.yaml");
         write_signed(&p, yaml, &sk);
@@ -728,7 +728,7 @@ executor_id: \"native:bash\"
 
         let yaml = "\
 version: \"1.0.0\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
@@ -758,14 +758,14 @@ parser_config: {}
         let yaml_a = "\
 version: \"1.0.0\"
 description: \"A wins\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         let yaml_b = "\
 version: \"2.0.0\"
 description: \"B loses\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
@@ -805,14 +805,14 @@ parser_config: {}
         let yaml_base = "\
 version: \"1.0.0\"
 description: \"base\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         let yaml_proj = "\
 version: \"9.0.0\"
 description: \"project override\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
@@ -859,7 +859,7 @@ formats:
 
         let yaml = "\
 version: \"1.0.0\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
@@ -922,14 +922,14 @@ parser_config: {}
         let yaml_a = "\
 version: \"1.0.0\"
 description: \"overlay file A\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         let yaml_b = "\
 version: \"2.0.0\"
 description: \"overlay file B\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
@@ -1053,7 +1053,7 @@ formats:
 
         let yaml = "\
 version: \"1.0.0\"
-executor_id: \"native:parser_yaml_document\"
+handler: \"handler:rye/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 totally_made_up_field: hi

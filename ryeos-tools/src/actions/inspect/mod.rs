@@ -15,7 +15,10 @@ use anyhow::{Context, Result};
 
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use std::sync::Arc;
+
+use ryeos_engine::handlers::HandlerRegistry;
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
@@ -70,8 +73,9 @@ fn build_parser_dispatcher(
     }
     let (parser_tools, _) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
-    let native_handlers = NativeParserHandlerRegistry::with_builtins();
-    Ok(ParserDispatcher::new(parser_tools, native_handlers))
+    let handlers = HandlerRegistry::load_base(&search, trust_store)
+        .with_context(|| "load handler descriptors")?;
+    Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
 }
 
 /// Discover installed bundle roots from the daemon state directory.

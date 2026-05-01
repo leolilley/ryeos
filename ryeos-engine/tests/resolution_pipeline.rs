@@ -18,33 +18,29 @@ use ryeos_engine::resolution::run_resolution_pipeline;
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 use ryeos_engine::{contracts::ItemSpace, item_resolution::ResolutionRoots};
 
-/// Local test seam — builds a dispatcher with only the parser
-/// descriptors this integration test actually exercises (yaml +
-/// markdown directive). Mirrors the live bundle config but stays
-/// out-of-crate so we don't depend on engine-internal test helpers.
 fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
     use serde_json::json;
-    let mk = |executor_id: &str, parser_config: serde_json::Value| ParserDescriptor {
+    let mk = |handler: &str, parser_config: serde_json::Value| ParserDescriptor {
         version: "1.0.0".into(),
         category: None,
         description: None,
-        executor_id: executor_id.into(),
+        handler: handler.into(),
         parser_api_version: 1,
         parser_config,
         output_schema: ryeos_engine::contracts::ValueShape::any_mapping(),
     };
-    ParserDispatcher::from_descriptors(vec![
+    let entries = vec![
         (
             "parser:rye/core/yaml/yaml".to_string(),
             mk(
-                "native:parser_yaml_document",
+                "handler:rye/core/yaml-document",
                 json!({ "require_mapping": true }),
             ),
         ),
         (
             "parser:rye/core/markdown/directive".to_string(),
             mk(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 json!({
                     "require_header": true,
                     "body_field": "body",
@@ -55,7 +51,8 @@ fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
                 }),
             ),
         ),
-    ])
+    ];
+    ryeos_engine::test_support::build_parser_dispatcher_from_roots(entries)
 }
 
 fn signing_key() -> SigningKey {

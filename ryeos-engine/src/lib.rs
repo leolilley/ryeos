@@ -22,6 +22,9 @@ pub mod runtime_registry;
 pub mod scope;
 pub mod trust;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 /// The working directory name used in all three spaces.
 /// Every space follows: `base_path / AI_DIR / {kind_directory} / {item_id}`
 pub const AI_DIR: &str = ".ai";

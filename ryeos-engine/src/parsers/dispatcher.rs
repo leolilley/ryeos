@@ -1,73 +1,47 @@
-//! `ParserDispatcher` — engine-local synchronous parser invocation.
+//! `ParserDispatcher` — subprocess-based parser dispatch via HandlerRegistry.
 //!
-//! Resolves a parser ref (canonical `tool:` ref) → descriptor →
-//! native handler. Handles signature stripping, then hands the cleaned
-//! content to the handler. Never goes through the launcher / runtime.
+//! Resolves a parser ref (canonical `parser:` ref) → descriptor → handler
+//! binary. Spawns the handler subprocess with a `HandlerRequest::Parse`,
+//! parses the JSON response. Never calls native handlers in-process.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use ryeos_handler_protocol::{
+    HandlerRequest, HandlerResponse, ParseRequest, ValidateParserConfigRequest,
+};
 use serde_json::Value;
 
 use crate::contracts::SignatureEnvelope;
 use crate::error::EngineError;
+use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 
-use super::handlers::{NativeParserHandlerRegistry, ParseInput};
 use super::registry::ParserRegistry;
 
-/// Dispatcher cloning is cheap: `parser_tools` is a `HashMap` of
-/// owned descriptors (Clone), and the handler registry is held behind
-/// an `Arc` so per-request overlays don't have to rebuild handler
-/// state. Each request can fork an effective dispatcher with the
-/// project overlay applied to `parser_tools` while sharing the same
-/// handler set.
+const PARSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct ParserDispatcher {
     pub parser_tools: ParserRegistry,
-    pub native_handlers: Arc<NativeParserHandlerRegistry>,
+    handlers: Arc<HandlerRegistry>,
 }
 
 impl ParserDispatcher {
-    pub fn new(
-        parser_tools: ParserRegistry,
-        native_handlers: NativeParserHandlerRegistry,
-    ) -> Self {
+    pub fn new(parser_tools: ParserRegistry, handlers: Arc<HandlerRegistry>) -> Self {
         Self {
             parser_tools,
-            native_handlers: Arc::new(native_handlers),
+            handlers,
         }
     }
 
-    /// Build a dispatcher that shares this dispatcher's handler set
-    /// but uses a different `ParserRegistry`. Used by
-    /// `Engine::effective_parser_dispatcher` to apply a per-request
-    /// project overlay without reconstructing handlers.
     pub fn with_parser_tools(&self, parser_tools: ParserRegistry) -> Self {
         Self {
             parser_tools,
-            native_handlers: Arc::clone(&self.native_handlers),
+            handlers: Arc::clone(&self.handlers),
         }
     }
 
-    /// Test-only convenience: build a dispatcher from a list of
-    /// `(canonical_ref, descriptor)` pairs and the built-in native
-    /// handlers. Production code loads `ParserRegistry` from disk via
-    /// `ParserRegistry::load_base`.
-    pub fn from_descriptors(
-        entries: Vec<(String, super::descriptor::ParserDescriptor)>,
-    ) -> Self {
-        Self::new(
-            ParserRegistry::from_entries(entries),
-            NativeParserHandlerRegistry::with_builtins(),
-        )
-    }
-
-    /// Resolve `parser_ref` → descriptor → native handler, then run it.
-    ///
-    /// Signature stripping uses the kind-specific
-    /// `signature_envelope` so a `# rye:signed:...` line in the body of
-    /// a markdown file (whose envelope is `<!-- ... -->`) is never
-    /// mistakenly stripped as if it were the bootstrap signature.
     pub fn dispatch(
         &self,
         parser_ref: &str,
@@ -87,38 +61,107 @@ impl ParserDispatcher {
             }
         })?;
 
-        let handler_name = descriptor
-            .executor_id
-            .strip_prefix("native:")
-            .ok_or_else(|| EngineError::Internal(format!(
-                "parser `{parser_ref}` has non-native executor `{}`; \
-                 only `native:` parsers are supported in v1",
-                descriptor.executor_id
-            )))?;
-
         let handler = self
-            .native_handlers
-            .get(handler_name)
-            .ok_or_else(|| EngineError::Internal(format!(
-                "parser `{parser_ref}` references unknown native handler `{handler_name}`"
-            )))?;
+            .handlers
+            .ensure_serves(&descriptor.handler, HandlerServes::Parser)
+            .map_err(EngineError::Handler)?;
 
-        // Strip ONLY signatures wrapped in this kind's envelope. A
-        // `# rye:signed:...` line that lives in the body of a markdown
-        // document (envelope `<!-- ... -->`) is not part of the
-        // bootstrap signature layer and must reach the parser intact.
         let stripped = lillux::signature::strip_signature_lines_with_envelope(
             content,
             &signature_envelope.prefix,
             signature_envelope.suffix.as_deref(),
         );
 
-        handler.parse(
-            &descriptor.parser_config,
-            ParseInput {
-                content: &stripped,
-                path,
-            },
-        )
+        let request = HandlerRequest::Parse(ParseRequest {
+            parser_config: descriptor.parser_config.clone(),
+            content: stripped,
+            source_path: path.map(|p| p.display().to_string()),
+        });
+
+        let resp = run_handler_subprocess(handler, &request, PARSE_TIMEOUT)?;
+
+        match resp {
+            HandlerResponse::ParseOk { value } => Ok(value),
+            HandlerResponse::ParseErr { kind, message } => {
+                Err(EngineError::ParserFailed {
+                    parser_id: parser_ref.into(),
+                    kind: crate::error::ParseErrKind::from_wire(kind),
+                    message,
+                })
+            }
+            other => Err(EngineError::Internal(format!(
+                "parser handler returned unexpected response: {other:?}"
+            ))),
+        }
     }
+
+    pub fn validate_config(&self, parser_ref: &str) -> Result<(), EngineError> {
+        let descriptor = self.parser_tools.get(parser_ref).ok_or_else(|| {
+            EngineError::ParserNotRegistered {
+                parser_id: parser_ref.to_string(),
+            }
+        })?;
+
+        let handler = self
+            .handlers
+            .ensure_serves(&descriptor.handler, HandlerServes::Parser)
+            .map_err(EngineError::Handler)?;
+
+        let request =
+            HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
+                parser_config: descriptor.parser_config.clone(),
+            });
+
+        let resp = run_handler_subprocess(handler, &request, PARSE_TIMEOUT)?;
+
+        match resp {
+            HandlerResponse::ValidateOk => Ok(()),
+            HandlerResponse::ValidateErr { message } => Err(EngineError::ParserFailed {
+                parser_id: parser_ref.into(),
+                kind: crate::error::ParseErrKind::Internal,
+                message,
+            }),
+            other => Err(EngineError::Internal(format!(
+                "parser handler returned unexpected response to validate_config: {other:?}"
+            ))),
+        }
+    }
+}
+
+fn run_handler_subprocess(
+    handler: &VerifiedHandler,
+    request: &HandlerRequest,
+    timeout: Duration,
+) -> Result<HandlerResponse, EngineError> {
+    let request_json = serde_json::to_string(request)
+        .map_err(|e| EngineError::Internal(format!("encode handler request: {e}")))?;
+
+    let req = lillux::exec::SubprocessRequest {
+        cmd: handler.resolved_binary_path.display().to_string(),
+        args: vec![],
+        cwd: None,
+        envs: vec![],
+        stdin_data: Some(request_json),
+        timeout: timeout.as_secs_f64(),
+    };
+
+    let output = lillux::exec::lib_run(req);
+    if !output.success {
+        if output.timed_out {
+            return Err(EngineError::HandlerSpawnFailed {
+                handler: handler.canonical_ref.clone(),
+                detail: format!("timed out after {}s", output.duration_ms / 1000.0),
+            });
+        }
+        return Err(EngineError::HandlerExitNonZero {
+            handler: handler.canonical_ref.clone(),
+            exit_code: output.exit_code,
+            stderr: output.stderr,
+        });
+    }
+
+    serde_json::from_str(&output.stdout).map_err(|e| EngineError::HandlerProtocolViolation {
+        handler: handler.canonical_ref.clone(),
+        detail: e.to_string(),
+    })
 }

@@ -30,7 +30,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use std::sync::Arc;
+
+use ryeos_engine::handlers::HandlerRegistry;
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 /// Verify every signable item in a bundle source tree.
@@ -102,11 +105,26 @@ pub fn preflight_verify_bundle(
     // 4. Load parser tools. Search roots: system, user, and the bundle
     //    being verified — bundles MAY ship their own parser descriptors
     //    needed for new kinds they introduce. Trust still gates loading.
-    let mut parser_search_roots: Vec<PathBuf> = vec![system_data_dir.to_path_buf()];
+    //
+    //    Dedupe by canonicalized path: when `source_path == system_data_dir`
+    //    (e.g. preflight verifying core in place during `rye init`) the
+    //    same root must not be walked twice — `HandlerRegistry::load_base`
+    //    rejects duplicate handler refs across roots.
+    let mut parser_search_roots: Vec<PathBuf> = Vec::new();
+    let mut seen_roots: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut push_unique = |path: PathBuf,
+                           roots: &mut Vec<PathBuf>,
+                           seen: &mut std::collections::HashSet<PathBuf>| {
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            roots.push(path);
+        }
+    };
+    push_unique(system_data_dir.to_path_buf(), &mut parser_search_roots, &mut seen_roots);
     if let Some(ur) = user_root {
-        parser_search_roots.push(ur.to_path_buf());
+        push_unique(ur.to_path_buf(), &mut parser_search_roots, &mut seen_roots);
     }
-    parser_search_roots.push(source_path.to_path_buf());
+    push_unique(source_path.to_path_buf(), &mut parser_search_roots, &mut seen_roots);
 
     // Diagnostic: warn if the source ships a legacy bundle-internal
     // trust dir, which the engine no longer treats as a trust source.
@@ -124,8 +142,10 @@ pub fn preflight_verify_bundle(
     let (parser_tools, _dups) =
         ParserRegistry::load_base(&parser_search_roots, &trust_store, &kinds)
             .context("preflight: load parser tools")?;
+    let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store)
+        .context("preflight: load handler descriptors")?;
     let parser_dispatcher =
-        ParserDispatcher::new(parser_tools, NativeParserHandlerRegistry::with_builtins());
+        ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
 
     // 5. Walk every signable file under each kind dir.
     let mut failures: Vec<String> = Vec::new();

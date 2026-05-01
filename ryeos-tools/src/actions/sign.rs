@@ -31,7 +31,10 @@ use lillux::crypto::{DecodePrivateKey, SigningKey};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindRegistry, KindSchema};
-use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use std::sync::Arc;
+
+use ryeos_engine::handlers::HandlerRegistry;
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
@@ -421,8 +424,9 @@ fn build_parser_dispatcher(
     }
     let (parser_tools, _duplicates) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
-    let native_handlers = NativeParserHandlerRegistry::with_builtins();
-    Ok(ParserDispatcher::new(parser_tools, native_handlers))
+    let handlers = HandlerRegistry::load_base(&search, trust_store)
+        .with_context(|| "load handler descriptors")?;
+    Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
 }
 
 /// Sign a file in place using the kind's signature envelope. Loads

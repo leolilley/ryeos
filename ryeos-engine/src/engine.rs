@@ -998,7 +998,7 @@ formats:
             &project_dir,
             "rye/core/yaml/yaml",
             "version: \"9.9.9-project-overlay\"\n\
-             executor_id: \"native:parser_yaml_document\"\n\
+             handler: \"handler:rye/core/yaml-document\"\n\
              parser_api_version: 1\n\
              parser_config: {}\n",
         );
@@ -1061,7 +1061,7 @@ formats:
             &project_dir,
             "proj/only",
             "version: \"1.0.0\"\n\
-             executor_id: \"native:parser_yaml_document\"\n\
+             handler: \"handler:rye/core/yaml-document\"\n\
              parser_api_version: 1\n\
              parser_config:\n  require_mapping: true\n",
         );
@@ -1140,7 +1140,7 @@ formats:
             &project_dir,
             "rye/core/yaml/yaml",
             "version: \"7.7.7-snapshot-test\"\n\
-             executor_id: \"native:parser_yaml_document\"\n\
+             handler: \"handler:rye/core/yaml-document\"\n\
              parser_api_version: 1\n\
              parser_config: {}\n",
         );

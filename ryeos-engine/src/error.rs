@@ -297,4 +297,47 @@ pub enum EngineError {
 
     #[error("internal engine error: {0}")]
     Internal(String),
+
+    // ── Handler subprocess dispatch ──────────────────────────────────
+
+    #[error("parser `{parser_id}` failed: {kind:?}: {message}")]
+    ParserFailed {
+        parser_id: String,
+        kind: ParseErrKind,
+        message: String,
+    },
+
+    #[error("handler `{handler}` spawn failed: {detail}")]
+    HandlerSpawnFailed { handler: String, detail: String },
+
+    #[error("handler `{handler}` exited with code {exit_code}; stderr: {stderr}")]
+    HandlerExitNonZero {
+        handler: String,
+        exit_code: i32,
+        stderr: String,
+    },
+
+    #[error("handler `{handler}` returned malformed response: {detail}")]
+    HandlerProtocolViolation { handler: String, detail: String },
+
+    #[error("handler error: {0}")]
+    Handler(#[from] crate::handlers::HandlerError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParseErrKind {
+    Syntax,
+    Schema,
+    Internal,
+}
+
+impl ParseErrKind {
+    pub fn from_wire(wire: ryeos_handler_protocol::ParseErrKind) -> Self {
+        match wire {
+            ryeos_handler_protocol::ParseErrKind::Syntax => Self::Syntax,
+            ryeos_handler_protocol::ParseErrKind::Schema => Self::Schema,
+            ryeos_handler_protocol::ParseErrKind::Internal => Self::Internal,
+        }
+    }
 }

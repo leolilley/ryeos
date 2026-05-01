@@ -21,11 +21,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
 use crate::contracts::ContractViolation;
+use crate::handlers::{HandlerRegistry, HandlerServes};
 use crate::kind_registry::KindRegistry;
-use crate::parsers::{DuplicateRef, NativeParserHandlerRegistry, ParserRegistry};
+use crate::parsers::{DuplicateRef, ParserRegistry};
+use ryeos_handler_protocol::{HandlerRequest, HandlerResponse, ValidateParserConfigRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootIssue {
@@ -36,16 +39,22 @@ pub enum BootIssue {
         ext: String,
         parser_ref: String,
     },
-    /// A parser descriptor's `executor_id` references an unknown
-    /// `native:` handler.
-    UnknownNativeHandler {
+    /// A parser descriptor's `handler` references an unknown handler.
+    UnknownHandler {
         parser_ref: String,
         handler: String,
     },
-    /// A parser descriptor's `parser_config` failed handler validation.
+    /// A parser descriptor's `parser_config` failed handler validation
+    /// via subprocess.
     InvalidParserConfig {
         parser_ref: String,
         reason: String,
+    },
+    /// Handler binary spawn failed during config validation.
+    HandlerUnusable {
+        parser_ref: String,
+        handler: String,
+        detail: String,
     },
     /// A composer is registered for a kind that doesn't exist in the
     /// `KindRegistry`. Composer registration is explicit, so this is
@@ -96,17 +105,13 @@ pub enum BootIssue {
 pub fn validate_boot(
     kinds: &KindRegistry,
     parser_tools: &ParserRegistry,
-    native_handlers: &NativeParserHandlerRegistry,
+    handler_registry: &Arc<HandlerRegistry>,
     native_composers: &NativeComposerHandlerRegistry,
     composers: &ComposerRegistry,
     dup_refs: &[DuplicateRef],
 ) -> Result<(), Vec<BootIssue>> {
     let mut issues: Vec<BootIssue> = Vec::new();
 
-    // Loader-detected canonical-ref collisions are always fatal: two
-    // different parser YAMLs trying to occupy the same slot is an
-    // ambiguous configuration even when first-found-wins picks a
-    // deterministic winner.
     for dup in dup_refs {
         issues.push(BootIssue::DuplicateParserRef {
             parser_ref: dup.canonical_ref.clone(),
@@ -114,8 +119,6 @@ pub fn validate_boot(
         });
     }
 
-    // Cache parser config validation results so we don't re-run the
-    // handler check once per kind that uses the same parser ref.
     let mut config_checked: HashMap<String, ()> = HashMap::new();
 
     for kind in kinds.kinds().map(|s| s.to_string()).collect::<Vec<_>>() {
@@ -139,55 +142,99 @@ pub fn validate_boot(
                 }
             };
 
-            let handler_name = match descriptor.executor_id.strip_prefix("native:") {
-                Some(h) => h,
-                None => {
-                    issues.push(BootIssue::UnknownNativeHandler {
+            let handler_result = handler_registry
+                .ensure_serves(&descriptor.handler, HandlerServes::Parser);
+
+            let handler = match &handler_result {
+                Ok(h) => Some(*h),
+                Err(_) => {
+                    issues.push(BootIssue::UnknownHandler {
                         parser_ref: parser_ref.clone(),
-                        handler: descriptor.executor_id.clone(),
+                        handler: descriptor.handler.clone(),
                     });
-                    continue;
+                    None
                 }
             };
 
-            let handler = match native_handlers.get(handler_name) {
-                Some(h) => h,
-                None => {
-                    issues.push(BootIssue::UnknownNativeHandler {
-                        parser_ref: parser_ref.clone(),
-                        handler: handler_name.to_string(),
-                    });
-                    continue;
-                }
-            };
+            if let Some(h) = handler {
+                if !config_checked.contains_key(parser_ref) {
+                    let request =
+                        HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
+                            parser_config: descriptor.parser_config.clone(),
+                        });
+                    let request_json = match serde_json::to_string(&request) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            issues.push(BootIssue::HandlerUnusable {
+                                parser_ref: parser_ref.clone(),
+                                handler: descriptor.handler.clone(),
+                                detail: format!("encode request: {e}"),
+                            });
+                            config_checked.insert(parser_ref.clone(), ());
+                            // Still fall through to contract check
+                            schedule_contract_check(
+                                &mut issues,
+                                &kind,
+                                ext,
+                                parser_ref,
+                                &schema,
+                                &descriptor,
+                            );
+                            continue;
+                        }
+                    };
 
-            if !config_checked.contains_key(parser_ref) {
-                if let Err(reason) = handler.validate_config(&descriptor.parser_config) {
-                    issues.push(BootIssue::InvalidParserConfig {
-                        parser_ref: parser_ref.clone(),
-                        reason,
-                    });
+                    let req = lillux::exec::SubprocessRequest {
+                        cmd: h.resolved_binary_path.display().to_string(),
+                        args: vec![],
+                        cwd: None,
+                        envs: vec![],
+                        stdin_data: Some(request_json),
+                        timeout: 30.0,
+                    };
+
+                    let output = lillux::exec::lib_run(req);
+                    if !output.success {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!(
+                                "exit code {}: {}",
+                                output.exit_code,
+                                output.stderr.trim()
+                            ),
+                        });
+                    } else {
+                        match serde_json::from_str::<HandlerResponse>(&output.stdout) {
+                            Ok(HandlerResponse::ValidateOk) => {}
+                            Ok(HandlerResponse::ValidateErr { message }) => {
+                                issues.push(BootIssue::InvalidParserConfig {
+                                    parser_ref: parser_ref.clone(),
+                                    reason: message,
+                                });
+                            }
+                            Ok(other) => {
+                                issues.push(BootIssue::HandlerUnusable {
+                                    parser_ref: parser_ref.clone(),
+                                    handler: descriptor.handler.clone(),
+                                    detail: format!("unexpected response: {other:?}"),
+                                });
+                            }
+                            Err(e) => {
+                                issues.push(BootIssue::HandlerUnusable {
+                                    parser_ref: parser_ref.clone(),
+                                    handler: descriptor.handler.clone(),
+                                    detail: format!("malformed response: {e}"),
+                                });
+                            }
+                        }
+                    }
+                    config_checked.insert(parser_ref.clone(), ());
                 }
-                config_checked.insert(parser_ref.clone(), ());
             }
 
-            // Parser → composer wiring contract.
-            // ALWAYS enforced. Both fields are mandatory at the
-            // schema/descriptor layer (serde-required + manual
-            // YAML parser require), so there's no opt-in skip.
-            // Aggregates all violations.
-            let _ = handler; // contract check uses descriptor only
-            for violation in schema
-                .composed_value_contract
-                .is_satisfied_by(&descriptor.output_schema)
-            {
-                issues.push(BootIssue::ParserComposerContractViolation {
-                    kind: kind.clone(),
-                    ext: ext.ext.clone(),
-                    parser_ref: parser_ref.clone(),
-                    violation,
-                });
-            }
+            // Contract check always runs regardless of handler availability.
+            schedule_contract_check(&mut issues, &kind, ext, parser_ref, &schema, &descriptor);
         }
     }
 
@@ -240,6 +287,27 @@ pub fn validate_boot(
     }
 }
 
+fn schedule_contract_check(
+    issues: &mut Vec<BootIssue>,
+    kind: &str,
+    ext: &crate::kind_registry::ExtensionSpec,
+    parser_ref: &str,
+    schema: &crate::kind_registry::KindSchema,
+    descriptor: &crate::parsers::ParserDescriptor,
+) {
+    for violation in schema
+        .composed_value_contract
+        .is_satisfied_by(&descriptor.output_schema)
+    {
+        issues.push(BootIssue::ParserComposerContractViolation {
+            kind: kind.to_string(),
+            ext: ext.ext.clone(),
+            parser_ref: parser_ref.to_string(),
+            violation,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,22 +316,21 @@ mod tests {
     };
     use crate::kind_registry::KindRegistry;
     use crate::parsers::descriptor::ParserDescriptor;
-    use crate::parsers::handlers::{NativeParserHandler, ParseInput};
-    use crate::parsers::{NativeParserHandlerRegistry, ParserRegistry};
+    use crate::parsers::ParserRegistry;
     use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use serde_json::Value;
     use std::fs;
     use std::sync::Arc;
 
+    fn handler_registry() -> Arc<HandlerRegistry> {
+        Arc::new(HandlerRegistry::empty())
+    }
+
     fn native_composers() -> NativeComposerHandlerRegistry {
         NativeComposerHandlerRegistry::with_builtins()
     }
 
-    /// Build the canonical composer registry from `kinds`, using the
-    /// built-in native composer handlers. Replaces the old
-    /// `ComposerRegistry::with_defaults()` shortcut at every test
-    /// callsite — composer wiring is now data-driven.
     fn composers_from(kinds: &KindRegistry) -> ComposerRegistry {
         ComposerRegistry::from_kinds(kinds, &native_composers()).unwrap()
     }
@@ -294,13 +361,7 @@ mod tests {
         }])
     }
 
-    /// Write a minimal directive kind schema referencing the supplied
-    /// parser canonical ref. The schema is the smallest thing
-    /// `KindRegistry::load_base` will accept that has one extension
-    /// + one parser ref to validate against.
     fn write_directive_kind(root: &std::path::Path, parser_ref: &str, sk: &SigningKey) {
-        // Every kind schema now MUST declare composed_value_contract
-        // and composer.
         let yaml = format!(
             "\
 location:
@@ -323,21 +384,18 @@ composed_value_contract:
         fs::write(dir.join("directive.kind-schema.yaml"), signed).unwrap();
     }
 
-    fn parser_descriptor(executor_id: &str, parser_config: Value) -> ParserDescriptor {
+    fn parser_descriptor(handler: &str, parser_config: Value) -> ParserDescriptor {
         ParserDescriptor {
             version: "1.0.0".into(),
             category: None,
             description: None,
-            executor_id: executor_id.into(),
+            handler: handler.into(),
             parser_api_version: 1,
             parser_config,
             output_schema: crate::contracts::ValueShape::any_mapping(),
         }
     }
 
-    /// Same as `write_directive_kind` but appends a
-    /// `composed_value_contract` block so the boot validator runs the
-    /// parser→composer wiring check.
     fn write_directive_kind_with_contract(
         root: &std::path::Path,
         parser_ref: &str,
@@ -377,7 +435,7 @@ composed_value_contract:
     }
 
     fn parser_descriptor_with_schema(
-        executor_id: &str,
+        handler: &str,
         parser_config: Value,
         output_schema: crate::contracts::ValueShape,
     ) -> ParserDescriptor {
@@ -385,7 +443,7 @@ composed_value_contract:
             version: "1.0.0".into(),
             category: None,
             description: None,
-            executor_id: executor_id.into(),
+            handler: handler.into(),
             parser_api_version: 1,
             parser_config,
             output_schema,
@@ -400,18 +458,15 @@ composed_value_contract:
         KindRegistry::load_base(&[root], &ts).unwrap()
     }
 
-    /// Happy path: kind references a parser tool that exists, executor
-    /// is a known native handler, parser_config validates, and the
-    /// composer registered for `directive` matches a known kind.
     #[test]
-    fn validate_boot_happy_path() {
+    fn validate_boot_parser_ref_resolves_and_handler_checked() {
         let parser_ref = "parser:rye/core/markdown/frontmatter";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -421,10 +476,18 @@ composed_value_contract:
                 }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).expect("happy path Ok");
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        assert!(issues.iter().any(|i| matches!(
+            i,
+            BootIssue::UnknownHandler { .. }
+        )));
+        assert!(!issues.iter().any(|i| matches!(
+            i,
+            BootIssue::DanglingParserRef { .. }
+        )));
     }
 
     #[test]
@@ -432,10 +495,10 @@ composed_value_contract:
         let parser_ref = "tool:does/not/exist";
         let kinds = kinds_with_directive(parser_ref);
         let parsers = ParserRegistry::empty();
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DanglingParserRef { parser_ref: pr, kind, .. }
@@ -444,31 +507,27 @@ composed_value_contract:
     }
 
     #[test]
-    fn unknown_native_handler_emitted() {
+    fn unknown_handler_emitted() {
         let parser_ref = "parser:rye/core/x/x";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
-            // executor_id with `native:` prefix but unknown handler suffix
-            parser_descriptor("native:totally_made_up_handler", serde_json::json!({})),
+            parser_descriptor("handler:rye/core/totally_made_up", serde_json::json!({})),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
-            BootIssue::UnknownNativeHandler { handler, .. }
-                if handler == "totally_made_up_handler"
+            BootIssue::UnknownHandler { handler, .. }
+                if handler == "handler:rye/core/totally_made_up"
         )));
     }
 
     #[test]
-    fn unknown_native_handler_no_native_prefix() {
-        // `executor_id` without a `native:` prefix is also reported via
-        // UnknownNativeHandler — the handler name in the issue is the
-        // raw executor_id.
+    fn unknown_handler_non_handler_prefix() {
         let parser_ref = "parser:rye/core/x/x";
         let kinds = kinds_with_directive(parser_ref);
 
@@ -476,52 +535,48 @@ composed_value_contract:
             parser_ref.to_string(),
             parser_descriptor("subprocess:python", serde_json::json!({})),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
-            BootIssue::UnknownNativeHandler { handler, .. } if handler == "subprocess:python"
+            BootIssue::UnknownHandler { handler, .. } if handler == "subprocess:python"
         )));
     }
 
     #[test]
-    fn invalid_parser_config_emitted() {
+    fn handler_unusable_emitted_for_missing_binary() {
         let parser_ref = "parser:rye/core/yaml/yaml";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
-            // require_mapping must be a bool — pass a string to fail
-            // YamlDocumentHandler::validate_config.
             parser_descriptor(
-                "native:parser_yaml_document",
+                "handler:rye/core/yaml-document",
                 serde_json::json!({ "require_mapping": "yes please" }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
-            BootIssue::InvalidParserConfig { parser_ref: pr, .. } if pr == parser_ref
+            BootIssue::UnknownHandler { parser_ref: pr, .. } if pr == parser_ref
         )));
     }
 
     #[test]
     fn composer_for_unknown_kind_emitted() {
-        // No directive kind in the registry, but a composer IS
-        // registered for `directive` — should report.
         let kinds = KindRegistry::empty();
         let parsers = ParserRegistry::empty();
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let mut composers = ComposerRegistry::new();
         composers.register("directive", Arc::new(IdentityComposer), Value::Null);
         composers.register("graph", Arc::new(IdentityComposer), Value::Null);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
         let unknown_kinds: Vec<&str> = issues
             .iter()
             .filter_map(|i| match i {
@@ -533,85 +588,45 @@ composed_value_contract:
         assert!(unknown_kinds.contains(&"graph"));
     }
 
-    /// Aggregation: multiple issues across kinds returned together
-    /// (validator does not short-circuit).
     #[test]
     fn aggregates_multiple_issues() {
         let parser_ref = "parser:rye/core/yaml/yaml";
         let kinds = kinds_with_directive(parser_ref);
 
-        // Two faults at once:
-        // 1. invalid parser_config → InvalidParserConfig
-        // 2. ComposerForUnknownKind for a fake kind we register a composer for
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "native:parser_yaml_document",
+                "handler:rye/core/yaml-document",
                 serde_json::json!({ "require_mapping": "not a bool" }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let mut composers = composers_from(&kinds);
         composers.register("ghost_kind", Arc::new(IdentityComposer), Value::Null);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
-        let has_cfg = issues
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        let has_unknown = issues
             .iter()
-            .any(|i| matches!(i, BootIssue::InvalidParserConfig { .. }));
+            .any(|i| matches!(i, BootIssue::UnknownHandler { .. }));
         let has_ghost = issues.iter().any(|i| matches!(
             i,
             BootIssue::ComposerForUnknownKind { kind } if kind == "ghost_kind"
         ));
         assert!(
-            has_cfg && has_ghost,
+            has_unknown && has_ghost,
             "expected both faults reported, got: {issues:?}"
         );
         assert!(issues.len() >= 2);
     }
 
-
-    /// Sanity: a noop handler whose validate_config always succeeds
-    /// can be plugged in via `NativeParserHandlerRegistry::register`,
-    /// proving the validator consults the registry rather than a
-    /// hardcoded handler set.
-    #[test]
-    fn custom_handler_resolves_via_registry() {
-        struct Noop;
-        impl NativeParserHandler for Noop {
-            fn validate_config(&self, _: &Value) -> Result<(), String> {
-                Ok(())
-            }
-            fn parse(&self, _: &Value, _: ParseInput<'_>) -> Result<Value, crate::error::EngineError> {
-                Ok(Value::Null)
-            }
-        }
-
-        let parser_ref = "parser:rye/core/custom/x";
-        let kinds = kinds_with_directive(parser_ref);
-        let parsers = ParserRegistry::from_entries(vec![(
-            parser_ref.to_string(),
-            parser_descriptor("native:custom_noop", serde_json::json!({})),
-        )]);
-        let mut handlers = NativeParserHandlerRegistry::new();
-        handlers.register("custom_noop", Box::new(Noop));
-        let composers = composers_from(&kinds);
-        validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).expect("custom handler accepted");
-    }
-
-    /// `dup_refs` from the loader is surfaced as a structured
-    /// `BootIssue::DuplicateParserRef` — the validator does not silently
-    /// ignore loader collisions even when first-found-wins picked a
-    /// deterministic winner.
     #[test]
     fn duplicate_parser_ref_emitted() {
-        // Use a setup that is otherwise valid so the duplicate is the
-        // ONLY issue we expect.
         let parser_ref = "parser:rye/core/markdown/frontmatter";
         let kinds = kinds_with_directive(parser_ref);
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -621,7 +636,7 @@ composed_value_contract:
                 }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
         let dup_refs = vec![DuplicateRef {
@@ -632,7 +647,7 @@ composed_value_contract:
             ],
         }];
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &dup_refs).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &dup_refs).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DuplicateParserRef { parser_ref: pr, paths }
@@ -640,12 +655,7 @@ composed_value_contract:
         )), "expected DuplicateParserRef in {issues:?}");
     }
 
-    /// Build a kind schema for the `parser` kind itself referencing a
-    /// configurable canonical ref, mirroring the bundle's
-    /// `parser.kind-schema.yaml`. Used to exercise the self-hosting
-    /// invariant.
     fn write_parser_kind(root: &std::path::Path, parser_ref: &str, sk: &SigningKey) {
-        // Includes the now-mandatory composed_value_contract + composer.
         let yaml = format!(
             "\
 location:
@@ -667,10 +677,6 @@ composed_value_contract:
         fs::write(dir.join("parser.kind-schema.yaml"), signed).unwrap();
     }
 
-    /// Self-hosting invariant: the `parser` kind's own declared parser
-    /// must be present in the loaded `ParserRegistry`. If the YAML
-    /// parser used to parse parser-tool descriptors is missing, boot
-    /// must fail loud (caught by the per-kind extension walk).
     #[test]
     fn parser_kind_self_hosting_parser_must_resolve() {
         let root = tempdir();
@@ -679,12 +685,11 @@ composed_value_contract:
         write_parser_kind(&root, "parser:rye/core/yaml/yaml", &sk);
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
-        // Empty ParserRegistry → the self-hosting parser ref dangles.
         let parsers = ParserRegistry::empty();
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
 
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DanglingParserRef { kind, parser_ref, .. }
@@ -692,11 +697,8 @@ composed_value_contract:
         )), "expected DanglingParserRef for parser kind in {issues:?}");
     }
 
-    /// Companion happy-path: when the self-hosting parser IS present
-    /// in the registry, no DanglingParserRef is emitted for the
-    /// `parser` kind.
     #[test]
-    fn parser_kind_self_hosting_parser_present_passes() {
+    fn parser_kind_self_hosting_parser_present_no_dangling_ref() {
         let root = tempdir();
         let sk = signing_key();
         let ts = trust_store(&sk);
@@ -707,18 +709,22 @@ composed_value_contract:
         let parsers = ParserRegistry::from_entries(vec![(
             self_ref.to_string(),
             parser_descriptor(
-                "native:parser_yaml_document",
+                "handler:rye/core/yaml-document",
                 serde_json::json!({ "require_mapping": true }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
-        // No `parser` composer is registered (parsers don't compose),
-        // so use new() to avoid spurious ComposerForUnknownKind for
-        // `directive`.
+        let hr = handler_registry();
         let composers = ComposerRegistry::new();
 
-        validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[])
-            .expect("self-hosting parser resolves cleanly");
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        assert!(!issues.iter().any(|i| matches!(
+            i,
+            BootIssue::DanglingParserRef { .. }
+        )));
+        assert!(issues.iter().any(|i| matches!(
+            i,
+            BootIssue::UnknownHandler { .. }
+        )));
     }
 
     // ── Parser → composer wiring contract tests ──────────────────────
@@ -736,10 +742,8 @@ composed_value_contract:
         }
     }
 
-    /// Kind contract is satisfied by parser output_schema → no
-    /// `ParserComposerContractViolation`.
     #[test]
-    fn contract_satisfied_no_error() {
+    fn contract_satisfied_no_contract_violation() {
         let parser_ref = "parser:rye/core/markdown/directive";
         let kinds = kinds_with_directive_contract(
             parser_ref,
@@ -748,7 +752,7 @@ composed_value_contract:
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor_with_schema(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -757,23 +761,23 @@ composed_value_contract:
                 shape_with_required_body(),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
-        validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[])
-            .expect("contract satisfied path");
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
+        assert!(
+            !issues.iter().any(|i| matches!(
+                i,
+                BootIssue::ParserComposerContractViolation { .. }
+            )),
+            "expected no contract violations, got: {issues:?}"
+        );
     }
 
-    /// Kind schema YAML missing `composed_value_contract` is rejected
-    /// at load time — there is no longer an opt-in path. Replaces the
-    /// old `missing_output_schema_emitted` test (impossible state now
-    /// that both fields are mandatory).
     #[test]
     fn kind_schema_missing_contract_rejected_at_load() {
         let root = tempdir();
         let sk = signing_key();
         let ts = trust_store(&sk);
-        // Hand-write a directive kind schema WITHOUT
-        // composed_value_contract — must be rejected by the loader.
         let yaml = "\
 location:
   directory: directives
@@ -797,10 +801,6 @@ formats:
         );
     }
 
-    /// Kind schema YAML missing `composer` is rejected at load time.
-    /// Mirrors `kind_schema_missing_contract_rejected_at_load` for the
-    /// new required field — every kind must explicitly name its
-    /// composer handler ID.
     #[test]
     fn kind_schema_missing_composer_rejected_at_load() {
         let root = tempdir();
@@ -832,14 +832,8 @@ composed_value_contract:
         );
     }
 
-    /// A kind schema's `composer` field that names an unregistered
-    /// native composer handler must be flagged by the boot validator.
-    /// Composer-side equivalent of `dangling_parser_ref_emitted`.
     #[test]
     fn unknown_composer_handler_emitted() {
-        // Hand-build a kind schema whose composer ID is not in the
-        // native registry. We bypass `kinds_with_directive` so we can
-        // set `composer:` to something other than `rye/core/directive`.
         let root = tempdir();
         let sk = signing_key();
         let ts = trust_store(&sk);
@@ -863,11 +857,10 @@ composed_value_contract:
         fs::write(dir.join("directive.kind-schema.yaml"), signed).unwrap();
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
-        // Provide a parser to keep parser-side checks clean.
         let parsers = ParserRegistry::from_entries(vec![(
             "parser:rye/core/markdown/directive".to_string(),
             parser_descriptor(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -875,13 +868,10 @@ composed_value_contract:
                 }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
-        // Empty composer registry — we're testing the per-kind
-        // handler-ID resolution check, not the ComposerForUnknownKind
-        // check.
+        let hr = handler_registry();
         let composers = ComposerRegistry::new();
         let issues =
-            validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[])
+            validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[])
                 .unwrap_err();
         assert!(
             issues.iter().any(|i| matches!(
@@ -893,12 +883,9 @@ composed_value_contract:
         );
     }
 
-    /// All wiring violations aggregated at once: root_type mismatch,
-    /// missing required field, AND type mismatch — no short-circuit.
     #[test]
     fn aggregates_all_contract_violations() {
         let parser_ref = "parser:rye/core/markdown/directive";
-        // Kind needs mapping with body:string + name:string.
         let mut required = BTreeMap::new();
         required.insert("body".to_string(), FieldType::Single(PrimType::String));
         required.insert("name".to_string(), FieldType::Single(PrimType::String));
@@ -911,7 +898,6 @@ composed_value_contract:
             parser_ref,
             "  root_type: mapping\n  required:\n    body: string\n    name: string\n",
         );
-        // Parser declares: sequence root, body=integer, no name.
         let mut p_required = BTreeMap::new();
         p_required.insert("body".to_string(), FieldType::Single(PrimType::Integer));
         let bad_producer = ValueShape {
@@ -922,7 +908,7 @@ composed_value_contract:
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor_with_schema(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -931,9 +917,9 @@ composed_value_contract:
                 bad_producer,
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
+        let hr = handler_registry();
         let composers = composers_from(&kinds);
-        let issues = validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[]).unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[]).unwrap_err();
 
         let viols: Vec<&ContractViolation> = issues
             .iter()
@@ -960,17 +946,11 @@ composed_value_contract:
         );
     }
 
-    /// Two kinds with bad `composer_config` produce two
-    /// `InvalidComposerConfig` violations in one boot report —
-    /// validator does not short-circuit on the first.
     #[test]
     fn invalid_composer_config_aggregated() {
         let root = tempdir();
         let sk = signing_key();
         let ts = trust_store(&sk);
-        // Two kinds — both bind identity composer but pass non-empty
-        // configs, which identity rejects. Use distinct kinds so we
-        // can assert two distinct kind names appear.
         for (kind, junk) in [("alpha", "  unused: 1"), ("beta", "  also_unused: 2")] {
             let yaml = format!(
                 "\
@@ -1000,7 +980,7 @@ composed_value_contract:
         let parsers = ParserRegistry::from_entries(vec![(
             "parser:rye/core/markdown/x".to_string(),
             parser_descriptor(
-                "native:parser_yaml_header_document",
+                "handler:rye/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -1008,12 +988,10 @@ composed_value_contract:
                 }),
             ),
         )]);
-        let handlers = NativeParserHandlerRegistry::with_builtins();
-        // Empty composer registry — we're testing the per-kind
-        // composer-config check, not registry-side bookkeeping.
+        let hr = handler_registry();
         let composers = ComposerRegistry::new();
         let issues =
-            validate_boot(&kinds, &parsers, &handlers, &native_composers(), &composers, &[])
+            validate_boot(&kinds, &parsers, &hr, &native_composers(), &composers, &[])
                 .unwrap_err();
 
         let bad: Vec<&str> = issues

@@ -1,10 +1,22 @@
 //! Unified bundle binary resolution for runtimes + handlers.
 //!
-//! Accepts BOTH legacy `bin:<name>` refs (used by tool YAMLs that
-//! reference rye-inspect etc.) AND path-style `bin/<triple>/<name>`
-//! refs (used by runtime YAMLs and handler descriptors).
+//! Accepts two intentional cross-consumer ref shapes — neither is a
+//! compatibility shim; they're the canonical forms used by different
+//! authoring surfaces and the resolver normalizes both to the same
+//! verified `<bundle>/.ai/bin/<host_triple>/<name>` path:
 //!
-//! Verifies manifest hash and signer trust in both cases.
+//!   - `bin:<name>` — the canonical short form used by tool YAMLs.
+//!     The triple is implicit (always the host triple), so authors
+//!     don't have to mention it; it's also the form `rye-bundle-tool`
+//!     emits when describing tool binary refs.
+//!
+//!   - `bin/<triple>/<name>` — the path-style form used by runtime
+//!     YAMLs and handler descriptors. The triple is explicit so a
+//!     bundle can ship multiple architectures side-by-side and the
+//!     descriptor unambiguously names which one it covers.
+//!
+//! Both shapes go through the same manifest-hash + trust-store
+//! verification path below.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,7 +56,7 @@ pub fn resolve_bundle_binary_ref(
 
     // Determine the binary name and item_ref based on ref shape.
     let (bin_name, item_ref, bin_path) = if let Some(name) = binary_ref.strip_prefix("bin:") {
-        // Legacy shape: bin:<name>
+        // Canonical short shape: bin:<name> (triple implicit = host)
         let name = name.trim();
         if name.is_empty() {
             return Err(EngineError::InvalidBinPrefix {

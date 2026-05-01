@@ -12,8 +12,9 @@ use anyhow::{Context, Result};
 use ryeos_engine::boot_validation::validate_boot;
 use ryeos_engine::composers::{ComposerRegistry, NativeComposerHandlerRegistry};
 use ryeos_engine::engine::Engine;
+use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::roots;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
@@ -111,8 +112,22 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         "loaded parser tool descriptors"
     );
 
-    // 7. Build native parser handler registry
-    let native_handlers = NativeParserHandlerRegistry::with_builtins();
+    // 7. Load handler registry from bundle roots. Hard-error on any
+    //    failure: parser+composer dispatch routes through this registry,
+    //    and silently degrading to an empty registry produces confusing
+    //    "parser not registered" failures downstream instead of pointing
+    //    at the real load problem (no signed descriptors, bad manifest,
+    //    untrusted publisher, etc.).
+    let handler_registry = HandlerRegistry::load_base(
+        &system_roots.iter().chain(user_root.iter()).cloned().collect::<Vec<_>>(),
+        &trust_store,
+    )
+    .context("failed to load handler descriptors from bundle roots")?;
+    tracing::info!(
+        count = handler_registry.iter().count(),
+        "loaded handler descriptors"
+    );
+    let handler_registry = std::sync::Arc::new(handler_registry);
 
     // 8. Build native composer handler registry, then derive the
     //    per-kind composer registry data-drivenly from the loaded
@@ -130,7 +145,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     if let Err(issues) = validate_boot(
         &kinds,
         &parser_tools,
-        &native_handlers,
+        &handler_registry,
         &native_composers,
         &composers,
         &parser_duplicates,
@@ -146,7 +161,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     //     the SAME `composers` instance used by boot validation. The
     //     launcher reads the registry back off the engine — there is
     //     no second construction site that could drift.
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
+    let parser_dispatcher = ParserDispatcher::new(parser_tools, handler_registry);
 
     // Scan every bundle root (system + user, when present) for verified
     // `kind: runtime` YAMLs. Fail-closed on any verification error or

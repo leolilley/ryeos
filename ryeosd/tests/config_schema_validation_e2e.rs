@@ -18,7 +18,7 @@ use ryeos_engine::contracts::{
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry};
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 fn manifest_dir() -> PathBuf {
@@ -78,7 +78,7 @@ fn build_engine_against_bundle() -> Engine {
     let (parser_tools, _dups) =
         ParserRegistry::load_base(&[bundle_root.clone()], &trust_store, &kinds)
             .expect("parser tools load");
-    let native_handlers = NativeParserHandlerRegistry::with_builtins();
+    let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher = ParserDispatcher::new(parser_tools, native_handlers);
 
     let native_composers = NativeComposerHandlerRegistry::with_builtins();

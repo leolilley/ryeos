@@ -1892,6 +1892,7 @@ dependencies = [
  "jsonschema",
  "lillux",
  "regex",
+ "ryeos-handler-protocol",
  "ryeos-tracing",
  "serde",
  "serde_json",
@@ -1923,6 +1924,26 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ryeos-handler-bins"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "ryeos-handler-protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
+name = "ryeos-handler-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

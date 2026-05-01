@@ -25,8 +25,8 @@ pub struct ParserDescriptor {
     pub category: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// Native handler reference, e.g. `"native:parser_yaml_document"`.
-    pub executor_id: String,
+    /// Canonical handler ref, e.g. `"handler:rye/core/yaml-document"`.
+    pub handler: String,
     pub parser_api_version: u32,
     /// Opaque-to-the-engine config blob; the native handler validates
     /// and consumes it.

@@ -47,6 +47,7 @@ tokio-stream = "0.1.18"
 
 [dev-dependencies]
 tempfile = "3"
+ryeos-engine = { path = "../ryeos-engine", features = ["test-support"] }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-tracing = { path = "../ryeos-tracing", features = ["test-harness"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

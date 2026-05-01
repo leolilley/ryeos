@@ -1141,7 +1141,7 @@ mod tests {
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{
-        NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry,
+        ParserDispatcher, ParserRegistry,
     };
     use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
@@ -1219,7 +1219,7 @@ metadata:
             .expect("load runtime kind schema");
         let parser_dispatcher = ParserDispatcher::new(
             ParserRegistry::empty(),
-            NativeParserHandlerRegistry::with_builtins(),
+            std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
         );
         Engine::new(kinds, parser_dispatcher, None, vec![]).with_trust_store(ts)
     }
