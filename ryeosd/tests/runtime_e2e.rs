@@ -7,9 +7,9 @@
 //! - Schema-gated 501 for kinds with no `execution:` block (`config`,
 //!   `knowledge` in V5.3 — knowledge gains an execution block in V5.4).
 //! - Direct `runtime:*` invocation routes through
-//!   `dispatch::dispatch_native_runtime` (proven via the synth
-//!   pin-fake-runtime YAML reaching the schema-derived
-//!   `DispatchCapabilities` rejection rather than any legacy native
+//!   `dispatch::dispatch_managed_subprocess` (proven via the synth
+//!   pin-fake-runtime YAML reaching the protocol-derived
+//!   `ProtocolCapabilities` resolution rather than any legacy native
 //!   branch — the legacy branch is gone).
 //! - Multi-default conflict at startup is fail-closed: two runtimes
 //!   declaring `serves: <kind>` AND `default: true` for the same kind
@@ -142,15 +142,15 @@ async fn e2e_knowledge_ref_returns_501_in_v53() {
     );
 }
 
-// ── 3. Direct `runtime:*` invocation routes through dispatch_native_runtime ──
+// ── 3. Direct `runtime:*` invocation routes through dispatch_managed_subprocess ──
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // Plant a synth runtime in user space; auth-disabled wildcard
-    // scope satisfies `runtime.execute`, so dispatch_native_runtime
+    // scope satisfies `runtime.execute`, so dispatch_managed_subprocess
     // proceeds past the cap gate and reaches the binary materialization
     // step. The binary doesn't exist, so we expect an error mentioning
-    // `native:` (the executor_ref dispatch_native_runtime synthesizes)
+    // `native:` (the executor_ref dispatch_managed_subprocess synthesizes)
     // OR the bundle manifest. The KEY assertion: the error path is
     // taken, NOT a 200 silently fallthrough or a 500 generic.
     //
@@ -332,7 +332,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 // We synthesize: a directive item that exists in user space + a synth
 // runtime that serves "directive". The directive resolves; the loop
 // follows its `@directive` alias (via the kind-schema or registry)
-// onto `runtime:e2e-directive-runtime`; `dispatch_native_runtime`
+// onto `runtime:e2e-directive-runtime`; `dispatch_managed_subprocess`
 // sees `request.original_root_kind == "directive"` and SKIPS the cap
 // check. The materialization step then fails (no binary on disk),
 // but the failure mode must NOT be a 403 — that would prove the
@@ -407,7 +407,7 @@ inputs: {}
 // `binary_ref: badshape`. The dispatcher's order is:
 //
 //   1. resolve_dispatch_hop attaches VerifiedRuntime         (succeeds)
-//   2. dispatch_native_runtime: B1 cap gate (gated on
+    //   2. dispatch_managed_subprocess: B1 cap gate (gated on
 //      original_root_kind == "runtime")                       (skipped on indirect)
 //   3. check_dispatch_capabilities                            (succeeds)
 //   4. strip_binary_ref_prefix("badshape")                    (FAILS with
@@ -483,7 +483,7 @@ inputs: {}
     // emitted only by `strip_binary_ref_prefix` rejecting the
     // `binary_ref` shape. Its presence proves the dispatch loop walked
     // past the B1 cap-gate location (B1 fires earlier in
-    // dispatch_native_runtime than strip_binary_ref_prefix).
+    // dispatch_managed_subprocess than strip_binary_ref_prefix).
     let err_str = body
         .get("error")
         .and_then(|v| v.as_str())

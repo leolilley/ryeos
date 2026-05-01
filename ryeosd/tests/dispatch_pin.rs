@@ -6,16 +6,17 @@
 //! today produces.
 //!
 //! V5.3 Task 0b update — the three native-runtime rejection tests now
-//! drive `runtime:*` refs through the schema-derived
-//! `kind_registry::DispatchCapabilities` table (introduced by 0b),
-//! instead of the deleted V5.2-shape `tool:native_pin` synth (whose
-//! `tool_type: tool` + `__executor_id__: native:*` shape is no longer
-//! a real V5.3 dispatch path now that every runtime is `kind: runtime`).
-//! The wording of every rejection is preserved byte-identically — that
-//! is the point of these pin tests, and `DispatchCapabilities`'
-//! V5.2-line-cited table values are the source of truth for the move.
-//! Test names are intentionally retained so the mapping back to the
-//! historical V5.2 inline branches stays grep-able.
+//! drive `runtime:*` refs through the protocol-derived
+//! `ProtocolCapabilities` resolved from the verified protocol descriptor
+//! (introduced by 0b), instead of the deleted V5.2-shape `tool:native_pin`
+//! synth (whose `tool_type: tool` + `__executor_id__: native:*` shape is
+//! no longer a real V5.3 dispatch path now that every runtime is
+//! `kind: runtime`). The wording of every rejection is preserved
+//! byte-identically — that is the point of these pin tests, and
+//! `ProtocolCapabilities`' values from the protocol descriptor are the
+//! source of truth for the move. Test names are intentionally retained
+//! so the mapping back to the historical V5.2 inline branches stays
+//! grep-able.
 
 mod common;
 
@@ -69,8 +70,8 @@ pem = "ed25519:{key_b64}"
 /// colliding with any default runtime served from a real bundle.
 ///
 /// The binary need not exist on disk — every native pin test reaches
-/// only the `DispatchCapabilities` rejection in
-/// `dispatch_native_runtime`, which fires BEFORE
+/// only the `ProtocolCapabilities` resolution in
+/// `dispatch_managed_subprocess`, which fires BEFORE
 /// `launch::build_and_launch` materializes anything.
 fn install_pin_runtime(_state_path: &Path, user_space: &Path) -> anyhow::Result<()> {
     let sk = pin_test_signing_key();
@@ -258,7 +259,7 @@ async fn pin_native_runtime_with_detached() {
         serde_json::json!({
             "error": "detached mode not yet supported for native runtimes"
         }),
-        "exact error body shape (V5.3 Task 0b's DispatchCapabilities table reproduces this)"
+        "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"
     );
 }
 
@@ -280,7 +281,7 @@ async fn pin_native_runtime_with_target_site_id() {
         serde_json::json!({
             "error": "remote execution not yet supported for native runtimes"
         }),
-        "exact error body shape (V5.3 Task 0b's DispatchCapabilities table reproduces this)"
+        "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"
     );
 }
 

@@ -39,7 +39,7 @@ pub struct ProtocolDescriptor {
     #[serde(default)]
     pub env_injections: Vec<EnvInjection>,
 
-    /// Dispatch capability bits (replaces `DispatchCapabilities`).
+    /// Dispatch capability bits from the protocol descriptor.
     pub capabilities: ProtocolCapabilities,
 
     /// Lifecycle expectations.

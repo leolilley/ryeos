@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn unwrap_native_runtime_envelope_exposes_inner_result() {
-        // dispatch_native_runtime wraps RuntimeResult fields:
+        // dispatch_managed_subprocess wraps RuntimeResult fields:
         // `{success, status, result, outputs, warnings}`. Same unwrap
         // applies for graph→graph or graph→directive dispatches.
         let envelope = json!({

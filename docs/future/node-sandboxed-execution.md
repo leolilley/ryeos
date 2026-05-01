@@ -487,8 +487,8 @@ The shape:
 | `remote_broker`                  | Forward execution to a different verified node via the cluster broker, return result over the same channel.         | Both nodes attest; `ChainHop.trust_class` propagates across the broker hop.                  |
 | `wasm_sandbox`                   | Execute inside an in-process WASM runtime with capability-bound imports.                                            | The WASM runtime itself is a `kind: runtime` item; the sandbox terminator is what gates entry. |
 
-For each, **adding the terminator is one `TerminatorSpec` variant + one
-match arm in `dispatch::dispatch`**. The kind-schema YAML for any kind
+For each, **adding the protocol is one signed YAML descriptor + one
+kind-schema terminator reference**. The kind-schema YAML for any kind
 that wants this dispatch shape declares `terminator:
 node_sandboxed_subprocess` (or whichever) — no daemon code change to
 opt a new kind in.

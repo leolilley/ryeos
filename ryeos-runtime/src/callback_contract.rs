@@ -28,10 +28,9 @@ use serde_json::Value;
 /// returns at its `Ok(json!({ "thread": ..., "result": ... }))` site:
 ///
 /// * service terminator       (`dispatch_service`)
-/// * subprocess terminator    (`dispatch_subprocess`)
-/// * native runtime terminator (`dispatch_native_runtime`)
+/// * subprocess terminator    (`dispatch_subprocess` / `dispatch_managed_subprocess`)
 ///
-/// All three return identical-shape unary outcomes; this struct binds
+/// Both return identical-shape unary outcomes; this struct binds
 /// that contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

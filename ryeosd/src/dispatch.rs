@@ -510,12 +510,11 @@ pub async fn dispatch_service(
 
 // ── Native runtime terminator ─────────────────────────────────────────
 
-// Note: pre-P1.4 there was a `lookup_runtime_for_dispatch` helper that
-// re-resolved runtime refs from the engine. P1.4 made it dead — the
-// dispatch loop now attaches `VerifiedRuntime` to the hop via
+// The dispatch loop attaches `VerifiedRuntime` to the hop via
 // `RuntimeRegistry::lookup_by_ref` (see `resolve_dispatch_hop`), and
-// `dispatch_managed_subprocess` consumes that owned value. Don't reintroduce
-// a per-call lookup; the loop owns runtime metadata as part of the hop.
+// `dispatch_managed_subprocess` consumes that owned value. Don't
+// reintroduce a per-call lookup; the loop owns runtime metadata as
+// part of the hop.
 
 /// Strip the `bin/<triple>/` prefix from a runtime YAML's `binary_ref`.
 fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
@@ -1253,12 +1252,10 @@ metadata:
         Engine::new(kinds, parser_dispatcher, None, vec![]).with_trust_store(ts)
     }
 
-    // P1.4: tests for `lookup_runtime_for_dispatch` were removed when
-    // that helper was deleted. The dispatch loop now attaches the
-    // verified runtime to the hop via `RuntimeRegistry::lookup_by_ref`
-    // (covered by `runtime_registry` integration tests) and
-    // `dispatch_managed_subprocess` consumes that owned value, so the
-    // per-call lookup path no longer exists.
+    // The dispatch loop attaches the verified runtime to the hop via
+    // `RuntimeRegistry::lookup_by_ref` (covered by `runtime_registry`
+    // integration tests) and `dispatch_managed_subprocess` consumes
+    // that owned value, so no per-call lookup path exists.
 
     #[test]
     fn strip_binary_ref_prefix_strips_triple() {

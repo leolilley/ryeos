@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Protocol dispatch capability bits. Replaces the old
-/// `DispatchCapabilities` — same field names, same semantics,
-/// but sourced from the verified protocol descriptor, not a
-/// hardcoded table.
+/// Protocol dispatch capability bits. Sourced from the verified
+/// protocol descriptor, not a hardcoded table.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ProtocolCapabilities {
     pub allows_pushed_head: bool,

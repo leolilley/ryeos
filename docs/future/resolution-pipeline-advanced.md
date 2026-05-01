@@ -167,13 +167,13 @@ cut from scope:
 
 | Item                                              | Why deferred                                                                                                                                                | Trigger                                                                 |
 | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **Multiple in-process registries**                | V5.3 ships exactly one — `HandlerRegistryKind::Services`. The closed enum exists so future variants (`Parsers`, `Composers`, etc.) can land additively without reintroducing string dispatch. | A second daemon-internal handler family wants kind-schema-driven routing. |
+| **Multiple in-process registries**                | V5.3 ships exactly one — `InProcessRegistryKind::Services`. The closed enum exists so future variants (`Parsers`, `Composers`, etc.) can land additively without reintroducing string dispatch. | A second daemon-internal handler family wants kind-schema-driven routing. |
 | **Hot-reload runtime/bundle discovery**           | V5.3 scans bundle roots once at engine init. Re-scanning on bundle install/remove without daemon restart is a separate concern (file-watcher, registry diff, in-flight execution coherency). | First operator workflow that demands install-without-restart.            |
-| **Fourth terminator type** (`wasm_sandbox`, `remote_broker`) | V5.3 fixes the vocabulary at three terminators. Adding a fourth is a real architectural change requiring its own design — see `node-sandboxed-execution.md` for `remote_broker` and the broader sandbox-engines-as-providers shape. | First concrete consumer for sandboxed or remote-brokered execution.       |
+| **New protocol primitive** (`wasm_sandbox`, `remote_broker`) | V5.3 fixes the vocabulary at two terminators. New wire contracts are protocol descriptors (signed YAML), not new terminator types — see `node-sandboxed-execution.md` for `remote_broker` and the broader sandbox-engines-as-providers shape. Adding a new vocabulary primitive IS a real architectural change requiring its own design. | First concrete consumer for sandboxed or remote-brokered execution.       |
 
 The V5.3 dispatch loop is forward-compatible with all three: adding a
-registry variant is one enum case, adding a terminator is one
-`TerminatorSpec` variant + one match arm, and rescan-on-event is a
+registry variant is one enum case, adding a protocol is one signed YAML
+descriptor + kind-schema terminator reference, and rescan-on-event is a
 state-machine wrapper around the existing scan function. None require
 re-architecting the dispatch core.
 
