@@ -13,7 +13,7 @@ use ryeos_engine::boot_validation::validate_boot;
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
-use ryeos_engine::kind_registry::KindRegistry;
+use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::roots;
@@ -153,7 +153,14 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
     let composers = ComposerRegistry::from_kinds(&kinds, &handler_registry)
         .context("failed to derive composer registry from kind schemas")?;
 
-    // 9. Cross-registry boot validation: every parser ref a kind extension
+    // 9b. Validate that every Subprocess terminator's protocol_ref
+    //     resolves in the protocol registry. Unresolved refs are a
+    //     hard boot error — the daemon cannot dispatch a kind whose
+    //     protocol is unknown.
+    validate_terminator_refs(&kinds, &protocol_registry)
+        .context("terminator→protocol ref validation failed")?;
+
+    // 9c. Cross-registry boot validation: every parser ref a kind extension
     //    cites must resolve to a known descriptor + handler + valid config,
     //    every kind's declared composer handler ref must resolve and its
     //    composer_config must pass the handler's subprocess validation,
@@ -202,5 +209,28 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         .with_runtimes(runtimes);
 
     Ok(engine)
+}
+
+/// Walk every kind schema's terminator and verify that `Subprocess`
+/// terminators' `protocol_ref` values resolve in the protocol registry.
+fn validate_terminator_refs(
+    kinds: &KindRegistry,
+    protocols: &ProtocolRegistry,
+) -> Result<()> {
+    for kind_name in kinds.kinds() {
+        if let Some(schema) = kinds.get(kind_name) {
+            if let Some(exec) = &schema.execution {
+                if let Some(TerminatorDecl::Subprocess { protocol_ref }) = &exec.terminator {
+                    protocols.require(protocol_ref).with_context(|| {
+                        format!(
+                            "kind `{kind_name}` declares protocol `{protocol_ref}` \
+                             but no such protocol is registered in the protocol registry"
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 

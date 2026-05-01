@@ -406,18 +406,25 @@ pub struct RuntimeSpec {
     pub ignored_keys: Vec<String>,
 }
 
-/// How a kind terminates dispatch. Three variants only — adding a fourth
-/// is a real architectural change requiring its own design (see
-/// docs/future/resolution-pipeline-advanced.md "Cut from V5.3").
+/// How a kind terminates dispatch. Two variants only — `InProcess` for
+/// daemon-owned Rust handlers, `Subprocess` for everything that spawns a
+/// child binary. The child's envelope shape is determined by the
+/// `protocol_ref` field, which points into the `ProtocolRegistry`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(tag = "terminator", rename_all = "snake_case")]
-pub enum TerminatorSpec {
-    /// External executable; spawn subprocess, capture stdout/stderr/exit.
-    Subprocess,
-    /// Daemon-owned in-process handler; lookup by endpoint in named registry.
-    InProcessHandler { registry: HandlerRegistryKind },
-    /// Native runtime; materialize binary, spawn with LaunchEnvelope, await RuntimeResult.
-    NativeRuntimeSpawn,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminatorDecl {
+    /// Daemon calls a registered Rust fn in a named registry.
+    InProcess {
+        registry: InProcessRegistryKind,
+    },
+    /// Daemon spawns a child binary; envelope shape comes from the
+    /// referenced protocol descriptor.
+    Subprocess {
+        /// Canonical ref into ProtocolRegistry, e.g.
+        /// "protocol:rye/core/runtime_v1".
+        #[serde(rename = "protocol")]
+        protocol_ref: String,
+    },
 }
 
 /// Closed enum of named in-process handler registries. Single variant in V5.3
@@ -425,75 +432,8 @@ pub enum TerminatorSpec {
 /// docs/future/resolution-pipeline-advanced.md.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum HandlerRegistryKind {
+pub enum InProcessRegistryKind {
     Services,
-}
-
-/// Schema-derived dispatch capability bits per terminator. The table
-/// is fixed per V5.2 behavior (not a per-kind-YAML knob in V5.3) — it
-/// reproduces the inline rejection branches that V5.2 carried in
-/// `ryeosd/src/api/execute.rs` for the `is_native_executor` path,
-/// re-keyed by terminator so the new schema-driven dispatch core
-/// (`ryeosd/src/dispatch.rs`) can consult one place.
-///
-/// V5.3 Task 0b moves this from per-call inline checks in
-/// `api/execute.rs` (deleted) into `dispatch::dispatch_*` callers,
-/// which pass the request shape (launch_mode / target_site_id /
-/// project_source kind) down to the terminator gate. The pin tests in
-/// `ryeosd/tests/dispatch_pin.rs` lock the exact 400/409 wording.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DispatchCapabilities {
-    /// May the terminator be invoked when the request's project source
-    /// is `pushed_head` (a CAS HEAD checkout)? V5.2 behavior: native
-    /// runtime spawn says no; subprocess + in-process handlers say yes.
-    pub allows_pushed_head: bool,
-    /// May the terminator be invoked with `target_site_id` set
-    /// (remote-execution intent)? V5.2 behavior: native runtime spawn
-    /// says no; subprocess + in-process handlers say yes.
-    pub allows_target_site: bool,
-    /// May the terminator be invoked with `launch_mode == "detached"`?
-    /// V5.2 behavior: native runtime spawn says no; subprocess +
-    /// in-process handlers say yes.
-    pub allows_detached: bool,
-}
-
-/// V5.2 source-line provenance for the table values:
-///
-/// * `Subprocess` — V5.2 tool/directive path runs via
-///   `runner::run_inline` / `runner::run_detached`; today it gates
-///   nothing of these three at dispatch time, so all three bits are
-///   `true`.
-/// * `InProcessHandler { Services }` — V5.2 `service:` branch in
-///   `ryeosd/src/api/execute.rs` likewise rejected none of these
-///   three; preserved verbatim as `true / true / true`.
-/// * `NativeRuntimeSpawn` — V5.2 inline rejections lived around lines
-///   271–291 of `ryeosd/src/api/execute.rs` (deleted by Task 0b):
-///     * `pushed_head` → 400 "pushed_head not yet supported for native runtimes"
-///     * `target_site_id` → 400 "remote execution not yet supported for native runtimes"
-///     * `launch_mode == "detached"` → 400 "detached mode not yet supported for native runtimes"
-///   All three bits therefore `false`. Pin tests
-///   `pin_native_runtime_with_detached`,
-///   `pin_native_runtime_with_target_site_id` and
-///   `pin_native_runtime_with_pushed_head` lock the exact wording
-///   under the new `runtime:` shape.
-pub fn capabilities_for(terminator: &TerminatorSpec) -> DispatchCapabilities {
-    match terminator {
-        TerminatorSpec::Subprocess => DispatchCapabilities {
-            allows_pushed_head: true,
-            allows_target_site: true,
-            allows_detached: true,
-        },
-        TerminatorSpec::InProcessHandler { .. } => DispatchCapabilities {
-            allows_pushed_head: true,
-            allows_target_site: true,
-            allows_detached: true,
-        },
-        TerminatorSpec::NativeRuntimeSpawn => DispatchCapabilities {
-            allows_pushed_head: false,
-            allows_target_site: false,
-            allows_detached: false,
-        },
-    }
 }
 
 /// Mechanism by which a non-terminating, non-aliased kind delegates
@@ -555,8 +495,11 @@ pub struct ExecutionSchema {
     /// There is NO silent fallback to a legacy dispatch path. If a
     /// schema declares `execution:` with none of the three, that is a
     /// schema error caught at load time.
-    #[serde(default, skip)]
-    pub terminator: Option<TerminatorSpec>,
+    ///
+    /// The nested form is parsed natively by serde (tagged enum on
+    /// `kind`). No manual parse step.
+    #[serde(default)]
+    pub terminator: Option<TerminatorDecl>,
     /// Explicit delegation declaration. When `Some`, the dispatch
     /// loop is permitted to consult the declared mechanism (today:
     /// `RuntimeRegistry::lookup_for`). When `None`, the dispatcher
@@ -1471,7 +1414,15 @@ fn parse_execution_schema(
         }
     }
 
-    let terminator = parse_terminator_spec(execution_value, display)?;
+    let terminator = if let Some(t_value) = execution_value.get("terminator") {
+        Some(serde_yaml::from_value(t_value.clone()).map_err(|e| {
+            EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid terminator declaration: {e}"),
+            }
+        })?)
+    } else {
+        None
+    };
 
     let delegate = parse_delegation_spec(execution_value, display)?;
 
@@ -1483,7 +1434,7 @@ fn parse_execution_schema(
     // S1: load-time non-actionable schema rejection. A kind that
     // declares `execution:` MUST declare at least one routing
     // primitive the dispatcher can act on:
-    //   * a `terminator` (Subprocess / InProcessHandler / NativeRuntimeSpawn)
+    //   * a `terminator` (InProcess / Subprocess)
     //   * one or more `aliases` (which may include an `@<own_kind>`
     //     entry the dispatch loop walks via `FollowAlias`, OR
     //     `@<other>` entries used by `plan_builder` for tool-chain
@@ -1571,60 +1522,6 @@ fn parse_delegation_spec(
         }
     };
     Ok(Some(DelegationSpec { via }))
-}
-
-/// Parse the `execution.terminator` field (and its associated `registry`
-/// for `in_process_handler`) from a kind schema. Returns `None` when no
-/// terminator is declared. Closed-enum validation: any terminator name
-/// or registry name not in the Rust enum is a hard parse error.
-fn parse_terminator_spec(
-    execution_value: &serde_yaml::Value,
-    display: &str,
-) -> Result<Option<TerminatorSpec>, EngineError> {
-    let Some(t_value) = execution_value.get("terminator") else {
-        return Ok(None);
-    };
-    let t_str = t_value
-        .as_str()
-        .ok_or_else(|| EngineError::SchemaLoaderError {
-            reason: format!("{display}: `execution.terminator` must be a string"),
-        })?;
-    let spec = match t_str {
-        "subprocess" => TerminatorSpec::Subprocess,
-        "in_process_handler" => {
-            let registry_str = execution_value
-                .get("registry")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "{display}: `execution.terminator: in_process_handler` requires \
-                         a `registry` field"
-                    ),
-                })?;
-            let registry = match registry_str {
-                "services" => HandlerRegistryKind::Services,
-                other => {
-                    return Err(EngineError::SchemaLoaderError {
-                        reason: format!(
-                            "{display}: unknown handler registry `{other}` \
-                             (known: services)"
-                        ),
-                    });
-                }
-            };
-            TerminatorSpec::InProcessHandler { registry }
-        }
-        "native_runtime_spawn" => TerminatorSpec::NativeRuntimeSpawn,
-        other => {
-            return Err(EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{display}: unknown terminator `{other}` \
-                     (known: subprocess, in_process_handler, native_runtime_spawn)"
-                ),
-            });
-        }
-    };
-    Ok(Some(spec))
 }
 
 #[cfg(test)]
@@ -2202,12 +2099,19 @@ formats:
     fn execution_schema_parses_subprocess_terminator() {
         let yaml = "\
 execution:
-  terminator: subprocess
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/opaque
   aliases:
     \"@subprocess\": \"tool:rye/core/subprocess/execute\"
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
-        assert_eq!(exec.terminator, Some(TerminatorSpec::Subprocess));
+        assert_eq!(
+            exec.terminator,
+            Some(TerminatorDecl::Subprocess {
+                protocol_ref: "protocol:rye/core/opaque".into()
+            })
+        );
         assert_eq!(
             exec.aliases.get("@subprocess").map(|s| s.as_str()),
             Some("tool:rye/core/subprocess/execute")
@@ -2215,29 +2119,37 @@ execution:
     }
 
     #[test]
-    fn execution_schema_parses_in_process_handler_terminator_with_services_registry() {
+    fn execution_schema_parses_in_process_terminator_with_services_registry() {
         let yaml = "\
 execution:
-  terminator: in_process_handler
-  registry: services
+  terminator:
+    kind: in_process
+    registry: services
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(
             exec.terminator,
-            Some(TerminatorSpec::InProcessHandler {
-                registry: HandlerRegistryKind::Services
+            Some(TerminatorDecl::InProcess {
+                registry: InProcessRegistryKind::Services
             })
         );
     }
 
     #[test]
-    fn execution_schema_parses_native_runtime_spawn_terminator() {
+    fn execution_schema_parses_subprocess_terminator_with_runtime_protocol() {
         let yaml = "\
 execution:
-  terminator: native_runtime_spawn
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
-        assert_eq!(exec.terminator, Some(TerminatorSpec::NativeRuntimeSpawn));
+        assert_eq!(
+            exec.terminator,
+            Some(TerminatorDecl::Subprocess {
+                protocol_ref: "protocol:rye/core/runtime_v1".into()
+            })
+        );
     }
 
     #[test]
@@ -2331,16 +2243,18 @@ execution:
     }
 
     #[test]
-    fn execution_schema_rejects_unknown_terminator() {
+    fn execution_schema_rejects_unknown_terminator_kind() {
         let yaml = "\
 execution:
-  terminator: wasm_sandbox
+  terminator:
+    kind: wasm_sandbox
+    protocol: protocol:rye/core/opaque
 ";
         let err = parse_exec(yaml).unwrap_err();
         match err {
             EngineError::SchemaLoaderError { reason } => {
                 assert!(
-                    reason.contains("unknown terminator") && reason.contains("wasm_sandbox"),
+                    reason.contains("invalid terminator declaration"),
                     "unexpected error: {reason}"
                 );
             }
@@ -2349,17 +2263,37 @@ execution:
     }
 
     #[test]
-    fn execution_schema_rejects_in_process_handler_with_unknown_registry() {
+    fn execution_schema_rejects_in_process_with_unknown_registry() {
         let yaml = "\
 execution:
-  terminator: in_process_handler
-  registry: parsers
+  terminator:
+    kind: in_process
+    registry: parsers
 ";
         let err = parse_exec(yaml).unwrap_err();
         match err {
             EngineError::SchemaLoaderError { reason } => {
                 assert!(
-                    reason.contains("unknown handler registry") && reason.contains("parsers"),
+                    reason.contains("invalid terminator declaration"),
+                    "unexpected error: {reason}"
+                );
+            }
+            other => panic!("expected SchemaLoaderError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_schema_rejects_subprocess_without_protocol() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+";
+        let err = parse_exec(yaml).unwrap_err();
+        match err {
+            EngineError::SchemaLoaderError { reason } => {
+                assert!(
+                    reason.contains("invalid terminator declaration"),
                     "unexpected error: {reason}"
                 );
             }

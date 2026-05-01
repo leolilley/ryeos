@@ -51,8 +51,8 @@ use serde_json::{json, Value};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    capabilities_for, DelegationVia, DispatchCapabilities, ExecutionSchema,
-    HandlerRegistryKind, TerminatorSpec,
+    DelegationVia, ExecutionSchema,
+    InProcessRegistryKind, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -128,17 +128,29 @@ pub struct DispatchRequest<'a> {
     pub pre_minted_thread_id: Option<String>,
 }
 
-/// Check the schema-derived `DispatchCapabilities` for the matched
-/// terminator against the request shape. On mismatch, returns the
-/// V5.2 wording verbatim (pin tests assert byte equality):
+/// Check protocol-derived capabilities for a `Subprocess` terminator
+/// against the request shape. Reads the capability bits from the
+/// protocol descriptor in the engine's `ProtocolRegistry`. On mismatch,
+/// returns the V5.2 wording verbatim (pin tests assert byte equality):
 /// * `pushed_head` → "pushed_head not yet supported for native runtimes"
 /// * `target_site_id` → "remote execution not yet supported for native runtimes"
 /// * `launch_mode == "detached"` → "detached mode not yet supported for native runtimes"
-fn check_dispatch_capabilities(
-    terminator: &TerminatorSpec,
+///
+/// REMOVED IN ζ — this becomes a unified capability gate keyed off
+/// `SubprocessRole`, reading from `VerifiedProtocol.descriptor.capabilities`.
+fn check_protocol_capabilities(
+    protocol_ref: &str,
     request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
 ) -> Result<(), DispatchError> {
-    let caps: DispatchCapabilities = capabilities_for(terminator);
+    let protocol = ctx
+        .engine
+        .protocols
+        .require(protocol_ref)
+        .map_err(|_| DispatchError::CapabilityRejected {
+            reason: format!("protocol {protocol_ref} not registered"),
+        })?;
+    let caps = &protocol.descriptor.capabilities;
     if request.project_source_is_pushed_head && !caps.allows_pushed_head {
         return Err(DispatchError::CapabilityRejected {
             reason: "pushed_head not yet supported for native runtimes".into(),
@@ -166,7 +178,7 @@ pub(crate) enum HopAction {
     /// Schema declares a terminator; the second tuple element is the
     /// schema-declared `thread_profile` (A3 — never a kind-name
     /// hardcode in the dispatch sites).
-    Terminate(TerminatorSpec, String),
+    Terminate(TerminatorDecl, String),
     /// Schema has no terminator but declares an `@<kind>` alias the
     /// loop must follow next iteration.
     FollowAlias(CanonicalRef),
@@ -465,8 +477,8 @@ pub async fn dispatch_service(
         }
     })?;
     match terminator {
-        TerminatorSpec::InProcessHandler {
-            registry: HandlerRegistryKind::Services,
+        TerminatorDecl::InProcess {
+            registry: InProcessRegistryKind::Services,
         } => {
             let verified = service_executor::resolve_and_verify(
                 &ctx.engine,
@@ -633,9 +645,10 @@ pub(crate) async fn dispatch_native_runtime(
         )?;
     }
 
-    // Schema-derived capability gate. Wording preserved verbatim —
+    // Protocol-derived capability gate. Wording preserved verbatim —
     // pinned by `ryeosd/tests/dispatch_pin.rs::pin_native_runtime_with_*`.
-    check_dispatch_capabilities(&TerminatorSpec::NativeRuntimeSpawn, request)?;
+    // REMOVED IN ζ — unified gate keyed off SubprocessRole.
+    check_protocol_capabilities("protocol:rye/core/runtime_v1", request, ctx)?;
 
     let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
     let executor_ref = format!("native:{bare}");
@@ -791,7 +804,7 @@ pub async fn dispatch_subprocess(
             detail: "dispatch_subprocess called on a schema with no terminator".into(),
         }
     })?;
-    if !matches!(terminator, TerminatorSpec::Subprocess) {
+    if !matches!(terminator, TerminatorDecl::Subprocess { .. }) {
         return Err(DispatchError::SchemaMisconfigured {
             kind: current_ref.kind.clone(),
             detail: format!(
@@ -1065,8 +1078,12 @@ pub async fn dispatch(
 /// captured from the first hop. Leaf dispatchers consume what they
 /// need from both. No borrowed view struct — owned values flow through
 /// the match.
+///
+/// REMOVED IN ζ — the temporary 2-protocol shim (runtime_v1 vs opaque)
+/// is replaced by a unified `dispatch_subprocess` keyed off
+/// `SubprocessRole`.
 async fn dispatch_by(
-    terminator: TerminatorSpec,
+    terminator: TerminatorDecl,
     canonical_ref: CanonicalRef,
     verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
@@ -1077,10 +1094,23 @@ async fn dispatch_by(
     state: &AppState,
 ) -> Result<Value, DispatchError> {
     match terminator {
-        TerminatorSpec::Subprocess => {
-            // Subprocess uses the hop's thread_profile directly —
-            // there's no registry hop for subprocess, so root_subject
-            // and hop always agree.
+        TerminatorDecl::Subprocess { protocol_ref } => {
+            // Temporary shim: route runtime_v1 to the old
+            // dispatch_native_runtime; everything else goes through
+            // dispatch_subprocess unchanged. REMOVED IN ζ.
+            if protocol_ref == "protocol:rye/core/runtime_v1" {
+                return dispatch_native_runtime(
+                    canonical_ref,
+                    verified,
+                    thread_profile,
+                    runtime,
+                    root_subject,
+                    request,
+                    ctx,
+                    state,
+                )
+                .await;
+            }
             let tp = thread_profile.ok_or_else(|| {
                 DispatchError::SchemaMisconfigured {
                     kind: canonical_ref.kind.clone(),
@@ -1097,8 +1127,8 @@ async fn dispatch_by(
             )
             .await
         }
-        TerminatorSpec::InProcessHandler {
-            registry: HandlerRegistryKind::Services,
+        TerminatorDecl::InProcess {
+            registry: InProcessRegistryKind::Services,
         } => {
             let tp = thread_profile.ok_or_else(|| {
                 DispatchError::SchemaMisconfigured {
@@ -1109,19 +1139,6 @@ async fn dispatch_by(
             dispatch_service(
                 &canonical_ref.to_string(),
                 &tp,
-                request,
-                ctx,
-                state,
-            )
-            .await
-        }
-        TerminatorSpec::NativeRuntimeSpawn => {
-            dispatch_native_runtime(
-                canonical_ref,
-                verified,
-                thread_profile,
-                runtime,
-                root_subject,
                 request,
                 ctx,
                 state,
@@ -1180,7 +1197,9 @@ version: "1.0.0"
 location:
   directory: runtimes
 execution:
-  terminator: native_runtime_spawn
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
   thread_profile: runtime_run
   resolution: []
 formats:

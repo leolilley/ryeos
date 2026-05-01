@@ -322,6 +322,16 @@ pub enum EngineError {
 
     #[error("handler error: {0}")]
     Handler(#[from] crate::handlers::HandlerError),
+
+    // ── Protocol references ────────────────────────────────────────
+
+    #[error("kind `{kind}` references unknown protocol `{protocol_ref}`: {source}")]
+    KindReferencesUnknownProtocol {
+        kind: String,
+        protocol_ref: String,
+        #[source]
+        source: crate::protocols::ProtocolError,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
