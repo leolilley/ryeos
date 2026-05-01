@@ -3,19 +3,37 @@ use serde::{Deserialize, Serialize};
 use crate::error::EngineError;
 use crate::subprocess_spec::SubprocessBuildRequest;
 
+/// Stdin shape declared by a protocol descriptor.
+///
+/// The builder (protocols/builder.rs) consumes this enum to decide what
+/// bytes to place on the child's stdin. Vocabulary-level `build_stdin`
+/// handles the `ParametersJson` case; `Opaque` and `LaunchEnvelopeV1`
+/// are handled by the builder directly (see builder.rs for details).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StdinShape {
-    /// JSON serialization of dispatch parameters (today's tool path).
+    /// JSON serialization of dispatch parameters (tool path).
     /// `params` from DispatchRequest is written verbatim as the stdin body.
     ParametersJson,
 
-    /// LaunchEnvelope v1 (today's runtime path). Constructs an envelope
-    /// with: resolution snapshot, callback token, CAS root, thread metadata.
-    /// Wire shape is `LaunchEnvelope` in `launch_envelope_types.rs`.
+    /// No stdin data. The caller feeds stdin out of band (or not at all).
+    /// Builder produces `Vec::new()` for this shape.
+    Opaque,
+
+    /// LaunchEnvelope v1 (runtime path). The daemon constructs a
+    /// `LaunchEnvelope` (see `launch_envelope_types.rs`) and the builder
+    /// serializes it onto stdin. The vocabulary `build_stdin` function
+    /// does NOT handle this case — it returns an error if called with
+    /// this shape, because envelope construction requires daemon-level
+    /// context that the vocabulary module does not have.
     LaunchEnvelopeV1,
 }
 
+/// Build stdin bytes for a shape that the vocabulary layer can handle.
+///
+/// Returns an error for `LaunchEnvelopeV1` — the builder handles that
+/// case directly with a pre-constructed `LaunchEnvelope`.
+/// Returns an error for `Opaque` — the builder produces empty bytes.
 pub fn build_stdin(
     shape: StdinShape,
     request: &SubprocessBuildRequest,
@@ -25,19 +43,17 @@ pub fn build_stdin(
             Ok(serde_json::to_vec(&request.params)
                 .map_err(|e| EngineError::Internal(format!("stdin serialize failed: {e}")))?)
         }
+        StdinShape::Opaque => {
+            // Opaque stdin: no data. The builder produces empty bytes.
+            Ok(Vec::new())
+        }
         StdinShape::LaunchEnvelopeV1 => {
-            // The full LaunchEnvelope construction requires daemon-level
-            // context (roots, callback, policy, resolution). In commit β
-            // we provide the builder signature; the daemon wires the actual
-            // construction in ζ. For now, use params as a placeholder — the
-            // vocabulary module defines the shape, the daemon fills it.
-            let envelope = serde_json::json!({
-                "invocation_id": format!("inv-{}", &request.thread_id[..8.min(request.thread_id.len())]),
-                "thread_id": request.thread_id,
-                "params": request.params,
-            });
-            Ok(serde_json::to_vec(&envelope)
-                .map_err(|e| EngineError::Internal(format!("stdin serialize failed: {e}")))?)
+            // Launch envelope construction requires daemon-level context.
+            // The builder (protocols/builder.rs) handles this directly by
+            // accepting a pre-constructed LaunchEnvelope reference.
+            Err(EngineError::Internal(
+                "build_stdin cannot produce LaunchEnvelopeV1; use the protocol builder".into(),
+            ))
         }
     }
 }
@@ -59,6 +75,7 @@ mod tests {
             acting_principal: "fp:test".to_string(),
             cas_root: PathBuf::from("/tmp/cas"),
             callback_token: None,
+            callback_socket_path: None,
             vault_handle: None,
             params,
             resolution_output: None,
@@ -69,6 +86,7 @@ mod tests {
     fn round_trip_all_variants() {
         for (name, shape) in [
             ("parameters_json", StdinShape::ParametersJson),
+            ("opaque", StdinShape::Opaque),
             ("launch_envelope_v1", StdinShape::LaunchEnvelopeV1),
         ] {
             let yaml = serde_yaml::to_string(&shape).unwrap();
@@ -90,5 +108,20 @@ mod tests {
         let bytes = build_stdin(StdinShape::ParametersJson, &req).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, params);
+    }
+
+    #[test]
+    fn opaque_builder_produces_empty_bytes() {
+        let req = make_request(serde_json::json!({}));
+        let bytes = build_stdin(StdinShape::Opaque, &req).unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn launch_envelope_v1_builder_errors() {
+        let req = make_request(serde_json::json!({}));
+        let result = build_stdin(StdinShape::LaunchEnvelopeV1, &req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("protocol builder"));
     }
 }

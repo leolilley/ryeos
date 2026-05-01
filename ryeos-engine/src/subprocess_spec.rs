@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 use crate::error::EngineError;
+use crate::protocol_vocabulary::{CallbackChannel, StdoutShape};
 use crate::resolution::ResolutionOutput;
 
 /// The unified subprocess invocation boundary. Both the tool-style
@@ -35,6 +36,17 @@ pub struct SubprocessSpec {
     pub stdin: Vec<u8>,
     /// Hard timeout; child is killed on exceed.
     pub timeout: Duration,
+
+    /// Stdout shape declared by the protocol descriptor; the lillux
+    /// bridge consults this to choose buffered vs streaming decode.
+    /// Default: `OpaqueBytes` (backward compatible with specs not yet
+    /// routed through the builder).
+    pub stdout_shape: StdoutShape,
+
+    /// Callback channel kind; the launcher consults this to know
+    /// whether to register a callback token before spawn.
+    /// Default: `None` (backward compatible).
+    pub callback_channel: CallbackChannel,
 
     /// Provenance fields — used by tracing, callback wiring, and the
     /// future sandbox-wrap stage. Not passed to lillux directly.
@@ -57,6 +69,7 @@ pub struct SubprocessBuildRequest {
     pub acting_principal: String,
     pub cas_root: PathBuf,
     pub callback_token: Option<String>,
+    pub callback_socket_path: Option<String>,
     pub vault_handle: Option<String>,
     pub params: Value,
     pub resolution_output: Option<ResolutionOutput>,

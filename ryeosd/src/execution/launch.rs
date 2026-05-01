@@ -433,6 +433,50 @@ pub async fn build_and_launch(
     // directly and never re-derive.
     let effective_caps: Vec<String> = derive_effective_caps(&resolution.composed);
 
+    // The launching kind schema (e.g. `directive`, `graph`) drives
+    // inventory build below; it does NOT carry the subprocess
+    // terminator — those kinds run in-process inside a runtime.
+    let launching_kind_schema = state
+        .engine
+        .kinds
+        .get(&resolved.resolved_item.kind)
+        .ok_or_else(|| anyhow::anyhow!(
+            "build_and_launch: launching kind `{}` is not registered",
+            resolved.resolved_item.kind
+        ))?;
+
+    // Resolve the protocol descriptor from the **runtime** kind schema
+    // (always `runtime`), not from the launching item's kind.
+    // build_and_launch is only ever called for managed-lifecycle
+    // subprocess spawns where a runtime hosts the launching item; the
+    // subprocess terminator + protocol_ref live on the runtime kind.
+    let runtime_kind_schema = state
+        .engine
+        .kinds
+        .get("runtime")
+        .ok_or_else(|| anyhow::anyhow!(
+            "build_and_launch: `runtime` kind schema is not registered"
+        ))?;
+
+    let protocol_ref = runtime_kind_schema
+        .execution()
+        .and_then(|ex| ex.terminator.as_ref())
+        .and_then(|t| match t {
+            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol_ref } => {
+                Some(protocol_ref.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!(
+            "build_and_launch: `runtime` kind has no subprocess terminator with protocol ref"
+        ))?;
+
+    let verified_protocol = state
+        .engine
+        .protocols
+        .require(&protocol_ref)
+        .map_err(|e| anyhow::anyhow!("protocol lookup failed for `{protocol_ref}`: {e}"))?;
+
     tracing::info!(
         item_ref = %resolved.item_ref,
         kind = kind,
@@ -456,14 +500,6 @@ pub async fn build_and_launch(
     // 6b. Build inventory the launching kind asked for. The engine
     //     enumerates + parses every inventoried item once here so the
     //     runtime is a pure consumer of `envelope.inventory`.
-    let launching_kind_schema = state
-        .engine
-        .kinds
-        .get(&resolved.resolved_item.kind)
-        .ok_or_else(|| anyhow::anyhow!(
-            "build_and_launch: launching kind `{}` is not registered",
-            resolved.resolved_item.kind
-        ))?;
     let inventory = ryeos_engine::inventory::build_inventory_for_launching_kind(
         launching_kind_schema,
         &state.engine.kinds,
@@ -547,12 +583,12 @@ pub async fn build_and_launch(
     // of P3b.2 hang). `spawn_blocking` moves the wait onto Tokio's
     // dedicated blocking pool so async workers stay free to service
     // UDS callbacks.
-    let envelope_json = serde_json::to_string(&envelope)?;
     let binary_path = materialized_binary.to_string_lossy().to_string();
     let project_owned = project_path.to_path_buf();
     let callback_owned = envelope.callback.clone();
     let thread_id_owned = thread_id.to_string();
     let duration = hard_limits.duration_seconds;
+    let descriptor_clone = verified_protocol.descriptor.clone();
     // The native-runtime spawn pipe must include vault_bindings the
     // same way `services::thread_lifecycle::spawn_item` does for
     // generic plan-node subprocesses. Without this, operator secrets
@@ -564,9 +600,10 @@ pub async fn build_and_launch(
         .collect();
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(
+            &descriptor_clone,
             &binary_path,
             &project_owned,
-            &envelope_json,
+            &envelope,
             duration,
             &callback_owned,
             &thread_id_owned,
@@ -637,45 +674,59 @@ pub async fn build_and_launch(
 }
 
 fn spawn_runtime(
+    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
     binary: &str,
     project_path: &Path,
-    envelope_json: &str,
+    envelope: &LaunchEnvelope,
     timeout_secs: u64,
     callback: &EnvelopeCallback,
     thread_id: &str,
     vault_bindings: &[(String, String)],
 ) -> Result<RuntimeResult> {
-    // Build the subprocess env: allowlisted parent vars + daemon-resolved
-    // roots + declared secrets (vault_bindings) + daemon-callback infra.
-    // After B's lillux contract change, the subprocess sees ONLY these
-    // entries — inherited parent env is no longer available.
+    // Build the base env: allowlisted parent vars + declared secrets.
+    // The builder adds descriptor-declared injection env vars on top.
     let secret_map: std::collections::BTreeMap<String, String> =
         vault_bindings.iter().cloned().collect();
-    let mut envs = crate::process::build_spawn_env(&secret_map)?;
-    envs.extend([
-        ("RYEOSD_SOCKET_PATH".to_string(), callback.socket_path.to_string_lossy().to_string()),
-        ("RYEOSD_CALLBACK_TOKEN".to_string(), callback.token.clone()),
-        ("RYEOSD_THREAD_ID".to_string(), thread_id.to_string()),
-        ("RYEOSD_PROJECT_PATH".to_string(), project_path.to_string_lossy().to_string()),
-    ]);
+    let base_env = crate::process::build_spawn_env(&secret_map)?;
 
-    // Build the unified SubprocessSpec — both tool and runtime paths
-    // converge on this struct before translating to lillux.
-    let spec = ryeos_engine::subprocess_spec::SubprocessSpec {
-        cmd: PathBuf::from(binary),
-        args: vec![
+    // Use the protocol builder to produce the SubprocessSpec.
+    let item_ref =
+        ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
+            .expect("hardcoded runtime:spawn ref is valid");
+    let callback_bindings = ryeos_engine::protocols::CallbackBindings {
+        socket_path: callback.socket_path.to_string_lossy().to_string(),
+        token: callback.token.clone(),
+    };
+    let build_request = ryeos_engine::protocols::BuildRequest {
+        item_ref: &item_ref,
+        binary_path: Path::new(binary),
+        args: &[
             "--project-path".to_string(),
             project_path.to_string_lossy().to_string(),
         ],
-        cwd: project_path.to_path_buf(),
-        env: envs,
-        stdin: envelope_json.as_bytes().to_vec(),
+        cwd: project_path,
+        project_path,
+        thread_id,
+        callback: Some(&callback_bindings),
+        vault_bindings,
+        launch_envelope: Some(envelope),
         timeout: std::time::Duration::from_secs(timeout_secs),
-        item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
-            .expect("hardcoded runtime:spawn ref is valid"),
-        thread_id: thread_id.to_string(),
-        project_path: project_path.to_path_buf(),
+        acting_principal: "", // not needed for env injection in runtime path
+        cas_root: Path::new("/"), // not needed for env injection in runtime path
     };
+
+    let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)
+        .map_err(|e| anyhow::anyhow!("builder failed: {e}"))?;
+
+    // Merge builder-produced injected env on top of base env.
+    // Base env has PATH, HOME, etc. + vault secrets.
+    // Builder env has the descriptor-declared injections (socket path, token, etc).
+    let mut merged_env: std::collections::BTreeMap<String, String> =
+        base_env.into_iter().collect();
+    for (k, v) in &spec.env {
+        merged_env.insert(k.clone(), v.clone());
+    }
+    spec.env = merged_env.into_iter().collect();
 
     // sandbox_wrap is identity today; the sandbox wave fills it in.
     let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec)

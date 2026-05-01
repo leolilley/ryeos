@@ -351,7 +351,12 @@ fn validate_protocol_descriptor(
                 },
             });
         }
-        if matches!(inj.source, EnvInjectionSource::CallbackTokenUrl) {
+        if matches!(
+            inj.source,
+            EnvInjectionSource::CallbackTokenUrl
+                | EnvInjectionSource::CallbackSocketPath
+                | EnvInjectionSource::CallbackToken
+        ) {
             has_callback_injection = true;
         }
     }
@@ -373,7 +378,12 @@ fn validate_protocol_descriptor(
                     source: crate::protocol_vocabulary::VocabularyError::CallbackInjectionWithoutChannel {
                         name: desc.env_injections
                             .iter()
-                            .find(|i| matches!(i.source, EnvInjectionSource::CallbackTokenUrl))
+                            .find(|i| matches!(
+                                i.source,
+                                EnvInjectionSource::CallbackTokenUrl
+                                    | EnvInjectionSource::CallbackSocketPath
+                                    | EnvInjectionSource::CallbackToken
+                            ))
                             .map(|i| i.name.clone())
                             .unwrap_or_default(),
                     },

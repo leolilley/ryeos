@@ -10,6 +10,11 @@ pub enum EnvInjectionSource {
     /// Full URL the child posts callbacks to. Requires
     /// CallbackChannel != None.
     CallbackTokenUrl,
+    /// Unix socket path of the daemon's callback listener. Used when
+    /// the descriptor wants the raw socket path (e.g., `RYEOSD_SOCKET_PATH`).
+    CallbackSocketPath,
+    /// Opaque token string the child includes in callbacks for auth.
+    CallbackToken,
     /// Stable thread identifier the daemon uses to correlate.
     ThreadId,
     /// Effective project root path on disk.
@@ -58,6 +63,20 @@ pub fn produce_env_value(
                 )
             })
         }
+        EnvInjectionSource::CallbackSocketPath => {
+            request.callback_socket_path.clone().ok_or_else(|| {
+                EngineError::Internal(
+                    "callback_socket_path requested but no callback_socket_path available".into(),
+                )
+            })
+        }
+        EnvInjectionSource::CallbackToken => {
+            request.callback_token.clone().ok_or_else(|| {
+                EngineError::Internal(
+                    "callback_token requested but no callback_token available".into(),
+                )
+            })
+        }
         EnvInjectionSource::VaultHandle => {
             request.vault_handle.clone().ok_or_else(|| {
                 EngineError::Internal(
@@ -98,7 +117,8 @@ mod tests {
             project_path: PathBuf::from("/project"),
             acting_principal: "fp:abc123".to_string(),
             cas_root: PathBuf::from("/cas/root"),
-            callback_token: Some("http://localhost:8080/cb".to_string()),
+            callback_token: Some("tok-abc".to_string()),
+            callback_socket_path: Some("/tmp/ryeos-callback.sock".to_string()),
             vault_handle: Some("vault-handle-1".to_string()),
             params: serde_json::json!({}),
             resolution_output: None,
@@ -109,6 +129,8 @@ mod tests {
     fn round_trip_all_sources() {
         for src in [
             EnvInjectionSource::CallbackTokenUrl,
+            EnvInjectionSource::CallbackSocketPath,
+            EnvInjectionSource::CallbackToken,
             EnvInjectionSource::ThreadId,
             EnvInjectionSource::ProjectPath,
             EnvInjectionSource::ActingPrincipal,
@@ -159,7 +181,21 @@ mod tests {
     fn producer_callback_token_url() {
         let req = make_request();
         let val = produce_env_value(EnvInjectionSource::CallbackTokenUrl, &req).unwrap();
-        assert_eq!(val, "http://localhost:8080/cb");
+        assert_eq!(val, "tok-abc");
+    }
+
+    #[test]
+    fn producer_callback_socket_path() {
+        let req = make_request();
+        let val = produce_env_value(EnvInjectionSource::CallbackSocketPath, &req).unwrap();
+        assert_eq!(val, "/tmp/ryeos-callback.sock");
+    }
+
+    #[test]
+    fn producer_callback_token() {
+        let req = make_request();
+        let val = produce_env_value(EnvInjectionSource::CallbackToken, &req).unwrap();
+        assert_eq!(val, "tok-abc");
     }
 
     #[test]
@@ -167,6 +203,22 @@ mod tests {
         let mut req = make_request();
         req.callback_token = None;
         let result = produce_env_value(EnvInjectionSource::CallbackTokenUrl, &req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn producer_callback_socket_path_errors_when_missing() {
+        let mut req = make_request();
+        req.callback_socket_path = None;
+        let result = produce_env_value(EnvInjectionSource::CallbackSocketPath, &req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn producer_callback_token_errors_when_missing() {
+        let mut req = make_request();
+        req.callback_token = None;
+        let result = produce_env_value(EnvInjectionSource::CallbackToken, &req);
         assert!(result.is_err());
     }
 

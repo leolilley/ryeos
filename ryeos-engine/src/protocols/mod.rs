@@ -9,9 +9,11 @@
 //! Adding a new vocabulary primitive is a daemon code change, not a
 //! protocol-descriptor change.
 
+pub mod builder;
 pub mod descriptor;
 pub mod registry;
 
+pub use builder::{build_subprocess_spec, BuildError, BuildRequest, CallbackBindings};
 pub use descriptor::ProtocolDescriptor;
 pub use registry::{ProtocolError, ProtocolRegistry, VerifiedProtocol};
 
